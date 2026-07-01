@@ -1,6 +1,7 @@
+import { PassThrough } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
-import { sendJson } from '../src/server/httpUtil.js';
+import { readJsonBody, sendJson } from '../src/server/httpUtil.js';
 
 function makeResponse(): ServerResponse & {
   body: string;
@@ -49,5 +50,17 @@ describe('sendJson', () => {
     sendJson(res, 200, { at: new Date('2026-07-01T12:00:00.000Z') });
 
     expect(JSON.parse(res.body)).toEqual({ at: '2026-07-01T12:00:00.000Z' });
+  });
+});
+
+describe('readJsonBody', () => {
+  it('rejects invalid JSON with a generic public error', async () => {
+    const req = new PassThrough() as unknown as Parameters<typeof readJsonBody>[0];
+    const promise = readJsonBody(req);
+
+    req.end('{');
+
+    await expect(promise).rejects.toThrow('Invalid JSON body');
+    await expect(promise).rejects.not.toThrow(/Unexpected end/);
   });
 });

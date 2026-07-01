@@ -40,10 +40,10 @@ export function readJsonBody(req: IncomingMessage): Promise<Record<string, unkno
       }
       try {
         resolve(JSON.parse(body) as Record<string, unknown>);
-      } catch (error) {
-        reject(error);
+      } catch {
+        reject(new Error('Invalid JSON body'));
       }
     });
-    req.on('error', reject);
+    req.on('error', () => reject(new Error('Request body read failed')));
   });
 }
