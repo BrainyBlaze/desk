@@ -1,0 +1,11 @@
+· Manifesting… (3m 11s · ↑ 11.9k tokens)
+✽ Manifesting… (6m 15s · ↓ 22.1k tokens · thought for 14s)
+✶ Symbioting… (running stop hooks… 4/6 · 15s · ↓ 646 tokens)
+
+  ◯ Explore  Reading channelsProtocol.ts definitions                         3m 24s · ↓ 55.9k tokens
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  user@host:/workspace/projects/desk [Opus 4.8 (1M context)] [ctx:62%]                             /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

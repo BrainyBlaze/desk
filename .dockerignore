@@ -1,0 +1,30 @@
+# Build the dependency tree and dist/ *inside* the image — never ship the host's
+node_modules
+dist
+
+# VCS / CI metadata
+.git
+.github
+.gitignore
+
+# The Docker build files themselves (keep them out of the build context)
+Dockerfile
+.dockerignore
+docker-compose.yaml
+docker-compose.yml
+
+# Editor / OS cruft and logs
+.DS_Store
+*.log
+
+# Not needed to build the CLI or serve the UI
+tests
+docs
+.claude
+output/playwright
+.playwright-cli
+
+# Local build artifacts from the standalone (Bun) build
+desk-server
+serve-entry.mjs
+*.url

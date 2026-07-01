@@ -1,0 +1,22 @@
+
+  ┃
+  ┃  ⠋ Wait for delayed idle capture and inspect
+  ┃
+  ┃  $ sleep 22; echo "---idle capture result---"; if [ -f /workspace/projects/desk/tests/samples/
+  ┃  opencode-glm-idle.txt ]; then wc -l /workspace/projects/desk/tests/samples/opencode-glm-idle.
+  ┃  txt; echo "tail:"; tail -10 /workspace/projects/desk/tests/samples/opencode-glm-idle.txt;
+  ┃  echo "---"; echo "esc-interrupt occurrences (should be 0 for true idle):"; grep -c "esc
+  ┃  interrupt" /workspace/projects/desk/tests/samples/opencode-glm-idle.txt; echo "spinner-dot (
+  ┃  braille) line count:"; grep -cP "[\x{2800}-\x{28ff}]" /workspace/projects/desk/tests/samples/
+  ┃  opencode-glm-idle.txt; else echo "IDLE CAPTURE NOT FOUND — background job may have died"; fi
+  ┃
+
+     ▣  Build · GLM-5.2
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · GLM-5.2 Z.AI Coding Plan
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                           149.2K (15%)  ctrl+p commands
+

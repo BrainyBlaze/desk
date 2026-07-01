@@ -1,0 +1,19 @@
+site_name: Desk
+site_description: Mission control for fleets of coding agents.
+repo_url: https://github.com/BrainyBlaze/desk
+theme:
+  name: mkdocs
+  navigation_depth: 3
+strict: true
+nav:
+  - Overview: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Agents and terminals: agents-and-terminals.md
+  - Channels: channels-protocol.md
+  - IDE and LSP: ide-and-lsp.md
+  - Git and GitHub: github-operations.md
+  - GitHub Projects: github-projects.md
+  - Notes: notes.md
+  - Operations: operations.md
+  - License: license.md

@@ -1,0 +1,21 @@
+
+  ┃
+  ┃  Reply with exactly the single word: hello
+  ┃
+
+     hello
+
+     ▣  Build · GLM-5.2 · 3.4s
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · GLM-5.2 Z.AI Coding Plan
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                     9.3K (1%)  ctrl+p commands
+

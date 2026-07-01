@@ -1,0 +1,8 @@
+● The accepted v1 spec + proof matrix are recorded; I will implement immediately when it lands.
+  Nothing required from me until the gate opens.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  user@host:/workspace/projects/desk [Opus 4.8 (1M context)] [ctx:60%]                             /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

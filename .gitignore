@@ -1,0 +1,31 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules
+
+# Test / tooling artifacts
+output/playwright/
+.playwright-cli/
+coverage/
+
+# Logs & debug
+*.log
+npm-debug.log*
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS / editor cruft
+.DS_Store
+
+# Local agent scratch
+.claude/
+
+# Bun standalone build artifacts
+src/server/assets/*.tar.gz
+/desk-server
+/probe-server
+/probe-*.mjs

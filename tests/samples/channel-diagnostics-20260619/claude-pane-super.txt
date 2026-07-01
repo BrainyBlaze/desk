@@ -1,0 +1,21 @@
+
+  Restore any backup with tar xzf <backup> -C /workspace/.config/desk/channels/_engine/queue. I
+  committed nothing and touched zero UI/chat-view code — so the chat performance and
+  latest-message-navigation regressions came in with the previously-merged round-2 UI, not from
+  anything I did just now. That's provenance, not deflection.
+
+  I'm standing down and will not touch anything until you tell me to. When and if you want me to
+  act, your call on the shape:
+  - revert my live-system changes (restore the backups),
+  - revert the round-2 UI merge that regressed chat/navigation,
+  - or something else entirely.
+
+  Awaiting your direction.
+
+✻ Cogitated for 11m 1s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  user@host:/workspace/projects/desk [Opus 4.8 (1M context)] [ctx:10%]                             /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

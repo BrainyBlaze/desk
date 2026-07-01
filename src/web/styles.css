@@ -1,0 +1,5290 @@
+:root {
+  color-scheme: dark;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  background: #020506;
+  color: var(--desk-text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow: hidden;
+  background: #020506;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+/* Arwes-themed scrollbars for every scrollable surface inside the shell
+   (sidebar tree, modal body, dropdown panel, tab strips). Terminal panes
+   keep their own rules further down. */
+.deskShell * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--desk-line) transparent;
+}
+
+.deskShell *::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.deskShell *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.deskShell *::-webkit-scrollbar-thumb {
+  background: var(--desk-line);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.deskShell *::-webkit-scrollbar-thumb:hover {
+  background: var(--desk-line-strong);
+  background-clip: padding-box;
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+.deskShell *::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.deskShell {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  padding: 8px;
+  overflow: hidden;
+  color: var(--desk-text);
+  background:
+    radial-gradient(circle at 15% 8%, var(--desk-glow), transparent 26%),
+    linear-gradient(135deg, var(--desk-bg) 0%, var(--desk-bg-elevated) 54%, var(--desk-bg) 100%);
+}
+
+.backgroundField {
+  position: fixed;
+  inset: 0;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.terminalFrame {
+  position: relative;
+  display: grid;
+  grid-template-rows: 84px minmax(0, 1fr) 22px;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--desk-line);
+  background: var(--desk-bg);
+  box-shadow: inset 0 0 28px var(--desk-glow);
+}
+
+.terminalFrame > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.44;
+  z-index: 0;
+}
+
+.workspaceTopbar {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: 30px 53px;
+  min-width: 0;
+  min-height: 84px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--desk-line);
+  background:
+    linear-gradient(90deg, var(--desk-surface), var(--desk-surface)),
+    repeating-linear-gradient(90deg, var(--desk-glow) 0 1px, transparent 1px 18px);
+}
+
+.topbarPrimary,
+.topbarTelemetry {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+}
+
+.topbarPrimary {
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  gap: 8px;
+}
+
+.topbarTelemetry {
+  /* Auto-flow: the cell count varies (GPU adapters render only when present). */
+  grid-template-columns: minmax(170px, 1.2fr);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(120px, 1fr);
+  gap: 8px;
+  padding: 4px 0 5px;
+  border-top: 1px solid var(--desk-line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--desk-text);
+}
+
+.brand strong {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+
+/* metallic wordmark: a static vertical chrome ramp (bottom layer) with a
+   travelling glint band (top layer). The glint is TRANSPARENT outside its
+   band — the resting look is owned entirely by the static layer, so both
+   keyframe holds render pixel-identically and the loop wrap (100% -> 0%)
+   has no visible jump. (A previous full-width ramp parked differently on
+   each side of the sweep and snapped at the wrap.)
+   Applied to the arwes Text CONTENT span — background-clip:text only renders
+   glyphs that belong to the element carrying the background. The :not()
+   selector covers reduced motion, where TextReveal renders a plain <strong>
+   with no content span. --desk-sheen-hi is theme-set: white on dark themes,
+   a lighter-than-text tint on light themes (a white glint would erase
+   glyphs into a light bg). */
+.brand strong .arwes-text-text__content,
+.brand strong:not(.arwes-text-text) {
+  background:
+    linear-gradient(
+      105deg,
+      transparent 0%,
+      transparent 35%,
+      var(--desk-sheen-hi, #ffffff) 44%,
+      var(--desk-line-strong) 50%,
+      var(--desk-sheen-hi, #ffffff) 56%,
+      transparent 65%,
+      transparent 100%
+    ),
+    linear-gradient(180deg, var(--desk-text) 0%, var(--desk-text) 45%, var(--desk-text-dim) 125%);
+  background-size: 250% 100%, 100% 100%;
+  background-position: 125% 0, 0 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 6px var(--desk-sheen-glow, var(--desk-glow)));
+  animation: deskLogoSheen 5s ease-in-out infinite;
+}
+
+@keyframes deskLogoSheen {
+  /* Both holds keep the 35–65% band outside the visible 40%-wide window, so
+     the parked frames show only the static chrome layer. */
+  0%,
+  18% {
+    background-position: 125% 0, 0 0;
+  }
+  62%,
+  100% {
+    background-position: -25% 0, 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand strong .arwes-text-text__content,
+  .brand strong:not(.arwes-text-text) {
+    /* Parked at 50%: the glint band sits centered over the chrome ramp —
+       static metal instead of a moving glint. */
+    animation: none;
+    background-position: 50% 0, 0 0;
+  }
+}
+
+.brand span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--desk-text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.microStats {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--desk-text-dim);
+}
+
+/* ---------- bottom status bar ---------- */
+
+.statusBar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 0 6px;
+  overflow: hidden;
+  border-top: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+  font-size: 10.5px;
+  letter-spacing: 0.35px;
+  color: var(--desk-text-dim);
+  user-select: none;
+}
+
+.statusSegments {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+/* The left side carries arbitrarily long paths: let it shrink and ellipsize;
+   the right side is compact signals and never shrinks. */
+.statusLeft {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.statusRight {
+  flex: 0 0 auto;
+}
+
+.statusSegment {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  white-space: nowrap;
+}
+
+.statusSegment + .statusSegment {
+  border-left: 1px solid var(--desk-line);
+}
+
+.statusSegment svg {
+  flex: none;
+  opacity: 0.75;
+}
+
+.statusSegmentText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statusSegment.ok {
+  color: var(--desk-ok);
+}
+
+.statusSegment.warn {
+  color: var(--desk-accent);
+}
+
+.statusSegment.danger {
+  color: var(--desk-error);
+}
+
+.statusSegment.accent {
+  color: var(--desk-text);
+}
+
+button.statusSegment {
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+button.statusSegment:hover {
+  background: var(--desk-glow);
+  color: var(--desk-text);
+}
+
+.projectStats {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  align-items: center;
+  color: var(--desk-text-dim);
+  font-size: 11px;
+}
+
+.projectStats b {
+  color: var(--desk-text);
+  font-weight: 700;
+}
+
+.deskPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 2px 12px;
+  background: var(--desk-glow, rgba(0, 245, 255, 0.08));
+  white-space: nowrap;
+}
+
+.deskPill.ok {
+  color: var(--desk-ok);
+}
+
+.deskPill.warn {
+  color: var(--desk-accent);
+}
+
+.deskCmd {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border: 0;
+  background: none;
+  padding: 0 12px;
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.deskCmd .deskCmdBack {
+  position: absolute;
+  inset: 0;
+}
+
+.deskCmd > svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.deskCmd .deskCmdContent {
+  position: relative;
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.deskCmd:hover:not(:disabled) {
+  --arwes-frames-line-color: var(--desk-line-strong);
+  color: var(--desk-accent);
+}
+
+.deskCmd:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.telemetryCell {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+}
+
+.telemetryCell strong,
+.telemetryCell small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.telemetryCell {
+  position: relative;
+  display: grid;
+  grid-template-rows: 12px 17px 12px;
+  align-content: center;
+  row-gap: 0;
+  height: 100%;
+  padding: 2px 11px;
+  box-shadow: inset 3px 0 0 var(--desk-line-strong);
+}
+
+/* Sixty-sample history ribbon riding the cell's free right half. */
+.telemetrySpark {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 42%;
+  max-width: 150px;
+  height: 26px;
+  transform: translateY(-50%);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.telemetrySpark polyline {
+  fill: none;
+  stroke: var(--desk-line-strong);
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px var(--desk-glow));
+}
+
+.telemetryCell.ok .telemetrySpark polyline {
+  stroke: var(--desk-ok);
+}
+
+.telemetryCell span {
+  color: var(--desk-text-dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+}
+
+.telemetryCell strong {
+  color: var(--desk-text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.telemetryCell small {
+  color: var(--desk-text-dim);
+  font-size: 9.5px;
+}
+
+.telemetryCell.ok {
+  box-shadow: inset 3px 0 0 var(--desk-ok);
+}
+
+.telemetryCell.warn {
+  box-shadow: inset 3px 0 0 var(--desk-accent);
+}
+
+.telemetryCell.ok strong,
+.telemetryCell.ok span {
+  color: var(--desk-ok);
+}
+
+.telemetryCell.warn strong,
+.telemetryCell.warn span {
+  color: var(--desk-accent);
+}
+
+.telemetryCell.muted {
+  opacity: 0.72;
+}
+
+.ok {
+  color: var(--desk-ok);
+}
+
+.warn {
+  color: var(--desk-accent);
+}
+
+.toolbar {
+  display: flex;
+  gap: 6px;
+}
+
+.thinButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 0;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-surface);
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.thinButton:hover:not(:disabled) {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+}
+
+.thinButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* Toast stack — above modals (z 12) and the drawer (z 9): always on top. */
+.toastStack {
+  position: fixed;
+  top: 92px;
+  right: 14px;
+  z-index: 50;
+  display: grid;
+  gap: 9px;
+  width: min(420px, calc(100vw - 28px));
+  pointer-events: none;
+}
+
+.deskToast {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 9px 11px;
+  background: var(--desk-bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px var(--desk-error),
+    inset 4px 0 0 var(--desk-error),
+    0 12px 30px rgba(0, 0, 0, 0.5);
+  color: var(--desk-text);
+  pointer-events: auto;
+}
+
+.deskToast.ok {
+  box-shadow:
+    inset 0 0 0 1px var(--desk-ok),
+    inset 4px 0 0 var(--desk-ok),
+    0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.deskToast.info {
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line-strong),
+    inset 4px 0 0 var(--desk-line-strong),
+    0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.deskToastIcon {
+  display: grid;
+  place-items: center;
+  height: 18px;
+  color: var(--desk-error);
+}
+
+.deskToast.ok .deskToastIcon {
+  color: var(--desk-ok);
+}
+
+.deskToast.info .deskToastIcon {
+  color: var(--desk-line-strong);
+}
+
+.deskToastBody {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.deskToastKind {
+  font-size: 8.5px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  color: var(--desk-error);
+}
+
+.deskToast.ok .deskToastKind {
+  color: var(--desk-ok);
+}
+
+.deskToast.info .deskToastKind {
+  color: var(--desk-line-strong);
+}
+
+.deskToastMessage {
+  font-size: 11.5px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.deskToastClose {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: none;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+}
+
+.deskToastClose:hover {
+  color: var(--desk-text);
+}
+
+.workspacePanels {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+}
+
+.groupRail,
+.sessionRail,
+.terminalRegion {
+  min-width: 0;
+  min-height: 0;
+  background: var(--desk-surface);
+}
+
+.groupTabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 100%;
+  padding: 6px 5px;
+  overflow: auto;
+  border-right: 1px solid var(--desk-line);
+}
+
+.railActionStack {
+  display: grid;
+  place-items: center;
+  min-height: 24px;
+}
+
+.groupTab {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  min-height: 42px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-surface);
+  color: var(--desk-text-dim);
+  cursor: pointer;
+}
+
+.groupTab.selected {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+  background: rgba(50, 42, 18, 0.55);
+}
+
+.groupTab span {
+  font-size: 11px;
+}
+
+.groupTab small {
+  margin-top: 2px;
+  color: var(--desk-accent);
+  font-size: 10px;
+}
+
+.sessionListCompact {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  padding: 6px;
+  overflow: auto;
+}
+
+.railTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 24px;
+  color: var(--desk-text);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.railActions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.railTitle span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.railTitle small {
+  color: var(--desk-accent);
+}
+
+.sessionRowFrame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 3px;
+  margin-bottom: 3px;
+}
+
+.sessionRow {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  height: 25px;
+  width: 100%;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-surface);
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.sessionRowFrame.selected .sessionRow,
+.sessionRow:hover {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+}
+
+.sessionRow span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminalRegion {
+  display: grid;
+  grid-template-rows: 29px minmax(0, 1fr);
+}
+
+.sessionTabs {
+  display: flex;
+  gap: 3px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 5px 0;
+  border-bottom: 1px solid rgba(95, 247, 255, 0.13);
+  background: var(--desk-surface);
+}
+
+.sessionTab {
+  display: inline-grid;
+  grid-template-columns: 9px minmax(52px, max-content);
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  max-width: 210px;
+  padding: 0 8px;
+  border: 1px solid var(--desk-line);
+  border-bottom: 0;
+  border-radius: 2px 2px 0 0;
+  background: var(--desk-surface);
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.sessionTab.selected {
+  border-color: rgba(255, 209, 102, 0.62);
+  background: rgba(8, 18, 18, 0.96);
+  color: var(--desk-text);
+}
+
+.sessionTab span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminalDock {
+  display: flex;
+  min-height: 0;
+  padding: 0;
+  background: var(--desk-term-bg, #000607);
+}
+
+.terminalSurfaceShell {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminalSurface {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--desk-term-bg, #000607);
+}
+
+.thinDetails {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 5px 7px;
+  margin: 4px 0 0;
+  font-size: 11px;
+}
+
+.thinDetails dt {
+  color: var(--desk-text-dim);
+}
+
+.thinDetails dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--desk-text);
+}
+
+.confirmCopy {
+  display: grid;
+  gap: 6px;
+  padding: 6px 0 10px;
+}
+
+.confirmCopy strong {
+  color: var(--desk-accent);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.confirmCopy span {
+  color: var(--desk-text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.thinForm {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.thinForm label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.thinForm .checkLine {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.thinForm .checkLine input {
+  width: 14px;
+  height: 14px;
+}
+
+.thinForm label span {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.thinForm input {
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--desk-line, var(--desk-line));
+  border-radius: 2px;
+  background: var(--desk-input-bg);
+  color: var(--desk-text);
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.thinForm input:focus,
+.thinForm select:focus,
+select:focus {
+  outline: none;
+  border-color: var(--desk-line-strong);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+.deskSelect {
+  position: relative;
+  min-width: 0;
+}
+
+.deskSelectTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--desk-line);
+  background: var(--desk-input-bg);
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.deskSelectTrigger:hover,
+.deskSelectTrigger.open {
+  border-color: var(--desk-line-strong);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+.deskSelectTrigger svg {
+  flex: none;
+  transition: transform 160ms ease;
+}
+
+.deskSelectTrigger svg.flip {
+  transform: rotate(180deg);
+}
+
+.deskSelectPanel {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  right: 0;
+  z-index: 8;
+  display: grid;
+  max-height: 180px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--desk-bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line-strong),
+    0 10px 28px rgba(0, 0, 0, 0.55),
+    0 0 12px var(--desk-glow);
+}
+
+/* Portalled to <body>: fixed in viewport space at the trigger rect, above the
+   modal scrim (z 12) so it is never clipped by the modal frame or body overflow.
+   Inline styles set left/top/width; right is cleared so width wins. */
+.deskSelectPanelPortal {
+  position: fixed;
+  right: auto;
+  z-index: 1000;
+}
+
+.deskSelectOption {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.deskSelectOption:hover {
+  background: var(--desk-glow);
+  color: var(--desk-text);
+}
+
+.deskSelectOption.selected {
+  color: var(--desk-accent);
+}
+
+.settingsSectionLabel {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.themeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.themeCard {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  padding: 10px 12px;
+  border: 0;
+  background: var(--desk-surface);
+  box-shadow: inset 0 0 0 1px var(--desk-line);
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+  transition: box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.themeCard:hover {
+  box-shadow: inset 0 0 0 1px var(--desk-line-strong);
+  background: var(--desk-glow);
+}
+
+.themeCard.selected {
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line-strong),
+    0 0 10px var(--desk-glow);
+}
+
+.themeCard.selected .themeCardLabel {
+  color: var(--desk-accent);
+}
+
+.themeCard small {
+  color: var(--desk-text-dim);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.themeChips {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.themeChips i {
+  width: 18px;
+  height: 12px;
+  box-shadow: inset 0 0 0 1px rgba(127, 127, 127, 0.4);
+}
+
+.iconButton {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-surface);
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+
+.iconButton:hover:not(:disabled) {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+}
+
+.iconButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.36;
+}
+
+/* Session state indicators. The glow is a radial gradient INSIDE the element
+   (fading to transparent), not a box-shadow: the agents tree's .treeMain has
+   `overflow: hidden`, which clipped a box-shadow glow into a square at the dot's
+   edge. Self-contained gradients can't be clipped, so the dots stay round. */
+.statusDot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.statusDot.running {
+  background: radial-gradient(circle, #c4ffec 0%, #21f7a3 34%, rgba(33, 247, 163, 0.4) 60%, rgba(33, 247, 163, 0) 80%);
+  animation: deskDotPulse 2.4s ease-in-out infinite;
+}
+
+.statusDot.missing {
+  background: radial-gradient(circle, #ffc6d2 0%, var(--desk-error, #ff4d6d) 34%, rgba(255, 77, 109, 0.4) 60%, rgba(255, 77, 109, 0) 80%);
+}
+
+@keyframes deskDotPulse {
+  0%,
+  100% {
+    opacity: 0.7;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+.statusDot.attention {
+  background: radial-gradient(circle, #ffe9a8 0%, #ffd166 34%, rgba(255, 196, 64, 0.45) 60%, rgba(255, 196, 64, 0) 80%);
+  animation: deskAttnLamp 1.2s ease-in-out infinite;
+}
+
+@keyframes deskAttentionPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 2px 0 rgba(255, 209, 102, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 10px 3px rgba(255, 209, 102, 0.95);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statusDot.running,
+  .statusDot.attention {
+    animation: none;
+  }
+}
+
+.resizeHandle {
+  position: relative;
+  width: 5px;
+  background: var(--desk-glow);
+  outline: none;
+}
+
+.resizeHandle::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 2px;
+  width: 1px;
+  background: var(--desk-line);
+}
+
+.resizeHandle:hover,
+.resizeHandle[data-resize-handle-active] {
+  background: rgba(255, 209, 102, 0.18);
+}
+
+.emptyWorkspace {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  color: var(--desk-text-dim);
+  font-size: 13px;
+}
+
+.terminalSurface .xterm {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+}
+
+.terminalSurface .xterm-viewport,
+.terminalSurface .xterm-screen {
+  width: 100% !important;
+}
+
+.terminalSurface .xterm-viewport {
+  height: 100% !important;
+  scrollbar-color: rgba(95, 247, 255, 0.45) rgba(0, 11, 13, 0.96);
+  scrollbar-width: thin;
+}
+
+.terminalScrollbackOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  margin: 0;
+  overflow: hidden;
+  background: var(--desk-term-bg, #02070a);
+  outline: none;
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+
+.terminalScrollbackOverlay .xterm {
+  height: 100%;
+}
+
+.terminalScrollbackOverlay .xterm-viewport {
+  overflow-x: hidden;
+}
+
+.terminalSurfaceShell[data-terminal-scrollback='true'] .terminalScrollRail {
+  display: none;
+}
+
+.terminalSurfaceShell[data-terminal-scrollback='true']::after {
+  content: 'SCROLLBACK · wheel to bottom or ESC for live';
+  position: absolute;
+  top: 4px;
+  right: 14px;
+  z-index: 3;
+  padding: 2px 8px;
+  background: var(--desk-surface);
+  box-shadow: inset 0 0 0 1px var(--desk-line, rgba(95, 247, 255, 0.3));
+  color: var(--desk-accent);
+  font-size: 9px;
+  letter-spacing: 1px;
+  pointer-events: none;
+}
+
+.terminalSurface .xterm.focus .xterm-cursor-block,
+.terminalSurface .xterm.focus .xterm-cursor-bar,
+.terminalSurface .xterm.focus .xterm-cursor-underline {
+  animation: terminalCursorBlink 1s steps(1, end) infinite !important;
+}
+
+.terminalSurfaceShell:not([data-terminal-input-active='true']) .terminalSurface .xterm .xterm-cursor,
+.terminalSurfaceShell:not([data-terminal-input-active='true']) .terminalSurface .xterm .xterm-cursor-block,
+.terminalSurfaceShell:not([data-terminal-input-active='true']) .terminalSurface .xterm .xterm-cursor-bar,
+.terminalSurfaceShell:not([data-terminal-input-active='true']) .terminalSurface .xterm .xterm-cursor-underline,
+.terminalSurfaceShell[data-terminal-scrollback='true'] .terminalSurface .xterm .xterm-cursor,
+.terminalSurfaceShell[data-terminal-scrollback='true'] .terminalSurface .xterm .xterm-cursor-block,
+.terminalSurfaceShell[data-terminal-scrollback='true'] .terminalSurface .xterm .xterm-cursor-bar,
+.terminalSurfaceShell[data-terminal-scrollback='true'] .terminalSurface .xterm .xterm-cursor-underline {
+  opacity: 0 !important;
+  animation: none !important;
+}
+
+@keyframes terminalCursorBlink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.terminalSurface .xterm-viewport::-webkit-scrollbar {
+  width: 9px;
+}
+
+.terminalSurface .xterm-viewport::-webkit-scrollbar-track {
+  background: var(--desk-term-bg, rgba(0, 11, 13, 0.96));
+  border-left: 1px solid rgba(95, 247, 255, 0.12);
+}
+
+.terminalSurface .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(95, 247, 255, 0.38);
+  border: 2px solid rgba(0, 11, 13, 0.96);
+  border-radius: 0;
+}
+
+.terminalSurface .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 209, 102, 0.72);
+}
+
+.terminalScrollRail {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  width: 9px;
+  border-left: 1px solid rgba(95, 247, 255, 0.12);
+  background: var(--desk-term-bg, rgba(0, 11, 13, 0.84));
+  cursor: ns-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.terminalScrollRail[data-scrollable='false'] {
+  opacity: 0.46;
+}
+
+.terminalScrollThumb {
+  width: 100%;
+  min-height: 28px;
+  background: var(--desk-line-strong);
+  box-shadow: 0 0 8px rgba(0, 245, 255, 0.18);
+}
+
+.terminalScrollRail[data-scrollable='false'] .terminalScrollThumb {
+  background: var(--desk-line);
+  box-shadow: none;
+}
+
+.modalScrim {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--desk-scrim, rgba(0, 4, 6, 0.74));
+  backdrop-filter: blur(3px);
+}
+
+.deskModal {
+  position: relative;
+  display: grid;
+  grid-template-rows: 32px minmax(0, 1fr);
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 96px));
+  padding: 18px 30px 22px;
+  background: var(--desk-bg);
+  --arwes-frames-bg-color: var(--desk-bg-elevated);
+  --arwes-frames-line-color: var(--desk-line-strong);
+  --arwes-frames-deco-color: var(--desk-accent);
+  --arwes-frames-bg-stroke: var(--desk-line);
+}
+
+.deskModal > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.modalHeader {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+}
+
+.modalBody {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.modalForm {
+  gap: 8px;
+  margin: 0;
+}
+
+.modalDetails {
+  grid-template-columns: 70px minmax(0, 1fr);
+  margin: 0;
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 900px) {
+  .topbarPrimary {
+    grid-template-columns: minmax(140px, 1fr) auto;
+  }
+
+  .projectStats {
+    display: none;
+  }
+
+  .topbarTelemetry {
+    grid-template-columns: minmax(120px, 1fr) repeat(3, minmax(88px, 1fr));
+    overflow: hidden;
+  }
+
+  .thinButton span {
+    display: none;
+  }
+}
+
+/* Narrow-desktop band only: trim the two long-value cells so four full-size
+   cells fit. Below 860px the compact strip takes over and wants NET back.
+   (Was an nth-of-type count — the phone-band fleet chip cluster is a sibling
+   div and silently shifted it.) */
+@media (max-width: 900px) and (min-width: 861px) {
+  .telemetryCell[data-cell='net'],
+  .telemetryCell[data-cell='disk'] {
+    display: none;
+  }
+}
+
+.deskContent {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+}
+
+.appRail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 5px;
+  border-right: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+}
+
+.subsystemButton {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  background: none;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.subsystemButton .subsystemButtonBar {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  translate: 0 -50%;
+  background: var(--desk-line-strong);
+  box-shadow: 0 0 7px var(--desk-glow);
+  transition: height 200ms ease;
+}
+
+.subsystemButton .subsystemButtonIcon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  transition: transform 130ms ease, filter 150ms ease;
+}
+
+.subsystemButton:hover {
+  color: var(--desk-text);
+  background: var(--desk-glow);
+}
+
+.subsystemButton:active .subsystemButtonIcon {
+  transform: scale(0.88);
+}
+
+.subsystemButton.selected {
+  color: var(--desk-text);
+}
+
+.subsystemButton.selected .subsystemButtonBar {
+  height: 72%;
+}
+
+.subsystemButton.selected .subsystemButtonIcon {
+  filter: drop-shadow(0 0 7px var(--desk-glow));
+}
+
+.subsystemButton.compact::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ffd166;
+  box-shadow: 0 0 8px rgba(255, 209, 102, 0.85);
+}
+
+.subsystemPanels {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.agentTreePanel,
+.editorTreePanel,
+.subsystemSurface,
+.editorSidebar,
+.editorStage {
+  min-width: 0;
+  min-height: 0;
+  background: var(--desk-surface);
+}
+
+.agentTreePanel,
+.editorTreePanel,
+.subsystemSurface {
+  height: 100%;
+}
+
+.agentTreePanelInner,
+.editorTreePanelInner,
+.subsystemSurfaceInner,
+.editorStage {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.panelResizeHandle {
+  position: relative;
+  flex: 0 0 5px;
+  background: rgba(95, 247, 255, 0.08);
+  outline: none;
+}
+
+.panelResizeHandle::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border: 1px solid var(--desk-line);
+}
+
+.subsystemPanels > .panelResizeHandle,
+.terminalPanelCols > .panelResizeHandle {
+  width: 5px;
+  cursor: col-resize;
+}
+
+.terminalPanelRows > .panelResizeHandle {
+  height: 5px;
+  cursor: row-resize;
+}
+
+.panelResizeHandle[data-resize-state],
+.panelResizeHandle:hover {
+  background: rgba(255, 209, 102, 0.26);
+}
+
+.subsystemPanels.agentSidebarCollapsed > .panelResizeHandle,
+.subsystemPanels.editorSidebarCollapsed > .panelResizeHandle {
+  flex-basis: 0;
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.subsystemPanels.agentSidebarCollapsed .agentTreePanelInner,
+.subsystemPanels.editorSidebarCollapsed .editorTreePanelInner {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Smooth programmatic collapse/expand: the transition is gated behind
+   .sidebarAnimating so manual drag-resize stays 1:1 with the pointer.
+   react-resizable-panels sizes the [data-panel] wrappers via flex-grow. */
+.subsystemPanels.sidebarAnimating > [data-panel] {
+  transition: flex-grow 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.agentTreePanelInner,
+.editorTreePanelInner {
+  transition: opacity 200ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subsystemPanels.sidebarAnimating > [data-panel],
+  .agentTreePanelInner,
+  .editorTreePanelInner {
+    transition: none;
+  }
+}
+
+.agentsSidebar {
+  display: grid;
+  /* header | filter row | tree */
+  grid-template-rows: 32px auto minmax(0, 1fr);
+  height: 100%;
+  border-right: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+}
+
+.sidebarHeader,
+.subsystemHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+}
+
+.projectTree {
+  min-height: 0;
+  overflow: auto;
+  padding: 5px;
+}
+
+.projectNode,
+.groupNode {
+  min-width: 0;
+}
+
+.projectNode + .projectNode {
+  margin-top: 7px;
+}
+
+.treeRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  min-width: 0;
+}
+
+.treeRow > svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  --arwes-frames-line-color: var(--desk-line-strong);
+  --arwes-frames-bg-color: var(--desk-glow);
+}
+
+.sessionNode:hover {
+  background: var(--desk-glow);
+}
+
+.treeToggle {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+}
+
+.treeToggle:hover {
+  color: var(--desk-accent);
+}
+
+.treeToggle.spacer {
+  pointer-events: none;
+}
+
+.treeMain {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  height: 24px;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--desk-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.treeMain span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.treeMain small {
+  color: var(--desk-accent);
+  font-size: 10px;
+}
+
+/* Count + needs-input lamp share the row's trailing grid cell so the lamp never
+   pushes the count onto a clipped second grid row. Count always sits first. */
+.treeMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.projectRow .treeMain {
+  color: var(--desk-text);
+  font-weight: 700;
+}
+
+.projectNode.selected > .projectRow .treeMain,
+.groupNode.selected > .groupRow .treeMain,
+.sessionNode.selected .treeMain {
+  color: var(--desk-text);
+}
+
+.sessionNode.selected {
+  filter: drop-shadow(0 0 4px var(--desk-glow));
+}
+
+.groupBranch {
+  margin-left: 8px;
+  padding-left: 7px;
+  border-left: 1px solid var(--desk-line);
+}
+
+.sessionBranch {
+  margin-left: 8px;
+  padding-left: 7px;
+  border-left: 1px solid var(--desk-line);
+}
+
+.treeActions,
+.railActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Row actions reveal on hover/keyboard focus (vs-code style): forty rows of
+   permanent icon clusters read as noise and steal width from the labels.
+   The reveal is gated to real hover devices: on touch, :hover flips DURING a
+   tap, the cluster materializes mid-gesture, the layout shifts, and the
+   synthesized click lands on the wrong element — rows became untappable. */
+.treeRow .treeActions {
+  display: none;
+}
+
+@media (hover: hover) {
+  .treeRow:hover .treeActions,
+  .treeRow:focus-within .treeActions {
+    display: inline-flex;
+  }
+}
+
+.treeActions .iconButton {
+  width: 18px;
+  height: 18px;
+}
+
+.agentSubsystem {
+  display: grid;
+  grid-template-rows: 32px minmax(0, 1fr);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.layoutBadge {
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 209, 102, 0.42);
+  color: var(--desk-accent);
+  font-size: 10px;
+}
+
+.multiplexerGrid {
+  display: block;
+  min-height: 0;
+  height: 100%;
+  padding: 5px;
+}
+
+.terminalPanelRows,
+.terminalPanelCols,
+.terminalPanelRow,
+.terminalPanelCell {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.terminalCell {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cellChrome {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cellChromeBorder {
+  position: absolute;
+  inset: 0;
+  background: var(--desk-line);
+}
+
+.cellChromeBody {
+  position: absolute;
+  inset: 1px;
+  display: grid;
+  grid-template-rows: 26px minmax(0, 1fr);
+  background: var(--desk-bg-elevated);
+}
+
+.cellChrome:hover .cellChromeBorder {
+  background: var(--desk-line-strong);
+}
+
+.cellChrome[data-focused='true'] .cellChromeBorder {
+  background: var(--desk-line-strong);
+}
+
+.cellChrome[data-focused='true'] {
+  filter: drop-shadow(0 0 7px var(--desk-glow));
+}
+
+.cellTabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: auto hidden;
+  padding: 3px;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+.cellLabel {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  border: 1px solid var(--desk-line);
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+
+.cellTab {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 190px;
+  height: 18px;
+  gap: 4px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-surface);
+  color: var(--desk-text);
+  cursor: grab;
+  font-size: 10px;
+}
+
+.cellTab span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cellTab.selected,
+.cellTab.globalSelected {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+}
+
+.cellRemove {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-surface);
+  color: var(--desk-text-dim);
+  cursor: pointer;
+}
+
+.cellRemove:hover {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+}
+
+.cellRemove:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.terminalCellBody {
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminalCellBody .terminalSurfaceShell {
+  border: 0;
+}
+
+.emptyCell {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--desk-text-dim);
+  font-size: 11px;
+}
+
+.editorSidebar {
+  border-right: 1px solid var(--desk-line);
+}
+
+.editorStage {
+  position: relative;
+  padding: 12px;
+}
+
+.deskPanel {
+  position: relative;
+  height: 100%;
+}
+
+.deskPanel > svg,
+.deskPanel > canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.deskPanelContent {
+  position: relative;
+  height: 100%;
+  padding: 24px;
+}
+
+.editorPlaceholder {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--desk-text-dim);
+}
+
+select {
+  height: 26px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-input-bg);
+  color: var(--desk-text);
+}
+
+@media (max-width: 900px) {
+  .deskContent {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .appRail {
+    padding-inline: 3px;
+  }
+
+  .subsystemPanels {
+    min-width: 0;
+  }
+}
+
+/* ---------- Notification drawer ---------- */
+
+.notifButtonWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.notifLamp {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ffd166;
+  box-shadow: 0 0 8px rgba(255, 209, 102, 0.9);
+  animation: deskAttentionPulse 1.1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.notifDrawer {
+  position: absolute;
+  top: 84px;
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  display: grid;
+  /* header / filter chips / scrolling list */
+  grid-template-rows: 34px auto minmax(0, 1fr);
+  border-left: 1px solid var(--desk-line-strong);
+  background: var(--desk-surface);
+  box-shadow: -14px 0 40px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(3px);
+}
+
+.notifResizeHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.notifResizeHandle:hover {
+  background: var(--desk-glow);
+}
+
+.notifHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--desk-line);
+  background: var(--desk-bg-elevated);
+}
+
+.notifHeader small {
+  color: var(--desk-accent);
+  font-size: 9px;
+  letter-spacing: 0.8px;
+}
+
+.notifList {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+  padding: 9px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.notifEmpty {
+  padding: 18px 6px;
+  color: var(--desk-text-dim);
+  font-size: 11px;
+  text-align: center;
+}
+
+.notifCard {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 0;
+  background: var(--desk-bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line),
+    inset 3px 0 0 var(--desk-line-strong);
+  color: var(--desk-text);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+  transition: box-shadow 140ms ease, background-color 140ms ease, opacity 140ms ease;
+}
+
+.notifCard:hover {
+  background: var(--desk-glow);
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line-strong),
+    inset 3px 0 0 var(--desk-line-strong);
+}
+
+.notifCard.ok {
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line),
+    inset 3px 0 0 var(--desk-ok);
+}
+
+.notifCard.warn {
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line),
+    inset 3px 0 0 var(--desk-accent);
+}
+
+.notifCard.error {
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line),
+    inset 3px 0 0 var(--desk-error);
+}
+
+.notifCard.read {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* acknowledged cards stay flat — hover affordance belongs to unread only */
+.notifCard.read:hover {
+  background: var(--desk-bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line),
+    inset 3px 0 0 var(--desk-line-strong);
+}
+.notifCard.read.ok:hover { box-shadow: inset 0 0 0 1px var(--desk-line), inset 3px 0 0 var(--desk-ok); }
+.notifCard.read.warn:hover { box-shadow: inset 0 0 0 1px var(--desk-line), inset 3px 0 0 var(--desk-accent); }
+.notifCard.read.error:hover { box-shadow: inset 0 0 0 1px var(--desk-line), inset 3px 0 0 var(--desk-error); }
+
+.notifCard.unread {
+  background: color-mix(in srgb, var(--desk-accent) 5%, var(--desk-bg-elevated));
+}
+/* the unread tint must not defeat the hover highlight (equal specificity, later rule wins) */
+.notifCard.unread:hover {
+  background: var(--desk-glow);
+}
+.notifCard.unread strong {
+  color: var(--desk-text);
+}
+
+.notifCardTop {
+  /* No space-between: the unread lamp is an optional third child, and
+     space-between recentered the kind label whenever it mounted. The lamp and
+     label stay a left cluster; only the timestamp is pushed right. */
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.notifCardTop small {
+  margin-left: auto;
+}
+
+.notifCardKind {
+  font-size: 8.5px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+}
+
+.notifCard.ok .notifCardKind {
+  color: var(--desk-ok);
+}
+
+.notifCard.warn .notifCardKind {
+  color: var(--desk-accent);
+}
+
+.notifCard.error .notifCardKind {
+  color: var(--desk-error);
+}
+
+.notifCardTop small {
+  color: var(--desk-text-dim);
+  font-size: 9px;
+}
+
+.notifCard strong {
+  overflow: hidden;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notifCardMessage {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+
+/* ---------- Emergency kill switch ---------- */
+
+/* Danger Cmd (emergency KILL): same octagon frame as other toolbar buttons,
+   transparent fill, red line + red label. */
+.deskCmd.danger {
+  color: var(--desk-error);
+  --arwes-frames-line-color: var(--desk-error);
+  --arwes-frames-bg-color: transparent;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.deskCmd.danger:hover:not(:disabled) {
+  color: var(--desk-error);
+  --arwes-frames-line-color: var(--desk-error);
+  filter: brightness(1.2) drop-shadow(0 0 7px var(--desk-error));
+}
+
+.modalScrim.danger {
+  background: rgba(40, 2, 6, 0.7);
+}
+
+.deskModal.danger {
+  --arwes-frames-line-color: var(--desk-error);
+  --arwes-frames-deco-color: var(--desk-error);
+  --arwes-frames-bg-stroke: var(--desk-error);
+  animation: deskDangerPulse 1s ease-in-out infinite;
+}
+
+@keyframes deskDangerPulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 6px rgba(255, 77, 109, 0.3));
+  }
+  50% {
+    filter: drop-shadow(0 0 16px rgba(255, 77, 109, 0.65));
+  }
+}
+
+.killConfirm .confirmCopy strong {
+  color: var(--desk-error);
+}
+
+.killConfirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.killConfirmActions .deskCmd {
+  --arwes-frames-line-color: var(--desk-error);
+  color: var(--desk-error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deskModal.danger {
+    animation: none;
+  }
+}
+
+/* ---------- Editor subsystem: explorer ---------- */
+.editorMount {
+  grid-column: 2;
+  grid-row: 1;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.channelsKeepAliveMount {
+  display: flex;
+  visibility: hidden;
+  pointer-events: none;
+}
+.channelsKeepAliveMount.active {
+  visibility: visible;
+  pointer-events: auto;
+}
+.editorMount > .editorPanels { flex: 1; min-width: 0; }
+/* always-mounted agents subsystem: same display-gated pattern as the editors */
+.editorMount > .subsystemPanels { flex: 1; min-width: 0; }
+
+/* Keep-alive multiplexer mounts: hidden groups stay in the DOM with live
+   terminals; only the active one is displayed. */
+.muxMount {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.muxMount > .agentSubsystem {
+  flex: 1;
+  width: 100%;
+}
+.editorSidebar { display: flex; flex-direction: column; }
+
+.editorRootSelect { position: relative; margin: 6px 8px; min-width: 0; }
+
+.editorRootButton {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 4px 9px;
+  background: var(--desk-glow); border: none;
+  color: var(--desk-text-dim); font: inherit; font-size: 11px; cursor: pointer;
+  overflow: hidden;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+.editorRootButton:hover,
+.editorRootButton.open { color: var(--desk-accent); background: var(--arwes-frames-bg-color); }
+.editorRootButton > svg { flex: none; color: var(--desk-accent); transition: transform 160ms ease; }
+.editorRootButton > svg.flip { transform: rotate(180deg); }
+/* direction:rtl ellipsizes the START of long paths (the tail is the informative
+   part); unicode-bidi:plaintext keeps the latin path itself rendering LTR so
+   slashes and tildes stay in their real positions. */
+.editorRootPath {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; unicode-bidi: plaintext; text-align: left;
+}
+
+/* Overlay dropdown (DeskSelect pattern) — floats above the tree instead of pushing it. */
+.editorRootPanel {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  right: 0;
+  z-index: 12;
+  display: grid;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px;
+  background: var(--desk-bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px var(--desk-line-strong),
+    0 10px 28px rgba(0, 0, 0, 0.55),
+    0 0 12px var(--desk-glow);
+}
+.editorRootPanel .treeInlineInput { margin-bottom: 3px; }
+.editorRootPanel .deskSelectOption {
+  gap: 6px;
+  min-width: 0;
+}
+.editorRootPanel .deskSelectOption > svg { flex: none; color: var(--desk-text-dim); }
+.editorRootPanel .deskSelectOption.selected > svg { color: var(--desk-accent); }
+.editorRootPanel .deskSelectOption > span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; unicode-bidi: plaintext; text-align: left;
+}
+
+.explorerTree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2px 6px 12px; font-size: 12px; }
+
+/* File tree rows share the agents-tree anatomy: toggle | main | meta. */
+.fileNode {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+  min-width: 0;
+}
+.fileNode:hover { background: var(--desk-glow); }
+.fileNode.selected { filter: drop-shadow(0 0 4px var(--desk-glow)); }
+.fileNode > svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  --arwes-frames-line-color: var(--desk-line-strong);
+  --arwes-frames-bg-color: var(--desk-glow);
+}
+.fileNodeHidden .treeMain { color: var(--desk-text-dim); opacity: 0.72; }
+.fileNodeDrop { outline: 1px dashed var(--desk-accent); outline-offset: -1px; background: var(--desk-glow); }
+.fileNodeEditing { grid-template-columns: auto auto minmax(0, 1fr); padding-right: 6px; }
+
+.fileNodeIcon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--desk-text-dim);
+}
+.fileNodeIcon.dir { color: var(--desk-accent); }
+.fileNode .treeMain { height: 24px; }
+.fileNode .treeMain small {
+  color: var(--desk-text-dim);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fileBranch {
+  margin-left: 9px;
+  padding-left: 6px;
+  border-left: 1px solid var(--desk-line);
+  min-width: 0;
+}
+
+.treeInlineInput {
+  width: 100%; background: var(--desk-input-bg); color: var(--desk-text);
+  border: none; border-bottom: 1px solid var(--desk-accent);
+  font: inherit; font-size: 12px; padding: 2px 6px;
+}
+.treeInlineInput:focus { outline: none; box-shadow: 0 1px 0 var(--desk-accent), 0 0 10px var(--desk-glow); }
+
+.treeContextMenu {
+  position: fixed; z-index: 60; min-width: 170px;
+  background: var(--desk-bg-elevated); padding: 5px;
+  border: 1px solid var(--desk-line-strong);
+  box-shadow: 0 0 18px var(--desk-glow), inset 0 0 24px var(--desk-glow);
+  display: flex; flex-direction: column;
+}
+.treeMenuItem {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 9px; background: none; border: none; cursor: pointer;
+  color: var(--desk-text); font: inherit; font-size: 12px; text-align: left;
+}
+.treeMenuItem:hover { background: var(--desk-glow); color: var(--desk-accent); }
+.treeMenuDanger { color: var(--desk-error); }
+.treeMenuDanger:hover { color: var(--desk-error); }
+
+.confirmBody { display: flex; flex-direction: column; gap: 12px; }
+.confirmActions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ---------- Editor subsystem: tabs + monaco ---------- */
+.editorStage { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0; }
+.editorStage > .deskPanel { flex: 1; height: auto; min-height: 0; margin: 12px; }
+
+.editorTabs {
+  display: flex; align-items: center; gap: 4px;
+  overflow-x: auto; overflow-y: hidden; flex: none;
+  border-bottom: 1px solid var(--desk-line); padding: 5px 8px;
+}
+.editorTab {
+  position: relative;
+  display: flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 10px;
+  cursor: pointer; user-select: none; white-space: nowrap;
+  color: var(--desk-text-dim); background: var(--desk-glow);
+  font-size: 12px;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+.editorTab:hover { color: var(--desk-text); background: var(--arwes-frames-bg-color); }
+.editorTabActive {
+  color: var(--desk-text);
+  background: var(--arwes-frames-bg-color);
+}
+.editorTabBar {
+  position: absolute; left: 6px; right: 6px; top: 0; height: 2px;
+  background: transparent; pointer-events: none;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+.editorTabActive .editorTabBar {
+  background: var(--desk-accent);
+  box-shadow: 0 0 8px var(--desk-accent);
+}
+.editorTabIcon { display: inline-grid; place-items: center; color: var(--desk-text-dim); flex: none; }
+.editorTabActive .editorTabIcon { color: var(--desk-accent); }
+.editorTabConflict { color: var(--desk-error); }
+.editorTabConflict .editorTabBar { background: var(--desk-error); box-shadow: 0 0 8px var(--desk-error); }
+.editorTabDeleted { text-decoration: line-through; }
+.editorTabDot { width: 6px; height: 6px; border-radius: 50%; background: transparent; flex: none; }
+.editorTabDotDirty { background: var(--desk-accent); box-shadow: 0 0 6px var(--desk-accent); }
+.editorTabLabel { overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.editorTabClose {
+  background: none; border: none; color: inherit; cursor: pointer; padding: 0;
+  display: grid; place-items: center; width: 14px; height: 14px; opacity: 0.6;
+}
+.editorTab:hover .editorTabClose, .editorTabActive .editorTabClose { opacity: 1; }
+.editorTabClose:hover { color: var(--desk-error); }
+
+.monacoHost { flex: 1; min-height: 0; }
+
+.editorConflictBanner {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 6px 12px; font-size: 12px;
+  color: var(--desk-error); background: var(--desk-bg-elevated);
+  border-bottom: 1px solid var(--desk-error);
+}
+
+/* ---------- Editor subsystem: search ---------- */
+.searchPanel { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 8px 12px; }
+.searchInputRow { display: flex; align-items: center; gap: 6px; color: var(--desk-text-dim); }
+.searchStatus { font-size: 11px; color: var(--desk-text-dim); padding: 0 2px; }
+.searchGroup { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.searchGroup > :first-child { font-size: 10px; letter-spacing: 0.14em; color: var(--desk-accent); margin: 6px 0 2px; }
+.searchFileGroup { display: flex; flex-direction: column; }
+.searchHitFile {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--desk-accent); font-size: 11px; padding: 3px 2px 1px;
+  overflow: hidden; white-space: nowrap;
+}
+.searchHitFile .fileNodeIcon { color: var(--desk-accent); flex: none; }
+.searchHit {
+  display: flex; align-items: center; gap: 6px; text-align: left;
+  background: none; border: none; cursor: pointer; color: var(--desk-text);
+  font: inherit; font-size: 12px; padding: 2px;
+  overflow: hidden; white-space: nowrap;
+}
+.searchHit:hover { background: var(--desk-glow); }
+.searchHitPath, .searchHitText { overflow: hidden; text-overflow: ellipsis; }
+.searchLineNo { color: var(--desk-text-dim); min-width: 28px; text-align: right; flex: none; }
+
+/* ---------- Settings: editor autosave ---------- */
+.autosaveRow { display: flex; gap: 8px; }
+.autosaveRow > .deskSelect { flex: 1; }
+.settingsHint { color: var(--desk-text-dim); font-size: 10px; line-height: 1.5; }
+
+/* ---------- Settings: sectioned layout with vertical tabs ---------- */
+.deskModal.wide { width: min(780px, calc(100vw - 48px)); }
+
+.settingsLayout {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  min-height: 400px;
+}
+
+.settingsTabs {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding-right: 12px;
+  border-right: 1px solid var(--desk-line);
+}
+
+.settingsTab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--desk-text-dim);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-align: left;
+  box-shadow: inset 2px 0 0 transparent;
+  transition: color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+.settingsTab > svg { flex: none; }
+.settingsTab:hover { color: var(--desk-text); background: var(--desk-glow); }
+.settingsTab.selected {
+  color: var(--desk-accent);
+  background: var(--desk-glow);
+  box-shadow: inset 2px 0 0 var(--desk-accent);
+}
+
+.settingsContent {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* ---------- Editor subsystem: viewers (image / pdf / markdown) ---------- */
+.editorHostWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.editorHostWrap > .monacoHost { flex: 1; min-height: 0; }
+.viewerOverlay {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--desk-bg);
+}
+
+.viewerStage {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; overflow: auto; padding: 14px;
+}
+.viewerStatus { color: var(--desk-text-dim); font-size: 11px; letter-spacing: 0.06em; }
+
+.imageStage img {
+  max-width: 100%; max-height: calc(100% - 28px);
+  object-fit: contain; cursor: zoom-in;
+  background:
+    repeating-conic-gradient(var(--desk-bg-elevated) 0% 25%, var(--desk-bg) 0% 50%) 0 0 / 18px 18px;
+  box-shadow: 0 0 0 1px var(--desk-line), 0 0 18px var(--desk-glow);
+}
+.imageStage.zoomed { justify-content: flex-start; align-items: flex-start; }
+.imageStage.zoomed img { max-width: none; max-height: none; cursor: zoom-out; }
+
+.pdfStage { padding: 0; gap: 0; }
+.pdfFrame { flex: 1; width: 100%; height: 100%; border: none; background: var(--desk-bg-elevated); }
+
+/* Markdown rendered view */
+.markdownView { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 26px 40px; }
+.markdownBody { max-width: 860px; margin: 0 auto; font-size: 13px; line-height: 1.65; color: var(--desk-text); }
+.markdownBody h1, .markdownBody h2, .markdownBody h3, .markdownBody h4 {
+  color: var(--desk-text); letter-spacing: 0.04em; margin: 1.4em 0 0.5em; line-height: 1.25;
+}
+.markdownBody h1 { font-size: 22px; border-bottom: 1px solid var(--desk-line); padding-bottom: 6px; }
+.markdownBody h2 { font-size: 18px; border-bottom: 1px solid var(--desk-line); padding-bottom: 4px; }
+.markdownBody h3 { font-size: 15px; color: var(--desk-accent); }
+.markdownBody h4 { font-size: 13px; color: var(--desk-accent); }
+.markdownBody a { color: var(--desk-accent); text-decoration: none; border-bottom: 1px dotted var(--desk-accent); }
+.markdownBody a:hover { text-shadow: 0 0 8px var(--desk-glow); }
+.markdownBody p { margin: 0.6em 0; }
+.markdownBody ul, .markdownBody ol { padding-left: 1.6em; margin: 0.6em 0; }
+.markdownBody li { margin: 0.18em 0; }
+.markdownBody li::marker { color: var(--desk-accent); }
+.markdownBody blockquote {
+  margin: 0.8em 0; padding: 4px 14px;
+  border-left: 2px solid var(--desk-accent);
+  background: var(--desk-glow); color: var(--desk-text-dim);
+}
+.markdownBody hr { border: none; border-top: 1px solid var(--desk-line); margin: 1.4em 0; }
+.markdownBody img { max-width: 100%; box-shadow: 0 0 0 1px var(--desk-line); }
+.markdownBody table { border-collapse: collapse; margin: 0.9em 0; display: block; overflow-x: auto; max-width: 100%; }
+.markdownBody th, .markdownBody td { border: 1px solid var(--desk-line); padding: 4px 11px; text-align: left; }
+.markdownBody th {
+  background: var(--desk-glow); color: var(--desk-accent);
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+}
+.markdownBody tr:nth-child(even) td { background: var(--desk-glow); }
+.markdownBody code {
+  background: var(--desk-glow); padding: 1px 5px; font-size: 12px;
+  color: var(--desk-text);
+}
+.markdownBody pre {
+  background: var(--desk-input-bg); border: 1px solid var(--desk-line);
+  padding: 10px 14px; overflow-x: auto; margin: 0.9em 0;
+  box-shadow: inset 0 0 18px var(--desk-glow);
+}
+.markdownBody pre code { background: none; padding: 0; display: block; }
+.markdownBody .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+.markdownBody input[type='checkbox'] { accent-color: var(--desk-accent); }
+
+.mermaidBlock { margin: 0.9em 0; display: flex; justify-content: center; }
+.mermaidBlock svg { max-width: 100%; height: auto; }
+.mermaidError {
+  color: var(--desk-error); background: var(--desk-input-bg);
+  border: 1px solid var(--desk-error); padding: 8px 12px; font-size: 11px; white-space: pre-wrap;
+}
+
+/* highlight.js token colors mapped to desk theme vars (matches the Monaco bridge) */
+.markdownBody .hljs-comment, .markdownBody .hljs-quote { color: var(--desk-text-dim); font-style: italic; }
+.markdownBody .hljs-keyword, .markdownBody .hljs-selector-tag, .markdownBody .hljs-tag { color: var(--desk-accent); }
+.markdownBody .hljs-string, .markdownBody .hljs-regexp, .markdownBody .hljs-addition { color: var(--desk-ok); }
+.markdownBody .hljs-number, .markdownBody .hljs-literal, .markdownBody .hljs-meta { color: var(--desk-accent); }
+.markdownBody .hljs-title, .markdownBody .hljs-name, .markdownBody .hljs-function { color: var(--desk-text); font-weight: 700; }
+.markdownBody .hljs-attr, .markdownBody .hljs-attribute, .markdownBody .hljs-variable { color: var(--desk-line-strong); }
+.markdownBody .hljs-deletion { color: var(--desk-error); }
+
+/* ---------- Git subsystem ---------- */
+.gitSidebar {
+  --desk-graph-0: var(--desk-accent);
+  --desk-graph-1: var(--desk-ok);
+  --desk-graph-2: #ffd166;
+  --desk-graph-3: var(--desk-error);
+  --desk-graph-4: var(--desk-line-strong);
+  --desk-graph-5: var(--desk-text-dim);
+}
+
+.gitBranchBar {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 26px; padding: 2px 10px;
+  border-bottom: 1px solid var(--desk-line);
+  font-size: 11px;
+}
+.gitBranchBar .deskPill { height: 17px; padding: 0 6px; font-size: 9px; }
+.gitBranchName {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-width: 0; color: var(--desk-accent); letter-spacing: 0.06em;
+}
+.gitBranchName > svg { flex: none; }
+.gitBranchName > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gitSyncActions { margin-left: auto; }
+
+.gitHubCard {
+  display: flex; align-items: center; gap: 6px;
+  margin: 4px 8px 0; padding: 4px 8px;
+  background: var(--arwes-frames-bg-color, var(--desk-glow));
+  border: 1px solid var(--desk-line);
+  font-size: 11px;
+}
+.gitHubCard .deskPill { height: 16px; padding: 0 6px; font-size: 9px; flex: none; }
+.gitHubName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--desk-text); }
+.gitHubCard > .iconButton { margin-left: auto; }
+.gitPrChip {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  height: 17px; padding: 0 6px;
+  background: none; border: 1px solid var(--desk-accent);
+  color: var(--desk-accent); font: inherit; font-size: 9px;
+  letter-spacing: 0.08em; cursor: pointer;
+}
+.gitPrChip:hover { background: var(--desk-glow); box-shadow: 0 0 8px var(--desk-glow); }
+.gitPrChip small { color: var(--desk-text-dim); }
+
+/* stacked sections in a resizable vertical split (react-resizable-panels) */
+.gitSectionsGroup { flex: 1 1 auto; min-height: 0; margin-top: 6px; }
+.gitSectionsGroup > .panelResizeHandle { height: 5px; cursor: row-resize; }
+.gitSectionPanel { min-height: 0; overflow: hidden; }
+.gitSection { display: flex; flex-direction: column; min-height: 0; height: 100%; border-top: 1px solid var(--desk-line); }
+.gitSectionHeader {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  min-height: 27px; padding: 5px 8px; background: none; border: none; cursor: pointer;
+  color: var(--desk-text-dim); font: inherit; font-size: 10px;
+  letter-spacing: 0.14em; text-transform: uppercase; text-align: left;
+}
+.gitSectionHeader:hover { color: var(--desk-accent); background: var(--desk-glow); }
+.gitSectionHeader .deskPill { height: 16px; padding: 0 6px; font-size: 9px; margin-left: auto; }
+.gitSectionBody { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0 8px; }
+
+/* commit box */
+.gitCommitBox { display: flex; flex-direction: column; gap: 5px; padding: 2px 8px 8px; }
+.gitCommitInput {
+  width: 100%; resize: vertical; min-height: 38px;
+  background: var(--desk-input-bg); color: var(--desk-text);
+  border: 1px solid var(--desk-line); border-bottom-color: var(--desk-accent);
+  font: inherit; font-size: 12px; padding: 4px 6px;
+}
+.gitCommitInput:focus { outline: none; border-color: var(--desk-accent); box-shadow: 0 0 10px var(--desk-glow); }
+.gitCommitActions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.gitAmendToggle {
+  display: inline-flex; align-items: center; gap: 5px; margin-right: auto;
+  color: var(--desk-text-dim); font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; cursor: pointer;
+}
+.gitAmendToggle input { accent-color: var(--desk-accent); }
+
+/* change rows */
+.gitChangeLists { display: flex; flex-direction: column; gap: 4px; }
+.gitGroupHeader {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px 1px; color: var(--desk-accent);
+  font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+}
+.gitGroupHeader .deskPill { height: 15px; padding: 0 5px; font-size: 9px; }
+.gitGroupHeader .gitRowActions { margin-left: auto; }
+.gitChangeRow {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center; gap: 4px; padding: 0 8px 0 10px; min-height: 24px;
+}
+.gitChangeRow:hover { background: var(--desk-glow); }
+.gitChangeMain {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  background: none; border: none; cursor: pointer; color: var(--desk-text);
+  font: inherit; font-size: 12px; padding: 0; text-align: left; height: 24px;
+}
+.gitChangeName { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+.gitChangeDir {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--desk-text-dim); font-size: 10px;
+  direction: rtl; unicode-bidi: plaintext; text-align: left;
+}
+.gitRowActions { display: inline-flex; align-items: center; gap: 2px; }
+.gitChangeRow .gitRowActions { opacity: 0; transition: opacity 120ms ease; }
+.gitChangeRow:hover .gitRowActions, .gitChangeRow:focus-within .gitRowActions { opacity: 1; }
+.gitStatusBadge {
+  width: 14px; text-align: center; flex: none;
+  font-style: normal; font-size: 11px; font-weight: 700;
+}
+.gitTone-modified { color: #ffd166; }
+.gitTone-added { color: var(--desk-ok); }
+.gitTone-deleted { color: var(--desk-error); }
+.gitTone-renamed { color: var(--desk-accent); }
+.gitTone-untracked { color: var(--desk-ok); }
+.gitTone-conflict { color: var(--desk-error); text-shadow: 0 0 6px var(--desk-error); }
+.gitChangeRow:has(.gitTone-deleted) .gitChangeName { text-decoration: line-through; }
+
+.gitEmptyNote { padding: 10px 12px; color: var(--desk-text-dim); font-size: 11px; }
+
+/* ---------- explorer tree git decorations ---------- */
+
+.fileNode .gitBadge {
+  flex: none;
+  margin-left: auto;
+  padding-right: 2px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.fileNode .gitDirDot {
+  flex: none;
+  margin-left: auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ffd166;
+  opacity: 0.85;
+}
+
+/* NO percentage max-width here: the chip sits in an auto-sized grid column,
+   so a % cap resolves against the chip's own column and self-clips even
+   "main" to a sliver. Long branch names are shortened in JS (both ends kept);
+   the ch cap below only backstops extremes. The name column (1fr) yields. */
+.fileNode .gitRepoChip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: 9.5px;
+  color: var(--desk-text-dim);
+}
+
+.fileNode .gitRepoChipBranch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24ch;
+}
+
+.fileNode .gitRepoChipMeta {
+  flex: none; /* arrows + change count stay visible whatever truncates */
+}
+
+.fileNode .gitRepoChip.dirty {
+  color: #ffd166;
+}
+
+/* The name keeps a readable floor and ellipsizes; tail columns (chip, badge)
+   may shrink below content (minmax 0) so the chip's own ellipsis engages
+   instead of the row overflowing at narrow sidebar widths. */
+.fileNode .treeMain {
+  grid-template-columns: auto minmax(48px, 1fr) auto;
+  grid-auto-columns: minmax(0, auto);
+}
+
+.fileNodeRevealFlash {
+  animation: gitRevealFlash 1.5s ease;
+}
+
+@keyframes gitRevealFlash {
+  0%, 60% { background: var(--desk-glow); box-shadow: inset 2px 0 0 var(--desk-accent); }
+  100% { background: transparent; box-shadow: none; }
+}
+
+/* ---------- monaco git gutter (linesDecorationsClassName) ---------- */
+
+.monaco-editor .gitGutterAdded,
+.monaco-editor .gitGutterModified,
+.monaco-editor .gitGutterDeleted {
+  width: 3px !important;
+  margin-left: 4px;
+}
+
+.monaco-editor .gitGutterAdded { background: var(--desk-ok); }
+.monaco-editor .gitGutterModified { background: #ffd166; }
+
+.monaco-editor .gitGutterDeleted {
+  background: transparent;
+  position: relative;
+}
+
+.monaco-editor .gitGutterDeleted::after {
+  content: '';
+  position: absolute;
+  left: -2px;
+  bottom: -4px;
+  border-left: 7px solid var(--desk-error);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+
+.monaco-editor .gitGutterDeletedTop::after {
+  bottom: auto;
+  top: -4px;
+}
+
+/* ---------- per-file history modal ---------- */
+
+.fileHistoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(420px, 60dvh);
+  overflow-y: auto;
+  min-width: min(520px, 78vw);
+}
+
+.fileHistoryEmpty {
+  padding: 12px;
+  color: var(--desk-text-dim);
+  font-size: 11px;
+}
+
+.fileHistoryRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--desk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fileHistoryRow:hover {
+  background: var(--desk-glow);
+  border-color: var(--desk-line);
+}
+
+.fileHistorySha {
+  color: var(--desk-accent);
+  font-size: 11px;
+}
+
+.fileHistorySubject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.fileHistoryMeta {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* ---------- quick-open palette (Ctrl+P) ---------- */
+
+.quickOpen {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: min(520px, 78vw);
+}
+
+.quickOpenInput {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.quickOpenResults {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: min(380px, 52dvh);
+  overflow-y: auto;
+}
+
+.quickOpenRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--desk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quickOpenRow.selected {
+  background: var(--desk-glow);
+  border-color: var(--desk-line);
+  box-shadow: inset 2px 0 0 var(--desk-accent);
+}
+
+.quickOpenName {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.quickOpenDir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+
+/* history */
+.gitHistoryBody { padding-bottom: 12px; }
+.gitCommitRow {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center; gap: 6px; height: 30px; padding: 0 8px 0 6px;
+  cursor: pointer; font-size: 12px;
+}
+.gitCommitRow:hover { background: var(--desk-glow); }
+.gitCommitRow.expanded { background: var(--desk-glow); box-shadow: inset 2px 0 0 var(--desk-accent); }
+.gitGraphRail { flex: none; display: block; }
+.gitGraphRail path { stroke-width: 1.4; opacity: 0.9; }
+.gitGraphNode { fill: var(--desk-bg); stroke-width: 1.6; }
+.gitCommitMain { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.gitCommitSubject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--desk-text); }
+.gitCommitMeta { flex: none; color: var(--desk-text-dim); font-size: 10px; }
+.gitCommitTime { min-width: 24px; text-align: right; }
+.gitRefChip {
+  flex: none; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 5px; height: 15px; line-height: 14px;
+  font-style: normal; font-size: 9px; letter-spacing: 0.06em;
+  border: 1px solid var(--desk-line-strong); color: var(--desk-text-dim);
+}
+.gitRef-head { border-color: var(--desk-accent); background: var(--desk-accent); color: var(--desk-bg); font-weight: 700; }
+.gitRef-branch { border-color: var(--desk-accent); color: var(--desk-accent); }
+.gitRef-remote { border-color: var(--desk-line-strong); color: var(--desk-text-dim); }
+.gitRef-tag { border-color: #ffd166; color: #ffd166; }
+.gitCommitFiles {
+  margin: 0 8px 6px 22px; padding: 2px 0;
+  border-left: 1px solid var(--desk-line);
+}
+.gitCommitFiles .gitChangeRow { padding-left: 6px; }
+.gitCommitBody {
+  margin: 4px 8px; padding: 6px 8px; max-height: 120px; overflow-y: auto;
+  background: var(--desk-input-bg); border: 1px solid var(--desk-line);
+  color: var(--desk-text-dim); font-size: 11px; white-space: pre-wrap;
+}
+.gitLoadMore { display: flex; justify-content: center; padding: 10px 0 4px; }
+
+/* repo picker rows */
+.gitRepoOption { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.gitRepoOption > svg { flex: none; color: var(--desk-text-dim); }
+.gitRepoOption.selected > svg { color: var(--desk-accent); }
+.gitRepoOption.dirty > svg { color: #ffd166; }
+.gitRepoName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gitRepoBranch { margin-left: auto; flex: none; color: var(--desk-text-dim); font-size: 10px; }
+.gitRepoOption .deskPill { flex: none; height: 15px; padding: 0 5px; font-size: 9px; }
+
+/* repo picker: filter + recents grouping + scrollable body */
+.gitRepoPanel { display: flex; flex-direction: column; gap: 4px; }
+.gitRepoSearch { width: 100%; padding: 5px 8px; font-size: 11px; }
+.gitRepoOptions { display: flex; flex-direction: column; max-height: min(46dvh, 380px); overflow-y: auto; }
+.gitRepoGroupLabel {
+  padding: 5px 8px 2px;
+  color: var(--desk-text-dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.gitRepoTriggerMeta {
+  flex: none;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12ch;
+  color: var(--desk-text-dim);
+  font-size: 9.5px;
+}
+
+/* branch compare (view changes without checkout) */
+.gitBranchRow.comparing { background: var(--desk-glow); box-shadow: inset 2px 0 0 var(--desk-accent); }
+.gitCompareFiles { padding: 1px 0 5px 14px; }
+.gitCompareHead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 6px;
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+.gitCompareHead > svg { flex: none; color: var(--desk-accent); }
+
+/* diff stage */
+.gitDiffToolbar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 4px 10px; font-size: 11px;
+  border-bottom: 1px solid var(--desk-line); background: var(--desk-surface);
+}
+.gitDiffToolbar .deskPill { height: 16px; padding: 0 6px; font-size: 9px; flex: none; }
+.gitDiffToolbar .gitRowActions { margin-left: auto; }
+.gitDiffPath {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--desk-text-dim);
+  direction: rtl; unicode-bidi: plaintext; text-align: left;
+}
+
+/* ---------- Projects subsystem (GitHub Projects v2) ---------- */
+.projStage { display: flex; flex-direction: column; }
+.projStageBody { position: relative; flex: 1; min-height: 0; display: flex; }
+.projToolbar { gap: 10px; }
+.projFilterRow { flex: 1; min-width: 0; max-width: 520px; }
+.projFilterRow .treeInlineInput { border-bottom-color: var(--desk-line); }
+.projFilterRow .treeInlineInput:focus { border-bottom-color: var(--desk-accent); outline: none; }
+.projToolbar .deskSelect { min-width: 140px; }
+.projDescription {
+  margin: 4px 10px 0; color: var(--desk-text-dim); font-size: 11px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.projMetaCard .gitHubName { flex: 1; }
+.projSideSection { margin-top: 8px; border-top: 1px solid var(--desk-line); padding-bottom: 4px; }
+
+/* status updates */
+.projStatusUpdate {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 2px 8px 6px; padding: 5px 8px;
+  border: 1px solid var(--desk-line); border-left-width: 2px;
+  font-size: 11px;
+}
+.projStatusUpdate > header { display: flex; align-items: center; gap: 6px; }
+.projStatusUpdate > header strong { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; }
+.projStatusUpdate > header small { margin-left: auto; color: var(--desk-text-dim); font-size: 9px; }
+.projStatusUpdate > span {
+  color: var(--desk-text-dim);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.projStatusDot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.projStatusDot.on_track, .projStatusUpdate.on_track { border-left-color: var(--desk-ok); }
+.projStatusDot.on_track { background: var(--desk-ok); }
+.projStatusDot.complete, .projStatusUpdate.complete { border-left-color: var(--desk-accent); }
+.projStatusDot.complete { background: var(--desk-accent); }
+.projStatusDot.at_risk, .projStatusUpdate.at_risk { border-left-color: #ffd166; }
+.projStatusDot.at_risk { background: #ffd166; }
+.projStatusDot.off_track, .projStatusUpdate.off_track { border-left-color: var(--desk-error); }
+.projStatusDot.off_track { background: var(--desk-error); }
+.projStatusDot.inactive, .projStatusUpdate.inactive { border-left-color: var(--desk-text-dim); }
+.projStatusDot.inactive { background: var(--desk-text-dim); }
+.projStatusUpdate.on_track > header strong { color: var(--desk-ok); }
+.projStatusUpdate.at_risk > header strong { color: #ffd166; }
+.projStatusUpdate.off_track > header strong { color: var(--desk-error); }
+
+/* views list */
+.projViewRow {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 3px 10px; background: none; border: none; cursor: pointer;
+  color: var(--desk-text); font: inherit; font-size: 12px; text-align: left;
+}
+.projViewRow:hover { background: var(--desk-glow); color: var(--desk-accent); }
+.projViewRow > svg { flex: none; color: var(--desk-text-dim); }
+.projViewRow:hover > svg { color: var(--desk-accent); }
+.projViewHasFilter { margin-left: auto; }
+
+/* board */
+.projBoard {
+  flex: 1; min-width: 0; display: flex; gap: 10px;
+  overflow-x: auto; overflow-y: hidden; padding: 10px 12px 12px;
+}
+.projColumn {
+  display: flex; flex-direction: column; flex: none;
+  width: 270px; min-height: 0; max-height: 100%;
+  border: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+}
+.projColumn.dropTarget { border-color: var(--desk-accent); box-shadow: inset 0 0 14px var(--desk-glow); }
+.projColumnHeader {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  padding: 6px 8px; border-bottom: 1px solid var(--desk-line);
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--desk-text);
+}
+.projColumnHeader .deskPill { height: 15px; padding: 0 5px; font-size: 9px; }
+.projColumnHeader .gitRowActions { margin-left: auto; }
+.projColumnDot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 6px currentColor; }
+.projColumnBody { flex: 1; min-height: 40px; overflow-y: auto; padding: 7px; display: flex; flex-direction: column; gap: 6px; }
+.projCard {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 7px 9px; cursor: grab;
+  border: 1px solid var(--desk-line); background: var(--desk-bg-elevated);
+  font-size: 12px;
+}
+.projCard:hover { border-color: var(--desk-line-strong); box-shadow: 0 0 10px var(--desk-glow); }
+.projCard.selected { border-color: var(--desk-accent); box-shadow: inset 2px 0 0 var(--desk-accent), 0 0 10px var(--desk-glow); }
+.projCard.dragging { opacity: 0.45; }
+.projCardTop { display: flex; align-items: center; gap: 6px; color: var(--desk-text-dim); font-size: 10px; }
+.projCardTop .deskPill { height: 14px; padding: 0 5px; font-size: 8px; margin-left: auto; }
+.projCardTitle { color: var(--desk-text); line-height: 1.35; overflow-wrap: anywhere; }
+.projCardLabels { display: flex; flex-wrap: wrap; gap: 4px; }
+.projLabelChip {
+  font-style: normal; font-size: 9px; padding: 0 5px; line-height: 14px;
+  border: 1px solid; opacity: 0.92;
+}
+.projCardAssignees { display: flex; flex-wrap: wrap; gap: 6px; color: var(--desk-accent); font-size: 10px; }
+.stateOpen { color: var(--desk-ok); }
+.stateClosed { color: var(--desk-error); }
+.statePurple, .prMerged { color: #bc8cff; }
+.stateDraft { color: var(--desk-text-dim); }
+
+/* table */
+.projTableWrap { flex: 1; min-width: 0; overflow: auto; padding: 0 0 12px; }
+.projTable { border-collapse: collapse; width: 100%; font-size: 12px; }
+.projTable th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--desk-surface); border-bottom: 1px solid var(--desk-line-strong);
+  padding: 0; text-align: left;
+}
+.projTableSort {
+  display: flex; align-items: center; gap: 5px; width: 100%;
+  padding: 7px 10px; background: none; border: none; cursor: pointer;
+  color: var(--desk-accent); font: inherit; font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase; text-align: left;
+}
+.projTableSort:hover { background: var(--desk-glow); }
+.projTable td { border-bottom: 1px solid var(--desk-line); padding: 2px 6px; white-space: nowrap; }
+.projTableRow:hover td { background: var(--desk-glow); }
+.projTableRow.selected td { box-shadow: inset 0 1px 0 var(--desk-accent), inset 0 -1px 0 var(--desk-accent); }
+.projTableTitleCol { min-width: 280px; max-width: 480px; white-space: normal; }
+.projTableTitle {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  background: none; border: none; cursor: pointer; color: var(--desk-text);
+  font: inherit; font-size: 12px; text-align: left; padding: 4px 2px;
+}
+.projTableTitle > svg { flex: none; }
+.projTableTitle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projTableTitle > small { color: var(--desk-text-dim); font-size: 10px; flex: none; }
+.projCellValue {
+  background: none; border: none; color: var(--desk-text-dim); font: inherit; font-size: 12px;
+  padding: 4px 4px; cursor: default; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.projCellEditable .projCellValue { cursor: pointer; }
+.projCellEditable .projCellValue:hover { color: var(--desk-accent); background: var(--desk-glow); }
+.projTable .deskSelect { min-width: 130px; }
+
+/* item drawer */
+.projDrawer {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 7;
+  width: min(440px, 60%);
+  display: flex; flex-direction: column;
+  border-left: 1px solid var(--desk-line-strong);
+  background: var(--desk-surface);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45);
+}
+.projDrawerBody { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px 24px; }
+.projDrawerTitle { margin: 2px 0 10px; font-size: 15px; line-height: 1.35; color: var(--desk-text); }
+.projDrawerActions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.projDrawerFields { display: flex; flex-direction: column; gap: 7px; margin-bottom: 12px; }
+.projDrawerField { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: center; gap: 8px; }
+.projDrawerField > span { color: var(--desk-text-dim); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+.projDrawerLabels { margin-bottom: 12px; }
+.projDrawerSection { border-top: 1px solid var(--desk-line); padding-top: 8px; margin-top: 8px; }
+.projDrawerSectionHead {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 6px;
+  color: var(--desk-accent); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+}
+.projDrawerSectionHead .deskPill { height: 15px; padding: 0 5px; font-size: 9px; }
+.projItemBody { font-size: 12px; }
+.projItemBody .markdownBody { max-width: none; }
+.projComment { border: 1px solid var(--desk-line); padding: 6px 9px; margin-bottom: 7px; font-size: 12px; }
+.projComment > header { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.projComment > header strong { color: var(--desk-accent); font-size: 11px; }
+.projComment > header small { color: var(--desk-text-dim); font-size: 9px; }
+.projCommentComposer { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; margin-top: 8px; }
+.projCommentComposer textarea { width: 100%; }
+.projDraftEditor { display: flex; flex-direction: column; gap: 6px; }
+.projDraftBody { min-height: 120px; }
+
+/* auth gate */
+.projAuthGate { display: flex; flex-direction: column; gap: 10px; text-align: center; }
+.projAuthGate > svg { color: var(--desk-accent); }
+.projAuthDetail { color: var(--desk-text-dim); font-size: 12px; max-width: 420px; }
+.projAuthCmd {
+  background: var(--desk-input-bg); border: 1px solid var(--desk-line);
+  padding: 6px 14px; color: var(--desk-accent); font-size: 13px; user-select: all;
+}
+
+/* ===================== channels subsystem ===================== */
+
+.chanSidebar { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.chanSidebarSections { flex: 1 1 auto; min-height: 0; margin-top: 4px; }
+.chanSidebarSections > .panelResizeHandle { height: 5px; cursor: row-resize; }
+.chanSidebarSectionPanel { min-height: 0; overflow: hidden; }
+.chanListPanel { min-height: 0; }
+.chanList {
+  overflow-y: auto; min-height: 0; height: 100%;
+  padding: 4px 6px; display: flex; flex-direction: column; gap: 3px;
+}
+.chanRow {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  background: transparent; border: 1px solid transparent; color: var(--desk-text);
+  padding: 5px 8px; cursor: pointer; font: inherit; min-width: 0;
+}
+.chanRow:hover { background: var(--desk-glow); }
+.chanRow.selected { border-color: var(--desk-line); background: var(--desk-glow); box-shadow: inset 2px 0 0 var(--desk-accent); }
+.chanRowHead { display: flex; align-items: center; gap: 6px; color: var(--desk-accent); font-size: 12px; min-width: 0; }
+.chanRowName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.chanRowPreview {
+  color: var(--desk-text-dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chanRowPreview.empty { font-style: italic; opacity: 0.7; }
+
+.chanSidebarSection { display: flex; flex-direction: column; min-height: 0; height: 100%; border-top: 1px solid var(--desk-line); overflow: hidden; }
+.chanSectionHeader { display: flex; align-items: center; gap: 6px; flex: none; min-height: 28px; padding: 0 6px; }
+.chanSectionToggle {
+  display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; height: 28px;
+  background: none; border: none; color: var(--desk-text-dim); font: inherit; cursor: pointer; text-align: left;
+}
+.chanSectionToggle:hover { color: var(--desk-accent); }
+.chanSectionToggle .settingsSectionLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chanSectionToggle .deskPill { height: 16px; padding: 0 6px; font-size: 9px; margin-left: auto; }
+.chanSectionBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 6px; }
+.chanMembers, .chanFiles { flex: none; }
+.chanSidebarSection.collapsed .chanSectionHeader { border-bottom: none; }
+.chanMemberRow { display: flex; align-items: center; gap: 6px; padding: 3px 10px; font-size: 11px; min-width: 0; }
+.chanMemberRow .gitRowActions { margin-left: auto; opacity: 0; }
+.chanMemberRow:hover .gitRowActions { opacity: 1; }
+.chanMemberName { color: var(--desk-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chanMemberDot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.chanMemberDot.running { background: var(--desk-ok); box-shadow: 0 0 6px var(--desk-ok); }
+.chanMemberDot.missing { background: var(--desk-error); box-shadow: 0 0 6px var(--desk-error); }
+.chanFileRow {
+  display: flex; align-items: center; gap: 6px; padding: 3px 10px; font-size: 11px;
+  color: var(--desk-text); text-decoration: none; min-width: 0;
+}
+.chanFileRow:hover { background: var(--desk-glow); }
+.chanFileRow svg { color: var(--desk-accent); flex: none; }
+.chanFileName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.chanFileRow small { color: var(--desk-text-dim); font-size: 9px; flex: none; }
+
+.chanStage { display: flex; flex-direction: column; min-width: 0; }
+.chanHeader {
+  flex: none; display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  border-bottom: 1px solid var(--desk-line); min-width: 0;
+}
+.chanHeaderName { display: flex; align-items: center; gap: 5px; color: var(--desk-accent); font-size: 14px; letter-spacing: 0.04em; }
+.chanHeaderGoal { color: var(--desk-text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.chanHeaderStat { color: var(--desk-text-dim); font-size: 10px; letter-spacing: 0.04em; flex: none; white-space: nowrap; }
+.chanHeaderSearch {
+  margin-left: auto; display: flex; align-items: center; gap: 5px;
+  min-width: min(240px, 24vw);
+  border: 1px solid color-mix(in srgb, var(--desk-accent) 36%, var(--desk-line));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--desk-accent) 9%, transparent), transparent 42%),
+    var(--desk-input-bg);
+  padding: 3px 4px 3px 8px;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--desk-accent) 8%, transparent);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+.chanHeaderSearch:focus-within {
+  border-color: var(--desk-accent);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--desk-accent) 16%, transparent), transparent 55%),
+    var(--desk-input-bg);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--desk-accent) 24%, transparent),
+    0 0 16px color-mix(in srgb, var(--desk-accent) 18%, transparent);
+}
+.chanHeaderSearch svg { color: var(--desk-text-dim); }
+.chanHeaderSearch:focus-within svg { color: var(--desk-accent); }
+.chanHeaderSearchInput {
+  background: transparent; border: 0; outline: 0; color: var(--desk-text); font: inherit; font-size: 11px;
+  min-width: 0; width: 100%;
+}
+.chanHeaderSearchInput::placeholder { color: color-mix(in srgb, var(--desk-text-dim) 82%, transparent); }
+.chanHeaderSearch .iconButton { width: 20px; height: 20px; flex: none; }
+
+.chanBody { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
+.chanFeedColumn { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; padding: 0 10px 10px; }
+.chanFeed { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding: 8px 4px; }
+.chanFeed.compact { padding: 4px 2px; }
+.chanFeedEmpty { color: var(--desk-text-dim); font-size: 12px; text-align: center; padding: 30px 0; }
+
+.chanDaySeparator { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; }
+.chanDayLine { flex: 1 1 auto; height: 1px; background: var(--desk-line); }
+.chanDayLabel { color: var(--desk-text-dim); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
+
+.chanMessage {
+  position: relative; padding: 5px 10px 4px; margin: 1px 0; border-left: 2px solid transparent;
+  transition: background 200ms ease, box-shadow 200ms ease;
+}
+.chanMessage:hover { background: var(--desk-glow); }
+.chanMessage.hue-0 { border-left-color: var(--desk-graph-0); }
+.chanMessage.hue-1 { border-left-color: var(--desk-graph-1); }
+.chanMessage.hue-2 { border-left-color: var(--desk-graph-2); }
+.chanMessage.hue-3 { border-left-color: var(--desk-graph-3); }
+.chanMessage.hue-4 { border-left-color: var(--desk-graph-4); }
+.chanMessage.hue-5 { border-left-color: var(--desk-graph-5); }
+.chanMessage.pingsHuman { background: color-mix(in srgb, var(--desk-graph-2) 8%, transparent); }
+/* the @human tint must not defeat the hover highlight (equal specificity, later rule wins) */
+.chanMessage.pingsHuman:hover { background: var(--desk-glow); }
+.chanMessageHead { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.chanAuthorBadge { color: var(--desk-text-dim); align-self: center; display: inline-flex; }
+.chanMessage.hue-0 .chanAuthor { color: var(--desk-graph-0); }
+.chanMessage.hue-1 .chanAuthor { color: var(--desk-graph-1); }
+.chanMessage.hue-2 .chanAuthor { color: var(--desk-graph-2); }
+.chanMessage.hue-3 .chanAuthor { color: var(--desk-graph-3); }
+.chanMessage.hue-4 .chanAuthor { color: var(--desk-graph-4); }
+.chanMessage.hue-5 .chanAuthor { color: var(--desk-graph-5); }
+.chanMessage.fromHuman .chanAuthor { color: var(--desk-accent); }
+.chanAuthor { font-size: 12px; font-weight: 600; letter-spacing: 0.03em; }
+.chanTime { color: var(--desk-text-dim); font-size: 10px; }
+.chanMsgId { color: var(--desk-text-dim); font-size: 9px; opacity: 0; margin-left: auto; user-select: all; }
+.chanMessage:hover .chanMsgId { opacity: 0.7; }
+.chanMessageBody { max-width: none; font-size: 12.5px; }
+.chanMessageBody p:first-child { margin-top: 0.2em; }
+.chanMessageBody p:last-child { margin-bottom: 0.2em; }
+.chanBodyFallback { white-space: pre-wrap; font-size: 12px; margin: 4px 0; }
+.chanMention {
+  color: var(--desk-accent); background: color-mix(in srgb, var(--desk-accent) 14%, transparent);
+  padding: 0 3px; border-radius: 2px; font-weight: 600;
+}
+.chanMention.broad { color: var(--desk-graph-2); background: color-mix(in srgb, var(--desk-graph-2) 14%, transparent); }
+.chanPathLink, .chanFileLink {
+  background: transparent; border: 0; padding: 0; font: inherit; cursor: pointer;
+  color: var(--desk-accent); border-bottom: 1px dotted var(--desk-accent);
+}
+.chanPathLink:hover, .chanFileLink:hover { text-shadow: 0 0 8px var(--desk-glow); }
+
+.chanMessageFoot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.chanThreadChip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 10px;
+  background: transparent; border: 1px solid var(--desk-line); color: var(--desk-accent);
+  padding: 1px 7px; cursor: pointer; font-family: inherit;
+}
+.chanThreadChip:hover { background: var(--desk-glow); }
+.chanThreadChip.ghost { opacity: 0; border-style: dashed; color: var(--desk-text-dim); }
+.chanMessage:hover .chanThreadChip.ghost { opacity: 1; }
+
+.chanThread {
+  border-left: 1px solid var(--desk-line);
+  display: flex; flex-direction: column; min-height: 0; padding: 0 8px 10px; background: transparent;
+}
+.chanThreadHeader { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--desk-line); }
+.chanThreadHeader .chanMsgId { opacity: 0.8; margin-left: 0; }
+.chanThreadHeader > :last-child { margin-left: auto; }
+/* The thread's root message rendered inline at the top of the single
+   replies scroller: accent-tinted so it reads as "what this thread is about".
+   Explicit :hover — equal-specificity later rules silently defeat the shared
+   .chanMessage:hover otherwise. */
+.chanMessage.threadAnchor {
+  background: color-mix(in srgb, var(--desk-accent) 8%, transparent);
+  border-left-color: var(--desk-accent);
+}
+.chanMessage.threadAnchor:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+
+.chanComposer {
+  flex: none; position: relative; display: flex; align-items: flex-end; gap: 6px;
+  border: 1px solid var(--desk-line); background: var(--desk-input-bg); padding: 6px 8px; margin-top: 6px;
+}
+.chanComposer.dragOver { border-color: var(--desk-accent); box-shadow: inset 0 0 14px var(--desk-glow); }
+.chanComposerResizeHandle {
+  position: absolute; left: 8px; right: 8px; top: -5px; height: 10px;
+  padding: 0; border: 0; background: transparent; cursor: ns-resize; touch-action: none; z-index: 2;
+}
+.chanComposerResizeHandle::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 4px; height: 1px;
+  background: var(--desk-line); opacity: 0.7;
+}
+.chanComposerResizeHandle:hover::before,
+.chanComposerResizeHandle:focus-visible::before,
+.chanComposerResizeHandle:active::before {
+  background: var(--desk-accent); box-shadow: 0 0 8px var(--desk-glow); opacity: 1;
+}
+.chanComposerResizeHandle:focus-visible { outline: 1px solid var(--desk-accent); outline-offset: 2px; }
+.chanComposerInput {
+  flex: 1 1 auto; background: transparent; border: 0; outline: 0; resize: none;
+  color: var(--desk-text); font: inherit; font-size: 12.5px; line-height: 1.5;
+  min-height: 3em; max-height: min(45vh, 260px); overflow-y: auto;
+}
+.chanComposerActions { display: flex; align-items: center; gap: 4px; }
+.chanAttach { display: inline-flex; align-items: center; color: var(--desk-text-dim); cursor: pointer; padding: 3px; }
+.chanAttach:hover { color: var(--desk-accent); }
+.chanComposerStatus { position: absolute; right: 10px; top: -16px; color: var(--desk-text-dim); font-size: 10px; }
+.chanMentionPop {
+  position: absolute; bottom: calc(100% + 4px); left: 8px; z-index: 30; min-width: 180px;
+  /* anchored to .chanComposerWrap (the composer's clip-path would clip it) */
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line);
+  display: flex; flex-direction: column; padding: 3px;
+}
+.chanMentionOption {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px; font: inherit; font-size: 11px;
+  background: transparent; border: 0; color: var(--desk-text); cursor: pointer; text-align: left;
+}
+.chanMentionOption.active { background: var(--desk-glow); color: var(--desk-accent); }
+.chanMentionOption small { margin-left: auto; color: var(--desk-text-dim); font-size: 9px; }
+
+.chanPickList { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; min-width: 380px; }
+.chanPickRow {
+  display: flex; align-items: center; gap: 8px; padding: 6px 9px; font: inherit; font-size: 12px;
+  background: transparent; border: 1px solid transparent; color: var(--desk-text); cursor: pointer; text-align: left;
+}
+.chanPickRow:hover { background: var(--desk-glow); border-color: var(--desk-line); }
+.chanPickLabel { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* channels: hover quick-actions + resizable thread split + edit modal */
+.chanQuickActions {
+  display: flex; align-items: center; gap: 2px; margin-left: 6px;
+  opacity: 0; pointer-events: none;
+}
+.chanMessage:hover .chanQuickActions { opacity: 1; pointer-events: auto; }
+.chanQuickAction {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 18px; padding: 0; background: transparent;
+  border: 1px solid var(--desk-line); color: var(--desk-text-dim); cursor: pointer;
+}
+.chanQuickAction:hover { color: var(--desk-accent); background: var(--desk-glow); }
+.chanFeedPanel, .chanThreadPanel { display: flex; min-width: 0; min-height: 0; }
+.chanFeedPanel > .chanFeedColumn { flex: 1 1 auto; }
+.chanThreadPanel > * { flex: 1 1 auto; min-width: 0; }
+.chanThread { width: 100%; min-width: 0; }
+.chanEditArea { resize: vertical; min-height: 90px; font: inherit; line-height: 1.5; }
+
+/* channels: rich add-agent picker rows */
+.chanPickRow.rich { align-items: flex-start; padding: 7px 9px; }
+.chanPickRow.rich .chanMemberDot { margin-top: 4px; }
+.chanPickMain { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.chanPickTop { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.chanPickTop strong { color: var(--desk-text); font-size: 12px; font-weight: 600; }
+.chanPickDetail { color: var(--desk-accent); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chanPickDetail.dim { color: var(--desk-text-dim); }
+.chanAddAgentModal {
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(520px, calc(100vw - 48px));
+  min-width: min(460px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+  overflow-x: hidden;
+}
+.chanAddFilters { display: flex; flex-direction: column; gap: 7px; }
+.chanAddSearch {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 6px;
+  color: var(--desk-text-dim);
+}
+.chanAddSearch .treeInlineInput { min-width: 0; margin: 0; }
+.chanAddFilterGrid {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+}
+.chanAddFilterGrid .deskSelect { flex: 1 1 138px; min-width: 0; max-width: 100%; }
+.chanAddFilterGrid .iconButton { flex: 0 0 28px; }
+.chanAddAgentModal .chanPickList { width: 100%; min-width: 0; max-width: 100%; overflow-x: hidden; }
+.chanAddAgentModal .chanPickRow { width: 100%; min-width: 0; }
+
+/* rail unread badge (channels) */
+.subsystemButtonBadge {
+  position: absolute; top: 4px; right: 4px; min-width: 15px; height: 15px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0 3px;
+  background: var(--desk-graph-2); color: var(--desk-bg); font-size: 9px; font-weight: 700;
+  border-radius: 8px; pointer-events: none; box-shadow: 0 0 8px var(--desk-glow);
+}
+
+/* event-card navigation: landing flash on the target message */
+.chanMessage.chanFlash {
+  animation: chanFlashPulse 2.6s ease-out;
+}
+@keyframes chanFlashPulse {
+  0% { background: color-mix(in srgb, var(--desk-accent) 28%, transparent); box-shadow: inset 3px 0 0 var(--desk-accent); }
+  60% { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+  100% { background: transparent; }
+}
+
+/* ===================== channels chat ui v2 ===================== */
+
+/* circular avatars + grouped layout: message is a two-column grid */
+.chanMessage { display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 9px; padding: 5px 10px 4px; }
+.chanMessage.grouped { padding-top: 1px; padding-bottom: 1px; }
+.chanAvatar {
+  width: 26px; height: 26px; margin-top: 2px; flex: none; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  background: color-mix(in srgb, var(--desk-accent) 16%, transparent);
+  color: var(--desk-accent); border: 1px solid var(--desk-line);
+}
+.chanAvatar.hue-0 { color: var(--desk-graph-0); background: color-mix(in srgb, var(--desk-graph-0) 14%, transparent); }
+.chanAvatar.hue-1 { color: var(--desk-graph-1); background: color-mix(in srgb, var(--desk-graph-1) 14%, transparent); }
+.chanAvatar.hue-2 { color: var(--desk-graph-2); background: color-mix(in srgb, var(--desk-graph-2) 14%, transparent); }
+.chanAvatar.hue-3 { color: var(--desk-graph-3); background: color-mix(in srgb, var(--desk-graph-3) 14%, transparent); }
+.chanAvatar.hue-4 { color: var(--desk-graph-4); background: color-mix(in srgb, var(--desk-graph-4) 14%, transparent); }
+.chanAvatar.hue-5 { color: var(--desk-graph-5); background: color-mix(in srgb, var(--desk-graph-5) 14%, transparent); }
+.chanAvatar.human { color: var(--desk-accent); background: color-mix(in srgb, var(--desk-accent) 18%, transparent); }
+.chanMessageRight { min-width: 0; }
+.chanMessageHead.slim { min-height: 0; }
+.chanGutterTime {
+  align-self: start; margin-top: 3px; font-size: 9px; color: var(--desk-text-dim);
+  opacity: 0; text-align: right; user-select: none;
+}
+.chanMessage.grouped:hover .chanGutterTime { opacity: 0.8; }
+.chanFeed.compact .chanMessage { grid-template-columns: 24px minmax(0, 1fr); }
+.chanFeed.compact .chanAvatar { width: 20px; height: 20px; font-size: 8px; }
+.chanHeaderAvatars { display: inline-flex; align-items: center; flex: none; }
+.chanAvatar.mini { width: 18px; height: 18px; font-size: 7px; margin-top: 0; }
+.chanHeaderAvatars .chanAvatar.mini:not(:first-child) { margin-left: -5px; }
+.chanAvatarOverflow { margin-left: 3px; color: var(--desk-text-dim); font-size: 9px; }
+
+/* sticky day separators */
+.chanDaySeparator { position: sticky; top: 0; z-index: 5; padding: 2px 0; background: var(--desk-bg); }
+
+/* NEW divider */
+.chanNewDivider { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; }
+.chanNewDivider .chanDayLine { background: var(--desk-graph-2); opacity: 0.7; }
+.chanNewLabel { color: var(--desk-graph-2); font-size: 9px; font-weight: 700; letter-spacing: 0.2em; flex: none; }
+
+/* unread highlight: the still-new block, cleared from the top down as the feed
+   is scrolled. The graph-2 (NEW) accent overrides the per-author hue bar while
+   a message is unread; specificity-matched :hover rules keep the glow on top. */
+.chanMessage.chanUnread {
+  background: color-mix(in srgb, var(--desk-graph-2) 9%, transparent);
+  box-shadow: inset 3px 0 0 var(--desk-graph-2);
+}
+.chanMessage.chanUnread.pingsHuman { background: color-mix(in srgb, var(--desk-graph-2) 13%, transparent); }
+.chanMessage.chanUnread:hover { background: var(--desk-glow); }
+
+/* keyboard-nav cursor: a static accent rail on the row j/k currently sit on
+   (no animation — keyboard movement should feel instant, not flashy). */
+.chanMessage.chanCursor {
+  background: color-mix(in srgb, var(--desk-accent) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--desk-accent);
+}
+.chanMessage.chanCursor:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+
+/* reactions: present kinds always show; absent kinds reveal on row hover for
+   one-click adding. Chip look mirrors the hover quick-actions. */
+.chanReactions { display: flex; gap: 4px; margin-top: 5px; }
+.chanReaction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid var(--desk-line);
+  background: transparent;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.chanReaction:hover { color: var(--desk-accent); border-color: var(--desk-accent); }
+.chanReactionOn {
+  opacity: 1;
+  color: var(--desk-accent);
+  border-color: var(--desk-accent);
+  background: color-mix(in srgb, var(--desk-accent) 14%, transparent);
+}
+.chanReactionOff { opacity: 0; }
+.chanMessage:hover .chanReactionOff { opacity: 0.4; }
+
+/* jump-to-latest pill over the feed */
+.chanFeedWrap { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.chanFeedWrap > .chanFeed { flex: 1 1 auto; }
+.chanJumpLatest {
+  position: absolute; right: 18px; bottom: 12px; z-index: 8;
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-accent); color: var(--desk-accent);
+  font: inherit; font-size: 10px; letter-spacing: 0.08em; cursor: pointer;
+  box-shadow: 0 0 12px var(--desk-glow);
+}
+.chanJumpLatest:hover { background: var(--desk-glow); }
+
+/* working strip above the composer */
+.chanWorkingStrip {
+  flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 4px 0;
+  color: var(--desk-text-dim); font-size: 10px; letter-spacing: 0.04em;
+}
+.chanWorkingDots { color: var(--desk-accent); animation: chanWorkingSpin 1.4s linear infinite; display: inline-block; }
+@keyframes chanWorkingSpin {
+  0% { opacity: 0.35; }
+  50% { opacity: 1; }
+  100% { opacity: 0.35; }
+}
+
+/* The channels feed animations (landing-flash + working spinner) were not
+   covered by the existing reduced-motion guards. Honour the user preference. */
+@media (prefers-reduced-motion: reduce) {
+  .chanMessage.chanFlash { animation: none; }
+  .chanWorkingDots { animation: none; }
+}
+
+/* command palette (Cmd-K) */
+.chanActionMeta {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 8px;
+  color: var(--desk-text-dim); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.chanPaletteOverlay {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanPalette {
+  width: min(560px, 92vw); max-height: 60vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanPaletteInput {
+  border: none; border-bottom: 1px solid var(--desk-line); background: var(--desk-input-bg);
+  color: var(--desk-text); font: inherit; font-size: 14px; padding: 12px 14px; outline: none;
+}
+.chanPaletteList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
+.chanPaletteItem {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px;
+  cursor: pointer; color: var(--desk-text);
+}
+.chanPaletteItem.active { background: color-mix(in srgb, var(--desk-accent) 18%, transparent); }
+.chanPaletteGroup {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--desk-text-dim); min-width: 52px;
+}
+.chanPaletteLabel { flex: 1; font-size: 13px; }
+.chanPaletteHint {
+  font-size: 11px; color: var(--desk-text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px;
+}
+.chanPaletteEmpty { padding: 12px 14px; color: var(--desk-text-dim); font-size: 12px; }
+
+/* operator inbox */
+.chanInboxToggle { position: relative; display: inline-flex; }
+.chanInboxBadge {
+  position: absolute; top: -4px; right: -4px; min-width: 14px; height: 14px;
+  padding: 0 3px; border-radius: 7px; background: var(--desk-error); color: #fff;
+  font-size: 9px; line-height: 14px; text-align: center; font-weight: 600;
+}
+.chanInboxOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanInbox {
+  width: min(560px, 92vw); max-height: 64vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanInboxHead {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--desk-line);
+}
+.chanInboxTitle { font-size: 13px; font-weight: 600; color: var(--desk-text); }
+.chanInboxCount { font-size: 11px; color: var(--desk-text-dim); }
+.chanInboxClose { margin-left: auto; background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
+.chanInboxError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanInboxEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanInboxList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
+.chanInboxItem { margin: 0; }
+.chanInboxRow {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanInboxRow:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanInboxKind {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; min-width: 56px; color: var(--desk-text-dim);
+}
+.chanInboxKind.submit-stuck,
+.chanInboxKind.blocked,
+.chanInboxKind.dropped,
+.chanInboxKind.awaiting-approval { color: var(--desk-error); }
+.chanInboxKind.paused { color: var(--desk-text-dim); }
+.chanInboxKind.needs-reply { color: var(--desk-accent); font-weight: 700; }
+.chanInboxKind.mention { color: var(--desk-accent); }
+.chanInboxLabel { flex: 1; font-size: 12px; }
+.chanInboxDetail {
+  font-size: 11px; color: var(--desk-text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
+}
+
+/* live delivery feed (self-fetching overlay; mirrors the inbox panel) */
+.chanFeedViewOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanFeedView {
+  width: min(620px, 92vw); max-height: 64vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanFeedViewHead {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--desk-line);
+}
+.chanFeedViewTitle { font-size: 13px; font-weight: 600; color: var(--desk-text); }
+.chanFeedViewCount { font-size: 11px; color: var(--desk-text-dim); }
+.chanFeedViewClose { margin-left: auto; background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
+.chanFeedViewError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanFeedViewEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanFeedViewList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
+.chanFeedViewItem { margin: 0; }
+.chanFeedViewRow {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanFeedViewRow:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanFeedViewKind {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; min-width: 58px; color: var(--desk-text-dim);
+}
+.chanFeedViewKind.queued { color: var(--desk-graph-2); }
+.chanFeedViewKind.delivery { color: var(--desk-ok); }
+.chanFeedViewKind.human-mention { color: var(--desk-accent); }
+.chanFeedViewChannel { font-size: 11px; color: var(--desk-text-dim); flex: none; }
+.chanFeedViewAuthor { font-size: 11px; color: var(--desk-text-dim); flex: none; }
+.chanFeedViewPreview {
+  flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chanFeedViewThread { font-size: 9px; color: var(--desk-accent); flex: none; }
+.chanFeedViewTime { font-size: 10px; color: var(--desk-text-dim); flex: none; }
+
+/* saved views (self-fetching overlay + create form) */
+.chanViewsOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanViews {
+  width: min(520px, 92vw); max-height: 70vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanViewsHead {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--desk-line);
+}
+.chanViewsTitle { font-size: 13px; font-weight: 600; color: var(--desk-text); flex: 1; }
+.chanViewsClose { background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
+.chanViewsError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanViewsEmpty { padding: 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanViewsList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(34vh, 340px); }
+.chanViewsItem { display: flex; align-items: center; gap: 4px; }
+.chanViewsApply {
+  display: flex; flex-direction: column; gap: 2px; flex: 1; padding: 8px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanViewsApply:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanViewsName { font-size: 12px; font-weight: 600; }
+.chanViewsSummary { font-size: 11px; color: var(--desk-text-dim); }
+.chanViewsDelete { background: none; border: none; color: var(--desk-text-dim); cursor: pointer; padding: 4px; }
+.chanViewsForm {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 14px;
+  border-top: 1px solid var(--desk-line);
+}
+.chanViewsInput {
+  font-size: 12px; padding: 4px 7px; border: 1px solid var(--desk-line);
+  border-radius: 5px; background: var(--desk-input-bg); color: var(--desk-text);
+}
+.chanViewsToggle { font-size: 11px; color: var(--desk-text-dim); display: inline-flex; align-items: center; gap: 4px; }
+.chanViewsSave {
+  font-size: 12px; padding: 4px 10px; border: 1px solid var(--desk-accent);
+  border-radius: 5px; background: color-mix(in srgb, var(--desk-accent) 14%, transparent);
+  color: var(--desk-accent); cursor: pointer;
+}
+.chanViewsSave:disabled { opacity: 0.5; cursor: default; }
+/* active saved-view chip in the feed header */
+.chanActiveView {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+  color: var(--desk-accent); padding: 2px 6px; border-radius: 5px;
+  background: color-mix(in srgb, var(--desk-accent) 12%, transparent);
+}
+.chanActiveViewName { font-weight: 600; }
+
+/* delivery timeline (self-fetching overlay; mirrors the live feed) */
+.chanTimelineOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanTimeline {
+  width: min(640px, 92vw); max-height: 66vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanTimelineHead {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--desk-line);
+}
+.chanTimelineTitle { font-size: 13px; font-weight: 600; color: var(--desk-text); }
+.chanTimelineCount { font-size: 11px; color: var(--desk-text-dim); }
+.chanTimelineClose { margin-left: auto; background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
+.chanTimelineError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanTimelineEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanTimelineList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
+.chanTimelineItem { margin: 0; }
+.chanTimelineRow {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanTimelineRow:hover:not(:disabled) { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanTimelineRow:disabled { cursor: default; }
+.chanTimelineKind {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; min-width: 86px; color: var(--desk-text-dim);
+}
+.chanTimelineKind.warn { color: var(--desk-error); }
+.chanTimelineSession { font-size: 11px; color: var(--desk-text-dim); flex: none; }
+.chanTimelineChannel { font-size: 11px; color: var(--desk-text-dim); flex: none; }
+.chanTimelinePreview { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chanTimelineTime { font-size: 10px; color: var(--desk-text-dim); flex: none; }
+
+/* while-away digest */
+.chanDigestOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanDigest {
+  width: min(480px, 92vw); max-height: 66vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanDigestHead {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--desk-line);
+}
+.chanDigestTitle { font-size: 13px; font-weight: 600; color: var(--desk-text); flex: 1; }
+.chanDigestCount { font-size: 11px; color: var(--desk-accent); }
+.chanDigestClose { background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
+.chanDigestError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanDigestEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanDigestBody { overflow-y: auto; padding: 4px; }
+.chanDigestSection { margin: 4px 0 8px; }
+.chanDigestSectionTitle {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--desk-text-dim);
+  margin: 6px 10px 4px;
+}
+.chanDigestList { list-style: none; margin: 0; padding: 0; }
+.chanDigestItem { margin: 0; }
+.chanDigestRow {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanDigestRow:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanDigestRowLabel { flex: 1; font-size: 12px; }
+.chanDigestRowDetail {
+  font-size: 11px; color: var(--desk-text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;
+}
+.chanDigestUnread {
+  font-size: 11px; font-weight: 600; color: var(--desk-accent); flex: none;
+  background: color-mix(in srgb, var(--desk-accent) 14%, transparent); border-radius: 999px; padding: 1px 8px;
+}
+
+/* featured / saved messages */
+.chanFeaturedOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 12vh; background: var(--desk-scrim);
+}
+.chanFeatured {
+  width: min(600px, 92vw); max-height: 66vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanFeaturedHead {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--desk-line);
+}
+.chanFeaturedTitle { font-size: 13px; font-weight: 600; color: var(--desk-text); }
+.chanFeaturedCount { font-size: 11px; color: var(--desk-text-dim); }
+.chanFeaturedClose { margin-left: auto; background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
+.chanFeaturedError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanFeaturedEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanFeaturedList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
+.chanFeaturedItem { display: flex; align-items: stretch; gap: 4px; }
+.chanFeaturedItem.missing { opacity: 0.6; }
+.chanFeaturedRow {
+  display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; padding: 8px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanFeaturedRow:hover:not(:disabled) { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanFeaturedRow:disabled { cursor: default; }
+.chanFeaturedMeta { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--desk-text-dim); }
+.chanFeaturedChannel { color: var(--desk-accent); }
+.chanFeaturedThread { text-transform: uppercase; letter-spacing: 0.05em; }
+.chanFeaturedSnippet { font-size: 12px; color: var(--desk-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chanFeaturedNote { font-size: 11px; color: var(--desk-text-dim); font-style: italic; }
+.chanFeaturedRemove { background: none; border: none; color: var(--desk-text-dim); cursor: pointer; padding: 0 8px; }
+.chanFeaturedRemove:hover { color: var(--desk-error); }
+
+/* cross-channel search */
+.chanSearchOverlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding-top: 10vh; background: var(--desk-scrim);
+}
+.chanSearch {
+  width: min(640px, 94vw); max-height: 70vh; display: flex; flex-direction: column;
+  background: var(--desk-bg-elevated); border: 1px solid var(--desk-line-strong);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.chanSearchControls { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--desk-line); }
+.chanSearchInput {
+  border: 1px solid var(--desk-line); background: var(--desk-input-bg);
+  color: var(--desk-text); font: inherit; font-size: 14px; padding: 8px 10px; border-radius: 6px; outline: none;
+}
+.chanSearchFilters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 11px; color: var(--desk-text-dim); }
+.chanSearchSelect,
+.chanSearchAuthor {
+  background: var(--desk-input-bg); color: var(--desk-text); border: 1px solid var(--desk-line);
+  border-radius: 6px; font: inherit; font-size: 11px; padding: 4px 6px;
+}
+.chanSearchToggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.chanSearchError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
+.chanSearchList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(48vh, 500px); }
+.chanSearchItem { margin: 0; }
+.chanSearchRow {
+  display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 8px 10px;
+  border: none; background: none; border-radius: 6px; cursor: pointer; color: var(--desk-text); text-align: left;
+}
+.chanSearchRow:hover { background: color-mix(in srgb, var(--desk-accent) 14%, transparent); }
+.chanSearchMeta { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--desk-text-dim); }
+.chanSearchChannel { color: var(--desk-accent); }
+.chanSearchThread { text-transform: uppercase; letter-spacing: 0.05em; }
+.chanSearchSnippet { font-size: 12px; color: var(--desk-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chanSearchEmpty { padding: 12px 14px; color: var(--desk-text-dim); font-size: 12px; }
+
+/* channels round 7: empty-state hero, header avatar cluster, composer hints */
+.chanEmptyHero {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; text-align: center; height: 100%; padding: 40px;
+}
+.chanEmptyIcon { color: var(--desk-accent); filter: drop-shadow(0 0 14px var(--desk-glow)); }
+.chanEmptyTitle { margin: 0; color: var(--desk-accent); font-size: 17px; letter-spacing: 0.3em; font-weight: 600; }
+.chanEmptyText { margin: 0; color: var(--desk-text-dim); font-size: 12.5px; max-width: 440px; line-height: 1.6; }
+
+
+.chanComposerWrap { flex: none; position: relative; display: flex; flex-direction: column; margin-top: 6px; }
+.chanComposerWrap > .chanComposer { margin-top: 0; }
+.chanComposerHint {
+  color: var(--desk-text-dim); font-size: 9px; padding: 3px 10px 0;
+  letter-spacing: 0.04em; user-select: none; white-space: nowrap;
+}
+.chanComposerHint kbd {
+  font-family: inherit; border: 1px solid var(--desk-line); padding: 0 3px; border-radius: 2px; font-size: 8px;
+}
+
+/* clickable mention chips (agent handles navigate to the terminal) */
+button.chanMention { border: 0; font: inherit; cursor: pointer; font-weight: 600; }
+button.chanMention.clickable:hover { background: color-mix(in srgb, var(--desk-accent) 30%, transparent); text-shadow: 0 0 8px var(--desk-glow); }
+
+/* ===================== git branches & worktrees explorer ===================== */
+.gitBranchesBody { overflow-y: auto; }
+.gitBranchGroup { display: flex; flex-direction: column; }
+.gitBranchRow {
+  display: flex; align-items: center; gap: 6px; padding: 2px 10px; font-size: 11px;
+  color: var(--desk-text); min-width: 0;
+}
+.gitBranchRow:hover { background: var(--desk-glow); }
+.gitBranchRow.current { box-shadow: inset 2px 0 0 var(--desk-accent); }
+.gitBranchRow.current .gitBranchRowName { color: var(--desk-accent); font-weight: 600; }
+.gitBranchRow > svg { color: var(--desk-text-dim); flex: none; }
+.gitBranchCurrentMark { color: var(--desk-ok) !important; }
+.gitBranchRowName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.gitBranchAge { color: var(--desk-text-dim); font-size: 9px; flex: none; }
+.gitBranchRow .gitRowActions { opacity: 0; }
+.gitBranchRow:hover .gitRowActions { opacity: 1; }
+.gitBranchSubHeader {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 10px 2px;
+  background: transparent; border: 0; color: var(--desk-text-dim); font: inherit; font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; text-align: left;
+}
+.gitBranchSubHeader.static { cursor: default; }
+.gitBranchSubHeader:not(.static):hover { color: var(--desk-accent); }
+.gitWorktreeBranch { color: var(--desk-accent); font-size: 9px; flex: none; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gitEmptyNote.small { padding: 4px 10px; font-size: 10px; }
+
+/* ---------- narrow viewports (phones / small tablets) ----------
+   Desk stays a desktop-first cockpit; below 860px the chrome compacts so the
+   active subsystem owns the screen: single-row header (telemetry hidden),
+   icon-only commands, stacked terminal cells (single column set in JS),
+   sidebars defaulting collapsed (boot default set in JS). */
+/* Rendered only on narrow viewports; the default guards the unmount race
+   when the viewport widens while a drawer is open. */
+.drawerScrim {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .drawerScrim {
+    display: block;
+  }
+
+  .deskShell {
+    height: 100dvh; /* mobile URL bars: 100vh overshoots */
+    padding: 0;
+  }
+
+  .terminalFrame {
+    grid-template-rows: 34px minmax(0, 1fr) 22px;
+  }
+
+  .workspaceTopbar {
+    grid-template-rows: 34px;
+    min-height: 34px;
+  }
+
+  .topbarTelemetry {
+    display: none;
+  }
+
+  .projectStats {
+    display: none;
+  }
+
+  .brand > span {
+    /* Direct child only: the old descendant selector also matched the arwes
+       wordmark's inner content span and erased DESK on every phone. */
+    display: none; /* "loading config" fallback */
+  }
+
+  .topbarPrimary {
+    grid-template-columns: auto 1fr;
+  }
+
+  .toolbar {
+    justify-content: flex-end;
+  }
+
+  /* Icon-only commands; the label survives as the title tooltip. */
+  .deskCmdContent > span {
+    display: none;
+  }
+
+  .subsystemButton {
+    width: 36px;
+    height: 36px;
+  }
+
+  .deskModal {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 32px);
+    padding: 14px 16px 16px;
+  }
+
+  /* Long context paths: the bar already ellipsizes; let it breathe. */
+  .statusSegment {
+    padding: 0 6px;
+  }
+
+  /* Drag-resize is a pointer affordance; on a phone the separators sit
+     exactly where thumbs scroll and the release-snap collapses sidebars
+     "at random". Sidebar toggling lives on the rail icons instead. With the
+     drawer overlay the strip is also a visual gap, so remove it entirely. */
+  .panelResizeHandle {
+    display: none;
+  }
+
+  /* Touch targets: desktop density is fine under a pointer, hostile under a
+     thumb. Push rows and buttons toward ~32px without changing type scale. */
+  .treeRow {
+    min-height: 32px;
+  }
+
+  .treeMain {
+    height: 32px;
+  }
+
+  .treeToggle {
+    width: 26px;
+    height: 32px;
+  }
+
+  .iconButton {
+    width: 28px;
+    height: 28px;
+  }
+
+  .deskCmd {
+    height: 32px;
+  }
+
+  .mobileMuxDots {
+    gap: 16px;
+    padding: 8px 0 9px;
+  }
+
+  .mobileMuxDot {
+    width: 12px;
+    height: 12px;
+  }
+
+  /* outranked specifics: .fileNode .treeMain pins 24px on desktop */
+  .fileNode .treeMain {
+    height: 32px;
+  }
+
+  .editorRootButton {
+    height: 28px;
+  }
+
+  .editorTabClose {
+    width: 20px;
+    height: 20px;
+  }
+
+  .cellTab {
+    height: 26px;
+  }
+
+  .cellRemove {
+    width: 24px;
+    height: 24px;
+  }
+
+  .chanSearchInput {
+    height: 24px;
+  }
+
+  .chanQuickAction {
+    min-width: 28px;
+    min-height: 26px;
+  }
+
+  /* Sidebars become overlay drawers: the surface keeps full width (terminals
+     never resize on drawer open/close) and the drawer slides over it. The
+     panel library keeps managing its virtual split underneath — stylesheet
+     !important beats its inline flex sizing — so desktop stays untouched.
+     Panel className lands on an INNER div, not on the [data-panel] wrapper
+     the library sizes, hence the :has() selectors. */
+  .subsystemPanels {
+    position: relative;
+  }
+
+  .subsystemPanels > [data-panel]:has(> .agentTreePanel),
+  .subsystemPanels > [data-panel]:has(> .editorTreePanel) {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    /* leave a real scrim strip on a 390px phone (rail already eats ~46px) */
+    width: clamp(220px, 70vw, 340px) !important;
+    flex: 0 0 auto !important;
+    z-index: 24;
+    background: var(--desk-surface);
+    border-right: 1px solid var(--desk-line-strong);
+    box-shadow: 18px 0 36px rgba(0, 0, 0, 0.5);
+    transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), visibility 240ms;
+  }
+
+  /* -120%, not -105%: the drawer starts to the right of the rail, so a
+     shallower slide would leave its right edge at positive viewport x and
+     the DOM judge in App.tsx (rect.right > 1) would misread it as open. */
+  .subsystemPanels.agentSidebarCollapsed > [data-panel]:has(> .agentTreePanel),
+  .subsystemPanels.editorSidebarCollapsed > [data-panel]:has(> .editorTreePanel) {
+    transform: translateX(-120%);
+    visibility: hidden;
+    box-shadow: none;
+  }
+
+  .subsystemPanels > [data-panel]:has(> .subsystemSurface) {
+    position: relative;
+    flex: 1 1 100% !important;
+  }
+
+  .drawerScrim {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    background: rgba(1, 8, 10, 0.55);
+    animation: drawerScrimIn 200ms ease;
+    cursor: pointer;
+  }
+
+  /* A thread cannot share a 390px row with the feed (min sizes alone exceed
+     the viewport): it takes the whole surface; its header X closes it. */
+  .chanBody {
+    position: relative;
+  }
+
+  .chanBody > [data-panel]:has(> .chanThreadPanel) {
+    position: absolute;
+    inset: 0;
+    width: 100% !important;
+    flex: none !important;
+    z-index: 10;
+    /* --desk-surface alone is 0.72 alpha on dark themes: the feed underneath
+       ghosted through the overlay. Layer it over the opaque bg. */
+    background:
+      linear-gradient(var(--desk-surface), var(--desk-surface)),
+      var(--desk-bg);
+  }
+
+  .chanBody > [data-panel]:has(> .chanFeedPanel) {
+    flex: 1 1 100% !important;
+  }
+}
+
+@media (max-width: 860px) and (prefers-reduced-motion: reduce) {
+  .subsystemPanels > [data-panel]:has(> .agentTreePanel),
+  .subsystemPanels > [data-panel]:has(> .editorTreePanel) {
+    transition: none;
+  }
+
+  .drawerScrim {
+    animation: none;
+  }
+}
+
+@keyframes drawerScrimIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* Touch devices have no hover: keep tree row actions reachable. focus-within
+   still works (a tap focuses the row), but a visible cluster on the selected
+   row spares the second tap. */
+@media (hover: none) {
+  .treeRow.selected .treeActions,
+  .treeRow.sessionNode.selected .treeActions,
+  .fileNode.selected .treeActions {
+    display: inline-flex;
+  }
+
+}
+
+/* ---------- mobile terminal pager (one full-screen cell, swipe to switch) ---------- */
+
+.agentSubsystem.mobileMux {
+  grid-template-rows: 32px minmax(0, 1fr) auto;
+}
+
+.mobileMuxPager {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.mobileMuxPager::-webkit-scrollbar {
+  display: none;
+}
+
+.mobileMuxSlide {
+  display: flex;
+  flex: 0 0 100%;
+  min-width: 100%;
+  min-height: 0;
+  height: 100%;
+  scroll-snap-align: start;
+  scroll-snap-stop: always; /* one cell per swipe, never two */
+  padding: 2px;
+}
+
+.mobileMuxSlide > section,
+.mobileMuxSlide .terminalCell {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.mobileMuxDots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 5px 0 6px;
+}
+
+.mobileMuxDot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: 1px solid var(--desk-line-strong);
+  background: transparent;
+  transform: rotate(45deg); /* arwes diamond */
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.mobileMuxDot.active {
+  background: var(--desk-ok);
+  border-color: var(--desk-ok);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+/* events drawer: count lamp, filter chips, per-card unread lamp */
+.notifLamp.withCount {
+  width: auto; min-width: 15px; height: 14px; border-radius: 8px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--desk-bg); font-size: 9px; font-weight: 700; line-height: 1;
+}
+.notifFilters {
+  flex: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 12px 6px;
+  border-bottom: 1px solid var(--desk-line);
+}
+.notifFilterChip {
+  display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 10px;
+  background: var(--desk-glow); border: 0; color: var(--desk-text-dim);
+  font: inherit; font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+  cursor: pointer; box-shadow: inset 0 0 0 1px transparent;
+  transition: color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+.notifFilterChip small { font-size: 8.5px; opacity: 0.75; font-weight: 400; }
+.notifFilterChip:hover { color: var(--desk-text); box-shadow: inset 0 0 0 1px var(--desk-line); }
+.notifFilterChip.active {
+  color: var(--desk-accent);
+  background: color-mix(in srgb, var(--desk-accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px var(--desk-accent);
+  text-shadow: 0 0 8px var(--desk-glow);
+}
+.notifCardLamp {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: #ffd166; box-shadow: 0 0 6px rgba(255, 209, 102, 0.9);
+  animation: deskAttentionPulse 1.1s ease-in-out infinite;
+}
+
+/* ---------- Header improvements: actionable pills, grouped toolbar, clock ---------- */
+
+/* Config path is a real button now: full path in the tooltip, click opens
+   desk.yml in the editor. Inherits the dim ellipsized look of the old span. */
+.brandPath {
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  color: var(--desk-text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.brandPath:hover {
+  color: var(--desk-accent);
+}
+
+/* Fleet actions | KILL | UI toggles — the larger outer gap separates the
+   destructive command from its routine neighbors. */
+.toolbar {
+  gap: 16px;
+}
+
+.toolbarGroup {
+  display: inline-flex;
+  gap: 6px;
+}
+
+/* Clickable pills (MISS): button reset on top of the deskPill skin. */
+.deskPill.clickable {
+  border: 0;
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+
+.deskPill.clickable:hover {
+  background: color-mix(in srgb, var(--desk-accent) 18%, transparent);
+  color: var(--desk-text);
+}
+
+/* MISS > 0 pulses with the same lamp language as attention dots; the pill is
+   clipped to an octagon, so the pulse lives on background, not box-shadow. */
+.deskPill.pulse {
+  animation: deskPillPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes deskPillPulse {
+  0%,
+  100% {
+    background: var(--desk-glow, rgba(0, 245, 255, 0.08));
+  }
+  50% {
+    background: color-mix(in srgb, var(--desk-accent) 26%, transparent);
+  }
+}
+
+/* Busy feedback: the Refresh glyph spins while a fleet operation is in flight. */
+.spinSlow {
+  animation: deskSpin 900ms linear infinite;
+}
+
+@keyframes deskSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.headerClock {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: var(--desk-text);
+  white-space: nowrap;
+}
+
+.headerClock small {
+  font-size: 9.5px;
+  color: var(--desk-text-dim);
+}
+
+/* Keyboard focus joins the house language instead of the UA default ring.
+   The octagon clip-path on pills clips outlines, so the clickable pill keeps
+   an inset accent instead. */
+.deskCmd:focus-visible,
+.iconButton:focus-visible,
+.brandPath:focus-visible {
+  outline: 1px solid var(--desk-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 10px var(--desk-glow);
+}
+
+.deskPill.clickable:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--desk-accent) 24%, transparent);
+  color: var(--desk-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deskPill.pulse {
+    animation: none;
+    background: color-mix(in srgb, var(--desk-accent) 20%, transparent);
+  }
+}
+
+@media (max-width: 1100px) {
+  .headerClock {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .brandPath {
+    display: none; /* config path: same fate as the old .brand span */
+  }
+}
+
+/* ---------- Mobile header: compact telemetry strip + fleet chips ---------- */
+
+/* Desktop: fleet pills live in the primary row; this cluster is phone-only. */
+.telemetryFleet {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  /* Reclaim the telemetry row as a 23px strip instead of dropping it: the
+     SCADA glance (CPU/RAM/NET) is the product's identity, and the fleet
+     chips restore RUN/MISS (with MISS's click-to-boot) lost with the pills. */
+  .terminalFrame {
+    grid-template-rows: 58px minmax(0, 1fr) 22px;
+  }
+
+  .workspaceTopbar {
+    grid-template-rows: 34px 23px;
+    min-height: 58px;
+  }
+
+  .topbarTelemetry {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 23px;
+    padding: 0 0 2px;
+    overflow: hidden;
+    border-top: 1px solid var(--desk-line);
+  }
+
+  .telemetryFleet {
+    display: inline-flex;
+    flex: none;
+    gap: 5px;
+  }
+
+  .telemetryFleet .deskPill {
+    height: 17px;
+    padding: 0 8px;
+    font-size: 9px;
+  }
+
+  /* Cells collapse to label+value chips: no frame, no sub line, no sparkline,
+     and no inset accent bar (it sat on the label's first glyph at zero padding). */
+  .telemetryCell {
+    display: inline-flex;
+    flex: none;
+    align-items: baseline;
+    gap: 4px;
+    height: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    clip-path: none !important;
+  }
+
+  .telemetryCell small,
+  .telemetryCell .telemetrySpark {
+    display: none;
+  }
+
+  .telemetryCell span {
+    font-size: 8.5px;
+  }
+
+  .telemetryCell strong {
+    font-size: 10.5px;
+  }
+
+  .telemetryCell[data-cell='host'] {
+    display: none; /* hostname/kernel: zero glance value on a phone */
+  }
+
+  /* The count badge crowded the neighbor button at icon-only sizes. */
+  .notifLamp.withCount {
+    min-width: 12px;
+    height: 11px;
+    padding: 0 3px;
+    font-size: 7.5px;
+    top: -2px;
+    right: -2px;
+  }
+}
+
+/* Long-value cells yield progressively as the strip narrows. */
+@media (max-width: 720px) {
+  .telemetryCell[data-cell='disk'] {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .telemetryCell[data-cell='nvidia'],
+  .telemetryCell[data-cell='intel'] {
+    display: none;
+  }
+}
+
+/* Read cards keep the lamp's slot (layout-stable) but extinguish it. */
+.notifCard.read .notifCardLamp {
+  visibility: hidden;
+  animation: none;
+}
+
+/* ---------- Thread panel polish ---------- */
+
+.chanThreadHeader .chanThreadCount {
+  flex: none;
+  color: var(--desk-accent);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+}
+
+/* The msg-id is reference info, not headline — let it truncate first. */
+.chanThreadHeader .chanMsgId {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Mobile header: burger menu ---------- */
+
+/* Inline slots keep the desktop toolbar layout byte-identical: on wide
+   viewports they dissolve (display: contents); the phone band swaps which
+   slots exist. */
+.cmdSlot {
+  display: contents;
+}
+
+.cmdMobileOnly {
+  display: none;
+}
+
+.headerMenuScrim,
+.headerMenu {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .cmdMobileHidden {
+    display: none;
+  }
+
+  .cmdSlot.cmdMobileOnly {
+    display: contents;
+  }
+
+  /* The header is a z-1 stacking context and .deskContent (also z-1, later
+     in DOM) paints over it — a fixed menu inside the header would render
+     UNDER the terminals. Lift the header only while the menu exists. */
+  .workspaceTopbar:has(.headerMenu) {
+    z-index: 41;
+  }
+
+  .headerMenuScrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: var(--desk-scrim, rgba(0, 4, 6, 0.45));
+    animation: drawerScrimIn 200ms ease;
+  }
+
+  .headerMenu {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 62px;
+    left: 8px;
+    right: 8px;
+    z-index: 41;
+    padding: 4px;
+    /* Surface tint over the opaque bg: surface alone is 0.72 alpha on dark
+       themes and the workspace would ghost through (thread-overlay lesson). */
+    background: linear-gradient(var(--desk-surface), var(--desk-surface)), var(--desk-bg);
+    border: 1px solid var(--desk-line-strong, var(--desk-line));
+    box-shadow:
+      0 0 0 1px var(--desk-line),
+      0 18px 42px rgba(0, 0, 0, 0.5),
+      inset 0 0 22px var(--desk-glow);
+    animation: headerMenuIn 160ms ease;
+  }
+
+  .headerMenuItem {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 46px;
+    padding: 8px 12px;
+    background: none;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--desk-line) 55%, transparent);
+    color: var(--desk-text);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .headerMenuItem:last-child {
+    border-bottom: 0;
+  }
+
+  .headerMenuItem:hover,
+  .headerMenuItem:active {
+    background: color-mix(in srgb, var(--desk-accent) 12%, transparent);
+  }
+
+  .headerMenuItem:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .headerMenuItem:disabled:hover,
+  .headerMenuItem:disabled:active {
+    background: none;
+  }
+
+  .headerMenuItem > svg {
+    flex: none;
+    color: var(--desk-accent);
+  }
+
+  .headerMenuLabel {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .headerMenuLabel small {
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    color: var(--desk-text);
+    opacity: 0.6;
+  }
+
+  /* The destructive command sits apart, in the house danger color. */
+  .headerMenuItem.danger {
+    margin-top: 4px;
+    border-top: 1px solid color-mix(in srgb, var(--desk-error) 45%, transparent);
+  }
+
+  .headerMenuItem.danger > svg,
+  .headerMenuItem.danger .headerMenuLabel {
+    color: var(--desk-error);
+  }
+
+  .headerMenuItem.danger:hover,
+  .headerMenuItem.danger:active {
+    background: color-mix(in srgb, var(--desk-error) 12%, transparent);
+  }
+}
+
+@keyframes headerMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 860px) and (prefers-reduced-motion: reduce) {
+  .headerMenu,
+  .headerMenuScrim {
+    animation: none;
+  }
+}
+
+/* ---------- agents UX round ---------- */
+
+/* The hover action cluster used to crush the group label to 4px; the label gets
+   a floor and the count (redundant while actions show) yields. */
+.agentsSidebar .treeMain {
+  overflow: hidden;
+}
+
+/* Only the LABEL span gets the floor — not the trailing count/lamp cell
+   (.treeMeta), which must size to its content so the lamp sits next to the row
+   controls instead of inside a 56px box that overlaps the hover action cluster. */
+.agentsSidebar .treeMain span:not(.statusDot):not(.treeMeta) {
+  min-width: 56px;
+}
+
+@media (hover: hover) {
+  .agentsSidebar .treeRow:hover .treeMain small,
+  .agentsSidebar .treeRow:focus-within .treeMain small {
+    display: none;
+  }
+}
+
+/* session filter + needs-input chip */
+.sidebarFilterRow {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 5px;
+}
+
+.sidebarFilterInput {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  font-size: 11px;
+}
+
+.sidebarFilterChip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--desk-line);
+  background: transparent;
+  color: var(--desk-text-dim);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.sidebarFilterChip.active {
+  border-color: #ffd166;
+  color: #ffd166;
+  box-shadow: 0 0 8px rgba(255, 209, 102, 0.45);
+}
+
+/* Attention bubbled to collapsed project/group rows. The glow is a radial
+   gradient INSIDE the element (fading to transparent), not a box-shadow — the
+   row's `overflow: hidden` would clip a box-shadow into an ugly square near the
+   edge. Pulses via opacity + scale so it reads as a soft round lamp. */
+.treeAttnDot {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffe9a8 0%, #ffd166 32%, rgba(255, 196, 64, 0.45) 58%, rgba(255, 196, 64, 0) 78%);
+  animation: deskAttnLamp 1.2s ease-in-out infinite;
+}
+
+@keyframes deskAttnLamp {
+  0%,
+  100% {
+    opacity: 0.65;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+/* bootable MISSING cells */
+.terminalCellBody {
+  position: relative;
+}
+
+.cellMissingOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: rgba(2, 8, 10, 0.62);
+  backdrop-filter: blur(1px);
+}
+
+.cellMissingTitle {
+  color: #ffd166;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+}
+
+.cellMissingMeta {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+
+.cellMissingBoot,
+.terminalReconnect button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--desk-accent);
+  background: transparent;
+  color: var(--desk-accent);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.cellMissingBoot:hover,
+.terminalReconnect button:hover {
+  background: rgba(255, 209, 102, 0.12);
+  box-shadow: 0 0 10px var(--desk-glow);
+}
+
+/* dead bridge: reconnect affordance instead of yellow prose */
+.terminalReconnect {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(2, 8, 10, 0.62);
+  color: var(--desk-text-dim);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+/* empty cell: tap-to-assign picker */
+.emptyCell {
+  position: relative;
+}
+
+.emptyCellAssign {
+  border: 0;
+  background: transparent;
+  color: var(--desk-text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 10px 14px;
+}
+
+.emptyCellAssign:hover {
+  color: var(--desk-text);
+}
+
+.cellSessionPicker {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, calc(-50% + 28px));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 160px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--desk-line-strong);
+  background: var(--desk-bg);
+}
+
+.cellSessionPicker .treeMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* layout badge is the layout control now */
+.layoutBadgeWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+button.layoutBadge {
+  cursor: pointer;
+  background: transparent;
+}
+
+button.layoutBadge:hover:not(:disabled) {
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+.layoutMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 92px;
+  padding: 4px;
+  border: 1px solid var(--desk-line-strong);
+  background: var(--desk-bg);
+}
+
+.layoutMenu .treeMenuItem.selected {
+  color: var(--desk-accent);
+}
+
+/* mobile pager: state-tinted diamonds, the active one becomes a named pill */
+.mobileMuxDot.state-running {
+  border-color: #21f7a3;
+}
+
+.mobileMuxDot.state-missing {
+  border-color: var(--desk-error, #ff4d6d);
+}
+
+.mobileMuxDot.state-attn {
+  border-color: #ffd166;
+  background: rgba(255, 209, 102, 0.55);
+  animation: deskAttentionPulse 1.1s ease-in-out infinite;
+}
+
+.mobileMuxDot.mobileMuxPill {
+  width: auto;
+  height: 18px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transform: none;
+  border-radius: 2px;
+  animation: none;
+}
+
+.mobileMuxDot.mobileMuxPill.active {
+  background: rgba(33, 247, 163, 0.12);
+  color: var(--desk-text);
+}
+
+.mobileMuxPillName {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* ---------- channels engine ops console ---------- */
+.chanEngineOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(1.5px);
+}
+.chanEngineDrawer {
+  width: min(560px, 92%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-left: 1px solid var(--desk-line-strong);
+  background: linear-gradient(180deg, var(--desk-bg-elevated), var(--desk-bg));
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.chanEngineDrawerModal {
+  width: 100%;
+  height: min(62vh, 620px);
+  padding: 0;
+  border-left: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.chanEngineDrawerModal .chanEngineHealth {
+  margin-left: 0;
+}
+.chanEngineHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.chanEngineTitle {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--desk-text);
+}
+.chanEngineHealth {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+}
+.chanEnginePill {
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--desk-line);
+  color: var(--desk-text-dim);
+  white-space: nowrap;
+}
+.chanEnginePill.ok {
+  color: var(--desk-ok);
+  border-color: color-mix(in srgb, var(--desk-ok) 50%, transparent);
+}
+.chanEnginePill.warn {
+  color: var(--desk-graph-2);
+  border-color: color-mix(in srgb, var(--desk-graph-2) 55%, transparent);
+}
+.chanEnginePill.muted {
+  color: var(--desk-text-dim);
+}
+.chanEngineToolbar {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  flex-wrap: wrap;
+}
+.chanEngineBtn {
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border: 1px solid var(--desk-line);
+  background: var(--desk-surface);
+  color: var(--desk-text);
+  cursor: pointer;
+  border-radius: 2px;
+  transition: border-color 0.15s, color 0.15s;
+}
+.chanEngineBtn:hover:not(:disabled) {
+  border-color: var(--desk-accent);
+  color: var(--desk-accent);
+}
+.chanEngineBtn.danger:hover:not(:disabled) {
+  border-color: var(--desk-error);
+  color: var(--desk-error);
+}
+.chanEngineBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.chanEngineHome {
+  font-size: 9.5px;
+  color: var(--desk-text-dim);
+  font-family: var(--desk-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: none;
+}
+.chanEngineError {
+  font-size: 11px;
+  color: var(--desk-error);
+  border: 1px solid color-mix(in srgb, var(--desk-error) 50%, transparent);
+  padding: 5px 8px;
+  border-radius: 2px;
+  flex: none;
+}
+.chanEngineSessions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.chanEngineEmpty {
+  color: var(--desk-text-dim);
+  font-size: 11px;
+  padding: 8px;
+}
+.chanEngineSession {
+  border: 1px solid var(--desk-line);
+  border-radius: 3px;
+  padding: 7px 8px;
+  background: var(--desk-surface);
+}
+.chanEngineSessionTop {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.chanEngineExpand {
+  font: inherit;
+  background: none;
+  border: none;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  width: 14px;
+  flex: none;
+}
+.chanEngineExpand:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.chanEnginePane {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  flex: none;
+  text-transform: lowercase;
+}
+.chanEnginePane.ok {
+  color: var(--desk-ok);
+}
+.chanEnginePane.warn {
+  color: var(--desk-graph-2);
+}
+.chanEnginePane.muted {
+  color: var(--desk-text-dim);
+}
+.chanEngineSessionName {
+  font-family: var(--desk-mono, monospace);
+  font-size: 10.5px;
+  color: var(--desk-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.chanEngineQueued {
+  font-size: 11px;
+  color: var(--desk-text);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+  min-width: 16px;
+  text-align: right;
+}
+.chanEngineMeta,
+.chanEngineFlags {
+  font-size: 9px;
+  color: var(--desk-text-dim);
+  flex: none;
+  white-space: nowrap;
+}
+.chanEngineFlags {
+  color: var(--desk-graph-2);
+}
+.chanEngineSessionActions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+/* Compact read-only resume-health line per session. */
+.chanEngineResume {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.chanEngineCwd {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chanEngineItems {
+  list-style: none;
+  margin: 7px 0 0;
+  padding: 6px 0 0;
+  border-top: 1px dashed var(--desk-line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chanEngineItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+}
+.chanEngineItemAuthor {
+  color: var(--desk-accent);
+  flex: none;
+}
+.chanEngineItemPreview {
+  color: var(--desk-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.chanEngineItemAge {
+  color: var(--desk-text-dim);
+  font-size: 9px;
+  flex: none;
+}
+.chanEngineItemDrop {
+  font: inherit;
+  background: none;
+  border: none;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  flex: none;
+}
+.chanEngineItemDrop:hover:not(:disabled) {
+  color: var(--desk-error);
+}
+.chanEngineConfirm {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--desk-error) 55%, transparent);
+  border-radius: 3px;
+  padding: 10px;
+  background: var(--desk-bg-elevated);
+}
+.chanEngineConfirm p {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--desk-text);
+  line-height: 1.4;
+}
+.chanEngineConfirmBtns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

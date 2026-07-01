@@ -1,0 +1,85 @@
+{
+  "name": "desk",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Manifest-driven manager for many long-running agent terminals (Codex, Claude Code, OpenCode) — tmux as the durable runtime, sci-fi/HUD web UI with editor, git, projects, notes and agent-messaging channels",
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BrainyBlaze/desk.git"
+  },
+  "keywords": [
+    "agents",
+    "tmux",
+    "terminal",
+    "claude-code",
+    "codex",
+    "multi-agent",
+    "dashboard"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "bin": {
+    "desk": "./dist/cli/main.js",
+    "desk-lsp-mcp": "./dist/server/lsp/deskLspMcpCli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && chmod +x dist/cli/main.js dist/server/lsp/deskLspMcpCli.js",
+    "build:ui": "vite build",
+    "build:standalone:assets": "vite build && node scripts/make-assets.mjs",
+    "build:standalone": "npm run build:standalone:assets && bun run scripts/build-standalone.ts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "tsx src/cli/main.ts",
+    "serve": "vite --host 127.0.0.1",
+    "ui": "vite --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "chokidar": "^5.0.0",
+    "connect": "^3.7.0",
+    "node-pty": "^1.1.0",
+    "pyright": "^1.1.410",
+    "sirv": "^3.0.2",
+    "typescript-language-server": "^5.3.0",
+    "ws": "^8.21.0",
+    "yaml": "^2.8.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@arwes/react": "^1.0.0-next.25020502",
+    "@tanstack/react-virtual": "^3.14.3",
+    "@types/connect": "^3.4.38",
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.2.0",
+    "@xterm/addon-attach": "^0.12.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "katex": "^0.17.0",
+    "lucide-react": "^1.17.0",
+    "mermaid": "^11.15.0",
+    "monaco-editor": "^0.55.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^4.11.2",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.3.5",
+    "vitest": "^3.2.0"
+  }
+}

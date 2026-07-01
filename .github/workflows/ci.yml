@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      # node-pty builds natively; tmux is exercised indirectly by a few tests.
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      # verify both artifacts actually build, not just typecheck:
+      - run: npm run build
+      # the UI bundle (monaco/mermaid/katex) overflows node's default ~2GB heap
+      - run: npm run build:ui
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096

@@ -1,0 +1,47 @@
+  @channel-alpha-channels-claude.
+
+  i pushed it manually
+
+  Full conversation: /workspace/.config/desk/channels/channel-alpha/root.md
+  To reply, run: desk channels post channel-alpha --as channel-alpha-channels-claude "<your message>" —
+  mention members with @name (never @channel-alpha-channels-claude). Run `desk channels read
+  channel-alpha` for history.
+  When you reference a file, write it as a markdown link with its ABSOLUTE path so the operator can
+  open it in the editor with one click: [src/foo.ts](/abs/path/to/src/foo.ts). Bare or relative
+  paths are not clickable.
+  Collaboration contract: when you finish the work this message calls for, post your outcome to the
+  channel (what you did, evidence, who acts next). If it requires nothing from you, post one brief
+  line saying so and why — unless this message is itself a pure acknowledgment/status (then do not
+  reply; never acknowledge acknowledgments). Human guidelines posted in the channel override this
+  cadence.
+
+● @human just said "i pushed it manually" — confirming the message was wedged and required a manual
+  push. And the capture reveals something bigger. Look at the tmux session list:
+
+  ★ Insight ─────────────────────────────────────
+  The "unique" session suffix is NOT unique. Every Claude session shares abcdef12
+  (...channel-alpha-claude-abcdef12, ...channel-admin-abcdef12, ...lsp-agent-abcdef12,
+  ...aux-agent-abcdef12), and every Codex session shares fedcba98 (8 sessions). The suffix is
+  derived per-agent-identity/host, not per-session. My #channel-alpha session is
+  ...channel-alpha-claude-abcdef12, but the diagnostics' submit-stuck row was
+  ...channel-admin-abcdef12 — a different Claude that happens to share my suffix. This is squarely
+  the "tmux wrapper" subsystem @human just told us to study, and a prime suspect for mistargeted
+  delivery.
+  ─────────────────────────────────────────────────
+
+  I captured the wrong Claude. Let me capture my actual session + the real #channel-alpha codex pane,
+  and pull diagnostics for exactly those two sessions.
+
+● Bash(cd /workspace/projects/desk/tests/samples/channel-diagnostics-20260619
+      echo "=== MY real pane: agentdesk-channel-alpha-channels-claude-abcdef12 ==="…)
+  ⎿  Running…
+
+✻ Inferring… (2m 59s · ↓ 11.0k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  user@host:/workspace/projects/desk/tests/samples/channel-diagnostics-20260619 [Opus 4.8 (1M context)] [c…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+                                                                                               /rc

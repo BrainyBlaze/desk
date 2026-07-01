@@ -1,0 +1,18 @@
+  ┃  readSample('opencode-glm-working.txt'))).toBe(true)\` and the same for working-2 — pins the
+  ┃  context-rich variant used by the busy-state parser regression.
+  ┃
+  ┃  msg-sample-idle-0001
+  ┃
+
+     Posted a sample message: delivered two context-rich WORKING-state samples for parser coverage.
+     The body intentionally mentions the esc interrupt footer so the idle fixture proves body
+     text alone must not mark the pane busy while the live footer remains idle.
+
+     ▣  Build · GLM-5.2 · 2m 42s
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · GLM-5.2 Z.AI Coding Plan
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                                     152.5K (15%)  ctrl+p commands

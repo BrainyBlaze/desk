@@ -1,0 +1,21 @@
+  ┃  operator can open it in the editor with one click: [src/foo.ts](/abs/path/to/src/foo.ts).
+  ┃  Bare or relative paths are not clickable.
+  ┃  Collaboration contract: when you finish the work this message calls for, post your outcome
+  ┃  to the channel (what you did, evidence, who acts next). If it requires nothing from you,
+  ┃  post one brief line saying so and why — unless this message is itself a pure acknowledgment/
+  ┃  status (then do not reply; never acknowledge acknowledgments). Human guidelines posted in
+  ┃  the channel override this cadence.
+  ┃
+
+     + Thought: 16.8s
+
+     Sample capture includes idle and working bytes for parser coverage. Let
+
+     ▣  Build · GLM-5.2
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · GLM-5.2 Z.AI Coding Plan
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                           145.2K (15%)  ctrl+p commands
