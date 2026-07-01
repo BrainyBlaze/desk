@@ -2388,14 +2388,24 @@ describe('spawnTmuxSettled', () => {
     // tmux spawns must each return their FULL payload.
     const size = 10_000;
     const payload = 'x'.repeat(size);
-    const results = await Promise.all(
-      Array.from({ length: 12 }, () =>
-        spawnTmuxSettled(['display-message', '-p', payload], { capture: true, timeoutMs: 4000 })
-      )
-    );
-    for (const result of results) {
-      expect(result.ok).toBe(true);
-      expect(result.stdout).toBe(`${payload}\n`);
+    const session = `desk-test-spawn-${process.pid}-${Date.now()}`;
+    const started = await spawnTmuxSettled(['new-session', '-d', '-s', session, 'sleep 30'], {
+      capture: false,
+      timeoutMs: 2000
+    });
+    expect(started.ok).toBe(true);
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 12 }, () =>
+          spawnTmuxSettled(['display-message', '-p', '-t', `${session}:`, payload], { capture: true, timeoutMs: 4000 })
+        )
+      );
+      for (const result of results) {
+        expect(result.ok).toBe(true);
+        expect(result.stdout).toBe(`${payload}\n`);
+      }
+    } finally {
+      await spawnTmuxSettled(['kill-session', '-t', session], { capture: false, timeoutMs: 2000 });
     }
   });
 });
