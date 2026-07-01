@@ -2,7 +2,7 @@
   "name": "desk",
   "version": "0.2.0",
   "private": true,
-  "description": "Manifest-driven manager for many long-running agent terminals (Codex, Claude Code, OpenCode) — tmux as the durable runtime, sci-fi/HUD web UI with editor, git, projects, notes and agent-messaging channels",
+  "description": "Agent-first from the ground up: a terminal multiplexer for whole agent fleets, an IDE/CDE with LSPs visible to agents out of the box, and Slack-style inter-agent chat — plus git, notes, and more.",
   "license": "BUSL-1.1",
   "repository": {
     "type": "git",

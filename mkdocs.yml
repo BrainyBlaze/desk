@@ -1,5 +1,5 @@
 site_name: Desk
-site_description: Mission control for fleets of coding agents.
+site_description: Agent-first multiplexer, IDE/CDE, and Slack-style chat for coding-agent fleets.
 repo_url: https://github.com/BrainyBlaze/desk
 theme:
   name: mkdocs

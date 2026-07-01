@@ -1,6 +1,6 @@
 <h1 align="center">Desk</h1>
 
-<p align="center"><strong>Mission control for a fleet of coding agents.</strong></p>
+<p align="center"><strong>Agent-first multiplexer, IDE/CDE, and Slack-style chat for coding-agent fleets.</strong></p>
 
 <p align="center">
   Keep many long-running agent terminals — Claude Code, OpenAI Codex, OpenCode,
