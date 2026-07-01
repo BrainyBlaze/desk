@@ -340,9 +340,9 @@ function stringArray(value: unknown): string[] {
 
 function ghErrorPayload(error: unknown): { status: number; body: Record<string, unknown> } {
   if (error instanceof GhError && error.missingScope) {
-    return { status: 403, body: { error: error.message, missingScope: true } };
+    return { status: 403, body: { error: 'GitHub token is missing required project scope', missingScope: true } };
   }
-  return { status: 500, body: { error: error instanceof Error ? error.message : String(error) } };
+  return { status: 500, body: { error: 'projects request failed' } };
 }
 
 /* ---------- request handling ---------- */
@@ -369,7 +369,7 @@ export async function handleProjectsRequest(req: IncomingMessage, res: ServerRes
             ok: false,
             login,
             missingScope: scope,
-            reason: err instanceof Error ? err.message : String(err)
+            reason: scope ? 'GitHub token is missing required project scope' : 'GitHub project check failed'
           });
         }
         return true;

@@ -782,8 +782,8 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     sendJson(res, 404, { error: `unknown channels endpoint: ${url.pathname}` });
     return true;
-  } catch (error) {
-    sendJson(res, 500, { error: error instanceof Error ? error.message : 'channels request failed' });
+  } catch {
+    sendJson(res, 500, { error: 'channels request failed' });
     return true;
   }
 }

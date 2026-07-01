@@ -877,8 +877,8 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
           }
 
           sendJson(res, 404, { error: `unknown API route ${url.pathname}` });
-        } catch (error) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        } catch {
+          sendJson(res, 500, { error: 'request failed' });
         }
       });
 }
