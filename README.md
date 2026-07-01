@@ -93,14 +93,6 @@ desk up               # start every configured agent session
 desk help             # all commands
 ```
 
-> [!IMPORTANT]
-> **Authenticate the agent CLIs in a normal terminal first — not from inside
-> Desk.** Desk launches agents under tmux with its own environment; an OAuth
-> login attempted from a terminal inside the Desk UI fails with a *wrong app
-> id* error. Run `codex` / `claude` in a plain terminal, complete the login
-> once, then add them to Desk. Desk attaches to and resumes
-> already-authenticated agents; it never handles auth.
-
 Optional, per subsystem:
 
 - **OpenAI Codex** — `npm install -g @openai/codex`, sign in once.
