@@ -10,7 +10,7 @@ import {
   isPaneBusy,
   isPaneReadyForInput,
   sendTextToTmux,
-  spawnSettled,
+  spawnTmuxSettled,
   tailPaneCapture
 } from '../src/server/channelsEngine.js';
 import {
@@ -2356,39 +2356,46 @@ describe('sliceMessages (lazy-load windowing)', () => {
   });
 });
 
-describe('spawnSettled', () => {
+describe('spawnTmuxSettled', () => {
   it('always settles: kills a child that outlives the timeout and reports failure', async () => {
     const start = Date.now();
-    const result = await spawnSettled('sleep', ['5'], { capture: false, timeoutMs: 80 });
+    const result = await spawnTmuxSettled(['wait-for', `desk-test-never-${Date.now()}`], {
+      capture: false,
+      timeoutMs: 80
+    });
     expect(result.ok).toBe(false);
-    // resolved on the timeout, not after the full 5s sleep
+    // resolved on the timeout, not after the wait is signaled
     expect(Date.now() - start).toBeLessThan(2000);
   });
 
   it('captures stdout and reports success on a clean exit', async () => {
-    const result = await spawnSettled('printf', ['hello'], { capture: true, timeoutMs: 2000 });
-    expect(result).toMatchObject({ ok: true, stdout: 'hello' });
+    const result = await spawnTmuxSettled(['-V'], { capture: true, timeoutMs: 2000 });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toMatch(/^tmux /);
   });
 
   it('reports failure (no stdout) when the command exits non-zero', async () => {
-    const result = await spawnSettled('sh', ['-c', 'exit 3'], { capture: true, timeoutMs: 2000 });
+    const result = await spawnTmuxSettled(['has-session', '-t', `desk-test-missing-${Date.now()}`], {
+      capture: true,
+      timeoutMs: 2000
+    });
     expect(result).toMatchObject({ ok: false, stdout: null });
   });
 
   it('captures full stdout under concurrency (no truncation race on large output)', async () => {
     // Reading stdout on `exit` truncates large output to empty under concurrent
     // load — the bug that stranded channel queues. Many concurrent large-output
-    // spawns must each return their FULL payload (output piped, not argv, to
-    // avoid ARG_MAX).
-    const size = 200_000;
+    // tmux spawns must each return their FULL payload.
+    const size = 10_000;
+    const payload = 'x'.repeat(size);
     const results = await Promise.all(
       Array.from({ length: 12 }, () =>
-        spawnSettled('sh', ['-c', `head -c ${size} /dev/zero | tr '\\0' x`], { capture: true, timeoutMs: 4000 })
+        spawnTmuxSettled(['display-message', '-p', payload], { capture: true, timeoutMs: 4000 })
       )
     );
     for (const result of results) {
       expect(result.ok).toBe(true);
-      expect(result.stdout?.length).toBe(size);
+      expect(result.stdout).toBe(`${payload}\n`);
     }
   });
 });

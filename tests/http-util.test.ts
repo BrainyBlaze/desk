@@ -1,0 +1,53 @@
+import type { ServerResponse } from 'node:http';
+import { describe, expect, it } from 'vitest';
+import { sendJson } from '../src/server/httpUtil.js';
+
+function makeResponse(): ServerResponse & {
+  body: string;
+  headers: Record<string, string>;
+} {
+  return {
+    body: '',
+    headers: {},
+    statusCode: 0,
+    setHeader(name: string, value: number | string | readonly string[]) {
+      this.headers[name.toLowerCase()] = String(value);
+      return this;
+    },
+    end(chunk?: unknown) {
+      this.body = String(chunk ?? '');
+      return this;
+    }
+  } as ServerResponse & { body: string; headers: Record<string, string> };
+}
+
+describe('sendJson', () => {
+  it('redacts stack fields before sending a JSON response', () => {
+    const res = makeResponse();
+
+    sendJson(res, 500, {
+      error: 'request failed',
+      detail: {
+        stack: 'Error: boom\n    at internal.ts:1:1',
+        nested: [{ stack: 'secret stack' }]
+      }
+    });
+
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'request failed',
+      detail: {
+        nested: [{}]
+      }
+    });
+    expect(res.body).not.toContain('internal.ts');
+    expect(res.body).not.toContain('secret stack');
+  });
+
+  it('preserves non-plain JSON-serializable objects', () => {
+    const res = makeResponse();
+
+    sendJson(res, 200, { at: new Date('2026-07-01T12:00:00.000Z') });
+
+    expect(JSON.parse(res.body)).toEqual({ at: '2026-07-01T12:00:00.000Z' });
+  });
+});

@@ -272,13 +272,12 @@ export interface SpawnSettledResult {
  * "not ready", so drain held those queues forever. `close` fires only once all
  * stdio streams have drained, so the capture is complete.
  */
-export function spawnSettled(
-  command: string,
+export function spawnTmuxSettled(
   args: string[],
   opts: { capture: boolean; timeoutMs?: number }
 ): Promise<SpawnSettledResult> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ['ignore', opts.capture ? 'pipe' : 'ignore', 'ignore'] });
+    const child = spawn('tmux', args, { stdio: ['ignore', opts.capture ? 'pipe' : 'ignore', 'ignore'] });
     let output = '';
     let settled = false;
     const finish = (result: SpawnSettledResult): void => {
@@ -321,7 +320,7 @@ export function defaultSessionRunning(tmuxSession: string): boolean {
 
 /** Last ~30 pane lines of the session's active pane (null when capture fails). */
 export async function defaultCapturePane(tmuxSession: string): Promise<string | null> {
-  const result = await spawnSettled('tmux', ['capture-pane', '-p', '-t', `${tmuxSession}:`], { capture: true });
+  const result = await spawnTmuxSettled(['capture-pane', '-p', '-t', `${tmuxSession}:`], { capture: true });
   return result.stdout === null ? null : tailPaneCapture(result.stdout);
 }
 
@@ -332,7 +331,7 @@ export { isPaneBusy, isPaneReadyForInput, paneFooterRegion, tailPaneCapture } fr
 
 /** Epoch-seconds tmux session creation time (null when unknown). */
 export async function defaultSessionCreatedAt(tmuxSession: string): Promise<number | null> {
-  const result = await spawnSettled('tmux', ['display-message', '-p', '-t', `${tmuxSession}:`, '#{session_created}'], {
+  const result = await spawnTmuxSettled(['display-message', '-p', '-t', `${tmuxSession}:`, '#{session_created}'], {
     capture: true
   });
   if (result.stdout === null) {
@@ -399,7 +398,7 @@ export function sendEnterToTmux(tmuxSession: string): Promise<boolean> {
 }
 
 function runTmux(args: string[]): Promise<boolean> {
-  return spawnSettled('tmux', args, { capture: false }).then((result) => result.ok);
+  return spawnTmuxSettled(args, { capture: false }).then((result) => result.ok);
 }
 
 function delay(ms: number): Promise<void> {
