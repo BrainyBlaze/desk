@@ -51,6 +51,17 @@ describe('sendJson', () => {
 
     expect(JSON.parse(res.body)).toEqual({ at: '2026-07-01T12:00:00.000Z' });
   });
+
+  it('serializes direct Error payloads without stack data', () => {
+    const res = makeResponse();
+    const error = new Error('boom');
+
+    sendJson(res, 500, { error });
+
+    expect(JSON.parse(res.body)).toEqual({ error: { name: 'Error', message: 'boom' } });
+    expect(res.body).not.toContain('stack');
+    expect(res.body).not.toContain('http-util.test');
+  });
 });
 
 describe('readJsonBody', () => {

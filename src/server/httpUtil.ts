@@ -13,6 +13,9 @@ function redactStackFields(value: unknown): unknown {
   if (!value || typeof value !== 'object') {
     return value;
   }
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message };
+  }
   if (Object.getPrototypeOf(value) !== Object.prototype) {
     return value;
   }
