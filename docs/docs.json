@@ -4,7 +4,7 @@
   "name": "Desk",
   "description": "Agent-first multiplexer, IDE/CDE, and Slack-style chat for coding-agent fleets.",
   "colors": {
-    "primary": "#0891B2",
+    "primary": "#0E7490",
     "light": "#22D3EE",
     "dark": "#0E7490"
   },
