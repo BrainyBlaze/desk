@@ -1,4 +1,7 @@
-# Notes
+---
+title: "Notes"
+description: "Project notes and knowledge capture"
+---
 
 Desk notes are local markdown files for quick operator memory, investigation
 scratchpads, and terminal-derived snippets.

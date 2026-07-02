@@ -1,4 +1,7 @@
-# Git and GitHub operations
+---
+title: "Git and GitHub operations"
+description: "Source control rail: status, history, diffs, and GitHub pull requests"
+---
 
 Desk includes a Git subsystem for day-to-day repository work and GitHub-aware
 operations. It uses the host `git` and `gh` commands rather than bundling its

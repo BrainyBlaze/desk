@@ -1,4 +1,7 @@
-# GitHub Projects
+---
+title: "GitHub Projects"
+description: "GitHub Projects boards inside the workspace"
+---
 
 Desk includes a GitHub Projects v2 subsystem for planning and coordination
 inside the same workspace as agents, code, terminals, and channels.

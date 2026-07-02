@@ -1,0 +1,45 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Desk",
+  "description": "Agent-first multiplexer, IDE/CDE, and Slack-style chat for coding-agent fleets.",
+  "colors": {
+    "primary": "#0E7490",
+    "light": "#22D3EE",
+    "dark": "#0E7490"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "getting-started", "configuration"]
+      },
+      {
+        "group": "Working with agents",
+        "pages": ["agents-and-terminals", "channels-protocol", "ide-and-lsp"]
+      },
+      {
+        "group": "Workspace tools",
+        "pages": ["github-operations", "github-projects", "notes"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["operations", "docs-hosting", "licensing"]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/BrainyBlaze/desk"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/BrainyBlaze/desk"
+    }
+  }
+}

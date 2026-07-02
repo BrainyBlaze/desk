@@ -1,4 +1,7 @@
-# Desk
+---
+title: "Desk"
+description: "Local mission control for a fleet of coding agents"
+---
 
 Desk is a local mission-control app for running a fleet of coding agents from
 one browser workspace. It keeps agent processes alive in tmux, gives the

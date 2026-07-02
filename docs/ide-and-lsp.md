@@ -1,4 +1,7 @@
-# IDE and LSP
+---
+title: "IDE and LSP"
+description: "The built-in editor, language servers, and how agents query them"
+---
 
 Desk includes a VS Code-like local editing surface built around Monaco. It is
 designed to sit beside the agent fleet so the operator can inspect, edit, and

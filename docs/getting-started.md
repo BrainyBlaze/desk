@@ -1,4 +1,7 @@
-# Getting started
+---
+title: "Getting started"
+description: "Install Desk, start the server, and launch your first agent session"
+---
 
 ## Requirements
 

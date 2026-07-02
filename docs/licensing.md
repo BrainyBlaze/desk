@@ -1,4 +1,7 @@
-# License
+---
+title: "License"
+description: "Business Source License 1.1 terms for Desk"
+---
 
 The canonical license text is the `LICENSE` file in the repository root.
 
