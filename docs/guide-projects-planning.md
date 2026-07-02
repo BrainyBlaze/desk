@@ -17,8 +17,9 @@ gh auth refresh -s project
 ```
 
 Desk stores no separate GitHub token, and the UI shows a re-check gate until
-the scope is present. The picker then lists projects from your account and
-every organization you can see.
+the scope is present. The picker then lists your most recently updated
+projects and those of your organizations (the first pages GitHub returns —
+use GitHub itself for very long project lists).
 
 ## Triage on the board
 
@@ -40,7 +41,7 @@ The item drawer opens issues, pull requests, and drafts with markdown bodies
 and recent comments. From the drawer or the card menu you can:
 
 - edit any field (text, number, date, single-select, iteration)
-- assign yourself, add or remove labels, close and reopen
+- assign yourself, close and reopen
 - comment
 - convert a draft into a real issue in a chosen repository
 - archive, unarchive, or remove from the project
