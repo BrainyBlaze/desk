@@ -20,18 +20,6 @@ The manifest has three top-level blocks:
 - `settings`: UI and subsystem settings
 
 ```yaml
-groups:
-  - id: scratch
-    label: Scratch
-    order: 20
-    layout:
-      kind: linear
-      cells: 2
-    sessions:
-      - name: scratch-shell
-        agent: bash
-        cwd: ~/projects/product
-
 projects:
   - id: product
     label: Product
