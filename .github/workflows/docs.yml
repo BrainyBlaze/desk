@@ -66,6 +66,7 @@ jobs:
           unzip -q docs/site.zip -d _site
           rm -f "_site/Start Docs.bat" "_site/Start Docs.command"
           touch _site/.nojekyll
+          echo "docs.desk.cloud" > _site/CNAME
       - name: Publish to gh-pages branch
         working-directory: _site
         run: |
