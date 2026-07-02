@@ -40,8 +40,8 @@ use the workspace.
 
 ## Authenticate external tools
 
-Desk calls the agent and developer tools already installed on the host. Log in
-to them before creating sessions:
+Desk calls the agent and developer tools already installed on the host. If a
+tool needs an account, sign in through that tool's normal flow:
 
 ```bash
 codex

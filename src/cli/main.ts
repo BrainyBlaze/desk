@@ -10,7 +10,7 @@ import { captureSession, findSession, loadDesk, planDeskUp, printStatus, runPlan
 import { runChannelsCli } from './channelsCli.js';
 import type { DeskSession } from '../core/types.js';
 
-const HELP = `desk — manifest-driven manager for many agent terminals
+const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
 
 Usage: desk <command> [options]
 
