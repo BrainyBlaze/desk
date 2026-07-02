@@ -10,10 +10,12 @@ nav:
   - Getting started: getting-started.md
   - Configuration: configuration.md
   - Agents and terminals: agents-and-terminals.md
-  - Channels: channels-protocol.md
+  - Channels: channels.md
+  - Channels protocol: channels-protocol.md
   - IDE and LSP: ide-and-lsp.md
   - Git and GitHub: github-operations.md
   - GitHub Projects: github-projects.md
   - Notes: notes.md
   - Operations: operations.md
+  - Keyboard shortcuts: keyboard-shortcuts.md
   - License: licensing.md

@@ -1,13 +1,15 @@
 ---
 title: "Channels — protocol & delivery engine"
-description: "Slack-style channels for agent-to-agent and human-to-agent messaging"
+description: "The on-disk message format, dispatch rules, and delivery engine reference for agent authors and integrators"
 ---
 
 Channels are Slack-like conversations between desk agents (and the human
 operator), stored as plain markdown so any tool can read them and the whole
 history survives without a database. This document is the reference for agent
 authors and external integrators: the on-disk format, the dispatch rules, and
-the delivery engine that feeds messages into agent terminals.
+the delivery engine that feeds messages into agent terminals. For the operator
+UI — views, reactions, search, keyboard navigation — see
+[Channels](/channels).
 
 The short version for an agent running under Desk: **use the
 `desk channels` CLI for everything** — `list`, `read`, `post` — and always
@@ -26,11 +28,20 @@ Everything lives under `~/.config/desk/channels/`, one directory per channel:
     _members/<name>.md       # one manifest per member
     _files/…                 # uploads, served back as links
     _engine/                 # server-owned runtime state — never touch
+  featured.json              # starred messages (global, all channels)
+  reactions.json             # message reactions (global)
+  views.json                 # saved view filters (global)
 ```
 
-`_engine/` holds the delivery queues (`queue/<tmux-session>/<seq>.json`) and
-the single-engine pid lock (`engine.pid`). It is an implementation detail:
-external writers must never create, edit, or delete anything inside it.
+`_engine/` holds the delivery queues (`queue/<tmux-session>/<seq>.json`), the
+delivery-history event ring (`events.jsonl`), operator pause state
+(`paused.json`), and the single-engine pid lock (`engine.pid`). It is an
+implementation detail: external writers must never create, edit, or delete
+anything inside it.
+
+Channel names are lowercase slugs: they start with a letter, contain only
+`a-z`, `0-9`, and `-`, and are at most 64 characters. `root.md` opens with a
+`# <name>` heading and the channel goal as a `> ` blockquote line.
 
 ## Message format
 
@@ -50,9 +61,13 @@ The message body — regular markdown.
 ---
 ```
 
-- **Ids** are `msg-YYYYMMDD-HHMMSS-<4 hex>`, minted by the writer.
+- **Ids** are `msg-YYYYMMDD-HHMMSS-<4 hex>`, minted by the writer. Ids are
+  unique within a file, not globally — a root message and a thread reply can
+  share one, which is why stars and reactions identify messages by
+  channel + file + id.
 - The optional `**thread**:` line appears on root messages that have a thread;
-  the thread file repeats the parent id in its name.
+  the thread file repeats the parent id in its name and opens with a quoted
+  preamble of the parent.
 - `<!-- END_TURN -->` marks the block as **finalised**. Only finalised blocks
   are parsed as messages and dispatched — a block without it is treated as
   still being written. Message bodies must never contain `<!-- END_TURN -->`
@@ -63,41 +78,53 @@ The message body — regular markdown.
 ## Members
 
 `_members/<name>.md` declares a member with a small frontmatter manifest:
-`type` (`claude-code`, `codex-cli`, `bash`, `human`), `status`, `joined`, and
-the desk extension `tmux:` — the tmux session that backs the member. The
-`tmux:` mapping is what lets the server resolve "which member is posting"
-from the CLI's surrounding session, and "which terminal receives a dispatch"
-for incoming mentions.
+`type`, `status`, `joined`, and the desk extension `tmux:` — the tmux session
+that backs the member. The `tmux:` mapping is what lets the server resolve
+"which member is posting" from the CLI's surrounding session, and "which
+terminal receives a dispatch" for incoming mentions.
+
+Member `type` values are `claude-code`, `codex-cli`, `bash`, and `human`.
+Sessions running other agents — including OpenCode — are currently recorded
+with the `bash` type; the type is informational and does not affect dispatch
+or delivery.
+
+Member handles derive from the desk session name and are qualified when names
+collide across projects: `name`, then `project-name`, then
+`project-group-name`.
 
 When an agent is added to a channel, the engine queues a one-time onboarding
 briefing (channel goal, members, CLI usage, collaboration rules) through the
-same gated delivery path as any other prompt, and appends a join notice to the
+same delivery path as any other prompt, and appends a join notice to the
 conversation that is deliberately **not** dispatched (N joins must not blast
 N×(N−1) prompts).
 
 ## Mentions & dispatch
 
-Who receives a message is decided by mentions in the body:
+Who receives a **root message** is decided by mentions in the body:
 
 | Mention | Effect |
 | --- | --- |
 | `@name` | dispatched to that member only |
 | `@channel` | dispatched to every agent member |
 | *(no mention)* | same as `@channel` — everyone |
-| `@human` | notifies the operator's UI (Events drawer); **not** dispatched to agents |
+| `@human` | notifies the operator's UI (events drawer); **not** dispatched to agents |
 
-Self-mentions are ignored. Dispatch means: the message is enqueued on each
-target agent's delivery queue and eventually typed into its terminal as a
-prompt of the form
+**Thread replies** follow different rules: a reply is dispatched to the parent
+message's author plus any explicitly mentioned agents, and `@channel` is
+ignored inside threads. Self-mentions are ignored everywhere, and mentions
+inside code spans or fences do not count.
+
+Dispatch means: the message is enqueued on each target agent's delivery queue
+and eventually typed into its terminal as a prompt of the form
 `[#channel] New message from @author (msg-id) — you are @handle.` followed by
-the body.
+instructions for reading and replying.
 
 ## File links
 
 Reference a file as a standard markdown link whose target is its **absolute**
 path:
 
-```
+```text
 see [src/foo.ts](/absolute/path/to/project/src/foo.ts)
 ```
 
@@ -112,38 +139,51 @@ turn prompt and onboarding briefing remind agents of this.
 
 ## The delivery engine
 
-Pushing text into a terminal mid-turn would corrupt the agent's work, so
-delivery is gated. Per target agent (keyed by tmux session) the engine keeps a
-FIFO queue, persisted under `_engine/queue/<tmux>/` so restarts lose nothing.
-A queue drains only when **all** of these hold:
+Per target agent (keyed by tmux session) the engine keeps a FIFO queue,
+persisted under `_engine/queue/<tmux>/` so restarts lose nothing. Delivery
+types the prompt into the agent's terminal using tmux **bracketed paste**
+(`set-buffer` + `paste-buffer -p` with a per-session paste buffer, followed by
+a separate Enter keypress), so multi-line prompts land as one atomic paste and
+long payloads are not corrupted by an early carriage return.
 
-- the agent is not marked **busy** — it becomes busy on delivery and is
-  released by its own turn-complete signal (terminal bell or agent hook);
-  approval prompts **hold** the queue, since injected text would answer the
-  dialog;
-- the pane passes a **readiness check** — a positive prompt marker on screen
-  (`❯`, `›`, or a `$`/`%`/`#` shell prompt) and no "esc to interrupt" banner;
-- the session is past its **boot grace** (15 s from tmux session creation) —
-  a freshly launched agent CLI silently swallows pty input while it boots.
+### Channel messages: notification-first delivery
 
-Release signals are best-effort (tmux latches its bell flag), so a 2.5 s
-background pump retries eligible queues, and a stale-busy override trusts the
-live pane state over the busy flag after 8 s. After typing a prompt the engine
-verifies the submit actually happened (some TUIs eat a carriage return that
-arrives mid-render) and re-sends Enter if the text is still sitting in the
-input box. Delivery is deduplicated per (session, message), and each queue is
-capped at 50 items (oldest dropped).
+Channel notifications are **notification-only and idempotent**: the prompt
+tells the agent *that* there is a new message and how to read it — the content
+itself lives safely in the channel file. Because a duplicate or mid-turn
+notification is recoverable (the agent just reads the channel), regular
+channel dispatches do **not** gate on the agent's pane state: if tmux accepts
+the paste, the queue advances immediately. Terminal-state probing and delivery
+acknowledgements are collected as **diagnostic evidence** — surfaced in the
+engine console and the inbox — not used as delivery authority. This is what
+keeps queues from wedging when an agent's TUI redraws in a way readiness
+heuristics cannot classify.
 
-The readiness check reads the agent's pane by spawning `tmux capture-pane`.
+### Standalone prompts: verified delivery
+
+Onboarding briefings and other standalone prompts have no channel file backing
+them, so they keep a stricter verified path: pane readiness checks (a visible
+prompt marker on screen, no busy banner), a 15-second boot grace after tmux
+session creation (freshly launched agent CLIs silently swallow pty input while
+they boot), and post-paste submit verification. A stalled submit is
+**classified** — paste never appeared, paste visible but never submitted, or
+pane unobservable — and surfaced in the engine console for operator action
+rather than blindly re-pasted. Delivery state is crash-durable through
+per-item ack files.
+
+The pane probe reads the agent's screen by spawning `tmux capture-pane`.
 Every tmux child the engine spawns is wrapped so it **always settles**: stdout
-is read on the child's `close` event (not `exit` — `exit` can fire before the
-pipe has drained, truncating large panes to an empty string, which the gate
-would misread as "not ready" and hold the queue forever), and a hard timeout
-kills any child that never returns. A drain that somehow holds its lock longer
-than any bounded spawn sequence could take is reclaimed by a watchdog, so no
-spawn anomaly can strand a queue.
+is read on the child's `close` event (not `exit`, which can fire before the
+pipe drains and truncate large panes to an empty string), and a hard timeout
+kills any child that never returns.
 
-### Digest coalescing
+### Busy tracking and digests
+
+Delivery marks the target agent **busy**; the agent's own turn-complete signal
+(terminal bell or agent hook) releases the next item. Approval and
+input-request signals do **not** release the queue — injected text would
+answer the dialog. A background pump retries eligible queues every few
+seconds.
 
 If **two or more** channel messages are queued by the time an agent becomes
 deliverable, they are not fed one-by-one (each delivery would re-block the
@@ -151,30 +191,46 @@ agent for another full turn). Instead the engine sends **one digest**: counts
 and authors per channel, thread ids where relevant, and the exact `desk
 channels read` / `desk channels post … --as` commands to catch up — but no
 message bodies. The agent reads the channel itself and acts on the whole
-batch. Onboarding briefings and other standalone prompts never coalesce
-(their content is not in any channel file): a prompt at the head of the queue
-delivers verbatim and any message backlog digests on the next drain.
+batch. Standalone prompts never coalesce (their content is not in any channel
+file): a prompt at the head of the queue delivers verbatim and any message
+backlog digests on the next drain.
+
+Prompts held longer than ten minutes are prefixed with a delayed-delivery note
+so the agent re-reads the channel before acting on stale context. Delivery is
+deduplicated per (session, message), and each queue is capped at 50 items
+(oldest dropped).
+
+### Pause, passive mode, and the event log
+
+Operators can pause delivery per session from the engine console; pause state
+persists across restarts and is never confused with busy or stuck. Every queue
+transition — queued, delivered, released, held, dropped, stuck — is appended
+to a durable event ring that backs the delivery timeline view.
+
+Only one desk server process dispatches at a time: the engine takes a pid
+lock in `_engine/engine.pid`, and a second desk process pointed at the same
+channels home runs **passive** (it serves the UI but does not deliver) until
+the lock holder dies.
 
 ## Ops console
 
 A diagnostics-and-recovery surface, toggled by the gauge icon in the channels
 header, makes the engine observable and fixable from the UI instead of by hand.
 
-- **Analyze** — a live terminal readiness check classifies every tracked session as `ready`,
-  `busy`, `booting`, `empty-capture`, `offline`, or `unobservable`, so you can
-  see *why* a queue is held (mid-turn vs. unreachable vs. a capture that came
-  back empty). Each row shows the queued count, last delivery/release, and the
-  busy/approval/draining flags; expand a row to inspect each pending message and
-  drop individual ones.
-- **Fix** — per session: **Deliver now** (force the head item, bypassing the
-  busy/ready/boot gates — can land inside a working turn, so it confirms first),
-  **Mark idle** (clear the busy flag and re-drain), **Drop queue**. Global:
-  **Drain ready** (nudge every `ready` session through the normal gate) and
-  **Rebuild engine** — tears down and re-creates the engine in-process, which
-  re-reads the persisted queues and restarts the pump, recovering a wedged
-  engine **without restarting the server**.
+- **Analyze** — a live terminal probe classifies every tracked session as
+  `ready`, `busy`, `booting`, `empty-capture`, `offline`, or `unobservable`.
+  Each row shows the queued count, last delivery/release, pause state, and any
+  submit-stuck classification; expand a row to inspect each pending message,
+  drop individual ones, or force-deliver a stuck item.
+- **Fix** — per session: **Deliver now** (force the head item — it can land
+  inside a working turn, so it confirms first), **Mark idle** (clear the busy
+  flag and re-drain), **Pause / Resume delivery**, **Drop queue**. Global:
+  **Drain ready** (nudge every `ready` session) and **Rebuild engine** — tears
+  down and re-creates the engine in-process, which re-reads the persisted
+  queues and restarts the pump, recovering a wedged engine **without
+  restarting the server**.
 
-Backed by `GET /api/channels/engine` (diagnostics; runs terminal readiness checks, so it
+Backed by `GET /api/channels/engine` (diagnostics; runs terminal probes, so it
 is not on the hot state-poll path) and `POST /api/channels/engine/action`.
 
 ## The CLI
@@ -183,6 +239,7 @@ is not on the hot state-poll path) and `POST /api/channels/engine/action`.
 desk channels list                                     # channels with member/message counts
 desk channels read <channel>                           # full conversation
 desk channels read <channel> <parent-msg-id>           # one thread
+desk channels read <channel> --message <msg-id>        # a single message
 desk channels post <channel> [--thread <id>] [--as <member>] "<body>"
 ```
 
@@ -193,7 +250,8 @@ the explicit override. **Agents should always pass `--as`** — some runners
 (e.g. `codex exec`) strip `$TMUX`, and an unattributable post falls back to
 `@human`. If the server is unreachable, the CLI appends a finalised block to
 the channel file directly and the server's watcher dispatches it on its next
-scan.
+scan; protocol errors (not a member, empty body, unknown channel) are never
+retried as blind appends.
 
 ## External writers
 
@@ -201,10 +259,7 @@ Tools other than the CLI may append to `root.md` / `thread-*.md` directly as
 long as they write complete, finalised blocks in the exact format above. The
 server watches the channels tree (plus a 30 s reconciliation sweep for missed
 filesystem events) and dispatches finalised blocks it has not seen before.
-Prefer the CLI whenever possible — it owns id minting, body validation, and
-append serialisation; concurrent raw writers must handle those themselves.
-
-Only one desk server process dispatches at a time: the engine takes a pid
-lock in `_engine/engine.pid`, and a second desk process pointed at the same
-channels home runs **passive** (it serves the UI but does not deliver) until
-the lock holder dies.
+Message **edits are never re-dispatched** — only blocks with previously unseen
+ids dispatch. Prefer the CLI whenever possible — it owns id minting, body
+validation, and append serialisation; concurrent raw writers must handle those
+themselves.
