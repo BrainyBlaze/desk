@@ -12,43 +12,87 @@
   "navigation": {
     "groups": [
       {
-        "group": "Get started",
+        "group": "Start here",
+        "icon": "rocket",
+        "root": "index",
         "pages": [
           "index",
           "getting-started",
-          "configuration",
-          "distribution-deployment"
+          {
+            "group": "Setup",
+            "expanded": true,
+            "pages": [
+              "configuration",
+              "distribution-deployment"
+            ]
+          }
         ]
       },
       {
-        "group": "Working with agents",
+        "group": "Agents and collaboration",
+        "icon": "bot",
         "pages": [
-          "agents-and-terminals",
-          "agent-integrations",
-          "channels",
-          "channels-protocol",
-          "ide-and-lsp"
+          {
+            "group": "Agent workspaces",
+            "expanded": true,
+            "pages": [
+              "agents-and-terminals",
+              "agent-integrations",
+              "ide-and-lsp"
+            ]
+          },
+          {
+            "group": "Channels",
+            "expanded": true,
+            "pages": [
+              "channels",
+              "channels-protocol"
+            ]
+          }
         ]
       },
       {
         "group": "Workspace tools",
+        "icon": "folder-git-2",
         "pages": [
-          "github-operations",
-          "github-projects",
+          {
+            "group": "GitHub",
+            "expanded": true,
+            "pages": [
+              "github-operations",
+              "github-projects"
+            ]
+          },
           "notes"
         ]
       },
       {
-        "group": "Reference",
+        "group": "Operations and reference",
+        "icon": "settings",
         "pages": [
-          "operations",
-          "keyboard-shortcuts",
-          "api-runtime-reference",
-          "security-plugin-model",
+          {
+            "group": "Operate",
+            "expanded": true,
+            "pages": [
+              "operations",
+              "keyboard-shortcuts"
+            ]
+          },
+          {
+            "group": "Extend and integrate",
+            "expanded": true,
+            "pages": [
+              "api-runtime-reference",
+              "security-plugin-model"
+            ]
+          },
           "licensing"
         ]
       }
     ]
+  },
+  "styling": {
+    "eyebrows": "breadcrumbs"
   },
   "contextual": {
     "options": [
