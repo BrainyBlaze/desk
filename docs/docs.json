@@ -8,6 +8,9 @@
     "light": "#22D3EE",
     "dark": "#0E7490"
   },
+  "icons": {
+    "library": "lucide"
+  },
   "favicon": "/favicon.svg",
   "navigation": {
     "groups": [
@@ -17,52 +20,31 @@
         "root": "index",
         "pages": [
           "index",
-          "getting-started",
-          {
-            "group": "Setup",
-            "expanded": true,
-            "pages": [
-              "configuration",
-              "distribution-deployment"
-            ]
-          }
+          "getting-started"
         ]
       },
       {
-        "group": "Agents and collaboration",
-        "icon": "bot",
+        "group": "Concepts",
+        "icon": "network",
         "pages": [
-          {
-            "group": "Agent workspaces",
-            "expanded": true,
-            "pages": [
-              "agents-and-terminals",
-              "agent-integrations",
-              "ide-and-lsp"
-            ]
-          },
-          {
-            "group": "Channels",
-            "expanded": true,
-            "pages": [
-              "channels",
-              "channels-protocol"
-            ]
-          }
+          "concepts-architecture",
+          "concepts-workspace-model",
+          "agents-and-terminals",
+          "agent-integrations",
+          "channels-protocol",
+          "ide-and-lsp"
         ]
       },
       {
-        "group": "Workspace tools",
-        "icon": "folder-git-2",
+        "group": "Guides",
+        "icon": "list-checks",
         "pages": [
-          {
-            "group": "GitHub",
-            "expanded": true,
-            "pages": [
-              "github-operations",
-              "github-projects"
-            ]
-          },
+          "guide-create-agent-fleet",
+          "guide-channels-collaboration",
+          "guide-deploy-securely",
+          "channels",
+          "github-operations",
+          "github-projects",
           "notes"
         ]
       },
@@ -75,18 +57,22 @@
             "expanded": true,
             "pages": [
               "operations",
-              "keyboard-shortcuts"
+              "troubleshooting"
             ]
           },
           {
-            "group": "Extend and integrate",
+            "group": "Reference",
             "expanded": true,
             "pages": [
+              "configuration",
+              "distribution-deployment",
               "api-runtime-reference",
-              "security-plugin-model"
+              "security-plugin-model",
+              "keyboard-shortcuts",
+              "release-notes",
+              "licensing"
             ]
-          },
-          "licensing"
+          }
         ]
       }
     ]

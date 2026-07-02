@@ -9,27 +9,30 @@ nav:
   - Start here:
       - Overview: index.md
       - Getting started: getting-started.md
-      - Setup:
-          - Configuration: configuration.md
-          - Distribution and deployment: distribution-deployment.md
-  - Agents and collaboration:
-      - Agent workspaces:
-          - Agents and terminals: agents-and-terminals.md
-          - Agent integrations: agent-integrations.md
-          - IDE and LSP: ide-and-lsp.md
-      - Channels:
-          - Channels: channels.md
-          - Channels protocol: channels-protocol.md
-  - Workspace tools:
-      - GitHub:
-          - Git and GitHub: github-operations.md
-          - GitHub Projects: github-projects.md
+  - Concepts:
+      - Architecture: concepts-architecture.md
+      - Workspace model: concepts-workspace-model.md
+      - Agents and terminals: agents-and-terminals.md
+      - Agent integrations: agent-integrations.md
+      - Channels protocol: channels-protocol.md
+      - IDE and LSP: ide-and-lsp.md
+  - Guides:
+      - Create an agent fleet: guide-create-agent-fleet.md
+      - Collaborate through channels: guide-channels-collaboration.md
+      - Deploy and secure Desk: guide-deploy-securely.md
+      - Channels: channels.md
+      - Git and GitHub: github-operations.md
+      - GitHub Projects: github-projects.md
       - Notes: notes.md
   - Operations and reference:
       - Operate:
           - Operations: operations.md
-          - Keyboard shortcuts: keyboard-shortcuts.md
-      - Extend and integrate:
+          - Troubleshooting and FAQ: troubleshooting.md
+      - Reference:
+          - Configuration: configuration.md
+          - Distribution and deployment: distribution-deployment.md
           - API and runtime reference: api-runtime-reference.md
           - Security and plugin model: security-plugin-model.md
-      - License: licensing.md
+          - Keyboard shortcuts: keyboard-shortcuts.md
+          - Release notes: release-notes.md
+          - License: licensing.md

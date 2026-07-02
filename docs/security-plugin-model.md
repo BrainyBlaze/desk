@@ -128,3 +128,12 @@ Runtime `DESK_PLUGINS` still works in standalone mode. The standalone server loa
 ## Error surfaces
 
 Public API routes return JSON errors. Unexpected route failures are collapsed to terse messages instead of exposing stacks. Plugins should follow the same pattern and avoid returning secrets or stack traces.
+
+## Next steps
+
+- Follow [Deploy and secure Desk](/guide-deploy-securely) before exposing Desk
+  beyond localhost.
+- Read [API and runtime reference](/api-runtime-reference) for the routes that
+  plugins can guard or extend.
+- Read [Troubleshooting and FAQ](/troubleshooting) for remote-access and
+  authentication symptoms.

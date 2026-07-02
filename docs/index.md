@@ -1,85 +1,128 @@
 ---
 title: "Desk"
-description: "Local mission control for a fleet of coding agents"
+description: "Local mission control for coding-agent fleets."
 ---
 
-Desk is a local mission-control app for running a fleet of coding agents from
-one browser workspace. It keeps agent processes alive in tmux, gives the
-operator a fast terminal multiplexer, and adds the surrounding tools needed to
-coordinate real work: channels, an IDE, git, GitHub, project boards, notes, and
-system telemetry.
+Desk is a local operator workspace for running many coding agents at once. It
+keeps each agent alive in tmux, renders the fleet in a browser multiplexer, and
+adds the collaboration and development tools you need around those agents:
+channels, an IDE, LSP-backed code intelligence, Git, GitHub, project boards,
+notes, and operational telemetry.
 
-Desk is built around a simple ownership model:
+<Columns cols={2}>
+  <Card title="Start in five minutes" icon="rocket" href="/getting-started">
+    Install Desk, start the server, authenticate agent tools, and launch your
+    first durable session.
+  </Card>
+
+  <Card title="Understand the model" icon="network" href="/concepts-architecture">
+    Learn how tmux, the manifest, the browser, the terminal broker, and agent
+    hooks fit together.
+  </Card>
+
+  <Card title="Create an agent fleet" icon="bot" href="/guide-create-agent-fleet">
+    Configure projects, groups, sessions, layouts, and agent permissions for a
+    multi-agent workspace.
+  </Card>
+
+  <Card title="Operate and troubleshoot" icon="activity" href="/troubleshooting">
+    Diagnose terminal, channel, GitHub, LSP, permission, and deployment issues.
+  </Card>
+</Columns>
+
+## What Desk is for
+
+Use Desk when you want one local control room for a group of agents working
+across projects, branches, terminals, files, and team-like conversations.
+
+Desk is built for:
+
+- **Agent operators** who need to keep Codex, Claude, OpenCode, shell, and
+  custom-command sessions alive while switching between groups quickly.
+- **Repository maintainers** who want terminals, editor tabs, Git operations,
+  GitHub context, project boards, and notes in one browser workspace.
+- **Multi-agent workflows** where agents need shared channels, mentions,
+  threads, delivery diagnostics, and explicit operator intervention points.
+- **Remote development boxes** where code, credentials, tmux, Git, agent CLIs,
+  and language servers already live on the host.
+
+## How the system is organized
+
+Desk separates process ownership from view ownership:
 
 - **tmux owns process lifetime.** Agent sessions keep running when the browser
-  closes, the network drops, or Desk restarts.
-- **The browser owns the view.** The UI renders terminals, files, diffs,
-  channels, boards, notes, and operational status without owning the agent
-  process.
-- **The manifest owns intent.** A YAML manifest defines groups, projects,
-  sessions, layout, and UI settings.
+  closes, the network drops, or the Desk server restarts.
+- **The manifest owns intent.** `~/.config/desk/desk.yml` defines projects,
+  groups, sessions, layouts, startup commands, permissions, and UI settings.
+- **The browser owns the view.** The UI subscribes to terminals, channels,
+  files, diffs, project boards, notes, and telemetry without becoming the
+  owner of the agent process.
+- **The broker owns terminal transport.** One browser WebSocket multiplexes
+  visible terminal output, warm PTYs, scrollback snapshots, and broker metrics.
+- **Hooks own agent events.** Codex, Claude, and OpenCode report lifecycle,
+  attention, prompt, stop, and permission events back to Desk.
 
-## Shipped subsystems
+Read [Architecture](/concepts-architecture) and [Workspace model](/concepts-workspace-model)
+before designing a larger fleet.
 
-### Agent multiplexer
+## Documentation map
 
-Run Claude Code, OpenAI Codex, OpenCode, shell sessions, or custom commands in
-durable tmux sessions. Group agents by project or role, lay them out in
-resizable terminal grids, resume known conversations, switch sessions from a
-keyboard palette, and route attention signals back to the UI when an agent
-finishes a turn or needs input.
+### Start here
 
-### Channels
+- [Getting started](/getting-started) walks through installation, first run,
+  agent authentication, session creation, and expected output.
+- [Configuration](/configuration) documents the manifest and settings model.
+- [Distribution and deployment](/distribution-deployment) explains source and
+  standalone runtimes.
 
-Channels are Slack-like rooms for agents and the operator. Messages are stored
-as markdown files, dispatched to target agents by mention, and delivered
-through each agent's terminal. Threads, reactions, starred messages, saved
-views, cross-channel search, and a delivery diagnostics console are built in.
+### Concepts
 
-### IDE and LSP
+- [Architecture](/concepts-architecture) explains the runtime components.
+- [Workspace model](/concepts-workspace-model) explains projects, groups,
+  sessions, layouts, tmux names, and resume ids.
+- [Agents and terminals](/agents-and-terminals) covers terminal behavior,
+  attention, rendering, and session controls.
+- [Channels protocol](/channels-protocol) documents message storage, delivery,
+  mentions, and diagnostics.
 
-The editor subsystem combines a git-aware file explorer, Monaco editor tabs,
-workspace search, live file watching, and Language Server Protocol support
-with bundled TypeScript, Python, and Rust integrations. The same language
-intelligence is exposed to managed agents through Desk's MCP server.
+### Guides
 
-### Git and GitHub operations
+- [Create an agent fleet](/guide-create-agent-fleet) builds a practical
+  multi-agent manifest.
+- [Collaborate through channels](/guide-channels-collaboration) shows the
+  operator and agent messaging loop.
+- [Deploy and secure Desk](/guide-deploy-securely) covers localhost defaults,
+  remote access, plugin gates, and standalone deployment.
 
-Desk includes repository discovery, status, staging, commits, pull/push/fetch,
-branch and worktree operations, no-checkout branch compare, lane-colored
-history, diff views, and GitHub repository and pull-request context through
-your local `git` and `gh` tools.
+### Operations and reference
 
-### GitHub Projects
+- [Operations](/operations) covers lifecycle, telemetry, attention, terminal
+  health, session controls, and the emergency kill switch.
+- [Troubleshooting and FAQ](/troubleshooting) maps symptoms to checks and
+  fixes.
+- [API and runtime reference](/api-runtime-reference), [Security and plugin
+  model](/security-plugin-model), [Keyboard shortcuts](/keyboard-shortcuts),
+  and [Release notes](/release-notes) provide operator reference material.
 
-GitHub Projects v2 boards and tables can be managed from Desk: select projects,
-move cards, edit fields, inspect items, work with drafts, post status updates,
-and filter project work without leaving the operator workspace.
+## First decision
 
-### Notes
+Choose how you want to run Desk:
 
-Notes are markdown files stored locally. Create quick scratch notes manually or
-from selected terminal text, edit them in Monaco with rendered previews, and
-keep terminal context close to the work it produced.
+<Tabs>
+  <Tab title="Source checkout">
+    Use this when you are developing Desk or want a linked `desk` CLI from a
+    clone. Start with [Getting started](/getting-started).
+  </Tab>
 
-### System monitor and operational controls
+  <Tab title="Standalone binary">
+    Use this when you want a no-Vite runtime from a release artifact. Read
+    [Distribution and deployment](/distribution-deployment) and then
+    [Deploy and secure Desk](/guide-deploy-securely).
+  </Tab>
+</Tabs>
 
-Desk surfaces CPU, memory, disk, network, and GPU telemetry, agent attention
-events, queue diagnostics, and operator controls for starting missing sessions,
-restarting sessions, and stopping agent processes when necessary.
-
-## Local-first by design
-
-Desk is designed for developer machines and remote boxes where the code,
-credentials, and agents already live. It runs locally, binds to localhost by
-default, and uses the tools already installed on the host: `tmux`, `git`,
-`gh`, agent CLIs, language servers, and filesystem state. It runs either from
-source with the Vite-based dev server or as a self-contained standalone binary
-built per platform.
-
-The workspace ships with twelve switchable color themes, a full sound design
-with a mute toggle, reduced-motion support, and a responsive mobile layout
-with slide-over drawers and a swipeable terminal pager.
-
-Use the rest of this documentation as the product reference for configuring,
-operating, and extending Desk.
+<Note>
+Desk is local-first by default. It binds to `127.0.0.1` unless configured
+otherwise. Read [Security and plugin model](/security-plugin-model) before
+exposing it beyond localhost.
+</Note>

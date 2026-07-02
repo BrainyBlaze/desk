@@ -118,3 +118,11 @@ When `gh` is authenticated, Desk can show GitHub repository metadata and pull re
 This is a view and navigation surface. Desk does not create, merge, or review pull requests from this page.
 
 Operations degrade when `gh` is missing, unauthenticated, or cannot resolve the repository.
+
+## Next steps
+
+- Use [GitHub Projects](/github-projects) for Projects v2 boards and tables.
+- Use [Troubleshooting and FAQ](/troubleshooting) when GitHub context or project
+  data does not load.
+- Return to [Create an agent fleet](/guide-create-agent-fleet) when you want
+  agents, shells, and Git workflows grouped by project.

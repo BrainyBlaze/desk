@@ -136,3 +136,12 @@ Use the standalone binary when:
 - you are deploying Desk as a local operator tool on a machine that already has tmux and the agent CLIs
 
 Before binding to anything other than localhost, read [Security and plugin model](/security-plugin-model).
+
+## Next steps
+
+- Follow [Deploy and secure Desk](/guide-deploy-securely) for a deployment
+  checklist.
+- Read [Architecture](/concepts-architecture) to understand what source and
+  standalone runtimes share.
+- Use [Troubleshooting and FAQ](/troubleshooting) for startup and remote-access
+  issues.
