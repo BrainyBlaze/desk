@@ -38,7 +38,8 @@ projects:
     groups:
       - id: main
         label: Main
-        layout: grid-4
+        layout:
+          kind: 2x2
         sessions: []
 ```
 
@@ -90,7 +91,8 @@ Groups let you switch between work modes without losing running sessions:
 ```yaml
       - id: review
         label: Review
-        layout: grid-2
+        layout:
+          kind: 2x2
         sessions:
           - name: review-codex
             agent: codex
