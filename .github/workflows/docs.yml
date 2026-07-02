@@ -1,0 +1,44 @@
+name: Docs
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Validate Mintlify build
+        working-directory: docs
+        run: npm exec -y --package=mint@4.2.660 -- mint validate
+      - name: Check Mintlify links
+        working-directory: docs
+        run: npm exec -y --package=mint@4.2.660 -- mint broken-links
+      - name: Check Mintlify accessibility
+        working-directory: docs
+        run: npm exec -y --package=mint@4.2.660 -- mint a11y
+      - name: Validate MkDocs compatibility
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install mkdocs
+          python -m mkdocs build --strict

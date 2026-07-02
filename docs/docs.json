@@ -25,7 +25,7 @@
       },
       {
         "group": "Reference",
-        "pages": ["operations", "licensing"]
+        "pages": ["operations", "docs-hosting", "licensing"]
       }
     ]
   },
