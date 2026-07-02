@@ -149,3 +149,11 @@ For UI-visible runtime state, check:
 - the channels engine console
 
 For GitHub or Projects failures, check `gh auth status` and whether the token has the required scopes.
+
+## Next steps
+
+- Use [Troubleshooting and FAQ](/troubleshooting) for symptom-based diagnosis.
+- Read [API and runtime reference](/api-runtime-reference) for the routes behind
+  the runtime surfaces.
+- Read [Deploy and secure Desk](/guide-deploy-securely) before changing bind
+  hosts or remote access.

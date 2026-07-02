@@ -282,3 +282,11 @@ settings:
 ## Atomic writes
 
 Desk writes manifest updates through a temporary file and rename. If you edit the manifest by hand while the UI is open, refresh the UI after saving so later UI edits do not overwrite your manual change.
+
+## Next steps
+
+- Read [Workspace model](/concepts-workspace-model) for the mental model behind
+  projects, groups, sessions, and tmux names.
+- Build a larger manifest with [Create an agent fleet](/guide-create-agent-fleet).
+- Use [Troubleshooting and FAQ](/troubleshooting) if a configured session does
+  not appear or start.

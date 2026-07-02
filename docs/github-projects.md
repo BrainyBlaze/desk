@@ -128,3 +128,11 @@ When authorized, Desk can:
 - link a repository to a project
 
 These operations use GitHub's Projects v2 GraphQL API and respect the authenticated account's permissions.
+
+## Next steps
+
+- Read [Git and GitHub operations](/github-operations) for repository, branch,
+  worktree, diff, and pull-request context.
+- Use [Troubleshooting and FAQ](/troubleshooting) if `gh` lacks the required
+  project scope.
+- Use [Channels](/channels) when project-board work needs agent discussion.

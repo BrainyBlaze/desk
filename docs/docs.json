@@ -8,47 +8,77 @@
     "light": "#22D3EE",
     "dark": "#0E7490"
   },
+  "icons": {
+    "library": "lucide"
+  },
   "favicon": "/favicon.svg",
   "navigation": {
     "groups": [
       {
-        "group": "Get started",
+        "group": "Start here",
+        "icon": "rocket",
+        "root": "index",
         "pages": [
           "index",
-          "getting-started",
-          "configuration",
-          "distribution-deployment"
+          "getting-started"
         ]
       },
       {
-        "group": "Working with agents",
+        "group": "Concepts",
+        "icon": "network",
         "pages": [
+          "concepts-architecture",
+          "concepts-workspace-model",
           "agents-and-terminals",
           "agent-integrations",
-          "channels",
           "channels-protocol",
           "ide-and-lsp"
         ]
       },
       {
-        "group": "Workspace tools",
+        "group": "Guides",
+        "icon": "list-checks",
         "pages": [
+          "guide-create-agent-fleet",
+          "guide-channels-collaboration",
+          "guide-deploy-securely",
+          "channels",
           "github-operations",
           "github-projects",
           "notes"
         ]
       },
       {
-        "group": "Reference",
+        "group": "Operations and reference",
+        "icon": "settings",
         "pages": [
-          "operations",
-          "keyboard-shortcuts",
-          "api-runtime-reference",
-          "security-plugin-model",
-          "licensing"
+          {
+            "group": "Operate",
+            "expanded": true,
+            "pages": [
+              "operations",
+              "troubleshooting"
+            ]
+          },
+          {
+            "group": "Reference",
+            "expanded": true,
+            "pages": [
+              "configuration",
+              "distribution-deployment",
+              "api-runtime-reference",
+              "security-plugin-model",
+              "keyboard-shortcuts",
+              "release-notes",
+              "licensing"
+            ]
+          }
         ]
       }
     ]
+  },
+  "styling": {
+    "eyebrows": "breadcrumbs"
   },
   "contextual": {
     "options": [

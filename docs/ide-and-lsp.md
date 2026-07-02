@@ -9,6 +9,10 @@ verify code without leaving the mission-control workspace — and so managed
 agents can query the same language intelligence through a structured tool
 interface.
 
+<Frame caption="The editor with a TypeScript file open: git-aware explorer, LSP ready, zero problems">
+  <img src="/images/editor.png" alt="The editor with a TypeScript file open: git-aware explorer, LSP ready, zero problems" />
+</Frame>
+
 ## File explorer
 
 The explorer provides root switching (typed path, home, or configured
