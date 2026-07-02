@@ -162,14 +162,15 @@ heuristics cannot classify.
 ### Standalone prompts: verified delivery
 
 Onboarding briefings and other standalone prompts have no channel file backing
-them, so they keep a stricter verified path: pane readiness checks (a visible
-prompt marker on screen, no busy banner), a 15-second boot grace after tmux
-session creation (freshly launched agent CLIs silently swallow pty input while
-they boot), and post-paste submit verification. A stalled submit is
-**classified** — paste never appeared, paste visible but never submitted, or
-pane unobservable — and surfaced in the engine console for operator action
+them, so while they deliver through the same ungated path, they are **verified
+after the paste**: the engine snapshots the pane before sending and then
+watches for evidence that the prompt was actually submitted. A stalled submit
+is **classified** — paste never appeared, paste visible but never submitted,
+or pane unobservable — and surfaced in the engine console for operator action
 rather than blindly re-pasted. Delivery state is crash-durable through
-per-item ack files.
+per-item ack files. (The probe also reports a boot-grace `booting`
+classification for fresh sessions, but as diagnostics — it does not hold
+delivery.)
 
 The pane probe reads the agent's screen by spawning `tmux capture-pane`.
 Every tmux child the engine spawns is wrapped so it **always settles**: stdout
@@ -222,9 +223,10 @@ header, makes the engine observable and fixable from the UI instead of by hand.
   Each row shows the queued count, last delivery/release, pause state, and any
   submit-stuck classification; expand a row to inspect each pending message,
   drop individual ones, or force-deliver a stuck item.
-- **Fix** — per session: **Deliver now** (force the head item — it can land
-  inside a working turn, so it confirms first), **Mark idle** (clear the busy
-  flag and re-drain), **Pause / Resume delivery**, **Drop queue**. Global:
+- **Fix** — per session: **Deliver now** (deliver the head item immediately —
+  it can land inside a working turn, so it confirms first), **Mark idle**
+  (clear the busy flag and re-drain), **Pause / Resume delivery**,
+  **Drop queue**. Global:
   **Drain ready** (nudge every `ready` session) and **Rebuild engine** — tears
   down and re-creates the engine in-process, which re-reads the persisted
   queues and restarts the pump, recovering a wedged engine **without

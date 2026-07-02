@@ -149,11 +149,12 @@ surface:
   offline, empty-capture, or unobservable — and shows queue depth, last
   delivery and release, and any stuck or blocked items, so you can see *why* a
   prompt has not landed.
-- **Fix** offers per-session levers: deliver now (bypasses all gates; confirms
-  first because it can land mid-turn), mark idle, pause or resume delivery,
-  drop the queue, and per-item drop or force-deliver. Global levers: drain all
-  ready sessions and **rebuild engine**, which re-creates the delivery engine
-  in-process — re-reading persisted queues — without restarting the server.
+- **Fix** offers per-session levers: deliver now (forces the head item
+  immediately; confirms first because it can land mid-turn), mark idle, pause
+  or resume delivery, drop the queue, and per-item drop or force-deliver.
+  Global levers: drain all ready sessions and **rebuild engine**, which
+  re-creates the delivery engine in-process — re-reading persisted queues —
+  without restarting the server.
 
 If a second Desk process serves the same channels home, it runs **passive**:
 it renders everything but does not deliver. A passive badge appears in the

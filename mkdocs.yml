@@ -9,7 +9,9 @@ nav:
   - Overview: index.md
   - Getting started: getting-started.md
   - Configuration: configuration.md
+  - Distribution and deployment: distribution-deployment.md
   - Agents and terminals: agents-and-terminals.md
+  - Agent integrations: agent-integrations.md
   - Channels: channels.md
   - Channels protocol: channels-protocol.md
   - IDE and LSP: ide-and-lsp.md
@@ -18,4 +20,6 @@ nav:
   - Notes: notes.md
   - Operations: operations.md
   - Keyboard shortcuts: keyboard-shortcuts.md
+  - API and runtime reference: api-runtime-reference.md
+  - Security and plugin model: security-plugin-model.md
   - License: licensing.md

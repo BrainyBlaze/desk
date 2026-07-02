@@ -16,13 +16,15 @@
         "pages": [
           "index",
           "getting-started",
-          "configuration"
+          "configuration",
+          "distribution-deployment"
         ]
       },
       {
         "group": "Working with agents",
         "pages": [
           "agents-and-terminals",
+          "agent-integrations",
           "channels",
           "channels-protocol",
           "ide-and-lsp"
@@ -41,6 +43,8 @@
         "pages": [
           "operations",
           "keyboard-shortcuts",
+          "api-runtime-reference",
+          "security-plugin-model",
           "licensing"
         ]
       }
