@@ -48,9 +48,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     concurrency:
-      group: docs-pages-deploy
+      group: docs-deploy
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
@@ -65,16 +65,24 @@ jobs:
           mkdir -p _site
           unzip -q docs/site.zip -d _site
           rm -f "_site/Start Docs.bat" "_site/Start Docs.command"
-          touch _site/.nojekyll
-          echo "docs.desk.cloud" > _site/CNAME
-      - name: Publish to gh-pages branch
-        working-directory: _site
-        run: |
-          git init -b gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "docs: publish ${GITHUB_SHA}"
-          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+      - name: Deploy to docs.desk.cloud
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}
+          DOCS_DEPLOY_HOST_KEY: ${{ secrets.DOCS_DEPLOY_HOST_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DOCS_DEPLOY_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$DOCS_DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key
+          RELEASE="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          rsync -az -e "ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts" \
+            _site/ "root@209.38.243.112:/var/www/docs-desk-cloud/releases/$RELEASE/"
+          ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts root@209.38.243.112 \
+            "ln -sfn /var/www/docs-desk-cloud/releases/$RELEASE /var/www/docs-desk-cloud/current \
+             && ls -dt /var/www/docs-desk-cloud/releases/* | tail -n +6 | xargs -r rm -rf"
+      - name: Verify live site
+        run: |
+          sleep 3
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://docs.desk.cloud/)
+          echo "https://docs.desk.cloud/ -> $code"
+          test "$code" = "200"
