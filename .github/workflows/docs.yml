@@ -42,3 +42,36 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install mkdocs
           python -m mkdocs build --strict
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: docs-pages-deploy
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Export static site
+        working-directory: docs
+        run: npm exec -y --package=mint@4.2.660 -- mint export --output site.zip
+      - name: Unpack site
+        run: |
+          mkdir -p _site
+          unzip -q docs/site.zip -d _site
+          rm -f "_site/Start Docs.bat" "_site/Start Docs.command"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
