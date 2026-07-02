@@ -9,6 +9,10 @@ adds the collaboration and development tools you need around those agents:
 channels, an IDE, LSP-backed code intelligence, Git, GitHub, project boards,
 notes, and operational telemetry.
 
+<Frame caption="The agent multiplexer: four durable tmux sessions in a 2x2 group">
+  <img src="/images/agents-multiplexer.png" alt="The agent multiplexer: four durable tmux sessions in a 2x2 group" />
+</Frame>
+
 <Columns cols={2}>
   <Card title="Start in five minutes" icon="rocket" href="/getting-started">
     Install Desk, start the server, authenticate agent tools, and launch your

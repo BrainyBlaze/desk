@@ -6,6 +6,10 @@ description: "Project notes and knowledge capture"
 Desk notes are local markdown files for quick operator memory, investigation
 scratchpads, and terminal-derived snippets.
 
+<Frame caption="A markdown note in the notes subsystem with autosave">
+  <img src="/images/notes.png" alt="A markdown note in the notes subsystem with autosave" />
+</Frame>
+
 ## Storage
 
 Notes live under a fixed home:

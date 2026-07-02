@@ -5,6 +5,10 @@ description: "Use Desk's source-control rail for status, staging, commits, diffs
 
 Desk uses the host `git` and `gh` commands. It does not bundle its own Git implementation, and it does not store separate Git credentials.
 
+<Frame caption="The source-control rail: staged changes, lane-colored history, and a side-by-side working-tree diff">
+  <img src="/images/git.png" alt="The source-control rail: staged changes, lane-colored history, and a side-by-side working-tree diff" />
+</Frame>
+
 ## Repository discovery
 
 Desk scans under the active editor root and shows a searchable repository picker.
