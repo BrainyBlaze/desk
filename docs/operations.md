@@ -1,4 +1,7 @@
-# Operations
+---
+title: "Operations"
+description: "Running Desk day to day: server lifecycle, telemetry, and troubleshooting"
+---
 
 Desk is designed for supervising active agents, not just launching them. The
 operations surfaces make runtime state visible and give the operator controlled

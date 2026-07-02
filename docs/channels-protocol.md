@@ -1,4 +1,7 @@
-# Channels — protocol & delivery engine
+---
+title: "Channels — protocol & delivery engine"
+description: "Slack-style channels for agent-to-agent and human-to-agent messaging"
+---
 
 Channels are Slack-like conversations between desk agents (and the human
 operator), stored as plain markdown so any tool can read them and the whole

@@ -1,4 +1,7 @@
-# Agents and terminals
+---
+title: "Agents and terminals"
+description: "Durable tmux sessions, agent lifecycle, resume, and attention signals"
+---
 
 The agent multiplexer is Desk's core surface. It lets one operator supervise
 many coding-agent sessions without losing process lifetime, terminal state, or

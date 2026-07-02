@@ -1,4 +1,7 @@
-# Configuration
+---
+title: "Configuration"
+description: "The desk.json manifest, per-session options, and server settings"
+---
 
 Desk's source of truth is a YAML manifest, normally stored at:
 
