@@ -13,24 +13,43 @@
     "groups": [
       {
         "group": "Get started",
-        "pages": ["index", "getting-started", "configuration"]
+        "pages": [
+          "index",
+          "getting-started",
+          "configuration"
+        ]
       },
       {
         "group": "Working with agents",
-        "pages": ["agents-and-terminals", "channels-protocol", "ide-and-lsp"]
+        "pages": [
+          "agents-and-terminals",
+          "channels",
+          "channels-protocol",
+          "ide-and-lsp"
+        ]
       },
       {
         "group": "Workspace tools",
-        "pages": ["github-operations", "github-projects", "notes"]
+        "pages": [
+          "github-operations",
+          "github-projects",
+          "notes"
+        ]
       },
       {
         "group": "Reference",
-        "pages": ["operations", "licensing"]
+        "pages": [
+          "operations",
+          "keyboard-shortcuts",
+          "licensing"
+        ]
       }
     ]
   },
   "contextual": {
-    "options": ["copy"]
+    "options": [
+      "copy"
+    ]
   },
   "navbar": {
     "links": [
