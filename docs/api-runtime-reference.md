@@ -203,3 +203,11 @@ The browser uses LSP wiring for editor features and diagnostics. Managed agents 
 ## Plugins
 
 Plugins can add middleware, routes, and WebSocket upgrade guards. See [Security and plugin model](/security-plugin-model) before relying on the API from another process or network boundary.
+
+## Next steps
+
+- Read [Security and plugin model](/security-plugin-model) before adding
+  runtime plugins or remote access.
+- Read [Architecture](/concepts-architecture) to understand which runtime
+  component owns each API surface.
+- Use [Operations](/operations) for operator-facing health and control routes.

@@ -7,6 +7,10 @@ The agent multiplexer is Desk's core surface. It lets one operator supervise
 many coding-agent sessions without losing process lifetime, terminal state, or
 attention signals.
 
+<Frame caption="A 2x2 group of durable tmux sessions with the sidebar tree and fleet telemetry">
+  <img src="/images/agents-multiplexer.png" alt="A 2x2 group of durable tmux sessions with the sidebar tree and fleet telemetry" />
+</Frame>
+
 ## Supported agents
 
 Desk has built-in profiles for:

@@ -10,6 +10,10 @@ This page covers working with channels in the UI. The on-disk format, dispatch
 rules, and delivery engine internals live in the
 [protocol reference](/channels-protocol).
 
+<Frame caption="A channel feed with mention chips, member roster, and delivery-aware status">
+  <img src="/images/channels.png" alt="A channel feed with mention chips, member roster, and delivery-aware status" />
+</Frame>
+
 ## The message feed
 
 The feed renders messages with author avatars and Slack-style run grouping: an

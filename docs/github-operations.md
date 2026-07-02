@@ -5,6 +5,10 @@ description: "Use Desk's source-control rail for status, staging, commits, diffs
 
 Desk uses the host `git` and `gh` commands. It does not bundle its own Git implementation, and it does not store separate Git credentials.
 
+<Frame caption="The source-control rail: staged changes, lane-colored history, and a side-by-side working-tree diff">
+  <img src="/images/git.png" alt="The source-control rail: staged changes, lane-colored history, and a side-by-side working-tree diff" />
+</Frame>
+
 ## Repository discovery
 
 Desk scans under the active editor root and shows a searchable repository picker.
@@ -118,3 +122,11 @@ When `gh` is authenticated, Desk can show GitHub repository metadata and pull re
 This is a view and navigation surface. Desk does not create, merge, or review pull requests from this page.
 
 Operations degrade when `gh` is missing, unauthenticated, or cannot resolve the repository.
+
+## Next steps
+
+- Use [GitHub Projects](/github-projects) for Projects v2 boards and tables.
+- Use [Troubleshooting and FAQ](/troubleshooting) when GitHub context or project
+  data does not load.
+- Return to [Create an agent fleet](/guide-create-agent-fleet) when you want
+  agents, shells, and Git workflows grouped by project.
