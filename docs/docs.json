@@ -25,9 +25,12 @@
       },
       {
         "group": "Reference",
-        "pages": ["operations", "docs-hosting", "licensing"]
+        "pages": ["operations", "licensing"]
       }
     ]
+  },
+  "contextual": {
+    "options": ["copy"]
   },
   "navbar": {
     "links": [
