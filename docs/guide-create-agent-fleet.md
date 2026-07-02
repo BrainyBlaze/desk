@@ -1,153 +1,99 @@
 ---
-title: "Create an agent fleet"
-description: "Configure projects, groups, sessions, layouts, permissions, and startup behavior for a multi-agent Desk workspace."
+title: "Set up a multi-agent workspace"
+description: "Build a two-project, three-group fleet through the UI: projects, groups, agents, layouts, and boot."
 ---
 
-This guide builds a practical multi-agent workspace around one repository. Use
-it after you have completed [Getting started](/getting-started).
+This guide builds a real multi-agent workspace entirely through the UI — two
+projects, three groups with different layouts, and nine sessions — the shape
+you see throughout these docs:
 
-## Goal
+<Frame caption="The finished workspace: two projects, a linear review lane selected, attention lamps live">
+  <img src="/images/agents-two-projects.png" alt="Sidebar with Acme and Billing projects and a terminal grid" />
+</Frame>
 
-You will create:
+Everything below can also be done by editing `~/.config/desk/desk.yml`
+directly — the [configuration reference](/configuration) documents every key.
+The UI writes the same manifest, atomically.
 
-- one project
-- two groups
-- Codex, Claude, OpenCode, Bash, and custom-command sessions
-- a predictable layout
-- a dry-run startup check
+## 1. Create a project
 
-## 1. Open the manifest
+A project gives Desk a named root directory that its groups and sessions
+inherit. In the agents sidebar, use the **+** button in the header and choose
+a project id, label, and working directory (for example `~/projects/acme`).
 
-Find the active manifest:
+Repeat for a second project (`billing`) if you are following the full
+scenario. Projects are the unit that the editor root, git discovery, and
+channel handles organize around.
 
-```bash
-desk config
-```
+## 2. Add groups with layouts
 
-Open the printed `desk.yml` path in your editor.
+Each project holds groups — one terminal grid per group. Hover the project
+row and click **Add group**. Pick the layout in the form:
 
-## 2. Define a project
+- `2x2` for a four-agent working set — the default choice
+- `linear` with 3 cells for a review lane you want side by side
+- `custom` with up to 16 cells when the fixed grids do not fit
 
-Use a stable project id and an absolute or home-relative cwd:
+Layouts are not fixed after creation: the badge in the multiplexer header
+switches kinds in place, the **+** and **−** controls add and remove cells,
+and dragging the separators between cells persists your exact split
+proportions per group. See
+[Multi-agent layouts](/guide-multi-agent-layouts) for the full tour.
 
-```yaml
-projects:
-  - id: product
-    label: Product
-    cwd: ~/projects/product
-    groups:
-      - id: main
-        label: Main
-        layout:
-          kind: 2x2
-        sessions: []
-```
+## 3. Add agent sessions
 
-Desk expands `~` against the server user's home directory.
+Hover a group row and click **Add session**:
 
-## 3. Add managed agents
+<Frame caption="The Add session form: project, group, name, working directory, agent, permission bypass, resume id">
+  <img src="/images/modal-add-session.png" alt="Add session modal" />
+</Frame>
 
-Add sessions for the agents you have authenticated:
+- **Agent** — `codex`, `claude`, `opencode`, `bash`, or a custom command.
+- **Bypass permissions** — for agent CLIs that support it, launches the
+  session with the agent's permission prompts disabled. Leave it off for
+  agents you want to approve actions interactively.
+- **Resume** — paste a known conversation id to continue an existing agent
+  conversation; leave empty to start fresh (Desk captures the new id where
+  the agent CLI exposes one).
+- **CWD** — inherited from the project unless you override it per session.
 
-```yaml
-sessions:
-  - name: planner-codex
-    agent: codex
-    cwd: ~/projects/product
-    bypassPermissions: true
-  - name: implementer-claude
-    agent: claude
-    cwd: ~/projects/product
-    bypassPermissions: true
-  - name: reviewer-opencode
-    agent: opencode
-    cwd: ~/projects/product
-    bypassPermissions: true
-```
+<Note>
+Authenticate agent CLIs once in a normal terminal before adding them —
+Desk attaches to already-authenticated tools.
+</Note>
 
-Use `bypassPermissions: false` when you want the agent CLI to ask before tools
-run. For OpenCode, Desk maps that checkbox to per-session OpenCode permission
-configuration.
+## 4. Boot the fleet
 
-## 4. Add support terminals
+Press **Up** in the header (or run `desk up`) to start every missing session.
+Each session becomes a durable tmux session — closing the browser, dropping
+the network, or restarting Desk never kills an agent. The RUN/MISS chips in
+the header track fleet state live, and the MISS chip is itself a button that
+boots whatever is down.
 
-Use Bash for manual work and custom commands for long-running tools:
+Individual cells have their own **Boot** overlay when a single session is
+missing, and groups grow a boot-all action when some of their sessions are
+down.
 
-```yaml
-  - name: shell
-    agent: bash
-    cwd: ~/projects/product
-  - name: dev-server
-    cwd: ~/projects/product
-    command: npm run dev
-```
+## 5. Organize as you grow
 
-Custom command sessions do not get managed-agent resume or permission behavior.
+- Drag projects, groups, and sessions to reorder them; drag a session onto
+  another group to move it. Order persists to the manifest.
+- The filter row narrows the tree by name; the bell chip filters to sessions
+  that need input.
+- `Ctrl+K` jumps to any session by fuzzy name from anywhere in the agents
+  subsystem — attention-needing sessions rank first.
 
-## 5. Add a second group
-
-Groups let you switch between work modes without losing running sessions:
-
-```yaml
-      - id: review
-        label: Review
-        layout:
-          kind: 2x2
-        sessions:
-          - name: review-codex
-            agent: codex
-            cwd: ~/projects/product
-            bypassPermissions: false
-          - name: review-shell
-            agent: bash
-            cwd: ~/projects/product
-```
-
-## 6. Dry-run and start
-
-Check what Desk will start:
+## Verify
 
 ```bash
-desk up --dry-run
-```
-
-Start missing sessions:
-
-```bash
-desk up
 desk status
 ```
 
-Expected result:
+Every configured session should show as running with its tmux name. From
+here:
 
-- every configured session has a matching tmux session
-- the browser shows the project and groups
-- managed agents start with Desk event hooks
-- Bash and custom commands run in their configured cwd
-
-## 7. Operate the fleet
-
-Use the UI for daily work:
-
-- switch groups from the agents sidebar
-- drag sessions into cells
-- use the command palette for session navigation
-- restart a session when an agent CLI exits
-- use [Channels](/channels) to coordinate agents through messages
-- use [Operations](/operations) to inspect terminal health and attention events
-
-## Common mistakes
-
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| Session does not start | `cwd` is missing or invalid | Set `cwd` on the session or project |
-| Agent starts in the wrong repo | Inherited project cwd is not what you expected | Set an explicit session `cwd` |
-| OpenCode prompts even with bypass checked | Existing pane was started before the current config | Restart that session |
-| `desk add` rejects a new agent session | CLI path requires `--resume` for managed agents | Use the UI Add Session modal or edit `desk.yml` directly |
-
-## Next steps
-
-- Use [Collaborate through channels](/guide-channels-collaboration) to turn the
-  fleet into a shared room workflow.
-- Use [Troubleshooting and FAQ](/troubleshooting) if sessions do not appear or
-  agents do not emit attention events.
+- [Choose the right layouts](/guide-multi-agent-layouts) for each group
+- [Put the agents in a channel](/guide-channels-collaboration) so they can
+  coordinate
+- [Watch events and attention](/guide-events-attention) instead of watching
+  terminals

@@ -40,7 +40,13 @@
         "icon": "list-checks",
         "pages": [
           "guide-create-agent-fleet",
+          "guide-multi-agent-layouts",
           "guide-channels-collaboration",
+          "guide-cross-team-collaboration",
+          "guide-ide-workflow",
+          "guide-git-review",
+          "guide-projects-planning",
+          "guide-events-attention",
           "guide-deploy-securely",
           "channels",
           "github-operations",
