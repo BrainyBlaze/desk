@@ -1,16 +1,18 @@
 ---
-title: "Deploy and secure Desk"
-description: "Run Desk locally, expose it deliberately, and choose the right security boundary for source and standalone deployments."
+title: "Run Desk securely"
+description: "Desk is single-user, local, self-hosted software. Run it on your own machine, keep it on localhost, and reach a remote box over SSH."
 ---
 
-Desk is designed for local use on a developer machine or remote development
-box. It has direct access to the host filesystem, tmux sessions, Git
-repositories, agent CLIs, and credentials available to the server user.
+Desk is **local, single-user, self-hosted software**. It runs on your own
+machine (or your own remote development box) for you — the person who owns the
+code, the tmux sessions, the agent CLIs, and the credentials on that host. It
+is not a multi-tenant service and is not meant to be hosted for other people.
 
-<Warning>
-Do not expose Desk directly to an untrusted network. Use SSH forwarding, a VPN,
-an authenticated reverse proxy, or a plugin gate when remote access is needed.
-</Warning>
+<Note>
+Desk has direct access to the host filesystem, tmux, Git, and any credentials
+available to the user that runs it. Run it as yourself, on a machine you
+control, and keep it bound to localhost.
+</Note>
 
 ## Choose a runtime
 
@@ -36,38 +38,32 @@ an authenticated reverse proxy, or a plugin gate when remote access is needed.
   </Tab>
 </Tabs>
 
-## Keep the default local boundary
+Both bind to `127.0.0.1:5173` by default. Keep that default.
 
-The default host is `127.0.0.1`. Keep that default when you use Desk from the
-same machine.
+## Working on a remote development box
 
-For a remote development box, prefer SSH forwarding:
+If your code and agents live on a remote box, you still run Desk **as yourself
+on that box** and reach it over an SSH tunnel — Desk stays on localhost at both
+ends, and nothing is exposed to the network:
 
 ```bash
 ssh -L 5173:127.0.0.1:5173 user@dev-box
 ```
 
-Then open `http://127.0.0.1:5173` locally.
+Then start Desk on the box (bound to `127.0.0.1`) and open
+`http://127.0.0.1:5173` in your local browser. The tunnel is authenticated by
+SSH; Desk itself never listens on a public interface.
 
-## If you bind beyond localhost
-
-Before setting `--host 0.0.0.0` or `DESK_HOST=0.0.0.0`, decide how requests are
-authenticated.
-
-Supported patterns:
-
-- SSH tunnel
-- VPN-only network
-- authenticated reverse proxy
-- runtime plugin via `DESK_PLUGINS`
-- embedded plugin in a downstream standalone build
-
-Read [Security and plugin model](/security-plugin-model) for the plugin surface.
+<Warning>
+Do not bind Desk to `0.0.0.0` or put it on a shared address. It has no user
+accounts, no login, and no request authentication — it trusts whoever can
+reach the port. The supported way to use Desk from elsewhere is an SSH tunnel
+to your own machine, not network exposure.
+</Warning>
 
 ## Install agent hooks
 
-Managed agents can report lifecycle and attention events through Desk-owned
-hooks:
+Managed agents report lifecycle and attention events through Desk-owned hooks:
 
 ```bash
 desk hooks install
@@ -81,7 +77,7 @@ home directory:
 desk hooks install --home /home/dev
 ```
 
-## Verify a deployment
+## Verify your setup
 
 After starting the server, check:
 
@@ -99,20 +95,22 @@ In the UI, verify:
 - Git and GitHub panels use the expected repository
 - notes and editor roots are the expected local paths
 
-## Operational safety checklist
+## Local safety checklist
 
-- Bind to localhost unless a gate is in place.
+- Keep the default `127.0.0.1` bind; never use `0.0.0.0`.
 - Run Desk as the user that owns the intended repositories and tmux sessions.
+- Reach a remote box over SSH forwarding, not by exposing the port.
 - Keep agent CLI credentials in their normal tool-managed locations.
 - Use `desk up --dry-run` before starting a large manifest.
 - Use the emergency kill switch only when you intend to stop all matching
   agent processes on the host.
 - Back up `~/.config/desk/desk.yml` before large manifest edits.
-- Treat `~/.config/desk/channels` and `~/.config/desk/notes` as local user data.
+- Treat `~/.config/desk/channels` and `~/.config/desk/notes` as local user
+  data.
 
 ## Next steps
 
 - Read [Distribution and deployment](/distribution-deployment) for artifact and
   build details.
 - Read [Operations](/operations) for runtime monitoring and controls.
-- Read [Troubleshooting and FAQ](/troubleshooting) for deployment symptoms.
+- Read [Troubleshooting and FAQ](/troubleshooting) for setup symptoms.

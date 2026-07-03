@@ -25,7 +25,7 @@ nav:
       - Review agent work with git: guide-git-review.md
       - Plan on GitHub Projects: guide-projects-planning.md
       - Events and attention: guide-events-attention.md
-      - Deploy and secure Desk: guide-deploy-securely.md
+      - Run Desk securely: guide-deploy-securely.md
       - Channels: channels.md
       - Git and GitHub: github-operations.md
       - GitHub Projects: github-projects.md
