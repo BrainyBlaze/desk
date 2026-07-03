@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/BrainyBlaze/desk/actions/workflows/ci.yml"><img src="https://github.com/BrainyBlaze/desk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://docs.desk.cloud"><img src="https://img.shields.io/badge/docs-docs.desk.cloud-0E7490" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/license-BSL%201.1-orange" alt="Business Source License 1.1">
   <img src="https://img.shields.io/badge/node-20%2B-brightgreen" alt="node 20+">
   <img src="https://img.shields.io/badge/runtime-tmux-1bb91f" alt="tmux runtime">
