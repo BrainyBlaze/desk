@@ -1,5 +1,6 @@
 ---
 title: "IDE and LSP"
+sidebarTitle: "IDE & LSP"
 description: "The built-in editor, language servers, and how agents query them"
 ---
 

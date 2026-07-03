@@ -1,5 +1,6 @@
 ---
 title: "Review agent work with git"
+sidebarTitle: "Git review"
 description: "The review loop for agent-produced changes: diffs, history, branch compare without checkout, and committing."
 ---
 

@@ -1,5 +1,6 @@
 ---
 title: "Plan work on GitHub Projects"
+sidebarTitle: "Projects planning"
 description: "Drive a GitHub Projects v2 board from Desk: triage, assignment, status updates, and keeping planning beside the agents doing the work."
 ---
 

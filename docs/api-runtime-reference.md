@@ -1,5 +1,6 @@
 ---
 title: "API and runtime reference"
+sidebarTitle: "API reference"
 description: "Reference the main local API routes, WebSocket endpoints, and runtime contracts used by Desk's browser and CLI."
 ---
 

@@ -1,5 +1,6 @@
 ---
 title: "Set up a multi-agent workspace"
+sidebarTitle: "Multi-agent setup"
 description: "Build a two-project, three-group fleet through the UI: projects, groups, agents, layouts, and boot."
 ---
 

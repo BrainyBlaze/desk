@@ -1,5 +1,6 @@
 ---
 title: "Multi-agent layouts"
+sidebarTitle: "Layouts"
 description: "Choose and tune terminal layouts for groups of agents: grids, linear lanes, custom cells, splits, and the mobile pager."
 ---
 

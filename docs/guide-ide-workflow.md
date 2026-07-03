@@ -1,5 +1,6 @@
 ---
 title: "Work in the IDE beside your agents"
+sidebarTitle: "IDE workflow"
 description: "The operator's editing loop: language intelligence, workspace search, and git-aware editing without leaving the workspace."
 ---
 

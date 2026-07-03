@@ -15,7 +15,7 @@
   "navigation": {
     "groups": [
       {
-        "group": "Start here",
+        "group": "Get started",
         "icon": "rocket",
         "root": "index",
         "pages": [
@@ -25,14 +25,12 @@
       },
       {
         "group": "Concepts",
-        "icon": "network",
+        "icon": "compass",
         "pages": [
           "concepts-architecture",
           "concepts-workspace-model",
           "agents-and-terminals",
-          "agent-integrations",
-          "channels-protocol",
-          "ide-and-lsp"
+          "agent-integrations"
         ]
       },
       {
@@ -46,39 +44,41 @@
           "guide-ide-workflow",
           "guide-git-review",
           "guide-projects-planning",
-          "guide-events-attention",
-          "guide-deploy-securely",
+          "guide-events-attention"
+        ]
+      },
+      {
+        "group": "Subsystems",
+        "icon": "layers",
+        "pages": [
           "channels",
+          "channels-protocol",
+          "ide-and-lsp",
           "github-operations",
           "github-projects",
           "notes"
         ]
       },
       {
-        "group": "Operations and reference",
+        "group": "Operations",
         "icon": "settings",
         "pages": [
-          {
-            "group": "Operate",
-            "expanded": true,
-            "pages": [
-              "operations",
-              "troubleshooting"
-            ]
-          },
-          {
-            "group": "Reference",
-            "expanded": true,
-            "pages": [
-              "configuration",
-              "distribution-deployment",
-              "api-runtime-reference",
-              "security-plugin-model",
-              "keyboard-shortcuts",
-              "release-notes",
-              "licensing"
-            ]
-          }
+          "operations",
+          "guide-deploy-securely",
+          "troubleshooting"
+        ]
+      },
+      {
+        "group": "Reference",
+        "icon": "book",
+        "pages": [
+          "configuration",
+          "distribution-deployment",
+          "api-runtime-reference",
+          "security-plugin-model",
+          "keyboard-shortcuts",
+          "release-notes",
+          "licensing"
         ]
       }
     ]

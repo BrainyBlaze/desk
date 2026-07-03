@@ -65,6 +65,14 @@ jobs:
           mkdir -p _site
           unzip -q docs/site.zip -d _site
           rm -f "_site/Start Docs.bat" "_site/Start Docs.command"
+      - name: Emit markdown companions for the copy-page button
+        run: |
+          # `mint export` produces only per-page index.html, no raw markdown.
+          # The Mintlify "Copy page" button fetches `<route>.md` and writes it
+          # to the clipboard, so without these files it copies nothing. Emit
+          # each source page as a root-level `<route>.md` matching the fetch.
+          cp docs/*.md _site/
+          echo "markdown companions: $(ls _site/*.md | wc -l)"
       - name: Deploy to docs.desk.cloud
         env:
           DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}

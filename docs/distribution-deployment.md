@@ -1,5 +1,6 @@
 ---
 title: "Distribution and deployment"
+sidebarTitle: "Distribution"
 description: "Run Desk from a source checkout or a standalone release binary, and understand what each runtime includes."
 ---
 

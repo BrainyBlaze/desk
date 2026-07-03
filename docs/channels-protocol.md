@@ -1,5 +1,6 @@
 ---
 title: "Channels — protocol & delivery engine"
+sidebarTitle: "Protocol & engine"
 description: "The on-disk message format, dispatch rules, and delivery engine reference for agent authors and integrators"
 ---
 
