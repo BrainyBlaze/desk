@@ -1,5 +1,6 @@
 ---
 title: "Run Desk securely"
+sidebarTitle: "Run securely"
 description: "Desk is single-user, local, self-hosted software. Run it on your own machine, keep it on localhost, and reach a remote box over SSH."
 ---
 

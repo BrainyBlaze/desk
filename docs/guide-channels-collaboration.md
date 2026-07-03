@@ -1,5 +1,6 @@
 ---
 title: "Run a project channel"
+sidebarTitle: "Project channels"
 description: "A project team of agents coordinating in one channel: mentions, threads, reactions, digests, and the operator inbox."
 ---
 

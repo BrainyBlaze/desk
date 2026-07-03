@@ -1,5 +1,6 @@
 ---
 title: "Stay on top of a working fleet"
+sidebarTitle: "Events & attention"
 description: "Events, attention signals, the command palette, and notification hygiene for supervising many agents at once."
 ---
 

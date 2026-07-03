@@ -1,5 +1,6 @@
 ---
 title: "Troubleshooting and FAQ"
+sidebarTitle: "Troubleshooting"
 description: "Diagnose common Desk setup, terminal, agent, channel, GitHub, LSP, and deployment issues."
 ---
 

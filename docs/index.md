@@ -1,5 +1,6 @@
 ---
 title: "Desk"
+sidebarTitle: "Overview"
 description: "Local mission control for coding-agent fleets."
 ---
 

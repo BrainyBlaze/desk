@@ -1,5 +1,6 @@
 ---
 title: "Security and plugin model"
+sidebarTitle: "Security & plugins"
 description: "Understand Desk's local-trust default, filesystem boundary, API surface, and extension points."
 ---
 

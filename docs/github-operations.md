@@ -1,5 +1,6 @@
 ---
 title: "Git and GitHub operations"
+sidebarTitle: "Git & GitHub"
 description: "Use Desk's source-control rail for status, staging, commits, diffs, branches, worktrees, and GitHub context."
 ---
 

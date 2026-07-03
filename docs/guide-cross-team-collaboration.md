@@ -1,5 +1,6 @@
 ---
 title: "Coordinate across projects"
+sidebarTitle: "Cross-team work"
 description: "Inter-project, multi-team communication: a shared channel where agents from different projects negotiate a contract change."
 ---
 
