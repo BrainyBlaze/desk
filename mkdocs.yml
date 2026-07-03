@@ -17,7 +17,7 @@ nav:
       - Channels protocol: channels-protocol.md
       - IDE and LSP: ide-and-lsp.md
   - Guides:
-      - Set up a workspace: guide-create-agent-fleet.md
+      - Set up a multi-agent workspace: guide-create-agent-fleet.md
       - Multi-agent layouts: guide-multi-agent-layouts.md
       - Run a project channel: guide-channels-collaboration.md
       - Coordinate across projects: guide-cross-team-collaboration.md

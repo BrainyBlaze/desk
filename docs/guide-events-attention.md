@@ -17,7 +17,7 @@ becomes:
 - a pulsing lamp on the session row, bubbling up to collapsed groups and
   projects,
 - an event card in the drawer,
-- an attention sound (muteable),
+- an attention sound that follows the mute setting,
 - and a release signal for the channels delivery engine.
 
 <Frame caption="The events drawer: kind filters, unread lamps, per-card navigation">
