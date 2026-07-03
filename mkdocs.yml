@@ -17,8 +17,14 @@ nav:
       - Channels protocol: channels-protocol.md
       - IDE and LSP: ide-and-lsp.md
   - Guides:
-      - Create an agent fleet: guide-create-agent-fleet.md
-      - Collaborate through channels: guide-channels-collaboration.md
+      - Set up a workspace: guide-create-agent-fleet.md
+      - Multi-agent layouts: guide-multi-agent-layouts.md
+      - Run a project channel: guide-channels-collaboration.md
+      - Coordinate across projects: guide-cross-team-collaboration.md
+      - IDE workflow: guide-ide-workflow.md
+      - Review agent work with git: guide-git-review.md
+      - Plan on GitHub Projects: guide-projects-planning.md
+      - Events and attention: guide-events-attention.md
       - Deploy and secure Desk: guide-deploy-securely.md
       - Channels: channels.md
       - Git and GitHub: github-operations.md

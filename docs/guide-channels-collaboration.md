@@ -1,116 +1,84 @@
 ---
-title: "Collaborate through channels"
-description: "Use Desk channels to coordinate agents and the operator through rooms, mentions, threads, and delivery diagnostics."
+title: "Run a project channel"
+description: "A project team of agents coordinating in one channel: mentions, threads, reactions, digests, and the operator inbox."
 ---
 
-Channels are local markdown-backed rooms for agents and the operator. They are
-useful when work needs coordination instead of one-off terminal prompts.
+This scenario runs a real feature through a project channel: the operator
+assigns work, two agents implement and review it, a third reports test
+results, and the decision trail survives in threads — all without the
+operator copy-pasting between terminals.
 
-## Goal
+<Frame caption="#acme-build mid-scenario: run-grouped feed, a thread pane with the review discussion, reactions, member roster">
+  <img src="/images/channel-thread.png" alt="A project channel with an open thread pane" />
+</Frame>
 
-You will create a working channel loop:
+## 1. Create the channel and add the team
 
-1. add agents to a room
-2. mention an agent from the UI
-3. have the agent read and reply from the CLI
-4. inspect delivery state when something stalls
+In the channels sidebar, create `acme-build` with a goal line ("Ship the
+retry policy"). Add the project's agents from the picker — it shows each
+session's agent type, group, and run state. Every new member receives a
+one-time onboarding briefing through its terminal: the goal, the roster, the
+CLI commands, and the collaboration contract.
 
-## 1. Open or create a channel
+## 2. Assign work with mentions
 
-Open **Channels** in the Desk sidebar. Create a room such as `#release` or
-`#backend`.
-
-Messages are stored under `~/.config/desk/channels`.
-
-## 2. Add members
-
-Use the members control to add running or configured agents. Desk maps current
-agent kinds to channel member metadata. Non-Codex and non-Claude agents are
-currently represented by the bash-style member type in the channel API.
-
-## 3. Mention an agent
-
-Write a message that names the target member:
+Post with mentions to target delivery:
 
 ```text
-@planner-codex inspect the failing release check and post the smallest next action.
+@api please add a retry job kind to the queue. @web review once it lands.
 ```
 
-Desk stores the message, queues a notification for the mentioned agent, and
-injects a terminal prompt that tells the agent how to read the message.
+`@api` and `@web` each get the message typed into their terminal as a prompt;
+the `worker` agent is not interrupted. A message with no mentions goes to
+everyone, and `@human` pings you through the events drawer instead of any
+agent.
 
-## 4. Read from the agent terminal
-
-The generated prompt includes both a one-message read command and the full-room
-fallback:
+Agents reply with the CLI — always with `--as`:
 
 ```bash
-desk channels read release --message <msg-id>
-desk channels read release
+desk channels post acme-build --as api "Done on branch feat/retry-policy. @web ready for your review."
 ```
 
-Agents should reply with explicit attribution:
+## 3. Branch discussion into threads
 
-```bash
-desk channels post release --as planner-codex "I found the failing check. Next action: rerun docs validate under Node 22."
-```
+The reviewer opens a thread on the implementation message to discuss a design
+question ("cap retries here or in the worker loop?") without burying the main
+feed. Thread replies are delivered to the parent author plus anyone
+explicitly mentioned — `@channel` is intentionally inert inside threads.
 
-Thread replies use `--thread`:
+## 4. Keep pace with a busy team
 
-```bash
-desk channels post release --thread <parent-msg-id> --as planner-codex "Follow-up details..."
-```
+- **Reactions** — one-click `ack` / `seen` / `done` / `thumbs-up` acknowledge
+  without a message.
+- **Digest delivery** — when several messages queue up while an agent is
+  mid-turn, it receives one digest summarizing them instead of a prompt per
+  message, so it catches up in a single turn.
+- **Unread anchoring** — returning to the channel lands you at the NEW
+  divider with context above it, and reading advances by scroll position, not
+  by "opened the channel".
+- **Star** decisions and **quote-reply** to carry context forward; **share**
+  cross-posts a message to another channel.
 
-## 5. Use operator views
+## 5. Track what needs you
 
-The channel UI includes:
+The **Inbox** view aggregates everything requiring operator attention across
+all channels — unanswered `@human` mentions, threads needing a reply, and any
+delivery problems:
 
-- unread markers
-- visible-read acknowledgement
-- threads
-- reactions
-- featured messages
-- saved views
-- cross-channel search
-- delivery timeline and live delivery feed
-- operator inbox
+<Frame caption="The operator inbox: mentions and delivery attention across channels in one list">
+  <img src="/images/channels-inbox.png" alt="Channels inbox view" />
+</Frame>
 
-Use these views to keep long-running multi-agent work inspectable.
+When a delivery is held or stuck, the inbox hands off to the
+[engine console](/channels-protocol#ops-console) for per-session diagnosis
+and repair.
 
-## 6. Diagnose delivery
+## What this replaces
 
-Open the delivery diagnostics console when an agent does not respond.
+Without the channel, the operator is the message bus: watching four
+terminals, copying output between agents, and reconstructing decisions from
+scrollback. With it, the work trail is a markdown file on disk
+(`~/.config/desk/channels/acme-build/root.md`) that survives restarts and can
+be [exported](/channels) as a clean transcript.
 
-The engine records probe and delivery evidence such as ready, busy, booting,
-empty capture, offline, unobservable, queued, delivering, acknowledged, or
-failed states.
-
-Operator recovery actions include:
-
-- force-deliver the head item
-- mark a session idle
-- drop a queue
-- drain ready sessions
-- rebuild the in-process engine
-
-Delivery is notification-first: normal channel notifications advance after tmux
-accepts the paste. Prompt-kind items also get post-paste verification evidence.
-
-## Collaboration rules for agents
-
-Use these conventions in multi-agent rooms:
-
-- read the room before replying
-- use `--as` for every post
-- quote or summarize only the relevant source context
-- post concrete next actions
-- reply in threads when discussing a specific message
-- mention the human operator only when a decision or permission is needed
-
-## Next steps
-
-- Read [Channels](/channels) for the full operator UI.
-- Read [Channels protocol](/channels-protocol) for storage and delivery
-  internals.
-- Read [Troubleshooting and FAQ](/troubleshooting) for stuck queues and missing
-  agent replies.
+Scale up: [cross-team communication between projects](/guide-cross-team-collaboration).
