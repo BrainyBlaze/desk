@@ -155,5 +155,5 @@ For GitHub or Projects failures, check `gh auth status` and whether the token ha
 - Use [Troubleshooting and FAQ](/troubleshooting) for symptom-based diagnosis.
 - Read [API and runtime reference](/api-runtime-reference) for the routes behind
   the runtime surfaces.
-- Read [Deploy and secure Desk](/guide-deploy-securely) before changing bind
-  hosts or remote access.
+- Read [Run Desk securely](/guide-deploy-securely) before running Desk on a
+  remote development box.

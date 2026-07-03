@@ -178,7 +178,7 @@ the managed session after enabling LSP settings or changing project roots.
 
 ## Deployment and security
 
-### Remote browser cannot connect
+### Browser over an SSH tunnel cannot connect
 
 Check the bind host:
 
@@ -186,13 +186,14 @@ Check the bind host:
 desk serve --host 127.0.0.1 --port 5173
 ```
 
-For remote access, prefer SSH forwarding:
+For a remote development box, use SSH forwarding:
 
 ```bash
 ssh -L 5173:127.0.0.1:5173 user@dev-box
 ```
 
-If you bind to a non-local interface, add an authentication boundary first.
+Keep Desk bound to `127.0.0.1` on the remote host. Do not expose the Desk port
+on a shared or public interface.
 
 ## FAQ
 

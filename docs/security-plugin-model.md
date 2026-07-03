@@ -3,7 +3,7 @@ title: "Security and plugin model"
 description: "Understand Desk's local-trust default, filesystem boundary, API surface, and extension points."
 ---
 
-Desk is a single-user local-trust tool by default.
+Desk is a single-user local-trust tool.
 
 The stock server has no built-in authentication. Anyone who can reach the server can use the UI and API as the local operator.
 
@@ -15,9 +15,11 @@ By default Desk binds to:
 127.0.0.1:5173
 ```
 
-Keep that default unless you provide your own access control.
+Keep that default.
 
-Do not expose Desk directly on an untrusted network. Use an authenticated tunnel, SSH port forwarding, a VPN, or a plugin-based gate when remote access is required.
+Do not expose Desk directly on a network. If Desk runs on your own remote
+development box, keep it bound to `127.0.0.1` there and reach it through SSH
+port forwarding.
 
 ## What a connected client can do
 
@@ -66,7 +68,9 @@ It is intentionally broader than the active manifest. Use it only as an emergenc
 
 ## Plugin extension points
 
-Desk exposes a small backend plugin interface for embedders.
+Desk exposes a small backend plugin interface for local embedders and
+downstream builds. It is an extension surface, not a replacement for built-in
+user accounts or request authentication.
 
 A plugin can provide:
 
@@ -79,12 +83,18 @@ Runtime plugin modules can export a plain plugin object:
 
 ```js
 export default {
-  name: "auth-gate",
-  middleware: [],
-  routes: [],
-  upgradeGuard(req) {
-    return Boolean(req.headers.authorization);
-  }
+  name: "local-status",
+  routes: [
+    (req, res, url) => {
+      if (req.method !== "GET" || url.pathname !== "/api/local-status") {
+        return false;
+      }
+
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, user: process.env.USER ?? "local" }));
+      return true;
+    }
+  ]
 };
 ```
 
@@ -95,7 +105,7 @@ The typed helper `defineDeskPlugin` exists in Desk's source tree at `src/server/
 Set `DESK_PLUGINS` to a comma-separated list of module specifiers:
 
 ```bash
-DESK_PLUGINS=/opt/desk/auth-plugin.js desk serve
+DESK_PLUGINS=/opt/desk/local-status-plugin.js desk serve
 ```
 
 Each module must export either:
@@ -108,7 +118,9 @@ Unset `DESK_PLUGINS` means stock local-trust behavior.
 
 ## WebSocket guards
 
-`upgradeGuard` runs before any WebSocket bridge handles a socket.
+`upgradeGuard` runs before any WebSocket bridge handles a socket. It is useful
+for embedded builds that need a local runtime policy, but it does not make the
+stock Desk server safe to expose publicly.
 
 It covers:
 
@@ -131,9 +143,9 @@ Public API routes return JSON errors. Unexpected route failures are collapsed to
 
 ## Next steps
 
-- Follow [Deploy and secure Desk](/guide-deploy-securely) before exposing Desk
-  beyond localhost.
+- Follow [Run Desk securely](/guide-deploy-securely) for the localhost and SSH
+  tunnel model.
 - Read [API and runtime reference](/api-runtime-reference) for the routes that
-  plugins can guard or extend.
-- Read [Troubleshooting and FAQ](/troubleshooting) for remote-access and
-  authentication symptoms.
+  plugins can extend.
+- Read [Troubleshooting and FAQ](/troubleshooting) for startup and connection
+  symptoms.

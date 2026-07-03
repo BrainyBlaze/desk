@@ -137,8 +137,9 @@ Use environment variables for the standalone runtime:
 DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
 ```
 
-See [Distribution and deployment](/distribution-deployment) and [Deploy and
-secure Desk](/guide-deploy-securely) before exposing Desk beyond localhost.
+See [Distribution and deployment](/distribution-deployment) and [Run Desk
+securely](/guide-deploy-securely) before choosing a source or standalone
+runtime.
 
 ## Bring a configured fleet up
 

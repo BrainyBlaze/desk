@@ -95,8 +95,8 @@ before designing a larger fleet.
   multi-agent manifest.
 - [Collaborate through channels](/guide-channels-collaboration) shows the
   operator and agent messaging loop.
-- [Deploy and secure Desk](/guide-deploy-securely) covers localhost defaults,
-  remote access, plugin gates, and standalone deployment.
+- [Run Desk securely](/guide-deploy-securely) covers localhost defaults, SSH
+  tunnels to your own development box, local safety, and standalone deployment.
 
 ### Operations and reference
 
@@ -126,7 +126,7 @@ Choose how you want to run Desk:
 </Tabs>
 
 <Note>
-Desk is local-first by default. It binds to `127.0.0.1` unless configured
-otherwise. Read [Security and plugin model](/security-plugin-model) before
-exposing it beyond localhost.
+Desk is local-first by default. Keep it bound to `127.0.0.1`; if you work on a
+remote development box, reach it through SSH port forwarding. Read [Security and
+plugin model](/security-plugin-model) before adding local runtime extensions.
 </Note>

@@ -135,7 +135,8 @@ Use the standalone binary when:
 - you do not want Vite or the UI source tree at runtime
 - you are deploying Desk as a local operator tool on a machine that already has tmux and the agent CLIs
 
-Before binding to anything other than localhost, read [Security and plugin model](/security-plugin-model).
+Keep Desk bound to localhost. If you work on a remote development box, use the
+SSH forwarding model in [Run Desk securely](/guide-deploy-securely).
 
 ## Next steps
 
@@ -143,5 +144,5 @@ Before binding to anything other than localhost, read [Security and plugin model
   checklist.
 - Read [Architecture](/concepts-architecture) to understand what source and
   standalone runtimes share.
-- Use [Troubleshooting and FAQ](/troubleshooting) for startup and remote-access
-  issues.
+- Use [Troubleshooting and FAQ](/troubleshooting) for startup and local
+  connection issues.

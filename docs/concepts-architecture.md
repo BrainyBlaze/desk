@@ -107,5 +107,5 @@ configuration. GitHub access is whatever the local `gh` command can do.
   sessions, layouts, and tmux naming.
 - Read [Agent integrations](/agent-integrations) for Codex, Claude, OpenCode,
   Bash, and custom command behavior.
-- Read [Security and plugin model](/security-plugin-model) before exposing Desk
-  beyond localhost.
+- Read [Security and plugin model](/security-plugin-model) before adding local
+  runtime extensions.
