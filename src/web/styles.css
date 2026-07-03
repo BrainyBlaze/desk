@@ -1480,6 +1480,11 @@ select:focus {
   box-shadow: 0 0 8px rgba(255, 209, 102, 0.85);
 }
 
+.railDocsButton {
+  margin-top: auto;
+  text-decoration: none;
+}
+
 .subsystemPanels {
   display: flex;
   min-width: 0;

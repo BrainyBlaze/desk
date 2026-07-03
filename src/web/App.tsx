@@ -24,6 +24,7 @@ import {
 import {
   Activity,
   Bell,
+  BookOpen,
   Bot,
   Boxes,
   Braces,
@@ -2956,11 +2957,33 @@ function AppRailImpl({
           onDoubleClick={onToggleNotesSidebar}
         />
       </Animator>
+      <RailDocsButton />
     </nav>
   );
 }
 
 const AppRail = memo(AppRailImpl);
+
+function RailDocsButton(): JSX.Element {
+  const bleeps = useBleeps<DeskBleepName>();
+  return (
+    <a
+      className="subsystemButton railDocsButton"
+      href="https://docs.desk.cloud"
+      target="_blank"
+      rel="noreferrer noopener"
+      aria-label="Docs"
+      title="Docs"
+      onMouseEnter={() => bleeps.hover?.play()}
+      onClick={() => bleeps.click?.play()}
+    >
+      <span className="subsystemButtonBar" aria-hidden="true" />
+      <span className="subsystemButtonIcon">
+        <BookOpen size={24} />
+      </span>
+    </a>
+  );
+}
 
 function TerminalSelectionMenu({
   menu,
