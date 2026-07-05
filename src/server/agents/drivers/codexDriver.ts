@@ -252,9 +252,9 @@ class CodexDriver implements AgentDriver {
       throw driverCommandError('Cannot inject into Codex before start', 'adapter-unavailable', false);
     }
     const input = [{ type: 'text' as const, text, text_elements: [] }];
-    const emitLocalUserMessage = () => {
+    const emitLocalUserMessage = (id?: string) => {
       this.userMessageCounter += 1;
-      this.emit({ kind: 'user-message', id: `codex-user-${this.userMessageCounter}`, text, source });
+      this.emit({ kind: 'user-message', id: id ?? `codex-user-${this.userMessageCounter}`, text, source });
     };
     if (this.activeTurnId) {
       await this.options.transport.request('turn/steer', {
@@ -265,11 +265,11 @@ class CodexDriver implements AgentDriver {
       emitLocalUserMessage();
       return;
     }
-    await this.options.transport.request('turn/start', {
+    const result = await this.options.transport.request('turn/start', {
       threadId: this.thread.id,
       input
     });
-    emitLocalUserMessage();
+    emitLocalUserMessage(userMessageIdFromTurnResult(result, text));
   }
 
   async respondPermission(requestId: string, optionId: string, _note?: string): Promise<void> {
@@ -459,13 +459,11 @@ function flattenThreadHistory(thread: Thread | undefined): DriverEvent[] {
   }
   const events: DriverEvent[] = [];
   for (const turn of thread.turns) {
+    const eventCountBeforeTurn = events.length;
     for (const item of turn.items) {
-      const event = itemToHistoryEvent(turn, item);
-      if (event) {
-        events.push(event);
-      }
+      events.push(...itemToHistoryEvents(turn, item));
     }
-    if (turn.status === 'completed') {
+    if (turn.status === 'completed' && events.length > eventCountBeforeTurn) {
       events.push({ kind: 'turn-complete', turnId: turn.id });
     }
   }
@@ -481,22 +479,22 @@ function findActiveTurnId(thread: Thread): string | null {
   return null;
 }
 
-function itemToHistoryEvent(turn: Turn, item: ThreadItem): DriverEvent | null {
+function itemToHistoryEvents(turn: Turn, item: ThreadItem): DriverEvent[] {
   switch (item.type) {
     case 'userMessage':
-      return { kind: 'user-message', id: item.id, text: userInputText(item.content), source: 'external' };
+      return [{ kind: 'user-message', id: item.id, text: userInputText(item.content), source: 'external' }];
     case 'agentMessage':
-      return { kind: 'assistant-message', id: item.id, turnId: turn.id, markdown: item.text };
+      return [{ kind: 'assistant-message', id: item.id, turnId: turn.id, markdown: item.text }];
     case 'commandExecution':
-      return commandToolEnd(item);
+      return [commandToolStart(item), commandToolEnd(item)];
     default:
-      return null;
+      return [];
   }
 }
 
 function itemStartedEvent(item: ThreadItem): DriverEvent | null {
   if (item.type === 'commandExecution') {
-    return { kind: 'tool-start', toolUseId: item.id, name: 'command', summary: item.command, detail: item.cwd };
+    return commandToolStart(item);
   }
   return null;
 }
@@ -519,6 +517,32 @@ function commandToolEnd(item: Extract<ThreadItem, { type: 'commandExecution' }>)
     summary: item.exitCode === null ? item.status : `exit ${item.exitCode}`,
     ...(item.aggregatedOutput ? { detail: item.aggregatedOutput } : {})
   };
+}
+
+function commandToolStart(item: Extract<ThreadItem, { type: 'commandExecution' }>): DriverEvent {
+  return { kind: 'tool-start', toolUseId: item.id, name: 'command', summary: item.command, detail: item.cwd };
+}
+
+function userMessageIdFromTurnResult(result: unknown, text: string): string | undefined {
+  if (!result || typeof result !== 'object') {
+    return undefined;
+  }
+  const turn = (result as { turn?: unknown }).turn;
+  if (!turn || typeof turn !== 'object') {
+    return undefined;
+  }
+  const items = (turn as { items?: unknown }).items;
+  if (!Array.isArray(items)) {
+    return undefined;
+  }
+  const userMessage = items.find((item): item is Extract<ThreadItem, { type: 'userMessage' }> => {
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    const maybeItem = item as Partial<ThreadItem>;
+    return maybeItem.type === 'userMessage' && userInputText(maybeItem.content ?? []) === text;
+  });
+  return userMessage?.id;
 }
 
 function userInputText(inputs: UserInput[]): string {

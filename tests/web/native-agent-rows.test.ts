@@ -85,6 +85,13 @@ describe('applyEvent — idempotency', () => {
     expect(model.rows.filter((r) => r.kind === 'user-message')).toHaveLength(1);
   });
 
+  it('does not duplicate a completed turn when restart backfill re-emits it with a new seq', () => {
+    const model = initialRowModel();
+    applyEvent(model, ev(5, { kind: 'turn-complete', turnId: 'turn-1' }));
+    applyEvent(model, ev(12, { kind: 'turn-complete', turnId: 'turn-1' }));
+    expect(model.rows.filter((r) => r.kind === 'turn-complete')).toHaveLength(1);
+  });
+
   it('groups tool start, output, and end into one disclosure row', () => {
     const model = initialRowModel();
     applyEvent(model, ev(1, { kind: 'tool-start', toolUseId: 't1', name: 'Bash', summary: 'npm test', detail: '/repo' }));

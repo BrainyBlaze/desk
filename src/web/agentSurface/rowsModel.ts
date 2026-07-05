@@ -143,7 +143,9 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       }
       return;
     case 'turn-complete':
-      model.rows.push({ kind: 'turn-complete', id: `tc-${event.turnId}-${event.seq}`, turnId: event.turnId, text: '' });
+      if (!model.rows.some((r) => r.kind === 'turn-complete' && r.turnId === event.turnId)) {
+        model.rows.push({ kind: 'turn-complete', id: `tc-${event.turnId}`, turnId: event.turnId, text: '' });
+      }
       return;
     case 'attention-hint':
       return;

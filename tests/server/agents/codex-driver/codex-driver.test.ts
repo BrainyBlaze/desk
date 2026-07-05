@@ -194,6 +194,78 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('backfills command executions with start and end events so tool rows survive restart', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/read': () => ({
+        thread: thread({
+          turns: [
+            turn({
+              id: 'turn-1',
+              status: 'completed',
+              completedAt: 2,
+              durationMs: 1000,
+              items: [
+                {
+                  type: 'commandExecution',
+                  id: 'cmd-1',
+                  command: 'npm test',
+                  cwd: '/repo',
+                  processId: null,
+                  source: 'user',
+                  status: 'completed',
+                  commandActions: [],
+                  aggregatedOutput: 'ok\n',
+                  exitCode: 0,
+                  durationMs: 12
+                }
+              ]
+            })
+          ]
+        })
+      })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await driver.start();
+    const history = await driver.fetchHistory();
+
+    expect(history).toEqual([
+      { kind: 'tool-start', toolUseId: 'cmd-1', name: 'command', summary: 'npm test', detail: '/repo' },
+      { kind: 'tool-end', toolUseId: 'cmd-1', status: 'ok', summary: 'exit 0', detail: 'ok\n' },
+      { kind: 'turn-complete', turnId: 'turn-1' }
+    ]);
+  });
+
+  it('does not emit turn-complete dividers for history turns with no renderable items', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/read': () => ({
+        thread: thread({
+          turns: [
+            turn({
+              id: 'reasoning-turn',
+              status: 'completed',
+              items: [{ type: 'reasoning', id: 'reasoning-1', summary: ['thinking'], content: [] }]
+            })
+          ]
+        })
+      })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await driver.start();
+    await expect(driver.fetchHistory()).resolves.toEqual([]);
+  });
+
   it('treats an unmaterialized fresh thread as empty history', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
@@ -289,6 +361,30 @@ describe('createCodexDriver', () => {
       { kind: 'user-message', id: expect.any(String), text: 'first', source: 'ui' },
       { kind: 'user-message', id: expect.any(String), text: 'second', source: 'channel' }
     ]);
+  });
+
+  it('uses the user item id returned by turn/start for the optimistic user row', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'turn/start': () => ({
+        turn: turn({
+          id: 'turn-1',
+          items: [{ type: 'userMessage', id: 'user-real-1', clientId: null, content: [{ type: 'text', text: 'first', text_elements: [] }] }]
+        })
+      })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+
+    await driver.start();
+    await driver.inject('first', 'ui');
+
+    expect(events).toEqual([{ kind: 'user-message', id: 'user-real-1', text: 'first', source: 'ui' }]);
   });
 
   it('does not emit a local user row when Codex rejects the inject dispatch', async () => {
