@@ -9,21 +9,12 @@ an operator view over that local runtime.
 
 ## Runtime components
 
-```mermaid
-flowchart LR
-  Manifest["desk.yml manifest"] --> Runner["Desk runner"]
-  Runner --> Tmux["tmux sessions"]
-  Tmux --> Agents["Codex / Claude / OpenCode / Bash / custom commands"]
-  Server["Desk server"] --> Broker["terminal broker"]
-  Broker --> Browser["browser UI"]
-  Server --> Channels["channel store"]
-  Server --> FS["filesystem and editor APIs"]
-  Server --> Git["git / gh APIs"]
-  Server --> LSP["LSP manager and MCP bridge"]
-  Agents --> Events["agent hooks and events"]
-  Events --> Server
-  Browser --> Server
-```
+<Frame>
+  <img
+    src="/images/architecture-runtime.svg"
+    alt="Desk runtime architecture. The browser operator view (terminals, channels, editor, git, projects, notes) connects over a WebSocket and the REST /api to a single local Desk server. The server coordinates the terminal broker, channels store, filesystem and editor APIs, git and gh operations, the LSP manager and MCP bridge, attention and agent events, telemetry, and UI assets. It drives the local runtime — the desk.yml manifest to the Desk runner to tmux sessions to agents (Codex, Claude, OpenCode, Bash, custom commands) — which report back through agent hooks that POST to /api/agent-event. State lives on local disk under ~/.config/desk."
+  />
+</Frame>
 
 ## Ownership boundaries
 
