@@ -741,6 +741,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             }
             for (const target of targets) {
               managedAgentLsp.cleanup(target);
+              agentSurfaceBroker.disposeSession(target);
             }
             const updated = deleteSessionFromManifest(manifest, {
               projectId,

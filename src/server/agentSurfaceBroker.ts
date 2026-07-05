@@ -165,6 +165,21 @@ export class AgentSurfaceBroker {
     }));
   }
 
+  /**
+   * Drop all broker state for a session (ring, state, inflight, guards). Called from
+   * the delete-session route so a recreated session with the same derived tmux name
+   * doesn't receive the OLD conversation's ring as its snapshot (BUG-7 root cause:
+   * broker session entry survived DeskSession deletion because nothing told the broker
+   * the session was gone).
+   */
+  disposeSession(sessionName: string): void {
+    const session = this.sessions.get(sessionName);
+    if (!session) {
+      return;
+    }
+    this.teardownSession(session);
+  }
+
   dispose(): void {
     for (const session of [...this.sessions.values()]) {
       this.teardownSession(session);

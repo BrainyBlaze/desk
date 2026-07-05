@@ -107,6 +107,7 @@ export class AgentHost {
   private readonly signals: NodeJS.Signals[];
 
   private driver: AgentDriver | null = null;
+  private driverReady = false;
   private socket: WebSocketLike | null = null;
   private seqCounter = 0;
   private committedRing: AgentSurfaceEvent[] = [];
@@ -281,19 +282,19 @@ export class AgentHost {
         return;
       case 'inject':
         await this.runCommand(frame.requestId, 'inject', () => {
-          if (!this.driver) throw notStartedError();
+          if (!this.driver || !this.driverReady) throw notStartedError();
           return this.driver.inject(frame.text, frame.source);
         });
         return;
       case 'respond-permission':
         await this.runCommand(frame.requestId, 'respond-permission', () => {
-          if (!this.driver) throw notStartedError();
+          if (!this.driver || !this.driverReady) throw notStartedError();
           return this.driver.respondPermission(frame.permissionRequestId, frame.optionId, frame.note);
         });
         return;
       case 'interrupt':
         await this.runCommand(frame.requestId, 'interrupt', () => {
-          if (!this.driver) throw notStartedError();
+          if (!this.driver || !this.driverReady) throw notStartedError();
           return this.driver.interrupt();
         });
         return;
@@ -345,6 +346,7 @@ export class AgentHost {
 
     try {
       const { session, status } = await driver.start();
+      this.driverReady = true;
       // emit session-info (always; even on reconnect the broker needs it for resume-id persist)
       this.emitDriverEvent({
         kind: 'session-info',
@@ -506,6 +508,7 @@ export class AgentHost {
         // best-effort
       }
       this.driver = null;
+      this.driverReady = false;
     }
   }
 
