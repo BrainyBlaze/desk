@@ -1,6 +1,79 @@
 import { describe, expect, it } from 'vitest';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest';
 
+describe('desk manifest ui mode', () => {
+  it('accepts native ui mode for SDK-backed agent sessions and carries it into specs', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: chat
+        cwd: ~/projects/alpha
+        agent: claude
+        uiMode: native
+      - name: plain
+        cwd: ~/projects/alpha
+        agent: codex
+`);
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'terminal']);
+  });
+
+  it('rejects native ui mode for bash sessions at parse time', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: shell
+        cwd: ~/projects/alpha
+        agent: bash
+        uiMode: native
+`)
+    ).toThrow(/native/);
+  });
+
+  it('rejects native ui mode for custom-command sessions at parse time', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: custom
+        command: htop
+        uiMode: native
+`)
+    ).toThrow(/native/);
+  });
+
+  it('rejects native ui mode when the session has no supported agent', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: mystery
+        cwd: ~/projects/alpha
+        uiMode: native
+`)
+    ).toThrow();
+  });
+
+  it('rejects unknown ui mode values at parse time', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: chat
+        cwd: ~/projects/alpha
+        agent: claude
+        uiMode: fancy
+`)
+    ).toThrow(/uiMode/);
+  });
+});
+
 describe('desk manifest', () => {
   it('turns grouped Codex resume entries into stable session specs', () => {
     const manifest = parseDeskManifest(`

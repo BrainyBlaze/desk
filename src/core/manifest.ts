@@ -138,6 +138,7 @@ function validateSession(groupId: string, session: DeskSession, inheritedCwd?: s
   if (!session || typeof session.name !== 'string' || session.name.trim() === '') {
     throw new Error(`group ${groupId} has a session without a name`);
   }
+  validateSessionUiMode(session);
   if (typeof session.command === 'string' && session.command.trim() !== '') {
     return;
   }
@@ -148,6 +149,20 @@ function validateSession(groupId: string, session: DeskSession, inheritedCwd?: s
     return;
   }
   throw new Error(`session ${session.name} requires a supported agent or command`);
+}
+
+function validateSessionUiMode(session: DeskSession): void {
+  if (session.uiMode === undefined || session.uiMode === 'terminal') {
+    return;
+  }
+  if (session.uiMode !== 'native') {
+    throw new Error(`session ${session.name} has an unknown uiMode; expected terminal or native`);
+  }
+  const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
+  const nativeCapableAgent = session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode';
+  if (hasCustomCommand || !nativeCapableAgent) {
+    throw new Error(`session ${session.name} cannot use native uiMode; only codex/claude/opencode agent sessions support it`);
+  }
 }
 
 function buildProjectSessionSpec({

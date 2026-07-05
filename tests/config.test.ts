@@ -55,6 +55,53 @@ describe('desk config', () => {
     });
   });
 
+  it('round-trips session uiMode through serialize/parse', () => {
+    const manifest = addSessionToManifest(createEmptyManifest(), {
+      groupId: 'research',
+      groupLabel: 'Research',
+      session: {
+        name: 'chat-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        uiMode: 'native'
+      }
+    });
+
+    const reparsed = parseDeskManifest(serializeDeskManifest(manifest));
+    expect(reparsed.groups[0].sessions[0].uiMode).toBe('native');
+  });
+
+  it('preserves uiMode and the pinned tmux session name across edits', () => {
+    const manifest = addSessionToManifest(createEmptyManifest(), {
+      groupId: 'research',
+      groupLabel: 'Research',
+      session: {
+        name: 'chat-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        uiMode: 'native',
+        tmuxSession: 'agentdesk-research-chat-agent-pinned00'
+      }
+    });
+
+    const edited = editSessionInManifest(manifest, {
+      groupId: 'research',
+      currentName: 'chat-agent',
+      session: {
+        name: 'chat-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        uiMode: 'native',
+        bypassPermissions: true
+      }
+    });
+
+    const session = edited.groups[0].sessions[0];
+    expect(session.uiMode).toBe('native');
+    expect(session.tmuxSession).toBe('agentdesk-research-chat-agent-pinned00');
+    expect(session.bypassPermissions).toBe(true);
+  });
+
   it('adds empty groups to manifest data', () => {
     const manifest = createEmptyManifest();
     const updated = addGroupToManifest(manifest, {
