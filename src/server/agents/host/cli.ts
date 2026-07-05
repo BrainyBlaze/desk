@@ -59,6 +59,9 @@ export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
   if (env.DESK_AGENT_CWD) {
     result.DESK_AGENT_CWD = env.DESK_AGENT_CWD;
   }
+  if (env.DESK_AGENT_MODEL) {
+    result.DESK_AGENT_MODEL = env.DESK_AGENT_MODEL;
+  }
   const level = env.DESK_AGENT_HOST_LOG_LEVEL;
   if (level === 'debug' || level === 'info' || level === 'warn' || level === 'error') {
     result.DESK_AGENT_HOST_LOG_LEVEL = level;
