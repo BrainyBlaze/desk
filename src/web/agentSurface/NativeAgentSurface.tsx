@@ -217,8 +217,13 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           placeholder="Send a message…"
           rows={2}
         />
-        <button type="button" className="nativeAgentSend" onClick={handleSend} disabled={!input.trim()}>
-          Send
+        <button
+          type="button"
+          className="nativeAgentSend"
+          onClick={handleSend}
+          disabled={!input.trim() || model.status === 'starting'}
+        >
+          {model.status === 'starting' ? 'Starting…' : 'Send'}
         </button>
       </div>
     </div>
