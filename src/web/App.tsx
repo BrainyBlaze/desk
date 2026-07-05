@@ -77,6 +77,8 @@ import {
   editProject,
   editProjectGroup,
   editProjectSession,
+  setSessionUiMode,
+  ApiCodeError,
   fetchDeskSnapshot,
   fetchPulse,
   killAllAgents,
@@ -193,6 +195,7 @@ type ModalMode =
   | 'deleteGroup'
   | 'deleteSession'
   | 'restartSession'
+  | 'switchUiMode'
   | 'settings'
   | 'killAll'
   | null;
@@ -387,6 +390,9 @@ export function App(): JSX.Element {
   );
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState<ModalMode>(null);
+  // Second-stage confirm: true once the server answered resume-not-captured and
+  // the user must explicitly accept starting a fresh conversation.
+  const [uiModeSwitchDiscard, setUiModeSwitchDiscard] = useState(false);
   const [projectForm, setProjectForm] = useState<ProjectForm>(emptyProjectForm);
   const [groupForm, setGroupForm] = useState<GroupForm>(emptyGroupForm);
   const [sessionForm, setSessionForm] = useState<SessionForm>(emptySessionForm);
@@ -1201,6 +1207,14 @@ export function App(): JSX.Element {
     if (!modalSession || !modalGroup) {
       return;
     }
+    // UI-mode changes must go through the atomic switch endpoint (spec §7):
+    // divert to a restart-style confirm instead of the manifest-only edit.
+    const currentUiMode = modalSession.spec.uiMode ?? 'terminal';
+    if (sessionForm.uiMode !== currentUiMode) {
+      setUiModeSwitchDiscard(false);
+      setModal('switchUiMode');
+      return;
+    }
     setBusy(true);
     try {
       const next = await editProjectSession({
@@ -1284,6 +1298,49 @@ export function App(): JSX.Element {
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmUiModeSwitch(): Promise<void> {
+    if (!modalSession || !modalGroup) {
+      return;
+    }
+    setBusy(true);
+    try {
+      // Persist the non-mode edits first, carrying the CURRENT mode so the
+      // manifest-only route never flips uiMode without a respawn; then run the
+      // atomic switch, which re-reads the fresh manifest and kills + starts.
+      await editProjectSession({
+        projectId: modalGroup.projectId,
+        groupId: modalGroup.groupId,
+        currentName: modalSession.spec.name,
+        projectCwd: modalGroup.projectCwd,
+        session: buildSessionPayload({ ...sessionForm, uiMode: modalSession.spec.uiMode ?? 'terminal' })
+      });
+      const next = await setSessionUiMode({
+        tmuxSession: modalSession.spec.tmuxSession,
+        uiMode: sessionForm.uiMode,
+        confirmDiscard: uiModeSwitchDiscard
+      });
+      setSnapshot(next);
+      setTerminalRevisions((current) => ({
+        ...current,
+        [modalSession.spec.tmuxSession]: (current[modalSession.spec.tmuxSession] ?? 0) + 1
+      }));
+      setUiModeSwitchDiscard(false);
+      setModal(null);
+      setError(null);
+    } catch (err) {
+      if (err instanceof ApiCodeError && err.code === 'resume-not-captured' && !uiModeSwitchDiscard) {
+        // Re-render the confirm as an explicit discard warning; the next
+        // confirm retries with confirmDiscard so nothing is lost silently.
+        setUiModeSwitchDiscard(true);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -2447,6 +2504,28 @@ export function App(): JSX.Element {
               if (modalSession && modalGroup) {
                 void restartExistingSession(modalSession, modalGroup);
               }
+            }}
+          />
+        </Modal>
+      );
+    }
+    if (modal === 'switchUiMode') {
+      return (
+        <Modal title={modalTitle(modal)} icon={<RotateCw size={13} />} onClose={() => setModal(null)}>
+          <ConfirmAction
+            label={
+              uiModeSwitchDiscard
+                ? `Start fresh in ${sessionForm.uiMode} mode`
+                : `Switch ${modalSession?.spec.name ?? 'session'} to ${sessionForm.uiMode} UI`
+            }
+            detail={
+              uiModeSwitchDiscard
+                ? 'No resume id has been captured for this session yet, so the switch cannot rejoin the conversation. Confirming starts a FRESH conversation in the new mode; the current one stays only in the agent-native history.'
+                : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
+            }
+            busy={busy}
+            onConfirm={() => {
+              void confirmUiModeSwitch();
             }}
           />
         </Modal>

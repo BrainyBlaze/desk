@@ -316,6 +316,34 @@ export async function restartProjectSession(payload: { tmuxSession: string }): P
   return postSnapshot('/api/restart-project-session', payload);
 }
 
+/** Error carrying the server's typed code (e.g. resume-not-captured, switch-in-progress). */
+export class ApiCodeError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string
+  ) {
+    super(message);
+  }
+}
+
+export async function setSessionUiMode(payload: {
+  tmuxSession: string;
+  uiMode: 'terminal' | 'native';
+  confirmDiscard?: boolean;
+}): Promise<DeskSnapshot> {
+  const response = await fetch('/api/set-session-ui-mode', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const body = (await response.json()) as DeskSnapshot | { error?: string; code?: string };
+  if (!response.ok) {
+    const record = body as { error?: string; code?: string };
+    throw new ApiCodeError(record.error ?? `request failed ${response.status}`, record.code);
+  }
+  return body as DeskSnapshot;
+}
+
 export async function moveProjectSession(payload: {
   sourceProjectId: string;
   sourceGroupId: string;

@@ -155,4 +155,14 @@ describe('session form modal source contract', () => {
   it('prefills the edit command field only for custom-command sessions', () => {
     expect(source).toMatch(/command: session\.spec\.customCommand \? session\.spec\.command : ''/);
   });
+
+  it('routes edit-modal ui-mode changes through the atomic switch endpoint', () => {
+    const apiSource = readFileSync(new URL('../src/web/api.ts', import.meta.url), 'utf8');
+    expect(apiSource).toContain('/api/set-session-ui-mode');
+    expect(apiSource).toMatch(/export async function setSessionUiMode/);
+    expect(source).toContain("'switchUiMode'");
+    expect(source).toContain('setSessionUiMode(');
+    expect(source).toContain('resume-not-captured');
+    expect(source).toMatch(/confirmDiscard/);
+  });
 });
