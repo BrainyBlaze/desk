@@ -35,6 +35,11 @@ describe('rowsFromSnapshot', () => {
     expect(rowsFromSnapshot(events).status).toBe('idle');
   });
 
+  it('uses the broker snapshot state when the committed ring has no status event', () => {
+    const events: AgentSurfaceEvent[] = [ev(1, { kind: 'user-message', id: 'u1', text: 'ready?', source: 'external' })];
+    expect(rowsFromSnapshot(events, 'idle').status).toBe('idle');
+  });
+
   it('records a pending permission from permission-request', () => {
     const events: AgentSurfaceEvent[] = [
       ev(1, {

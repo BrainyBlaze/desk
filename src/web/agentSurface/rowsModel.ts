@@ -41,8 +41,9 @@ export function initialRowModel(): RowModel {
  * transients out of the ring, so we don't expect deltas here; status / commit / tool /
  * permission / turn-complete / system rows are projected in chronological order.
  */
-export function rowsFromSnapshot(events: AgentSurfaceEvent[]): RowModel {
+export function rowsFromSnapshot(events: AgentSurfaceEvent[], state: AgentSurfaceState = 'starting'): RowModel {
   const model = initialRowModel();
+  model.status = state;
   for (const event of events) {
     applyCommittedEvent(model, event);
   }
