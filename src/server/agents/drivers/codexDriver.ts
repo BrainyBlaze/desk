@@ -67,7 +67,7 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
   private buffer = '';
   private readonly handlers = new Set<(event: CodexTransportEvent) => void>();
   private readonly pending = new Map<
-    number,
+    string,
     {
       resolve(value: unknown): void;
       reject(error: Error): void;
@@ -95,7 +95,7 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
     if (this.exited) {
       throw new Error('codex app-server exited');
     }
-    const id = this.nextId++;
+    const id = String(this.nextId++);
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
@@ -132,7 +132,7 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
   }
 
   private handleMessage(message: Record<string, unknown>): void {
-    if (typeof message.id === 'number' && !message.method) {
+    if (typeof message.id === 'string' && !message.method) {
       const pending = this.pending.get(message.id);
       if (!pending) {
         return;
@@ -183,20 +183,29 @@ class CodexDriver implements AgentDriver {
   }
 
   async start(): Promise<{ session: { agentSessionId?: string; model?: string }; status: DriverStatusEvent }> {
-    await this.options.transport.request('initialize', { clientInfo: { name: 'desk', version: 1 } });
+    await this.options.transport.request('initialize', {
+      clientInfo: { name: 'desk', title: 'Desk', version: '0.2.0' },
+      capabilities: null
+    });
     await this.options.transport.notify('initialized');
 
+    let threadResult: unknown;
     if (this.options.resumeId) {
-      await this.options.transport.request('thread/resume', {
+      threadResult = await this.options.transport.request('thread/resume', {
         threadId: this.options.resumeId,
         cwd: this.options.cwd,
         model: this.options.model ?? null
       });
     } else {
-      await this.options.transport.request('thread/start', {
+      threadResult = await this.options.transport.request('thread/start', {
         cwd: this.options.cwd,
         ...(this.options.model ? { model: this.options.model } : {})
       });
+    }
+
+    const returnedThread = threadFromRpcResult(threadResult);
+    if (!this.thread && returnedThread) {
+      this.thread = returnedThread;
     }
 
     if (!this.thread) {
@@ -332,6 +341,17 @@ class CodexDriver implements AgentDriver {
       handler(event);
     }
   }
+}
+
+function threadFromRpcResult(result: unknown): Thread | null {
+  if (!result || typeof result !== 'object') {
+    return null;
+  }
+  const thread = (result as { thread?: unknown }).thread;
+  if (!thread || typeof thread !== 'object' || typeof (thread as { id?: unknown }).id !== 'string') {
+    return null;
+  }
+  return thread as Thread;
 }
 
 function threadStatusToDriverStatus(thread: Thread): DriverStatusEvent {

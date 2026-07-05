@@ -29,10 +29,10 @@ describe('createCodexAppServerTransport', () => {
     transport.onEvent((event) => events.push(event));
 
     const request = transport.request('thread/read', { threadId: 'thread-1', includeTurns: true });
-    expect(proc.writes).toEqual(['{"id":1,"method":"thread/read","params":{"threadId":"thread-1","includeTurns":true}}\n']);
+    expect(proc.writes).toEqual(['{"id":"1","method":"thread/read","params":{"threadId":"thread-1","includeTurns":true}}\n']);
 
     proc.stdout.write('{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}\n');
-    proc.stdout.write('{"id":1,"result":{"ok":true}}\n');
+    proc.stdout.write('{"id":"1","result":{"ok":true}}\n');
 
     await expect(request).resolves.toEqual({ ok: true });
     expect(events).toHaveLength(1);
@@ -45,7 +45,7 @@ describe('createCodexAppServerTransport', () => {
     const request = transport.request('turn/start', { threadId: 'thread-1', input: [] });
 
     await transport.respond('approval-1', { decision: 'decline' });
-    proc.stdout.write('{"id":1,"error":{"code":-32000,"message":"turn failed"}}\n');
+    proc.stdout.write('{"id":"1","error":{"code":-32000,"message":"turn failed"}}\n');
 
     expect(proc.writes[1]).toBe('{"id":"approval-1","result":{"decision":"decline"}}\n');
     await expect(request).rejects.toThrow('turn failed');

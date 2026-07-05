@@ -126,19 +126,19 @@ describe('createCodexDriver', () => {
 
     const start = driver.start();
     await waitFor(() => proc.writes.length >= 1);
-    proc.stdout.write('{"id":1,"result":{"userAgent":"codex-cli 0.142.5","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"linux"}}\n');
+    proc.stdout.write('{"id":"1","result":{"userAgent":"codex-cli 0.142.5","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"linux"}}\n');
     await waitFor(() => proc.writes.length >= 3);
     proc.stdout.write('{"method":"thread/started","params":{"thread":{"id":"thread-1","sessionId":"session-1","forkedFromId":null,"parentThreadId":null,"preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1,"updatedAt":1,"recencyAt":1,"status":{"type":"idle"},"path":null,"cwd":"/repo","cliVersion":"codex-cli 0.142.5","source":"codex-app-server","threadSource":null,"agentNickname":null,"agentRole":null,"gitInfo":null,"name":null,"turns":[]}}}\n');
-    proc.stdout.write('{"id":2,"result":{}}\n');
+    proc.stdout.write('{"id":"2","result":{}}\n');
 
     await expect(start).resolves.toEqual({
       session: { agentSessionId: 'thread-1', model: 'gpt-5.5' },
       status: { kind: 'status', state: 'idle' }
     });
     expect(proc.writes).toEqual([
-      '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"desk","version":1}}}\n',
+      '{"id":"1","method":"initialize","params":{"clientInfo":{"name":"desk","title":"Desk","version":"0.2.0"},"capabilities":null}}\n',
       '{"method":"initialized"}\n',
-      '{"id":2,"method":"thread/start","params":{"cwd":"/repo","model":"gpt-5.5"}}\n'
+      '{"id":"2","method":"thread/start","params":{"cwd":"/repo","model":"gpt-5.5"}}\n'
     ]);
   });
 
@@ -192,6 +192,32 @@ describe('createCodexDriver', () => {
       { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'hi there' },
       { kind: 'turn-complete', turnId: 'turn-1' }
     ]);
+  });
+
+  it('accepts fresh thread metadata returned by thread/start without a thread/started notification', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => ({ thread: thread({ id: 'thread-from-result', status: { type: 'active', activeFlags: [] } }) })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await expect(driver.start()).resolves.toEqual({
+      session: { agentSessionId: 'thread-from-result' },
+      status: { kind: 'status', state: 'processing' }
+    });
+  });
+
+  it('accepts resumed thread metadata returned by thread/resume without a thread/started notification', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/resume': () => ({ thread: thread({ id: 'thread-resumed', status: { type: 'idle' } }) })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-resumed' });
+
+    await expect(driver.start()).resolves.toEqual({
+      session: { agentSessionId: 'thread-resumed' },
+      status: { kind: 'status', state: 'idle' }
+    });
   });
 
   it('injects with turn/start while idle and turn/steer with expectedTurnId while a turn is active', async () => {
