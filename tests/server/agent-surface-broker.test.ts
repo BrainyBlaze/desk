@@ -421,6 +421,31 @@ describe('AgentSurfaceBroker — server-internal injectUserMessage', () => {
     host.close();
     harness.close();
   });
+
+  it('rejects server-internal injectUserMessage with the typed command-result error on ok:false', async () => {
+    const harness = await startBroker();
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: deriveAgentHostToken(SECRET, 's1', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+
+    const injectPromise = harness.broker.injectUserMessage('s1', 'channel msg', 'channel');
+    const injectFrame = (await host.waitFor((f) => (f as { type?: string }).type === 'inject')) as unknown as { requestId: string };
+    host.send({
+      type: 'command-result',
+      requestId: injectFrame.requestId,
+      ok: false,
+      error: { code: 'send-while-busy', message: 'driver mid-turn', retryable: true }
+    });
+
+    await expect(injectPromise).rejects.toMatchObject({
+      code: 'send-while-busy',
+      message: 'driver mid-turn',
+      retryable: true
+    });
+
+    host.close();
+    harness.close();
+  });
 });
 
 // Test surface types for clarity (avoids naming collisions)

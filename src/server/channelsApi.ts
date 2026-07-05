@@ -61,6 +61,7 @@ import {
 } from './channelsProtocol.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { AgentSurfaceBroker } from './agentSurfaceBroker.js';
 
 /**
  * /api/channels/* — slack-like messaging between desk agents over the
@@ -86,12 +87,24 @@ interface ChannelsRuntime {
 
 let runtime: ChannelsRuntime | undefined;
 
-export function initChannelsRuntime(options: { home?: string } = {}): ChannelsRuntime {
+export interface ChannelsRuntimeOptions {
+  home?: string;
+  agentSurfaceBroker?: ChannelDeliveryBroker;
+}
+
+export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): ChannelsRuntime {
   if (runtime) {
     return runtime;
   }
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
-  const engine = new ChannelsEngine({
+  let engine!: ChannelsEngine;
+  const sendChannelDelivery = createChannelDeliverySender({
+    agentSurfaceBroker: options.agentSurfaceBroker,
+    onNonRetryableNativeFailure: (tmuxSession, error) => {
+      pauseEngineSession(home, engine, tmuxSession, `native channel delivery failed (${error.code}): ${error.message}`);
+    }
+  });
+  engine = new ChannelsEngine({
     home,
     // sendText wrapper: on a false return (tmux unreachable / session vanished),
     // revert EVERY .delivering file for this session back to .json. The engine's
@@ -100,7 +113,7 @@ export function initChannelsRuntime(options: { home?: string } = {}): ChannelsRu
     // for this single failed send. The pump then re-drains the reverted items
     // when the session becomes reachable again.
     sendText: async (tmuxSession, text) => {
-      const ok = await sendTextToTmux(tmuxSession, text);
+      const ok = await sendChannelDelivery(tmuxSession, text);
       if (!ok) {
         revertAllDeliveringToJson(home, tmuxSession);
       }
@@ -228,6 +241,70 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
   '.json': 'application/json',
   '.log': 'text/plain; charset=utf-8'
 };
+
+type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage'>;
+
+interface ChannelDeliverySession {
+  tmuxSession: string;
+  uiMode?: 'terminal' | 'native';
+}
+
+export interface ChannelDeliveryFailure {
+  code: string;
+  message: string;
+  retryable?: boolean;
+}
+
+export interface ChannelDeliverySenderOptions {
+  agentSurfaceBroker?: ChannelDeliveryBroker;
+  terminalSender?: (tmuxSession: string, text: string) => Promise<boolean>;
+  lookupSession?: (tmuxSession: string) => ChannelDeliverySession | undefined;
+  onNonRetryableNativeFailure?: (tmuxSession: string, error: ChannelDeliveryFailure) => void;
+  log?: (message: string) => void;
+}
+
+export function createChannelDeliverySender(options: ChannelDeliverySenderOptions = {}): (tmuxSession: string, text: string) => Promise<boolean> {
+  const terminalSender = options.terminalSender ?? sendTextToTmux;
+  const lookupSession = options.lookupSession ?? lookupDeskSessionForDelivery;
+  const log = options.log ?? ((message: string) => console.warn(message));
+  return async (tmuxSession, text) => {
+    const session = lookupSession(tmuxSession);
+    if (session?.uiMode !== 'native') {
+      return terminalSender(tmuxSession, text);
+    }
+    if (!options.agentSurfaceBroker) {
+      log(`native channel delivery failed for ${tmuxSession}: no agent surface broker`);
+      return false;
+    }
+    try {
+      await options.agentSurfaceBroker.injectUserMessage(tmuxSession, text, 'channel');
+      return true;
+    } catch (error) {
+      const failure = channelDeliveryFailure(error);
+      log(`native channel delivery failed for ${tmuxSession}: ${failure.code}: ${failure.message}`);
+      if (failure.retryable === false) {
+        options.onNonRetryableNativeFailure?.(tmuxSession, failure);
+      }
+      return false;
+    }
+  };
+}
+
+function lookupDeskSessionForDelivery(tmuxSession: string): ChannelDeliverySession | undefined {
+  return loadDeskCached({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+}
+
+function channelDeliveryFailure(error: unknown): ChannelDeliveryFailure {
+  if (error instanceof Error) {
+    const record = error as { code?: unknown; retryable?: unknown };
+    return {
+      code: typeof record.code === 'string' ? record.code : 'adapter-unavailable',
+      message: error.message,
+      ...(typeof record.retryable === 'boolean' ? { retryable: record.retryable } : {})
+    };
+  }
+  return { code: 'adapter-unavailable', message: String(error) };
+}
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 

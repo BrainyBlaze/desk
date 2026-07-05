@@ -53,12 +53,14 @@ interface BrowserClient {
 }
 
 interface InflightCommand {
-  ws: WebSocket;
-  surfaceId: string;
+  ws?: WebSocket;
+  surfaceId?: string;
   session: string;
   kind: 'inject' | 'respond-permission' | 'interrupt' | 'shutdown';
   /** Deadline after which the broker gives up and replies with a timeout error. */
   deadlineMs: number;
+  resolve?: () => void;
+  reject?: (error: Error & { code: AgentUiErrorCode; retryable: boolean }) => void;
 }
 
 interface HostConnection {
@@ -127,8 +129,17 @@ export class AgentSurfaceBroker {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${session}`, false);
     }
     const requestId = newRequestId();
+    const result = new Promise<void>((resolve, reject) => {
+      this.registerInflight(sess, requestId, {
+        session,
+        kind: 'inject',
+        deadlineMs: this.now() + this.commandTimeoutMs,
+        resolve,
+        reject
+      });
+    });
     this.sendHostCommand(host, { type: 'inject', requestId, text, source });
-    await this.awaitCommandResult(session, requestId);
+    await result;
   }
 
   /** Snapshot for the pulse API: sessions with their FSM state + lastSeq (read-only). */
@@ -485,12 +496,16 @@ export class AgentSurfaceBroker {
       const pending = session.inflight.get(requestId);
       if (pending && pending === cmd) {
         session.inflight.delete(requestId);
-        this.send(cmd.ws, {
-          type: 'error',
-          session: session.session,
-          code: 'adapter-unavailable',
-          message: `${cmd.kind} command timed out after ${this.commandTimeoutMs}ms`
-        });
+        const error = brokerError('adapter-unavailable', `${cmd.kind} command timed out after ${this.commandTimeoutMs}ms`, false);
+        cmd.reject?.(error);
+        if (cmd.ws) {
+          this.send(cmd.ws, {
+            type: 'error',
+            session: session.session,
+            code: error.code,
+            message: error.message
+          });
+        }
       }
     }, this.commandTimeoutMs).unref?.();
   }
@@ -509,49 +524,23 @@ export class AgentSurfaceBroker {
     if (ok) {
       // Surface affordances for command-result ok are broker-internal (no frame); the
       // turn progress arrives as events. The browser only sees errors.
+      cmd.resolve?.();
       return;
     }
     if (!error) {
+      cmd.reject?.(brokerError('adapter-unavailable', 'command failed without error detail', false));
       return;
     }
-    this.send(cmd.ws, {
-      type: 'error',
-      session: cmd.session,
-      code: error.code,
-      message: error.message
-    });
-  }
-
-  private awaitCommandResult(sessionName: string, requestId: string): Promise<void> {
-    const session = this.requireSession(sessionName);
-    return new Promise((resolve, reject) => {
-      const deadline = this.now() + this.commandTimeoutMs;
-      const timer = setTimeout(() => {
-        session.inflight.delete(requestId);
-        reject(brokerError('adapter-unavailable', 'injectUserMessage timed out', false));
-      }, deadline - this.now()).unref?.();
-      const original = session.inflight.get(requestId);
-      if (!original) {
-        clearTimeout(timer as NodeJS.Timeout);
-        resolve();
-        return;
-      }
-      // Replace the entry with a wrapper that intercepts the result.
-      session.inflight.set(requestId, {
-        ...original,
-        deadlineMs: deadline
+    const commandError = brokerError(error.code, error.message, error.retryable);
+    cmd.reject?.(commandError);
+    if (cmd.ws) {
+      this.send(cmd.ws, {
+        type: 'error',
+        session: cmd.session,
+        code: commandError.code,
+        message: commandError.message
       });
-      // Poll for resolution (avoid poking private fields from a Promise).
-      const poll = (): void => {
-        if (!session.inflight.has(requestId)) {
-          clearTimeout(timer as NodeJS.Timeout);
-          resolve();
-          return;
-        }
-        setTimeout(poll, 20).unref?.();
-      };
-      poll();
-    });
+    }
   }
 
   private synthesizeAttention(session: string, event: AgentSurfaceEvent): void {

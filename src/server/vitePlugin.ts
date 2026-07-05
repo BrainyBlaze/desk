@@ -7,6 +7,7 @@ import { loadPluginsFromEnv } from './pluginLoader.js';
 import { handleFsRequest } from './fsApi.js';
 import { handleGitRequest } from './gitApi.js';
 import { handleProjectsRequest } from './projectsApi.js';
+import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
 import { disposeChannelsRuntime, handleChannelsRequest, initChannelsRuntime } from './channelsApi.js';
 import { installFsWatchBridge } from './fsWatchBridge.js';
 import { installLspWebSocketBridge } from './lspWebSocketBridge.js';
@@ -278,7 +279,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
       startAttentionPolling();
       startSystemSampling();
       // Channels engine: watcher + per-agent delivery queues (gated on agent signals).
-      initChannelsRuntime();
+      initChannelsRuntime({ agentSurfaceBroker });
       restorePendingResumeCaptures(loadDesk({}).sessions);
       // Editing src/server/* restarts the vite server inside the SAME Node
       // process: the replacement plugin instance builds a fresh runtime, so
@@ -322,6 +323,10 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
           }
 
           if (await handleProjectsRequest(req, res, url)) {
+            return;
+          }
+
+          if (await handleAgentSessionInjectRequest(req, res, url, { broker: agentSurfaceBroker })) {
             return;
           }
 
