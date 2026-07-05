@@ -20,9 +20,9 @@ import type { DriverEvent, DriverStatusEvent } from '../host/driver.js';
  * binding surface in `opencodeDriver.ts` needs the live-binary probe.
  *
  * Mapping rules (spec docs/native-ui-mode-spec.md §4):
- *  - message.part.updated { delta }        → assistant-delta (transient)
- *  - message.updated (AssistantMessage)    → assistant-message (committed, full markdown)
- *  - message.updated (UserMessage)         → user-message (source from caller context; 'external' default)
+ *  - message.part.updated { delta }        → assistant-delta (transient) AND text-accumulator update
+ *  - message.updated (AssistantMessage, completed) → assistant-message (committed, assembled markdown)
+ *  - message.updated (UserMessage)         → SWALLOWED live (driver already emitted from inject(); never guessed)
  *  - ToolPart state pending                → tool-start
  *  - ToolPart state running                → (no event; sub-state of processing)
  *  - ToolPart state completed              → tool-end status=ok
@@ -35,9 +35,34 @@ import type { DriverEvent, DriverStatusEvent } from '../host/driver.js';
  *  - permission.updated                    → permission-request (requestId=permission.id)
  *  - permission.replied                    → permission-resolved (optionId=response)
  *
+ * Session filter (R3): every event is filtered by `ctx.sessionId`. opencode subagent
+ * Task tool creates child sessions on the same serve process; their messages/permissions
+ * would otherwise leak into our transcript. The mapper drops anything not matching.
+ *
  * History-derived UserMessages default source='external' (claude review msg-20260705-153930):
  * opencode history has no origin tag, so we never guess 'ui' or 'channel'.
  */
+
+/**
+ * Live-event mapping context. The driver owns these fields and passes them in so the
+ * mapper stays pure:
+ *  - `sessionId`: filter events by session id (R3). Foreign-session events return null.
+ *  - `pendingTurnId`: in-flight assistant messageID; used to attribute turn-complete
+ *    when session.idle fires (which carries no message id itself).
+ *  - `assistantTextByMessageId`: accumulated text parts per assistant messageID. The
+ *    mapper reads from this to assemble assistant-message markdown when an assistant
+ *    message's `time.completed` flips true (R1). Driver mutates this same map on every
+ *    message.part.updated for a text part.
+ *  - `assistantCommitted`: set of assistant messageIDs we've already emitted assistant-
+ *    message for, so the same id's repeated message.updated (they fire multiple times)
+ *    cannot double-commit.
+ */
+export interface LiveEventContext {
+  sessionId: string;
+  pendingTurnId?: string;
+  assistantTextByMessageId: Map<string, string>;
+  assistantCommitted: Set<string>;
+}
 
 /** Build a ToolPart summary suitable for tool-start / tool-end display. */
 function summarizeTool(part: ToolPart): string {
@@ -172,22 +197,32 @@ export function mapHistoryMessage(
 
 /**
  * Map a live SSE Event from /event into a DriverEvent. Returns null when the event kind
- * has no normalized representation (e.g., file watchers, TUI-only events, session.info
- * noise) so the driver can drop it without polluting the stream.
+ * has no normalized representation OR when the event belongs to a foreign session
+ * (subagent child session, etc.).
  *
- * `pendingTurnId` is the messageID of any in-flight assistant message (tracked by the
- * driver from the moment it sees a message.updated for a freshly-created assistant
- * message); turn-complete events need this because session.idle does not carry a message
- * id but the host needs to attribute the turn completion.
+ * Caller is responsible for mutating `ctx.assistantTextByMessageId` and
+ * `ctx.assistantCommitted` based on the return value — see `applyLiveEventSideEffects`.
  */
 export function mapLiveEvent(
   event: Event,
-  ctx: { pendingTurnId?: string }
+  ctx: LiveEventContext
 ): DriverEvent | DriverEvent[] | null {
+  if (!belongsToSession(event, ctx.sessionId)) {
+    return null;
+  }
   switch (event.type) {
     case 'message.part.updated': {
       const { part, delta } = event.properties;
-      if (part.type !== 'text' || !delta) {
+      if (part.type !== 'text') {
+        return null;
+      }
+      // Side effect: accumulate full text into the assistant's pending buffer (R1).
+      // The part object carries the full accumulated text for the message — append it.
+      const prior = ctx.assistantTextByMessageId.get(part.messageID) ?? '';
+      const next = prior.length > 0 ? `${prior}\n${part.text}` : part.text;
+      ctx.assistantTextByMessageId.set(part.messageID, next);
+
+      if (!delta) {
         return null;
       }
       return {
@@ -199,26 +234,29 @@ export function mapLiveEvent(
     case 'message.updated': {
       const info = event.properties.info;
       if (info.role === 'user') {
-        return {
-          kind: 'user-message',
-          id: info.id,
-          text: composeUserText([]),
-          // Live injects carry the caller's source via the driver; opencode doesn't tag it,
-          // so live user-message updates default to 'external' — driver overrides when it
-          // can correlate to a recent inject() call.
-          source: 'external'
-        };
+        // R2 fix: live user-messages are emitted by the driver's inject() (with the
+        // caller's source + actual text). message.updated for users carries no parts
+        // and no origin; we swallow it entirely. The driver's handleEvent drops the
+        // matching inject from its echo-tracking set.
+        return null;
       }
       const assistant = info as AssistantMessage;
-      // For assistant messages we cannot reconstruct parts from message.updated alone —
-      // the driver must accumulate parts via message.part.updated and assemble the final
-      // markdown when message.updated arrives. The mapper emits the session-id signal;
-      // the driver is responsible for the assembled payload.
+      // R1 fix: emit assistant-message exactly once per messageID, with the assembled
+      // markdown from accumulated text parts. Only commit when the assistant message
+      // has reached completion (info.time.completed set) — partial updates do not commit.
+      if (!assistant.time.completed) {
+        return null;
+      }
+      if (ctx.assistantCommitted.has(assistant.id)) {
+        return null;
+      }
+      ctx.assistantCommitted.add(assistant.id);
+      const markdown = ctx.assistantTextByMessageId.get(assistant.id) ?? '';
       return {
         kind: 'assistant-message',
         id: assistant.id,
         turnId: assistant.id,
-        markdown: ''
+        markdown
       };
     }
     case 'session.status': {
@@ -250,6 +288,29 @@ export function mapLiveEvent(
       // message.part.removed, etc. — not part of the agent-surface contract.
       return null;
   }
+}
+
+/**
+ * Returns true if the event payload references our session id. Different event kinds
+ * carry the session id in different fields; this checks them all. Returns true for
+ * event kinds that have NO session scoping (server.connected, etc.) — those still
+ * pass through to the mapper's switch.
+ */
+function belongsToSession(event: Event, sessionId: string): boolean {
+  const props = (event as { properties?: Record<string, unknown> }).properties;
+  if (!props) {
+    return true;
+  }
+  const candidate =
+    props.sessionID ??
+    (props.part as { sessionID?: string } | undefined)?.sessionID ??
+    (props.info as { sessionID?: string } | undefined)?.sessionID ??
+    (props.permission as { sessionID?: string } | undefined)?.sessionID;
+  if (typeof candidate !== 'string') {
+    // Events that legitimately have no session id (server.connected) — pass through.
+    return true;
+  }
+  return candidate === sessionId;
 }
 
 /** Map a SessionStatus (idle/busy/retry) to a DriverStatusEvent. */

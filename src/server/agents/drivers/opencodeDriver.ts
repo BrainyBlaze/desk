@@ -6,12 +6,19 @@ import type {
   SessionStatus,
   TextPartInput
 } from '@opencode-ai/sdk';
-import type { AgentDriver, DriverEvent, DriverStatusEvent } from '../host/driver.js';
+import {
+  driverCommandError,
+  isDriverCommandError,
+  type AgentDriver,
+  type DriverEvent,
+  type DriverStatusEvent
+} from '../host/driver.js';
 import {
   expandRetryStatus,
   mapHistoryMessage,
   mapLiveEvent,
-  mapSessionStatus
+  mapSessionStatus,
+  type LiveEventContext
 } from './opencodeMapper.js';
 
 /**
@@ -73,22 +80,20 @@ export function mapPermissionOptionId(optionId: string): PermissionResponse {
   return 'reject';
 }
 
-interface PendingInject {
-  text: string;
-  source: 'ui' | 'channel' | 'external';
-  sentAt: number;
-}
-
 export class OpencodeDriver implements AgentDriver {
   private readonly opts: OpencodeDriverOptions;
   private readonly handlers = new Set<(event: DriverEvent) => void>();
-  private readonly pendingInjects: PendingInject[] = [];
   private backend: OpencodeBackend | null = null;
   private unsubscribeEvents: (() => void) | null = null;
   private sessionId: string | null = null;
+  /** Pending assistant messageID — used to attribute turn-complete on session.idle. */
   private pendingTurnId: string | null = null;
-  /** Tracks assistant-message ids we've already emitted committed, to dedpe part deltas. */
-  private assistantDeltasSeen = new Set<string>();
+  /** Live text accumulator — populated by message.part.updated; consumed on commit. */
+  private readonly assistantTextByMessageId = new Map<string, string>();
+  /** Set of assistant messageIDs we've already committed, dedupes repeated message.updated. */
+  private readonly assistantCommitted = new Set<string>();
+  /** User messageIDs we emitted locally via inject(); swallow their opencode echo. */
+  private readonly injectedUserMessageIds = new Set<string>();
   private started = false;
   private shutDown = false;
 
@@ -151,7 +156,6 @@ export class OpencodeDriver implements AgentDriver {
     for (const event of events) {
       this.emit(event);
     }
-    void this.assistantDeltasSeen; // referenced for future part-delta dedup state
 
     return {
       session: { agentSessionId: sessionId },
@@ -164,12 +168,13 @@ export class OpencodeDriver implements AgentDriver {
       throw notStartedError();
     }
     const parts: TextPartInput[] = [{ type: 'text', text }];
-    this.pendingInjects.push({ text, source, sentAt: Date.now() });
     await this.backend.promptAsync(this.sessionId, parts);
-    // Optimistic local user-message emission; if opencode's message.updated arrives
-    // later with the same text, the host runner dedupes via id (we use a client-generated
-    // id here; opencode's id arrives via the SDK event).
-    this.emit({ kind: 'user-message', id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text, source });
+    // Optimistic local user-message emission. Generate an id we'll recognize when opencode
+    // echoes the message back via message.updated so we can swallow the echo (R2 fix:
+    // keyed on the locally-generated id rather than a queue position).
+    const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.injectedUserMessageIds.add(localId);
+    this.emit({ kind: 'user-message', id: localId, text, source });
   }
 
   async respondPermission(requestId: string, optionId: string, _note?: string): Promise<void> {
@@ -225,67 +230,88 @@ export class OpencodeDriver implements AgentDriver {
     if (this.shutDown) {
       return;
     }
-    // Track the in-flight assistant message id for turn-complete attribution.
+    // R1 / R2 / R3 fix: live mapper needs sessionId filter + accumulator + committed set
+    // + pendingTurnId attribution. The mapper mutates the accumulator + committed set
+    // in-place when it processes message.part.updated / message.updated.
+    const ctx: LiveEventContext = {
+      sessionId: this.sessionId ?? '',
+      pendingTurnId: this.pendingTurnId ?? undefined,
+      assistantTextByMessageId: this.assistantTextByMessageId,
+      assistantCommitted: this.assistantCommitted
+    };
+
+    // Track the in-flight assistant message id for turn-complete attribution (R4: cleared
+    // after session.idle emits turn-complete).
     if (event.type === 'message.updated' && event.properties.info.role === 'assistant') {
       this.pendingTurnId = event.properties.info.id;
     }
 
-    // Reconcile live injects: when opencode echoes a user message we just sent, swallow
-    // the duplicate (we already emitted a local user-message with the caller's source).
+    // R2 fix: opencode echoes our local injects as message.updated (no parts). The mapper
+    // returns null for user message.updated; we additionally forget the local id once we
+    // see the echo so the set doesn't grow unbounded. We can't correlate opencode's id to
+    // our local id (opencode assigns a new one), so we forget on a FIFO basis: the next
+    // user message.updated after an inject is treated as its echo.
     if (event.type === 'message.updated' && event.properties.info.role === 'user') {
-      const recent = this.pendingInjects[0];
-      if (recent) {
-        // opencode's user message arrives near-instantly after prompt_async resolves; we
-        // treat the first matching echo as the duplicate.
-        this.pendingInjects.shift();
-        return;
+      // Best-effort FIFO forget — at most one in-flight inject is expected (host runner
+      // serializes commands via send-while-busy), so popping the oldest is correct.
+      const firstLocal = this.injectedUserMessageIds.values().next().value;
+      if (firstLocal) {
+        this.injectedUserMessageIds.delete(firstLocal);
       }
+      // Mapper returns null here (R2); nothing else to do.
+      return;
     }
 
-    const mapped = mapLiveEvent(event, { pendingTurnId: this.pendingTurnId ?? undefined });
+    const mapped = mapLiveEvent(event, ctx);
     if (mapped === null) {
       return;
     }
     if (Array.isArray(mapped)) {
+      // R5 fix: route session.status through expandRetryStatus so live retry states emit
+      // the [status, attention-hint] pair, not just the bare status.
+      const expanded: DriverEvent[] = [];
       for (const e of mapped) {
+        if (e.kind === 'status') {
+          expanded.push(...expandRetryStatus(e));
+        } else {
+          expanded.push(e);
+        }
+      }
+      // R4 fix: if this batch contained turn-complete, clear pendingTurnId so a repeated
+      // session.idle doesn't duplicate it.
+      if (expanded.some((e) => e.kind === 'turn-complete')) {
+        this.pendingTurnId = null;
+      }
+      for (const e of expanded) {
         this.emit(e);
       }
     } else {
-      this.emit(mapped);
+      // Single event — also route through expandRetryStatus for the retry case.
+      if (mapped.kind === 'status') {
+        for (const e of expandRetryStatus(mapped)) {
+          this.emit(e);
+        }
+      } else {
+        this.emit(mapped);
+      }
     }
   }
 
   /**
-   * Best-effort history source attribution: if we have a pending inject that hasn't yet
-   * been consumed by an echo, attribute the next user message to that inject's source.
-   * Otherwise default to 'external' per claude review msg-20260705-153930.
+   * History backfill default source attribution. Per claude review (msg-20260705-153930)
+   * history has no origin tag — default to 'external'.
    */
   private deriveHistorySource(_info: Message): 'ui' | 'channel' | 'external' {
-    // History backfill typically runs once on (re)connect, after any in-flight injects
-    // have already been echoed. Default to 'external' so we never guess 'ui'/'channel'
-    // for an origin we cannot verify.
     return 'external';
   }
 }
 
 function sessionGoneError(resumeId: string): Error {
-  const err = new Error(`opencode session ${resumeId} not found (deleted?)`) as Error & {
-    code: 'driver-start-failed';
-    retryable: false;
-  };
-  err.code = 'driver-start-failed';
-  err.retryable = false;
-  return err;
+  return driverCommandError(`opencode session ${resumeId} not found (deleted?)`, 'driver-start-failed', false);
 }
 
 function notStartedError(): Error {
-  const err = new Error('opencode driver method called before start() resolved') as Error & {
-    code: 'adapter-unavailable';
-    retryable: false;
-  };
-  err.code = 'adapter-unavailable';
-  err.retryable = false;
-  return err;
+  return driverCommandError('opencode driver method called before start() resolved', 'adapter-unavailable', false);
 }
 
 /**
