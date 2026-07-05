@@ -19,6 +19,7 @@ import {
   notifyAgentSignal,
   type AgentEventKind
 } from './attention.js';
+import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.js';
 
 /**
  * Agent-surface broker — Phase 2 server core.
@@ -81,6 +82,8 @@ interface AgentSurfaceSession {
   currentState: AgentSurfaceState | null;
   lastSeq: number;
   inflight: Map<string, InflightCommand>;
+  /** Once true, skip the persistSessionResume manifest write on subsequent session-info. */
+  persistedResumeGuard: boolean;
   idleSince?: number;
 }
 
@@ -91,6 +94,14 @@ export interface AgentSurfaceBrokerOptions {
   resolveSecret?: () => string;
   /** Inject the attention tracker (test seam); production uses the singleton. */
   attention?: AttentionSink;
+  /**
+   * Inject the resume-persistence path (test seam). Production leaves this undefined
+   * and the broker calls persistSessionResume(tmuxSession, resume) which writes the
+   * default manifest at ~/.config/desk/desk.yml. Tests pass a custom function that
+   * writes to a temp manifest so the broker's session-info handling can be exercised
+   * hermetically.
+   */
+  persistResume?: (tmuxSession: string, resume: string) => boolean;
   now?: () => number;
 }
 
@@ -107,6 +118,7 @@ export class AgentSurfaceBroker {
   private readonly commandTimeoutMs: number;
   private readonly resolveSecret: () => string;
   private readonly attention: AttentionSink;
+  private readonly persistResume: (tmuxSession: string, resume: string) => boolean;
   private readonly now: () => number;
   private readonly sessions = new Map<string, AgentSurfaceSession>();
   private readonly browserClients = new Map<WebSocket, BrowserClient>();
@@ -116,6 +128,7 @@ export class AgentSurfaceBroker {
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.resolveSecret = options.resolveSecret ?? defaultResolveSecret;
     this.attention = options.attention ?? defaultAttentionSink;
+    this.persistResume = options.persistResume ?? ((tmuxSession, resume) => persistSessionResume(tmuxSession, resume));
     this.now = options.now ?? Date.now;
   }
 
@@ -241,6 +254,20 @@ export class AgentSurfaceBroker {
     }
     if (event.kind === 'status') {
       session.currentState = event.state;
+    }
+    // spec §6: session-info with agentSessionId is the load-bearing path for FRESH native
+    // sessions to gain a resume id (the driver can't know the id at start() time — claude
+    // streaming-init deadlock fix). Persist via the existing resumeCapture plumbing, which
+    // also pins the tmux session name. persistSessionResume is idempotent; we additionally
+    // gate on session.persistedResumeGuard so repeated session-info events on the same host
+    // don't re-read the manifest after the first successful write.
+    if (event.kind === 'session-info' && event.agentSessionId && session.host && !session.persistedResumeGuard) {
+      const agent = session.host.agent;
+      if (isValidResumeIdForAgent(agent, event.agentSessionId)) {
+        if (this.persistResume(session.session, event.agentSessionId)) {
+          session.persistedResumeGuard = true;
+        }
+      }
     }
     this.synthesizeAttention(session.session, event);
     this.fanEventToSurfaces(session, event);
@@ -407,7 +434,8 @@ export class AgentSurfaceBroker {
         ring: [],
         currentState: null,
         lastSeq: 0,
-        inflight: new Map()
+        inflight: new Map(),
+        persistedResumeGuard: false
       };
       this.sessions.set(name, session);
     }

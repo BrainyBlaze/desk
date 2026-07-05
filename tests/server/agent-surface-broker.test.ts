@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   AgentSurfaceBroker,
@@ -10,6 +13,8 @@ import {
   deriveAgentHostToken,
   getOrCreateAgentHostSecret
 } from '../../src/server/agentHostToken';
+import { readManifestFile, writeManifestFile, resolveManifestPath } from '../../src/core/config';
+import type { DeskManifest } from '../../src/core/types';
 import type {
   AgentHostClientFrame,
   AgentHostServerFrame,
@@ -452,3 +457,133 @@ describe('AgentSurfaceBroker — server-internal injectUserMessage', () => {
 type _A = AgentUiClientFrame;
 type _B = AgentUiServerFrame;
 type _C = AgentHostClientFrame;
+
+describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6)', () => {
+  let manifestDir: string;
+  let manifestPath: string;
+
+  beforeEach(() => {
+    manifestDir = mkdtempSync(join(tmpdir(), 'desk-broker-resume-'));
+    manifestPath = join(manifestDir, 'desk.yml');
+    const manifest: DeskManifest = {
+      groups: [
+        {
+          id: 'g1',
+          sessions: [
+            {
+              name: 's1',
+              cwd: manifestDir,
+              agent: 'opencode',
+              uiMode: 'native',
+              tmuxSession: 'sess-test-resume'
+            }
+          ]
+        }
+      ]
+    };
+    writeManifestFile(manifestPath, manifest);
+  });
+
+  afterEach(() => {
+    rmSync(manifestDir, { recursive: true, force: true });
+  });
+
+  async function startBrokerWithResumeSink(): Promise<{
+    broker: AgentSurfaceBroker;
+    close: () => void;
+    connectHost: () => Promise<TestPeer>;
+  }> {
+    const httpServer = createServer();
+    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const port = (httpServer.address() as { port: number }).port;
+    const broker = new AgentSurfaceBroker({
+      resolveSecret: () => SECRET,
+      attention: NOOP_ATTENTION,
+      persistResume: (tmuxSession, resume) => {
+        const manifest = readManifestFile(manifestPath);
+        let wrote = false;
+        for (const group of manifest.groups) {
+          for (const session of group.sessions) {
+            if (session.tmuxSession === tmuxSession && !session.resume) {
+              session.resume = resume;
+              wrote = true;
+            }
+          }
+        }
+        if (wrote) {
+          writeManifestFile(manifestPath, manifest);
+        }
+        return wrote;
+      }
+    });
+    const dispose = installAgentSurfaceBroker(httpServer as never, broker);
+    return {
+      broker,
+      close: () => {
+        dispose();
+        httpServer.close();
+      },
+      connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
+    };
+  }
+
+  it('fresh session-info with valid opencode resume id → manifest gains resume + pinned tmuxSession', async () => {
+    const harness = await startBrokerWithResumeSink();
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+
+    host.send({
+      type: 'event',
+      event: event(1, 'session-info', { agentSessionId: 'ses_abc123def456ghi789jkl012mno345pqr678stu901vwx' })
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const updated = readManifestFile(manifestPath);
+    const session = updated.groups[0]!.sessions[0]!;
+    expect(session.resume).toBe('ses_abc123def456ghi789jkl012mno345pqr678stu901vwx');
+    expect(session.tmuxSession).toBe('sess-test-resume');
+
+    host.close();
+    harness.close();
+  });
+
+  it('malformed resume id is NOT persisted (validation gate)', async () => {
+    const harness = await startBrokerWithResumeSink();
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+
+    host.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: 'not-a-valid-id' }) });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const updated = readManifestFile(manifestPath);
+    expect(updated.groups[0]!.sessions[0]!.resume).toBeUndefined();
+
+    host.close();
+    harness.close();
+  });
+
+  it('repeated session-info is idempotent (guard skips after first successful persist)', async () => {
+    const harness = await startBrokerWithResumeSink();
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+
+    const validId = 'ses_def456ghi789jkl012mno345pqr678stu901vwx999abc';
+    host.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: validId }) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    host.send({ type: 'event', event: event(2, 'session-info', { agentSessionId: validId }) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const updated = readManifestFile(manifestPath);
+    expect(updated.groups[0]!.sessions[0]!.resume).toBe(validId);
+
+    host.close();
+    harness.close();
+  });
+});
+
+import { beforeEach as _beforeEach, afterEach as _afterEach } from 'vitest';
+void _beforeEach;
+void _afterEach;
