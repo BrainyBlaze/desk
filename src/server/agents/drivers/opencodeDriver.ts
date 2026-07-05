@@ -22,6 +22,10 @@ import {
   type AssistantMessageText,
   type LiveEventContext
 } from './opencodeMapper.js';
+import {
+  ensureOpencodeConfigDir,
+  opencodePermissionConfigContent
+} from '../../../core/opencodeConfig.js';
 
 /**
  * OpenCode driver — bridges opencode serve ↔ the host runner.
@@ -139,7 +143,7 @@ export class OpencodeDriver implements AgentDriver {
       throw new Error('OpencodeDriver.start called twice');
     }
     this.started = true;
-    this.backend = this.opts.backend ?? (await createLiveBackend({ cwd: this.opts.cwd }));
+    this.backend = this.opts.backend ?? (await createLiveBackend({ cwd: this.opts.cwd, bypass: this.opts.bypass }));
 
     // Resolve or create the session BEFORE subscribing so we never miss an event for it.
     let sessionId: string;
@@ -352,8 +356,21 @@ function notStartedError(): Error {
  * Live backend factory — spawns an isolated `opencode serve --port 0` child, returns the
  * SDK client + close(). Implemented in a separate factory so the heavy SDK import stays
  * out of the hermetic test boundary.
+ *
+ * CRITICAL: sets OPENCODE_CONFIG_DIR + OPENCODE_CONFIG_CONTENT before spawning so the
+ * opencode serve child uses desk-managed config (provider definitions, permission ruleset,
+ * desk-attention plugin). Without these, the child runs with DEFAULT config → no provider
+ * → empty responses → "opencode doesn't work" (root cause of the human's BUG-10/BUG-opencode
+ * report). Terminal-mode launch sets these in buildAgentCommand; native-mode must do the same.
  */
-export async function createLiveBackend(_opts: { cwd: string }): Promise<OpencodeBackend> {
+export async function createLiveBackend(opts: { cwd: string; bypass: boolean }): Promise<OpencodeBackend> {
+  // Set the desk-managed opencode config before spawning — mirrors terminal-mode
+  // buildAgentCommand's env injection (manifest.ts buildOpencodeCommand).
+  const configDir = ensureOpencodeConfigDir();
+  process.env.OPENCODE_CONFIG_DIR = configDir;
+  process.env.OPENCODE_CONFIG_CONTENT = opencodePermissionConfigContent(opts.bypass);
+  process.env.OPENCODE_DISABLE_MOUSE = '1';
+
   // Imported lazily so the test boundary (which never calls this) doesn't pull the SDK.
   const sdk = await import('@opencode-ai/sdk');
   const server = await sdk.createOpencodeServer({ port: 0, hostname: '127.0.0.1' });
