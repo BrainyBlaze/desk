@@ -702,11 +702,13 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             const manifestPath = resolveManifestPath();
             const manifest = readManifestFile(manifestPath);
             const session = readDeskSessionBody(body.session, { cwdRequired: false });
+            const sessionBody = body.session as Record<string, unknown> | undefined;
             const updated = editSessionInManifest(manifest, {
               projectId: readRequiredString(body.projectId, 'projectId'),
               groupId: readRequiredString(body.groupId, 'groupId'),
               currentName: readRequiredString(body.currentName, 'currentName'),
               projectCwd: readOptionalString(body.projectCwd),
+              clearResume: sessionBody?.clearResume === true,
               session
             });
             writeManifestFile(manifestPath, updated);

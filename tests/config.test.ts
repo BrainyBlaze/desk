@@ -102,6 +102,35 @@ describe('desk config', () => {
     expect(session.bypassPermissions).toBe(true);
   });
 
+  it('preserves a captured resume id when an edit payload omits it without an explicit clear', () => {
+    const manifest = addSessionToManifest(createEmptyManifest(), {
+      groupId: 'research',
+      groupLabel: 'Research',
+      session: {
+        name: 'chat-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        resume: 'sess-uuid-1',
+        tmuxSession: 'agentdesk-research-chat-agent-pinned00'
+      }
+    });
+
+    const edited = editSessionInManifest(manifest, {
+      groupId: 'research',
+      currentName: 'chat-agent',
+      session: { name: 'chat-agent', cwd: '~/projects/sample', agent: 'claude', bypassPermissions: true }
+    });
+    expect(edited.groups[0].sessions[0].resume).toBe('sess-uuid-1');
+
+    const cleared = editSessionInManifest(manifest, {
+      groupId: 'research',
+      currentName: 'chat-agent',
+      clearResume: true,
+      session: { name: 'chat-agent', cwd: '~/projects/sample', agent: 'claude' }
+    });
+    expect(cleared.groups[0].sessions[0].resume).toBeUndefined();
+  });
+
   it('adds empty groups to manifest data', () => {
     const manifest = createEmptyManifest();
     const updated = addGroupToManifest(manifest, {

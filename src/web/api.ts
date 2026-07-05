@@ -11,8 +11,10 @@ interface SessionPayload {
   cwd?: string;
   agent?: string;
   resume?: string;
+  clearResume?: boolean;
   bypassPermissions?: boolean;
   command?: string;
+  uiMode?: 'terminal' | 'native';
 }
 
 export async function fetchDeskSnapshot(): Promise<DeskSnapshot> {

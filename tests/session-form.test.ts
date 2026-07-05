@@ -12,6 +12,7 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'codex',
         resume: '',
+        initialResume: '',
         bypassPermissions: true,
         command: '',
         uiMode: 'terminal'
@@ -33,6 +34,7 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'bash',
         resume: '',
+        initialResume: '',
         bypassPermissions: false,
         command: 'bash',
         uiMode: 'terminal'
@@ -53,6 +55,7 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'opencode',
         resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
+        initialResume: '',
         bypassPermissions: true,
         command: '',
         uiMode: 'terminal'
@@ -75,6 +78,7 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'claude',
         resume: '',
+        initialResume: '',
         bypassPermissions: false,
         command: '',
         uiMode: 'native'
@@ -96,6 +100,7 @@ describe('session form payload', () => {
       cwd: '/tmp/override',
       agent: 'claude',
       resume: '',
+        initialResume: '',
       bypassPermissions: false,
       command: '',
       uiMode: 'terminal'
@@ -112,6 +117,7 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'claude',
         resume: '',
+        initialResume: '',
         bypassPermissions: false,
         command: 'htop',
         uiMode: 'native'
@@ -123,6 +129,37 @@ describe('session form payload', () => {
     });
   });
 
+  it('marks a deliberate resume clear only when the field held a value at load', () => {
+    const cleared = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: '',
+      initialResume: 'sess-uuid-1',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'terminal'
+    });
+    expect(cleared.clearResume).toBe(true);
+
+    const staleEmpty = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: '',
+      initialResume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'terminal'
+    });
+    expect(staleEmpty.clearResume).toBeUndefined();
+    expect(staleEmpty.resume).toBeUndefined();
+  });
+
   it('drops native uiMode for agents without SDK support', () => {
     const payload = buildSessionPayload({
       projectId: 'alpha',
@@ -131,6 +168,7 @@ describe('session form payload', () => {
       cwd: '/tmp/override',
       agent: 'bash',
       resume: '',
+        initialResume: '',
       bypassPermissions: false,
       command: '',
       uiMode: 'native'

@@ -64,6 +64,13 @@ export interface DeleteProjectGroupOptions {
 export interface EditProjectSessionOptions extends AddProjectSessionOptions {
   currentName: string;
   projectCwd?: string;
+  /**
+   * Resume ids are captured asynchronously, so an edit form loaded before capture
+   * finishes carries an empty field. An omitted resume therefore PRESERVES the
+   * manifest value; only an explicit clearResume drops it (deliberate stale-id
+   * recovery from the edit modal).
+   */
+  clearResume?: boolean;
 }
 
 export interface DeleteProjectSessionOptions {
@@ -327,7 +334,7 @@ export function editSessionInManifest(manifest: DeskManifest, options: EditProje
     if (!group) {
       throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
     }
-    group.sessions = replaceSession(group.sessions, options.currentName, options.session);
+    group.sessions = replaceSession(group.sessions, options.currentName, options.session, undefined, options.clearResume);
     return { ...manifest, projects };
   }
 
@@ -336,7 +343,7 @@ export function editSessionInManifest(manifest: DeskManifest, options: EditProje
   if (!group) {
     throw new Error(`group ${options.groupId} does not exist`);
   }
-  group.sessions = replaceSession(group.sessions, options.currentName, options.session, options.projectCwd);
+  group.sessions = replaceSession(group.sessions, options.currentName, options.session, options.projectCwd, options.clearResume);
   return { ...manifest, groups, projects: manifest.projects };
 }
 
@@ -517,19 +524,31 @@ function cloneGroups(manifest: DeskManifest): DeskGroup[] {
   }));
 }
 
-function replaceSession(sessions: DeskSession[], currentName: string, nextSession: DeskSession, cwd?: string): DeskSession[] {
+function replaceSession(
+  sessions: DeskSession[],
+  currentName: string,
+  nextSession: DeskSession,
+  cwd?: string,
+  clearResume?: boolean
+): DeskSession[] {
   let replaced = false;
   const next = sessions.map((session) => {
     if (session.name !== currentName || (cwd && session.cwd && !cwdMatches(session.cwd, cwd))) {
       return session;
     }
     replaced = true;
+    const merged = { ...nextSession };
     // Preserve the pinned tmux session name unless the edit provides one:
     // dropping it would re-derive the name and orphan the running session.
-    if (nextSession.tmuxSession === undefined && session.tmuxSession !== undefined) {
-      return { ...nextSession, tmuxSession: session.tmuxSession };
+    if (merged.tmuxSession === undefined && session.tmuxSession !== undefined) {
+      merged.tmuxSession = session.tmuxSession;
     }
-    return nextSession;
+    // Preserve an async-captured resume id unless the edit explicitly clears it:
+    // a form loaded before capture finished must not silently erase the id.
+    if (merged.resume === undefined && session.resume !== undefined && clearResume !== true) {
+      merged.resume = session.resume;
+    }
+    return merged;
   });
   if (!replaced) {
     throw new Error(`session ${currentName} does not exist`);

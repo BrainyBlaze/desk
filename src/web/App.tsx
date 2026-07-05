@@ -222,6 +222,7 @@ interface SessionForm {
   cwd: string;
   agent: string;
   resume: string;
+  initialResume: string;
   bypassPermissions: boolean;
   command: string;
   uiMode: DeskSessionUiMode;
@@ -256,6 +257,7 @@ const emptySessionForm: SessionForm = {
   cwd: '',
   agent: 'codex',
   resume: '',
+  initialResume: '',
   bypassPermissions: true,
   command: '',
   uiMode: 'terminal'
@@ -1646,6 +1648,7 @@ export function App(): JSX.Element {
       cwd: session.spec.cwd,
       agent: session.spec.agent ?? 'codex',
       resume: session.spec.resume ?? '',
+      initialResume: session.spec.resume ?? '',
       bypassPermissions: session.spec.bypassPermissions ?? true,
       // Only custom commands belong in the editable command field; the derived
       // launch command must not be persisted back as a custom command.

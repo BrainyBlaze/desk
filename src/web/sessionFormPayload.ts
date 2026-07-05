@@ -8,6 +8,8 @@ export interface SessionFormPayloadInput {
   cwd: string;
   agent: string;
   resume: string;
+  /** Resume value at form load; distinguishes a deliberate clear from a stale-empty field. */
+  initialResume: string;
   bypassPermissions: boolean;
   command: string;
   uiMode: DeskSessionUiMode;
@@ -18,6 +20,7 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   cwd?: string;
   agent?: string;
   resume?: string;
+  clearResume?: boolean;
   bypassPermissions?: boolean;
   command?: string;
   uiMode?: DeskSessionUiMode;
@@ -31,11 +34,16 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
       command
     };
   }
+  const resume = form.resume.trim();
+  // Only an emptied field that previously SHOWED a value is a deliberate clear;
+  // an empty field that loaded empty may simply predate async resume capture.
+  const clearResume = resume === '' && form.initialResume.trim() !== '';
   return {
     name: form.name,
     cwd,
     agent: form.agent,
-    resume: form.resume.trim() || undefined,
+    resume: resume || undefined,
+    ...(clearResume ? { clearResume: true } : {}),
     bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined,
     ...(form.uiMode === 'native' && supportsNativeUi(form.agent, false) ? { uiMode: 'native' as const } : {})
   };
