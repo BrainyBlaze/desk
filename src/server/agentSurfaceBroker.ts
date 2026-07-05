@@ -300,6 +300,10 @@ export class AgentSurfaceBroker {
         session.host = null;
         session.idleSince = this.now();
         // Notify subscribed surfaces so they can render a disconnected state.
+        // Ring + state are NOT cleared here — they survive for same-pid reconnect
+        // (transient drop, lastSeq>0 path) and are reset only on new-pid hello.
+        // BUG-9 duplicate-rows is fixed at the codex history-mapper level (id mismatch
+        // between live optimistic rows and backfill rows), not here.
         this.broadcast(session, { type: 'exit', session: session.session, reason: 'crashed' });
       }
     }
