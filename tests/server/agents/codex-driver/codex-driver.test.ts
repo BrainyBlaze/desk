@@ -234,6 +234,8 @@ describe('createCodexDriver', () => {
       'turn/steer': () => ({})
     });
     const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
     await driver.start();
 
     await driver.inject('first', 'ui');
@@ -257,6 +259,11 @@ describe('createCodexDriver', () => {
           input: [{ type: 'text', text: 'second', text_elements: [] }]
         }
       }
+    ]);
+    expect(events).toEqual([
+      { kind: 'user-message', id: expect.any(String), text: 'first', source: 'ui' },
+      { kind: 'status', state: 'processing' },
+      { kind: 'user-message', id: expect.any(String), text: 'second', source: 'channel' }
     ]);
   });
 
@@ -529,6 +536,8 @@ describe('createCodexDriver', () => {
       }
     });
     const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
     await driver.start();
     transport.emit({
       id: 'cmd-approval',
@@ -572,12 +581,30 @@ describe('createCodexDriver', () => {
     await driver.respondPermission('cmd-approval', 'accept');
     await driver.respondPermission('file-approval', 'decline');
     await driver.respondPermission('question-approval', 'choice:0');
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'cmd-approval' } });
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'file-approval' } });
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'question-approval' } });
 
     expect(transport.calls.filter((call) => call.type === 'respond')).toEqual([
       { type: 'respond', requestId: 'cmd-approval', result: { decision: 'accept' } },
       { type: 'respond', requestId: 'file-approval', result: { decision: 'decline' } },
       { type: 'respond', requestId: 'question-approval', result: { answers: { choice: { answers: ['A'] } } } }
     ]);
+    expect(events.filter((event) => typeof event === 'object' && event !== null && (event as { kind?: unknown }).kind === 'permission-resolved')).toEqual([
+      { kind: 'permission-resolved', requestId: 'cmd-approval', optionId: 'accept', via: 'ui' },
+      { kind: 'permission-resolved', requestId: 'file-approval', optionId: 'decline', via: 'ui' },
+      { kind: 'permission-resolved', requestId: 'question-approval', optionId: 'choice:0', via: 'ui' }
+    ]);
+  });
+
+  it('reports command preconditions before start as non-retryable', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await expect(driver.inject('before start', 'ui')).rejects.toMatchObject({ code: 'adapter-unavailable', retryable: false });
+    await expect(driver.fetchHistory()).rejects.toMatchObject({ code: 'adapter-unavailable', retryable: false });
   });
 
   it('interrupts the active turn and closes transport on shutdown without further event emissions', async () => {

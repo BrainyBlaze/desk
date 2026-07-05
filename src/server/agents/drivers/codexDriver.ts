@@ -77,12 +77,14 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
 
   constructor(private readonly process: CodexAppServerProcess) {
     this.process.stdout.on('data', (chunk) => this.readStdout(String(chunk)));
+    this.process.stdin.on('error', (error) => {
+      this.fail(error instanceof Error ? error : new Error(String(error)));
+    });
     this.process.on('exit', (code, signal) => {
-      this.exited = true;
-      this.rejectPending(new Error(`codex app-server exited (${signal ?? code ?? 'unknown'})`));
+      this.fail(new Error(`codex app-server exited (${signal ?? code ?? 'unknown'})`));
     });
     this.process.on('error', (error) => {
-      this.rejectPending(error);
+      this.fail(error);
     });
   }
 
@@ -126,7 +128,16 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
       const line = this.buffer.slice(0, newline).trim();
       this.buffer = this.buffer.slice(newline + 1);
       if (line.length > 0) {
-        this.handleMessage(JSON.parse(line) as Record<string, unknown>);
+        let message: unknown;
+        try {
+          message = JSON.parse(line);
+        } catch (error) {
+          console.warn(
+            `Ignoring malformed codex app-server stdout line: ${error instanceof Error ? error.message : String(error)}`
+          );
+          continue;
+        }
+        this.handleMessage(message as Record<string, unknown>);
       }
     }
   }
@@ -162,6 +173,11 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
     }
     this.pending.clear();
   }
+
+  private fail(error: Error): void {
+    this.exited = true;
+    this.rejectPending(error);
+  }
 }
 
 class CodexDriver implements AgentDriver {
@@ -170,8 +186,10 @@ class CodexDriver implements AgentDriver {
   private activeTurnId: string | null = null;
   private pendingPermissions = 0;
   private readonly permissions = new Map<string, PendingPermission>();
+  private readonly uiPermissionResolutions = new Map<string, string>();
   private unsubscribeTransport: (() => void) | null = null;
   private stopped = false;
+  private userMessageCounter = 0;
 
   constructor(private readonly options: CodexDriverOptions & { transport: CodexAppServerTransport }) {
     this.unsubscribeTransport = this.options.transport.onEvent((event) => this.handleTransportEvent(event));
@@ -218,11 +236,13 @@ class CodexDriver implements AgentDriver {
     };
   }
 
-  async inject(text: string, _source: 'ui' | 'channel' | 'external'): Promise<void> {
+  async inject(text: string, source: 'ui' | 'channel' | 'external'): Promise<void> {
     if (!this.thread) {
-      throw driverCommandError('Cannot inject into Codex before start', 'adapter-unavailable', true);
+      throw driverCommandError('Cannot inject into Codex before start', 'adapter-unavailable', false);
     }
     const input = [{ type: 'text' as const, text, text_elements: [] }];
+    this.userMessageCounter += 1;
+    this.emit({ kind: 'user-message', id: `codex-user-${this.userMessageCounter}`, text, source });
     if (this.activeTurnId) {
       await this.options.transport.request('turn/steer', {
         threadId: this.thread.id,
@@ -243,6 +263,7 @@ class CodexDriver implements AgentDriver {
       throw driverCommandError(`Unknown Codex permission request ${requestId}`, 'unknown-permission', false);
     }
     await this.options.transport.respond(requestId, permission.responseFor(optionId));
+    this.uiPermissionResolutions.set(requestId, optionId);
   }
 
   async interrupt(): Promise<void> {
@@ -258,7 +279,7 @@ class CodexDriver implements AgentDriver {
   async fetchHistory(): Promise<DriverEvent[]> {
     const threadId = this.thread?.id ?? this.options.resumeId;
     if (!threadId) {
-      throw driverCommandError('Cannot fetch Codex history before start', 'adapter-unavailable', true);
+      throw driverCommandError('Cannot fetch Codex history before start', 'adapter-unavailable', false);
     }
     const response = (await this.options.transport.request('thread/read', { threadId, includeTurns: true })) as {
       thread?: Thread;
@@ -332,9 +353,17 @@ class CodexDriver implements AgentDriver {
       return;
     }
     if (event.method === 'serverRequest/resolved') {
+      const requestId = String(event.params.requestId);
+      const uiOptionId = this.uiPermissionResolutions.get(requestId);
       this.pendingPermissions = Math.max(0, this.pendingPermissions - 1);
-      this.permissions.delete(String(event.params.requestId));
-      this.emit({ kind: 'permission-resolved', requestId: String(event.params.requestId), optionId: 'resolved', via: 'agent' });
+      this.permissions.delete(requestId);
+      this.uiPermissionResolutions.delete(requestId);
+      this.emit({
+        kind: 'permission-resolved',
+        requestId,
+        optionId: uiOptionId ?? 'resolved',
+        via: uiOptionId === undefined ? 'agent' : 'ui'
+      });
       if (this.pendingPermissions === 0 && !this.activeTurnId) {
         this.emit({ kind: 'status', state: 'idle' });
       }

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createCodexAppServerTransport, type CodexAppServerProcess } from '../../../../src/server/agents/drivers/codexDriver.js';
 
 class FakeProcess extends EventEmitter implements CodexAppServerProcess {
@@ -49,6 +49,33 @@ describe('createCodexAppServerTransport', () => {
 
     expect(proc.writes[1]).toBe('{"id":"approval-1","result":{"decision":"decline"}}\n');
     await expect(request).rejects.toThrow('turn failed');
+  });
+
+  it('drops malformed stdout lines and continues parsing later JSONL responses', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const proc = new FakeProcess();
+      const transport = createCodexAppServerTransport({ process: proc });
+      const request = transport.request('thread/read', { threadId: 'thread-1' });
+
+      expect(() => proc.stdout.write('codex warning: version drift\n')).not.toThrow();
+      proc.stdout.write('{"id":"1","result":{"ok":true}}\n');
+
+      await expect(request).resolves.toEqual({ ok: true });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring malformed codex app-server stdout line'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('rejects pending requests when child stdin errors without throwing from the stream error event', async () => {
+    const proc = new FakeProcess();
+    const transport = createCodexAppServerTransport({ process: proc });
+    const request = transport.request('thread/read', { threadId: 'thread-1' });
+
+    expect(() => proc.stdin.emit('error', new Error('stdin gone'))).not.toThrow();
+
+    await expect(request).rejects.toThrow('stdin gone');
   });
 
   it('closes the child process and rejects pending requests on exit', async () => {
