@@ -22,7 +22,6 @@ describe('rowsFromSnapshot', () => {
     expect(model.rows.map((r) => r.kind)).toEqual([
       'user-message',
       'tool',
-      'tool',
       'assistant-message',
       'turn-complete'
     ]);
@@ -86,19 +85,28 @@ describe('applyEvent — idempotency', () => {
     expect(model.rows.filter((r) => r.kind === 'user-message')).toHaveLength(1);
   });
 
-  it('tool events are NOT deduped (start + end are distinct events by design)', () => {
+  it('groups tool start, output, and end into one disclosure row', () => {
     const model = initialRowModel();
-    applyEvent(model, ev(1, { kind: 'tool-start', toolUseId: 't1', name: 'Read', summary: 'foo' }));
-    applyEvent(model, ev(2, { kind: 'tool-end', toolUseId: 't1', status: 'ok', summary: 'done' }));
-    expect(model.rows.filter((r) => r.kind === 'tool')).toHaveLength(2);
+    applyEvent(model, ev(1, { kind: 'tool-start', toolUseId: 't1', name: 'Bash', summary: 'npm test', detail: '/repo' }));
+    applyEvent(model, ev(2, { kind: 'tool-output-delta', toolUseId: 't1', text: 'running\n' }));
+    applyEvent(model, ev(3, { kind: 'tool-end', toolUseId: 't1', status: 'ok', summary: 'exit 0', detail: 'done\n' }));
+    expect(model.rows.filter((r) => r.kind === 'tool')).toHaveLength(1);
+    expect(model.rows[0]).toMatchObject({
+      kind: 'tool',
+      toolUseId: 't1',
+      toolName: 'Bash',
+      text: 'npm test',
+      toolDetail: '/repo',
+      toolStatus: 'ok',
+      toolResult: 'done\n'
+    });
   });
 });
 
 describe('applyEvent — transient events', () => {
-  it('assistant-delta and tool-output-delta are no-ops on the row model (component handles delta accumulation)', () => {
+  it('assistant-delta is a no-op on the row model (component handles delta accumulation)', () => {
     const model = initialRowModel();
     applyEvent(model, ev(1, { kind: 'assistant-delta', turnId: 't1', text: 'chunk' }));
-    applyEvent(model, ev(2, { kind: 'tool-output-delta', toolUseId: 't1', text: 'out' }));
     expect(model.rows).toHaveLength(0);
   });
 });
