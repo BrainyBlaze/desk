@@ -286,10 +286,11 @@ export function buildAgentCommand(
     if (session.bypassPermissions) {
       args.push('--dangerously-skip-permissions');
     }
+    const baseCommand = args.join(' ');
     if (session.resume) {
-      args.push('--resume', shellQuote(session.resume));
+      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume, cwd)}`;
     }
-    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
+    return `cd ${shellQuote(cwd)} && ${env} ${baseCommand}`;
   }
   if (session.agent === 'codex') {
     const args = ['codex', CODEX_NOTIFICATION_FLAGS];
@@ -345,6 +346,22 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
 
 function agentEnvPrefix(agent: string | undefined, tmuxSession: string): string {
   return `DESK_TMUX_SESSION=${shellQuote(tmuxSession)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
+}
+
+function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {
+  const sdkTranscript = shellDoubleQuoteHomePath(`/.claude/projects/${claudeProjectDirName(cwd)}/${resume}.jsonl`);
+  return [
+    `desk_claude_session=${sdkTranscript}`,
+    `if [ -f "$desk_claude_session" ] && grep -q '"entrypoint":"sdk-cli"' "$desk_claude_session"; then touch "$desk_claude_session"; ${env} ${baseCommand} --continue; else ${env} ${baseCommand} --resume ${shellQuote(resume)}; fi`
+  ].join('; ');
+}
+
+function claudeProjectDirName(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function shellDoubleQuoteHomePath(pathAfterHome: string): string {
+  return `"$HOME${pathAfterHome.replace(/(["\\`$])/g, '\\$1')}"`;
 }
 
 function sessionHashSeed(session: DeskSession, cwd: string): string {

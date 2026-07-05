@@ -215,11 +215,16 @@ projects:
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
     expect(commands[0]).toBe("cd '/workspace/projects/sample' && exec bash");
     // Agent launches carry explicit Desk identity for globally installed hooks.
-    expect(commands[1]).toContain("cd '/workspace/projects/sample' && DESK_TMUX_SESSION='agentdesk-sample-main-claude-");
+    expect(commands[1]).toContain("cd '/workspace/projects/sample' && desk_claude_session=");
+    expect(commands[1]).toContain("DESK_TMUX_SESSION='agentdesk-sample-main-claude-");
     expect(commands[1]).toContain("DESK_AGENT='claude' claude");
     expect(commands[1]).toContain('--settings');
     expect(commands[1]).toContain('preferredNotifChannel');
     expect(commands[1]).toContain("--dangerously-skip-permissions --resume 'abc123'");
+    expect(commands[1]).toContain('desk_claude_session="$HOME/.claude/projects/-workspace-projects-sample/abc123.jsonl"');
+    expect(commands[1]).toContain('grep -q \'"entrypoint":"sdk-cli"\' "$desk_claude_session"');
+    expect(commands[1]).toContain('touch "$desk_claude_session"; DESK_TMUX_SESSION=');
+    expect(commands[1]).toContain('--continue');
     expect(commands[2]).toContain("DESK_AGENT='codex' codex -c tui.notifications=true");
     expect(commands[2]).toContain('tui.notification_method=bel');
     expect(commands[2]).toContain('--dangerously-bypass-approvals-and-sandbox');
