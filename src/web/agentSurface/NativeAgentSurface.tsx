@@ -41,7 +41,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   const surfaceId = useMemo(() => `${SURFACE_ID}-${session}-${revision}`, [session, revision]);
   const [model, setModel] = useState<RowModel>(initialRowModel);
   const [pendingAssistant, setPendingAssistant] = useState<Map<string, string>>(new Map());
-  const [bridgeDown, setBridgeDown] = useState(false);
+  const [pipelineLive, setPipelineLive] = useState(false);
   const [input, setInput] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -54,11 +54,12 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     setModel(initialRowModel());
     setPendingAssistant(new Map());
     setErrorMsg(null);
+    setPipelineLive(false);
 
     const handlers: SurfaceHandlers = {
       onSnapshot: ({ state, events }) => {
         if (disposed) return;
-        setModel(rowsFromSnapshot(events));
+        setModel(rowsFromSnapshot(events, state));
       },
       onEvent: (event) => {
         if (disposed) return;
@@ -90,7 +91,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
       },
       onConnectionChange: (up) => {
         if (disposed) return;
-        setBridgeDown(!up);
+        setPipelineLive(up);
       },
       onExit: () => {
         if (disposed) return;
@@ -122,12 +123,22 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     }
   }, [model.rows, pendingAssistant, model.pendingPermission]);
 
+  const canSend = pipelineLive && model.status === 'idle' && input.trim().length > 0;
+  const sendLabel = !pipelineLive
+    ? 'Connecting...'
+    : model.status === 'starting'
+      ? 'Starting...'
+      : model.status === 'idle'
+        ? 'Send'
+        : 'Wait...';
+
   const handleSend = (): void => {
+    if (!canSend) return;
     const text = input.trim();
-    if (!text) return;
-    setInput('');
     try {
       agentSurfaceClient.send(surfaceId, session, text);
+      setInput('');
+      setErrorMsg(null);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
@@ -194,7 +205,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           />
         ) : null}
         {errorMsg ? <div className="nativeAgentError">{errorMsg}</div> : null}
-        {bridgeDown ? (
+        {!pipelineLive && model.status !== 'starting' ? (
           <div className="nativeAgentBridgeDown">
             broker connection lost; reconnecting…
             <button type="button" className="nativeAgentRetryButton" onClick={handleForceReconnect}>
@@ -211,7 +222,9 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
-              handleSend();
+              if (canSend) {
+                handleSend();
+              }
             }
           }}
           placeholder="Send a message…"
@@ -221,9 +234,9 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           type="button"
           className="nativeAgentSend"
           onClick={handleSend}
-          disabled={!input.trim() || model.status === 'starting'}
+          disabled={!canSend}
         >
-          {model.status === 'starting' ? 'Starting…' : 'Send'}
+          {sendLabel}
         </button>
       </div>
     </div>
