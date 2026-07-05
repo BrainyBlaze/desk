@@ -1,4 +1,5 @@
-import { supportsBypassPermissions } from './sessionAgentOptions.js';
+import type { DeskSessionUiMode } from '../core/types.js';
+import { supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
 
 export interface SessionFormPayloadInput {
   projectId: string;
@@ -9,6 +10,7 @@ export interface SessionFormPayloadInput {
   resume: string;
   bypassPermissions: boolean;
   command: string;
+  uiMode: DeskSessionUiMode;
 }
 
 export function buildSessionPayload(form: SessionFormPayloadInput): {
@@ -18,6 +20,7 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   resume?: string;
   bypassPermissions?: boolean;
   command?: string;
+  uiMode?: DeskSessionUiMode;
 } {
   const cwd = form.cwd.trim() || undefined;
   const command = form.command.trim();
@@ -33,6 +36,7 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
     cwd,
     agent: form.agent,
     resume: form.resume.trim() || undefined,
-    bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined
+    bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined,
+    ...(form.uiMode === 'native' && supportsNativeUi(form.agent, false) ? { uiMode: 'native' as const } : {})
   };
 }

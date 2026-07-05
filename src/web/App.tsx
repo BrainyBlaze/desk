@@ -131,7 +131,8 @@ import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
 import { countSidebarAgents } from './sidebarCounts.js';
 import { buildSessionPayload } from './sessionFormPayload.js';
-import { SESSION_AGENT_OPTIONS, supportsBypassPermissions } from './sessionAgentOptions.js';
+import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
+import type { DeskSessionUiMode } from '../core/types.js';
 import { formatBytes, formatGpuMemory, formatPercent, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePoints } from './systemFormat.js';
 import type { DeskGroupView, DeskProjectView, DeskSessionView } from '../ui/model.js';
 import { buildWorkspaceState } from '../ui/workspace.js';
@@ -219,6 +220,7 @@ interface SessionForm {
   resume: string;
   bypassPermissions: boolean;
   command: string;
+  uiMode: DeskSessionUiMode;
 }
 
 interface PanelCell {
@@ -251,7 +253,8 @@ const emptySessionForm: SessionForm = {
   agent: 'codex',
   resume: '',
   bypassPermissions: true,
-  command: ''
+  command: '',
+  uiMode: 'terminal'
 };
 
 export function App(): JSX.Element {
@@ -1586,7 +1589,10 @@ export function App(): JSX.Element {
       agent: session.spec.agent ?? 'codex',
       resume: session.spec.resume ?? '',
       bypassPermissions: session.spec.bypassPermissions ?? true,
-      command: session.spec.command
+      // Only custom commands belong in the editable command field; the derived
+      // launch command must not be persisted back as a custom command.
+      command: session.spec.customCommand ? session.spec.command : '',
+      uiMode: session.spec.uiMode ?? 'terminal'
     });
     setModal(mode);
   }
@@ -5081,11 +5087,25 @@ function SessionFormView({
             onFormChange({
               ...form,
               agent,
-              bypassPermissions: supportsBypassPermissions(agent) ? form.bypassPermissions : false
+              bypassPermissions: supportsBypassPermissions(agent) ? form.bypassPermissions : false,
+              uiMode: supportsNativeUi(agent, form.command.trim() !== '') ? form.uiMode : 'terminal'
             })
           }
         />
       </label>
+      {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
+        <label>
+          <span>UI mode</span>
+          <DeskSelect
+            value={form.uiMode}
+            options={[
+              { value: 'terminal', label: 'terminal' },
+              { value: 'native', label: 'native' }
+            ]}
+            onChange={(uiMode) => onFormChange({ ...form, uiMode: uiMode === 'native' ? 'native' : 'terminal' })}
+          />
+        </label>
+      ) : null}
       {supportsBypassPermissions(form.agent) ? (
         <label className="checkLine">
           <input
@@ -5097,7 +5117,18 @@ function SessionFormView({
         </label>
       ) : null}
       <TextInput label="Resume id" value={form.resume} placeholder="codex resume id" onChange={(resume) => onFormChange({ ...form, resume })} />
-      <TextInput label="Command" value={form.command} placeholder="optional explicit command" onChange={(command) => onFormChange({ ...form, command })} />
+      <TextInput
+        label="Command"
+        value={form.command}
+        placeholder="optional explicit command"
+        onChange={(command) =>
+          onFormChange({
+            ...form,
+            command,
+            uiMode: supportsNativeUi(form.agent, command.trim() !== '') ? form.uiMode : 'terminal'
+          })
+        }
+      />
       <CommandButton icon={<Plus size={12} />} label="Store session" disabled={busy} submit />
     </form>
   );

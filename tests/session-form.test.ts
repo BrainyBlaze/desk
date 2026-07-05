@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { buildSessionPayload } from '../src/web/sessionFormPayload';
 
@@ -12,7 +13,8 @@ describe('session form payload', () => {
         agent: 'codex',
         resume: '',
         bypassPermissions: true,
-        command: ''
+        command: '',
+        uiMode: 'terminal'
       })
     ).toEqual({
       name: 'agent',
@@ -32,7 +34,8 @@ describe('session form payload', () => {
         agent: 'bash',
         resume: '',
         bypassPermissions: false,
-        command: 'bash'
+        command: 'bash',
+        uiMode: 'terminal'
       })
     ).toEqual({
       name: 'agent',
@@ -51,7 +54,8 @@ describe('session form payload', () => {
         agent: 'opencode',
         resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
         bypassPermissions: true,
-        command: ''
+        command: '',
+        uiMode: 'terminal'
       })
     ).toEqual({
       name: 'open',
@@ -60,5 +64,95 @@ describe('session form payload', () => {
       resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
       bypassPermissions: true
     });
+  });
+
+  it('carries native uiMode for SDK-backed agents', () => {
+    expect(
+      buildSessionPayload({
+        projectId: 'alpha',
+        groupId: 'main',
+        name: 'chat',
+        cwd: '/tmp/override',
+        agent: 'claude',
+        resume: '',
+        bypassPermissions: false,
+        command: '',
+        uiMode: 'native'
+      })
+    ).toEqual({
+      name: 'chat',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      bypassPermissions: false,
+      uiMode: 'native'
+    });
+  });
+
+  it('omits uiMode when terminal is selected so manifests stay lean', () => {
+    const payload = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'terminal'
+    });
+    expect('uiMode' in payload ? payload.uiMode : undefined).toBeUndefined();
+  });
+
+  it('drops native uiMode when an explicit command is present', () => {
+    expect(
+      buildSessionPayload({
+        projectId: 'alpha',
+        groupId: 'main',
+        name: 'custom',
+        cwd: '/tmp/override',
+        agent: 'claude',
+        resume: '',
+        bypassPermissions: false,
+        command: 'htop',
+        uiMode: 'native'
+      })
+    ).toEqual({
+      name: 'custom',
+      cwd: '/tmp/override',
+      command: 'htop'
+    });
+  });
+
+  it('drops native uiMode for agents without SDK support', () => {
+    const payload = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'shell',
+      cwd: '/tmp/override',
+      agent: 'bash',
+      resume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'native'
+    });
+    expect('uiMode' in payload ? payload.uiMode : undefined).toBeUndefined();
+  });
+});
+
+describe('session form modal source contract', () => {
+  const source = readFileSync(new URL('../src/web/App.tsx', import.meta.url), 'utf8');
+
+  it('renders a UI mode selector gated by supportsNativeUi', () => {
+    expect(source).toContain('supportsNativeUi(');
+    expect(source).toContain('UI mode');
+  });
+
+  it('tracks uiMode in the session form state with a terminal default', () => {
+    expect(source).toMatch(/uiMode: DeskSessionUiMode/);
+    expect(source).toMatch(/uiMode: 'terminal'/);
+  });
+
+  it('prefills the edit command field only for custom-command sessions', () => {
+    expect(source).toMatch(/command: session\.spec\.customCommand \? session\.spec\.command : ''/);
   });
 });
