@@ -60,8 +60,9 @@ export interface AssistantMessageText {
 
 /**
  * Assemble an AssistantMessageText into committed markdown by joining part texts in
- * first-seen order with a single newline separator. Single-part messages collapse to
- * that part's latest text.
+ * first-seen order with a double-newline separator (markdown paragraph break; matches
+ * composeAssistantMarkdown on the history path so live and backfilled commits render
+ * identically). Single-part messages collapse to that part's latest text.
  */
 export function assembleMarkdown(acc: AssistantMessageText | undefined): string {
   if (!acc || acc.partOrder.length === 0) {
@@ -74,7 +75,7 @@ export function assembleMarkdown(acc: AssistantMessageText | undefined): string 
       segments.push(text);
     }
   }
-  return segments.join('\n');
+  return segments.join('\n\n');
 }
 
 /**

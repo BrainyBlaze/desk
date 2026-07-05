@@ -310,7 +310,7 @@ describe('mapLiveEvent', () => {
     );
     // Commit: assemble final p1 + final p2 in first-seen order (p1 first, then p2)
     const assembled = assembleMarkdown(ctx.assistantTextByMessageId.get('m1'));
-    expect(assembled).toBe('a1+a2\nb1+b2');
+    expect(assembled).toBe('a1+a2\n\nb1+b2');
   });
   it('message.part.updated without delta → null but still accumulates', () => {
     const ctx = makeCtx();
