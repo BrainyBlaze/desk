@@ -80,7 +80,8 @@ import {
   type MoveProjectSessionOptions
 } from '../core/config.js';
 import { applyLspUiSettingsPatch, toClientSettings } from '../core/lspSettings.js';
-import { buildSessionSpecs, expandHome } from '../core/manifest.js';
+import { buildSessionSpecs, expandHome, sessionSupportsNativeUiMode } from '../core/manifest.js';
+import { createInFlightGuard, performUiModeSwitch, validateUiModeSwitch } from './uiModeSwitch.js';
 import { killSession, listTmuxSessions, listTmuxSessionsCached, loadDesk, planDeskUp, restartSession, runPlan, startSession } from '../core/runner.js';
 import { attentionTracker, notifyAgentSignal, setRaiseListener, startAttentionPolling, type AgentEventKind } from './attention.js';
 import {
@@ -122,6 +123,10 @@ import { normalizeAgentEventForApi } from './agentEvents.js';
 // server (src/server/standalone.ts), so all three run byte-identical request
 // handling. Optional `plugins` contribute middleware, routes, and a single
 // central WebSocket upgrade guard (see ./plugin.ts).
+// One switch per tmux session at a time; safe as an in-process guard because a
+// single desk server process owns tmux lifecycle for a manifest (spec §7).
+const uiModeSwitchGuard = createInFlightGuard();
+
 export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptions = {}): void {
   const plugins = options.plugins ?? [];
   const pluginRoutes: DeskRoute[] = plugins.flatMap((plugin) => plugin.routes ?? []);
@@ -736,6 +741,61 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             return;
           }
 
+          if (req.method === 'POST' && url.pathname === '/api/set-session-ui-mode') {
+            const body = await readJsonBody(req);
+            const tmuxSession = readRequiredString(body.tmuxSession, 'tmuxSession');
+            const uiMode = readRequiredString(body.uiMode, 'uiMode');
+            if (uiMode !== 'terminal' && uiMode !== 'native') {
+              sendJson(res, 400, { error: 'uiMode must be terminal or native', code: 'ui-mode-invalid' });
+              return;
+            }
+            const manifestPath = resolveManifestPath();
+            const manifest = readManifestFile(manifestPath);
+            const validated = validateUiModeSwitch(manifest, {
+              tmuxSession,
+              uiMode,
+              confirmDiscard: body.confirmDiscard === true,
+              homeDir: homedir()
+            });
+            if (!validated.ok) {
+              sendJson(res, validated.status, { error: validated.error, code: validated.code });
+              return;
+            }
+            if (validated.noop) {
+              sendJson(res, 200, buildDeskSnapshot());
+              return;
+            }
+            if (!uiModeSwitchGuard.begin(tmuxSession)) {
+              sendJson(res, 409, { error: `ui-mode switch already in progress for ${tmuxSession}`, code: 'switch-in-progress' });
+              return;
+            }
+            try {
+              let launch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
+              const result = await performUiModeSwitch(
+                { manifest, validated, homeDir: homedir() },
+                {
+                  write: (next) => writeManifestFile(manifestPath, next),
+                  prepare: (spec) => {
+                    managedAgentLsp.cleanup(spec.tmuxSession);
+                    launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
+                    return launch?.session ?? spec;
+                  },
+                  restart: (spec) => restartSession(spec),
+                  scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
+                }
+              );
+              if (!result.ok) {
+                launch?.cleanup();
+                sendJson(res, result.status, { error: result.error });
+                return;
+              }
+              sendJson(res, 200, buildDeskSnapshot());
+            } finally {
+              uiModeSwitchGuard.end(tmuxSession);
+            }
+            return;
+          }
+
           if (req.method === 'POST' && url.pathname === '/api/move-project-session') {
             const body = await readJsonBody(req);
             const manifestPath = resolveManifestPath();
@@ -921,6 +981,10 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
   }
 
   if (command) {
+    // Custom-command sessions are terminal-only; a native uiMode here is a client bug.
+    if (record.uiMode === 'native') {
+      throw new Error('session.uiMode native is not supported for custom-command sessions');
+    }
     session.command = command;
     return session;
   }
@@ -928,6 +992,18 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
   session.agent = readOptionalString(record.agent) ?? 'codex';
   session.resume = readOptionalString(record.resume);
   session.bypassPermissions = Boolean(record.bypassPermissions);
+  const uiMode = readOptionalString(record.uiMode);
+  if (uiMode !== undefined) {
+    if (uiMode !== 'terminal' && uiMode !== 'native') {
+      throw new Error('session.uiMode must be terminal or native');
+    }
+    if (uiMode === 'native') {
+      if (!sessionSupportsNativeUiMode({ agent: session.agent })) {
+        throw new Error(`session.uiMode native is not supported for agent ${session.agent}`);
+      }
+      session.uiMode = 'native';
+    }
+  }
   return session;
 }
 

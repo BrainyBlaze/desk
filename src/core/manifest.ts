@@ -158,11 +158,15 @@ function validateSessionUiMode(session: DeskSession): void {
   if (session.uiMode !== 'native') {
     throw new Error(`session ${session.name} has an unknown uiMode; expected terminal or native`);
   }
-  const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  const nativeCapableAgent = session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode';
-  if (hasCustomCommand || !nativeCapableAgent) {
+  if (!sessionSupportsNativeUiMode(session)) {
     throw new Error(`session ${session.name} cannot use native uiMode; only codex/claude/opencode agent sessions support it`);
   }
+}
+
+/** Native UI mode is limited to SDK-backed agents launched without a custom command. */
+export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' | 'command'>): boolean {
+  const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
+  return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
 }
 
 function buildProjectSessionSpec({
