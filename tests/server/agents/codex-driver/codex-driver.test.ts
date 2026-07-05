@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createCodexDriver,
   type CodexAppServerTransport,
@@ -150,6 +150,47 @@ describe('createCodexDriver', () => {
       '{"method":"initialized"}\n',
       '{"id":"2","method":"thread/start","params":{"cwd":"/repo","model":"gpt-5.5"}}\n'
     ]);
+  });
+
+  it('logs malformed app-server stdout at error level and keeps reading valid frames', async () => {
+    const proc = new FakeAppServerProcess();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const driver = createCodexDriver({ cwd: '/repo', transportOptions: { process: proc } });
+
+    try {
+      const start = driver.start();
+      await waitFor(() => proc.writes.length >= 1);
+      proc.stdout.write('not-json\n');
+      proc.stdout.write('{"id":"1","result":{"userAgent":"codex-cli 0.142.5","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"linux"}}\n');
+      await waitFor(() => proc.writes.length >= 3);
+      proc.stdout.write('{"method":"thread/started","params":{"thread":{"id":"thread-1","sessionId":"session-1","forkedFromId":null,"parentThreadId":null,"preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1,"updatedAt":1,"recencyAt":1,"status":{"type":"idle"},"path":null,"cwd":"/repo","cliVersion":"codex-cli 0.142.5","source":"codex-app-server","threadSource":null,"agentNickname":null,"agentRole":null,"gitInfo":null,"name":null,"turns":[]}}}\n');
+      proc.stdout.write('{"id":"2","result":{}}\n');
+
+      await expect(start).resolves.toEqual({
+        session: { agentSessionId: 'thread-1' },
+        status: { kind: 'status', state: 'idle' }
+      });
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('dropping malformed codex app-server stdout line'));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('logs codex app-server responses and messages that do not match the transport protocol', () => {
+    const proc = new FakeAppServerProcess();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const driver = createCodexDriver({ cwd: '/repo', transportOptions: { process: proc } });
+
+    try {
+      proc.stdout.write('{"id":"missing","result":{}}\n');
+      proc.stdout.write('{"unexpected":true}\n');
+
+      expect(driver).toBeDefined();
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('dropping codex app-server response for unknown request id missing'));
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('dropping unrecognized codex app-server message'));
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('initializes app-server, starts a fresh thread, and backfills committed history via thread/read', async () => {
@@ -754,6 +795,47 @@ describe('createCodexDriver', () => {
       { kind: 'permission-resolved', requestId: 'question-approval', optionId: 'resolved', via: 'agent' },
       { kind: 'status', state: 'idle' }
     ]);
+  });
+
+  it('logs and surfaces malformed codex question requests instead of rendering an empty prompt', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+
+    try {
+      await driver.start();
+      transport.emit({
+        id: 'bad-question',
+        method: 'item/tool/requestUserInput',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'question-item',
+          autoResolutionMs: null,
+          questions: []
+        }
+      });
+
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('malformed codex user-input request bad-question'));
+      expect(events).toContainEqual({
+        kind: 'permission-request',
+        requestId: 'bad-question',
+        variant: 'question',
+        title: 'Invalid question request',
+        detail: 'Codex sent a user-input request without a valid question payload.',
+        options: [{ id: 'dismiss', label: 'Dismiss', treatment: 'deny' }]
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('responds to command, file, and question permission requests by JSON-RPC request id', async () => {

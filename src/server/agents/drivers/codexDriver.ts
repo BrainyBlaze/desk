@@ -136,8 +136,8 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
         try {
           message = JSON.parse(line);
         } catch (error) {
-          console.warn(
-            `Ignoring malformed codex app-server stdout line: ${error instanceof Error ? error.message : String(error)}`
+          console.error(
+            `dropping malformed codex app-server stdout line: ${error instanceof Error ? error.message : String(error)}`
           );
           continue;
         }
@@ -150,6 +150,7 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
     if (typeof message.id === 'string' && !message.method) {
       const pending = this.pending.get(message.id);
       if (!pending) {
+        console.error(`dropping codex app-server response for unknown request id ${message.id}`);
         return;
       }
       this.pending.delete(message.id);
@@ -164,7 +165,9 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
       for (const handler of this.handlers) {
         handler(message as CodexTransportEvent);
       }
+      return;
     }
+    console.error(`dropping unrecognized codex app-server message: ${summarizeJson(message)}`);
   }
 
   private write(message: unknown): void {
@@ -189,6 +192,11 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
       handler({ method: 'transport/closed', params: { message: error.message } });
     }
   }
+}
+
+function summarizeJson(value: unknown): string {
+  const text = JSON.stringify(value);
+  return text.length > 500 ? `${text.slice(0, 500)}...` : text;
 }
 
 class CodexDriver implements AgentDriver {
@@ -588,32 +596,74 @@ function permissionFromServerRequest(event: CodexTransportEvent): PendingPermiss
     };
   }
   if (event.method === 'item/tool/requestUserInput') {
-    const question = event.params.questions[0];
+    const question = firstValidUserInputQuestion(event.params);
+    if (!question) {
+      const requestId = String(event.id);
+      console.error(`malformed codex user-input request ${requestId}: expected one question with id, prompt, and labeled options`);
+      return {
+        event: {
+          kind: 'permission-request',
+          requestId,
+          variant: 'question',
+          title: 'Invalid question request',
+          detail: 'Codex sent a user-input request without a valid question payload.',
+          options: [{ id: 'dismiss', label: 'Dismiss', treatment: 'deny' }]
+        },
+        responseFor: () => ({ answers: {} })
+      };
+    }
     return {
       event: {
         kind: 'permission-request',
         requestId: String(event.id),
         variant: 'question',
-        title: question?.header ?? 'Question',
-        ...(question?.question ? { detail: question.question } : {}),
-        options:
-          question?.options?.map((option, index) => ({
-            id: `${question.id}:${index}`,
-            label: option.label,
-            treatment: 'answer' as const
-          })) ?? []
+        title: question.header,
+        ...(question.question ? { detail: question.question } : {}),
+        options: question.options.map((option, index) => ({
+          id: `${question.id}:${index}`,
+          label: option.label,
+          treatment: 'answer' as const
+        }))
       },
       responseFor: (optionId: string) => {
-        if (!question) {
-          return { answers: {} };
-        }
         const [_questionId, indexText] = optionId.split(':');
-        const option = question.options?.[Number(indexText)];
-        return { answers: { [question.id]: { answers: [option?.label ?? optionId] } } };
+        const optionIndex = Number(indexText);
+        const option = Number.isInteger(optionIndex) ? question.options[optionIndex] : undefined;
+        if (!option) {
+          console.error(`invalid codex user-input response option ${optionId} for request ${String(event.id)}`);
+          return { answers: { [question.id]: { answers: [optionId] } } };
+        }
+        return { answers: { [question.id]: { answers: [option.label] } } };
       }
     };
   }
   return null;
+}
+
+function firstValidUserInputQuestion(params: unknown): { id: string; header: string; question: string; options: Array<{ label: string }> } | null {
+  const questions = (params as { questions?: unknown }).questions;
+  if (!Array.isArray(questions)) {
+    return null;
+  }
+  const question = questions[0];
+  if (!question || typeof question !== 'object') {
+    return null;
+  }
+  const candidate = question as { id?: unknown; header?: unknown; question?: unknown; options?: unknown };
+  if (typeof candidate.id !== 'string' || typeof candidate.header !== 'string' || typeof candidate.question !== 'string') {
+    return null;
+  }
+  if (!Array.isArray(candidate.options) || candidate.options.length === 0) {
+    return null;
+  }
+  const options: Array<{ label: string }> = [];
+  for (const option of candidate.options) {
+    if (!option || typeof option !== 'object' || typeof (option as { label?: unknown }).label !== 'string') {
+      return null;
+    }
+    options.push({ label: (option as { label: string }).label });
+  }
+  return { id: candidate.id, header: candidate.header, question: candidate.question, options };
 }
 
 function commandDecisionOptions(decisions: unknown): AgentSurfacePermissionOption[] {
