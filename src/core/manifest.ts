@@ -91,7 +91,8 @@ export function buildSessionSpecs(
         bypassPermissions: session.bypassPermissions,
         ...(hasCustomCommand ? { customCommand: true } : {}),
         tmuxSession,
-        command
+        command,
+        uiMode: session.uiMode ?? 'terminal'
       };
     })
   );
@@ -196,7 +197,8 @@ function buildProjectSessionSpec({
     bypassPermissions: session.bypassPermissions,
     ...(hasCustomCommand ? { customCommand: true } : {}),
     tmuxSession,
-    command
+    command,
+    uiMode: session.uiMode ?? 'terminal'
   };
 }
 

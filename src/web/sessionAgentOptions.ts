@@ -10,3 +10,7 @@ export const SESSION_AGENT_OPTIONS: DeskSelectOption[] = [
 export function supportsBypassPermissions(agent: string): boolean {
   return agent === 'codex' || agent === 'claude' || agent === 'opencode';
 }
+
+export function supportsNativeUi(agent: string, hasCustomCommand: boolean): boolean {
+  return !hasCustomCommand && (agent === 'codex' || agent === 'claude' || agent === 'opencode');
+}

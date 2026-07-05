@@ -37,7 +37,8 @@ groups:
         order: undefined,
         tmuxSession: 'agentdesk-group-1-alpha-00000000',
         command:
-          "cd '/workspace/projects/alpha' && DESK_TMUX_SESSION='agentdesk-group-1-alpha-00000000' DESK_AGENT='codex' codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume '00000000-0000-7000-8000-000000000001'"
+          "cd '/workspace/projects/alpha' && DESK_TMUX_SESSION='agentdesk-group-1-alpha-00000000' DESK_AGENT='codex' codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume '00000000-0000-7000-8000-000000000001'",
+        uiMode: 'terminal'
       },
       {
         groupId: 'group-1',
@@ -52,7 +53,8 @@ groups:
         order: undefined,
         tmuxSession: 'agentdesk-group-1-project-mu-00000000',
         command:
-          "cd '/workspace/projects/project-μ' && DESK_TMUX_SESSION='agentdesk-group-1-project-mu-00000000' DESK_AGENT='codex' codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume '00000000-0000-7000-8000-000000000002'"
+          "cd '/workspace/projects/project-μ' && DESK_TMUX_SESSION='agentdesk-group-1-project-mu-00000000' DESK_AGENT='codex' codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume '00000000-0000-7000-8000-000000000002'",
+        uiMode: 'terminal'
       }
     ]);
   });
