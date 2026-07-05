@@ -145,6 +145,10 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     }
   };
 
+  const handleForceReconnect = (): void => {
+    agentSurfaceClient.forceReconnect();
+  };
+
   const pendingAssistantEntries = useMemo(
     () => [...pendingAssistant.entries()].map(([turnId, text]) => ({ turnId, text })),
     [pendingAssistant]
@@ -188,7 +192,14 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           </div>
         ) : null}
         {errorMsg ? <div className="nativeAgentError">{errorMsg}</div> : null}
-        {bridgeDown ? <div className="nativeAgentBridgeDown">broker connection lost; reconnecting…</div> : null}
+        {bridgeDown ? (
+          <div className="nativeAgentBridgeDown">
+            broker connection lost; reconnecting…
+            <button type="button" className="nativeAgentRetryButton" onClick={handleForceReconnect}>
+              Retry now
+            </button>
+          </div>
+        ) : null}
       </div>
       <div className="nativeAgentComposer">
         <textarea

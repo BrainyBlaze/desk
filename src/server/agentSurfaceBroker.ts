@@ -504,11 +504,20 @@ export class AgentSurfaceBroker {
 
   private fanEventToSurfaces(session: AgentSurfaceSession, event: AgentSurfaceEvent): void {
     const transient = isTransient(event);
+    // Send at most ONE event frame per WebSocket per event (codex Phase 4 G2 fix).
+    // The browser-side client fans each frame to every subscribed surface for the session;
+    // sending one frame per surface would multiply deliveries (N surfaces × M ws surfaces
+    // per session = N*M arrivals per surface). Per-ws dedup collapses it to one arrival
+    // per surface, matching terminalBroker's output fanout shape.
     for (const [ws, surfaces] of session.clients.entries()) {
+      let shouldSend = false;
       for (const sub of surfaces.values()) {
-        if (transient && !sub.visible) {
-          continue;
+        if (!transient || sub.visible) {
+          shouldSend = true;
+          break;
         }
+      }
+      if (shouldSend) {
         this.send(ws, { type: 'event', session: session.session, event });
       }
     }

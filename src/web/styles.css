@@ -5519,3 +5519,19 @@ button.layoutBadge:hover:not(:disabled) {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+.nativeAgentRetryButton {
+  margin-left: 8px;
+  background: transparent;
+  border: 1px solid var(--desk-border, #2a3441);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.nativeAgentRetryButton:hover {
+  background: rgba(255, 255, 255, 0.08);
+}

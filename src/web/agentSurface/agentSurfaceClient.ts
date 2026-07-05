@@ -41,8 +41,22 @@ interface Surface {
 }
 
 const OPEN = 1;
-const RECONNECT_MAX = 5;
-const DEFAULT_BASE_URL = `ws://${location.host}`;
+// Unbounded backoff with a 30s cap — mirrors the host runner's post-hello policy
+// (claude Phase 4 G1 arbitration: symmetry with the server-restart persistence story
+// we proved live on the host side). The Retry button in NativeAgentSurface is the
+// operator escape hatch; we never silently give up.
+const RECONNECT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY;
+const RECONNECT_INITIAL_BACKOFF_MS = 250;
+const RECONNECT_MAX_BACKOFF_MS = 30_000;
+
+/** Resolve the WS base URL lazily so importing this module in a non-DOM context (tests)
+ *  does not crash on `location` being undefined. terminalBrokerClient uses the same trick. */
+function defaultBaseUrl(): string {
+  if (typeof location !== 'undefined') {
+    return `ws://${location.host}`;
+  }
+  return 'ws://127.0.0.1:5173';
+}
 
 export class AgentSurfaceClient {
   private socket: AgentSurfaceSocket | undefined;
@@ -55,7 +69,7 @@ export class AgentSurfaceClient {
 
   constructor(
     private readonly makeSocket: AgentSurfaceSocketFactory = defaultFactory,
-    private readonly baseUrl: string = DEFAULT_BASE_URL
+    private readonly baseUrl: string = defaultBaseUrl()
   ) {}
 
   subscribe(surfaceId: string, session: string, visible: boolean, handlers: SurfaceHandlers): void {
@@ -145,7 +159,14 @@ export class AgentSurfaceClient {
     this.connecting = true;
     const socket = this.makeSocket(`${this.baseUrl}/ws/agent-ui`);
     this.socket = socket;
+    // Capture socket locally; every handler checks `this.socket !== socket` so a stale
+    // socket that fires open/message/close AFTER forceReconnect or closeSocket replaced
+    // it cannot corrupt the current connection state (codex Phase 4 G1 fix, mirroring
+    // terminalBrokerClient's pattern at line ~205).
     socket.addEventListener('open', () => {
+      if (this.socket !== socket) {
+        return;
+      }
       this.connecting = false;
       this.connected = true;
       this.reconnectAttempts = 0;
@@ -154,18 +175,10 @@ export class AgentSurfaceClient {
         surface.handlers.onConnectionChange?.(true);
       }
     });
-    socket.addEventListener('close', () => {
-      this.connecting = false;
-      this.connected = false;
-      for (const surface of this.surfaces.values()) {
-        surface.handlers.onConnectionChange?.(false);
-      }
-      this.scheduleReconnect();
-    });
-    socket.addEventListener('error', () => {
-      // close handler will trigger reconnect
-    });
     socket.addEventListener('message', (event) => {
+      if (this.socket !== socket) {
+        return;
+      }
       if (!event.data) return;
       let frame: AgentUiServerFrame;
       try {
@@ -175,17 +188,35 @@ export class AgentSurfaceClient {
       }
       this.handleServerFrame(frame);
     });
+    socket.addEventListener('close', () => {
+      if (this.socket !== socket) {
+        return;
+      }
+      this.connecting = false;
+      this.connected = false;
+      this.socket = undefined;
+      for (const surface of this.surfaces.values()) {
+        surface.handlers.onConnectionChange?.(false);
+      }
+      this.scheduleReconnect();
+    });
+    socket.addEventListener('error', () => {
+      // 'close' follows and drives reconnect; nothing extra to do here.
+    });
   }
 
   private scheduleReconnect(): void {
     if (this.surfaces.size === 0) {
       return;
     }
-    if (this.reconnectAttempts >= RECONNECT_MAX) {
+    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
       return;
     }
     this.reconnectAttempts += 1;
-    const backoff = Math.min(5_000, 250 * 2 ** (this.reconnectAttempts - 1));
+    const backoff = Math.min(
+      RECONNECT_MAX_BACKOFF_MS,
+      RECONNECT_INITIAL_BACKOFF_MS * 2 ** Math.min(this.reconnectAttempts - 1, 20)
+    );
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.socket = undefined;
