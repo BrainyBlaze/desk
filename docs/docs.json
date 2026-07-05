@@ -44,7 +44,11 @@
           "guide-ide-workflow",
           "guide-git-review",
           "guide-projects-planning",
-          "guide-events-attention"
+          "guide-events-attention",
+          "playbook-research-consensus",
+          "playbook-supervised-development",
+          "playbook-multi-feature",
+          "playbook-multi-project"
         ]
       },
       {
