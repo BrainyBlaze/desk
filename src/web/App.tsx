@@ -100,6 +100,7 @@ import {
   type DeskFetchedUiSettings
 } from './api.js';
 import { TerminalSurface } from './TerminalSurface.js';
+import { NativeAgentSurface } from './agentSurface/NativeAgentSurface.js';
 import { StatusBar } from './StatusBar.js';
 import { publishStatus, type StatusSegment } from './statusSegments.js';
 import {
@@ -4805,12 +4806,20 @@ function TerminalCellImpl({
           <div className="terminalCellBody">
             {cell.activeSession ? (
               <>
-                <TerminalSurface
-                  session={cell.activeSession}
-                  revision={revision}
-                  focused={cell.activeSession.spec.tmuxSession === selectedTmux}
-                  onSelectionMenu={onSelectionMenu}
-                />
+                {cell.activeSession.spec.uiMode === 'native' ? (
+                  <NativeAgentSurface
+                    session={cell.activeSession.spec.tmuxSession}
+                    revision={revision}
+                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                  />
+                ) : (
+                  <TerminalSurface
+                    session={cell.activeSession}
+                    revision={revision}
+                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                    onSelectionMenu={onSelectionMenu}
+                  />
+                )}
                 {cell.activeSession.state !== 'running' ? (
                   <div className="cellMissingOverlay">
                     <span className="cellMissingTitle">SESSION MISSING</span>

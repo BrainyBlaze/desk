@@ -5293,3 +5293,229 @@ button.layoutBadge:hover:not(:disabled) {
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* ── Native UI surface (chat-style agent view) ──────────────────────────────── */
+
+.nativeAgentSurface {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: var(--desk-bg, #0b0e14);
+  color: var(--desk-fg, #e6edf3);
+  font-family: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.nativeAgentHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--desk-border, #1f2937);
+  background: var(--desk-bg-elev, #11161d);
+}
+
+.nativeAgentStatus {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.85;
+}
+
+.nativeAgentStatus.state-processing,
+.nativeAgentStatus.state-tool-executing {
+  color: #ffcc66;
+}
+
+.nativeAgentStatus.state-awaiting-permission {
+  color: #ff9966;
+}
+
+.nativeAgentStatus.state-error,
+.nativeAgentStatus.state-exited {
+  color: #ff6666;
+}
+
+.nativeAgentInterrupt {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--desk-border, #2a3441);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.nativeAgentInterrupt:hover {
+  background: var(--desk-bg-hover, #1b2330);
+}
+
+.nativeAgentFeed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nativeAgentRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.nativeAgentRow.user {
+  background: rgba(80, 160, 240, 0.08);
+  margin-left: 24px;
+}
+
+.nativeAgentRow.assistant {
+  background: rgba(120, 200, 120, 0.05);
+  margin-right: 24px;
+}
+
+.nativeAgentRow.assistant.pending {
+  opacity: 0.7;
+}
+
+.nativeAgentRow.tool {
+  font-size: 11px;
+  opacity: 0.7;
+  margin-left: 12px;
+  margin-right: 12px;
+}
+
+.nativeAgentRow.tool.status-error {
+  color: #ff8888;
+}
+
+.nativeAgentRow.tool.status-denied {
+  color: #ffaa66;
+}
+
+.nativeAgentRow.turnComplete,
+.nativeAgentRow.system {
+  font-size: 11px;
+  text-align: center;
+  opacity: 0.5;
+  padding: 2px 0;
+}
+
+.nativeAgentAuthor {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}
+
+.nativeAgentText {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.nativeAgentPermission {
+  border: 1px solid var(--desk-border, #2a3441);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  background: rgba(255, 153, 102, 0.06);
+}
+
+.nativeAgentPermissionTitle {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.nativeAgentPermissionOptions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.nativeAgentPermissionOption {
+  background: transparent;
+  border: 1px solid var(--desk-border, #2a3441);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.nativeAgentPermissionOption.treatment-allow,
+.nativeAgentPermissionOption.treatment-allow-session {
+  border-color: #66cc88;
+  color: #88ddaa;
+}
+
+.nativeAgentPermissionOption.treatment-deny {
+  border-color: #cc6666;
+  color: #dd8888;
+}
+
+.nativeAgentPermissionOption:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.nativeAgentError,
+.nativeAgentBridgeDown {
+  font-size: 11px;
+  padding: 4px 8px;
+  background: rgba(255, 102, 102, 0.1);
+  border-radius: 3px;
+  margin: 4px 0;
+}
+
+.nativeAgentBridgeDown {
+  background: rgba(255, 204, 102, 0.1);
+}
+
+.nativeAgentComposer {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--desk-border, #1f2937);
+  background: var(--desk-bg-elev, #11161d);
+}
+
+.nativeAgentInput {
+  flex: 1;
+  resize: none;
+  background: var(--desk-bg, #0b0e14);
+  border: 1px solid var(--desk-border, #2a3441);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 3px;
+  min-height: 32px;
+  max-height: 160px;
+}
+
+.nativeAgentInput:focus {
+  outline: none;
+  border-color: var(--desk-accent, #66aaff);
+}
+
+.nativeAgentSend {
+  background: var(--desk-accent, #66aaff);
+  border: none;
+  color: #0b0e14;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.nativeAgentSend:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
