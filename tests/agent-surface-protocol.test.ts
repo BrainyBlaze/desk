@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseAgentHostClientFrame,
+  parseAgentHostServerFrame,
   parseAgentSurfaceEvent,
   parseAgentUiClientFrame
 } from '../src/core/agentSurfaceProtocol';
@@ -199,6 +200,69 @@ describe('parseAgentSurfaceEvent', () => {
     expect(() => parseAgentSurfaceEvent({ ...base, kind: 'attention-hint', attention: 'vibes' })).toThrow();
     expect(() => parseAgentSurfaceEvent({ ...base, kind: 'history-boundary', backfillComplete: false })).toThrow();
     expect(() => parseAgentSurfaceEvent({ ...base, kind: 'agent-error', message: 'boom', fatal: 'yes' })).toThrow();
+  });
+});
+
+describe('parseAgentHostServerFrame', () => {
+  it('parses every server-to-host frame kind', () => {
+    expect(parseAgentHostServerFrame({ type: 'hello-ack', lastSeq: 0 })).toEqual({ type: 'hello-ack', lastSeq: 0 });
+    expect(parseAgentHostServerFrame({ type: 'hello-ack', lastSeq: 42 })).toEqual({ type: 'hello-ack', lastSeq: 42 });
+    expect(parseAgentHostServerFrame({ type: 'inject', requestId: 'r1', text: 'hi', source: 'channel' })).toEqual({
+      type: 'inject',
+      requestId: 'r1',
+      text: 'hi',
+      source: 'channel'
+    });
+    expect(
+      parseAgentHostServerFrame({
+        type: 'respond-permission',
+        requestId: 'r2',
+        permissionRequestId: 'perm-1',
+        optionId: 'allow'
+      })
+    ).toEqual({ type: 'respond-permission', requestId: 'r2', permissionRequestId: 'perm-1', optionId: 'allow' });
+    expect(
+      parseAgentHostServerFrame({
+        type: 'respond-permission',
+        requestId: 'r2',
+        permissionRequestId: 'perm-1',
+        optionId: 'other',
+        note: 'why'
+      })
+    ).toEqual({
+      type: 'respond-permission',
+      requestId: 'r2',
+      permissionRequestId: 'perm-1',
+      optionId: 'other',
+      note: 'why'
+    });
+    expect(parseAgentHostServerFrame({ type: 'interrupt', requestId: 'r3' })).toEqual({ type: 'interrupt', requestId: 'r3' });
+    expect(parseAgentHostServerFrame({ type: 'shutdown', requestId: 'r4' })).toEqual({ type: 'shutdown', requestId: 'r4' });
+  });
+
+  it('throws per malformed server-to-host frame', () => {
+    expect(() => parseAgentHostServerFrame(null)).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'reboot' })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'hello-ack' })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'hello-ack', lastSeq: -1 })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'hello-ack', lastSeq: 1.5 })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'inject', requestId: 'r1', text: 'hi', source: 'webhook' })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'inject', requestId: 'r1', source: 'ui' })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'inject', text: 'hi', source: 'ui' })).toThrow();
+    expect(() =>
+      parseAgentHostServerFrame({ type: 'respond-permission', requestId: 'r2', optionId: 'allow' })
+    ).toThrow();
+    expect(() =>
+      parseAgentHostServerFrame({
+        type: 'respond-permission',
+        requestId: 'r2',
+        permissionRequestId: 'perm-1',
+        optionId: 'allow',
+        note: 9
+      })
+    ).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'interrupt' })).toThrow();
+    expect(() => parseAgentHostServerFrame({ type: 'shutdown' })).toThrow();
   });
 });
 

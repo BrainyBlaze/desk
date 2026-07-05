@@ -280,6 +280,35 @@ export function parseAgentSurfaceEvent(value: unknown): AgentSurfaceEvent {
   }
 }
 
+export function parseAgentHostServerFrame(value: unknown): AgentHostServerFrame {
+  const frame = asRecord(value);
+  switch (frame.type) {
+    case 'hello-ack':
+      return { type: 'hello-ack', lastSeq: nonNegativeInt(frame.lastSeq) };
+    case 'inject':
+      return {
+        type: 'inject',
+        requestId: nonEmptyString(frame.requestId),
+        text: nonEmptyString(frame.text),
+        source: oneOf(frame.source, MESSAGE_SOURCES)
+      };
+    case 'respond-permission':
+      return {
+        type: 'respond-permission',
+        requestId: nonEmptyString(frame.requestId),
+        permissionRequestId: nonEmptyString(frame.permissionRequestId),
+        optionId: nonEmptyString(frame.optionId),
+        ...(frame.note === undefined ? {} : { note: str(frame.note) })
+      };
+    case 'interrupt':
+      return { type: 'interrupt', requestId: nonEmptyString(frame.requestId) };
+    case 'shutdown':
+      return { type: 'shutdown', requestId: nonEmptyString(frame.requestId) };
+    default:
+      throw invalidFrame();
+  }
+}
+
 export function parseAgentHostClientFrame(value: unknown): AgentHostClientFrame {
   const frame = asRecord(value);
   switch (frame.type) {
