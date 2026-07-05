@@ -92,7 +92,8 @@ export function buildSessionSpecs(
         ...(hasCustomCommand ? { customCommand: true } : {}),
         tmuxSession,
         command,
-        uiMode: session.uiMode ?? 'terminal'
+        uiMode: session.uiMode ?? 'terminal',
+        ...(session.model ? { model: session.model } : {})
       };
     })
   );
@@ -217,7 +218,8 @@ function buildProjectSessionSpec({
     ...(hasCustomCommand ? { customCommand: true } : {}),
     tmuxSession,
     command,
-    uiMode: session.uiMode ?? 'terminal'
+    uiMode: session.uiMode ?? 'terminal',
+    ...(session.model ? { model: session.model } : {})
   };
 }
 

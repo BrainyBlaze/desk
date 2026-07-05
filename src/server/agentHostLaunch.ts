@@ -23,6 +23,7 @@ export function rewriteNativeLaunchCommand(spec: SessionSpec, context: NativeLau
     `DESK_AGENT=${shellQuote(spec.agent ?? '')}`,
     ...(spec.resume ? [`DESK_AGENT_RESUME=${shellQuote(spec.resume)}`] : []),
     `DESK_AGENT_BYPASS=${shellQuote(spec.bypassPermissions ? '1' : '0')}`,
+    ...(spec.model ? [`DESK_AGENT_MODEL=${shellQuote(spec.model)}`] : []),
     `DESK_SERVER_URL=${shellQuote(context.serverUrl)}`,
     `DESK_AGENT_HOST_TOKEN=${shellQuote(context.token)}`
   ].join(' ');

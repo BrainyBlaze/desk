@@ -19,6 +19,21 @@ groups:
     expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'terminal']);
   });
 
+  it('carries an optional model through parse and spec derivation', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: chat
+        cwd: ~/projects/alpha
+        agent: opencode
+        uiMode: native
+        model: zai-coding-plan/glm-5.2
+`);
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    expect(spec.model).toBe('zai-coding-plan/glm-5.2');
+  });
+
   it('builds the static agent-host command for native sessions', () => {
     const manifest = parseDeskManifest(`
 groups:

@@ -129,6 +129,15 @@ describe('session form payload', () => {
     });
   });
 
+  it('passes a model only when one is set', () => {
+    const base = {
+      projectId: 'alpha', groupId: 'main', name: 'chat', cwd: '/tmp/x', agent: 'opencode',
+      resume: '', initialResume: '', bypassPermissions: false, command: '', uiMode: 'native' as const
+    };
+    expect(buildSessionPayload({ ...base, model: 'zai-coding-plan/glm-5.2' }).model).toBe('zai-coding-plan/glm-5.2');
+    expect('model' in buildSessionPayload({ ...base, model: '' })).toBe(false);
+  });
+
   it('marks a deliberate resume clear only when the field held a value at load', () => {
     const cleared = buildSessionPayload({
       projectId: 'alpha',

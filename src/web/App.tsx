@@ -226,6 +226,7 @@ interface SessionForm {
   bypassPermissions: boolean;
   command: string;
   uiMode: DeskSessionUiMode;
+  model: string;
 }
 
 interface PanelCell {
@@ -260,7 +261,8 @@ const emptySessionForm: SessionForm = {
   initialResume: '',
   bypassPermissions: true,
   command: '',
-  uiMode: 'terminal'
+  uiMode: 'terminal',
+  model: ''
 };
 
 export function App(): JSX.Element {
@@ -1658,7 +1660,8 @@ export function App(): JSX.Element {
       // Only custom commands belong in the editable command field; the derived
       // launch command must not be persisted back as a custom command.
       command: session.spec.customCommand ? session.spec.command : '',
-      uiMode: session.spec.uiMode ?? 'terminal'
+      uiMode: session.spec.uiMode ?? 'terminal',
+      model: session.spec.model ?? ''
     });
     setModal(mode);
   }
@@ -5205,6 +5208,14 @@ function SessionFormView({
             onChange={(uiMode) => onFormChange({ ...form, uiMode: uiMode === 'native' ? 'native' : 'terminal' })}
           />
         </label>
+      ) : null}
+      {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
+        <TextInput
+          label="Model"
+          value={form.model}
+          placeholder="provider default"
+          onChange={(model) => onFormChange({ ...form, model })}
+        />
       ) : null}
       {supportsBypassPermissions(form.agent) ? (
         <label className="checkLine">

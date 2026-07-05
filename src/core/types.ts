@@ -107,6 +107,8 @@ export interface DeskSession {
   tmuxSession?: string;
   order?: number;
   uiMode?: DeskSessionUiMode;
+  /** Runtime model override (provider/model string, driver-interpreted). NOT part of session identity. */
+  model?: string;
 }
 
 export interface SessionSpec {
@@ -128,6 +130,7 @@ export interface SessionSpec {
   tmuxSession: string;
   command: string;
   uiMode: DeskSessionUiMode;
+  model?: string;
 }
 
 export interface AgentMcpLaunchConfig {

@@ -47,6 +47,13 @@ describe('rewriteNativeLaunchCommand', () => {
     expect(rewritten.command).toContain("DESK_AGENT_BYPASS='1'");
   });
 
+  it('injects DESK_AGENT_MODEL only when the spec carries a model', () => {
+    const withModel = rewriteNativeLaunchCommand(spec({ model: 'zai-coding-plan/glm-5.2' }), ctx);
+    expect(withModel.command).toContain("DESK_AGENT_MODEL='zai-coding-plan/glm-5.2'");
+    const without = rewriteNativeLaunchCommand(spec(), ctx);
+    expect(without.command).not.toContain('DESK_AGENT_MODEL');
+  });
+
   it('shell-quotes hostile values', () => {
     const rewritten = rewriteNativeLaunchCommand(spec({ resume: "it's" }), { serverUrl: ctx.serverUrl, token: "to'k" });
     expect(rewritten.command).toContain("DESK_AGENT_RESUME='it'\\''s'");

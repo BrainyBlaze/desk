@@ -13,6 +13,8 @@ export interface SessionFormPayloadInput {
   bypassPermissions: boolean;
   command: string;
   uiMode: DeskSessionUiMode;
+  /** Optional runtime model override; empty string = provider default. */
+  model?: string;
 }
 
 export function buildSessionPayload(form: SessionFormPayloadInput): {
@@ -24,6 +26,7 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   bypassPermissions?: boolean;
   command?: string;
   uiMode?: DeskSessionUiMode;
+  model?: string;
 } {
   const cwd = form.cwd.trim() || undefined;
   const command = form.command.trim();
@@ -45,6 +48,7 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
     resume: resume || undefined,
     ...(clearResume ? { clearResume: true } : {}),
     bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined,
-    ...(form.uiMode === 'native' && supportsNativeUi(form.agent, false) ? { uiMode: 'native' as const } : {})
+    ...(form.uiMode === 'native' && supportsNativeUi(form.agent, false) ? { uiMode: 'native' as const } : {}),
+    ...((form.model ?? '').trim() ? { model: (form.model ?? '').trim() } : {})
   };
 }

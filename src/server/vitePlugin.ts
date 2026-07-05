@@ -1038,6 +1038,10 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
       session.uiMode = 'native';
     }
   }
+  const model = readOptionalString(record.model);
+  if (model) {
+    session.model = model;
+  }
   return session;
 }
 
