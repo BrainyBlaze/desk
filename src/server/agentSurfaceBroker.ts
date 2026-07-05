@@ -247,6 +247,9 @@ export class AgentSurfaceBroker {
       frame = parseAgentHostClientFrame(JSON.parse(String(raw)));
     } catch (err) {
       // Drop+audit per parse-or-throw contract; the host should not crash on this.
+      console.error(
+        `[agent-surface] dropping malformed host frame for ${session.session}: ${err instanceof Error ? err.message : String(err)}; raw=${String(raw).slice(0, 200)}`
+      );
       return;
     }
     switch (frame.type) {
