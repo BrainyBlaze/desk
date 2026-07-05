@@ -94,17 +94,19 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
       }
     };
 
-    agentSurfaceClient.subscribe(surfaceId, session, focused, handlers);
+    // All mounted cells in a group are physically visible (the keep-alive system only
+    // unmounts whole non-warm groups). Broker visibility must track physical visibility,
+    // not focus — otherwise non-focused native cells in a layout grid get no snapshot
+    // and appear empty. Focus is a UI affordance (status badge highlight, etc.) only.
+    agentSurfaceClient.subscribe(surfaceId, session, true, handlers);
     return () => {
       disposed = true;
       agentSurfaceClient.unsubscribe(surfaceId);
     };
-  }, [session, surfaceId, focused, revision]);
+  }, [session, surfaceId, revision]);
 
-  // Visibility follows focus changes.
-  useEffect(() => {
-    agentSurfaceClient.setVisibility(surfaceId, focused);
-  }, [surfaceId, focused]);
+  // Broker visibility stays true for mounted surfaces — the cell is physically on-screen.
+  // (The keep-alive unmount handles true-hidden cells by destroying the component entirely.)
 
   // Auto-scroll to bottom on new content (only when user is already near bottom).
   useEffect(() => {
