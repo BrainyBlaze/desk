@@ -209,6 +209,12 @@ export class AgentSurfaceBroker {
       session.ring = [];
       session.currentState = null;
       session.lastSeq = 0;
+      // A new pid is a fresh spawn — the agent may mint a NEW session id (e.g.
+      // confirmDiscard switch where the user explicitly accepted losing the prior
+      // conversation). Reset persistedResumeGuard so the next session-info event with
+      // the new id re-runs persistSessionResume; otherwise the manifest would keep the
+      // OLD id and the next restart would silently resume the pre-discard conversation.
+      session.persistedResumeGuard = false;
     }
     session.lastHostPid = frame.pid;
     const host: HostConnection = { ws, pid: frame.pid, agent: frame.agent, session: session.session };

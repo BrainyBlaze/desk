@@ -582,6 +582,70 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     host.close();
     harness.close();
   });
+
+  it('new pid resets persistedResumeGuard so a fresh session-info with a different valid id re-attempts persist (claude review residual-edge fix)', async () => {
+    // Track every persist attempt so the test verifies BROKER intent (the broker should
+    // re-attempt after a pid change), independent of whether the underlying sink allows
+    // overwrite. The production silent-loss fix for "manifest keeps old id" lives in the
+    // switch-flow (set-session-ui-mode should clear resume on confirmDiscard); the broker's
+    // job is to ATTEMPT the persist, which the guard reset enables.
+    const persistCalls: Array<{ tmuxSession: string; resume: string }> = [];
+    const httpServer = createServer();
+    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const port = (httpServer.address() as { port: number }).port;
+    const broker = new AgentSurfaceBroker({
+      resolveSecret: () => SECRET,
+      attention: NOOP_ATTENTION,
+      persistResume: (tmuxSession, resume) => {
+        persistCalls.push({ tmuxSession, resume });
+        return true; // tell the broker the persist succeeded so the guard engages per-call
+      }
+    });
+    const dispose = installAgentSurfaceBroker(httpServer as never, broker);
+    const harness = {
+      broker,
+      close: () => {
+        dispose();
+        httpServer.close();
+      },
+      connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
+    };
+
+    const host1 = await harness.connectHost();
+    host1.send({ type: 'hello', session: 'sess-re', agent: 'opencode', token: tokenFor('sess-re', 'opencode'), pid: 1 });
+    await host1.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    const idA = 'ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    host1.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: idA }) });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(persistCalls).toEqual([{ tmuxSession: 'sess-re', resume: idA }]);
+    host1.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // Same-pid reconnect keeps the guard — second session-info does NOT re-attempt.
+    const host1b = await harness.connectHost();
+    host1b.send({ type: 'hello', session: 'sess-re', agent: 'opencode', token: tokenFor('sess-re', 'opencode'), pid: 1 });
+    await host1b.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    host1b.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: idA }) });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(persistCalls).toHaveLength(1); // guard held — no re-attempt
+    host1b.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // New pid → guard resets → second session-info (different id) DOES re-attempt.
+    const host2 = await harness.connectHost();
+    host2.send({ type: 'hello', session: 'sess-re', agent: 'opencode', token: tokenFor('sess-re', 'opencode'), pid: 2 });
+    await host2.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    const idB = 'ses_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    host2.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: idB }) });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(persistCalls).toEqual([
+      { tmuxSession: 'sess-re', resume: idA },
+      { tmuxSession: 'sess-re', resume: idB }
+    ]);
+
+    host2.close();
+    harness.close();
+  });
 });
 
 import { beforeEach as _beforeEach, afterEach as _afterEach } from 'vitest';
