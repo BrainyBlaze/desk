@@ -971,8 +971,12 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
           }
 
           sendJson(res, 404, { error: `unknown API route ${url.pathname}` });
-        } catch {
-          sendJson(res, 500, { error: 'request failed' });
+        } catch (err) {
+          // Surface the real failure: log server-side with the route for operators,
+          // return the message so clients render an actionable error instead of a
+          // generic "request failed".
+          console.error(`[desk-api] ${req.method ?? ''} ${req.url ?? ''} failed:`, err);
+          sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
 }
