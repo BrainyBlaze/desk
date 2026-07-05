@@ -1,0 +1,113 @@
+/* Docs search modal (Pagefind). Injected into every page <head> at build time.
+   Theme-aware via [data-pf-theme]; colours track the docs theme. */
+
+html.pf-lock {
+  overflow: hidden;
+}
+
+.pf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10vh 16px 24px;
+  background: rgba(4, 9, 20, 0.55);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+
+  --pagefind-ui-scale: 0.9;
+  --pagefind-ui-font: inherit;
+  --pagefind-ui-border-radius: 10px;
+  --pagefind-ui-primary: #0e7490;
+}
+
+.pf-overlay.pf-open {
+  display: flex;
+}
+
+.pf-panel {
+  width: 100%;
+  max-width: 640px;
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--pf-bg, #ffffff);
+  color: var(--pf-text, #0b1220);
+  border: 1px solid var(--pf-border, rgba(0, 0, 0, 0.1));
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.pf-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--pf-border, rgba(0, 0, 0, 0.08));
+}
+
+.pf-hint {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.pf-close {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--pf-border, rgba(0, 0, 0, 0.15));
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.pf-close:hover {
+  opacity: 1;
+}
+
+#pf-search {
+  padding: 12px 14px 16px;
+  overflow-y: auto;
+}
+
+.pf-error {
+  padding: 8px 4px;
+  opacity: 0.7;
+  font-size: 14px;
+}
+
+.pf-overlay[data-pf-theme="light"] {
+  --pf-bg: #ffffff;
+  --pf-text: #0b1220;
+  --pf-border: rgba(0, 0, 0, 0.1);
+  --pagefind-ui-primary: #0e7490;
+  --pagefind-ui-text: #0b1220;
+  --pagefind-ui-background: #ffffff;
+  --pagefind-ui-border: rgba(0, 0, 0, 0.12);
+  --pagefind-ui-tag: #eef2f4;
+}
+
+.pf-overlay[data-pf-theme="dark"] {
+  --pf-bg: #0b1220;
+  --pf-text: #e6eef5;
+  --pf-border: rgba(255, 255, 255, 0.12);
+  --pagefind-ui-primary: #22d3ee;
+  --pagefind-ui-text: #e6eef5;
+  --pagefind-ui-background: #0b1220;
+  --pagefind-ui-border: rgba(255, 255, 255, 0.14);
+  --pagefind-ui-tag: #14263a;
+}
+
+@media (max-width: 640px) {
+  .pf-overlay {
+    padding: 6vh 10px 16px;
+  }
+}

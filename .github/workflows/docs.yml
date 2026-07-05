@@ -73,6 +73,25 @@ jobs:
           # each source page as a root-level `<route>.md` matching the fetch.
           cp docs/*.md _site/
           echo "markdown companions: $(ls _site/*.md | wc -l)"
+      - name: Build self-hosted search index (Pagefind)
+        run: |
+          # Mintlify search is a hosted (cloud) feature; the static export has no
+          # search backend, so its bar shows "Login into CLI to enable search".
+          # Build a Pagefind index from the exported HTML and inject a small shim
+          # (kept in scripts/, not docs/, so mint never inlines it) that
+          # intercepts the search trigger and opens a Pagefind modal instead.
+          #
+          # Mark the article body first so only page content is indexed, not the
+          # nav/sidebar chrome repeated on every page. This must run before pagefind.
+          find _site -name '*.html' -exec sed -i \
+            's#<main id="content-container">#<main id="content-container" data-pagefind-body>#g' {} +
+          npx -y pagefind@1.5.2 --site _site
+          mkdir -p _site/search-shim
+          cp scripts/docs/search-shim/search.js scripts/docs/search-shim/search.css _site/search-shim/
+          # Inject the shim CSS/JS into every page <head>.
+          find _site -name '*.html' -exec sed -i \
+            's#</head>#<link rel="stylesheet" href="/search-shim/search.css"><script defer src="/search-shim/search.js"></script></head>#' {} +
+          echo "pagefind index: $([ -f _site/pagefind/pagefind-entry.json ] && echo ok); shim on $(grep -rl 'search-shim/search.js' _site --include='*.html' | wc -l) pages"
       - name: Deploy to docs.desk.cloud
         env:
           DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}
