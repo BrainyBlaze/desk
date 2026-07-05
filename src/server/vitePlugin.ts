@@ -98,6 +98,7 @@ import { executeKillSwitch } from './killSwitch.js';
 import { buildDeskSnapshot } from './snapshot.js';
 import { getSystemSnapshot, startSystemSampling } from './systemSampler.js';
 import { createDefaultTerminalBroker, installTerminalBroker } from './terminalBroker.js';
+import { AgentSurfaceBroker, installAgentSurfaceBroker } from './agentSurfaceBroker.js';
 import {
   captureTmuxPane,
   installTerminalBridge,
@@ -136,6 +137,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
     .map((plugin) => plugin.upgradeGuard)
     .filter((guard): guard is NonNullable<typeof guard> => typeof guard === 'function');
   const terminalBroker = createDefaultTerminalBroker();
+  const agentSurfaceBroker = new AgentSurfaceBroker();
   const lspDiagnosticsStore = new LspDiagnosticsStore();
   const lspManager = new LspManager(undefined, { diagnosticsStore: lspDiagnosticsStore });
   const lspRequestPlanner = {
@@ -237,6 +239,10 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
         installTerminalBridge(server.httpServer);
         const disposeTerminalBroker = installTerminalBroker(server.httpServer, terminalBroker);
         server.httpServer.once('close', disposeTerminalBroker);
+        // Native UI mode broker — Phase 2 server core. Two WS endpoints:
+        // /ws/agent-host (adapter hosts) and /ws/agent-ui (browser surfaces).
+        const disposeAgentSurfaceBroker = installAgentSurfaceBroker(server.httpServer, agentSurfaceBroker);
+        server.httpServer.once('close', disposeAgentSurfaceBroker);
         // installFsWatchBridge only listens for 'upgrade'; vite's union type
         // includes Http2SecureServer which is structurally fine for that.
         installFsWatchBridge(server.httpServer as NodeHttpServer);
