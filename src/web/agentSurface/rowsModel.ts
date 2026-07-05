@@ -148,8 +148,17 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
         model.rows.push({ kind: 'turn-complete', id: `tc-${event.turnId}`, turnId: event.turnId, text: '' });
       }
       return;
-    case 'attention-hint':
+    case 'attention-hint': {
+      // BUG-14 fix: attention-hint (esp. session-status from retry) MUST be visible.
+      // Previously skipped → opencode retried provider errors silently → user saw nothing.
+      const label = event.attention === 'session-status' ? 'status' : event.attention;
+      model.rows.push({
+        kind: 'system',
+        id: `hint-${event.seq}`,
+        text: event.detail ? `${label}: ${event.detail}` : label
+      });
       return;
+    }
     case 'history-boundary':
       return;
     case 'agent-error':

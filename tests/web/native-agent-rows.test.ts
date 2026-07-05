@@ -133,13 +133,17 @@ describe('applyEvent — error + system rows', () => {
 });
 
 describe('applyEvent — no-op kinds', () => {
-  it('session-info, attention-hint, history-boundary do not affect the row model', () => {
+  it('session-info and history-boundary do not affect the row model; attention-hint renders as system row (BUG-14)', () => {
     const model = initialRowModel();
     applyEvent(model, ev(1, { kind: 'session-info', agentSessionId: 'ses_x', model: 'gpt' }));
-    applyEvent(model, ev(2, { kind: 'attention-hint', attention: 'session-status' }));
     applyEvent(model, ev(3, { kind: 'history-boundary', backfillComplete: true }));
     expect(model.rows).toHaveLength(0);
     expect(model.status).toBe('starting');
     expect(model.pendingPermission).toBeNull();
+
+    // BUG-14: attention-hint MUST be visible (was silently skipped → user saw nothing during retry)
+    applyEvent(model, ev(2, { kind: 'attention-hint', attention: 'session-status', detail: 'retry: rate limited' }));
+    expect(model.rows).toHaveLength(1);
+    expect(model.rows[0]).toMatchObject({ kind: 'system', text: 'status: retry: rate limited' });
   });
 });
