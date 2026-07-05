@@ -65,7 +65,7 @@ function makeMockBackend(opts: {
     async abort(id) {
       calls.push({ method: 'abort', args: [id] });
     },
-    async promptAsync(id, parts) {
+    async promptAsync(id, parts, _model?: string) {
       calls.push({ method: 'promptAsync', args: [id, parts] });
     },
     async respondPermission(id, permissionId, response: PermissionResponse) {

@@ -55,7 +55,7 @@ export interface OpencodeBackend {
   /** Abort the in-flight turn for this session. */
   abort(sessionId: string): Promise<void>;
   /** Send a message asynchronously (no wait for response). */
-  promptAsync(sessionId: string, parts: TextPartInput[]): Promise<void>;
+  promptAsync(sessionId: string, parts: TextPartInput[], model?: string): Promise<void>;
   /** Respond to a permission request. */
   respondPermission(sessionId: string, permissionId: string, response: PermissionResponse): Promise<void>;
   /** List messages (info + parts) for committed-history backfill. */
@@ -81,6 +81,10 @@ export interface OpencodeDriverOptions {
   resumeId?: string;
   /** Bypass permissions flag from DESK_AGENT_BYPASS. */
   bypass: boolean;
+  /** Model override (providerID/modelID format, e.g. "zai-coding-plan/glm-5.2").
+   * When set, every prompt_async carries this model so the agent doesn't fall back
+   * to the provider default (which the user's plan may not include — BUG-15). */
+  model?: string;
   /** Inject the backend (test seam); omit to use the live SDK-backed factory. */
   backend?: OpencodeBackend;
   /** Title for freshly-created sessions. */
@@ -187,7 +191,7 @@ export class OpencodeDriver implements AgentDriver {
       throw notStartedError();
     }
     const parts: TextPartInput[] = [{ type: 'text', text }];
-    await this.backend.promptAsync(this.sessionId, parts);
+    await this.backend.promptAsync(this.sessionId, parts, this.opts.model);
     // Optimistic local user-message emission. Generate an id we'll recognize when opencode
     // echoes the message back via message.updated so we can swallow the echo (R2 fix:
     // keyed on the locally-generated id rather than a queue position).
@@ -395,8 +399,15 @@ export async function createLiveBackend(opts: { cwd: string; bypass: boolean }):
     async abort(sessionId: string): Promise<void> {
       await client.session.abort({ path: { id: sessionId } });
     },
-    async promptAsync(sessionId: string, parts: TextPartInput[]): Promise<void> {
-      await client.session.promptAsync({ path: { id: sessionId }, body: { parts } });
+    async promptAsync(sessionId: string, parts: TextPartInput[], model?: string): Promise<void> {
+      const body: Record<string, unknown> = { parts };
+      if (model) {
+        const [providerID, modelID] = model.split('/');
+        if (providerID && modelID) {
+          body.model = { providerID, modelID };
+        }
+      }
+      await client.session.promptAsync({ path: { id: sessionId }, body: body as never });
     },
     async respondPermission(sessionId: string, permissionId: string, response: PermissionResponse): Promise<void> {
       await client.postSessionIdPermissionsPermissionId({
