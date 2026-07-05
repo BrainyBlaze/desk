@@ -283,9 +283,20 @@ class CodexDriver implements AgentDriver {
       this.emit({ kind: 'assistant-delta', turnId: event.params.turnId, text: event.params.delta });
       return;
     }
+    if (event.method === 'item/started') {
+      const payload = itemStartedEvent(event.params.item);
+      if (payload) {
+        this.emit(payload);
+      }
+      return;
+    }
+    if (event.method === 'item/commandExecution/outputDelta') {
+      this.emit({ kind: 'tool-output-delta', toolUseId: event.params.itemId, text: event.params.delta });
+      return;
+    }
     if (event.method === 'item/completed') {
-      const payload = itemToHistoryEvent({ id: event.params.turnId } as Turn, event.params.item);
-      if (payload?.kind === 'assistant-message') {
+      const payload = itemCompletedEvent({ id: event.params.turnId } as Turn, event.params.item);
+      if (payload) {
         this.emit(payload);
       }
       return;
@@ -372,9 +383,38 @@ function itemToHistoryEvent(turn: Turn, item: ThreadItem): DriverEvent | null {
       return { kind: 'user-message', id: item.id, text: userInputText(item.content), source: 'external' };
     case 'agentMessage':
       return { kind: 'assistant-message', id: item.id, turnId: turn.id, markdown: item.text };
+    case 'commandExecution':
+      return commandToolEnd(item);
     default:
       return null;
   }
+}
+
+function itemStartedEvent(item: ThreadItem): DriverEvent | null {
+  if (item.type === 'commandExecution') {
+    return { kind: 'tool-start', toolUseId: item.id, name: 'command', summary: item.command, detail: item.cwd };
+  }
+  return null;
+}
+
+function itemCompletedEvent(turn: Turn, item: ThreadItem): DriverEvent | null {
+  if (item.type === 'agentMessage') {
+    return { kind: 'assistant-message', id: item.id, turnId: turn.id, markdown: item.text };
+  }
+  if (item.type === 'commandExecution') {
+    return commandToolEnd(item);
+  }
+  return null;
+}
+
+function commandToolEnd(item: Extract<ThreadItem, { type: 'commandExecution' }>): DriverEvent {
+  return {
+    kind: 'tool-end',
+    toolUseId: item.id,
+    status: item.status === 'completed' ? 'ok' : item.status === 'declined' ? 'denied' : 'error',
+    summary: item.exitCode === null ? item.status : `exit ${item.exitCode}`,
+    ...(item.aggregatedOutput ? { detail: item.aggregatedOutput } : {})
+  };
 }
 
 function userInputText(inputs: UserInput[]): string {

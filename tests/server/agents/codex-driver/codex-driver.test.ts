@@ -268,6 +268,68 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('normalizes command execution item lifecycle into tool events', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+
+    transport.emit({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'commandExecution',
+          id: 'cmd-1',
+          command: 'npm test',
+          cwd: '/repo',
+          processId: null,
+          source: 'user',
+          status: 'inProgress',
+          commandActions: [],
+          aggregatedOutput: '',
+          exitCode: null,
+          durationMs: null
+        }
+      }
+    });
+    transport.emit({ method: 'item/commandExecution/outputDelta', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'cmd-1', delta: 'ok\n' } });
+    transport.emit({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'commandExecution',
+          id: 'cmd-1',
+          command: 'npm test',
+          cwd: '/repo',
+          processId: null,
+          source: 'user',
+          status: 'completed',
+          commandActions: [],
+          aggregatedOutput: 'ok\n',
+          exitCode: 0,
+          durationMs: 12
+        }
+      }
+    });
+
+    expect(events).toEqual([
+      { kind: 'tool-start', toolUseId: 'cmd-1', name: 'command', summary: 'npm test', detail: '/repo' },
+      { kind: 'tool-output-delta', toolUseId: 'cmd-1', text: 'ok\n' },
+      { kind: 'tool-end', toolUseId: 'cmd-1', status: 'ok', summary: 'exit 0', detail: 'ok\n' }
+    ]);
+  });
+
   it('normalizes command, file, question permission requests and resolved notifications', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
