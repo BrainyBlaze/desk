@@ -194,6 +194,30 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('treats an unmaterialized fresh thread as empty history', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/read': () => {
+        throw new Error('thread thread-1 is not materialized yet; includeTurns is unavailable before first user message');
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await driver.start();
+    await expect(driver.fetchHistory()).resolves.toEqual([]);
+
+    expect(transport.calls).toMatchObject([
+      { type: 'request', method: 'initialize' },
+      { type: 'notify', method: 'initialized' },
+      { type: 'request', method: 'thread/start' },
+      { type: 'request', method: 'thread/read', params: { threadId: 'thread-1', includeTurns: true } }
+    ]);
+  });
+
   it('accepts fresh thread metadata returned by thread/start without a thread/started notification', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),

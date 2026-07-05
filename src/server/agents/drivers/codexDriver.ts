@@ -296,9 +296,17 @@ class CodexDriver implements AgentDriver {
     if (!threadId) {
       throw driverCommandError('Cannot fetch Codex history before start', 'adapter-unavailable', false);
     }
-    const response = (await this.options.transport.request('thread/read', { threadId, includeTurns: true })) as {
-      thread?: Thread;
-    };
+    let response: { thread?: Thread };
+    try {
+      response = (await this.options.transport.request('thread/read', { threadId, includeTurns: true })) as {
+        thread?: Thread;
+      };
+    } catch (error) {
+      if (isUnmaterializedThreadReadError(error)) {
+        return [];
+      }
+      throw error;
+    }
     return flattenThreadHistory(response.thread);
   }
 
@@ -421,6 +429,13 @@ function threadFromRpcResult(result: unknown): Thread | null {
     return null;
   }
   return thread as Thread;
+}
+
+function isUnmaterializedThreadReadError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.includes('is not materialized yet') && error.message.includes('includeTurns is unavailable before first user message');
 }
 
 function threadStatusToDriverStatus(thread: Thread): DriverStatusEvent {
