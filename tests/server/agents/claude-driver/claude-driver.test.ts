@@ -103,11 +103,12 @@ const INIT: ClaudeSdkMessage = {
 
 async function startedHarness(options: Parameters<typeof harness>[0] = {}): Promise<Harness> {
   const h = harness(options);
-  const pending = h.driver.start();
-  h.query.push(INIT);
-  const result = await pending;
-  expect(result.session).toEqual({ agentSessionId: 'sess-uuid-1', model: 'claude-fable-5' });
+  // start() must resolve WITHOUT any message from the CLI: in streaming-input
+  // mode init only arrives after the first user message (live-probe finding).
+  const result = await h.driver.start();
   expect(result.status).toMatchObject({ kind: 'status', state: 'idle' });
+  h.query.push(INIT);
+  await drain();
   return h;
 }
 
@@ -117,13 +118,31 @@ async function drain(): Promise<void> {
 }
 
 describe('claudeDriver start', () => {
-  it('resolves with session info from the init message and passes resume + parity options', async () => {
-    const h = await startedHarness({ resume: 'sess-uuid-1' });
+  it('resolves before init, passes resume + parity options, and surfaces init as session-info', async () => {
+    const h = harness({ resume: 'sess-uuid-1' });
+    const result = await h.driver.start();
+    expect(result.session).toEqual({ agentSessionId: 'sess-uuid-1' });
+    expect(result.status).toMatchObject({ kind: 'status', state: 'idle' });
+
     const config = h.config();
     expect(config.options.resume).toBe('sess-uuid-1');
     expect(config.options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' });
     expect(config.options.cwd).toBe('/tmp/project');
     expect(typeof config.options.canUseTool).toBe('function');
+
+    h.query.push(INIT);
+    await drain();
+    expect(h.events.find((event) => event.kind === 'session-info')).toMatchObject({
+      kind: 'session-info',
+      agentSessionId: 'sess-uuid-1',
+      model: 'claude-fable-5'
+    });
+  });
+
+  it('throws when the session ends immediately after launch', async () => {
+    const h = harness();
+    h.query.finish();
+    await expect(h.driver.start()).rejects.toThrow(/ended immediately/);
   });
 });
 

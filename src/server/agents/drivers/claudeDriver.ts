@@ -164,13 +164,13 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
     });
   }
 
-  async function consume(active: ClaudeQueryHandle, onInit: (message: ClaudeSdkMessage) => void): Promise<void> {
+  async function consume(active: ClaudeQueryHandle): Promise<void> {
     try {
       for await (const message of active) {
         if (isShutdown) {
           return;
         }
-        routeMessage(message, onInit);
+        routeMessage(message);
       }
     } catch (error) {
       if (!isShutdown) {
@@ -179,14 +179,21 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
     }
   }
 
-  function routeMessage(message: ClaudeSdkMessage, onInit: (message: ClaudeSdkMessage) => void): void {
+  function routeMessage(message: ClaudeSdkMessage): void {
     switch (message.type) {
       case 'system': {
         if (message.subtype === 'init') {
           if (typeof message.session_id === 'string' && message.session_id !== '') {
             sessionId = message.session_id;
           }
-          onInit(message);
+          // In streaming-input mode the CLI emits init only after the first
+          // user message, so this arrives mid-session — surface it as a
+          // session-info event rather than blocking start() on it.
+          emit({
+            kind: 'session-info',
+            ...(sessionId ? { agentSessionId: sessionId } : {}),
+            ...(typeof message.model === 'string' ? { model: message.model } : {})
+          });
         }
         return;
       }
@@ -276,12 +283,6 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
 
     async start() {
       assertLive('start');
-      let resolveInit!: (message: ClaudeSdkMessage) => void;
-      let rejectInit!: (error: Error) => void;
-      const init = new Promise<ClaudeSdkMessage>((resolve, reject) => {
-        resolveInit = resolve;
-        rejectInit = reject;
-      });
       const queryOptions: ClaudeQueryOptions = {
         cwd: options.cwd,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
@@ -292,15 +293,23 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
           : { canUseTool })
       };
       handle = sdk.query({ prompt: input, options: queryOptions });
-      const loop = consume(handle, resolveInit).then(() =>
-        rejectInit(new Error('claude session ended before initialization'))
-      );
-      void loop;
-      const initMessage = await init;
+      // Streaming-input deadlock guard (live-probe finding): the CLI emits its
+      // init message only AFTER the first user message arrives on the input
+      // stream, so start() must NOT wait for init. Return the best-known
+      // session identity now; init surfaces later as a session-info event.
+      // A short settle race still catches instant spawn failures so start()
+      // honors its throw-on-unrecoverable contract.
+      const loopEnded = consume(handle).then(() => 'ended' as const);
+      const settled = await Promise.race([
+        loopEnded,
+        new Promise<'ok'>((resolve) => setTimeout(() => resolve('ok'), 300))
+      ]);
+      if (settled === 'ended' && !isShutdown) {
+        throw new Error('claude session ended immediately after launch; see pane log for details');
+      }
       return {
         session: {
-          ...(sessionId ? { agentSessionId: sessionId } : {}),
-          ...(typeof initMessage.model === 'string' ? { model: initMessage.model } : {})
+          ...(sessionId ? { agentSessionId: sessionId } : {})
         },
         status: { kind: 'status', state: 'idle' }
       };
