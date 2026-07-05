@@ -16,7 +16,10 @@ export interface AgentRow {
 
 export interface PendingPermission {
   requestId: string;
+  variant: 'tool' | 'command' | 'file-edit' | 'question';
   title: string;
+  detail?: string;
+  diff?: { path: string; before?: string; after?: string };
   options: Array<{ id: string; label: string; treatment: string }>;
 }
 
@@ -86,7 +89,10 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
     case 'permission-request':
       model.pendingPermission = {
         requestId: event.requestId,
+        variant: event.variant,
         title: event.title,
+        ...(event.detail ? { detail: event.detail } : {}),
+        ...(event.diff ? { diff: event.diff } : {}),
         options: event.options.map((o) => ({ id: o.id, label: o.label, treatment: o.treatment }))
       };
       return;

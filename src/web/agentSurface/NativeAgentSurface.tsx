@@ -175,21 +175,17 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           </div>
         ))}
         {model.pendingPermission ? (
-          <div className="nativeAgentPermission">
-            <div className="nativeAgentPermissionTitle">{model.pendingPermission.title}</div>
-            <div className="nativeAgentPermissionOptions">
-              {model.pendingPermission.options.map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  className={`nativeAgentPermissionOption treatment-${opt.treatment}`}
-                  onClick={() => handlePermission(opt.id)}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          <PermissionCard
+            permission={model.pendingPermission}
+            onRespond={(optionId, note) => {
+              try {
+                agentSurfaceClient.respondPermission(surfaceId, session, model.pendingPermission!.requestId, optionId, note);
+                setModel((prev) => ({ ...prev, pendingPermission: null }));
+              } catch (err) {
+                setErrorMsg(err instanceof Error ? err.message : String(err));
+              }
+            }}
+          />
         ) : null}
         {errorMsg ? <div className="nativeAgentError">{errorMsg}</div> : null}
         {bridgeDown ? (
@@ -249,12 +245,7 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
         </div>
       );
     case 'tool':
-      return (
-        <div className={`nativeAgentRow tool status-${row.toolStatus ?? 'ok'}`}>
-          <span className="nativeAgentAuthor">{row.toolUseId}</span>
-          <span className="nativeAgentText">{row.text}</span>
-        </div>
-      );
+      return <ToolCallBlock row={row} />;
     case 'turn-complete':
       return <div className="nativeAgentRow turnComplete">— turn complete —</div>;
     case 'system':
@@ -262,4 +253,87 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
     default:
       return <div className="nativeAgentRow unknown">{row.text}</div>;
   }
+}
+
+function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
+  const icon = row.toolStatus === 'ok' ? '✓' : row.toolStatus === 'error' ? '✗' : row.toolStatus === 'denied' ? '⊘' : '⟳';
+  const statusClass = row.toolStatus ?? 'running';
+  return (
+    <div className={`nativeAgentRow tool status-${statusClass}`}>
+      <span className="nativeAgentToolIcon">{icon}</span>
+      <span className="nativeAgentToolName">{row.toolUseId ?? 'tool'}</span>
+      <span className="nativeAgentToolSummary">{row.text}</span>
+    </div>
+  );
+}
+
+function PermissionCard({
+  permission,
+  onRespond
+}: {
+  permission: PendingPermission;
+  onRespond: (optionId: string, note?: string) => void;
+}): JSX.Element {
+  const [customText, setCustomText] = useState('');
+  const hasCustom = permission.options.some((o) => o.treatment === 'custom');
+
+  const handleCustom = (): void => {
+    const opt = permission.options.find((o) => o.treatment === 'custom');
+    if (opt) {
+      onRespond(opt.id, customText.trim() || undefined);
+    }
+  };
+
+  return (
+    <div className={`nativeAgentPermission variant-${permission.variant}`}>
+      <div className="nativeAgentPermissionTitle">{permission.title}</div>
+      {permission.detail ? (
+        <div className="nativeAgentPermissionDetail">{permission.detail}</div>
+      ) : null}
+      {permission.diff ? (
+        <div className="nativeAgentPermissionDiff">
+          <div className="nativeAgentPermissionDiffPath">{permission.diff.path}</div>
+          {permission.diff.before ? (
+            <pre className="nativeAgentPermissionDiffBefore">{permission.diff.before}</pre>
+          ) : null}
+          {permission.diff.after ? (
+            <pre className="nativeAgentPermissionDiffAfter">{permission.diff.after}</pre>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="nativeAgentPermissionOptions">
+        {permission.options
+          .filter((opt) => opt.treatment !== 'custom')
+          .map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              className={`nativeAgentPermissionOption treatment-${opt.treatment}`}
+              onClick={() => onRespond(opt.id)}
+            >
+              {opt.label}
+            </button>
+          ))}
+      </div>
+      {hasCustom ? (
+        <div className="nativeAgentPermissionCustom">
+          <input
+            type="text"
+            className="nativeAgentPermissionCustomInput"
+            value={customText}
+            onChange={(e) => setCustomText(e.target.value)}
+            placeholder="Type a custom answer…"
+          />
+          <button
+            type="button"
+            className="nativeAgentPermissionOption treatment-custom"
+            onClick={handleCustom}
+            disabled={!customText.trim()}
+          >
+            Submit
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
 }

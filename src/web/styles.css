@@ -5535,3 +5535,93 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentRetryButton:hover {
   background: rgba(255, 255, 255, 0.08);
 }
+
+/* Tool call block */
+.nativeAgentToolIcon {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  margin-right: 4px;
+}
+
+.nativeAgentRow.tool.status-ok .nativeAgentToolIcon { color: #66cc88; }
+.nativeAgentRow.tool.status-error .nativeAgentToolIcon { color: #cc6666; }
+.nativeAgentRow.tool.status-denied .nativeAgentToolIcon { color: #cc8844; }
+.nativeAgentRow.tool.status-running .nativeAgentToolIcon { color: #66aaff; animation: nativeAgentSpin 1s linear infinite; }
+
+@keyframes nativeAgentSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.nativeAgentToolName {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  margin-right: 4px;
+}
+
+.nativeAgentToolSummary {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* Permission card improvements */
+.nativeAgentPermission.variant-file-edit { border-color: #66aaff; background: rgba(102, 170, 255, 0.06); }
+.nativeAgentPermission.variant-command { border-color: #ffaa66; background: rgba(255, 170, 102, 0.06); }
+.nativeAgentPermission.variant-question { border-color: #cc88ff; background: rgba(204, 136, 255, 0.06); }
+
+.nativeAgentPermissionDetail {
+  font-size: 11px;
+  opacity: 0.7;
+  margin-bottom: 6px;
+}
+
+.nativeAgentPermissionDiff {
+  margin: 6px 0;
+  font-size: 11px;
+  border: 1px solid var(--desk-border, #1f2937);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.nativeAgentPermissionDiffPath {
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.nativeAgentPermissionDiffBefore,
+.nativeAgentPermissionDiffAfter {
+  margin: 0;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.nativeAgentPermissionDiffBefore { background: rgba(255, 102, 102, 0.08); color: #ff9999; }
+.nativeAgentPermissionDiffAfter { background: rgba(102, 204, 136, 0.08); color: #99ddaa; }
+
+.nativeAgentPermissionCustom {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.nativeAgentPermissionCustomInput {
+  flex: 1;
+  background: var(--desk-bg, #0b0e14);
+  border: 1px solid var(--desk-border, #2a3441);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+
+.nativeAgentPermissionCustomInput:focus {
+  outline: none;
+  border-color: var(--desk-accent, #66aaff);
+}
