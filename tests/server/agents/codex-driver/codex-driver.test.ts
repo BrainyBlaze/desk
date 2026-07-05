@@ -261,9 +261,52 @@ describe('createCodexDriver', () => {
       }
     ]);
     expect(events).toEqual([
-      { kind: 'user-message', id: expect.any(String), text: 'first', source: 'ui' },
       { kind: 'status', state: 'processing' },
+      { kind: 'user-message', id: expect.any(String), text: 'first', source: 'ui' },
       { kind: 'user-message', id: expect.any(String), text: 'second', source: 'channel' }
+    ]);
+  });
+
+  it('does not emit a local user row when Codex rejects the inject dispatch', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'turn/start': () => {
+        throw new Error('dispatch failed');
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+
+    await expect(driver.inject('lost message', 'channel')).rejects.toThrow('dispatch failed');
+
+    expect(events).toEqual([]);
+  });
+
+  it('emits a non-fatal agent error and exited status when the app-server transport closes unexpectedly', async () => {
+    const proc = new FakeAppServerProcess();
+    const driver = createCodexDriver({ cwd: '/repo', transportOptions: { process: proc } });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+
+    const start = driver.start();
+    await waitFor(() => proc.writes.length >= 1);
+    proc.stdout.write('{"id":"1","result":{"userAgent":"codex-cli 0.142.5","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"linux"}}\n');
+    await waitFor(() => proc.writes.length >= 3);
+    proc.stdout.write('{"method":"thread/started","params":{"thread":{"id":"thread-1","sessionId":"session-1","forkedFromId":null,"parentThreadId":null,"preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1,"updatedAt":1,"recencyAt":1,"status":{"type":"idle"},"path":null,"cwd":"/repo","cliVersion":"codex-cli 0.142.5","source":"codex-app-server","threadSource":null,"agentNickname":null,"agentRole":null,"gitInfo":null,"name":null,"turns":[]}}}\n');
+    proc.stdout.write('{"id":"2","result":{}}\n');
+    await start;
+
+    proc.emit('exit', 1, null);
+
+    expect(events).toEqual([
+      { kind: 'agent-error', fatal: false, message: 'codex app-server exited (1)' },
+      { kind: 'status', state: 'exited' }
     ]);
   });
 

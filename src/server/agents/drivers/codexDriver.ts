@@ -9,7 +9,9 @@ import type { Turn } from '../codexBindings/v2/Turn.js';
 import type { UserInput } from '../codexBindings/v2/UserInput.js';
 import { driverCommandError, type AgentDriver, type DriverEvent, type DriverStatusEvent } from '../host/driver.js';
 
-export type CodexTransportEvent = ServerNotification | ServerRequest;
+type CodexTransportClosedEvent = { method: 'transport/closed'; params: { message: string } };
+
+export type CodexTransportEvent = ServerNotification | ServerRequest | CodexTransportClosedEvent;
 
 export interface CodexAppServerTransport {
   onEvent(handler: (event: CodexTransportEvent) => void): () => void;
@@ -74,6 +76,7 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
     }
   >();
   private exited = false;
+  private failed = false;
 
   constructor(private readonly process: CodexAppServerProcess) {
     this.process.stdout.on('data', (chunk) => this.readStdout(String(chunk)));
@@ -115,6 +118,7 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
 
   async close(): Promise<void> {
     this.handlers.clear();
+    this.exited = true;
     this.process.kill('SIGTERM');
   }
 
@@ -175,8 +179,15 @@ class JsonlCodexAppServerTransport implements CodexAppServerTransport {
   }
 
   private fail(error: Error): void {
+    if (this.failed) {
+      return;
+    }
+    this.failed = true;
     this.exited = true;
     this.rejectPending(error);
+    for (const handler of this.handlers) {
+      handler({ method: 'transport/closed', params: { message: error.message } });
+    }
   }
 }
 
@@ -241,20 +252,24 @@ class CodexDriver implements AgentDriver {
       throw driverCommandError('Cannot inject into Codex before start', 'adapter-unavailable', false);
     }
     const input = [{ type: 'text' as const, text, text_elements: [] }];
-    this.userMessageCounter += 1;
-    this.emit({ kind: 'user-message', id: `codex-user-${this.userMessageCounter}`, text, source });
+    const emitLocalUserMessage = () => {
+      this.userMessageCounter += 1;
+      this.emit({ kind: 'user-message', id: `codex-user-${this.userMessageCounter}`, text, source });
+    };
     if (this.activeTurnId) {
       await this.options.transport.request('turn/steer', {
         threadId: this.thread.id,
         expectedTurnId: this.activeTurnId,
         input
       });
+      emitLocalUserMessage();
       return;
     }
     await this.options.transport.request('turn/start', {
       threadId: this.thread.id,
       input
     });
+    emitLocalUserMessage();
   }
 
   async respondPermission(requestId: string, optionId: string, _note?: string): Promise<void> {
@@ -297,6 +312,18 @@ class CodexDriver implements AgentDriver {
 
   private handleTransportEvent(event: CodexTransportEvent): void {
     if (this.stopped) {
+      return;
+    }
+    if (event.method === 'transport/closed') {
+      if (!this.thread) {
+        return;
+      }
+      this.activeTurnId = null;
+      this.pendingPermissions = 0;
+      this.permissions.clear();
+      this.uiPermissionResolutions.clear();
+      this.emit({ kind: 'agent-error', fatal: false, message: event.params.message });
+      this.emit({ kind: 'status', state: 'exited' });
       return;
     }
     const currentThreadId = this.thread?.id ?? this.options.resumeId;
