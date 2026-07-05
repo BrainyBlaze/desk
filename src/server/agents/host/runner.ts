@@ -108,6 +108,7 @@ export class AgentHost {
 
   private driver: AgentDriver | null = null;
   private driverReady = false;
+  private commandQueue: Array<{ requestId: string; kind: 'inject' | 'respond-permission' | 'interrupt' | 'shutdown'; fn: () => Promise<void> }> = [];
   private socket: WebSocketLike | null = null;
   private seqCounter = 0;
   private committedRing: AgentSurfaceEvent[] = [];
@@ -281,25 +282,25 @@ export class AgentHost {
         await this.handleHelloAck(frame.lastSeq);
         return;
       case 'inject':
-        await this.runCommand(frame.requestId, 'inject', () => {
-          if (!this.driver || !this.driverReady) throw notStartedError();
+        await this.routeCommand(frame.requestId, 'inject', () => {
+          if (!this.driver) throw notStartedError();
           return this.driver.inject(frame.text, frame.source);
         });
         return;
       case 'respond-permission':
-        await this.runCommand(frame.requestId, 'respond-permission', () => {
-          if (!this.driver || !this.driverReady) throw notStartedError();
+        await this.routeCommand(frame.requestId, 'respond-permission', () => {
+          if (!this.driver) throw notStartedError();
           return this.driver.respondPermission(frame.permissionRequestId, frame.optionId, frame.note);
         });
         return;
       case 'interrupt':
-        await this.runCommand(frame.requestId, 'interrupt', () => {
-          if (!this.driver || !this.driverReady) throw notStartedError();
+        await this.routeCommand(frame.requestId, 'interrupt', () => {
+          if (!this.driver) throw notStartedError();
           return this.driver.interrupt();
         });
         return;
       case 'shutdown':
-        await this.runCommand(frame.requestId, 'shutdown', async () => {
+        await this.routeCommand(frame.requestId, 'shutdown', async () => {
           this.shuttingDown = true;
           if (this.driver) {
             await this.driver.shutdown();
@@ -358,6 +359,17 @@ export class AgentHost {
       if (needsInitialBackfill) {
         await this.runBackfill({ skipStatus: true });
       }
+      // Drain any commands queued during startup (BUG-12 fix).
+      await this.drainCommandQueue();
+      // BUG-13 fix: delayed re-backfill ~2s after start. Agent-native stores (claude JSONL,
+      // codex rollout, opencode SQLite) may not have flushed the latest messages when the
+      // initial backfill reads them. A second pass catches late writes; the surface's
+      // id-dedupe makes replays harmless.
+      setTimeout(() => {
+        if (!this.shuttingDown && this.driver) {
+          this.runBackfill({ skipStatus: true }).catch(() => undefined);
+        }
+      }, 2000).unref?.();
       this.logger.info('driver started');
     } catch (err) {
       this.logger.error(`driver.start failed: ${describeError(err)}`);
@@ -428,6 +440,37 @@ export class AgentHost {
 
   private emitDriverEvent(payload: AgentSurfaceEventPayload): void {
     this.handleDriverEvent(payload);
+  }
+
+  /**
+   * Route a command to execution or queue. If the driver is ready, execute immediately
+   * via runCommand. If not ready (driver.start() hasn't resolved yet), buffer the command
+   * — it'll be replayed in order once the driver starts. This replaces the earlier
+   * reject-gate approach (BUG-12 fix): Send stays enabled, messages queue properly,
+   * no silent message loss during startup.
+   */
+  private async routeCommand(
+    requestId: string,
+    kind: 'inject' | 'respond-permission' | 'interrupt' | 'shutdown',
+    fn: () => Promise<void>
+  ): Promise<void> {
+    if (this.driverReady) {
+      await this.runCommand(requestId, kind, fn);
+      return;
+    }
+    // Driver not ready — queue for replay after start() resolves.
+    this.logger.info(`queuing ${kind} command (requestId=${requestId}) until driver ready`);
+    this.commandQueue.push({ requestId, kind, fn });
+  }
+
+  /** Drain queued commands in order after driver start() resolves. */
+  private async drainCommandQueue(): Promise<void> {
+    const queue = this.commandQueue;
+    this.commandQueue = [];
+    for (const cmd of queue) {
+      this.logger.info(`replaying queued ${cmd.kind} command (requestId=${cmd.requestId})`);
+      await this.runCommand(cmd.requestId, cmd.kind, cmd.fn);
+    }
   }
 
   private async runCommand(
