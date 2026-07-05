@@ -56,8 +56,16 @@ export interface OpencodeBackend {
   respondPermission(sessionId: string, permissionId: string, response: PermissionResponse): Promise<void>;
   /** List messages (info + parts) for committed-history backfill. */
   listMessages(sessionId: string): Promise<Array<{ info: Message; parts: Part[] }>>;
-  /** Subscribe to the global /event stream for this server. Returns unsubscribe. */
-  subscribeEvents(handler: (event: Event) => void): Promise<() => void>;
+  /**
+   * Subscribe to the global /event stream for this server. Returns unsubscribe.
+   * `onEnd` fires when the stream terminates (server crash, network drop, clean close)
+   * so the driver can emit a non-fatal agent-error instead of sitting idle forever
+   * (Phase 4 debt item: driver stream-end hardening, applies to all 3 drivers).
+   */
+  subscribeEvents(
+    handler: (event: Event) => void,
+    onEnd?: (error?: Error) => void
+  ): Promise<() => void>;
   /** Close the backend (kills the spawned opencode serve if owned). */
   close(): Promise<void>;
 }
@@ -148,8 +156,13 @@ export class OpencodeDriver implements AgentDriver {
     this.sessionId = sessionId;
 
     // Subscribe to events before reading status so a turn that starts between the two
-    // calls still surfaces as a processing event.
-    this.unsubscribeEvents = await this.backend.subscribeEvents((event) => this.handleEvent(event));
+    // calls still surfaces as a processing event. The onEnd callback emits a non-fatal
+    // agent-error when the SSE stream terminates outside shutdown so the cell surfaces
+    // the failure instead of sitting idle forever (Phase 4 stream-end hardening).
+    this.unsubscribeEvents = await this.backend.subscribeEvents(
+      (event) => this.handleEvent(event),
+      (error) => this.handleStreamEnd(error)
+    );
 
     const statusMap = await this.backend.status();
     const opencodeStatus = statusMap[sessionId] ?? { type: 'idle' as const };
@@ -226,6 +239,25 @@ export class OpencodeDriver implements AgentDriver {
       this.backend = null;
     }
     this.handlers.clear();
+  }
+
+  private handleStreamEnd(error?: Error): void {
+    if (this.shutDown) {
+      return;
+    }
+    if (error) {
+      this.emit({
+        kind: 'agent-error',
+        message: `opencode event stream error: ${error.message}`,
+        fatal: false
+      });
+      return;
+    }
+    this.emit({
+      kind: 'agent-error',
+      message: 'opencode event stream ended unexpectedly; restart the session to reconnect',
+      fatal: false
+    });
   }
 
   private handleEvent(event: Event): void {
@@ -360,21 +392,36 @@ export async function createLiveBackend(_opts: { cwd: string }): Promise<Opencod
       const data = result.data ?? [];
       return data.map((entry) => ({ info: entry.info, parts: entry.parts }));
     },
-    async subscribeEvents(handler: (event: Event) => void): Promise<() => void> {
+    async subscribeEvents(
+      handler: (event: Event) => void,
+      onEnd?: (error?: Error) => void
+    ): Promise<() => void> {
       // The SDK SSE helper resolves once the stream is established. We return an
       // unsubscribe that aborts the underlying fetch; opencode serve closes the stream.
+      // The SSE promise resolves/rejects on stream termination — wire onEnd so the
+      // driver can emit a non-fatal agent-error when the stream dies outside shutdown.
       const controller = new AbortController();
-      void client.global.event({
-        signal: controller.signal,
-        onSseEvent: (sseEvent: { data?: unknown }) => {
-          if (!sseEvent.data) return;
-          try {
-            handler(JSON.parse(sseEvent.data as string) as Event);
-          } catch {
-            // malformed event — drop
+      void client.global
+        .event({
+          signal: controller.signal,
+          onSseEvent: (sseEvent: { data?: unknown }) => {
+            if (!sseEvent.data) return;
+            try {
+              handler(JSON.parse(sseEvent.data as string) as Event);
+            } catch {
+              // malformed event — drop
+            }
           }
-        }
-      });
+        })
+        .then(() => {
+          // Stream closed cleanly (rare in normal operation — opencode serve is long-lived).
+          onEnd?.();
+        })
+        .catch((err: unknown) => {
+          // AbortError fires when WE unsubscribe; don't surface that as an error.
+          if (controller.signal.aborted) return;
+          onEnd?.(err instanceof Error ? err : new Error(String(err)));
+        });
       return () => controller.abort();
     },
     async close(): Promise<void> {

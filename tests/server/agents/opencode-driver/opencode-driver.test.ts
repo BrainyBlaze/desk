@@ -75,10 +75,14 @@ function makeMockBackend(opts: {
       calls.push({ method: 'listMessages', args: [id] });
       return opts.history ?? [];
     },
-    async subscribeEvents(handler) {
+    async subscribeEvents(handler: (event: Event) => void, onEnd?: (error?: Error) => void) {
       calls.push({ method: 'subscribeEvents', args: [] });
-      subscribers.add(handler);
-      return () => subscribers.delete(handler);
+      subscribers.add(handler as (event: Event) => void);
+      // Stash onEnd so tests can simulate stream termination.
+      (this as unknown as { _onEnd?: (error?: Error) => void })._onEnd = onEnd;
+      return () => {
+        subscribers.delete(handler as (event: Event) => void);
+      };
     },
     async close() {
       calls.push({ method: 'close', args: [] });
@@ -320,6 +324,59 @@ describe('OpencodeDriver fetchHistory', () => {
       code: 'adapter-unavailable',
       retryable: false
     });
+  });
+});
+
+describe('OpencodeDriver stream-end hardening', () => {
+  it('emits non-fatal agent-error when the SSE stream ends unexpectedly (not on shutdown)', async () => {
+    const backend = makeMockBackend();
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend });
+    const events: Array<{ kind: string; fatal?: boolean; message?: string }> = [];
+    driver.onEvent((e) => events.push(e as { kind: string; fatal?: boolean; message?: string }));
+    await driver.start();
+    events.length = 0;
+
+    // Simulate stream termination (opencode serve crash / network drop)
+    const onEnd = (backend as unknown as { _onEnd?: (error?: Error) => void })._onEnd;
+    expect(onEnd).toBeDefined();
+    onEnd?.(new Error('SSE connection reset'));
+
+    const err = events.find((e) => e.kind === 'agent-error');
+    expect(err).toBeDefined();
+    expect(err?.fatal).toBe(false);
+    expect(err?.message).toContain('SSE connection reset');
+  });
+
+  it('emits non-fatal agent-error when the stream ends cleanly outside shutdown', async () => {
+    const backend = makeMockBackend();
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend });
+    const events: Array<{ kind: string; fatal?: boolean; message?: string }> = [];
+    driver.onEvent((e) => events.push(e as { kind: string; fatal?: boolean; message?: string }));
+    await driver.start();
+    events.length = 0;
+
+    const onEnd = (backend as unknown as { _onEnd?: (error?: Error) => void })._onEnd;
+    onEnd?.(); // clean close, no error
+
+    const err = events.find((e) => e.kind === 'agent-error');
+    expect(err).toBeDefined();
+    expect(err?.fatal).toBe(false);
+    expect(err?.message).toContain('ended unexpectedly');
+  });
+
+  it('does NOT emit agent-error on stream end when driver is already shut down', async () => {
+    const backend = makeMockBackend();
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend });
+    const events: Array<{ kind: string }> = [];
+    driver.onEvent((e) => events.push(e as { kind: string }));
+    await driver.start();
+    await driver.shutdown();
+    events.length = 0;
+
+    const onEnd = (backend as unknown as { _onEnd?: (error?: Error) => void })._onEnd;
+    onEnd?.(new Error('late stream error'));
+
+    expect(events.filter((e) => e.kind === 'agent-error')).toHaveLength(0);
   });
 });
 
