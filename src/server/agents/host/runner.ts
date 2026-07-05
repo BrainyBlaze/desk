@@ -54,6 +54,7 @@ export interface AgentHostEnv {
   DESK_AGENT_RESUME?: string;
   DESK_AGENT_BYPASS: string;
   DESK_AGENT_CWD?: string;
+  DESK_AGENT_MODEL?: string;
   DESK_SERVER_URL: string;
   DESK_AGENT_HOST_TOKEN: string;
   DESK_AGENT_HOST_LOG_LEVEL?: 'debug' | 'info' | 'warn' | 'error';

@@ -23,13 +23,15 @@ export function loadDriver(env: AgentHostEnv, _logger: AgentHostLogger): AgentDr
   const agent = env.DESK_AGENT as DeskAgent;
   const bypass = env.DESK_AGENT_BYPASS === '1';
   const cwd = env.DESK_AGENT_CWD ?? process.cwd();
+  const model = env.DESK_AGENT_MODEL;
 
   switch (agent) {
     case 'opencode':
       return new OpencodeDriver({
         cwd,
         bypass,
-        resumeId: env.DESK_AGENT_RESUME
+        resumeId: env.DESK_AGENT_RESUME,
+        ...(model ? { model } : {})
       });
     case 'claude':
       return createClaudeDriver({
@@ -40,7 +42,8 @@ export function loadDriver(env: AgentHostEnv, _logger: AgentHostLogger): AgentDr
     case 'codex':
       return createCodexDriver({
         cwd,
-        resumeId: env.DESK_AGENT_RESUME
+        resumeId: env.DESK_AGENT_RESUME,
+        ...(model ? { model } : {})
       });
     default:
       throw driverCommandError(

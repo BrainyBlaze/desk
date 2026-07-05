@@ -42,6 +42,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   const [model, setModel] = useState<RowModel>(initialRowModel);
   const [pendingAssistant, setPendingAssistant] = useState<Map<string, string>>(new Map());
   const [pipelineLive, setPipelineLive] = useState(false);
+  const [agentModel, setAgentModel] = useState<string | undefined>(undefined);
   const [input, setInput] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -63,6 +64,10 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
       },
       onEvent: (event) => {
         if (disposed) return;
+        setPipelineLive(true);
+        if (event.kind === 'session-info' && event.model) {
+          setAgentModel(event.model);
+        }
         if (event.kind === 'assistant-delta') {
           setPendingAssistant((prev) => {
             const next = new Map(prev);
@@ -175,6 +180,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     <div className="nativeAgentSurface">
       <div className="nativeAgentHeader">
         <span className={`nativeAgentStatus state-${model.status}`}>{model.status}</span>
+        {agentModel ? <span className="nativeAgentModelBadge">{agentModel}</span> : null}
         {model.status === 'processing' || model.status === 'tool-executing' ? (
           <button type="button" className="nativeAgentInterrupt" onClick={handleInterrupt}>
             Stop
