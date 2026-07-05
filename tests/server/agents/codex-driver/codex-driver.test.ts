@@ -78,6 +78,16 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('condition not met');
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function thread(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 'thread-1',
@@ -312,6 +322,62 @@ describe('createCodexDriver', () => {
 
     await expect(driver.start()).resolves.toEqual({
       session: { agentSessionId: 'thread-resumed' },
+      status: { kind: 'status', state: 'idle' }
+    });
+  });
+
+  it('does not report ready from thread/start before the request resolves', async () => {
+    const started = deferred<unknown>();
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread({ id: 'thread-starting' }) } });
+        return started.promise;
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    let resolved = false;
+
+    const start = driver.start().then((value) => {
+      resolved = true;
+      return value;
+    });
+    await waitFor(() => transport.calls.some((call) => call.type === 'request' && call.method === 'thread/start'));
+    await Promise.resolve();
+
+    expect(resolved).toBe(false);
+
+    started.resolve({});
+    await expect(start).resolves.toEqual({
+      session: { agentSessionId: 'thread-starting' },
+      status: { kind: 'status', state: 'idle' }
+    });
+  });
+
+  it('does not report ready from thread/resume before the request resolves', async () => {
+    const resumed = deferred<unknown>();
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/resume': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread({ id: 'thread-resuming' }) } });
+        return resumed.promise;
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-resuming' });
+    let resolved = false;
+
+    const start = driver.start().then((value) => {
+      resolved = true;
+      return value;
+    });
+    await waitFor(() => transport.calls.some((call) => call.type === 'request' && call.method === 'thread/resume'));
+    await Promise.resolve();
+
+    expect(resolved).toBe(false);
+
+    resumed.resolve({});
+    await expect(start).resolves.toEqual({
+      session: { agentSessionId: 'thread-resuming' },
       status: { kind: 'status', state: 'idle' }
     });
   });
