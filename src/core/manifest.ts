@@ -350,9 +350,12 @@ function agentEnvPrefix(agent: string | undefined, tmuxSession: string): string 
 
 function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {
   const sdkTranscript = shellDoubleQuoteHomePath(`/.claude/projects/${claudeProjectDirName(cwd)}/${resume}.jsonl`);
+  const resumeArg = shellQuote(resume);
   return [
     `desk_claude_session=${sdkTranscript}`,
-    `if [ -f "$desk_claude_session" ] && grep -q '"entrypoint":"sdk-cli"' "$desk_claude_session"; then touch "$desk_claude_session"; ${env} ${baseCommand} --continue; else ${env} ${baseCommand} --resume ${shellQuote(resume)}; fi`
+    `${env} ${baseCommand} --resume ${resumeArg}`,
+    'desk_claude_resume_status=$?',
+    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue" >&2; if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi; ${env} ${baseCommand} --continue; desk_claude_continue_status=$?; if [ "$desk_claude_continue_status" -ne 0 ]; then printf '%s\\n' "desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics" >&2; printf '%s\\n' "desk: claude resume id: ${resume}" >&2; exec "\${SHELL:-/bin/sh}"; fi; fi`
   ].join('; ');
 }
 
