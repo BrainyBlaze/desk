@@ -11,7 +11,10 @@ export interface AgentRow {
   turnId?: string;
   text: string;
   toolUseId?: string;
-  toolStatus?: 'ok' | 'error' | 'denied';
+  toolName?: string;
+  toolStatus?: 'ok' | 'error' | 'denied' | 'running';
+  toolDetail?: string;
+  toolResult?: string;
 }
 
 export interface PendingPermission {
@@ -75,20 +78,55 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
         model.rows.push({ kind: 'assistant-message', id: event.id, turnId: event.turnId, text: event.markdown });
       }
       return;
-    case 'tool-start':
-      model.rows.push({ kind: 'tool', id: `tool-${event.toolUseId}-start`, toolUseId: event.toolUseId, text: event.summary });
+    case 'tool-start': {
+      const toolRowId = `tool-${event.toolUseId}`;
+      const existing = model.rows.find((r) => r.id === toolRowId);
+      if (existing) {
+        existing.toolStatus = 'running';
+        existing.toolName = event.name;
+        existing.text = event.summary;
+        existing.toolDetail = event.detail;
+        existing.toolResult = undefined;
+      } else {
+        model.rows.push({
+          kind: 'tool',
+          id: toolRowId,
+          toolUseId: event.toolUseId,
+          toolName: event.name,
+          text: event.summary,
+          toolStatus: 'running',
+          ...(event.detail ? { toolDetail: event.detail } : {})
+        });
+      }
       return;
-    case 'tool-output-delta':
+    }
+    case 'tool-output-delta': {
+      const existing = model.rows.find((r) => r.id === `tool-${event.toolUseId}`);
+      if (existing) {
+        existing.toolResult = `${existing.toolResult ?? ''}${event.text}`;
+      }
       return;
-    case 'tool-end':
-      model.rows.push({
-        kind: 'tool',
-        id: `tool-${event.toolUseId}-end`,
-        toolUseId: event.toolUseId,
-        toolStatus: event.status,
-        text: event.summary ?? event.status
-      });
+    }
+    case 'tool-end': {
+      const toolRowId = `tool-${event.toolUseId}`;
+      const existing = model.rows.find((r) => r.id === toolRowId);
+      if (existing) {
+        existing.toolStatus = event.status;
+        const result = event.detail ?? event.summary ?? event.status;
+        if (result.trim()) existing.toolResult = result;
+      } else {
+        const result = event.detail ?? event.summary ?? event.status;
+        model.rows.push({
+          kind: 'tool',
+          id: toolRowId,
+          toolUseId: event.toolUseId,
+          text: event.summary ?? event.status,
+          toolStatus: event.status,
+          ...(result.trim() ? { toolResult: result } : {})
+        });
+      }
       return;
+    }
     case 'permission-request':
       model.pendingPermission = {
         requestId: event.requestId,

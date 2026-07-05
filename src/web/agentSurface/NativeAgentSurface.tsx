@@ -17,7 +17,8 @@ import {
 } from './rowsModel.js';
 
 // Reuse the channels markdown renderer (spec §9: ChannelMarkdown). Lazy-loaded +
-// memoized for code-splitting, same pattern as MessageList.
+// memoized for code-splitting, same pattern as MessageList. AgentMarkdown wrapper
+// defined below near the component tree.
 const ChannelMarkdown = lazy(() => import('../channels/ChannelMarkdown.js'));
 
 /**
@@ -25,9 +26,8 @@ const ChannelMarkdown = lazy(() => import('../channels/ChannelMarkdown.js'));
  *
  * MVP scope (this commit): snapshot + events rendered as chronological rows; basic
  * composer with Enter-to-send / Shift-Enter newline; status badge; visibility-driven
- * subscription. Tool and permission events render with a minimal functional shape
- * (tool summary line + permission card with allow/deny buttons) — proper styled
- * ToolCallBlock / PermissionCard components land in follow-up commits per spec §9.
+ * subscription. Tool rows render as compact disclosure blocks with input/output detail,
+ * and permissions render as allow/deny cards.
  *
  * Reused channels primitives: Composer pattern from channels/Composer.tsx is mirrored
  * rather than imported (channels Composer carries channelsUpload coupling + channels-
@@ -177,7 +177,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
         {pendingAssistantEntries.map(({ turnId, text }) => (
           <div key={`pending-${turnId}`} className="nativeAgentRow assistant pending">
             <span className="nativeAgentAuthor">assistant</span>
-            <span className="nativeAgentText">{text}</span>
+            <AgentMarkdown body={text} />
           </div>
         ))}
         {model.pendingPermission ? (
@@ -247,13 +247,7 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
       return (
         <div className="nativeAgentRow assistant">
           <span className="nativeAgentAuthor">assistant</span>
-          <Suspense fallback={<span className="nativeAgentText">{row.text}</span>}>
-            <ChannelMarkdown
-              body={row.text}
-              channel=""
-              onOpenFile={() => undefined}
-            />
-          </Suspense>
+          <AgentMarkdown body={row.text} />
         </div>
       );
     case 'tool':
@@ -267,14 +261,53 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
   }
 }
 
+function AgentMarkdown({ body }: { body: string }): JSX.Element {
+  return (
+    <Suspense fallback={<span className="nativeAgentText">{body}</span>}>
+      <ChannelMarkdown body={body} channel="" onOpenFile={() => undefined} />
+    </Suspense>
+  );
+}
+
 function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
-  const icon = row.toolStatus === 'ok' ? '✓' : row.toolStatus === 'error' ? '✗' : row.toolStatus === 'denied' ? '⊘' : '⟳';
+  const [open, setOpen] = useState(false);
   const statusClass = row.toolStatus ?? 'running';
+  const hasInput = Boolean(row.toolDetail?.trim());
+  const hasOutput = Boolean(row.toolResult?.trim());
+  const hasBody = hasInput || hasOutput;
   return (
     <div className={`nativeAgentRow tool status-${statusClass}`}>
-      <span className="nativeAgentToolIcon">{icon}</span>
-      <span className="nativeAgentToolName">{row.toolUseId ?? 'tool'}</span>
-      <span className="nativeAgentToolSummary">{row.text}</span>
+      <span className="nativeAgentToolDot" aria-hidden="true" />
+      <div className="nativeAgentToolContent">
+        <button
+          type="button"
+          className="nativeAgentToolHeader"
+          aria-expanded={open}
+          onClick={() => hasBody && setOpen((value) => !value)}
+          disabled={!hasBody}
+        >
+          <span className="nativeAgentToolName">{row.toolName ?? row.toolUseId ?? 'tool'}</span>
+          {row.text ? <span className="nativeAgentToolSummary">{row.text}</span> : null}
+          <span className="nativeAgentToolStatus">{statusClass}</span>
+          {hasBody ? <span className={`nativeAgentToolChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span> : null}
+        </button>
+        {open && hasBody ? (
+          <div className="nativeAgentToolBody">
+            {hasInput ? (
+              <div className="nativeAgentToolBox">
+                <span className="nativeAgentToolBoxLabel">in</span>
+                <pre>{row.toolDetail}</pre>
+              </div>
+            ) : null}
+            {hasOutput ? (
+              <div className="nativeAgentToolBox">
+                <span className="nativeAgentToolBoxLabel">out</span>
+                <pre>{row.toolResult}</pre>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
