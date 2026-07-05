@@ -5,11 +5,13 @@ on:
     branches: [main, master]
     paths:
       - 'docs/**'
+      - 'scripts/docs/search-shim/**'
       - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
+      - 'scripts/docs/search-shim/**'
       - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
