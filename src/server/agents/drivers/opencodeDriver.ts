@@ -444,13 +444,13 @@ export async function createLiveBackend(opts: { cwd: string; bypass: boolean }):
         try {
           await client.global.event({
             signal: controller.signal,
-            onSseEvent: (sseEvent: { data?: unknown }) => {
-              if (!sseEvent.data) return;
-              try {
-                handler(JSON.parse(sseEvent.data as string) as Event);
-              } catch {
-                // malformed event — drop
-              }
+          onSseEvent: (sseEvent: { data?: unknown }) => {
+            if (!sseEvent.data) return;
+            try {
+              handler(JSON.parse(sseEvent.data as string) as Event);
+            } catch (err) {
+              console.warn('opencode driver: dropping malformed SSE event', sseEvent.data instanceof String ? String(sseEvent.data).slice(0, 200) : '<non-string>', err);
+            }
             }
           });
           // Stream closed cleanly (rare for opencode serve — it's long-lived).
