@@ -169,6 +169,19 @@ export class AgentHost {
         void this.shutdown().then(() => this.exitFn(0));
       });
     }
+    // BUG-16 fix: synchronous process-group kill on exit ensures opencode serve
+    // grandchildren (and any other spawned subprocesses) die with the host, even
+    // on abrupt exit paths (uncaught exception, SIGKILL can't be caught but this
+    // covers the cases that CAN be caught). process.kill(-pid, sig) targets the
+    // entire process group — all children spawned without detaching inherit the
+    // host's group.
+    process.on('exit', () => {
+      try {
+        process.kill(-process.pid, 'SIGTERM');
+      } catch {
+        // best-effort — group may already be gone or we lack permission
+      }
+    });
   }
 
   private async connectAndRun(): Promise<void> {
