@@ -44,7 +44,13 @@
           "guide-ide-workflow",
           "guide-git-review",
           "guide-projects-planning",
-          "guide-events-attention",
+          "guide-events-attention"
+        ]
+      },
+      {
+        "group": "Best practices",
+        "icon": "lightbulb",
+        "pages": [
           "playbook-research-consensus",
           "playbook-supervised-development",
           "playbook-multi-feature",
