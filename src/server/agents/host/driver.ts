@@ -86,6 +86,19 @@ export function driverCommandError(
  * All command methods MAY throw `DriverCommandError` for typed failures; the host maps
  * those verbatim. Unknown errors fall through to the per-method default mapping
  * documented on `DriverCommandError`.
+ *
+ * HOST-RUNNER INVARIANTS (cross-agent — learned from claude live probe e180c9b):
+ * - **No short timeout around `start()`**: agent init can legitimately take minutes in
+ *   hook-heavy environments (claude runs the user's SessionStart hook stack with
+ *   settingSources default; same hooks as terminal mode). `start()` resolving fast does
+ *   NOT mean the agent is ready to answer; it means the spawn pipe is up.
+ * - **`session-info` events may arrive at ANY time and supersede the `start()` return**:
+ *   in claude streaming-input mode the SDK emits init only after the first user input
+ *   arrives — so the start() return carries best-known identity (resume id when
+ *   resuming, undefined when fresh), and the real session id + model arrive later as a
+ *   `session-info` event the host MUST forward. For FRESH sessions that event is where
+ *   the resume id first appears; the broker's `session-info` → `persistSessionResume`
+ *   mapping (spec §6) is the only id path in that case.
  */
 export interface AgentDriver {
   /**
@@ -102,6 +115,11 @@ export interface AgentDriver {
    * and return the initial broker-visible session-info plus the current deterministic
    * status. The host emits both as `AgentSurfaceEvent`s when `hello-ack.lastSeq === 0`
    * (fresh subscriber or server restart), ahead of any committed-history backfill.
+   *
+   * **Returns immediately with best-known identity** — see interface-level invariant:
+   * the real session id / model may arrive later via a `session-info` event that
+   * supersedes this return value. Host MUST forward those events. Host MUST NOT wrap
+   * this call in a short timeout (agent init can take minutes under hook-heavy envs).
    *
    * Should throw on unrecoverable failure (the host emits `agent-error {fatal:true}`
    * and exits nonzero so the tmux pane surfaces the failure).
