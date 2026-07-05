@@ -33,7 +33,12 @@ export interface AgentSurfacePermissionOption {
   treatment: AgentSurfacePermissionTreatment;
 }
 
-export type AgentSurfaceEvent = AgentSurfaceEventBase &
+/**
+ * Event payloads without the seq/ts envelope. Drivers emit these; the adapter
+ * host stamps seq/ts to produce AgentSurfaceEvent. Exported separately because
+ * Omit over the enveloped union collapses the discriminant in TypeScript.
+ */
+export type AgentSurfaceEventPayload =
   (
     | { kind: 'session-info'; agentSessionId?: string; model?: string }
     | { kind: 'status'; state: AgentSurfaceState; detail?: string }
@@ -63,6 +68,8 @@ export type AgentSurfaceEvent = AgentSurfaceEventBase &
     | { kind: 'history-boundary'; backfillComplete: true }
     | { kind: 'agent-error'; message: string; fatal: boolean }
   );
+
+export type AgentSurfaceEvent = AgentSurfaceEventBase & AgentSurfaceEventPayload;
 
 export type AgentUiErrorCode =
   | 'adapter-unavailable'
