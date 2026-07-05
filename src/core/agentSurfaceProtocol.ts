@@ -103,3 +103,295 @@ export type AgentHostClientFrame =
   | { type: 'event'; event: AgentSurfaceEvent }
   | { type: 'command-result'; requestId: string; ok: true }
   | { type: 'command-result'; requestId: string; ok: false; error: { code: AgentUiErrorCode; message: string; retryable: boolean } };
+
+const AGENT_SURFACE_STATES: readonly AgentSurfaceState[] = [
+  'starting',
+  'idle',
+  'processing',
+  'tool-executing',
+  'awaiting-permission',
+  'interrupted',
+  'error',
+  'exited'
+];
+
+const PERMISSION_TREATMENTS: readonly AgentSurfacePermissionTreatment[] = ['allow', 'allow-session', 'deny', 'answer', 'custom'];
+
+const AGENT_UI_ERROR_CODES: readonly AgentUiErrorCode[] = [
+  'adapter-unavailable',
+  'driver-start-failed',
+  'not-native-session',
+  'send-while-busy',
+  'unknown-permission',
+  'invalid-frame'
+];
+
+const MESSAGE_SOURCES = ['ui', 'channel', 'external'] as const;
+const TOOL_END_STATUSES = ['ok', 'error', 'denied'] as const;
+const PERMISSION_VARIANTS = ['tool', 'command', 'file-edit', 'question'] as const;
+const RESOLUTION_VIAS = ['ui', 'agent', 'timeout', 'respawn'] as const;
+const ATTENTION_HINTS = ['idle-prompt', 'elicitation', 'session-status'] as const;
+
+export function parseAgentUiClientFrame(value: unknown): AgentUiClientFrame {
+  const frame = asRecord(value);
+  const session = nonEmptyString(frame.session);
+  const surfaceId = nonEmptyString(frame.surfaceId);
+  switch (frame.type) {
+    case 'subscribe':
+      return { type: 'subscribe', session, surfaceId, visible: bool(frame.visible) };
+    case 'visibility':
+      return { type: 'visibility', session, surfaceId, visible: bool(frame.visible) };
+    case 'unsubscribe':
+      return { type: 'unsubscribe', session, surfaceId };
+    case 'send':
+      return { type: 'send', session, surfaceId, text: nonEmptyString(frame.text) };
+    case 'respond-permission':
+      return {
+        type: 'respond-permission',
+        session,
+        surfaceId,
+        requestId: nonEmptyString(frame.requestId),
+        optionId: nonEmptyString(frame.optionId),
+        ...(frame.note === undefined ? {} : { note: str(frame.note) })
+      };
+    case 'interrupt':
+      return { type: 'interrupt', session, surfaceId };
+    default:
+      throw invalidFrame();
+  }
+}
+
+export function parseAgentSurfaceEvent(value: unknown): AgentSurfaceEvent {
+  const event = asRecord(value);
+  const seq = nonNegativeInt(event.seq);
+  const ts = nonEmptyString(event.ts);
+  switch (event.kind) {
+    case 'session-info':
+      return {
+        kind: 'session-info',
+        seq,
+        ts,
+        ...(event.agentSessionId === undefined ? {} : { agentSessionId: str(event.agentSessionId) }),
+        ...(event.model === undefined ? {} : { model: str(event.model) })
+      };
+    case 'status':
+      return {
+        kind: 'status',
+        seq,
+        ts,
+        state: oneOf(event.state, AGENT_SURFACE_STATES),
+        ...(event.detail === undefined ? {} : { detail: str(event.detail) })
+      };
+    case 'user-message':
+      return {
+        kind: 'user-message',
+        seq,
+        ts,
+        id: nonEmptyString(event.id),
+        text: str(event.text),
+        source: oneOf(event.source, MESSAGE_SOURCES)
+      };
+    case 'assistant-delta':
+      return { kind: 'assistant-delta', seq, ts, turnId: nonEmptyString(event.turnId), text: str(event.text) };
+    case 'assistant-message':
+      return {
+        kind: 'assistant-message',
+        seq,
+        ts,
+        id: nonEmptyString(event.id),
+        turnId: nonEmptyString(event.turnId),
+        markdown: str(event.markdown)
+      };
+    case 'tool-start':
+      return {
+        kind: 'tool-start',
+        seq,
+        ts,
+        toolUseId: nonEmptyString(event.toolUseId),
+        name: nonEmptyString(event.name),
+        summary: str(event.summary),
+        ...(event.detail === undefined ? {} : { detail: str(event.detail) })
+      };
+    case 'tool-output-delta':
+      return { kind: 'tool-output-delta', seq, ts, toolUseId: nonEmptyString(event.toolUseId), text: str(event.text) };
+    case 'tool-end':
+      return {
+        kind: 'tool-end',
+        seq,
+        ts,
+        toolUseId: nonEmptyString(event.toolUseId),
+        status: oneOf(event.status, TOOL_END_STATUSES),
+        ...(event.summary === undefined ? {} : { summary: str(event.summary) }),
+        ...(event.detail === undefined ? {} : { detail: str(event.detail) })
+      };
+    case 'permission-request':
+      return {
+        kind: 'permission-request',
+        seq,
+        ts,
+        requestId: nonEmptyString(event.requestId),
+        variant: oneOf(event.variant, PERMISSION_VARIANTS),
+        title: nonEmptyString(event.title),
+        ...(event.detail === undefined ? {} : { detail: str(event.detail) }),
+        ...(event.diff === undefined ? {} : { diff: parseDiff(event.diff) }),
+        options: parseOptions(event.options)
+      };
+    case 'permission-resolved':
+      return {
+        kind: 'permission-resolved',
+        seq,
+        ts,
+        requestId: nonEmptyString(event.requestId),
+        optionId: nonEmptyString(event.optionId),
+        via: oneOf(event.via, RESOLUTION_VIAS)
+      };
+    case 'turn-complete':
+      return {
+        kind: 'turn-complete',
+        seq,
+        ts,
+        turnId: nonEmptyString(event.turnId),
+        ...(event.usage === undefined ? {} : { usage: parseUsage(event.usage) })
+      };
+    case 'attention-hint':
+      return {
+        kind: 'attention-hint',
+        seq,
+        ts,
+        attention: oneOf(event.attention, ATTENTION_HINTS),
+        ...(event.detail === undefined ? {} : { detail: str(event.detail) })
+      };
+    case 'history-boundary':
+      if (event.backfillComplete !== true) {
+        throw invalidFrame();
+      }
+      return { kind: 'history-boundary', seq, ts, backfillComplete: true };
+    case 'agent-error':
+      return { kind: 'agent-error', seq, ts, message: nonEmptyString(event.message), fatal: bool(event.fatal) };
+    default:
+      throw invalidFrame();
+  }
+}
+
+export function parseAgentHostClientFrame(value: unknown): AgentHostClientFrame {
+  const frame = asRecord(value);
+  switch (frame.type) {
+    case 'hello':
+      return {
+        type: 'hello',
+        session: nonEmptyString(frame.session),
+        token: nonEmptyString(frame.token),
+        agent: nonEmptyString(frame.agent),
+        pid: nonNegativeInt(frame.pid)
+      };
+    case 'event':
+      return { type: 'event', event: parseAgentSurfaceEvent(frame.event) };
+    case 'command-result': {
+      const requestId = nonEmptyString(frame.requestId);
+      if (frame.ok === true) {
+        return { type: 'command-result', requestId, ok: true };
+      }
+      if (frame.ok === false) {
+        const error = asRecord(frame.error);
+        return {
+          type: 'command-result',
+          requestId,
+          ok: false,
+          error: {
+            code: oneOf(error.code, AGENT_UI_ERROR_CODES),
+            message: nonEmptyString(error.message),
+            retryable: bool(error.retryable)
+          }
+        };
+      }
+      throw invalidFrame();
+    }
+    default:
+      throw invalidFrame();
+  }
+}
+
+function parseOptions(value: unknown): AgentSurfacePermissionOption[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw invalidFrame();
+  }
+  return value.map((entry) => {
+    const option = asRecord(entry);
+    return {
+      id: nonEmptyString(option.id),
+      label: nonEmptyString(option.label),
+      treatment: oneOf(option.treatment, PERMISSION_TREATMENTS)
+    };
+  });
+}
+
+function parseDiff(value: unknown): { path: string; before?: string; after?: string } {
+  const diff = asRecord(value);
+  return {
+    path: nonEmptyString(diff.path),
+    ...(diff.before === undefined ? {} : { before: str(diff.before) }),
+    ...(diff.after === undefined ? {} : { after: str(diff.after) })
+  };
+}
+
+function parseUsage(value: unknown): { inputTokens?: number; outputTokens?: number; costUsd?: number } {
+  const usage = asRecord(value);
+  return {
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: finiteNumber(usage.inputTokens) }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: finiteNumber(usage.outputTokens) }),
+    ...(usage.costUsd === undefined ? {} : { costUsd: finiteNumber(usage.costUsd) })
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalidFrame();
+  }
+  return value as Record<string, unknown>;
+}
+
+function nonEmptyString(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw invalidFrame();
+  }
+  return value;
+}
+
+function str(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw invalidFrame();
+  }
+  return value;
+}
+
+function bool(value: unknown): boolean {
+  if (typeof value !== 'boolean') {
+    throw invalidFrame();
+  }
+  return value;
+}
+
+function nonNegativeInt(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidFrame();
+  }
+  return value;
+}
+
+function finiteNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw invalidFrame();
+  }
+  return value;
+}
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw invalidFrame();
+  }
+  return value as T;
+}
+
+function invalidFrame(): Error {
+  return new Error('invalid agent surface frame');
+}
