@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantMessage, Message, Permission, SessionStatus, ToolPart, UserMessage } from '@opencode-ai/sdk';
 import {
+  assembleMarkdown,
   expandRetryStatus,
   mapHistoryMessage,
   mapLiveEvent,
   mapPermission,
   mapSessionError,
   mapSessionStatus,
+  type AssistantMessageText,
   type LiveEventContext
 } from '../../../../src/server/agents/drivers/opencodeMapper';
 
@@ -182,7 +184,10 @@ describe('mapLiveEvent', () => {
       ctx
     );
     expect(result).toEqual({ kind: 'assistant-delta', turnId: 'm-asst-1', text: 'chunk-1' });
-    expect(ctx.assistantTextByMessageId.get('m-asst-1')).toBe('hello ');
+    expect(ctx.assistantTextByMessageId.get('m-asst-1')).toEqual({
+      partOrder: ['p1'],
+      partText: new Map([['p1', 'hello ']])
+    });
   });
 
   it('message.part.updated accumulates across multiple parts', () => {
@@ -207,9 +212,106 @@ describe('mapLiveEvent', () => {
       },
       ctx
     );
-    expect(ctx.assistantTextByMessageId.get('m1')).toBe('first\nsecond');
+    expect(ctx.assistantTextByMessageId.get('m1')).toEqual({
+      partOrder: ['p1', 'p2'],
+      partText: new Map([
+        ['p1', 'first'],
+        ['p2', 'second']
+      ])
+    });
   });
 
+  it('R1 follow-up — repeated updates for the SAME partID replace, not append', () => {
+    const ctx = makeCtx();
+    // opencode fires message.part.updated many times for one part as text grows
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p1', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'Hel' } as never,
+          delta: 'Hel'
+        }
+      },
+      ctx
+    );
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p1', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'Hello wor' } as never,
+          delta: 'lo wor'
+        }
+      },
+      ctx
+    );
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p1', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'Hello world' } as never,
+          delta: 'ld'
+        }
+      },
+      ctx
+    );
+    const assembled = ctx.assistantTextByMessageId.get('m1');
+    expect(assembled).toEqual({
+      partOrder: ['p1'],
+      partText: new Map([['p1', 'Hello world']])
+    });
+  });
+
+  it('R1 follow-up — multi-part message: each part updated twice, commit joins final texts in first-seen order', () => {
+    const ctx = makeCtx({
+      assistantTextByMessageId: new Map()
+    });
+    // Manually build the accumulator via repeated mapLiveEvent calls
+    const seed = ctx.assistantTextByMessageId; // alias for clarity
+    expect(seed).toBe(ctx.assistantTextByMessageId);
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p1', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'a1' } as never,
+          delta: 'a1'
+        }
+      },
+      ctx
+    );
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p2', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'b1' } as never,
+          delta: 'b1'
+        }
+      },
+      ctx
+    );
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p1', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'a1+a2' } as never,
+          delta: '+a2'
+        }
+      },
+      ctx
+    );
+    mapLiveEvent(
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p2', sessionID: SESSION_ID, messageID: 'm1', type: 'text', text: 'b1+b2' } as never,
+          delta: '+b2'
+        }
+      },
+      ctx
+    );
+    // Commit: assemble final p1 + final p2 in first-seen order (p1 first, then p2)
+    const assembled = assembleMarkdown(ctx.assistantTextByMessageId.get('m1'));
+    expect(assembled).toBe('a1+a2\nb1+b2');
+  });
   it('message.part.updated without delta → null but still accumulates', () => {
     const ctx = makeCtx();
     const result = mapLiveEvent(
@@ -222,11 +324,18 @@ describe('mapLiveEvent', () => {
       ctx
     );
     expect(result).toBeNull();
-    expect(ctx.assistantTextByMessageId.get('m1')).toBe('acc');
+    expect(ctx.assistantTextByMessageId.get('m1')).toEqual({
+      partOrder: ['p1'],
+      partText: new Map([['p1', 'acc']])
+    });
   });
 
   it('message.updated for assistant without completed → null (do not commit yet)', () => {
-    const ctx = makeCtx({ assistantTextByMessageId: new Map([['m-asst-1', 'pending text']]) });
+    const ctx = makeCtx({
+      assistantTextByMessageId: new Map([
+        ['m-asst-1', { partOrder: ['p1'], partText: new Map([['p1', 'pending text']]) }]
+      ])
+    });
     const result = mapLiveEvent(
       {
         type: 'message.updated',
@@ -239,7 +348,11 @@ describe('mapLiveEvent', () => {
   });
 
   it('R1 — message.updated for completed assistant → assistant-message with assembled markdown', () => {
-    const ctx = makeCtx({ assistantTextByMessageId: new Map([['m-asst-1', 'hello world']]) });
+    const ctx = makeCtx({
+      assistantTextByMessageId: new Map([
+        ['m-asst-1', { partOrder: ['p1'], partText: new Map([['p1', 'hello world']]) }]
+      ])
+    });
     const result = mapLiveEvent(
       { type: 'message.updated', properties: { info: assistantMessage() } },
       ctx
@@ -255,7 +368,9 @@ describe('mapLiveEvent', () => {
 
   it('R1 — message.updated idempotent: second commit for same messageID returns null', () => {
     const ctx = makeCtx({
-      assistantTextByMessageId: new Map([['m-asst-1', 'tx']]),
+      assistantTextByMessageId: new Map([
+        ['m-asst-1', { partOrder: ['p1'], partText: new Map([['p1', 'tx']]) }]
+      ]),
       assistantCommitted: new Set(['m-asst-1'])
     });
     const result = mapLiveEvent(
@@ -264,7 +379,6 @@ describe('mapLiveEvent', () => {
     );
     expect(result).toBeNull();
   });
-
   it('R2 — message.updated for user → null (live user-messages come from inject only)', () => {
     const ctx = makeCtx();
     const result = mapLiveEvent(

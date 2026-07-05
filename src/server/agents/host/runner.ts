@@ -6,6 +6,7 @@ import type {
   AgentSurfaceEventPayload,
   AgentUiErrorCode
 } from '../../../core/agentSurfaceProtocol.js';
+import { parseAgentHostServerFrame } from '../../../core/agentSurfaceProtocol.js';
 import type { DeskAgent } from '../../../core/types.js';
 import {
   isDriverCommandError,
@@ -557,63 +558,3 @@ function wsUrl(serverUrl: string): string {
   return serverUrl.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
 }
 
-/**
- * Parse an AgentHostServerFrame from an unknown value. Throws on malformed input so
- * the caller can drop+audit. Mirrors claude's parseAgentHostClientFrame shape.
- *
- * TODO(promote): once this stabilizes, move into core/agentSurfaceProtocol.ts so the
- * protocol module owns both directions' parsers. Tracked for a follow-up that doesn't
- * block Phase 1.
- */
-export function parseAgentHostServerFrame(value: unknown): AgentHostServerFrame {
-  if (!value || typeof value !== 'object') {
-    throw new Error('agent host server frame must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  switch (record.type) {
-    case 'hello-ack':
-      return { type: 'hello-ack', lastSeq: nonNegativeInt(record.lastSeq) };
-    case 'inject':
-      return {
-        type: 'inject',
-        requestId: nonEmptyString(record.requestId),
-        text: typeof record.text === 'string' ? record.text : '',
-        source: parseSource(record.source)
-      };
-    case 'respond-permission':
-      return {
-        type: 'respond-permission',
-        requestId: nonEmptyString(record.requestId),
-        permissionRequestId: nonEmptyString(record.permissionRequestId),
-        optionId: nonEmptyString(record.optionId),
-        note: typeof record.note === 'string' ? record.note : undefined
-      };
-    case 'interrupt':
-      return { type: 'interrupt', requestId: nonEmptyString(record.requestId) };
-    case 'shutdown':
-      return { type: 'shutdown', requestId: nonEmptyString(record.requestId) };
-    default:
-      throw new Error(`unknown agent host server frame type: ${String(record.type)}`);
-  }
-}
-
-function nonEmptyString(value: unknown): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error('expected non-empty string');
-  }
-  return value;
-}
-
-function nonNegativeInt(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || Math.floor(value) !== value) {
-    throw new Error('expected non-negative integer');
-  }
-  return value;
-}
-
-function parseSource(value: unknown): 'ui' | 'channel' | 'external' {
-  if (value === 'ui' || value === 'channel' || value === 'external') {
-    return value;
-  }
-  return 'external';
-}

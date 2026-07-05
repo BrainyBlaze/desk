@@ -14,10 +14,12 @@ import {
   type DriverStatusEvent
 } from '../host/driver.js';
 import {
+  assembleMarkdown,
   expandRetryStatus,
   mapHistoryMessage,
   mapLiveEvent,
   mapSessionStatus,
+  type AssistantMessageText,
   type LiveEventContext
 } from './opencodeMapper.js';
 
@@ -89,7 +91,7 @@ export class OpencodeDriver implements AgentDriver {
   /** Pending assistant messageID — used to attribute turn-complete on session.idle. */
   private pendingTurnId: string | null = null;
   /** Live text accumulator — populated by message.part.updated; consumed on commit. */
-  private readonly assistantTextByMessageId = new Map<string, string>();
+  private readonly assistantTextByMessageId = new Map<string, AssistantMessageText>();
   /** Set of assistant messageIDs we've already committed, dedupes repeated message.updated. */
   private readonly assistantCommitted = new Set<string>();
   /** User messageIDs we emitted locally via inject(); swallow their opencode echo. */

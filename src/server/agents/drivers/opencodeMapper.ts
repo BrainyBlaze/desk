@@ -44,15 +44,48 @@ import type { DriverEvent, DriverStatusEvent } from '../host/driver.js';
  */
 
 /**
+ * Per-messageID accumulator for assistant text parts. Replaces an earlier
+ * `Map<string, string>` shape that APPENDed part texts — wrong, because opencode fires
+ * message.part.updated REPEATEDLY for the same partID as its text grows (part.text is the
+ * full accumulated text of that part at that moment). The correct shape tracks each part's
+ * latest text keyed by partID, plus the first-seen order so the assembled markdown preserves
+ * authoring intent.
+ */
+export interface AssistantMessageText {
+  /** Part IDs in first-seen order. */
+  partOrder: string[];
+  /** Latest text per partID. Replace on each message.part.updated for the same id. */
+  partText: Map<string, string>;
+}
+
+/**
+ * Assemble an AssistantMessageText into committed markdown by joining part texts in
+ * first-seen order with a single newline separator. Single-part messages collapse to
+ * that part's latest text.
+ */
+export function assembleMarkdown(acc: AssistantMessageText | undefined): string {
+  if (!acc || acc.partOrder.length === 0) {
+    return '';
+  }
+  const segments: string[] = [];
+  for (const partId of acc.partOrder) {
+    const text = acc.partText.get(partId);
+    if (text) {
+      segments.push(text);
+    }
+  }
+  return segments.join('\n');
+}
+
+/**
  * Live-event mapping context. The driver owns these fields and passes them in so the
  * mapper stays pure:
  *  - `sessionId`: filter events by session id (R3). Foreign-session events return null.
  *  - `pendingTurnId`: in-flight assistant messageID; used to attribute turn-complete
  *    when session.idle fires (which carries no message id itself).
- *  - `assistantTextByMessageId`: accumulated text parts per assistant messageID. The
- *    mapper reads from this to assemble assistant-message markdown when an assistant
- *    message's `time.completed` flips true (R1). Driver mutates this same map on every
- *    message.part.updated for a text part.
+ *  - `assistantTextByMessageId`: per-messageID accumulator keyed by partID. The mapper
+ *    mutates this on every message.part.updated for a text part (REPLACE per partID,
+ *    NOT append); assembled markdown is read on commit (R1 fix).
  *  - `assistantCommitted`: set of assistant messageIDs we've already emitted assistant-
  *    message for, so the same id's repeated message.updated (they fire multiple times)
  *    cannot double-commit.
@@ -60,7 +93,7 @@ import type { DriverEvent, DriverStatusEvent } from '../host/driver.js';
 export interface LiveEventContext {
   sessionId: string;
   pendingTurnId?: string;
-  assistantTextByMessageId: Map<string, string>;
+  assistantTextByMessageId: Map<string, AssistantMessageText>;
   assistantCommitted: Set<string>;
 }
 
@@ -216,11 +249,18 @@ export function mapLiveEvent(
       if (part.type !== 'text') {
         return null;
       }
-      // Side effect: accumulate full text into the assistant's pending buffer (R1).
-      // The part object carries the full accumulated text for the message — append it.
-      const prior = ctx.assistantTextByMessageId.get(part.messageID) ?? '';
-      const next = prior.length > 0 ? `${prior}\n${part.text}` : part.text;
-      ctx.assistantTextByMessageId.set(part.messageID, next);
+      // R1 fix: REPLACE per partID (not append). opencode fires many updates for the same
+      // partID as text grows; part.text is the full accumulated text at that moment.
+      // Tracking first-seen order lets us assemble multi-part messages correctly on commit.
+      let acc = ctx.assistantTextByMessageId.get(part.messageID);
+      if (!acc) {
+        acc = { partOrder: [], partText: new Map() };
+        ctx.assistantTextByMessageId.set(part.messageID, acc);
+      }
+      if (!acc.partText.has(part.id)) {
+        acc.partOrder.push(part.id);
+      }
+      acc.partText.set(part.id, part.text);
 
       if (!delta) {
         return null;
@@ -238,6 +278,10 @@ export function mapLiveEvent(
         // caller's source + actual text). message.updated for users carries no parts
         // and no origin; we swallow it entirely. The driver's handleEvent drops the
         // matching inject from its echo-tracking set.
+        //
+        // v2 implication: when opencode live dual-view is added (multiple clients on
+        // one serve), user messages originating from OTHER clients will not surface in
+        // this driver's transcript until that path is designed. Deliberate v1 constraint.
         return null;
       }
       const assistant = info as AssistantMessage;
@@ -251,7 +295,7 @@ export function mapLiveEvent(
         return null;
       }
       ctx.assistantCommitted.add(assistant.id);
-      const markdown = ctx.assistantTextByMessageId.get(assistant.id) ?? '';
+      const markdown = assembleMarkdown(ctx.assistantTextByMessageId.get(assistant.id));
       return {
         kind: 'assistant-message',
         id: assistant.id,

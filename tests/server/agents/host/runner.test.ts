@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentSurfaceEventPayload, AgentHostServerFrame } from '../../../../src/core/agentSurfaceProtocol';
-import { AgentHost, parseAgentHostServerFrame, type AgentHostEnv, type WebSocketLike } from '../../../../src/server/agents/host/runner';
+import { parseAgentHostServerFrame, type AgentHostServerFrame } from '../../../../src/core/agentSurfaceProtocol';
+import { AgentHost, type AgentHostEnv, type WebSocketLike } from '../../../../src/server/agents/host/runner';
 import type { AgentDriver, DriverEvent, DriverStatusEvent } from '../../../../src/server/agents/host/driver';
 
 class MockSocket implements WebSocketLike {
@@ -352,13 +352,11 @@ describe('parseAgentHostServerFrame', () => {
       type: 'inject', requestId: 'r1', text: 'hi', source: 'channel'
     });
   });
-  it('inject with missing source defaults to external', () => {
-    expect(parseAgentHostServerFrame({ type: 'inject', requestId: 'r1', text: 'hi' })).toEqual({
-      type: 'inject', requestId: 'r1', text: 'hi', source: 'external'
-    });
+  it('inject with missing source is rejected (server-side framing must include source)', () => {
+    expect(() => parseAgentHostServerFrame({ type: 'inject', requestId: 'r1', text: 'hi' })).toThrow();
   });
-  it('rejects unknown type', () => {
-    expect(() => parseAgentHostServerFrame({ type: 'bogus' })).toThrow(/unknown agent host server frame type/);
+  it('rejects unknown type with invalid frame', () => {
+    expect(() => parseAgentHostServerFrame({ type: 'bogus' })).toThrow(/invalid agent surface frame/);
   });
   it('rejects non-negative integer for lastSeq', () => {
     expect(() => parseAgentHostServerFrame({ type: 'hello-ack', lastSeq: -1 })).toThrow();
