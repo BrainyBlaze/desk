@@ -340,6 +340,24 @@ describe('claudeDriver interrupt and shutdown', () => {
     });
   });
 
+  it('surfaces an unexpected stream end as a non-fatal error and exited state', async () => {
+    const h = await startedHarness();
+    h.query.finish();
+    await drain();
+    const error = h.events.find((event) => event.kind === 'agent-error');
+    expect(error).toMatchObject({ kind: 'agent-error', fatal: false });
+    expect(h.events[h.events.length - 1]).toMatchObject({ kind: 'status', state: 'exited' });
+  });
+
+  it('does not report a stream end caused by shutdown', async () => {
+    const h = await startedHarness();
+    await h.driver.shutdown();
+    h.query.finish();
+    await drain();
+    expect(h.events.some((event) => event.kind === 'agent-error')).toBe(false);
+    expect(h.events.some((event) => event.kind === 'status' && event.state === 'exited')).toBe(false);
+  });
+
   it('stops emitting events after shutdown', async () => {
     const h = await startedHarness();
     await h.driver.shutdown();

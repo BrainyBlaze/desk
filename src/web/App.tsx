@@ -1016,6 +1016,11 @@ export function App(): JSX.Element {
         // Liveness self-heal: fold the live tmux set into the snapshot.
         // patchViewLiveness preserves identity of untouched sessions so
         // terminal sockets never churn on a state-only patch.
+        // Known constraint: pulse patches RUN STATES only. Manifest edits made
+        // out-of-band (another client, curl, hand-edit) — including uiMode
+        // switches — don't reach an open tab until a mutation response or a
+        // manual Refresh replaces the snapshot. Tracked separately as a
+        // manifest-fingerprint-in-pulse improvement.
         const running = new Set(pulse.running);
         setSnapshot((current) => {
           if (!current) {
@@ -2504,6 +2509,8 @@ export function App(): JSX.Element {
             label={`Restart ${modalSession?.spec.name ?? 'session'}`}
             detail="This kills the running tmux session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
             busy={busy}
+            confirmLabel="Restart session"
+            confirmIcon={<RotateCw size={12} />}
             onConfirm={() => {
               if (modalSession && modalGroup) {
                 void restartExistingSession(modalSession, modalGroup);
@@ -2528,6 +2535,8 @@ export function App(): JSX.Element {
                 : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
             }
             busy={busy}
+            confirmLabel={uiModeSwitchDiscard ? 'Switch UI mode (start fresh)' : 'Switch UI mode'}
+            confirmIcon={<RotateCw size={12} />}
             onConfirm={() => {
               void confirmUiModeSwitch();
             }}
@@ -5293,12 +5302,17 @@ function ConfirmAction({
   label,
   detail,
   busy,
-  onConfirm
+  onConfirm,
+  confirmLabel,
+  confirmIcon
 }: {
   label: string;
   detail: string;
   busy: boolean;
   onConfirm: () => void;
+  /** Confirm-button branding; defaults keep the historical destructive styling. */
+  confirmLabel?: string;
+  confirmIcon?: ReactNode;
 }): JSX.Element {
   return (
     <div className="thinForm modalForm">
@@ -5306,7 +5320,12 @@ function ConfirmAction({
         <strong>{label}</strong>
         <span>{detail}</span>
       </div>
-      <CommandButton icon={<Trash2 size={12} />} label="Confirm delete" disabled={busy} onClick={onConfirm} />
+      <CommandButton
+        icon={confirmIcon ?? <Trash2 size={12} />}
+        label={confirmLabel ?? 'Confirm delete'}
+        disabled={busy}
+        onClick={onConfirm}
+      />
     </div>
   );
 }

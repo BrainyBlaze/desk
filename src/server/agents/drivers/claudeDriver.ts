@@ -172,6 +172,12 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
         }
         routeMessage(message);
       }
+      // Stream ended without an error and outside shutdown: the claude process
+      // is gone. Surface it so the cell never sits "idle" forever (glm review).
+      if (!isShutdown) {
+        emit({ kind: 'agent-error', message: 'claude session ended unexpectedly', fatal: false });
+        status('exited');
+      }
     } catch (error) {
       if (!isShutdown) {
         emit({ kind: 'agent-error', message: error instanceof Error ? error.message : String(error), fatal: true });

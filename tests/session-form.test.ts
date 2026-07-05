@@ -194,6 +194,11 @@ describe('session form modal source contract', () => {
     expect(source).toMatch(/command: session\.spec\.customCommand \? session\.spec\.command : ''/);
   });
 
+  it('brands the ui-mode switch confirm as a switch, not a delete', () => {
+    expect(source).toContain("'Switch UI mode'");
+    expect(source).toMatch(/confirmLabel\?: string/);
+  });
+
   it('routes edit-modal ui-mode changes through the atomic switch endpoint', () => {
     const apiSource = readFileSync(new URL('../src/web/api.ts', import.meta.url), 'utf8');
     expect(apiSource).toContain('/api/set-session-ui-mode');
