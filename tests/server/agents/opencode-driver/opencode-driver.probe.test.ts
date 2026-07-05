@@ -1,5 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { DriverEvent } from '../../../../src/server/agents/host/driver';
@@ -19,14 +19,19 @@ import { OpencodeDriver } from '../../../../src/server/agents/drivers/opencodeDr
  * auth/store/sessions are not touched.
  */
 const PROBE_ENABLED = process.env.DESK_OPENCODE_PROBE === '1';
+// Check both standard env vars AND the opencode auth file (covers the zai-coding-plan
+// provider configured via opencode.json + auth.json rather than env vars).
+const REAL_AUTH_PATH = join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+const REAL_CONFIG_PATH = join(homedir(), '.config', 'opencode', 'opencode.json');
 const HAS_PROVIDER_CRED =
   Boolean(process.env.ANTHROPIC_API_KEY) ||
   Boolean(process.env.OPENAI_API_KEY) ||
-  Boolean(process.env.OPENROUTER_API_KEY);
+  Boolean(process.env.OPENROUTER_API_KEY) ||
+  existsSync(REAL_AUTH_PATH);
 const SKIP_REASON = !PROBE_ENABLED
   ? 'set DESK_OPENCODE_PROBE=1 to run'
   : !HAS_PROVIDER_CRED
-    ? 'set ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY'
+    ? 'set ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY or have opencode auth configured'
     : '';
 
 describe.skipIf(!PROBE_ENABLED || !HAS_PROVIDER_CRED)('opencode driver live probe', () => {
@@ -35,6 +40,16 @@ describe.skipIf(!PROBE_ENABLED || !HAS_PROVIDER_CRED)('opencode driver live prob
   const previousConfigDir = process.env.OPENCODE_CONFIG_DIR;
 
   process.env.OPENCODE_CONFIG_DIR = configDir;
+
+  // Copy the real opencode config + auth into the isolated fixture so the spawned
+  // opencode serve child can authenticate with the user's configured provider(s)
+  // (e.g., zai-coding-plan) without touching the user's real opencode state.
+  // Pattern mirrors claude-driver.probe.test.ts copying .credentials.json.
+  if (PROBE_ENABLED) {
+    if (existsSync(REAL_CONFIG_PATH)) {
+      copyFileSync(REAL_CONFIG_PATH, join(configDir, 'opencode.json'));
+    }
+  }
 
   afterAll(() => {
     if (previousConfigDir === undefined) {
