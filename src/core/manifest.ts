@@ -266,6 +266,12 @@ export function buildAgentCommand(
   tmuxSession: string,
   agentMcp?: AgentMcpLaunchConfig
 ): string {
+  if (session.uiMode === 'native') {
+    // Static base only: runtime values (server URL, host token) are injected
+    // at spawn time by the server-side rewrite (agentHostLaunch), keeping
+    // manifest-derived commands deterministic.
+    return `cd ${shellQuote(cwd)} && exec desk agent-host`;
+  }
   if (session.agent === 'bash') {
     return `cd ${shellQuote(cwd)} && exec bash`;
   }

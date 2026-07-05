@@ -19,6 +19,20 @@ groups:
     expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'terminal']);
   });
 
+  it('builds the static agent-host command for native sessions', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: chat
+        cwd: ~/projects/alpha
+        agent: claude
+        uiMode: native
+`);
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    expect(spec.command).toBe("cd '/workspace/projects/alpha' && exec desk agent-host");
+  });
+
   it('rejects native ui mode for bash sessions at parse time', () => {
     expect(() =>
       parseDeskManifest(`

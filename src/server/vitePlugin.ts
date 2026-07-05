@@ -82,6 +82,8 @@ import {
 import { applyLspUiSettingsPatch, toClientSettings } from '../core/lspSettings.js';
 import { buildSessionSpecs, expandHome, sessionSupportsNativeUiMode } from '../core/manifest.js';
 import { createInFlightGuard, performUiModeSwitch, validateUiModeSwitch } from './uiModeSwitch.js';
+import { rewriteNativeLaunchCommand } from './agentHostLaunch.js';
+import { deriveAgentHostToken, getOrCreateAgentHostSecret } from './agentHostToken.js';
 import { killSession, listTmuxSessions, listTmuxSessionsCached, loadDesk, planDeskUp, restartSession, runPlan, startSession } from '../core/runner.js';
 import { attentionTracker, notifyAgentSignal, setRaiseListener, startAttentionPolling, type AgentEventKind } from './attention.js';
 import {
@@ -200,6 +202,24 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
     tokenRegistry: lspCapabilityTokens,
     getApiBaseUrl: () => canonicalLocalApiBaseUrl(server.httpServer)
   });
+  // Native-mode launch enrichment (spec §5): applied LAST at every spawn site
+  // so the agent-host command wins over any earlier spec rewrite. Without a
+  // resolvable server URL the spec passes through unenriched and the host
+  // fails visibly in its pane.
+  const nativeAgentLaunch = (spec: SessionSpec): SessionSpec => {
+    if (spec.uiMode !== 'native') {
+      return spec;
+    }
+    const serverUrl = canonicalLocalApiBaseUrl(server.httpServer);
+    if (!serverUrl) {
+      return spec;
+    }
+    const secret = getOrCreateAgentHostSecret();
+    return rewriteNativeLaunchCommand(spec, {
+      serverUrl,
+      token: deriveAgentHostToken(secret, spec.tmuxSession, spec.agent ?? '')
+    });
+  };
       if (server.httpServer) {
         // Single, central WebSocket upgrade guard. Registered BEFORE the bridges
         // so it runs first: any plugin guard that rejects closes the socket, and
@@ -450,7 +470,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             const desk = loadDesk({});
             const plan = planDeskUp(desk.sessions);
             const settings = readManifestFile(resolveManifestPath()).settings;
-            const exitCode = dryRun ? runPlan(plan, true) : runManagedPlan(plan, settings, managedAgentLsp);
+            const exitCode = dryRun ? runPlan(plan, true) : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
             if (!dryRun && exitCode === 0) {
               for (const action of plan) {
                 if (action.type === 'start') {
@@ -487,7 +507,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
               return;
             }
             const launch = managedAgentLsp.prepare(nextSession, updated.settings);
-            const sessionToStart = launch?.session ?? nextSession;
+            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession);
             const started = startSession(sessionToStart);
             if (!started.ok) {
               launch?.cleanup();
@@ -562,7 +582,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
               return;
             }
             const launch = managedAgentLsp.prepare(nextSession, updated.settings);
-            const sessionToStart = launch?.session ?? nextSession;
+            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession);
             const started = startSession(sessionToStart);
             if (!started.ok) {
               launch?.cleanup();
@@ -730,7 +750,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             }
             managedAgentLsp.cleanup(session.tmuxSession);
             const launch = managedAgentLsp.prepare(session, readManifestFile(resolveManifestPath()).settings);
-            const restarted = restartSession(launch?.session ?? session);
+            const restarted = restartSession(nativeAgentLaunch(launch?.session ?? session));
             if (!restarted.ok) {
               launch?.cleanup();
               sendJson(res, 500, { error: restarted.error });
@@ -778,7 +798,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
                   prepare: (spec) => {
                     managedAgentLsp.cleanup(spec.tmuxSession);
                     launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
-                    return launch?.session ?? spec;
+                    return nativeAgentLaunch(launch?.session ?? spec);
                   },
                   restart: (spec) => restartSession(spec),
                   scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
@@ -1251,14 +1271,15 @@ function canonicalLocalApiBaseUrl(httpServer: { address(): unknown } | null | un
 function runManagedPlan(
   plan: TmuxPlanAction[],
   settings: DeskSettings | undefined,
-  managedAgentLsp: ReturnType<typeof createManagedAgentLspWiring>
+  managedAgentLsp: ReturnType<typeof createManagedAgentLspWiring>,
+  nativeAgentLaunch: (spec: SessionSpec) => SessionSpec = (spec) => spec
 ): number {
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = startSession(launch?.session ?? action.session);
+    const started = startSession(nativeAgentLaunch(launch?.session ?? action.session));
     if (!started.ok) {
       launch?.cleanup();
       return 1;
