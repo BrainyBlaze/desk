@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Buffer } from 'node:buffer';
 import { parseAgentHostServerFrame, type AgentHostServerFrame } from '../../../../src/core/agentSurfaceProtocol';
 import { AgentHost, type AgentHostEnv, type WebSocketLike } from '../../../../src/server/agents/host/runner';
 import type { AgentDriver, DriverEvent, DriverStatusEvent } from '../../../../src/server/agents/host/driver';
@@ -50,6 +51,11 @@ class MockSocket implements WebSocketLike {
   }
   fireMessage(frame: AgentHostServerFrame): void {
     const payload = JSON.stringify(frame);
+    for (const h of this.messageHandlers) h(payload);
+  }
+  /** Deliver a frame as a Buffer to mimic the production ws library (regression: msg-20260705-212002). */
+  fireMessageAsBuffer(frame: AgentHostServerFrame): void {
+    const payload = Buffer.from(JSON.stringify(frame));
     for (const h of this.messageHandlers) h(payload);
   }
   fireClose(): void {
@@ -340,6 +346,54 @@ describe('AgentHost driver event stamping', () => {
       expect(typeof event.ts).toBe('string');
       expect(event.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     }
+  });
+});
+
+describe('AgentHost regression: real-ws Buffer frames (msg-20260705-212002)', () => {
+  it('hello-ack + driver start succeed when inbound frames arrive as Buffer (production ws shape)', async () => {
+    const driver = makeMockDriver({
+      startReturn: {
+        session: { agentSessionId: 'ses_test' },
+        status: { kind: 'status', state: 'idle' }
+      }
+    });
+    const { host, socket, sentFrames } = makeHost({ driver });
+    const runPromise = host.run();
+    socket.fireOpen();
+    // hello-ack as Buffer — the production ws library delivers Buffers, not strings.
+    socket.fireMessageAsBuffer({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+    // Verify hello was sent (host got past hello-ack into driver start).
+    const hello = sentFrames().find((f) => f.type === 'hello');
+    expect(hello).toBeDefined();
+    // Verify driver started: session-info + status events emitted.
+    const events = sentFrames()
+      .filter((f) => f.type === 'event')
+      .map((f) => (f as { event: { kind: string } }).event);
+    expect(events.some((e) => e.kind === 'session-info')).toBe(true);
+    expect(events.some((e) => e.kind === 'status')).toBe(true);
+
+    socket.fireMessageAsBuffer({ type: 'shutdown', requestId: 'r1' });
+    await runPromise;
+  });
+
+  it('inject command delivered as Buffer reaches the driver and returns command-result ok:true', async () => {
+    const driver = makeMockDriver();
+    const { host, socket, sentFrames } = makeHost({ driver });
+    const runPromise = host.run();
+    socket.fireOpen();
+    socket.fireMessageAsBuffer({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+    socket.fireMessageAsBuffer({ type: 'inject', requestId: 'r1', text: 'hi', source: 'ui' });
+    await flush();
+    expect(driver.injectCalls).toEqual([{ text: 'hi', source: 'ui' }]);
+    const result = sentFrames().find(
+      (f) => f.type === 'command-result' && (f as { requestId?: string }).requestId === 'r1'
+    );
+    expect(result).toMatchObject({ type: 'command-result', requestId: 'r1', ok: true });
+
+    socket.fireMessageAsBuffer({ type: 'shutdown', requestId: 'r2' });
+    await runPromise;
   });
 });
 

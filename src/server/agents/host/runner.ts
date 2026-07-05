@@ -266,7 +266,10 @@ export class AgentHost {
   private async handleInbound(data: unknown): Promise<void> {
     let frame: AgentHostServerFrame;
     try {
-      frame = parseAgentHostServerFrame(typeof data === 'string' ? JSON.parse(data) : data);
+      // Production ws delivers BUFFERS, not strings; a hermetic test fake that yields
+      // strings passes the previous typeof check while the real runtime drops every
+      // frame. String(...) handles both shapes (Buffer.toString() + string-identity).
+      frame = parseAgentHostServerFrame(JSON.parse(String(data)));
     } catch (err) {
       this.logger.error(`dropping malformed frame: ${describeError(err)}`);
       return;
