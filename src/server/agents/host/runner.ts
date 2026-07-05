@@ -11,7 +11,8 @@ import type { DeskAgent } from '../../../core/types.js';
 import {
   isDriverCommandError,
   type AgentDriver,
-  type DriverEvent
+  type DriverEvent,
+  type DriverStatusEvent
 } from './driver.js';
 import { loadDriver } from './loader.js';
 import { AgentHostLogger } from './logger.js';
@@ -110,6 +111,10 @@ export class AgentHost {
   private driver: AgentDriver | null = null;
   private driverReady = false;
   private commandQueue: Array<{ requestId: string; kind: 'inject' | 'respond-permission' | 'interrupt' | 'shutdown'; fn: () => Promise<void> }> = [];
+  /** Cached last session-info payload for re-emit on reconnect backfill (spec §5 step 3). */
+  private lastSessionInfo: AgentSurfaceEventPayload | null = null;
+  /** Cached last status payload for re-emit on reconnect backfill. */
+  private lastStatus: DriverStatusEvent | null = null;
   private socket: WebSocketLike | null = null;
   private seqCounter = 0;
   private committedRing: AgentSurfaceEvent[] = [];
@@ -424,8 +429,17 @@ export class AgentHost {
       return;
     }
     if (!opts.skipStatus) {
-      // Re-emit current status before backfill events so the subscriber observes the
-      // transition from idle → backfill → idle correctly.
+      // Re-emit cached session-info + status before backfill events so the subscriber
+      // observes the correct FSM state (not the broker's default 'starting'). This was
+      // an empty block with a comment — P0 merge blocker found by claude browser pass
+      // (msg-20260706-011046): after server restart, all surfaces stuck on 'starting'
+      // with Send disabled forever because no status was re-emitted during backfill.
+      if (this.lastSessionInfo) {
+        this.emitDriverEvent(this.lastSessionInfo);
+      }
+      if (this.lastStatus) {
+        this.emitDriverEvent(this.lastStatus);
+      }
     }
     for (const event of history) {
       this.emitDriverEvent(event);
@@ -437,6 +451,14 @@ export class AgentHost {
   private handleDriverEvent(payload: DriverEvent): void {
     if (this.shuttingDown) {
       return;
+    }
+    // Cache session-info + status for re-emit on reconnect backfill (P0 fix: empty
+    // status block in runBackfill left surfaces stuck on 'starting' after server restart).
+    if (payload.kind === 'session-info') {
+      this.lastSessionInfo = payload;
+    }
+    if (payload.kind === 'status') {
+      this.lastStatus = payload;
     }
     const event: AgentSurfaceEvent = {
       ...payload,
