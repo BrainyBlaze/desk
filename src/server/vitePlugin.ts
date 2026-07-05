@@ -8,6 +8,7 @@ import { handleFsRequest } from './fsApi.js';
 import { handleGitRequest } from './gitApi.js';
 import { handleProjectsRequest } from './projectsApi.js';
 import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
+import { shouldRespawnAfterEdit } from './editRespawn.js';
 import { disposeChannelsRuntime, handleChannelsRequest, initChannelsRuntime } from './channelsApi.js';
 import { installFsWatchBridge } from './fsWatchBridge.js';
 import { installLspWebSocketBridge } from './lspWebSocketBridge.js';
@@ -703,15 +704,33 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             const manifest = readManifestFile(manifestPath);
             const session = readDeskSessionBody(body.session, { cwdRequired: false });
             const sessionBody = body.session as Record<string, unknown> | undefined;
+            const projectId = readRequiredString(body.projectId, 'projectId');
+            const groupId = readRequiredString(body.groupId, 'groupId');
+            const currentName = readRequiredString(body.currentName, 'currentName');
+            const findSpec = (specs: SessionSpec[], name: string): SessionSpec | undefined =>
+              specs.find((s) => s.projectId === projectId && s.groupId === groupId && s.name === name);
+            const oldSpec = findSpec(loadDesk({}).sessions, currentName);
             const updated = editSessionInManifest(manifest, {
-              projectId: readRequiredString(body.projectId, 'projectId'),
-              groupId: readRequiredString(body.groupId, 'groupId'),
-              currentName: readRequiredString(body.currentName, 'currentName'),
+              projectId,
+              groupId,
+              currentName,
               projectCwd: readOptionalString(body.projectCwd),
               clearResume: sessionBody?.clearResume === true,
               session
             });
             writeManifestFile(manifestPath, updated);
+            const newSpec = findSpec(loadDesk({}).sessions, session.name);
+            if (shouldRespawnAfterEdit(oldSpec, newSpec, (t) => listTmuxSessions().has(t)) && newSpec) {
+              managedAgentLsp.cleanup(newSpec.tmuxSession);
+              const launch = managedAgentLsp.prepare(newSpec, readManifestFile(manifestPath).settings);
+              const restarted = restartSession(nativeAgentLaunch(launch?.session ?? newSpec));
+              if (!restarted.ok) {
+                launch?.cleanup();
+                sendJson(res, 500, { error: `session edit saved but respawn failed: ${restarted.error}` });
+                return;
+              }
+              scheduleAgentResumeCapture(newSpec);
+            }
             sendJson(res, 200, buildDeskSnapshot());
             return;
           }
