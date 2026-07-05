@@ -278,6 +278,11 @@ class CodexDriver implements AgentDriver {
     if (this.stopped) {
       return;
     }
+    const currentThreadId = this.thread?.id ?? this.options.resumeId;
+    const incomingThreadId = eventThreadId(event);
+    if (currentThreadId && incomingThreadId && incomingThreadId !== currentThreadId) {
+      return;
+    }
     if (event.method === 'thread/started') {
       this.thread = event.params.thread;
       this.activeTurnId = findActiveTurnId(event.params.thread);
@@ -341,6 +346,14 @@ class CodexDriver implements AgentDriver {
       handler(event);
     }
   }
+}
+
+function eventThreadId(event: CodexTransportEvent): string | null {
+  if (event.method === 'thread/started') {
+    return event.params.thread.id;
+  }
+  const params = event.params as { threadId?: unknown };
+  return typeof params.threadId === 'string' ? params.threadId : null;
 }
 
 function threadFromRpcResult(result: unknown): Thread | null {

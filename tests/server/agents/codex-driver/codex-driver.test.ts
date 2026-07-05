@@ -356,6 +356,71 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('drops live events and permission requests for other Codex threads', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+
+    transport.emit({ method: 'turn/started', params: { threadId: 'other-thread', turn: turn({ id: 'other-turn' }) } });
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId: 'other-thread', turnId: 'other-turn', itemId: 'assistant-1', delta: 'leak' } });
+    transport.emit({
+      method: 'item/started',
+      params: {
+        threadId: 'other-thread',
+        turnId: 'other-turn',
+        item: {
+          type: 'commandExecution',
+          id: 'cmd-1',
+          command: 'npm test',
+          cwd: '/repo',
+          processId: null,
+          source: 'user',
+          status: 'inProgress',
+          commandActions: [],
+          aggregatedOutput: '',
+          exitCode: null,
+          durationMs: null
+        }
+      }
+    });
+    transport.emit({ method: 'item/commandExecution/outputDelta', params: { threadId: 'other-thread', turnId: 'other-turn', itemId: 'cmd-1', delta: 'leak\n' } });
+    transport.emit({
+      method: 'item/completed',
+      params: {
+        threadId: 'other-thread',
+        turnId: 'other-turn',
+        item: { type: 'agentMessage', id: 'assistant-1', text: 'leak', phase: null, memoryCitation: null }
+      }
+    });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'other-thread', turn: turn({ id: 'other-turn', status: 'completed' }) } });
+    transport.emit({
+      id: 'other-approval',
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'other-thread',
+        turnId: 'other-turn',
+        itemId: 'cmd-item',
+        startedAtMs: 1,
+        environmentId: null,
+        reason: null,
+        command: 'npm test',
+        cwd: '/repo',
+        availableDecisions: ['accept', 'decline']
+      }
+    });
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'other-thread', requestId: 'other-approval' } });
+
+    expect(events).toEqual([]);
+  });
+
   it('normalizes command, file, question permission requests and resolved notifications', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
