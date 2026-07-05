@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -15,6 +15,10 @@ import {
   type PendingPermission,
   type RowModel
 } from './rowsModel.js';
+
+// Reuse the channels markdown renderer (spec §9: ChannelMarkdown). Lazy-loaded +
+// memoized for code-splitting, same pattern as MessageList.
+const ChannelMarkdown = lazy(() => import('../channels/ChannelMarkdown.js'));
 
 /**
  * Native UI surface — chat-style view of one agent session.
@@ -243,7 +247,13 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
       return (
         <div className="nativeAgentRow assistant">
           <span className="nativeAgentAuthor">assistant</span>
-          <span className="nativeAgentText">{row.text}</span>
+          <Suspense fallback={<span className="nativeAgentText">{row.text}</span>}>
+            <ChannelMarkdown
+              body={row.text}
+              channel=""
+              onOpenFile={() => undefined}
+            />
+          </Suspense>
         </div>
       );
     case 'tool':

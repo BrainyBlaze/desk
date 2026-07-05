@@ -68,6 +68,9 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       // commits them on assistant-message. Skip here.
       return;
     case 'assistant-message':
+      if (event.markdown.trim() === '') {
+        return; // BUG-3 sub-bug: skip empty-markdown assistant events (blank bubble)
+      }
       if (!model.rows.some((r) => r.id === event.id)) {
         model.rows.push({ kind: 'assistant-message', id: event.id, turnId: event.turnId, text: event.markdown });
       }

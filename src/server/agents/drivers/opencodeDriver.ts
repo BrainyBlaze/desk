@@ -396,33 +396,63 @@ export async function createLiveBackend(_opts: { cwd: string }): Promise<Opencod
       handler: (event: Event) => void,
       onEnd?: (error?: Error) => void
     ): Promise<() => void> {
-      // The SDK SSE helper resolves once the stream is established. We return an
-      // unsubscribe that aborts the underlying fetch; opencode serve closes the stream.
-      // The SSE promise resolves/rejects on stream termination — wire onEnd so the
-      // driver can emit a non-fatal agent-error when the stream dies outside shutdown.
-      const controller = new AbortController();
-      void client.global
-        .event({
-          signal: controller.signal,
-          onSseEvent: (sseEvent: { data?: unknown }) => {
-            if (!sseEvent.data) return;
-            try {
-              handler(JSON.parse(sseEvent.data as string) as Event);
-            } catch {
-              // malformed event — drop
+      // Bounded retry on stream termination (BUG-3 fix, claude Phase 4 visual-validation):
+      // opencode's SSE has known transient drops; demanding a manual restart for a
+      // short-lived network blip is poor UX. Retry with capped exponential backoff before
+      // declaring death via onEnd. AbortError (self-initiated unsubscribe) is NOT retried.
+      const MAX_RETRIES = 5;
+      const INITIAL_BACKOFF_MS = 500;
+      const MAX_BACKOFF_MS = 10_000;
+
+      let aborted = false;
+      let activeController: AbortController | null = null;
+
+      const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const attempt = async (retryCount: number): Promise<void> => {
+        if (aborted) return;
+        const controller = new AbortController();
+        activeController = controller;
+        try {
+          await client.global.event({
+            signal: controller.signal,
+            onSseEvent: (sseEvent: { data?: unknown }) => {
+              if (!sseEvent.data) return;
+              try {
+                handler(JSON.parse(sseEvent.data as string) as Event);
+              } catch {
+                // malformed event — drop
+              }
             }
+          });
+          // Stream closed cleanly (rare for opencode serve — it's long-lived).
+          if (aborted) return;
+          if (retryCount >= MAX_RETRIES) {
+            onEnd?.();
+            return;
           }
-        })
-        .then(() => {
-          // Stream closed cleanly (rare in normal operation — opencode serve is long-lived).
-          onEnd?.();
-        })
-        .catch((err: unknown) => {
-          // AbortError fires when WE unsubscribe; don't surface that as an error.
-          if (controller.signal.aborted) return;
-          onEnd?.(err instanceof Error ? err : new Error(String(err)));
-        });
-      return () => controller.abort();
+          await sleep(Math.min(MAX_BACKOFF_MS, INITIAL_BACKOFF_MS * 2 ** retryCount));
+          // Reset retry count on successful re-subscribe after receiving events — a fresh
+          // connection that delivered events is a healthy connection; the next drop starts
+          // the retry count from 0 again.
+          return attempt(0);
+        } catch (err) {
+          if (aborted || controller.signal.aborted) return;
+          if (retryCount >= MAX_RETRIES) {
+            onEnd?.(err instanceof Error ? err : new Error(String(err)));
+            return;
+          }
+          await sleep(Math.min(MAX_BACKOFF_MS, INITIAL_BACKOFF_MS * 2 ** retryCount));
+          return attempt(retryCount + 1);
+        }
+      };
+
+      void attempt(0);
+
+      return () => {
+        aborted = true;
+        activeController?.abort();
+      };
     },
     async close(): Promise<void> {
       server.close();
