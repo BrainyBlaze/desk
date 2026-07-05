@@ -1,0 +1,458 @@
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { describe, expect, it } from 'vitest';
+import {
+  createCodexDriver,
+  type CodexAppServerTransport,
+  type CodexAppServerProcess,
+  type CodexTransportEvent
+} from '../../../../src/server/agents/drivers/codexDriver.js';
+
+class FakeCodexTransport implements CodexAppServerTransport {
+  readonly calls: Array<
+    | { type: 'request'; method: string; params: unknown }
+    | { type: 'notify'; method: string }
+    | { type: 'respond'; requestId: string; result: unknown }
+  > = [];
+  closed = false;
+  private listeners = new Set<(event: CodexTransportEvent) => void>();
+
+  constructor(private readonly requestHandlers: Record<string, (params: unknown) => unknown>) {}
+
+  onEvent(handler: (event: CodexTransportEvent) => void): () => void {
+    this.listeners.add(handler);
+    return () => this.listeners.delete(handler);
+  }
+
+  emit(event: CodexTransportEvent): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+
+  async request(method: string, params: unknown): Promise<unknown> {
+    this.calls.push({ type: 'request', method, params });
+    const handler = this.requestHandlers[method];
+    if (!handler) {
+      throw new Error(`unexpected request ${method}`);
+    }
+    return handler(params);
+  }
+
+  async notify(method: string): Promise<void> {
+    this.calls.push({ type: 'notify', method });
+  }
+
+  async respond(requestId: string, result: unknown): Promise<void> {
+    this.calls.push({ type: 'respond', requestId, result });
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    return undefined;
+  }
+}
+
+class FakeAppServerProcess extends EventEmitter implements CodexAppServerProcess {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly writes: string[] = [];
+
+  constructor() {
+    super();
+    this.stdin.on('data', (chunk) => this.writes.push(String(chunk)));
+  }
+
+  kill(): boolean {
+    return true;
+  }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let index = 0; index < 20; index += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error('condition not met');
+}
+
+function thread(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'thread-1',
+    sessionId: 'session-1',
+    forkedFromId: null,
+    parentThreadId: null,
+    preview: '',
+    ephemeral: false,
+    modelProvider: 'openai',
+    createdAt: 1,
+    updatedAt: 1,
+    recencyAt: 1,
+    status: { type: 'idle' },
+    path: null,
+    cwd: '/repo',
+    cliVersion: 'codex-cli 0.142.5',
+    source: 'codex-app-server',
+    threadSource: null,
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    name: null,
+    turns: [],
+    ...overrides
+  };
+}
+
+function turn(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'turn-1',
+    status: 'inProgress',
+    error: null,
+    startedAt: 1,
+    completedAt: null,
+    durationMs: null,
+    itemsView: { type: 'complete' },
+    items: [],
+    ...overrides
+  };
+}
+
+describe('createCodexDriver', () => {
+  it('uses a real app-server transport by default while allowing an injected process for tests', async () => {
+    const proc = new FakeAppServerProcess();
+    const driver = createCodexDriver({ cwd: '/repo', model: 'gpt-5.5', transportOptions: { process: proc } });
+
+    const start = driver.start();
+    await waitFor(() => proc.writes.length >= 1);
+    proc.stdout.write('{"id":1,"result":{"userAgent":"codex-cli 0.142.5","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"linux"}}\n');
+    await waitFor(() => proc.writes.length >= 3);
+    proc.stdout.write('{"method":"thread/started","params":{"thread":{"id":"thread-1","sessionId":"session-1","forkedFromId":null,"parentThreadId":null,"preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1,"updatedAt":1,"recencyAt":1,"status":{"type":"idle"},"path":null,"cwd":"/repo","cliVersion":"codex-cli 0.142.5","source":"codex-app-server","threadSource":null,"agentNickname":null,"agentRole":null,"gitInfo":null,"name":null,"turns":[]}}}\n');
+    proc.stdout.write('{"id":2,"result":{}}\n');
+
+    await expect(start).resolves.toEqual({
+      session: { agentSessionId: 'thread-1', model: 'gpt-5.5' },
+      status: { kind: 'status', state: 'idle' }
+    });
+    expect(proc.writes).toEqual([
+      '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"desk","version":1}}}\n',
+      '{"method":"initialized"}\n',
+      '{"id":2,"method":"thread/start","params":{"cwd":"/repo","model":"gpt-5.5"}}\n'
+    ]);
+  });
+
+  it('initializes app-server, starts a fresh thread, and backfills committed history via thread/read', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/read': (params) => {
+        expect(params).toEqual({ threadId: 'thread-1', includeTurns: true });
+        return {
+          thread: thread({
+            turns: [
+              {
+                id: 'turn-1',
+                status: 'completed',
+                error: null,
+                startedAt: 1,
+                completedAt: 2,
+                durationMs: 1000,
+                itemsView: { type: 'complete' },
+                items: [
+                  { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'hello', text_elements: [] }] },
+                  { type: 'agentMessage', id: 'assistant-1', text: 'hi there', phase: null, memoryCitation: null }
+                ]
+              }
+            ]
+          })
+        };
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', model: 'gpt-5.5' });
+
+    const started = await driver.start();
+    const history = await driver.fetchHistory();
+
+    expect(transport.calls).toMatchObject([
+      { type: 'request', method: 'initialize' },
+      { type: 'notify', method: 'initialized' },
+      { type: 'request', method: 'thread/start', params: { cwd: '/repo', model: 'gpt-5.5' } },
+      { type: 'request', method: 'thread/read', params: { threadId: 'thread-1', includeTurns: true } }
+    ]);
+    expect(started).toEqual({
+      session: { agentSessionId: 'thread-1', model: 'gpt-5.5' },
+      status: { kind: 'status', state: 'idle' }
+    });
+    expect(history).toEqual([
+      { kind: 'user-message', id: 'user-1', text: 'hello', source: 'external' },
+      { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'hi there' },
+      { kind: 'turn-complete', turnId: 'turn-1' }
+    ]);
+  });
+
+  it('injects with turn/start while idle and turn/steer with expectedTurnId while a turn is active', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'turn/start': () => {
+        transport.emit({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn({ id: 'turn-1' }) } });
+        return { turn: turn({ id: 'turn-1' }) };
+      },
+      'turn/steer': () => ({})
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    await driver.start();
+
+    await driver.inject('first', 'ui');
+    await driver.inject('second', 'channel');
+
+    expect(transport.calls).toMatchObject([
+      { type: 'request', method: 'initialize' },
+      { type: 'notify', method: 'initialized' },
+      { type: 'request', method: 'thread/start' },
+      {
+        type: 'request',
+        method: 'turn/start',
+        params: { threadId: 'thread-1', input: [{ type: 'text', text: 'first', text_elements: [] }] }
+      },
+      {
+        type: 'request',
+        method: 'turn/steer',
+        params: {
+          threadId: 'thread-1',
+          expectedTurnId: 'turn-1',
+          input: [{ type: 'text', text: 'second', text_elements: [] }]
+        }
+      }
+    ]);
+  });
+
+  it('normalizes assistant deltas, committed messages, and turn completion notifications', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+
+    transport.emit({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn({ id: 'turn-1' }) } });
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'assistant-1', delta: 'hel' } });
+    transport.emit({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { type: 'agentMessage', id: 'assistant-1', text: 'hello', phase: null, memoryCitation: null }
+      }
+    });
+    transport.emit({ method: 'turn/completed', params: { threadId: 'thread-1', turn: turn({ id: 'turn-1', status: 'completed' }) } });
+
+    expect(events).toEqual([
+      { kind: 'status', state: 'processing' },
+      { kind: 'assistant-delta', turnId: 'turn-1', text: 'hel' },
+      { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'hello' },
+      { kind: 'turn-complete', turnId: 'turn-1' },
+      { kind: 'status', state: 'idle' }
+    ]);
+  });
+
+  it('normalizes command, file, question permission requests and resolved notifications', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+
+    transport.emit({
+      id: 'cmd-approval',
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'cmd-item',
+        startedAtMs: 1,
+        environmentId: null,
+        reason: 'needs network',
+        command: 'npm test',
+        cwd: '/repo',
+        availableDecisions: ['accept', 'acceptForSession', 'decline']
+      }
+    });
+    transport.emit({
+      id: 'file-approval',
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'file-item', startedAtMs: 1, reason: 'write docs', grantRoot: '/repo' }
+    });
+    transport.emit({
+      id: 'question-approval',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'question-item',
+        autoResolutionMs: null,
+        questions: [
+          {
+            id: 'choice',
+            header: 'Pick one',
+            question: 'Which option?',
+            isOther: false,
+            isSecret: false,
+            options: [{ label: 'A', description: 'First' }]
+          }
+        ]
+      }
+    });
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'cmd-approval' } });
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'file-approval' } });
+    transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'question-approval' } });
+
+    expect(events).toEqual([
+      { kind: 'status', state: 'awaiting-permission' },
+      {
+        kind: 'permission-request',
+        requestId: 'cmd-approval',
+        variant: 'command',
+        title: 'Run command',
+        detail: 'npm test\n\nneeds network',
+        options: [
+          { id: 'accept', label: 'Allow', treatment: 'allow' },
+          { id: 'acceptForSession', label: 'Allow for session', treatment: 'allow-session' },
+          { id: 'decline', label: 'Deny', treatment: 'deny' }
+        ]
+      },
+      { kind: 'status', state: 'awaiting-permission' },
+      {
+        kind: 'permission-request',
+        requestId: 'file-approval',
+        variant: 'file-edit',
+        title: 'Allow file changes',
+        detail: 'write docs',
+        options: [
+          { id: 'accept', label: 'Allow', treatment: 'allow' },
+          { id: 'decline', label: 'Deny', treatment: 'deny' }
+        ]
+      },
+      { kind: 'status', state: 'awaiting-permission' },
+      {
+        kind: 'permission-request',
+        requestId: 'question-approval',
+        variant: 'question',
+        title: 'Pick one',
+        detail: 'Which option?',
+        options: [{ id: 'choice:0', label: 'A', treatment: 'answer' }]
+      },
+      { kind: 'permission-resolved', requestId: 'cmd-approval', optionId: 'resolved', via: 'agent' },
+      { kind: 'permission-resolved', requestId: 'file-approval', optionId: 'resolved', via: 'agent' },
+      { kind: 'permission-resolved', requestId: 'question-approval', optionId: 'resolved', via: 'agent' },
+      { kind: 'status', state: 'idle' }
+    ]);
+  });
+
+  it('responds to command, file, and question permission requests by JSON-RPC request id', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    await driver.start();
+    transport.emit({
+      id: 'cmd-approval',
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'cmd-item',
+        startedAtMs: 1,
+        environmentId: null,
+        command: 'npm test',
+        availableDecisions: ['accept', 'decline']
+      }
+    });
+    transport.emit({
+      id: 'file-approval',
+      method: 'item/fileChange/requestApproval',
+      params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'file-item', startedAtMs: 1 }
+    });
+    transport.emit({
+      id: 'question-approval',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'question-item',
+        autoResolutionMs: null,
+        questions: [
+          {
+            id: 'choice',
+            header: 'Pick one',
+            question: 'Which option?',
+            isOther: false,
+            isSecret: false,
+            options: [{ label: 'A', description: 'First' }]
+          }
+        ]
+      }
+    });
+
+    await driver.respondPermission('cmd-approval', 'accept');
+    await driver.respondPermission('file-approval', 'decline');
+    await driver.respondPermission('question-approval', 'choice:0');
+
+    expect(transport.calls.filter((call) => call.type === 'respond')).toEqual([
+      { type: 'respond', requestId: 'cmd-approval', result: { decision: 'accept' } },
+      { type: 'respond', requestId: 'file-approval', result: { decision: 'decline' } },
+      { type: 'respond', requestId: 'question-approval', result: { answers: { choice: { answers: ['A'] } } } }
+    ]);
+  });
+
+  it('interrupts the active turn and closes transport on shutdown without further event emissions', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'turn/interrupt': () => ({ status: 'ok' })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+    transport.emit({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn({ id: 'turn-1' }) } });
+
+    await driver.interrupt();
+    await driver.shutdown();
+    transport.emit({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'assistant-1', delta: 'late' } });
+
+    expect(transport.calls).toMatchObject([
+      { type: 'request', method: 'initialize' },
+      { type: 'notify', method: 'initialized' },
+      { type: 'request', method: 'thread/start' },
+      { type: 'request', method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' } }
+    ]);
+    expect(transport.closed).toBe(true);
+    expect(events).toEqual([{ kind: 'status', state: 'processing' }]);
+  });
+});
