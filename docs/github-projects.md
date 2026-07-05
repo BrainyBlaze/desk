@@ -5,6 +5,10 @@ description: "Work with GitHub Projects v2 boards, tables, fields, drafts, statu
 
 Desk includes a GitHub Projects v2 subsystem for planning work beside agents, terminals, code, Git, notes, and channels.
 
+<Frame caption="A GitHub Projects board in Desk: project metadata, status updates, saved views, filters, grouped cards, and the active work items">
+  <img src="/images/projects-board.png" alt="GitHub Projects board in Desk with project status updates, saved views, filters, grouped columns, and work-item cards" />
+</Frame>
+
 The subsystem uses the GitHub CLI:
 
 - `gh api graphql` for Projects v2 queries and mutations
@@ -62,6 +66,10 @@ For iteration fields, Desk includes the active iteration and recent completed it
 
 The table view gives a dense list with sortable columns and inline field editing.
 
+<Frame caption="The table layout: project fields, owners, iterations, confidence values, and item status in one dense view">
+  <img src="/images/projects-table.png" alt="GitHub Projects table view in Desk showing status, priority, iteration, owner, confidence, and due-date fields" />
+</Frame>
+
 Supported field edits include:
 
 - text
@@ -97,6 +105,10 @@ Supported patterns include:
 
 Open an item to inspect and update its details.
 
+<Frame caption="An item drawer with editable fields, rendered markdown, comments, and issue actions">
+  <img src="/images/projects-item-drawer.png" alt="GitHub Projects item drawer in Desk with editable fields, a rendered definition of done, anti-gaming gate notes, comments, and issue actions" />
+</Frame>
+
 The drawer supports:
 
 - rendered markdown body
@@ -113,11 +125,19 @@ The drawer supports:
 
 You can add an item by URL when GitHub can resolve it to an issue, pull request, or draft-compatible content.
 
+<Frame caption="Add an issue, pull request, or draft title without leaving the Projects surface">
+  <img src="/images/projects-add-item.png" alt="Add item modal in Desk Projects with an input for an issue URL, pull-request URL, or draft title" />
+</Frame>
+
 You can also create draft items directly in the project and later convert them to issues.
 
 ## Status updates
 
 Desk supports project status updates, including create and delete operations. Status updates carry a health value such as on track, at risk, or off track, plus rendered body content.
+
+<Frame caption="Post project health updates from the same sidebar that shows the current status history">
+  <img src="/images/projects-status-update.png" alt="Post status update modal in Desk Projects with a health selector and markdown body field" />
+</Frame>
 
 ## Project operations
 
