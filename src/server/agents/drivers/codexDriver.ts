@@ -381,6 +381,13 @@ class CodexDriver implements AgentDriver {
       await this.handleGoalSlash(args);
       return [];
     }
+    if (name === 'compact') {
+      if (args) {
+        throw driverCommandError('/compact does not accept arguments in Codex native mode', 'unsupported-command', false);
+      }
+      await this.options.transport.request('thread/compact/start', { threadId: this.thread.id });
+      return [];
+    }
     const settings = codexSettingsSlashPatch(name, args);
     if (settings) {
       await this.options.transport.request('thread/settings/update', {

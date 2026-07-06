@@ -775,6 +775,32 @@ describe('createCodexDriver', () => {
     expect(events.filter((event) => (event as { kind?: string }).kind === 'user-message')).toHaveLength(3);
   });
 
+  it('/compact routes to Codex compact API without starting a turn', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/compact/start': () => ({})
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+    events.length = 0;
+
+    await driver.inject('/compact', 'ui');
+
+    expect(transport.calls).toContainEqual({
+      type: 'request',
+      method: 'thread/compact/start',
+      params: { threadId: 'thread-1' }
+    });
+    expect(transport.calls.some((call) => call.type === 'request' && call.method === 'turn/start')).toBe(false);
+    expect(events).toEqual([{ kind: 'user-message', id: 'codex-user-1', text: '/compact', source: 'ui' }]);
+  });
+
   it('interactive Codex slash commands fail with unsupported-command instead of becoming model text', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
