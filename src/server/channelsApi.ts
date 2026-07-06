@@ -859,8 +859,11 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     sendJson(res, 404, { error: `unknown channels endpoint: ${url.pathname}` });
     return true;
-  } catch {
-    sendJson(res, 500, { error: 'channels request failed' });
+  } catch (err) {
+    // Last-resort net for the channels router: log the real failure with the
+    // route and return the message — a generic 500 hides every failure class.
+    console.error(`[desk-channels] ${req.method ?? ''} ${url.pathname} failed:`, err);
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     return true;
   }
 }
