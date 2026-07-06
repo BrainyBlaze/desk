@@ -43,6 +43,7 @@ export function loadDriver(env: AgentHostEnv, _logger: AgentHostLogger): AgentDr
       return createCodexDriver({
         cwd,
         resumeId: env.DESK_AGENT_RESUME,
+        bypassPermissions: bypass,
         ...(model ? { model } : {})
       });
     default:

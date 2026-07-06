@@ -254,6 +254,54 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('maps bypass permissions to Codex thread approval and sandbox overrides on start', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', bypassPermissions: true });
+
+    await driver.start();
+
+    expect(transport.calls).toContainEqual({
+      type: 'request',
+      method: 'thread/start',
+      params: {
+        cwd: '/repo',
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      }
+    });
+  });
+
+  it('maps bypass permissions to Codex thread approval and sandbox overrides on resume', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/resume': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread({ id: 'thread-resumed' }) } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-resumed', bypassPermissions: true });
+
+    await driver.start();
+
+    expect(transport.calls).toContainEqual({
+      type: 'request',
+      method: 'thread/resume',
+      params: {
+        threadId: 'thread-resumed',
+        cwd: '/repo',
+        model: null,
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access'
+      }
+    });
+  });
+
   it('backfills command executions with start and end events so tool rows survive restart', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
@@ -1310,6 +1358,9 @@ describe('createCodexDriver', () => {
     });
 
     await driver.respondPermission('cmd-approval', 'accept');
+    expect(events.filter((event) => typeof event === 'object' && event !== null && (event as { kind?: unknown }).kind === 'permission-resolved')).toEqual([
+      { kind: 'permission-resolved', requestId: 'cmd-approval', optionId: 'accept', via: 'ui' }
+    ]);
     await driver.respondPermission('file-approval', 'decline');
     await driver.respondPermission('question-approval', 'choice:0');
     transport.emit({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 'cmd-approval' } });

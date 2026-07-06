@@ -3,6 +3,8 @@ import type { Readable, Writable } from 'node:stream';
 import type { AgentSurfacePermissionOption } from '../../../core/agentSurfaceProtocol.js';
 import type { ServerNotification } from '../codexBindings/ServerNotification.js';
 import type { ServerRequest } from '../codexBindings/ServerRequest.js';
+import type { AskForApproval } from '../codexBindings/v2/AskForApproval.js';
+import type { SandboxMode } from '../codexBindings/v2/SandboxMode.js';
 import type { Thread } from '../codexBindings/v2/Thread.js';
 import type { ThreadItem } from '../codexBindings/v2/ThreadItem.js';
 import type { Turn } from '../codexBindings/v2/Turn.js';
@@ -44,6 +46,7 @@ export interface CodexDriverOptions {
   cwd: string;
   model?: string;
   resumeId?: string;
+  bypassPermissions?: boolean;
 }
 
 const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
@@ -65,6 +68,13 @@ const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
 const CODEX_GOAL_STATUSES = new Set(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
 const CODEX_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
 const CODEX_PERSONALITIES = new Set(['none', 'friendly', 'pragmatic']);
+
+function codexBypassThreadOverrides(bypassPermissions: boolean | undefined): {
+  approvalPolicy?: AskForApproval;
+  sandbox?: SandboxMode;
+} {
+  return bypassPermissions ? { approvalPolicy: 'never', sandbox: 'danger-full-access' } : {};
+}
 
 function parseSlashCommand(text: string): { name: string; args: string } | null {
   const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
@@ -271,7 +281,6 @@ class CodexDriver implements AgentDriver {
   private activeTurnId: string | null = null;
   private pendingPermissions = 0;
   private readonly permissions = new Map<string, PendingPermission>();
-  private readonly uiPermissionResolutions = new Map<string, string>();
   private unsubscribeTransport: (() => void) | null = null;
   private stopped = false;
   private userMessageCounter = 0;
@@ -297,11 +306,13 @@ class CodexDriver implements AgentDriver {
       threadResult = await this.options.transport.request('thread/resume', {
         threadId: this.options.resumeId,
         cwd: this.options.cwd,
-        model: this.options.model ?? null
+        model: this.options.model ?? null,
+        ...codexBypassThreadOverrides(this.options.bypassPermissions)
       });
     } else {
       threadResult = await this.options.transport.request('thread/start', {
         cwd: this.options.cwd,
+        ...codexBypassThreadOverrides(this.options.bypassPermissions),
         ...(this.options.model ? { model: this.options.model } : {})
       });
     }
@@ -427,7 +438,7 @@ class CodexDriver implements AgentDriver {
       throw driverCommandError(`Unknown Codex permission request ${requestId}`, 'unknown-permission', false);
     }
     await this.options.transport.respond(requestId, permission.responseFor(optionId));
-    this.uiPermissionResolutions.set(requestId, optionId);
+    this.resolvePermission(requestId, optionId, 'ui');
   }
 
   async interrupt(): Promise<void> {
@@ -521,7 +532,6 @@ class CodexDriver implements AgentDriver {
       this.activeTurnId = null;
       this.pendingPermissions = 0;
       this.permissions.clear();
-      this.uiPermissionResolutions.clear();
       this.emit({ kind: 'agent-error', fatal: false, message: event.params.message });
       this.emit({ kind: 'status', state: 'exited' });
       return;
@@ -589,19 +599,18 @@ class CodexDriver implements AgentDriver {
     }
     if (event.method === 'serverRequest/resolved') {
       const requestId = String(event.params.requestId);
-      const uiOptionId = this.uiPermissionResolutions.get(requestId);
-      this.pendingPermissions = Math.max(0, this.pendingPermissions - 1);
-      this.permissions.delete(requestId);
-      this.uiPermissionResolutions.delete(requestId);
-      this.emit({
-        kind: 'permission-resolved',
-        requestId,
-        optionId: uiOptionId ?? 'resolved',
-        via: uiOptionId === undefined ? 'agent' : 'ui'
-      });
-      if (this.pendingPermissions === 0 && !this.activeTurnId) {
-        this.emit({ kind: 'status', state: 'idle' });
-      }
+      this.resolvePermission(requestId, 'resolved', 'agent');
+    }
+  }
+
+  private resolvePermission(requestId: string, optionId: string, via: 'agent' | 'ui'): void {
+    if (!this.permissions.delete(requestId)) {
+      return;
+    }
+    this.pendingPermissions = Math.max(0, this.pendingPermissions - 1);
+    this.emit({ kind: 'permission-resolved', requestId, optionId, via });
+    if (this.pendingPermissions === 0 && !this.activeTurnId) {
+      this.emit({ kind: 'status', state: 'idle' });
     }
   }
 
