@@ -19,11 +19,14 @@ import type { DriverEvent } from './driver.js';
 export interface ToolJournalRecord {
   /** Id of the last committed user/assistant message before this tool event. */
   anchorId: string | null;
+  /** Text prefix of the anchor message — id-independent fallback for agents whose
+   * live ids are synthetic (codex: live 'codex-user-N' vs history real item ids). */
+  anchorText?: string;
   event: DriverEvent;
 }
 
 export interface ToolJournal {
-  append(anchorId: string | null, event: DriverEvent): void;
+  append(anchorId: string | null, event: DriverEvent, anchorText?: string): void;
   /** Splice journaled tool events into API history at their anchor messages. */
   merge(history: DriverEvent[]): DriverEvent[];
   /** Number of records currently held (post-load, post-rotation). */
@@ -71,8 +74,8 @@ export function createToolJournal(opts: { path: string; cap?: number }): ToolJou
   }
 
   return {
-    append(anchorId, event) {
-      const record: ToolJournalRecord = { anchorId, event };
+    append(anchorId, event, anchorText) {
+      const record: ToolJournalRecord = { anchorId, event, ...(anchorText ? { anchorText } : {}) };
       records.push(record);
       if (records.length > cap) {
         records = records.slice(-cap);
@@ -98,28 +101,32 @@ export function createToolJournal(opts: { path: string; cap?: number }): ToolJou
           present.add(event.toolUseId);
         }
       }
-      const byAnchor = new Map<string, ToolJournalRecord[]>();
-      for (const record of records) {
-        if (!record.anchorId) continue;
+      const pending = records.filter((record) => {
+        if (!record.anchorId && !record.anchorText) return false;
         if ((record.event.kind === 'tool-start' || record.event.kind === 'tool-end') && present.has(record.event.toolUseId)) {
-          continue;
+          return false;
         }
-        const group = byAnchor.get(record.anchorId) ?? [];
-        group.push(record);
-        byAnchor.set(record.anchorId, group);
-      }
-      if (byAnchor.size === 0) {
+        return true;
+      });
+      if (pending.length === 0) {
         return history;
       }
       const merged: DriverEvent[] = [];
+      const used = new Set<ToolJournalRecord>();
       for (const event of history) {
         merged.push(event);
         const id = 'id' in event ? (event as { id?: string }).id : undefined;
-        if (id && byAnchor.has(id)) {
-          for (const record of byAnchor.get(id)!) {
+        const text =
+          event.kind === 'user-message' ? event.text.slice(0, 200) : event.kind === 'assistant-message' ? event.markdown.slice(0, 200) : undefined;
+        for (const record of pending) {
+          if (used.has(record)) continue;
+          // Id match first; text-prefix fallback with ordered consumption handles
+          // agents whose live ids never appear in history (repeats resolve in order).
+          const hit = (id && record.anchorId === id) || (text !== undefined && record.anchorText !== undefined && record.anchorText === text);
+          if (hit) {
+            used.add(record);
             merged.push(record.event);
           }
-          byAnchor.delete(id);
         }
       }
       // Anchors no longer present in history (pruned/compacted upstream) — their

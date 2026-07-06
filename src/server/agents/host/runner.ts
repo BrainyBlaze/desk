@@ -129,6 +129,7 @@ export class AgentHost {
   private readonly toolJournal: ToolJournal;
   /** Id of the last committed user/assistant message — the anchor for journaled tool events. */
   private lastMessageAnchorId: string | null = null;
+  private lastMessageAnchorText: string | null = null;
 
   constructor(opts: AgentHostOptions) {
     this.env = opts.env;
@@ -480,9 +481,10 @@ export class AgentHost {
     // cannot return them (codex app-server exposes no tool items on resume).
     if (payload.kind === 'user-message' || payload.kind === 'assistant-message') {
       this.lastMessageAnchorId = payload.id;
+      this.lastMessageAnchorText = (payload.kind === 'user-message' ? payload.text : payload.markdown).slice(0, 200);
     }
     if (payload.kind === 'tool-start' || payload.kind === 'tool-end') {
-      this.toolJournal.append(this.lastMessageAnchorId, payload);
+      this.toolJournal.append(this.lastMessageAnchorId, payload, this.lastMessageAnchorText ?? undefined);
     }
     const event: AgentSurfaceEvent = {
       ...payload,
