@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -9,8 +10,10 @@ import {
 } from './agentSurfaceClient.js';
 import {
   applyEvent as applyEventToModel,
+  buildAgentFeedItems,
   initialRowModel,
   rowsFromSnapshot,
+  type AgentFeedItem,
   type AgentRow,
   type PendingPermission,
   type RowModel
@@ -146,6 +149,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   const followingRef = useRef(true);
   const prevRowCountRef = useRef(0);
   const [unseenCount, setUnseenCount] = useState(0);
+  const [expandedTurnIds, setExpandedTurnIds] = useState<Set<string>>(() => new Set());
 
   // UX item 8: "new since last view" separator. The marker index is fixed at
   // refocus/remount time (rows beyond the stored last-seen count are new);
@@ -165,10 +169,35 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     }
   }, [focused, session, model.rows.length]);
 
+  const feedItems = useMemo(
+    () => buildAgentFeedItems(model.rows, { expandedTurnIds }),
+    [model.rows, expandedTurnIds]
+  );
+  const virtualizer = useVirtualizer({
+    count: feedItems.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 58,
+    overscan: 8
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+  const totalVirtualSize = virtualizer.getTotalSize();
+
+  const scrollToLatest = (): void => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (feedItems.length > 0) {
+      virtualizer.scrollToIndex(feedItems.length - 1, { align: 'end' });
+    }
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (current) current.scrollTop = current.scrollHeight;
+    });
+  };
+
   const jumpToLatest = () => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    scrollToLatest();
     followingRef.current = true;
     setUnseenCount(0);
   };
@@ -192,7 +221,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     // once while scrollTop is still 0 — land on the latest message.
     const snapshotReplace = prevCount === 0 && model.rows.length > 0;
     if (snapshotReplace || followingRef.current) {
-      el.scrollTop = el.scrollHeight;
+      scrollToLatest();
       followingRef.current = true;
       if (unseenCount !== 0) setUnseenCount(0);
       return;
@@ -259,16 +288,31 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
         {/* Stop moved to the composer action slot (UX item 5); header keeps status only. */}
       </div>
       <div className="nativeAgentFeed" ref={scrollRef} onScroll={handleFeedScroll}>
-        {model.rows.map((row, index) => (
-          <Fragment key={row.id}>
-            {unreadMarkerIndex !== null && index === unreadMarkerIndex ? (
-              <div className="nativeAgentRow unreadMarker" aria-label="new since last view">
-                new since last view
+        <div className="nativeAgentVirtualSpacer" style={{ height: totalVirtualSize }}>
+          {virtualItems.map((virtualRow) => {
+            const item = feedItems[virtualRow.index];
+            if (!item) return null;
+            return (
+              <div
+                key={virtualRow.key}
+                ref={virtualizer.measureElement}
+                data-index={virtualRow.index}
+                className="nativeAgentVirtualItem"
+                style={{ transform: `translateY(${virtualRow.start}px)` }}
+              >
+                {shouldShowUnreadMarkerBeforeItem(feedItems, virtualRow.index, unreadMarkerIndex) ? (
+                  <div className="nativeAgentRow unreadMarker" aria-label="new since last view">
+                    new since last view
+                  </div>
+                ) : null}
+                <AgentFeedItemView
+                  item={item}
+                  onExpandTurn={(turnId) => setExpandedTurnIds((prev) => new Set(prev).add(turnId))}
+                />
               </div>
-            ) : null}
-            <AgentRowView row={row} />
-          </Fragment>
-        ))}
+            );
+          })}
+        </div>
         {pendingAssistantEntries.map(({ turnId, text }) => (
           <div key={`pending-${turnId}`} className="nativeAgentRow assistant pending">
             <span className="nativeAgentAuthor">assistant</span>
@@ -357,6 +401,43 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
       </div>
     </div>
   );
+}
+
+function AgentFeedItemView({
+  item,
+  onExpandTurn
+}: {
+  item: AgentFeedItem;
+  onExpandTurn: (turnId: string) => void;
+}): JSX.Element {
+  if (item.kind === 'row') {
+    return <AgentRowView row={item.row} />;
+  }
+  return <TurnSummaryRow item={item} onExpand={() => onExpandTurn(item.turnId)} />;
+}
+
+function TurnSummaryRow({ item, onExpand }: { item: Extract<AgentFeedItem, { kind: 'turn-summary' }>; onExpand: () => void }): JSX.Element {
+  return (
+    <button type="button" className="nativeAgentRow nativeAgentTurnSummary" onClick={onExpand}>
+      <span className="nativeAgentTurnSummaryTitle">Collapsed turn</span>
+      <span className="nativeAgentTurnSummaryPreview">{item.preview}</span>
+      <span className="nativeAgentTurnSummaryMeta">
+        {item.rowCount} rows · {item.toolCount} tool{item.toolCount === 1 ? '' : 's'} · {item.assistantCount} repl{item.assistantCount === 1 ? 'y' : 'ies'}
+      </span>
+    </button>
+  );
+}
+
+function shouldShowUnreadMarkerBeforeItem(
+  items: AgentFeedItem[],
+  index: number,
+  unreadMarkerIndex: number | null
+): boolean {
+  if (unreadMarkerIndex === null) return false;
+  const item = items[index];
+  if (!item || item.lastRowIndex < unreadMarkerIndex) return false;
+  const previous = items[index - 1];
+  return !previous || previous.lastRowIndex < unreadMarkerIndex;
 }
 
 export interface NativeAgentSurfaceProps {

@@ -33,6 +33,9 @@ export interface ToolStateDisplay {
 
 type ToolTerminalStatus = 'ok' | 'error' | 'denied';
 
+export const DEFAULT_TURN_COLLAPSE_ROW_THRESHOLD = 120;
+export const DEFAULT_TURN_COLLAPSE_KEEP_RECENT_TURNS = 3;
+
 export interface RowCollapse {
   defaultCollapsed: true;
   reason: 'channel-onboarding' | 'long-payload';
@@ -54,6 +57,27 @@ export interface RowModel {
   pendingPermission: PendingPermission | null;
 }
 
+export type AgentFeedItem =
+  | { kind: 'row'; id: string; row: AgentRow; rowIndex: number; firstRowIndex: number; lastRowIndex: number }
+  | {
+      kind: 'turn-summary';
+      id: string;
+      turnId: string;
+      rows: AgentRow[];
+      firstRowIndex: number;
+      lastRowIndex: number;
+      rowCount: number;
+      toolCount: number;
+      assistantCount: number;
+      preview: string;
+    };
+
+export interface BuildAgentFeedItemsOptions {
+  collapseAfterRows?: number;
+  keepRecentTurns?: number;
+  expandedTurnIds?: ReadonlySet<string>;
+}
+
 export function initialRowModel(): RowModel {
   return { rows: [], status: 'starting', pendingPermission: null };
 }
@@ -70,6 +94,47 @@ export function rowsFromSnapshot(events: AgentSurfaceEvent[], state: AgentSurfac
     applyCommittedEvent(model, event);
   }
   return model;
+}
+
+export function buildAgentFeedItems(
+  rows: AgentRow[],
+  options: BuildAgentFeedItemsOptions = {}
+): AgentFeedItem[] {
+  const collapseAfterRows = options.collapseAfterRows ?? DEFAULT_TURN_COLLAPSE_ROW_THRESHOLD;
+  if (rows.length < collapseAfterRows) {
+    return rows.map((row, index) => rowFeedItem(row, index));
+  }
+
+  const keepRecentTurns = options.keepRecentTurns ?? DEFAULT_TURN_COLLAPSE_KEEP_RECENT_TURNS;
+  const completedTurns = collectCompletedTurns(rows);
+  const collapseThroughTurnIndex = completedTurns.length - keepRecentTurns;
+  if (collapseThroughTurnIndex <= 0) {
+    return rows.map((row, index) => rowFeedItem(row, index));
+  }
+
+  const items: AgentFeedItem[] = [];
+  let nextTurn = 0;
+  let index = 0;
+  while (index < rows.length) {
+    const turn = completedTurns[nextTurn];
+    if (turn && index === turn.startIndex) {
+      const shouldCollapse =
+        nextTurn < collapseThroughTurnIndex && !options.expandedTurnIds?.has(turn.turnId);
+      if (shouldCollapse) {
+        items.push(turnSummaryItem(turn, rows));
+      } else {
+        for (let rowIndex = turn.startIndex; rowIndex <= turn.endIndex; rowIndex += 1) {
+          items.push(rowFeedItem(rows[rowIndex], rowIndex));
+        }
+      }
+      index = turn.endIndex + 1;
+      nextTurn += 1;
+      continue;
+    }
+    items.push(rowFeedItem(rows[index], index));
+    index += 1;
+  }
+  return items;
 }
 
 /**
@@ -230,6 +295,59 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
 
 function applyCommittedEvent(model: RowModel, event: AgentSurfaceEvent): void {
   applyEvent(model, event);
+}
+
+interface CompletedTurnSpan {
+  turnId: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+function rowFeedItem(row: AgentRow, rowIndex: number): AgentFeedItem {
+  return {
+    kind: 'row',
+    id: row.id,
+    row,
+    rowIndex,
+    firstRowIndex: rowIndex,
+    lastRowIndex: rowIndex
+  };
+}
+
+function collectCompletedTurns(rows: AgentRow[]): CompletedTurnSpan[] {
+  const turns: CompletedTurnSpan[] = [];
+  let startIndex = 0;
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (row.kind === 'turn-complete' && row.turnId) {
+      turns.push({ turnId: row.turnId, startIndex, endIndex: index });
+      startIndex = index + 1;
+    }
+  }
+  return turns;
+}
+
+function turnSummaryItem(turn: CompletedTurnSpan, rows: AgentRow[]): AgentFeedItem {
+  const turnRows = rows.slice(turn.startIndex, turn.endIndex + 1);
+  return {
+    kind: 'turn-summary',
+    id: `turn-summary-${turn.turnId}`,
+    turnId: turn.turnId,
+    rows: turnRows,
+    firstRowIndex: turn.startIndex,
+    lastRowIndex: turn.endIndex,
+    rowCount: turnRows.length,
+    toolCount: turnRows.filter((row) => row.kind === 'tool').length,
+    assistantCount: turnRows.filter((row) => row.kind === 'assistant-message').length,
+    preview: turnPreview(turnRows)
+  };
+}
+
+function turnPreview(rows: AgentRow[]): string {
+  const row = rows.find((candidate) => candidate.kind === 'user-message' && candidate.text.trim())
+    ?? rows.find((candidate) => candidate.kind === 'assistant-message' && candidate.text.trim())
+    ?? rows.find((candidate) => candidate.text.trim());
+  return row ? previewText(row.text) : 'completed turn';
 }
 
 function collapseMetadataForPayload(

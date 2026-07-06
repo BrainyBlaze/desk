@@ -86,3 +86,26 @@ describe('native agent Phase B styles', () => {
     expect(source).toMatch(/\.nativeAgentToolElapsed/);
   });
 });
+
+describe('native agent Phase C turn collapse and virtualization', () => {
+  it('uses feed items, turn summary rows, and a virtualized feed container', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(/useVirtualizer/);
+    expect(source).toMatch(/buildAgentFeedItems/);
+    expect(source).toMatch(/function TurnSummaryRow/);
+    expect(source).toMatch(/nativeAgentVirtualSpacer/);
+    expect(source).toMatch(/virtualizer\.measureElement/);
+    expect(source).toMatch(/nativeAgentTurnSummary/);
+  });
+
+  it('defines scoped turn summary and virtual feed styles', () => {
+    const source = stylesSource();
+
+    expect(source).toMatch(/UX item 10/);
+    expect(source).toMatch(/\.nativeAgentVirtualSpacer/);
+    expect(source).toMatch(/\.nativeAgentVirtualItem/);
+    expect(source).toMatch(/\.nativeAgentTurnSummary/);
+    expect(source).toMatch(/\.nativeAgentTurnSummaryMeta/);
+  });
+});

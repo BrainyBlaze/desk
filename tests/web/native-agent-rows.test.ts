@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentSurfaceEvent } from '../../src/core/agentSurfaceProtocol';
-import { applyEvent, initialRowModel, rowsFromSnapshot } from '../../src/web/agentSurface/rowsModel';
+import { applyEvent, buildAgentFeedItems, initialRowModel, rowsFromSnapshot } from '../../src/web/agentSurface/rowsModel';
 
 const TS = '2026-07-05T18:00:00.000Z';
 function ev(seq: number, partial: Omit<AgentSurfaceEvent, 'seq' | 'ts'>): AgentSurfaceEvent {
@@ -255,5 +255,64 @@ describe('applyEvent — tool state display metadata', () => {
         durationMs: 1250
       }
     });
+  });
+});
+
+describe('buildAgentFeedItems — turn collapse', () => {
+  function appendTurn(model: ReturnType<typeof initialRowModel>, turnNumber: number): void {
+    const turnId = `turn-${turnNumber}`;
+    applyEvent(model, ev(turnNumber * 10 + 1, { kind: 'user-message', id: `u-${turnNumber}`, text: `question ${turnNumber}`, source: 'ui' }));
+    applyEvent(model, ev(turnNumber * 10 + 2, { kind: 'tool-start', toolUseId: `tool-${turnNumber}`, name: 'Bash', summary: `cmd ${turnNumber}` }));
+    applyEvent(model, ev(turnNumber * 10 + 3, { kind: 'tool-end', toolUseId: `tool-${turnNumber}`, status: 'ok', summary: 'ok' }));
+    applyEvent(model, ev(turnNumber * 10 + 4, { kind: 'assistant-message', id: `a-${turnNumber}`, turnId, markdown: `answer ${turnNumber}` }));
+    applyEvent(model, ev(turnNumber * 10 + 5, { kind: 'turn-complete', turnId }));
+  }
+
+  it('keeps short transcripts expanded', () => {
+    const model = initialRowModel();
+    appendTurn(model, 1);
+    appendTurn(model, 2);
+
+    const items = buildAgentFeedItems(model.rows, { collapseAfterRows: 20, keepRecentTurns: 1 });
+
+    expect(items).toHaveLength(model.rows.length);
+    expect(items.every((item) => item.kind === 'row')).toBe(true);
+  });
+
+  it('collapses older completed turns once the transcript is long', () => {
+    const model = initialRowModel();
+    appendTurn(model, 1);
+    appendTurn(model, 2);
+    appendTurn(model, 3);
+
+    const items = buildAgentFeedItems(model.rows, { collapseAfterRows: 4, keepRecentTurns: 1 });
+
+    expect(items[0]).toMatchObject({
+      kind: 'turn-summary',
+      turnId: 'turn-1',
+      rowCount: 4,
+      toolCount: 1,
+      assistantCount: 1,
+      preview: 'question 1'
+    });
+    expect(items[1]).toMatchObject({ kind: 'turn-summary', turnId: 'turn-2' });
+    expect(items.slice(2).every((item) => item.kind === 'row')).toBe(true);
+  });
+
+  it('expands a collapsed turn when its id is in the expanded set', () => {
+    const model = initialRowModel();
+    appendTurn(model, 1);
+    appendTurn(model, 2);
+    appendTurn(model, 3);
+
+    const items = buildAgentFeedItems(model.rows, {
+      collapseAfterRows: 4,
+      keepRecentTurns: 1,
+      expandedTurnIds: new Set(['turn-1'])
+    });
+
+    expect(items[0]).toMatchObject({ kind: 'row', row: { id: 'u-1' } });
+    expect(items.some((item) => item.kind === 'turn-summary' && item.turnId === 'turn-1')).toBe(false);
+    expect(items.some((item) => item.kind === 'turn-summary' && item.turnId === 'turn-2')).toBe(true);
   });
 });

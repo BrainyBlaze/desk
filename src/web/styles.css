@@ -6074,6 +6074,53 @@ button.layoutBadge:hover:not(:disabled) {
   opacity: 0.72;
 }
 
+/* UX item 10: turn collapse and virtualized long transcripts. */
+.nativeAgentVirtualSpacer {
+  position: relative;
+  width: 100%;
+}
+
+.nativeAgentVirtualItem {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+.nativeAgentTurnSummary {
+  width: calc(100% - 24px);
+  margin-right: 24px;
+  border: 1px dashed rgba(102, 170, 255, 0.28);
+  background: rgba(102, 170, 255, 0.05);
+  color: rgba(220, 235, 250, 0.86);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nativeAgentTurnSummary:hover {
+  border-color: rgba(102, 170, 255, 0.48);
+  background: rgba(102, 170, 255, 0.08);
+}
+
+.nativeAgentTurnSummaryTitle {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.72;
+}
+
+.nativeAgentTurnSummaryPreview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nativeAgentTurnSummaryMeta {
+  font-size: 10px;
+  opacity: 0.58;
+}
+
 /* UX item 9: slash-command palette above the composer. */
 .nativeAgentPalette {
   position: absolute;
