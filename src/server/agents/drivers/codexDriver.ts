@@ -65,6 +65,8 @@ const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
 const CODEX_GOAL_STATUSES = new Set(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
 const CODEX_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
 const CODEX_PERSONALITIES = new Set(['none', 'friendly', 'pragmatic']);
+const CODEX_RELOAD_TOOL_LIMITATION_DETAIL =
+  'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.';
 
 function parseSlashCommand(text: string): { name: string; args: string } | null {
   const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
@@ -453,26 +455,50 @@ class CodexDriver implements AgentDriver {
     if (!thread) {
       return [];
     }
-    const turns = thread.turns.some((turn) => turn.itemsView !== 'full') ? await this.fetchFullTurns(threadId, thread.turns) : thread.turns;
-    return flattenThreadHistory({ ...thread, turns });
+    const turns = await this.hydrateHistoryTurns(threadId, thread.turns);
+    const events = flattenThreadHistory({ ...thread, turns });
+    if (shouldEmitReloadToolLimitation(turns, events, Boolean(this.options.resumeId))) {
+      events.push({ kind: 'attention-hint', attention: 'session-status', detail: CODEX_RELOAD_TOOL_LIMITATION_DETAIL });
+    }
+    return events;
   }
 
-  private async fetchFullTurns(threadId: string, fallbackTurns: Turn[]): Promise<Turn[]> {
-    const turns: Turn[] = [];
-    let cursor: string | null = null;
-    do {
-      const page = (await this.options.transport.request('thread/turns/list', {
-        threadId,
-        itemsView: 'full',
-        sortDirection: 'asc',
-        ...(cursor ? { cursor } : {})
-      })) as { data?: Turn[]; nextCursor?: string | null };
-      if (Array.isArray(page.data)) {
-        turns.push(...page.data);
+  private async hydrateHistoryTurns(threadId: string, turns: Turn[]): Promise<Turn[]> {
+    const hydratedTurns: Turn[] = [];
+    for (const turn of turns) {
+      if (!shouldFetchHistoryItems(turn, Boolean(this.options.resumeId))) {
+        hydratedTurns.push(turn);
+        continue;
       }
-      cursor = typeof page.nextCursor === 'string' && page.nextCursor.length > 0 ? page.nextCursor : null;
-    } while (cursor);
-    return turns.length > 0 ? turns : fallbackTurns;
+      const items = await this.fetchTurnItems(threadId, turn.id);
+      hydratedTurns.push(items ? { ...turn, items, itemsView: 'full' } : turn);
+    }
+    return hydratedTurns;
+  }
+
+  private async fetchTurnItems(threadId: string, turnId: string): Promise<ThreadItem[] | null> {
+    const items: ThreadItem[] = [];
+    let cursor: string | null = null;
+    try {
+      do {
+        const page = (await this.options.transport.request('thread/turns/items/list', {
+          threadId,
+          turnId,
+          sortDirection: 'asc',
+          ...(cursor ? { cursor } : {})
+        })) as { data?: ThreadItem[]; nextCursor?: string | null };
+        if (Array.isArray(page.data)) {
+          items.push(...page.data);
+        }
+        cursor = typeof page.nextCursor === 'string' && page.nextCursor.length > 0 ? page.nextCursor : null;
+      } while (cursor);
+    } catch (error) {
+      if (isOptionalHistoryItemsError(error)) {
+        return null;
+      }
+      throw error;
+    }
+    return items.length > 0 ? items : null;
   }
 
   async shutdown(): Promise<void> {
@@ -609,6 +635,58 @@ function isUnmaterializedThreadReadError(error: unknown): boolean {
     return false;
   }
   return error.message.includes('is not materialized yet') && error.message.includes('includeTurns is unavailable before first user message');
+}
+
+function isOptionalHistoryItemsError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('thread/turns/items/list') ||
+    message.includes('method not found') ||
+    message.includes('unknown method') ||
+    message.includes('experimentalapi') ||
+    message.includes('not supported') ||
+    message.includes('invalid request')
+  );
+}
+
+function shouldFetchHistoryItems(turn: Turn, isResumedHistory: boolean): boolean {
+  if (turn.itemsView !== 'full') {
+    return true;
+  }
+  return isResumedHistory && turn.status === 'completed' && turn.items.some(isRenderableHistoryItem) && !turn.items.some(isToolThreadItem);
+}
+
+function isRenderableHistoryItem(item: ThreadItem): boolean {
+  return item.type === 'userMessage' || item.type === 'agentMessage';
+}
+
+function isToolThreadItem(item: ThreadItem): boolean {
+  switch (item.type) {
+    case 'commandExecution':
+    case 'mcpToolCall':
+    case 'dynamicToolCall':
+    case 'fileChange':
+    case 'collabAgentToolCall':
+    case 'webSearch':
+    case 'imageView':
+    case 'sleep':
+    case 'imageGeneration':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function shouldEmitReloadToolLimitation(turns: Turn[], events: DriverEvent[], isResumedHistory: boolean): boolean {
+  return (
+    isResumedHistory &&
+    turns.some((turn) => turn.status === 'completed' && turn.items.some(isRenderableHistoryItem)) &&
+    events.some((event) => event.kind === 'user-message' || event.kind === 'assistant-message') &&
+    !events.some((event) => event.kind === 'tool-start' || event.kind === 'tool-end')
+  );
 }
 
 function threadStatusToDriverStatus(thread: Thread): DriverStatusEvent {

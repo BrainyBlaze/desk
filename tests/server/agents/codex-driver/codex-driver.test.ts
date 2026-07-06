@@ -402,7 +402,7 @@ describe('createCodexDriver', () => {
     );
   });
 
-  it('loads full Codex turn items when thread/read only returns summary turns', async () => {
+  it('loads full Codex turn items from per-turn item pages when thread/read only returns summary turns', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
       'thread/start': () => {
@@ -424,51 +424,44 @@ describe('createCodexDriver', () => {
           ]
         })
       }),
-      'thread/turns/list': (params) => {
-        expect(params).toEqual({ threadId: 'thread-1', itemsView: 'full', sortDirection: 'asc' });
+      'thread/turns/items/list': (params) => {
+        expect(params).toEqual({ threadId: 'thread-1', turnId: 'turn-1', sortDirection: 'asc' });
         return {
           data: [
-            turn({
-              id: 'turn-1',
+            { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'please use tools', text_elements: [] }] },
+            {
+              type: 'commandExecution',
+              id: 'cmd-1',
+              command: 'pwd',
+              cwd: '/repo',
+              processId: null,
+              source: 'user',
               status: 'completed',
-              itemsView: 'full',
-              items: [
-                { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'please use tools', text_elements: [] }] },
-                {
-                  type: 'commandExecution',
-                  id: 'cmd-1',
-                  command: 'pwd',
-                  cwd: '/repo',
-                  processId: null,
-                  source: 'user',
-                  status: 'completed',
-                  commandActions: [],
-                  aggregatedOutput: '/repo\n',
-                  exitCode: 0,
-                  durationMs: 12
-                },
-                {
-                  type: 'mcpToolCall',
-                  id: 'mcp-1',
-                  server: 'github',
-                  tool: 'search_issues',
-                  status: 'completed',
-                  arguments: { q: 'desk' },
-                  appContext: null,
-                  pluginId: null,
-                  result: { content: ['done'], structuredContent: null, _meta: null },
-                  error: null,
-                  durationMs: 34
-                },
-                {
-                  type: 'fileChange',
-                  id: 'patch-1',
-                  changes: [{ path: '/repo/src/a.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' }],
-                  status: 'completed'
-                },
-                { type: 'agentMessage', id: 'assistant-1', text: 'done', phase: null, memoryCitation: null }
-              ]
-            })
+              commandActions: [],
+              aggregatedOutput: '/repo\n',
+              exitCode: 0,
+              durationMs: 12
+            },
+            {
+              type: 'mcpToolCall',
+              id: 'mcp-1',
+              server: 'github',
+              tool: 'search_issues',
+              status: 'completed',
+              arguments: { q: 'desk' },
+              appContext: null,
+              pluginId: null,
+              result: { content: ['done'], structuredContent: null, _meta: null },
+              error: null,
+              durationMs: 34
+            },
+            {
+              type: 'fileChange',
+              id: 'patch-1',
+              changes: [{ path: '/repo/src/a.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' }],
+              status: 'completed'
+            },
+            { type: 'agentMessage', id: 'assistant-1', text: 'done', phase: null, memoryCitation: null }
           ],
           nextCursor: null,
           backwardsCursor: null
@@ -491,6 +484,56 @@ describe('createCodexDriver', () => {
       { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'done' },
       { kind: 'turn-complete', turnId: 'turn-1' }
     ]);
+  });
+
+  it('surfaces an honest reload limitation when resumed Codex history has no recoverable tool items', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/resume': () => ({ thread: thread({ id: 'thread-1', status: { type: 'idle' } }) }),
+      'thread/read': () => ({
+        thread: thread({
+          turns: [
+            turn({
+              id: 'turn-1',
+              status: 'completed',
+              itemsView: 'full',
+              items: [
+                { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'please use tools', text_elements: [] }] },
+                { type: 'agentMessage', id: 'assistant-1', text: 'done', phase: null, memoryCitation: null }
+              ]
+            })
+          ]
+        })
+      }),
+      'thread/turns/items/list': (params) => {
+        expect(params).toEqual({ threadId: 'thread-1', turnId: 'turn-1', sortDirection: 'asc' });
+        return {
+          data: [
+            { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'please use tools', text_elements: [] }] },
+            { type: 'agentMessage', id: 'assistant-1', text: 'done', phase: null, memoryCitation: null }
+          ],
+          nextCursor: null,
+          backwardsCursor: null
+        };
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-1' });
+
+    await driver.start();
+    const history = await driver.fetchHistory();
+
+    expect(history).toEqual([
+      { kind: 'user-message', id: 'user-1', text: 'please use tools', source: 'external' },
+      { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'done' },
+      { kind: 'turn-complete', turnId: 'turn-1' },
+      {
+        kind: 'attention-hint',
+        attention: 'session-status',
+        detail: 'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.'
+      }
+    ]);
+    expect(transport.calls.some((call) => call.type === 'request' && call.method === 'thread/turns/list')).toBe(false);
+    expect(transport.calls.some((call) => call.type === 'request' && call.method === 'thread/turns/items/list')).toBe(true);
   });
 
   it('does not emit turn-complete dividers for history turns with no renderable items', async () => {
