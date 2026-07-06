@@ -101,10 +101,16 @@ export function createToolJournal(opts: { path: string; cap?: number }): ToolJou
           present.add(event.toolUseId);
         }
       }
+      const seenJournalToolEvents = new Set<string>();
       const pending = records.filter((record) => {
         if (!record.anchorId && !record.anchorText) return false;
         if ((record.event.kind === 'tool-start' || record.event.kind === 'tool-end') && present.has(record.event.toolUseId)) {
           return false;
+        }
+        if (record.event.kind === 'tool-start' || record.event.kind === 'tool-end') {
+          const key = `${record.event.kind}:${record.event.toolUseId}`;
+          if (seenJournalToolEvents.has(key)) return false;
+          seenJournalToolEvents.add(key);
         }
         return true;
       });

@@ -38,6 +38,19 @@ describe('toolJournal merge (codex reload: API returns messages only)', () => {
     expect(merged.filter((e) => e.kind === 'tool-end')).toHaveLength(1);
   });
 
+  it('heals duplicate tool records already present inside the journal', () => {
+    const j = createToolJournal({ path: tempPath() });
+    j.append('u1', toolStart('tool-1'));
+    j.append('u1', toolEnd('tool-1'));
+    j.append('u1', toolStart('tool-1'));
+    j.append('u1', toolEnd('tool-1'));
+
+    const merged = j.merge([user('u1'), assistant('a1')]);
+
+    expect(merged.filter((e) => e.kind === 'tool-start')).toHaveLength(1);
+    expect(merged.filter((e) => e.kind === 'tool-end')).toHaveLength(1);
+  });
+
   it('drops journaled events whose anchor is gone from history', () => {
     const j = createToolJournal({ path: tempPath() });
     j.append('u-pruned', toolStart('tool-9'));
