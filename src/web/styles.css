@@ -5389,8 +5389,10 @@ button.layoutBadge:hover:not(:disabled) {
   align-items: flex-start;
   gap: 8px;
   font-size: 11px;
-  margin-left: 12px;
-  margin-right: 12px;
+  /* Tool blocks belong to the assistant column: same left edge, same right
+     inset as .nativeAgentRow.assistant so they share one vertical line. */
+  margin-left: 0;
+  margin-right: 24px;
   padding: 5px 8px;
 }
 
