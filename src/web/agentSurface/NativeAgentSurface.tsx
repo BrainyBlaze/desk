@@ -37,13 +37,24 @@ const ChannelMarkdown = lazy(() => import('../channels/ChannelMarkdown.js'));
 
 const SURFACE_ID = `native-${Math.random().toString(36).slice(2, 10)}`;
 
+/**
+ * Per-session composer drafts, module-level so they survive the keep-alive
+ * unmount when the user switches tabs within a cell (UX item 2: switching
+ * sessions used to destroy whatever was typed).
+ */
+const composerDrafts = new Map<string, string>();
+
 export function NativeAgentSurface({ session, revision, focused = false }: NativeAgentSurfaceProps): JSX.Element {
   const surfaceId = useMemo(() => `${SURFACE_ID}-${session}-${revision}`, [session, revision]);
   const [model, setModel] = useState<RowModel>(initialRowModel);
   const [pendingAssistant, setPendingAssistant] = useState<Map<string, string>>(new Map());
   const [pipelineLive, setPipelineLive] = useState(false);
   const [agentModel, setAgentModel] = useState<string | undefined>(undefined);
-  const [input, setInput] = useState('');
+  const [input, setInputState] = useState(() => composerDrafts.get(session) ?? '');
+  const setInput = (value: string): void => {
+    composerDrafts.set(session, value);
+    setInputState(value);
+  };
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const visibleRef = useRef(focused);
@@ -216,11 +227,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
       <div className="nativeAgentHeader">
         <span className={`nativeAgentStatus state-${model.status}`}>{model.status}</span>
         {agentModel ? <span className="nativeAgentModelBadge">{agentModel}</span> : null}
-        {model.status === 'processing' || model.status === 'tool-executing' ? (
-          <button type="button" className="nativeAgentInterrupt" onClick={handleInterrupt}>
-            Stop
-          </button>
-        ) : null}
+        {/* Stop moved to the composer action slot (UX item 5); header keeps status only. */}
       </div>
       <div className="nativeAgentFeed" ref={scrollRef} onScroll={handleFeedScroll}>
         {model.rows.map((row) => (
@@ -232,6 +239,18 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
             <AgentMarkdown body={text} />
           </div>
         ))}
+        {(model.status === 'processing' || model.status === 'tool-executing') && pendingAssistantEntries.length === 0 ? (
+          // UX item 1: between send and the first streamed token the transcript
+          // used to sit dead-still — slow providers read as broken. A quiet
+          // animated row says the agent is working.
+          <div className="nativeAgentRow working" aria-live="polite">
+            <span className="nativeAgentWorkingDots" aria-label="agent is working">
+              <span>·</span>
+              <span>·</span>
+              <span>·</span>
+            </span>
+          </div>
+        ) : null}
         {model.pendingPermission ? (
           <PermissionCard
             permission={model.pendingPermission}
@@ -276,14 +295,22 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           placeholder="Send a message…"
           rows={2}
         />
-        <button
-          type="button"
-          className="nativeAgentSend"
-          onClick={handleSend}
-          disabled={!canSend}
-        >
-          {sendLabel}
-        </button>
+        {model.status === 'processing' || model.status === 'tool-executing' ? (
+          // UX item 5: while a turn runs, the composer's action slot IS the Stop
+          // control — the user's cursor and attention live here, not the header.
+          <button type="button" className="nativeAgentSend nativeAgentSendStop" onClick={handleInterrupt}>
+            Stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="nativeAgentSend"
+            onClick={handleSend}
+            disabled={!canSend}
+          >
+            {sendLabel}
+          </button>
+        )}
       </div>
     </div>
   );
