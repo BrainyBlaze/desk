@@ -43,6 +43,7 @@ const SURFACE_ID = `native-${Math.random().toString(36).slice(2, 10)}`;
 type MessageMenuHandler = (text: string, x: number, y: number) => void;
 type CreateNoteHandler = (text: string) => void;
 type CopyState = 'idle' | 'copied' | 'failed';
+const COPY_TIMEOUT_MS = 800;
 
 /**
  * Per-session composer drafts, module-level so they survive the keep-alive
@@ -728,12 +729,40 @@ function RowActions({ text, onCreateNote }: { text: string; onCreateNote?: Creat
 }
 
 async function copyRowText(text: string): Promise<boolean> {
-  if (!navigator.clipboard) return false;
+  if (navigator.clipboard) {
+    const copied = await copyRowTextWithTimeout(navigator.clipboard, text);
+    if (copied) return true;
+  }
+  return fallbackCopyRowText(text);
+}
+
+async function copyRowTextWithTimeout(clipboard: Clipboard, text: string): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(text);
-    return true;
+    return await Promise.race([
+      clipboard.writeText(text).then(() => true),
+      new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), COPY_TIMEOUT_MS))
+    ]);
   } catch {
     return false;
+  }
+}
+
+function fallbackCopyRowText(text: string): boolean {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
   }
 }
 

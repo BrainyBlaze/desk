@@ -121,6 +121,16 @@ describe('native agent message actions and notes', () => {
     expect(source).toMatch(/nativeAgentRowAction copied/);
   });
 
+  it('bounds stalled clipboard writes and falls back to execCommand copy', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(/const COPY_TIMEOUT_MS = 800/);
+    expect(source).toMatch(/Promise\.race/);
+    expect(source).toMatch(/copyRowTextWithTimeout/);
+    expect(source).toMatch(/fallbackCopyRowText/);
+    expect(source).toMatch(/document\.execCommand\('copy'\)/);
+  });
+
   it('wires message context menus to the existing notes creator flow', () => {
     const surface = nativeSurfaceSource();
     const app = appSource();
