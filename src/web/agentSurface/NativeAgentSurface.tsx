@@ -203,10 +203,10 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
     }
   };
 
-  const handlePermission = (optionId: string): void => {
+  const handlePermission = (optionId: string, note?: string): void => {
     if (!model.pendingPermission) return;
     try {
-      agentSurfaceClient.respondPermission(surfaceId, session, model.pendingPermission.requestId, optionId);
+      agentSurfaceClient.respondPermission(surfaceId, session, model.pendingPermission.requestId, optionId, note);
       setModel((prev) => ({ ...prev, pendingPermission: null }));
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -251,19 +251,6 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
             </span>
           </div>
         ) : null}
-        {model.pendingPermission ? (
-          <PermissionCard
-            permission={model.pendingPermission}
-            onRespond={(optionId, note) => {
-              try {
-                agentSurfaceClient.respondPermission(surfaceId, session, model.pendingPermission!.requestId, optionId, note);
-                setModel((prev) => ({ ...prev, pendingPermission: null }));
-              } catch (err) {
-                setErrorMsg(err instanceof Error ? err.message : String(err));
-              }
-            }}
-          />
-        ) : null}
         {errorMsg ? <div className="nativeAgentError">{errorMsg}</div> : null}
         {!pipelineLive && model.status !== 'starting' ? (
           <div className="nativeAgentBridgeDown">
@@ -278,6 +265,11 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
         <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
           {unseenCount} new message{unseenCount === 1 ? '' : 's'} ↓
         </button>
+      ) : null}
+      {model.pendingPermission ? (
+        <div className="nativeAgentPermissionDock" aria-live="polite">
+          <PermissionCard permission={model.pendingPermission} onRespond={handlePermission} />
+        </div>
       ) : null}
       <div className="nativeAgentComposer">
         <textarea
@@ -326,6 +318,9 @@ export interface NativeAgentSurfaceProps {
 }
 
 function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
+  if (row.collapse) {
+    return <CollapsiblePayloadRow row={row} />;
+  }
   switch (row.kind) {
     case 'user-message':
       return (
@@ -350,6 +345,28 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
     default:
       return <div className="nativeAgentRow unknown">{row.text}</div>;
   }
+}
+
+function CollapsiblePayloadRow({ row }: { row: AgentRow }): JSX.Element {
+  const [open, setOpen] = useState(!row.collapse?.defaultCollapsed);
+  const author = row.kind === 'user-message' ? 'you' : row.kind;
+  const reasonLabel = row.collapse?.reason === 'channel-onboarding' ? 'channel context' : 'long payload';
+  return (
+    <div className={`nativeAgentRow ${row.kind === 'user-message' ? 'user' : 'system'} collapsible`}>
+      <button
+        type="button"
+        className="nativeAgentPayloadHeader"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="nativeAgentAuthor">{author}</span>
+        <span className="nativeAgentPayloadReason">{reasonLabel}</span>
+        <span className="nativeAgentPayloadPreview">{row.collapse?.preview}</span>
+        <span className={`nativeAgentPayloadChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span>
+      </button>
+      {open ? <span className="nativeAgentText">{row.text}</span> : null}
+    </div>
+  );
 }
 
 function AgentMarkdown({ body }: { body: string }): JSX.Element {

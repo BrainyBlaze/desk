@@ -10,11 +10,18 @@ export interface AgentRow {
   id: string;
   turnId?: string;
   text: string;
+  collapse?: RowCollapse;
   toolUseId?: string;
   toolName?: string;
   toolStatus?: 'ok' | 'error' | 'denied' | 'running';
   toolDetail?: string;
   toolResult?: string;
+}
+
+export interface RowCollapse {
+  defaultCollapsed: true;
+  reason: 'channel-onboarding' | 'long-payload';
+  preview: string;
 }
 
 export interface PendingPermission {
@@ -64,7 +71,12 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       return;
     case 'user-message':
       if (!model.rows.some((r) => r.id === event.id)) {
-        model.rows.push({ kind: 'user-message', id: event.id, text: event.text });
+        model.rows.push({
+          kind: 'user-message',
+          id: event.id,
+          text: event.text,
+          ...collapseMetadataForPayload('user-message', event.text)
+        });
       }
       return;
     case 'assistant-delta':
@@ -155,7 +167,8 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       model.rows.push({
         kind: 'system',
         id: `hint-${event.seq}`,
-        text: event.detail ? `${label}: ${event.detail}` : label
+        text: event.detail ? `${label}: ${event.detail}` : label,
+        ...collapseMetadataForPayload('system', event.detail ? `${label}: ${event.detail}` : label)
       });
       return;
     }
@@ -169,4 +182,46 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
 
 function applyCommittedEvent(model: RowModel, event: AgentSurfaceEvent): void {
   applyEvent(model, event);
+}
+
+function collapseMetadataForPayload(
+  kind: AgentRow['kind'],
+  text: string
+): { collapse?: RowCollapse } {
+  if (kind !== 'user-message' && kind !== 'system') {
+    return {};
+  }
+  const reason = collapseReasonForPayload(text);
+  if (!reason) {
+    return {};
+  }
+  return {
+    collapse: {
+      defaultCollapsed: true,
+      reason,
+      preview: previewText(text)
+    }
+  };
+}
+
+function collapseReasonForPayload(text: string): RowCollapse['reason'] | null {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (
+    normalized.includes('You have been added to the desk channel') &&
+    normalized.includes('This is a multi-agent collaboration room')
+  ) {
+    return 'channel-onboarding';
+  }
+  if (normalized.length >= 900) {
+    return 'long-payload';
+  }
+  return null;
+}
+
+function previewText(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= 156) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 153).trimEnd()}...`;
 }

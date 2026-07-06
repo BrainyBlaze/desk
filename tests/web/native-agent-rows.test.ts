@@ -147,3 +147,46 @@ describe('applyEvent — no-op kinds', () => {
     expect(model.rows[0]).toMatchObject({ kind: 'system', text: 'status: retry: rate limited' });
   });
 });
+
+describe('applyEvent — collapsible payload metadata', () => {
+  it('marks long channel onboarding user payloads collapsible with a short preview', () => {
+    const model = initialRowModel();
+    const text = [
+      'You have been added to the desk channel #test as @validation-val-1.',
+      'This is a multi-agent collaboration room — you are expected to participate actively, not observe.',
+      'Channel goal: (not set — ask @human if direction is unclear)',
+      'Members: @human (human operator)',
+      'How it works:',
+      '- New messages addressed to you arrive in this terminal automatically.',
+      '- Read the room first: desk channels read test',
+      '- Post: desk channels post test --as validation-val-1 "<message>"'
+    ].join(' ');
+
+    applyEvent(model, ev(1, { kind: 'user-message', id: 'u-channel', text, source: 'channel' }));
+
+    expect(model.rows[0]).toMatchObject({
+      kind: 'user-message',
+      collapse: {
+        defaultCollapsed: true,
+        reason: 'channel-onboarding'
+      }
+    });
+    expect(model.rows[0].collapse?.preview.length).toBeLessThan(180);
+    expect(model.rows[0].text).toBe(text);
+  });
+
+  it('recognizes channel onboarding payloads even when the source is external', () => {
+    const model = initialRowModel();
+    const text = [
+      'You have been added to the desk channel #test as @validation-val-2.',
+      'This is a multi-agent collaboration room — you are expected to participate actively, not observe.',
+      'How it works:',
+      '- New messages addressed to you arrive in this terminal automatically.',
+      '- Read the room first: desk channels read test'
+    ].join(' ');
+
+    applyEvent(model, ev(1, { kind: 'user-message', id: 'u-external', text, source: 'external' }));
+
+    expect(model.rows[0].collapse?.reason).toBe('channel-onboarding');
+  });
+});

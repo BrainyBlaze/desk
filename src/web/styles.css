@@ -5551,6 +5551,61 @@ button.layoutBadge:hover:not(:disabled) {
   filter: brightness(1.3);
 }
 
+/* UX items 3 + 4: collapsed injected payloads and docked active permissions. */
+.nativeAgentRow.collapsible {
+  gap: 5px;
+}
+
+.nativeAgentPayloadHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nativeAgentPayloadReason {
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.58;
+}
+
+.nativeAgentPayloadPreview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.78;
+}
+
+.nativeAgentPayloadChevron {
+  margin-left: auto;
+  opacity: 0.52;
+  transition: transform 120ms ease;
+}
+
+.nativeAgentPayloadChevron.open {
+  transform: rotate(90deg);
+}
+
+.nativeAgentPermissionDock {
+  padding: 6px 8px 0;
+  border-top: 1px solid var(--desk-border, #1f2937);
+  background: var(--desk-bg-elev, #11161d);
+}
+
+.nativeAgentPermissionDock .nativeAgentPermission {
+  margin: 0;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
 .nativeAgentComposer {
   display: flex;
   align-items: flex-end;
