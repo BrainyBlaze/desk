@@ -6022,7 +6022,9 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentToolHeaderLine .nativeAgentToolHeader {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .nativeAgentRowMeta {
@@ -6047,7 +6049,10 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentRowActions {
   margin-left: auto;
   display: inline-flex;
+  justify-content: flex-end;
   gap: 4px;
+  flex: 0 0 52px;
+  width: 52px;
   opacity: 0;
   transition: opacity 120ms ease;
 }
@@ -6095,15 +6100,27 @@ button.layoutBadge:hover:not(:disabled) {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
+  width: 18px;
   border: 1px solid rgba(102, 170, 255, 0.34);
   border-radius: 999px;
-  padding: 1px 7px;
+  padding: 0;
   font-size: 10px;
   line-height: 1.5;
   color: rgba(205, 226, 255, 0.88);
   background: rgba(102, 170, 255, 0.08);
   flex: 0 0 auto;
+}
+
+.nativeAgentToolBadge:has(.nativeAgentToolElapsed) {
+  width: auto;
+  min-width: 18px;
+  padding: 0 5px;
+}
+
+.nativeAgentToolGlyph {
+  flex: none;
 }
 
 .nativeAgentToolBadge.tone-ok {

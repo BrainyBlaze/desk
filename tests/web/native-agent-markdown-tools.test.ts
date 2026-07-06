@@ -5,6 +5,14 @@ const nativeSurfaceSource = () => readFileSync('src/web/agentSurface/NativeAgent
 const stylesSource = () => readFileSync('src/web/styles.css', 'utf8');
 const appSource = () => readFileSync('src/web/App.tsx', 'utf8');
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function cssBlock(source: string, selector: string): string {
+  return new RegExp(`${escapeRegExp(selector)}\\s*\\{(?<body>[^}]*)\\}`, 's').exec(source)?.groups?.body ?? '';
+}
+
 describe('native agent markdown rendering', () => {
   it('renders committed and pending assistant text through the markdown renderer', () => {
     const source = nativeSurfaceSource();
@@ -64,20 +72,28 @@ describe('native agent Phase B row anatomy', () => {
 });
 
 describe('native agent Phase B tool state clarity', () => {
-  it('renders explicit tool labels, elapsed time, and active running affordance', () => {
+  it('uses compact status glyphs and hides subsecond elapsed noise in tool badges', () => {
     const source = nativeSurfaceSource();
 
-    expect(source).toMatch(/row\.toolState\?\.label/);
+    expect(source).toMatch(/import \{ Check, Copy, StickyNote, X \} from 'lucide-react'/);
+    expect(source).toMatch(/function ToolStatusGlyph/);
+    expect(source).toMatch(/aria-label="tool done"/);
+    expect(source).toMatch(/aria-label="tool failed"/);
     expect(source).toMatch(/formatDurationMs\(row\.toolState\?\.durationMs\)/);
+    expect(source).toMatch(/if \(durationMs < 1000\) return null;/);
     expect(source).toMatch(/nativeAgentToolBadge/);
     expect(source).toMatch(/nativeAgentToolSpinner/);
     expect(source).toMatch(/aria-label=\"tool is running\"/);
+    expect(source).not.toMatch(/<span>\{row\.toolState\?\.label \?\? statusClass\}<\/span>/);
   });
 });
 
 describe('native agent Phase B styles', () => {
   it('defines scoped row anatomy and tool state styles', () => {
     const source = stylesSource();
+    const headerRule = cssBlock(source, '.nativeAgentToolHeaderLine .nativeAgentToolHeader');
+    const actionsRule = cssBlock(source, '.nativeAgentRowActions');
+    const badgeRule = cssBlock(source, '.nativeAgentToolBadge');
 
     expect(source).toMatch(/UX items 6 \+ 7/);
     expect(source).toMatch(/\.nativeAgentRowMeta/);
@@ -85,6 +101,14 @@ describe('native agent Phase B styles', () => {
     expect(source).toMatch(/\.nativeAgentToolBadge/);
     expect(source).toMatch(/\.nativeAgentToolSpinner/);
     expect(source).toMatch(/\.nativeAgentToolElapsed/);
+    expect(headerRule).toContain('flex: 1 1 auto');
+    expect(headerRule).toContain('min-width: 0');
+    expect(headerRule).toContain('overflow: hidden');
+    expect(actionsRule).toContain('flex: 0 0 52px');
+    expect(actionsRule).toContain('width: 52px');
+    expect(actionsRule).toContain('justify-content: flex-end');
+    expect(badgeRule).toContain('width: 18px');
+    expect(badgeRule).toContain('padding: 0');
   });
 });
 
@@ -135,7 +159,7 @@ describe('native agent message actions and notes', () => {
     const surface = nativeSurfaceSource();
     const styles = stylesSource();
 
-    expect(surface).toMatch(/import \{ Copy, StickyNote \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ Check, Copy, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/<Copy size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/<StickyNote size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/aria-label=\{copyActionLabel\}/);

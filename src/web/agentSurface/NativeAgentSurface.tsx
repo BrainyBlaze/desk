@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Copy, StickyNote } from 'lucide-react';
+import { Check, Copy, StickyNote, X } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -632,6 +632,7 @@ function ToolCallBlock({
   const [open, setOpen] = useState(false);
   const statusClass = row.toolStatus ?? 'running';
   const tone = row.toolState?.tone ?? statusClass;
+  const statusLabel = row.toolState?.label ?? statusClass;
   const durationLabel = formatDurationMs(row.toolState?.durationMs);
   const hasInput = Boolean(row.toolDetail?.trim());
   const hasOutput = Boolean(row.toolResult?.trim());
@@ -657,9 +658,12 @@ function ToolCallBlock({
           >
             <span className="nativeAgentToolName">{row.toolName ?? row.toolUseId ?? 'tool'}</span>
             {row.text ? <span className="nativeAgentToolSummary">{row.text}</span> : null}
-            <span className={`nativeAgentToolBadge tone-${tone}`}>
-              {row.toolState?.active ? <span className="nativeAgentToolSpinner" aria-label="tool is running" /> : null}
-              <span>{row.toolState?.label ?? statusClass}</span>
+            <span className={`nativeAgentToolBadge tone-${tone}`} title={statusLabel}>
+              {row.toolState?.active ? (
+                <span className="nativeAgentToolSpinner" aria-label="tool is running" />
+              ) : (
+                <ToolStatusGlyph status={statusLabel} />
+              )}
               {durationLabel ? <span className="nativeAgentToolElapsed">{durationLabel}</span> : null}
             </span>
             {hasBody ? <span className={`nativeAgentToolChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span> : null}
@@ -685,6 +689,20 @@ function ToolCallBlock({
       </div>
     </div>
   );
+}
+
+function ToolStatusGlyph({ status }: { status: string }): JSX.Element {
+  const normalized = status.toLowerCase();
+  if (normalized === 'done' || normalized === 'ok' || normalized === 'success') {
+    return <Check className="nativeAgentToolGlyph" size={12} aria-label="tool done" />;
+  }
+  if (normalized === 'failed' || normalized === 'error') {
+    return <X className="nativeAgentToolGlyph" size={12} aria-label="tool failed" />;
+  }
+  if (normalized === 'denied') {
+    return <X className="nativeAgentToolGlyph" size={12} aria-label="tool denied" />;
+  }
+  return <span className="nativeAgentToolGlyph" aria-label={status} />;
 }
 
 function RowMeta({ row, fallbackAuthor }: { row: AgentRow; fallbackAuthor: string }): JSX.Element {
@@ -810,7 +828,7 @@ function formatFullTimestamp(ts: string): string {
 
 function formatDurationMs(durationMs?: number): string | null {
   if (durationMs === undefined) return null;
-  if (durationMs < 1000) return `${durationMs}ms`;
+  if (durationMs < 1000) return null;
   if (durationMs < 10000) return `${(durationMs / 1000).toFixed(1)}s`;
   return `${Math.round(durationMs / 1000)}s`;
 }
