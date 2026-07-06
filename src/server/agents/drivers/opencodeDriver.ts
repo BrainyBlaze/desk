@@ -62,6 +62,8 @@ export interface OpencodeBackend {
   listMessages(sessionId: string): Promise<Array<{ info: Message; parts: Part[] }>>;
   /** Run an opencode session command (native slash-command support). */
   runCommand(sessionId: string, command: string, args: string, model?: string): Promise<void>;
+  /** List available session commands (UX item 9: composer palette). */
+  listCommands(): Promise<Array<{ name: string; description?: string }>>;
   /**
    * Subscribe to the global /event stream for this server. Returns unsubscribe.
    * `onEnd` fires when the stream terminates (server crash, network drop, clean close)
@@ -194,6 +196,24 @@ export class OpencodeDriver implements AgentDriver {
     for (const event of events) {
       this.emit(event);
     }
+
+    // UX item 9: surface the agent's command list for the composer palette.
+    // Best-effort — discovery failure logs and the palette simply doesn't render.
+    void this.backend
+      .listCommands()
+      .then((commands) => {
+        if (this.shutDown || !Array.isArray(commands) || commands.length === 0) return;
+        this.emit({
+          kind: 'session-info',
+          agentSessionId: sessionId,
+          commands: commands
+            .filter((c) => c && typeof c.name === 'string' && c.name !== '')
+            .map((c) => ({ name: c.name, ...(typeof c.description === 'string' ? { description: c.description } : {}) }))
+        });
+      })
+      .catch((err: unknown) => {
+        console.error('opencode driver: command discovery failed:', err instanceof Error ? err.message : String(err));
+      });
 
     return {
       session: { agentSessionId: sessionId },
@@ -549,6 +569,10 @@ export async function createLiveBackend(opts: { cwd: string; bypass: boolean }):
         path: { id: sessionId, permissionID: permissionId },
         body: { response }
       });
+    },
+    async listCommands(): Promise<Array<{ name: string; description?: string }>> {
+      const result = await client.command.list();
+      return (result.data ?? []).map((c) => ({ name: c.name, ...(c.description ? { description: c.description } : {}) }));
     },
     async runCommand(sessionId: string, command: string, args: string, model?: string): Promise<void> {
       const result = await client.session.command({

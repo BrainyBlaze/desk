@@ -77,6 +77,10 @@ function makeMockBackend(opts: {
     async abort(id) {
       calls.push({ method: 'abort', args: [id] });
     },
+    async listCommands() {
+      calls.push({ method: 'listCommands', args: [] });
+      return [{ name: 'compact', description: 'compact the session' }];
+    },
     async runCommand(id, command, args, model) {
       calls.push({ method: 'runCommand', args: [id, command, args, model] });
       if (opts.fail?.runCommand) throw opts.fail.runCommand;

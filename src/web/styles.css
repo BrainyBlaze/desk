@@ -6167,3 +6167,7 @@ button.layoutBadge:hover:not(:disabled) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.nativeAgentPaletteItem.selected {
+  background: rgba(51, 187, 204, 0.22);
+}

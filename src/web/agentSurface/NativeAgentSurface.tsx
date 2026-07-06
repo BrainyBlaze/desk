@@ -61,6 +61,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   const [pipelineLive, setPipelineLive] = useState(false);
   const [agentModel, setAgentModel] = useState<string | undefined>(undefined);
   const [agentCommands, setAgentCommands] = useState<Array<{ name: string; description?: string }>>([]);
+  const [paletteIndex, setPaletteIndex] = useState(0);
   const [input, setInputState] = useState(() => composerDrafts.get(session) ?? '');
   const setInput = (value: string): void => {
     composerDrafts.set(session, value);
@@ -357,8 +358,13 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           {agentCommands
             .filter((c) => c.name.toLowerCase().startsWith(input.slice(1).toLowerCase()))
             .slice(0, 8)
-            .map((c) => (
-              <button key={c.name} type="button" className="nativeAgentPaletteItem" onClick={() => setInput(`/${c.name} `)}>
+            .map((c, i) => (
+              <button
+                key={c.name}
+                type="button"
+                className={`nativeAgentPaletteItem${i === paletteIndex ? ' selected' : ''}`}
+                onClick={() => setInput(`/${c.name} `)}
+              >
                 <span className="nativeAgentPaletteName">/{c.name}</span>
                 {c.description ? <span className="nativeAgentPaletteDesc">{c.description}</span> : null}
               </button>
@@ -381,6 +387,35 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
+            const paletteOpen = input.startsWith('/') && !input.includes(' ') && agentCommands.length > 0;
+            if (paletteOpen) {
+              const filtered = agentCommands
+                .filter((c) => c.name.toLowerCase().startsWith(input.slice(1).toLowerCase()))
+                .slice(0, 8);
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setPaletteIndex((i) => (i + 1) % Math.max(filtered.length, 1));
+                return;
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setPaletteIndex((i) => (i - 1 + Math.max(filtered.length, 1)) % Math.max(filtered.length, 1));
+                return;
+              }
+              if (e.key === 'Enter' && filtered.length > 0) {
+                e.preventDefault();
+                const pick = filtered[Math.min(paletteIndex, filtered.length - 1)]!;
+                setInput(`/${pick.name} `);
+                setPaletteIndex(0);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setInput('');
+                setPaletteIndex(0);
+                return;
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               if (canSend) {
