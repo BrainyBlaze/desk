@@ -83,6 +83,15 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
       onSnapshot: ({ state, events }) => {
         if (disposed) return;
         setModel(rowsFromSnapshot(events, state));
+        // session-info lives in the ring: a fresh page load must recover the
+        // model badge and the command palette from the snapshot, not only from
+        // live re-emits (found live: palette empty after reload).
+        for (const event of events) {
+          if (event.kind === 'session-info') {
+            if (event.model) setAgentModel(event.model);
+            if (event.commands && event.commands.length > 0) setAgentCommands(event.commands);
+          }
+        }
       },
       onEvent: (event) => {
         if (disposed) return;

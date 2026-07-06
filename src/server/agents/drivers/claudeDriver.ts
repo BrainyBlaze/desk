@@ -234,9 +234,13 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
                 emit({
                   kind: 'session-info',
                   ...(sessionId ? { agentSessionId: sessionId } : {}),
-                  commands: commands
-                    .filter((c) => c && typeof c.name === 'string' && c.name !== '')
-                    .map((c) => ({ name: c.name, ...(typeof c.description === 'string' ? { description: c.description } : {}) }))
+                  commands: [
+                    // Driver-intercepted command — not in SDK discovery but fully supported here.
+                    { name: 'model', description: 'switch the model live (e.g. /model sonnet)' },
+                    ...commands
+                      .filter((c) => c && typeof c.name === 'string' && c.name !== '')
+                      .map((c) => ({ name: c.name, ...(typeof c.description === 'string' ? { description: c.description } : {}) }))
+                  ]
                 });
               })
               .catch((err: unknown) => {
