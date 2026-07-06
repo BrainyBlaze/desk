@@ -52,7 +52,7 @@ describe('createCodexAppServerTransport', () => {
   });
 
   it('drops malformed stdout lines and continues parsing later JSONL responses', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const proc = new FakeProcess();
       const transport = createCodexAppServerTransport({ process: proc });
@@ -62,9 +62,9 @@ describe('createCodexAppServerTransport', () => {
       proc.stdout.write('{"id":"1","result":{"ok":true}}\n');
 
       await expect(request).resolves.toEqual({ ok: true });
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring malformed codex app-server stdout line'));
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('dropping malformed codex app-server stdout line'));
     } finally {
-      warn.mockRestore();
+      error.mockRestore();
     }
   });
 
