@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const nativeSurfaceSource = () => readFileSync('src/web/agentSurface/NativeAgentSurface.tsx', 'utf8');
 const stylesSource = () => readFileSync('src/web/styles.css', 'utf8');
+const appSource = () => readFileSync('src/web/App.tsx', 'utf8');
 
 describe('native agent markdown rendering', () => {
   it('renders committed and pending assistant text through the markdown renderer', () => {
@@ -36,7 +37,7 @@ describe('native agent payload collapse and permission dock', () => {
 
     expect(source).toMatch(/function CollapsiblePayloadRow/);
     expect(source).toMatch(/if \(row\.collapse\)/);
-    expect(source).toMatch(/<CollapsiblePayloadRow row=\{row\} \/>/);
+    expect(source).toMatch(/<CollapsiblePayloadRow row=\{row\}/);
     expect(source).toMatch(/nativeAgentPayloadPreview/);
     expect(source).toMatch(/channel context/);
   });
@@ -107,5 +108,42 @@ describe('native agent Phase C turn collapse and virtualization', () => {
     expect(source).toMatch(/\.nativeAgentVirtualItem/);
     expect(source).toMatch(/\.nativeAgentTurnSummary/);
     expect(source).toMatch(/\.nativeAgentTurnSummaryMeta/);
+  });
+});
+
+describe('native agent message actions and notes', () => {
+  it('shows copy success only after clipboard write resolves', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(/type CopyState = 'idle' \| 'copied' \| 'failed'/);
+    expect(source).toMatch(/await copyRowText\(text\)/);
+    expect(source).toMatch(/showCopyState\(copied \? 'copied' : 'failed'\)/);
+    expect(source).toMatch(/nativeAgentRowAction copied/);
+  });
+
+  it('wires message context menus to the existing notes creator flow', () => {
+    const surface = nativeSurfaceSource();
+    const app = appSource();
+
+    expect(surface).toMatch(/onMessageMenu\?: \(text: string, x: number, y: number\) => void/);
+    expect(surface).toMatch(/onContextMenu=\{\(event\) => openMessageMenu\(event, row\.text\)\}/);
+    expect(surface).toMatch(/<RowActions text=\{row\.text\} onCreateNote=\{onCreateNote\} \/>/);
+    expect(app).toMatch(/onTerminalSelectionMenu: \(text: string, x: number, y: number\) => setTerminalMenu\(\{ text, x, y \}\)/);
+    expect(app).toMatch(/onSelectionMenu=\{onTerminalSelectionMenu\}/);
+    expect(app).toMatch(/onMessageMenu=\{onSelectionMenu\}/);
+    expect(app).toMatch(/onCreateNote=\{onCreateNoteFromText\}/);
+    expect(app).toMatch(/noteCreatorRef\.current\?\.\(text\)/);
+  });
+
+  it('defines collision-safe collapsed payload header styles', () => {
+    const surface = nativeSurfaceSource();
+    const styles = stylesSource();
+
+    expect(surface).toMatch(/nativeAgentPayloadMetaLine/);
+    expect(surface).toMatch(/nativeAgentPayloadPreviewLine/);
+    expect(styles).toMatch(/\.nativeAgentPayloadMetaLine/);
+    expect(styles).toMatch(/flex-shrink: 0/);
+    expect(styles).toMatch(/\.nativeAgentPayloadPreviewLine/);
+    expect(styles).toMatch(/min-width: 0/);
   });
 });

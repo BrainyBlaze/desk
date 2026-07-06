@@ -2039,7 +2039,12 @@ export function App(): JSX.Element {
     onBootSession: bootSession,
     onChangeLayout: changeGroupLayout,
     onPersistLayoutSizes: persistGroupLayoutSizes,
-    onTerminalSelectionMenu: (text: string, x: number, y: number) => setTerminalMenu({ text, x, y })
+    onTerminalSelectionMenu: (text: string, x: number, y: number) => setTerminalMenu({ text, x, y }),
+    onCreateNoteFromText: (text: string) => {
+      setTerminalMenu(null);
+      setSubsystem('notes');
+      noteCreatorRef.current?.(text);
+    }
   });
   const headerHandlers = useStableCallbacks({
     onToggleMuted: () => setMuted((value) => !value),
@@ -2343,11 +2348,7 @@ export function App(): JSX.Element {
                     void navigator.clipboard?.writeText(text).catch(() => undefined);
                     setTerminalMenu(null);
                   }}
-                  onCreateNote={(text) => {
-                    setTerminalMenu(null);
-                    setSubsystem('notes');
-                    noteCreatorRef.current?.(text);
-                  }}
+                  onCreateNote={muxHandlers.onCreateNoteFromText}
                 />
               ) : null}
               <ToastStack toasts={toasts} onDismiss={dismissToast} />
@@ -4332,6 +4333,7 @@ interface MuxHandlers {
   onChangeLayout: (group: DeskGroupView, kind: LayoutKind) => void;
   onPersistLayoutSizes: (group: DeskGroupView, sizes: { rows?: number[]; cols?: number[][] }) => void;
   onTerminalSelectionMenu: (text: string, x: number, y: number) => void;
+  onCreateNoteFromText: (text: string) => void;
 }
 
 /**
@@ -4437,6 +4439,7 @@ function AgentMultiplexerImpl({
   onChangeLayout,
   onPersistLayoutSizes,
   onTerminalSelectionMenu,
+  onCreateNoteFromText,
   terminalRevisions
 }: {
   group: DeskGroupView;
@@ -4455,6 +4458,7 @@ function AgentMultiplexerImpl({
   onChangeLayout: (group: DeskGroupView, kind: LayoutKind) => void;
   onPersistLayoutSizes: (group: DeskGroupView, sizes: { rows?: number[]; cols?: number[][] }) => void;
   onTerminalSelectionMenu: (text: string, x: number, y: number) => void;
+  onCreateNoteFromText: (text: string) => void;
   terminalRevisions: Record<string, number>;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
@@ -4546,6 +4550,7 @@ function AgentMultiplexerImpl({
       onBootSession={onBootSession}
       onRemoveCell={onRemoveCell}
       onSelectionMenu={onTerminalSelectionMenu}
+      onCreateNoteFromText={onCreateNoteFromText}
     />
   );
   const header = (
@@ -4739,7 +4744,8 @@ function TerminalCellImpl({
   onAssignSession,
   onBootSession,
   onRemoveCell,
-  onSelectionMenu
+  onSelectionMenu,
+  onCreateNoteFromText
 }: {
   group: DeskGroupView;
   cell: PanelCell;
@@ -4754,6 +4760,7 @@ function TerminalCellImpl({
   onBootSession: (session: DeskSessionView) => void;
   onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
   onSelectionMenu: (text: string, x: number, y: number) => void;
+  onCreateNoteFromText: (text: string) => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   // Tap-to-assign picker for empty cells — DnD-only assignment is hostile to
@@ -4826,6 +4833,8 @@ function TerminalCellImpl({
                     session={cell.activeSession.spec.tmuxSession}
                     revision={revision}
                     focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                    onMessageMenu={onSelectionMenu}
+                    onCreateNote={onCreateNoteFromText}
                   />
                 ) : (
                   <TerminalSurface

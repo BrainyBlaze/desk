@@ -5557,9 +5557,12 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentPayloadHeader {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
+  row-gap: 2px;
   width: 100%;
   min-width: 0;
   padding: 0;
@@ -5569,6 +5572,25 @@ button.layoutBadge:hover:not(:disabled) {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.nativeAgentPayloadMetaLine {
+  grid-column: 1;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.nativeAgentPayloadMetaLine .nativeAgentRowMeta {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.nativeAgentPayloadPreviewLine {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .nativeAgentPayloadReason {
@@ -5586,6 +5608,8 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentPayloadChevron {
+  grid-column: 2;
+  grid-row: 1 / span 2;
   margin-left: auto;
   opacity: 0.52;
   transition: transform 120ms ease;
@@ -6019,6 +6043,18 @@ button.layoutBadge:hover:not(:disabled) {
   border-color: var(--desk-border, #2a3441);
   background: rgba(255, 255, 255, 0.06);
   color: rgba(235, 245, 255, 0.92);
+}
+
+.nativeAgentRowAction.copied {
+  border-color: rgba(66, 214, 146, 0.45);
+  background: rgba(66, 214, 146, 0.12);
+  color: rgba(148, 255, 207, 0.96);
+}
+
+.nativeAgentRowAction.failed {
+  border-color: rgba(255, 120, 120, 0.45);
+  background: rgba(255, 120, 120, 0.12);
+  color: rgba(255, 175, 175, 0.96);
 }
 
 .nativeAgentToolBadge {

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   AgentSurfaceEvent,
@@ -39,6 +40,9 @@ const ChannelMarkdown = lazy(() => import('../channels/ChannelMarkdown.js'));
  */
 
 const SURFACE_ID = `native-${Math.random().toString(36).slice(2, 10)}`;
+type MessageMenuHandler = (text: string, x: number, y: number) => void;
+type CreateNoteHandler = (text: string) => void;
+type CopyState = 'idle' | 'copied' | 'failed';
 
 /**
  * Per-session composer drafts, module-level so they survive the keep-alive
@@ -54,7 +58,13 @@ const composerDrafts = new Map<string, string>();
  */
 const lastSeenRowCounts = new Map<string, number>();
 
-export function NativeAgentSurface({ session, revision, focused = false }: NativeAgentSurfaceProps): JSX.Element {
+export function NativeAgentSurface({
+  session,
+  revision,
+  focused = false,
+  onMessageMenu,
+  onCreateNote
+}: NativeAgentSurfaceProps): JSX.Element {
   const surfaceId = useMemo(() => `${SURFACE_ID}-${session}-${revision}`, [session, revision]);
   const [model, setModel] = useState<RowModel>(initialRowModel);
   const [pendingAssistant, setPendingAssistant] = useState<Map<string, string>>(new Map());
@@ -318,6 +328,8 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
                 <AgentFeedItemView
                   item={item}
                   onExpandTurn={(turnId) => setExpandedTurnIds((prev) => new Set(prev).add(turnId))}
+                  onMessageMenu={onMessageMenu}
+                  onCreateNote={onCreateNote}
                 />
               </div>
             );
@@ -449,13 +461,17 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
 
 function AgentFeedItemView({
   item,
-  onExpandTurn
+  onExpandTurn,
+  onMessageMenu,
+  onCreateNote
 }: {
   item: AgentFeedItem;
   onExpandTurn: (turnId: string) => void;
+  onMessageMenu?: MessageMenuHandler;
+  onCreateNote?: CreateNoteHandler;
 }): JSX.Element {
   if (item.kind === 'row') {
-    return <AgentRowView row={item.row} />;
+    return <AgentRowView row={item.row} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />;
   }
   return <TurnSummaryRow item={item} onExpand={() => onExpandTurn(item.turnId)} />;
 }
@@ -491,35 +507,53 @@ export interface NativeAgentSurfaceProps {
   revision: number;
   /** This cell holds the global selection — drives broker visibility. */
   focused?: boolean;
+  /** Opens the shared Copy/Create note context menu for message-like rows. */
+  onMessageMenu?: (text: string, x: number, y: number) => void;
+  /** Creates a note directly from a message-like row. */
+  onCreateNote?: (text: string) => void;
 }
 
-function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
+function AgentRowView({
+  row,
+  onMessageMenu,
+  onCreateNote
+}: {
+  row: AgentRow;
+  onMessageMenu?: MessageMenuHandler;
+  onCreateNote?: CreateNoteHandler;
+}): JSX.Element {
+  const openMessageMenu = (event: ReactMouseEvent, text: string): void => {
+    if (!onMessageMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMessageMenu(text, event.clientX, event.clientY);
+  };
   if (row.collapse) {
-    return <CollapsiblePayloadRow row={row} />;
+    return <CollapsiblePayloadRow row={row} onMessageMenu={onMessageMenu} />;
   }
   switch (row.kind) {
     case 'user-message':
       return (
-        <div className="nativeAgentRow user">
+        <div className="nativeAgentRow user" onContextMenu={(event) => openMessageMenu(event, row.text)}>
           <div className="nativeAgentMessageHeader">
             <RowMeta row={row} fallbackAuthor="you" />
-            <RowActions text={row.text} />
+            <RowActions text={row.text} onCreateNote={onCreateNote} />
           </div>
           <span className="nativeAgentText">{row.text}</span>
         </div>
       );
     case 'assistant-message':
       return (
-        <div className="nativeAgentRow assistant">
+        <div className="nativeAgentRow assistant" onContextMenu={(event) => openMessageMenu(event, row.text)}>
           <div className="nativeAgentMessageHeader">
             <RowMeta row={row} fallbackAuthor="assistant" />
-            <RowActions text={row.text} />
+            <RowActions text={row.text} onCreateNote={onCreateNote} />
           </div>
           <AgentMarkdown body={row.text} />
         </div>
       );
     case 'tool':
-      return <ToolCallBlock row={row} />;
+      return <ToolCallBlock row={row} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />;
     case 'turn-complete':
       return <div className="nativeAgentRow turnComplete">— turn complete —</div>;
     case 'system':
@@ -529,21 +563,34 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
   }
 }
 
-function CollapsiblePayloadRow({ row }: { row: AgentRow }): JSX.Element {
+function CollapsiblePayloadRow({ row, onMessageMenu }: { row: AgentRow; onMessageMenu?: MessageMenuHandler }): JSX.Element {
   const [open, setOpen] = useState(!row.collapse?.defaultCollapsed);
   const author = row.kind === 'user-message' ? 'you' : row.kind;
   const reasonLabel = row.collapse?.reason === 'channel-onboarding' ? 'channel context' : 'long payload';
+  const openMessageMenu = (event: ReactMouseEvent): void => {
+    if (!onMessageMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMessageMenu(row.text, event.clientX, event.clientY);
+  };
   return (
-    <div className={`nativeAgentRow ${row.kind === 'user-message' ? 'user' : 'system'} collapsible`}>
+    <div
+      className={`nativeAgentRow ${row.kind === 'user-message' ? 'user' : 'system'} collapsible`}
+      onContextMenu={openMessageMenu}
+    >
       <button
         type="button"
         className="nativeAgentPayloadHeader"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <RowMeta row={row} fallbackAuthor={author} />
-        <span className="nativeAgentPayloadReason">{reasonLabel}</span>
-        <span className="nativeAgentPayloadPreview">{row.collapse?.preview}</span>
+        <span className="nativeAgentPayloadMetaLine">
+          <RowMeta row={row} fallbackAuthor={author} />
+        </span>
+        <span className="nativeAgentPayloadPreviewLine">
+          <span className="nativeAgentPayloadReason">{reasonLabel}</span>
+          <span className="nativeAgentPayloadPreview">{row.collapse?.preview}</span>
+        </span>
         <span className={`nativeAgentPayloadChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span>
       </button>
       {open ? <span className="nativeAgentText">{row.text}</span> : null}
@@ -559,7 +606,15 @@ function AgentMarkdown({ body }: { body: string }): JSX.Element {
   );
 }
 
-function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
+function ToolCallBlock({
+  row,
+  onMessageMenu,
+  onCreateNote
+}: {
+  row: AgentRow;
+  onMessageMenu?: MessageMenuHandler;
+  onCreateNote?: CreateNoteHandler;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
   const statusClass = row.toolStatus ?? 'running';
   const tone = row.toolState?.tone ?? statusClass;
@@ -568,8 +623,14 @@ function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
   const hasOutput = Boolean(row.toolResult?.trim());
   const hasBody = hasInput || hasOutput;
   const copyText = row.toolResult ?? row.toolDetail ?? row.text;
+  const openMessageMenu = (event: ReactMouseEvent): void => {
+    if (!onMessageMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMessageMenu(copyText, event.clientX, event.clientY);
+  };
   return (
-    <div className={`nativeAgentRow tool status-${statusClass}`}>
+    <div className={`nativeAgentRow tool status-${statusClass}`} onContextMenu={openMessageMenu}>
       <span className="nativeAgentToolDot" aria-hidden="true" />
       <div className="nativeAgentToolContent">
         <div className="nativeAgentToolHeaderLine">
@@ -589,7 +650,7 @@ function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
             </span>
             {hasBody ? <span className={`nativeAgentToolChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span> : null}
           </button>
-          <RowActions text={copyText} />
+          <RowActions text={copyText} onCreateNote={onCreateNote} />
         </div>
         {open && hasBody ? (
           <div className="nativeAgentToolBody">
@@ -625,19 +686,55 @@ function RowMeta({ row, fallbackAuthor }: { row: AgentRow; fallbackAuthor: strin
   );
 }
 
-function RowActions({ text }: { text: string }): JSX.Element {
+function RowActions({ text, onCreateNote }: { text: string; onCreateNote?: CreateNoteHandler }): JSX.Element {
+  const [copyState, setCopyState] = useState<CopyState>('idle');
+  const resetTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+    };
+  }, []);
+  const showCopyState = (state: CopyState): void => {
+    setCopyState(state);
+    if (resetTimerRef.current !== null) {
+      window.clearTimeout(resetTimerRef.current);
+    }
+    resetTimerRef.current = window.setTimeout(() => setCopyState('idle'), 1300);
+  };
+  const handleCopy = async (): Promise<void> => {
+    const copied = await copyRowText(text);
+    showCopyState(copied ? 'copied' : 'failed');
+  };
+  const copyClassName =
+    copyState === 'copied'
+      ? 'nativeAgentRowAction copied'
+      : copyState === 'failed'
+        ? 'nativeAgentRowAction failed'
+        : 'nativeAgentRowAction';
   return (
     <span className="nativeAgentRowActions">
-      <button type="button" className="nativeAgentRowAction" onClick={() => copyRowText(text)}>
-        Copy
+      <button type="button" className={copyClassName} onClick={() => void handleCopy()} aria-live="polite">
+        {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Failed' : 'Copy'}
       </button>
+      {onCreateNote ? (
+        <button type="button" className="nativeAgentRowAction note" onClick={() => onCreateNote(text)}>
+          Note
+        </button>
+      ) : null}
     </span>
   );
 }
 
-function copyRowText(text: string): void {
-  if (!navigator.clipboard) return;
-  void navigator.clipboard.writeText(text).catch(() => undefined);
+async function copyRowText(text: string): Promise<boolean> {
+  if (!navigator.clipboard) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function formatShortTimestamp(ts: string): string {
