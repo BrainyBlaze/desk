@@ -1,6 +1,6 @@
 # Item 11 — Child-agent / subtask nesting (design gate)
 
-Status: DRAFT for sign-off (claude authored; codex to ack/amend). No code until acked.
+Status: AMENDED per codex review (msg-224708) — codex scope narrowed to tool-row-only v1. Awaiting final ack.
 
 ## Problem
 
@@ -15,9 +15,13 @@ events nested under the spawning tool call; desk should too.
 - claude SDK: every streamed message carries `parent_tool_use_id` (null for the
   main thread; the spawning Task tool's tool_use id for subagent traffic). The
   driver currently ignores it.
-- codex app-server: `collabAgentToolCall` thread items represent child-agent
-  calls; their nested progress arrives as item updates attributed to that item id
-  (codex to confirm exact shape from bindings — amend here).
+- codex app-server (AMENDED per codex review 2026-07-06): `collabAgentToolCall`
+  items carry id/senderThreadId/receiverThreadIds but NO nested progress — child
+  activity lives in SEPARATE threads which the driver's threadId filter drops
+  today. Attribution would require indexing receiverThreadIds → parent item id
+  and fetching/subscribing those receiver threads. That child-thread read path
+  is NOT taken in v1: codex stays tool-row-only, nested transcript support
+  explicitly DEFERRED (same honest pattern as opencode below).
 - opencode: `Command.subtask` marks subtask commands; child sessions have their
   own session ids with a parent reference (driver's belongsToSession currently
   drops them — R3 was deliberate for v1).
@@ -39,8 +43,10 @@ parentToolUseId?: string;
 
 - claude: stamp `parentToolUseId` from `parent_tool_use_id` on all mapped
   events (live + history — the store records it per message).
-- codex: stamp from the owning collabAgentToolCall item id on its nested
-  updates (live + fetchHistory full-turn items).
+- codex: v1 = tool-row-only (collabAgentToolCall renders as a tool row, as it
+  already does after the item-6 mapping); nested child-thread transcripts
+  deferred with this note. No parentToolUseId stamping from the codex driver
+  in v1.
 - opencode: v1 keeps R3 (child sessions dropped) — flip only if the child
   events can be cheaply attributed via their parent reference; otherwise defer
   to v1.1 with an explicit note. NO silent half-support.
