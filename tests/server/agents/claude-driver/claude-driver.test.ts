@@ -529,3 +529,17 @@ describe('claudeDriver fetchHistory', () => {
     });
   });
 });
+
+describe('claudeDriver bare /model', () => {
+  it('reports the current model instead of silently doing nothing (human repro)', async () => {
+    const h = await startedHarness();
+    h.events.length = 0;
+    await h.driver.inject('/model', 'ui');
+    const hint = h.events.find((e) => e.kind === 'attention-hint') as { detail?: string } | undefined;
+    expect(hint).toBeDefined();
+    expect(hint!.detail).toContain('claude-fable-5');
+    expect(hint!.detail).toContain('/model <name>');
+    expect(h.setModelCalls).toHaveLength(0);
+    expect(h.pushedMessages).toHaveLength(0);
+  });
+});

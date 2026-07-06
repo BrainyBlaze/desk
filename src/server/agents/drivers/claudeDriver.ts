@@ -139,6 +139,7 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
   let turnCounter = 0;
   let permissionCounter = 0;
   let currentTurnId = 't0';
+  let currentModel: string | undefined;
 
   function emit(event: DriverEvent): void {
     if (isShutdown) {
@@ -213,6 +214,9 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
           // In streaming-input mode the CLI emits init only after the first
           // user message, so this arrives mid-session — surface it as a
           // session-info event rather than blocking start() on it.
+          if (typeof message.model === 'string') {
+            currentModel = message.model;
+          }
           emit({
             kind: 'session-info',
             ...(sessionId ? { agentSessionId: sessionId } : {}),
@@ -343,11 +347,24 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
       assertLive('inject');
       const slash = parseSlashCommand(text);
       if (slash?.name === 'model') {
+        turnCounter += 1;
+        if (!slash.args) {
+          // Bare /model opens a picker in the TUI; natively we report the current
+          // model instead of silently doing nothing (found live: bare /model gave
+          // zero feedback).
+          emit({ kind: 'user-message', id: `user-${turnCounter}`, text, source });
+          emit({
+            kind: 'attention-hint',
+            attention: 'session-status',
+            detail: `current model: ${currentModel ?? 'provider default'} — use /model <name> to switch (e.g. /model sonnet)`
+          });
+          return;
+        }
         if (typeof handle?.setModel !== 'function') {
           throw driverCommandError('/model is not supported by this claude sdk version', 'unsupported-command', false);
         }
-        await handle.setModel(slash.args || undefined);
-        turnCounter += 1;
+        await handle.setModel(slash.args);
+        currentModel = slash.args;
         emit({ kind: 'user-message', id: `user-${turnCounter}`, text, source });
         // No turn starts — confirm the switch via session-info so the model
         // badge updates immediately.
