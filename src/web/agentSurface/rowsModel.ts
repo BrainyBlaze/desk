@@ -10,13 +10,28 @@ export interface AgentRow {
   id: string;
   turnId?: string;
   text: string;
+  authorLabel?: 'you' | 'assistant' | 'tool' | 'system';
+  createdAt?: string;
+  updatedAt?: string;
   collapse?: RowCollapse;
   toolUseId?: string;
   toolName?: string;
   toolStatus?: 'ok' | 'error' | 'denied' | 'running';
+  toolState?: ToolStateDisplay;
   toolDetail?: string;
   toolResult?: string;
 }
+
+export interface ToolStateDisplay {
+  label: 'Running' | 'Done' | 'Failed' | 'Denied';
+  tone: 'running' | 'ok' | 'error' | 'denied';
+  active: boolean;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+}
+
+type ToolTerminalStatus = 'ok' | 'error' | 'denied';
 
 export interface RowCollapse {
   defaultCollapsed: true;
@@ -74,6 +89,8 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
         model.rows.push({
           kind: 'user-message',
           id: event.id,
+          authorLabel: 'you',
+          createdAt: event.ts,
           text: event.text,
           ...collapseMetadataForPayload('user-message', event.text)
         });
@@ -88,7 +105,14 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
         return; // BUG-3 sub-bug: skip empty-markdown assistant events (blank bubble)
       }
       if (!model.rows.some((r) => r.id === event.id)) {
-        model.rows.push({ kind: 'assistant-message', id: event.id, turnId: event.turnId, text: event.markdown });
+        model.rows.push({
+          kind: 'assistant-message',
+          id: event.id,
+          turnId: event.turnId,
+          authorLabel: 'assistant',
+          createdAt: event.ts,
+          text: event.markdown
+        });
       }
       return;
     case 'tool-start': {
@@ -96,18 +120,25 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       const existing = model.rows.find((r) => r.id === toolRowId);
       if (existing) {
         existing.toolStatus = 'running';
+        existing.authorLabel = 'tool';
+        existing.createdAt = existing.createdAt ?? event.ts;
+        existing.updatedAt = undefined;
         existing.toolName = event.name;
         existing.text = event.summary;
         existing.toolDetail = event.detail;
         existing.toolResult = undefined;
+        existing.toolState = toolStateForStart(existing.createdAt);
       } else {
         model.rows.push({
           kind: 'tool',
           id: toolRowId,
           toolUseId: event.toolUseId,
           toolName: event.name,
+          authorLabel: 'tool',
+          createdAt: event.ts,
           text: event.summary,
           toolStatus: 'running',
+          toolState: toolStateForStart(event.ts),
           ...(event.detail ? { toolDetail: event.detail } : {})
         });
       }
@@ -125,6 +156,10 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       const existing = model.rows.find((r) => r.id === toolRowId);
       if (existing) {
         existing.toolStatus = event.status;
+        existing.authorLabel = 'tool';
+        existing.createdAt = existing.createdAt ?? event.ts;
+        existing.updatedAt = event.ts;
+        existing.toolState = toolStateForEnd(event.status, existing.toolState?.startedAt ?? existing.createdAt, event.ts);
         const result = event.detail ?? event.summary ?? event.status;
         if (result.trim()) existing.toolResult = result;
       } else {
@@ -133,8 +168,12 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
           kind: 'tool',
           id: toolRowId,
           toolUseId: event.toolUseId,
+          authorLabel: 'tool',
+          createdAt: event.ts,
+          updatedAt: event.ts,
           text: event.summary ?? event.status,
           toolStatus: event.status,
+          toolState: toolStateForEnd(event.status, event.ts, event.ts),
           ...(result.trim() ? { toolResult: result } : {})
         });
       }
@@ -157,7 +196,14 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       return;
     case 'turn-complete':
       if (!model.rows.some((r) => r.kind === 'turn-complete' && r.turnId === event.turnId)) {
-        model.rows.push({ kind: 'turn-complete', id: `tc-${event.turnId}`, turnId: event.turnId, text: '' });
+        model.rows.push({
+          kind: 'turn-complete',
+          id: `tc-${event.turnId}`,
+          turnId: event.turnId,
+          authorLabel: 'system',
+          createdAt: event.ts,
+          text: ''
+        });
       }
       return;
     case 'attention-hint': {
@@ -167,6 +213,8 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
       model.rows.push({
         kind: 'system',
         id: `hint-${event.seq}`,
+        authorLabel: 'system',
+        createdAt: event.ts,
         text: event.detail ? `${label}: ${event.detail}` : label,
         ...collapseMetadataForPayload('system', event.detail ? `${label}: ${event.detail}` : label)
       });
@@ -175,7 +223,7 @@ export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
     case 'history-boundary':
       return;
     case 'agent-error':
-      model.rows.push({ kind: 'system', id: `err-${event.seq}`, text: event.message });
+      model.rows.push({ kind: 'system', id: `err-${event.seq}`, authorLabel: 'system', createdAt: event.ts, text: event.message });
       return;
   }
 }
@@ -224,4 +272,49 @@ function previewText(text: string): string {
     return normalized;
   }
   return `${normalized.slice(0, 153).trimEnd()}...`;
+}
+
+function toolStateForStart(startedAt: string): ToolStateDisplay {
+  return {
+    label: 'Running',
+    tone: 'running',
+    active: true,
+    startedAt
+  };
+}
+
+function toolStateForEnd(
+  status: ToolTerminalStatus,
+  startedAt: string,
+  finishedAt: string
+): ToolStateDisplay {
+  const durationMs = durationBetween(startedAt, finishedAt);
+  return {
+    label: toolStateLabel(status),
+    tone: status,
+    active: false,
+    startedAt,
+    finishedAt,
+    ...(durationMs !== null ? { durationMs } : {})
+  };
+}
+
+function toolStateLabel(status: ToolTerminalStatus): ToolStateDisplay['label'] {
+  switch (status) {
+    case 'ok':
+      return 'Done';
+    case 'error':
+      return 'Failed';
+    case 'denied':
+      return 'Denied';
+  }
+}
+
+function durationBetween(startedAt: string, finishedAt: string): number | null {
+  const startMs = Date.parse(startedAt);
+  const endMs = Date.parse(finishedAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+    return null;
+  }
+  return endMs - startMs;
 }

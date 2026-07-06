@@ -5960,6 +5960,17 @@ button.layoutBadge:hover:not(:disabled) {
   min-width: 0;
 }
 
+.nativeAgentToolHeaderLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.nativeAgentToolHeaderLine .nativeAgentToolHeader {
+  flex: 1;
+}
+
 .nativeAgentRowMeta {
   display: inline-flex;
   align-items: center;

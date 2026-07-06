@@ -357,14 +357,20 @@ function AgentRowView({ row }: { row: AgentRow }): JSX.Element {
     case 'user-message':
       return (
         <div className="nativeAgentRow user">
-          <span className="nativeAgentAuthor">you</span>
+          <div className="nativeAgentMessageHeader">
+            <RowMeta row={row} fallbackAuthor="you" />
+            <RowActions text={row.text} />
+          </div>
           <span className="nativeAgentText">{row.text}</span>
         </div>
       );
     case 'assistant-message':
       return (
         <div className="nativeAgentRow assistant">
-          <span className="nativeAgentAuthor">assistant</span>
+          <div className="nativeAgentMessageHeader">
+            <RowMeta row={row} fallbackAuthor="assistant" />
+            <RowActions text={row.text} />
+          </div>
           <AgentMarkdown body={row.text} />
         </div>
       );
@@ -391,7 +397,7 @@ function CollapsiblePayloadRow({ row }: { row: AgentRow }): JSX.Element {
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="nativeAgentAuthor">{author}</span>
+        <RowMeta row={row} fallbackAuthor={author} />
         <span className="nativeAgentPayloadReason">{reasonLabel}</span>
         <span className="nativeAgentPayloadPreview">{row.collapse?.preview}</span>
         <span className={`nativeAgentPayloadChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span>
@@ -412,25 +418,35 @@ function AgentMarkdown({ body }: { body: string }): JSX.Element {
 function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
   const [open, setOpen] = useState(false);
   const statusClass = row.toolStatus ?? 'running';
+  const tone = row.toolState?.tone ?? statusClass;
+  const durationLabel = formatDurationMs(row.toolState?.durationMs);
   const hasInput = Boolean(row.toolDetail?.trim());
   const hasOutput = Boolean(row.toolResult?.trim());
   const hasBody = hasInput || hasOutput;
+  const copyText = row.toolResult ?? row.toolDetail ?? row.text;
   return (
     <div className={`nativeAgentRow tool status-${statusClass}`}>
       <span className="nativeAgentToolDot" aria-hidden="true" />
       <div className="nativeAgentToolContent">
-        <button
-          type="button"
-          className="nativeAgentToolHeader"
-          aria-expanded={open}
-          onClick={() => hasBody && setOpen((value) => !value)}
-          disabled={!hasBody}
-        >
-          <span className="nativeAgentToolName">{row.toolName ?? row.toolUseId ?? 'tool'}</span>
-          {row.text ? <span className="nativeAgentToolSummary">{row.text}</span> : null}
-          <span className="nativeAgentToolStatus">{statusClass}</span>
-          {hasBody ? <span className={`nativeAgentToolChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span> : null}
-        </button>
+        <div className="nativeAgentToolHeaderLine">
+          <button
+            type="button"
+            className="nativeAgentToolHeader"
+            aria-expanded={open}
+            onClick={() => hasBody && setOpen((value) => !value)}
+            disabled={!hasBody}
+          >
+            <span className="nativeAgentToolName">{row.toolName ?? row.toolUseId ?? 'tool'}</span>
+            {row.text ? <span className="nativeAgentToolSummary">{row.text}</span> : null}
+            <span className={`nativeAgentToolBadge tone-${tone}`}>
+              {row.toolState?.active ? <span className="nativeAgentToolSpinner" aria-label="tool is running" /> : null}
+              <span>{row.toolState?.label ?? statusClass}</span>
+              {durationLabel ? <span className="nativeAgentToolElapsed">{durationLabel}</span> : null}
+            </span>
+            {hasBody ? <span className={`nativeAgentToolChevron ${open ? 'open' : ''}`} aria-hidden="true">›</span> : null}
+          </button>
+          <RowActions text={copyText} />
+        </div>
         {open && hasBody ? (
           <div className="nativeAgentToolBody">
             {hasInput ? (
@@ -450,6 +466,56 @@ function ToolCallBlock({ row }: { row: AgentRow }): JSX.Element {
       </div>
     </div>
   );
+}
+
+function RowMeta({ row, fallbackAuthor }: { row: AgentRow; fallbackAuthor: string }): JSX.Element {
+  return (
+    <span className="nativeAgentRowMeta">
+      <span className="nativeAgentAuthor">{row.authorLabel ?? fallbackAuthor}</span>
+      {row.createdAt ? (
+        <time className="nativeAgentTimestamp" dateTime={row.createdAt} title={formatFullTimestamp(row.createdAt)}>
+          {formatShortTimestamp(row.createdAt)}
+        </time>
+      ) : null}
+    </span>
+  );
+}
+
+function RowActions({ text }: { text: string }): JSX.Element {
+  return (
+    <span className="nativeAgentRowActions">
+      <button type="button" className="nativeAgentRowAction" onClick={() => copyRowText(text)}>
+        Copy
+      </button>
+    </span>
+  );
+}
+
+function copyRowText(text: string): void {
+  if (!navigator.clipboard) return;
+  void navigator.clipboard.writeText(text).catch(() => undefined);
+}
+
+function formatShortTimestamp(ts: string): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return ts;
+  return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function formatFullTimestamp(ts: string): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return ts;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'medium'
+  }).format(date);
+}
+
+function formatDurationMs(durationMs?: number): string | null {
+  if (durationMs === undefined) return null;
+  if (durationMs < 1000) return `${durationMs}ms`;
+  if (durationMs < 10000) return `${(durationMs / 1000).toFixed(1)}s`;
+  return `${Math.round(durationMs / 1000)}s`;
 }
 
 function PermissionCard({

@@ -7,6 +7,10 @@ function ev(seq: number, partial: Omit<AgentSurfaceEvent, 'seq' | 'ts'>): AgentS
   return { seq, ts: TS, ...partial } as AgentSurfaceEvent;
 }
 
+function evAt(seq: number, ts: string, partial: Omit<AgentSurfaceEvent, 'seq' | 'ts'>): AgentSurfaceEvent {
+  return { seq, ts, ...partial } as AgentSurfaceEvent;
+}
+
 describe('rowsFromSnapshot', () => {
   it('projects a committed-only ring into ordered rows', () => {
     const events: AgentSurfaceEvent[] = [
@@ -188,5 +192,68 @@ describe('applyEvent — collapsible payload metadata', () => {
     applyEvent(model, ev(1, { kind: 'user-message', id: 'u-external', text, source: 'external' }));
 
     expect(model.rows[0].collapse?.reason).toBe('channel-onboarding');
+  });
+});
+
+describe('applyEvent — row anatomy metadata', () => {
+  it('records author labels and timestamps for message rows', () => {
+    const model = initialRowModel();
+
+    applyEvent(model, ev(1, { kind: 'user-message', id: 'u1', text: 'hi', source: 'ui' }));
+    applyEvent(model, ev(2, { kind: 'assistant-message', id: 'a1', turnId: 'turn-1', markdown: 'hello' }));
+
+    expect(model.rows[0]).toMatchObject({
+      kind: 'user-message',
+      authorLabel: 'you',
+      createdAt: TS
+    });
+    expect(model.rows[1]).toMatchObject({
+      kind: 'assistant-message',
+      authorLabel: 'assistant',
+      createdAt: TS
+    });
+  });
+});
+
+describe('applyEvent — tool state display metadata', () => {
+  it('marks a started tool as actively running with a clear display label', () => {
+    const model = initialRowModel();
+
+    applyEvent(model, ev(1, { kind: 'tool-start', toolUseId: 't1', name: 'Bash', summary: 'npm test' }));
+
+    expect(model.rows[0]).toMatchObject({
+      kind: 'tool',
+      authorLabel: 'tool',
+      createdAt: TS,
+      toolState: {
+        label: 'Running',
+        tone: 'running',
+        active: true,
+        startedAt: TS
+      }
+    });
+  });
+
+  it('marks a completed error tool with finish time and elapsed duration', () => {
+    const model = initialRowModel();
+    const startTs = '2026-07-05T18:00:00.000Z';
+    const endTs = '2026-07-05T18:00:01.250Z';
+
+    applyEvent(model, evAt(1, startTs, { kind: 'tool-start', toolUseId: 't1', name: 'Bash', summary: 'npm test' }));
+    applyEvent(model, evAt(2, endTs, { kind: 'tool-end', toolUseId: 't1', status: 'error', summary: 'exit 1' }));
+
+    expect(model.rows[0]).toMatchObject({
+      kind: 'tool',
+      toolStatus: 'error',
+      updatedAt: endTs,
+      toolState: {
+        label: 'Failed',
+        tone: 'error',
+        active: false,
+        startedAt: startTs,
+        finishedAt: endTs,
+        durationMs: 1250
+      }
+    });
   });
 });

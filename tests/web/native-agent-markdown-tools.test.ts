@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const nativeSurfaceSource = () => readFileSync('src/web/agentSurface/NativeAgentSurface.tsx', 'utf8');
+const stylesSource = () => readFileSync('src/web/styles.css', 'utf8');
 
 describe('native agent markdown rendering', () => {
   it('renders committed and pending assistant text through the markdown renderer', () => {
@@ -46,5 +47,42 @@ describe('native agent payload collapse and permission dock', () => {
     expect(source).toMatch(/className=\"nativeAgentPermissionDock\"/);
     expect(source).toMatch(/<PermissionCard permission=\{model\.pendingPermission\} onRespond=\{handlePermission\} \/>/);
     expect(source).not.toMatch(new RegExp('<div className="nativeAgentFeed"[\\\\s\\\\S]*?<PermissionCard[\\\\s\\\\S]*?</div>\\\\s*\\\\{unseenCount > 0'));
+  });
+});
+
+describe('native agent Phase B row anatomy', () => {
+  it('renders row metadata and copy actions for message rows', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(/function RowMeta/);
+    expect(source).toMatch(/nativeAgentRowMeta/);
+    expect(source).toMatch(/dateTime=\{row\.createdAt\}/);
+    expect(source).toMatch(/nativeAgentRowActions/);
+    expect(source).toMatch(/copyRowText/);
+  });
+});
+
+describe('native agent Phase B tool state clarity', () => {
+  it('renders explicit tool labels, elapsed time, and active running affordance', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(/row\.toolState\?\.label/);
+    expect(source).toMatch(/formatDurationMs\(row\.toolState\?\.durationMs\)/);
+    expect(source).toMatch(/nativeAgentToolBadge/);
+    expect(source).toMatch(/nativeAgentToolSpinner/);
+    expect(source).toMatch(/aria-label=\"tool is running\"/);
+  });
+});
+
+describe('native agent Phase B styles', () => {
+  it('defines scoped row anatomy and tool state styles', () => {
+    const source = stylesSource();
+
+    expect(source).toMatch(/UX items 6 \+ 7/);
+    expect(source).toMatch(/\.nativeAgentRowMeta/);
+    expect(source).toMatch(/\.nativeAgentRowActions/);
+    expect(source).toMatch(/\.nativeAgentToolBadge/);
+    expect(source).toMatch(/\.nativeAgentToolSpinner/);
+    expect(source).toMatch(/\.nativeAgentToolElapsed/);
   });
 });
