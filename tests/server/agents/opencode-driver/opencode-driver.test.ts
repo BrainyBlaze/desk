@@ -21,7 +21,7 @@ function makeMockBackend(opts: {
   initialSessionId?: string;
   initialStatus?: SessionStatus;
   history?: Array<{ info: Message; parts: Part[] }>;
-  fail?: { createSession?: Error; getSession?: Error };
+  fail?: { createSession?: Error; getSession?: Error; runCommand?: Error };
 } = {}): MockBackend {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const subscribers = new Set<(event: Event) => void>();
@@ -76,6 +76,10 @@ function makeMockBackend(opts: {
     },
     async abort(id) {
       calls.push({ method: 'abort', args: [id] });
+    },
+    async runCommand(id, command, args, model) {
+      calls.push({ method: 'runCommand', args: [id, command, args, model] });
+      if (opts.fail?.runCommand) throw opts.fail.runCommand;
     },
     async promptAsync(id, parts, _model?: string) {
       calls.push({ method: 'promptAsync', args: [id, parts] });
@@ -453,6 +457,41 @@ describe('OpencodeDriver collect helper', () => {
     );
     expect(result).toBeUndefined();
     expect(vi.fn()).not.toHaveBeenCalled();
+  });
+});
+
+describe('OpencodeDriver slash commands', () => {
+  it('routes slash text to the session command API with the model override', async () => {
+    const backend = makeMockBackend();
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend, model: 'zai-coding-plan/glm-5.2' });
+    const events: Array<{ kind: string }> = [];
+    driver.onEvent((e) => events.push(e as { kind: string }));
+    await driver.start();
+    events.length = 0;
+    await driver.inject('/compact now please', 'ui');
+    const call = backend.calls.find((c) => c.method === 'runCommand');
+    expect(call?.args).toEqual(['ses_mock', 'compact', 'now please', 'zai-coding-plan/glm-5.2']);
+    expect(events.some((e) => e.kind === 'user-message')).toBe(true);
+    expect(backend.calls.some((c) => c.method === 'promptAsync')).toBe(false);
+  });
+
+  it('maps command API failures to a typed unsupported-command error', async () => {
+    const backend = makeMockBackend({ fail: { runCommand: new Error('unknown command: bogus') } });
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend });
+    await driver.start();
+    await expect(driver.inject('/bogus', 'ui')).rejects.toMatchObject({
+      code: 'unsupported-command',
+      retryable: false
+    });
+  });
+
+  it('plain text still goes through promptAsync', async () => {
+    const backend = makeMockBackend();
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend });
+    await driver.start();
+    await driver.inject('hello', 'ui');
+    expect(backend.calls.some((c) => c.method === 'promptAsync')).toBe(true);
+    expect(backend.calls.some((c) => c.method === 'runCommand')).toBe(false);
   });
 });
 

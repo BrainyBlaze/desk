@@ -60,6 +60,8 @@ export interface OpencodeBackend {
   respondPermission(sessionId: string, permissionId: string, response: PermissionResponse): Promise<void>;
   /** List messages (info + parts) for committed-history backfill. */
   listMessages(sessionId: string): Promise<Array<{ info: Message; parts: Part[] }>>;
+  /** Run an opencode session command (native slash-command support). */
+  runCommand(sessionId: string, command: string, args: string, model?: string): Promise<void>;
   /**
    * Subscribe to the global /event stream for this server. Returns unsubscribe.
    * `onEnd` fires when the stream terminates (server crash, network drop, clean close)
@@ -202,6 +204,27 @@ export class OpencodeDriver implements AgentDriver {
   async inject(text: string, source: 'ui' | 'channel' | 'external'): Promise<void> {
     if (!this.sessionId || !this.backend) {
       throw notStartedError();
+    }
+    const slash = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
+    if (slash) {
+      // opencode exposes session commands over POST /session/:id/command; an
+      // unknown command errors there and surfaces as a typed unsupported-command
+      // instead of being sent to the model as literal text.
+      try {
+        await this.backend.runCommand(this.sessionId, slash[1]!.toLowerCase(), slash[2]!.trim(), this.opts.model);
+      } catch (err) {
+        throw driverCommandError(
+          `/${slash[1]!.toLowerCase()} failed in native mode: ${err instanceof Error ? err.message : String(err)} — switch to terminal UI if this is an interactive command`,
+          'unsupported-command',
+          false
+        );
+      }
+      const localCommandId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      this.injectedUserMessageIds.add(localCommandId);
+      this.emit({ kind: 'user-message', id: localCommandId, text, source });
+      this.disarmTurnWatchdog();
+      this.armTurnWatchdog();
+      return;
     }
     const parts: TextPartInput[] = [{ type: 'text', text }];
     await this.backend.promptAsync(this.sessionId, parts, this.opts.model);
@@ -526,6 +549,16 @@ export async function createLiveBackend(opts: { cwd: string; bypass: boolean }):
         path: { id: sessionId, permissionID: permissionId },
         body: { response }
       });
+    },
+    async runCommand(sessionId: string, command: string, args: string, model?: string): Promise<void> {
+      const result = await client.session.command({
+        path: { id: sessionId },
+        body: { command, arguments: args, ...(model ? { model } : {}) }
+      });
+      const failure = (result as { error?: unknown }).error;
+      if (failure !== undefined) {
+        throw new Error(typeof failure === 'string' ? failure : JSON.stringify(failure).slice(0, 200));
+      }
     },
     async listMessages(sessionId: string): Promise<Array<{ info: Message; parts: Part[] }>> {
       const result = await client.session.messages({ path: { id: sessionId } });

@@ -18,6 +18,11 @@ class FakeQuery implements AsyncIterable<ClaudeSdkMessage> {
   private waiters: Array<(value: IteratorResult<ClaudeSdkMessage>) => void> = [];
   private done = false;
   interrupts = 0;
+  setModelCalls: Array<string | undefined> = [];
+
+  async setModel(model?: string): Promise<void> {
+    this.setModelCalls.push(model);
+  }
 
   push(message: ClaudeSdkMessage): void {
     const waiter = this.waiters.shift();
@@ -60,15 +65,24 @@ interface Harness {
   events: DriverEvent[];
   config: () => ClaudeQueryConfig;
   history: ClaudeSdkMessage[];
+  pushedMessages: Array<Record<string, unknown>>;
+  readonly setModelCalls: Array<string | undefined>;
 }
 
-function harness(options: { resume?: string; history?: ClaudeSdkMessage[]; omitHistoryApi?: boolean } = {}): Harness {
+function harness(options: { resume?: string; history?: ClaudeSdkMessage[]; omitHistoryApi?: boolean; omitSetModel?: boolean } = {}): Harness {
   const query = new FakeQuery();
+  if (options.omitSetModel) {
+    (query as { setModel?: unknown }).setModel = undefined;
+  }
   let captured: ClaudeQueryConfig | undefined;
   const history = options.history ?? [];
+  const pushedMessages: Array<Record<string, unknown>> = [];
   const sdk: ClaudeSdkBoundary = {
     query: (config) => {
       captured = config;
+      void (async () => {
+        for await (const m of config.prompt) pushedMessages.push(m);
+      })();
       return query;
     },
     ...(options.omitHistoryApi
@@ -85,6 +99,10 @@ function harness(options: { resume?: string; history?: ClaudeSdkMessage[]; omitH
     query,
     events,
     history,
+    pushedMessages,
+    get setModelCalls() {
+      return query.setModelCalls;
+    },
     config: () => {
       if (!captured) {
         throw new Error('query was not called');
@@ -369,6 +387,51 @@ describe('claudeDriver interrupt and shutdown', () => {
     });
     await drain();
     expect(h.events.length).toBe(count);
+  });
+});
+
+describe('claudeDriver slash commands', () => {
+  it('/model routes to Query.setModel without starting a turn and emits session-info with the new model', async () => {
+    const h = await startedHarness();
+    h.events.length = 0;
+    await h.driver.inject('/model sonnet', 'ui');
+    expect(h.setModelCalls).toEqual(['sonnet']);
+    const kinds = h.events.map((e) => e.kind);
+    expect(kinds).toContain('user-message');
+    expect(kinds).toContain('session-info');
+    const info = h.events.find((e) => e.kind === 'session-info') as { model?: string };
+    expect(info.model).toBe('sonnet');
+    // No prompt was pushed — the SDK stream got nothing.
+    expect(h.pushedMessages).toHaveLength(0);
+  });
+
+  it('/model without setModel support fails with unsupported-command', async () => {
+    const h = await startedHarness({ omitSetModel: true });
+    await expect(h.driver.inject('/model sonnet', 'ui')).rejects.toSatisfy((error: unknown) => {
+      return isDriverCommandError(error) && error.code === 'unsupported-command' && error.retryable === false;
+    });
+  });
+
+  it('interactive commands (/login) fail with unsupported-command instead of hanging the stream', async () => {
+    const h = await startedHarness();
+    await expect(h.driver.inject('/login', 'ui')).rejects.toSatisfy((error: unknown) => {
+      return isDriverCommandError(error) && error.code === 'unsupported-command';
+    });
+    expect(h.pushedMessages).toHaveLength(0);
+  });
+
+  it('other slash text passes through to the SDK stream as a prompt (CLI processes it)', async () => {
+    const h = await startedHarness();
+    h.events.length = 0;
+    await h.driver.inject('/compact', 'ui');
+    expect(h.pushedMessages).toHaveLength(1);
+    expect(h.events.some((e) => e.kind === 'user-message')).toBe(true);
+  });
+
+  it('plain text is unaffected', async () => {
+    const h = await startedHarness();
+    await h.driver.inject('hello there', 'ui');
+    expect(h.pushedMessages).toHaveLength(1);
   });
 });
 

@@ -77,6 +77,7 @@ export type AgentUiErrorCode =
   | 'not-native-session'
   | 'send-while-busy'
   | 'unknown-permission'
+  | 'unsupported-command'
   | 'invalid-frame';
 
 /** Browser -> server frames on /ws/agent-ui. */
@@ -130,6 +131,7 @@ const AGENT_UI_ERROR_CODES: readonly AgentUiErrorCode[] = [
   'not-native-session',
   'send-while-busy',
   'unknown-permission',
+  'unsupported-command',
   'invalid-frame'
 ];
 

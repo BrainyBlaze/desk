@@ -51,7 +51,25 @@ export interface ClaudeQueryConfig {
 
 export interface ClaudeQueryHandle extends AsyncIterable<ClaudeSdkMessage> {
   interrupt(): Promise<void>;
+  /** Live model switch without respawn (SDK Query.setModel); absent on old SDKs. */
+  setModel?: (model?: string) => Promise<void>;
   close?: () => void;
+}
+
+/**
+ * Slash commands that only make sense in the interactive TUI (auth flows,
+ * pickers, conversation resets that would break the resume-id identity).
+ * These fail with a typed unsupported-command error instead of being pushed
+ * into the stream where they would hang or corrupt the session.
+ */
+const INTERACTIVE_SLASH_BLOCKLIST = new Set(['login', 'logout', 'exit', 'quit', 'clear', 'resume', 'theme', 'vim', 'terminal-setup']);
+
+function parseSlashCommand(text: string): { name: string; args: string } | null {
+  const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
+  if (!match) {
+    return null;
+  }
+  return { name: match[1]!.toLowerCase(), args: match[2]!.trim() };
 }
 
 export interface ClaudeSdkBoundary {
@@ -323,6 +341,32 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
 
     async inject(text, source) {
       assertLive('inject');
+      const slash = parseSlashCommand(text);
+      if (slash?.name === 'model') {
+        if (typeof handle?.setModel !== 'function') {
+          throw driverCommandError('/model is not supported by this claude sdk version', 'unsupported-command', false);
+        }
+        await handle.setModel(slash.args || undefined);
+        turnCounter += 1;
+        emit({ kind: 'user-message', id: `user-${turnCounter}`, text, source });
+        // No turn starts — confirm the switch via session-info so the model
+        // badge updates immediately.
+        emit({
+          kind: 'session-info',
+          ...(sessionId ? { agentSessionId: sessionId } : {}),
+          ...(slash.args ? { model: slash.args } : {})
+        });
+        return;
+      }
+      if (slash && INTERACTIVE_SLASH_BLOCKLIST.has(slash.name)) {
+        throw driverCommandError(
+          `/${slash.name} is not available in native mode — switch this session to terminal UI for interactive commands`,
+          'unsupported-command',
+          false
+        );
+      }
+      // Remaining slash text passes through as a prompt: the CLI processes its
+      // known slash commands natively in streaming-input mode (/compact etc.).
       turnCounter += 1;
       currentTurnId = `t${turnCounter}`;
       emit({ kind: 'user-message', id: `user-${turnCounter}`, text, source });

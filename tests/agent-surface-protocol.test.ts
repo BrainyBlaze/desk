@@ -294,6 +294,16 @@ describe('parseAgentHostClientFrame', () => {
     });
   });
 
+  it('accepts unsupported-command as a typed error code (native slash-command contract)', () => {
+    const frame = parseAgentHostClientFrame({
+      type: 'command-result',
+      requestId: 'req-slash',
+      ok: false,
+      error: { code: 'unsupported-command', message: '/login needs terminal mode', retryable: false }
+    });
+    expect(frame).toMatchObject({ type: 'command-result', ok: false });
+  });
+
   it('throws per malformed host frame', () => {
     expect(() => parseAgentHostClientFrame(null)).toThrow();
     expect(() => parseAgentHostClientFrame({ type: 'goodbye' })).toThrow();
