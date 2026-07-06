@@ -520,9 +520,10 @@ describe('createCodexDriver', () => {
     const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-1' });
 
     await driver.start();
-    const history = await driver.fetchHistory();
+    const firstHistory = await driver.fetchHistory();
+    const secondHistory = await driver.fetchHistory();
 
-    expect(history).toEqual([
+    expect(firstHistory).toEqual([
       { kind: 'user-message', id: 'user-1', text: 'please use tools', source: 'external' },
       { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'done' },
       { kind: 'turn-complete', turnId: 'turn-1' },
@@ -531,6 +532,11 @@ describe('createCodexDriver', () => {
         attention: 'session-status',
         detail: 'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.'
       }
+    ]);
+    expect(secondHistory).toEqual([
+      { kind: 'user-message', id: 'user-1', text: 'please use tools', source: 'external' },
+      { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'done' },
+      { kind: 'turn-complete', turnId: 'turn-1' }
     ]);
     expect(transport.calls.some((call) => call.type === 'request' && call.method === 'thread/turns/list')).toBe(false);
     expect(transport.calls.some((call) => call.type === 'request' && call.method === 'thread/turns/items/list')).toBe(true);

@@ -277,6 +277,7 @@ class CodexDriver implements AgentDriver {
   private unsubscribeTransport: (() => void) | null = null;
   private stopped = false;
   private userMessageCounter = 0;
+  private emittedReloadToolLimitation = false;
 
   constructor(private readonly options: CodexDriverOptions & { transport: CodexAppServerTransport }) {
     this.unsubscribeTransport = this.options.transport.onEvent((event) => this.handleTransportEvent(event));
@@ -457,8 +458,9 @@ class CodexDriver implements AgentDriver {
     }
     const turns = await this.hydrateHistoryTurns(threadId, thread.turns);
     const events = flattenThreadHistory({ ...thread, turns });
-    if (shouldEmitReloadToolLimitation(turns, events, Boolean(this.options.resumeId))) {
+    if (!this.emittedReloadToolLimitation && shouldEmitReloadToolLimitation(turns, events, Boolean(this.options.resumeId))) {
       events.push({ kind: 'attention-hint', attention: 'session-status', detail: CODEX_RELOAD_TOOL_LIMITATION_DETAIL });
+      this.emittedReloadToolLimitation = true;
     }
     return events;
   }
