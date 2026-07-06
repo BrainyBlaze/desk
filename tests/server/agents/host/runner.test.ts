@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import { parseAgentHostServerFrame, type AgentHostServerFrame } from '../../../../src/core/agentSurfaceProtocol';
 import { AgentHost, type AgentHostEnv, type WebSocketLike } from '../../../../src/server/agents/host/runner';
 import type { AgentDriver, DriverEvent, DriverStatusEvent } from '../../../../src/server/agents/host/driver';
+import type { ToolJournal } from '../../../../src/server/agents/host/toolJournal';
 
 class MockSocket implements WebSocketLike {
   readonly OPEN = 1;
@@ -86,6 +87,7 @@ function makeMockDriver(opts: {
   interruptCalls: number;
   shutdownCalls: number;
   respondPermissionCalls: Array<{ requestId: string; optionId: string }>;
+  emit: (event: DriverEvent) => void;
 } {
   const handlers = new Set<(event: DriverEvent) => void>();
   // Wrap in objects so closure property updates propagate to the returned driver.
@@ -120,6 +122,9 @@ function makeMockDriver(opts: {
     shutdown: async () => {
       state.shutdownCalls += 1;
     },
+    emit: (event: DriverEvent) => {
+      for (const h of handlers) h(event);
+    },
     injectCalls: state.injectCalls,
     interruptCalls: 0,
     shutdownCalls: 0,
@@ -131,16 +136,47 @@ function makeMockDriver(opts: {
   return driver;
 }
 
+function makeMemoryJournal(): ToolJournal & { appended: Array<{ anchorId: string | null; kind: string }> } {
+  const appended: Array<{ anchorId: string | null; kind: string }> = [];
+  const records: Array<{ anchorId: string | null; event: DriverEvent }> = [];
+  return {
+    appended,
+    append(anchorId, event) {
+      appended.push({ anchorId, kind: event.kind });
+      records.push({ anchorId, event });
+    },
+    merge(history) {
+      const present = new Set(
+        history.filter((e) => e.kind === 'tool-start' || e.kind === 'tool-end').map((e) => (e as { toolUseId: string }).toolUseId)
+      );
+      const out: DriverEvent[] = [];
+      for (const event of history) {
+        out.push(event);
+        const id = 'id' in event ? (event as { id?: string }).id : undefined;
+        for (const r of records) {
+          if (r.anchorId === id && !present.has((r.event as { toolUseId: string }).toolUseId)) {
+            out.push(r.event);
+          }
+        }
+      }
+      return out;
+    },
+    size: () => records.length
+  };
+}
+
 function makeHost(opts: {
   env?: Partial<AgentHostEnv>;
   driver?: ReturnType<typeof makeMockDriver>;
   socket?: MockSocket;
   loadDriver?: (env: AgentHostEnv, logger: unknown) => AgentDriver;
+  toolJournal?: ToolJournal;
 } = {}): { host: AgentHost; socket: MockSocket; driver: ReturnType<typeof makeMockDriver>; sentFrames: () => unknown[] } {
   const socket = opts.socket ?? new MockSocket();
   const driver = opts.driver ?? makeMockDriver();
   const host = new AgentHost({
     env: makeEnv(opts.env),
+    toolJournal: opts.toolJournal ?? makeMemoryJournal(),
     loadDriver: opts.loadDriver ?? (() => driver),
     createSocket: () => socket,
     exit: () => undefined,
@@ -426,5 +462,47 @@ describe('vi mock sanity', () => {
     const spy = vi.fn();
     spy();
     expect(spy).toHaveBeenCalled();
+  });
+});
+
+describe('AgentHost tool journal (codex reload: tool rows survive via desk-owned journal)', () => {
+  it('journals committed tool events with their message anchor and merges them into backfill', async () => {
+    const journal = makeMemoryJournal();
+    const driver = makeMockDriver({
+      history: [
+        { kind: 'user-message', id: 'u1', text: 'run it', source: 'external' },
+        { kind: 'assistant-message', id: 'a1', turnId: 't1', markdown: 'done' }
+      ]
+    });
+    const { host, socket, sentFrames } = makeHost({ driver, toolJournal: journal });
+    const runPromise = host.run();
+    socket.fireOpen();
+    await flush();
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+
+    // Live tool flow arrives from the driver.
+    driver.emit({ kind: 'user-message', id: 'u1', text: 'run it', source: 'ui' });
+    driver.emit({ kind: 'tool-start', toolUseId: 'tool-1', name: 'Bash', summary: 'pwd' });
+    driver.emit({ kind: 'tool-end', toolUseId: 'tool-1', status: 'ok' });
+    await flush();
+    expect(journal.appended).toEqual([
+      { anchorId: 'u1', kind: 'tool-start' },
+      { anchorId: 'u1', kind: 'tool-end' }
+    ]);
+
+    // Simulate a server-restart backfill: history (messages only) must come back
+    // with the journaled tool events spliced after their anchor.
+    socket.sent.length = 0;
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+    const kinds = sentFrames()
+      .filter((f) => (f as { type?: string }).type === 'event')
+      .map((f) => (f as { event: { kind: string } }).event.kind);
+    expect(kinds).toContain('tool-start');
+    expect(kinds).toContain('tool-end');
+    const uIdx = kinds.indexOf('user-message');
+    expect(kinds.indexOf('tool-start')).toBeGreaterThan(uIdx);
+    void runPromise;
   });
 });

@@ -16,6 +16,7 @@ import {
 } from './driver.js';
 import { loadDriver } from './loader.js';
 import { AgentHostLogger } from './logger.js';
+import { createToolJournal, toolJournalPath, type ToolJournal } from './toolJournal.js';
 
 /**
  * Adapter host runner — the in-tmux process that owns one agent driver and bridges it
@@ -77,6 +78,8 @@ export interface AgentHostOptions {
   scheduler?: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
   /** Signal the host should observe for graceful exit. */
   signals?: NodeJS.Signals[];
+  /** Override the tool journal (test seam); production journals to ~/.config/desk/tool-journal. */
+  toolJournal?: ToolJournal;
 }
 
 export interface WebSocketLike {
@@ -122,6 +125,10 @@ export class AgentHost {
   private inFlightCommand: CommandPending | null = null;
   private shuttingDown = false;
   private reconnectTimer: unknown = null;
+  /** Desk-owned journal of committed tool events — fills what agent APIs can't return on resume. */
+  private readonly toolJournal: ToolJournal;
+  /** Id of the last committed user/assistant message — the anchor for journaled tool events. */
+  private lastMessageAnchorId: string | null = null;
 
   constructor(opts: AgentHostOptions) {
     this.env = opts.env;
@@ -133,6 +140,7 @@ export class AgentHost {
     this.now = opts.now ?? (() => new Date());
     this.scheduler = opts.scheduler ?? { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as NodeJS.Timeout) };
     this.signals = opts.signals ?? ['SIGTERM', 'SIGINT'];
+    this.toolJournal = opts.toolJournal ?? createToolJournal({ path: toolJournalPath(opts.env.DESK_TMUX_SESSION) });
   }
 
   /**
@@ -445,6 +453,9 @@ export class AgentHost {
         this.emitDriverEvent(this.lastStatus);
       }
     }
+    // Splice desk-journaled tool events into the API history at their anchors;
+    // toolUseId dedupe leaves agents whose APIs return tools untouched.
+    history = this.toolJournal.merge(history);
     for (const event of history) {
       this.emitDriverEvent(event);
     }
@@ -463,6 +474,15 @@ export class AgentHost {
     }
     if (payload.kind === 'status') {
       this.lastStatus = payload;
+    }
+    // Journal committed tool events anchored to the message they followed —
+    // this is what lets a reload restore tool rows for agents whose APIs
+    // cannot return them (codex app-server exposes no tool items on resume).
+    if (payload.kind === 'user-message' || payload.kind === 'assistant-message') {
+      this.lastMessageAnchorId = payload.id;
+    }
+    if (payload.kind === 'tool-start' || payload.kind === 'tool-end') {
+      this.toolJournal.append(this.lastMessageAnchorId, payload);
     }
     const event: AgentSurfaceEvent = {
       ...payload,

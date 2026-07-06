@@ -9,6 +9,7 @@ import { handleGitRequest } from './gitApi.js';
 import { handleProjectsRequest } from './projectsApi.js';
 import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
 import { shouldRespawnAfterEdit } from './editRespawn.js';
+import { deleteToolJournal } from './agents/host/toolJournal.js';
 import { disposeChannelsRuntime, handleChannelsRequest, initChannelsRuntime } from './channelsApi.js';
 import { installFsWatchBridge } from './fsWatchBridge.js';
 import { installLspWebSocketBridge } from './lspWebSocketBridge.js';
@@ -761,6 +762,9 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             for (const target of targets) {
               managedAgentLsp.cleanup(target);
               agentSurfaceBroker.disposeSession(target);
+              // Same hygiene as disposeSession: a recreated same-name session must
+              // not inherit the deleted session's journaled tool events.
+              deleteToolJournal(target);
             }
             const updated = deleteSessionFromManifest(manifest, {
               projectId,
