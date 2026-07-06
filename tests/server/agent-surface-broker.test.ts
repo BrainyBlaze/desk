@@ -733,3 +733,30 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
 import { beforeEach as _beforeEach, afterEach as _afterEach } from 'vitest';
 void _beforeEach;
 void _afterEach;
+
+describe('AgentSurfaceBroker — reload snapshot reset (human BUG: duplicated transcript after session reload)', () => {
+  it('pushes a replace-snapshot to subscribed surfaces when a NEW pid says hello', async () => {
+    const harness = await startBroker();
+    const host1 = await harness.connectHost();
+    host1.send({ type: 'hello', session: 'sr', agent: 'claude', token: tokenFor('sr', 'claude'), pid: 100 });
+    await host1.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    host1.send({ type: 'event', event: event(1, 'user-message', { id: 'user-1', text: 'hi', source: 'ui' }) });
+
+    const browser = await harness.connectBrowser();
+    browser.send({ type: 'subscribe', session: 'sr', surfaceId: 'surf-1', visible: true });
+    await browser.waitFor((f) => (f as { type?: string }).type === 'snapshot');
+    browser.received.length = 0;
+
+    // Session reload: fresh host process with a NEW pid.
+    const host2 = await harness.connectHost();
+    host2.send({ type: 'hello', session: 'sr', agent: 'claude', token: tokenFor('sr', 'claude'), pid: 200 });
+    const snap = await browser.waitFor<{ type: string; events: unknown[] }>(
+      (f) => (f as { type?: string }).type === 'snapshot'
+    );
+    expect(snap.events).toHaveLength(0);
+    host1.close();
+    host2.close();
+    browser.close();
+    harness.close();
+  });
+});

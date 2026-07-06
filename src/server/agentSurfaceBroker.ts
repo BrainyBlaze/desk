@@ -230,6 +230,17 @@ export class AgentSurfaceBroker {
       // the new id re-runs persistSessionResume; otherwise the manifest would keep the
       // OLD id and the next restart would silently resume the pre-discard conversation.
       session.persistedResumeGuard = false;
+      // Already-subscribed surfaces still hold the OLD spawn's rows. Without a
+      // fresh snapshot they would keep them and APPEND the new spawn's backfill
+      // as live events — live ids (user-N) can never dedupe against history ids
+      // (store uuids), so every reload duplicated the whole transcript. Push a
+      // replace-snapshot NOW (empty ring); the incoming backfill rebuilds the
+      // transcript exactly once on top of it.
+      for (const [clientWs, surfaces] of session.clients.entries()) {
+        for (const sub of surfaces.values()) {
+          this.sendSnapshot(clientWs, session, sub.surfaceId);
+        }
+      }
     }
     session.lastHostPid = frame.pid;
     const host: HostConnection = { ws, pid: frame.pid, agent: frame.agent, session: session.session };
