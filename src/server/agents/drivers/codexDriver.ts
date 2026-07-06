@@ -449,7 +449,30 @@ class CodexDriver implements AgentDriver {
       }
       throw error;
     }
-    return flattenThreadHistory(response.thread);
+    const thread = response.thread;
+    if (!thread) {
+      return [];
+    }
+    const turns = thread.turns.some((turn) => turn.itemsView !== 'full') ? await this.fetchFullTurns(threadId, thread.turns) : thread.turns;
+    return flattenThreadHistory({ ...thread, turns });
+  }
+
+  private async fetchFullTurns(threadId: string, fallbackTurns: Turn[]): Promise<Turn[]> {
+    const turns: Turn[] = [];
+    let cursor: string | null = null;
+    do {
+      const page = (await this.options.transport.request('thread/turns/list', {
+        threadId,
+        itemsView: 'full',
+        sortDirection: 'asc',
+        ...(cursor ? { cursor } : {})
+      })) as { data?: Turn[]; nextCursor?: string | null };
+      if (Array.isArray(page.data)) {
+        turns.push(...page.data);
+      }
+      cursor = typeof page.nextCursor === 'string' && page.nextCursor.length > 0 ? page.nextCursor : null;
+    } while (cursor);
+    return turns.length > 0 ? turns : fallbackTurns;
   }
 
   async shutdown(): Promise<void> {

@@ -124,7 +124,7 @@ function turn(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     startedAt: 1,
     completedAt: null,
     durationMs: null,
-    itemsView: { type: 'complete' },
+    itemsView: 'full',
     items: [],
     ...overrides
   };
@@ -213,7 +213,7 @@ describe('createCodexDriver', () => {
                 startedAt: 1,
                 completedAt: 2,
                 durationMs: 1000,
-                itemsView: { type: 'complete' },
+                itemsView: 'full',
                 items: [
                   { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'hello', text_elements: [] }] },
                   { type: 'agentMessage', id: 'assistant-1', text: 'hi there', phase: null, memoryCitation: null }
@@ -400,6 +400,97 @@ describe('createCodexDriver', () => {
         expect.objectContaining({ kind: 'tool-start', toolUseId: 'imagegen-1', name: 'image-generation', summary: 'logo mark' })
       ])
     );
+  });
+
+  it('loads full Codex turn items when thread/read only returns summary turns', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/read': () => ({
+        thread: thread({
+          turns: [
+            turn({
+              id: 'turn-1',
+              status: 'completed',
+              itemsView: 'summary',
+              items: [
+                { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'please use tools', text_elements: [] }] },
+                { type: 'agentMessage', id: 'assistant-1', text: 'done', phase: null, memoryCitation: null }
+              ]
+            })
+          ]
+        })
+      }),
+      'thread/turns/list': (params) => {
+        expect(params).toEqual({ threadId: 'thread-1', itemsView: 'full', sortDirection: 'asc' });
+        return {
+          data: [
+            turn({
+              id: 'turn-1',
+              status: 'completed',
+              itemsView: 'full',
+              items: [
+                { type: 'userMessage', id: 'user-1', clientId: null, content: [{ type: 'text', text: 'please use tools', text_elements: [] }] },
+                {
+                  type: 'commandExecution',
+                  id: 'cmd-1',
+                  command: 'pwd',
+                  cwd: '/repo',
+                  processId: null,
+                  source: 'user',
+                  status: 'completed',
+                  commandActions: [],
+                  aggregatedOutput: '/repo\n',
+                  exitCode: 0,
+                  durationMs: 12
+                },
+                {
+                  type: 'mcpToolCall',
+                  id: 'mcp-1',
+                  server: 'github',
+                  tool: 'search_issues',
+                  status: 'completed',
+                  arguments: { q: 'desk' },
+                  appContext: null,
+                  pluginId: null,
+                  result: { content: ['done'], structuredContent: null, _meta: null },
+                  error: null,
+                  durationMs: 34
+                },
+                {
+                  type: 'fileChange',
+                  id: 'patch-1',
+                  changes: [{ path: '/repo/src/a.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' }],
+                  status: 'completed'
+                },
+                { type: 'agentMessage', id: 'assistant-1', text: 'done', phase: null, memoryCitation: null }
+              ]
+            })
+          ],
+          nextCursor: null,
+          backwardsCursor: null
+        };
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await driver.start();
+    const history = await driver.fetchHistory();
+
+    expect(history).toEqual([
+      { kind: 'user-message', id: 'user-1', text: 'please use tools', source: 'external' },
+      { kind: 'tool-start', toolUseId: 'cmd-1', name: 'command', summary: 'pwd', detail: '/repo' },
+      { kind: 'tool-end', toolUseId: 'cmd-1', status: 'ok', summary: 'exit 0', detail: '/repo\n' },
+      { kind: 'tool-start', toolUseId: 'mcp-1', name: 'mcp', summary: 'github.search_issues', detail: '{"q":"desk"}' },
+      expect.objectContaining({ kind: 'tool-end', toolUseId: 'mcp-1', status: 'ok' }),
+      { kind: 'tool-start', toolUseId: 'patch-1', name: 'file-change', summary: '1 file change', detail: '/repo/src/a.ts' },
+      { kind: 'tool-end', toolUseId: 'patch-1', status: 'ok', summary: 'completed', detail: '/repo/src/a.ts' },
+      { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'done' },
+      { kind: 'turn-complete', turnId: 'turn-1' }
+    ]);
   });
 
   it('does not emit turn-complete dividers for history turns with no renderable items', async () => {
