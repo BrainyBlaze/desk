@@ -288,7 +288,7 @@ class CodexDriver implements AgentDriver {
   async start(): Promise<{ session: { agentSessionId?: string; model?: string }; status: DriverStatusEvent }> {
     await this.options.transport.request('initialize', {
       clientInfo: { name: 'desk', title: 'Desk', version: '0.2.0' },
-      capabilities: null
+      capabilities: { experimentalApi: true }
     });
     await this.options.transport.notify('initialized');
 

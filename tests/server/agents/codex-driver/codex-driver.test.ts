@@ -147,7 +147,7 @@ describe('createCodexDriver', () => {
       status: { kind: 'status', state: 'idle' }
     });
     expect(proc.writes).toEqual([
-      '{"id":"1","method":"initialize","params":{"clientInfo":{"name":"desk","title":"Desk","version":"0.2.0"},"capabilities":null}}\n',
+      '{"id":"1","method":"initialize","params":{"clientInfo":{"name":"desk","title":"Desk","version":"0.2.0"},"capabilities":{"experimentalApi":true}}}\n',
       '{"method":"initialized"}\n',
       '{"id":"2","method":"thread/start","params":{"cwd":"/repo","model":"gpt-5.5"}}\n'
     ]);
@@ -229,6 +229,14 @@ describe('createCodexDriver', () => {
     const started = await driver.start();
     const history = await driver.fetchHistory();
 
+    expect(transport.calls[0]).toEqual({
+      type: 'request',
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'desk', title: 'Desk', version: '0.2.0' },
+        capabilities: { experimentalApi: true }
+      }
+    });
     expect(transport.calls).toMatchObject([
       { type: 'request', method: 'initialize' },
       { type: 'notify', method: 'initialized' },
