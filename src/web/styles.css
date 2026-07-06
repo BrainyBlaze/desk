@@ -5931,3 +5931,134 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentSurface .markdownBody a {
   color: var(--desk-accent, #66aaff);
 }
+
+/* UX item 8: unread separator — marks where "new since last view" begins. */
+.nativeAgentRow.unreadMarker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #cc8844;
+  opacity: 0.85;
+}
+
+.nativeAgentRow.unreadMarker::before,
+.nativeAgentRow.unreadMarker::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid rgba(204, 136, 68, 0.5);
+}
+
+/* UX items 6 + 7: row anatomy metadata/actions and clearer tool state. */
+.nativeAgentMessageHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.nativeAgentRowMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: rgba(210, 225, 240, 0.62);
+}
+
+.nativeAgentTimestamp {
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.nativeAgentRow:hover .nativeAgentTimestamp,
+.nativeAgentRow:focus-within .nativeAgentTimestamp {
+  opacity: 0.72;
+}
+
+.nativeAgentRowActions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.nativeAgentRow:hover .nativeAgentRowActions,
+.nativeAgentRow:focus-within .nativeAgentRowActions {
+  opacity: 1;
+}
+
+.nativeAgentRowAction {
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(210, 225, 240, 0.72);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.nativeAgentRowAction:hover {
+  border-color: var(--desk-border, #2a3441);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(235, 245, 255, 0.92);
+}
+
+.nativeAgentToolBadge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid rgba(102, 170, 255, 0.34);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: rgba(205, 226, 255, 0.88);
+  background: rgba(102, 170, 255, 0.08);
+  flex: 0 0 auto;
+}
+
+.nativeAgentToolBadge.tone-ok {
+  border-color: rgba(102, 204, 136, 0.42);
+  color: #a8e5bd;
+  background: rgba(102, 204, 136, 0.08);
+}
+
+.nativeAgentToolBadge.tone-error {
+  border-color: rgba(204, 102, 102, 0.48);
+  color: #ffaaa8;
+  background: rgba(204, 102, 102, 0.08);
+}
+
+.nativeAgentToolBadge.tone-denied {
+  border-color: rgba(204, 136, 68, 0.5);
+  color: #f0bd83;
+  background: rgba(204, 136, 68, 0.08);
+}
+
+.nativeAgentToolSpinner {
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  animation: nativeAgentToolSpin 800ms linear infinite;
+}
+
+@keyframes nativeAgentToolSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.nativeAgentToolElapsed {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}

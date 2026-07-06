@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -43,6 +43,13 @@ const SURFACE_ID = `native-${Math.random().toString(36).slice(2, 10)}`;
  * sessions used to destroy whatever was typed).
  */
 const composerDrafts = new Map<string, string>();
+
+/**
+ * Per-session last-seen row counts (UX item 8): frozen while a surface is
+ * unfocused/unmounted, advanced while the user is actually looking. On refocus,
+ * rows beyond the frozen count sit below a "new since last view" separator.
+ */
+const lastSeenRowCounts = new Map<string, number>();
 
 export function NativeAgentSurface({ session, revision, focused = false }: NativeAgentSurfaceProps): JSX.Element {
   const surfaceId = useMemo(() => `${SURFACE_ID}-${session}-${revision}`, [session, revision]);
@@ -135,6 +142,24 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   const followingRef = useRef(true);
   const prevRowCountRef = useRef(0);
   const [unseenCount, setUnseenCount] = useState(0);
+
+  // UX item 8: "new since last view" separator. The marker index is fixed at
+  // refocus/remount time (rows beyond the stored last-seen count are new);
+  // while focused the stored count tracks the transcript so the next away-and-
+  // back shows only what actually arrived in between.
+  const [unreadMarkerIndex, setUnreadMarkerIndex] = useState<number | null>(null);
+  useEffect(() => {
+    if (focused) {
+      const lastSeen = lastSeenRowCounts.get(session) ?? 0;
+      setUnreadMarkerIndex(model.rows.length > lastSeen && lastSeen > 0 ? lastSeen : null);
+    }
+    // Falling out of focus freezes the stored count at whatever was last seen.
+  }, [focused, session]);
+  useEffect(() => {
+    if (focused) {
+      lastSeenRowCounts.set(session, model.rows.length);
+    }
+  }, [focused, session, model.rows.length]);
 
   const jumpToLatest = () => {
     const el = scrollRef.current;
@@ -230,8 +255,15 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
         {/* Stop moved to the composer action slot (UX item 5); header keeps status only. */}
       </div>
       <div className="nativeAgentFeed" ref={scrollRef} onScroll={handleFeedScroll}>
-        {model.rows.map((row) => (
-          <AgentRowView key={row.id} row={row} />
+        {model.rows.map((row, index) => (
+          <Fragment key={row.id}>
+            {unreadMarkerIndex !== null && index === unreadMarkerIndex ? (
+              <div className="nativeAgentRow unreadMarker" aria-label="new since last view">
+                new since last view
+              </div>
+            ) : null}
+            <AgentRowView row={row} />
+          </Fragment>
         ))}
         {pendingAssistantEntries.map(({ turnId, text }) => (
           <div key={`pending-${turnId}`} className="nativeAgentRow assistant pending">
