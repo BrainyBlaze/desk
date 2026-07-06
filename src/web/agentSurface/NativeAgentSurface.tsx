@@ -118,13 +118,48 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   // Broker visibility stays true for mounted surfaces — the cell is physically on-screen.
   // (The keep-alive unmount handles true-hidden cells by destroying the component entirely.)
 
-  // Auto-scroll to bottom on new content (only when user is already near bottom).
-  useEffect(() => {
+  // Scroll UX: land on the LATEST message when a session opens/reloads, follow
+  // live output while the user is at the bottom, and NEVER yank the view while
+  // they read history — new rows raise a jump pill instead.
+  const followingRef = useRef(true);
+  const prevRowCountRef = useRef(0);
+  const [unseenCount, setUnseenCount] = useState(0);
+
+  const jumpToLatest = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    followingRef.current = true;
+    setUnseenCount(0);
+  };
+
+  const handleFeedScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (nearBottom) {
+    followingRef.current = nearBottom;
+    if (nearBottom && unseenCount !== 0) {
+      setUnseenCount(0);
+    }
+  };
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const prevCount = prevRowCountRef.current;
+    prevRowCountRef.current = model.rows.length;
+    // Snapshot replace (open/reload/backfill): the whole transcript arrives at
+    // once while scrollTop is still 0 — land on the latest message.
+    const snapshotReplace = prevCount === 0 && model.rows.length > 0;
+    if (snapshotReplace || followingRef.current) {
       el.scrollTop = el.scrollHeight;
+      followingRef.current = true;
+      if (unseenCount !== 0) setUnseenCount(0);
+      return;
+    }
+    // Reading history: keep the view still, count what arrived below.
+    if (model.rows.length > prevCount) {
+      setUnseenCount((n) => n + (model.rows.length - prevCount));
     }
   }, [model.rows, pendingAssistant, model.pendingPermission]);
 
@@ -187,7 +222,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           </button>
         ) : null}
       </div>
-      <div className="nativeAgentFeed" ref={scrollRef}>
+      <div className="nativeAgentFeed" ref={scrollRef} onScroll={handleFeedScroll}>
         {model.rows.map((row) => (
           <AgentRowView key={row.id} row={row} />
         ))}
@@ -220,6 +255,11 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           </div>
         ) : null}
       </div>
+      {unseenCount > 0 ? (
+        <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
+          {unseenCount} new message{unseenCount === 1 ? '' : 's'} ↓
+        </button>
+      ) : null}
       <div className="nativeAgentComposer">
         <textarea
           className="nativeAgentInput"

@@ -5297,6 +5297,7 @@ button.layoutBadge:hover:not(:disabled) {
 /* ── Native UI surface (chat-style agent view) ──────────────────────────────── */
 
 .nativeAgentSurface {
+  position: relative; /* anchor for the jump-to-latest pill */
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -5480,6 +5481,28 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentBridgeDown {
   background: rgba(255, 204, 102, 0.1);
+}
+
+.nativeAgentJumpPill {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 4px 14px;
+  border: 1px solid var(--desk-accent, #33bbcc);
+  border-radius: 12px;
+  background: var(--desk-bg-elevated, rgba(10, 25, 30, 0.95));
+  color: var(--desk-accent, #66ddee);
+  font-size: 11px;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+}
+
+.nativeAgentJumpPill:hover {
+  filter: brightness(1.25);
 }
 
 .nativeAgentComposer {
