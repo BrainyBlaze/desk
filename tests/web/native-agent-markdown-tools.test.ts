@@ -131,6 +131,22 @@ describe('native agent message actions and notes', () => {
     expect(source).toMatch(/document\.execCommand\('copy'\)/);
   });
 
+  it('uses compact accessible icons for row copy and note actions', () => {
+    const surface = nativeSurfaceSource();
+    const styles = stylesSource();
+
+    expect(surface).toMatch(/import \{ Copy, StickyNote \} from 'lucide-react'/);
+    expect(surface).toMatch(/<Copy size=\{14\} aria-hidden="true" \/>/);
+    expect(surface).toMatch(/<StickyNote size=\{14\} aria-hidden="true" \/>/);
+    expect(surface).toMatch(/aria-label=\{copyActionLabel\}/);
+    expect(surface).toMatch(/title=\{copyActionLabel\}/);
+    expect(surface).toMatch(/aria-label="Create note"/);
+    expect(surface).not.toMatch(/copyState === 'copied' \? 'Copied' : copyState === 'failed' \? 'Failed' : 'Copy'/);
+    expect(styles).toMatch(/width: 24px/);
+    expect(styles).toMatch(/height: 24px/);
+    expect(styles).toMatch(/justify-content: center/);
+  });
+
   it('wires message context menus to the existing notes creator flow', () => {
     const surface = nativeSurfaceSource();
     const app = appSource();

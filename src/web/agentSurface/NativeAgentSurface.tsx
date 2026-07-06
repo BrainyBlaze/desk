@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { Copy, StickyNote } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -714,14 +715,28 @@ function RowActions({ text, onCreateNote }: { text: string; onCreateNote?: Creat
       : copyState === 'failed'
         ? 'nativeAgentRowAction failed'
         : 'nativeAgentRowAction';
+  const copyActionLabel = copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy';
   return (
     <span className="nativeAgentRowActions">
-      <button type="button" className={copyClassName} onClick={() => void handleCopy()} aria-live="polite">
-        {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Failed' : 'Copy'}
+      <button
+        type="button"
+        className={copyClassName}
+        onClick={() => void handleCopy()}
+        aria-label={copyActionLabel}
+        title={copyActionLabel}
+        aria-live="polite"
+      >
+        <Copy size={14} aria-hidden="true" />
       </button>
       {onCreateNote ? (
-        <button type="button" className="nativeAgentRowAction note" onClick={() => onCreateNote(text)}>
-          Note
+        <button
+          type="button"
+          className="nativeAgentRowAction note"
+          onClick={() => onCreateNote(text)}
+          aria-label="Create note"
+          title="Create note"
+        >
+          <StickyNote size={14} aria-hidden="true" />
         </button>
       ) : null}
     </span>
