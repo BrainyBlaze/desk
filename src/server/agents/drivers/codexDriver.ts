@@ -46,6 +46,72 @@ export interface CodexDriverOptions {
   resumeId?: string;
 }
 
+const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
+  'login',
+  'logout',
+  'exit',
+  'quit',
+  'clear',
+  'resume',
+  'import',
+  'raw',
+  'experimental',
+  'memories',
+  'skills',
+  'approve',
+  'permissions'
+]);
+
+const CODEX_GOAL_STATUSES = new Set(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
+const CODEX_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
+const CODEX_PERSONALITIES = new Set(['none', 'friendly', 'pragmatic']);
+
+function parseSlashCommand(text: string): { name: string; args: string } | null {
+  const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
+  if (!match) {
+    return null;
+  }
+  return { name: match[1]!.toLowerCase(), args: match[2]!.trim() };
+}
+
+function codexSettingsSlashPatch(name: string, args: string): Record<string, unknown> | null {
+  switch (name) {
+    case 'personality':
+      if (!CODEX_PERSONALITIES.has(args)) {
+        throw driverCommandError('/personality requires one of: none, friendly, pragmatic', 'unsupported-command', false);
+      }
+      return { personality: args };
+    case 'effort':
+      if (!args) {
+        throw driverCommandError('/effort requires a value', 'unsupported-command', false);
+      }
+      return { effort: args };
+    case 'summary':
+      if (!CODEX_REASONING_SUMMARIES.has(args)) {
+        throw driverCommandError('/summary requires one of: auto, concise, detailed, none', 'unsupported-command', false);
+      }
+      return { summary: args };
+    case 'service-tier':
+    case 'tier':
+      return { serviceTier: args || null };
+    case 'permission-profile':
+      return { permissions: args || null };
+    case 'approval':
+    case 'approvals':
+      if (!['untrusted', 'on-failure', 'on-request', 'never'].includes(args)) {
+        throw driverCommandError('/approval requires one of: untrusted, on-failure, on-request, never', 'unsupported-command', false);
+      }
+      return { approvalPolicy: args };
+    case 'fast':
+      if (!args) {
+        throw driverCommandError('/fast requires an explicit Codex service tier in native mode', 'unsupported-command', false);
+      }
+      return { serviceTier: args };
+    default:
+      return null;
+  }
+}
+
 export function createCodexAppServerTransport(options: CodexAppServerTransportOptions = {}): CodexAppServerTransport {
   return new JsonlCodexAppServerTransport(
     options.process ??
@@ -264,6 +330,15 @@ class CodexDriver implements AgentDriver {
       this.userMessageCounter += 1;
       this.emit({ kind: 'user-message', id: id ?? `codex-user-${this.userMessageCounter}`, text, source });
     };
+    const slash = parseSlashCommand(text);
+    if (slash) {
+      const confirmations = await this.handleSlashCommand(slash.name, slash.args);
+      emitLocalUserMessage();
+      for (const confirmation of confirmations) {
+        this.emit(confirmation);
+      }
+      return;
+    }
     if (this.activeTurnId) {
       await this.options.transport.request('turn/steer', {
         threadId: this.thread.id,
@@ -278,6 +353,65 @@ class CodexDriver implements AgentDriver {
       input
     });
     emitLocalUserMessage(userMessageIdFromTurnResult(result, text));
+  }
+
+  private async handleSlashCommand(name: string, args: string): Promise<DriverEvent[]> {
+    if (!this.thread) {
+      throw driverCommandError('Cannot run Codex slash command before start', 'adapter-unavailable', false);
+    }
+    if (CODEX_INTERACTIVE_SLASH_BLOCKLIST.has(name)) {
+      throw driverCommandError(
+        `/${name} is not available in native mode — switch this session to terminal UI for interactive commands`,
+        'unsupported-command',
+        false
+      );
+    }
+    if (name === 'model') {
+      await this.options.transport.request('thread/settings/update', {
+        threadId: this.thread.id,
+        model: args || null
+      });
+      return [{
+        kind: 'session-info',
+        agentSessionId: this.thread.id,
+        ...(args ? { model: args } : {})
+      }];
+    }
+    if (name === 'goal') {
+      await this.handleGoalSlash(args);
+      return [];
+    }
+    const settings = codexSettingsSlashPatch(name, args);
+    if (settings) {
+      await this.options.transport.request('thread/settings/update', {
+        threadId: this.thread.id,
+        ...settings
+      });
+      return [];
+    }
+    throw driverCommandError(
+      `/${name} is not available in Codex native mode — switch this session to terminal UI for interactive commands`,
+      'unsupported-command',
+      false
+    );
+  }
+
+  private async handleGoalSlash(args: string): Promise<void> {
+    if (!this.thread) {
+      throw driverCommandError('Cannot run Codex goal command before start', 'adapter-unavailable', false);
+    }
+    if (!args) {
+      throw driverCommandError('/goal requires an objective, status, or clear in native mode', 'unsupported-command', false);
+    }
+    if (args === 'clear') {
+      await this.options.transport.request('thread/goal/clear', { threadId: this.thread.id });
+      return;
+    }
+    if (CODEX_GOAL_STATUSES.has(args)) {
+      await this.options.transport.request('thread/goal/set', { threadId: this.thread.id, status: args });
+      return;
+    }
+    await this.options.transport.request('thread/goal/set', { threadId: this.thread.id, objective: args });
   }
 
   async respondPermission(requestId: string, optionId: string, _note?: string): Promise<void> {
@@ -370,6 +504,14 @@ class CodexDriver implements AgentDriver {
     }
     if (event.method === 'item/commandExecution/outputDelta') {
       this.emit({ kind: 'tool-output-delta', toolUseId: event.params.itemId, text: event.params.delta });
+      return;
+    }
+    if (event.method === 'item/mcpToolCall/progress') {
+      this.emit({ kind: 'tool-output-delta', toolUseId: event.params.itemId, text: event.params.message });
+      return;
+    }
+    if (event.method === 'item/fileChange/patchUpdated') {
+      this.emit({ kind: 'tool-output-delta', toolUseId: event.params.itemId, text: fileChangePatchSummary(event.params.changes) });
       return;
     }
     if (event.method === 'item/completed') {
@@ -495,26 +637,29 @@ function itemToHistoryEvents(turn: Turn, item: ThreadItem): DriverEvent[] {
       return [{ kind: 'assistant-message', id: item.id, turnId: turn.id, markdown: item.text }];
     case 'commandExecution':
       return [commandToolStart(item), commandToolEnd(item)];
+    case 'mcpToolCall':
+    case 'dynamicToolCall':
+    case 'fileChange':
+    case 'collabAgentToolCall':
+    case 'webSearch':
+    case 'imageView':
+    case 'sleep':
+    case 'imageGeneration':
+      return toolHistoryEvents(item);
     default:
       return [];
   }
 }
 
 function itemStartedEvent(item: ThreadItem): DriverEvent | null {
-  if (item.type === 'commandExecution') {
-    return commandToolStart(item);
-  }
-  return null;
+  return toolStartEvent(item);
 }
 
 function itemCompletedEvent(turn: Turn, item: ThreadItem): DriverEvent | null {
   if (item.type === 'agentMessage') {
     return { kind: 'assistant-message', id: item.id, turnId: turn.id, markdown: item.text };
   }
-  if (item.type === 'commandExecution') {
-    return commandToolEnd(item);
-  }
-  return null;
+  return toolEndEvent(item);
 }
 
 function commandToolEnd(item: Extract<ThreadItem, { type: 'commandExecution' }>): DriverEvent {
@@ -529,6 +674,136 @@ function commandToolEnd(item: Extract<ThreadItem, { type: 'commandExecution' }>)
 
 function commandToolStart(item: Extract<ThreadItem, { type: 'commandExecution' }>): DriverEvent {
   return { kind: 'tool-start', toolUseId: item.id, name: 'command', summary: item.command, detail: item.cwd };
+}
+
+function toolHistoryEvents(item: ThreadItem): DriverEvent[] {
+  const start = toolStartEvent(item);
+  const end = toolEndEvent(item);
+  return [start, end].filter((event): event is DriverEvent => event !== null);
+}
+
+function toolStartEvent(item: ThreadItem): DriverEvent | null {
+  switch (item.type) {
+    case 'commandExecution':
+      return commandToolStart(item);
+    case 'mcpToolCall':
+      return withOptionalDetail(
+        { kind: 'tool-start', toolUseId: item.id, name: 'mcp', summary: `${item.server}.${item.tool}` },
+        safeJson(item.arguments)
+      );
+    case 'dynamicToolCall':
+      return withOptionalDetail(
+        { kind: 'tool-start', toolUseId: item.id, name: 'dynamic-tool', summary: dottedName(item.namespace, item.tool) },
+        safeJson(item.arguments)
+      );
+    case 'fileChange':
+      return withOptionalDetail(
+        { kind: 'tool-start', toolUseId: item.id, name: 'file-change', summary: plural(item.changes.length, 'file change') },
+        fileChangePatchSummary(item.changes)
+      );
+    case 'collabAgentToolCall':
+      return withOptionalDetail(
+        { kind: 'tool-start', toolUseId: item.id, name: 'agent', summary: item.tool },
+        [item.model ? `model ${item.model}` : '', item.prompt ?? ''].filter(Boolean).join('\n')
+      );
+    case 'webSearch':
+      return withOptionalDetail(
+        { kind: 'tool-start', toolUseId: item.id, name: 'web-search', summary: item.query },
+        safeJson(item.action)
+      );
+    case 'imageView':
+      return { kind: 'tool-start', toolUseId: item.id, name: 'image-view', summary: item.path };
+    case 'sleep':
+      return { kind: 'tool-start', toolUseId: item.id, name: 'sleep', summary: `${item.durationMs}ms` };
+    case 'imageGeneration':
+      return withOptionalDetail(
+        { kind: 'tool-start', toolUseId: item.id, name: 'image-generation', summary: item.revisedPrompt ?? item.status },
+        item.savedPath
+      );
+    default:
+      return null;
+  }
+}
+
+function toolEndEvent(item: ThreadItem): DriverEvent | null {
+  switch (item.type) {
+    case 'commandExecution':
+      return commandToolEnd(item);
+    case 'mcpToolCall':
+      return withOptionalDetail(
+        { kind: 'tool-end', toolUseId: item.id, status: item.status === 'completed' ? 'ok' : 'error', summary: item.status },
+        item.error?.message ?? safeJson(item.result)
+      );
+    case 'dynamicToolCall':
+      return withOptionalDetail(
+        { kind: 'tool-end', toolUseId: item.id, status: item.status === 'completed' && item.success !== false ? 'ok' : 'error', summary: item.status },
+        dynamicToolContentDetail(item.contentItems)
+      );
+    case 'fileChange':
+      return withOptionalDetail(
+        {
+          kind: 'tool-end',
+          toolUseId: item.id,
+          status: item.status === 'completed' ? 'ok' : item.status === 'declined' ? 'denied' : 'error',
+          summary: item.status
+        },
+        fileChangePatchSummary(item.changes)
+      );
+    case 'collabAgentToolCall':
+      return withOptionalDetail(
+        { kind: 'tool-end', toolUseId: item.id, status: item.status === 'completed' ? 'ok' : 'error', summary: item.status },
+        item.receiverThreadIds.join('\n')
+      );
+    case 'webSearch':
+    case 'imageView':
+    case 'sleep':
+      return { kind: 'tool-end', toolUseId: item.id, status: 'ok', summary: 'completed' };
+    case 'imageGeneration':
+      return withOptionalDetail(
+        { kind: 'tool-end', toolUseId: item.id, status: imageGenerationStatus(item.status), summary: item.status },
+        item.savedPath ?? item.result
+      );
+    default:
+      return null;
+  }
+}
+
+function dottedName(namespace: string | null, tool: string): string {
+  return namespace ? `${namespace}.${tool}` : tool;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+function fileChangePatchSummary(changes: Array<Extract<ThreadItem, { type: 'fileChange' }>['changes'][number]>): string {
+  return changes.map((change) => change.path).join('\n');
+}
+
+function dynamicToolContentDetail(items: Extract<ThreadItem, { type: 'dynamicToolCall' }>['contentItems']): string {
+  return (items ?? []).map((item) => (item.type === 'inputText' ? item.text : item.imageUrl)).join('\n');
+}
+
+function imageGenerationStatus(status: string): 'ok' | 'error' {
+  return ['completed', 'complete', 'succeeded', 'success', 'saved'].includes(status.toLowerCase()) ? 'ok' : 'error';
+}
+
+function withOptionalDetail<T extends DriverEvent>(event: T, detail: string | undefined | null): T {
+  return detail ? ({ ...event, detail } as T) : event;
+}
+
+function safeJson(value: unknown): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function userMessageIdFromTurnResult(result: unknown, text: string): string | undefined {

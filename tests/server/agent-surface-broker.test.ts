@@ -368,6 +368,8 @@ describe('AgentSurfaceBroker — attention synthesis', () => {
 
   it('turn-complete pushes turn-complete event', async () => {
     const pushed: string[] = [];
+    const signaled: string[] = [];
+    const raised: string[] = [];
     const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer> }>((resolve) => {
       const httpServer = createServer();
       httpServer.listen(0, '127.0.0.1', () => {
@@ -376,8 +378,8 @@ describe('AgentSurfaceBroker — attention synthesis', () => {
           resolveSecret: () => SECRET,
           attention: {
             pushEvent: (_s, kind) => pushed.push(kind),
-            notifySignal: () => undefined,
-            raise: () => undefined
+            notifySignal: (_s, kind) => signaled.push(kind),
+            raise: (session) => raised.push(session)
           }
         });
         const dispose = installAgentSurfaceBroker(httpServer as never, broker);
@@ -395,6 +397,86 @@ describe('AgentSurfaceBroker — attention synthesis', () => {
     host.send({ type: 'event', event: event(1, 'turn-complete', { turnId: 't1' }) });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(pushed).toContain('turn-complete');
+    expect(signaled).toContain('turn-complete');
+    expect(raised).toContain('s1');
+
+    host.close();
+    harness.close();
+  });
+
+  it('fatal agent-error raises and signals input-requested', async () => {
+    const pushed: string[] = [];
+    const signaled: string[] = [];
+    const raised: string[] = [];
+    const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer> }>((resolve) => {
+      const httpServer = createServer();
+      httpServer.listen(0, '127.0.0.1', () => {
+        const port = (httpServer.address() as { port: number }).port;
+        const broker = new AgentSurfaceBroker({
+          resolveSecret: () => SECRET,
+          attention: {
+            pushEvent: (_s, kind) => pushed.push(kind),
+            notifySignal: (_s, kind) => signaled.push(kind),
+            raise: (session) => raised.push(session)
+          }
+        });
+        const dispose = installAgentSurfaceBroker(httpServer as never, broker);
+        resolve({
+          broker,
+          close: () => { dispose(); httpServer.close(); },
+          port,
+          connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
+        });
+      });
+    });
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'claude', token: tokenFor('s1', 'claude'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    host.send({ type: 'event', event: event(1, 'agent-error', { fatal: true, message: 'agent needs input' }) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(pushed).toContain('input-requested');
+    expect(signaled).toContain('input-requested');
+    expect(raised).toContain('s1');
+
+    host.close();
+    harness.close();
+  });
+
+  it('input attention hints raise and signal input-requested while session-status stays drawer-only', async () => {
+    const pushed: string[] = [];
+    const signaled: string[] = [];
+    const raised: string[] = [];
+    const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer> }>((resolve) => {
+      const httpServer = createServer();
+      httpServer.listen(0, '127.0.0.1', () => {
+        const port = (httpServer.address() as { port: number }).port;
+        const broker = new AgentSurfaceBroker({
+          resolveSecret: () => SECRET,
+          attention: {
+            pushEvent: (_s, kind) => pushed.push(kind),
+            notifySignal: (_s, kind) => signaled.push(kind),
+            raise: (session) => raised.push(session)
+          }
+        });
+        const dispose = installAgentSurfaceBroker(httpServer as never, broker);
+        resolve({
+          broker,
+          close: () => { dispose(); httpServer.close(); },
+          port,
+          connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
+        });
+      });
+    });
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    host.send({ type: 'event', event: event(1, 'attention-hint', { attention: 'idle-prompt', detail: 'waiting for prompt' }) });
+    host.send({ type: 'event', event: event(2, 'attention-hint', { attention: 'elicitation', detail: 'answer needed' }) });
+    host.send({ type: 'event', event: event(3, 'attention-hint', { attention: 'session-status', detail: 'retrying provider' }) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(pushed).toEqual(['input-requested', 'input-requested', 'turn-complete']);
+    expect(signaled).toEqual(['input-requested', 'input-requested']);
+    expect(raised).toEqual(['s1', 's1']);
 
     host.close();
     harness.close();

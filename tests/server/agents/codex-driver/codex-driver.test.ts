@@ -7,6 +7,7 @@ import {
   type CodexAppServerProcess,
   type CodexTransportEvent
 } from '../../../../src/server/agents/drivers/codexDriver.js';
+import { isDriverCommandError } from '../../../../src/server/agents/host/driver.js';
 
 class FakeCodexTransport implements CodexAppServerTransport {
   readonly calls: Array<
@@ -292,6 +293,115 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('backfills non-command Codex tool items with start and end events so tool rows survive restart', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/read': () => ({
+        thread: thread({
+          turns: [
+            turn({
+              id: 'turn-1',
+              status: 'completed',
+              completedAt: 2,
+              durationMs: 1000,
+              items: [
+                {
+                  type: 'mcpToolCall',
+                  id: 'mcp-1',
+                  server: 'github',
+                  tool: 'search_issues',
+                  status: 'completed',
+                  arguments: { q: 'desk' },
+                  appContext: null,
+                  pluginId: null,
+                  result: { content: ['done'], structuredContent: null, _meta: null },
+                  error: null,
+                  durationMs: 34
+                },
+                {
+                  type: 'dynamicToolCall',
+                  id: 'dyn-1',
+                  namespace: 'image_gen',
+                  tool: 'imagegen',
+                  arguments: { prompt: 'logo' },
+                  status: 'failed',
+                  contentItems: [{ type: 'inputText', text: 'generation failed' }],
+                  success: false,
+                  durationMs: 5
+                },
+                {
+                  type: 'fileChange',
+                  id: 'patch-1',
+                  changes: [{ path: '/repo/src/a.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' }],
+                  status: 'declined'
+                },
+                {
+                  type: 'collabAgentToolCall',
+                  id: 'agent-1',
+                  tool: 'spawnAgent',
+                  status: 'completed',
+                  senderThreadId: 'thread-1',
+                  receiverThreadIds: ['thread-child'],
+                  prompt: 'inspect mapper',
+                  model: 'gpt-5.5',
+                  reasoningEffort: null,
+                  agentsStates: {}
+                },
+                { type: 'webSearch', id: 'web-1', query: 'Codex app server', action: { type: 'search', query: 'Codex app server', queries: null } },
+                { type: 'imageView', id: 'image-1', path: '/repo/screenshot.png' },
+                { type: 'sleep', id: 'sleep-1', durationMs: 1000 },
+                { type: 'imageGeneration', id: 'imagegen-1', status: 'completed', revisedPrompt: 'logo mark', result: 'ok', savedPath: '/repo/logo.png' }
+              ]
+            })
+          ]
+        })
+      })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    await driver.start();
+    const history = await driver.fetchHistory();
+
+    expect(history.map((event) => event.kind)).toEqual([
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'tool-start',
+      'tool-end',
+      'turn-complete'
+    ]);
+    expect(history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'mcp-1', name: 'mcp', summary: 'github.search_issues' }),
+        expect.objectContaining({ kind: 'tool-end', toolUseId: 'mcp-1', status: 'ok' }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'dyn-1', name: 'dynamic-tool', summary: 'image_gen.imagegen' }),
+        expect.objectContaining({ kind: 'tool-end', toolUseId: 'dyn-1', status: 'error', detail: expect.stringContaining('generation failed') }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'patch-1', name: 'file-change', summary: '1 file change' }),
+        expect.objectContaining({ kind: 'tool-end', toolUseId: 'patch-1', status: 'denied' }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'agent-1', name: 'agent', summary: 'spawnAgent' }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'web-1', name: 'web-search', summary: 'Codex app server' }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'image-1', name: 'image-view', summary: '/repo/screenshot.png' }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'sleep-1', name: 'sleep', summary: '1000ms' }),
+        expect.objectContaining({ kind: 'tool-start', toolUseId: 'imagegen-1', name: 'image-generation', summary: 'logo mark' })
+      ])
+    );
+  });
+
   it('does not emit turn-complete dividers for history turns with no renderable items', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
@@ -470,6 +580,83 @@ describe('createCodexDriver', () => {
     ]);
   });
 
+  it('/model updates Codex thread settings without starting a turn and emits session-info', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/settings/update': () => ({})
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+    events.length = 0;
+
+    await driver.inject('/model gpt-5.5-codex', 'ui');
+
+    expect(transport.calls).toContainEqual({
+      type: 'request',
+      method: 'thread/settings/update',
+      params: { threadId: 'thread-1', model: 'gpt-5.5-codex' }
+    });
+    expect(transport.calls.some((call) => call.type === 'request' && call.method === 'turn/start')).toBe(false);
+    expect(events).toEqual([
+      { kind: 'user-message', id: 'codex-user-1', text: '/model gpt-5.5-codex', source: 'ui' },
+      { kind: 'session-info', agentSessionId: 'thread-1', model: 'gpt-5.5-codex' }
+    ]);
+  });
+
+  it('/goal routes to Codex goal APIs without starting a turn', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      },
+      'thread/goal/set': () => ({}),
+      'thread/goal/clear': () => ({})
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+    events.length = 0;
+
+    await driver.inject('/goal finish native UI', 'channel');
+    await driver.inject('/goal complete', 'channel');
+    await driver.inject('/goal clear', 'channel');
+
+    expect(transport.calls).toEqual(
+      expect.arrayContaining([
+        { type: 'request', method: 'thread/goal/set', params: { threadId: 'thread-1', objective: 'finish native UI' } },
+        { type: 'request', method: 'thread/goal/set', params: { threadId: 'thread-1', status: 'complete' } },
+        { type: 'request', method: 'thread/goal/clear', params: { threadId: 'thread-1' } }
+      ])
+    );
+    expect(transport.calls.some((call) => call.type === 'request' && call.method === 'turn/start')).toBe(false);
+    expect(events.filter((event) => (event as { kind?: string }).kind === 'user-message')).toHaveLength(3);
+  });
+
+  it('interactive Codex slash commands fail with unsupported-command instead of becoming model text', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    await driver.start();
+
+    await expect(driver.inject('/login', 'ui')).rejects.toSatisfy((error: unknown) => {
+      return isDriverCommandError(error) && error.code === 'unsupported-command' && error.retryable === false;
+    });
+    expect(transport.calls.some((call) => call.type === 'request' && call.method === 'turn/start')).toBe(false);
+  });
+
   it('uses the user item id returned by turn/start for the optimistic user row', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
@@ -630,6 +817,70 @@ describe('createCodexDriver', () => {
       { kind: 'tool-start', toolUseId: 'cmd-1', name: 'command', summary: 'npm test', detail: '/repo' },
       { kind: 'tool-output-delta', toolUseId: 'cmd-1', text: 'ok\n' },
       { kind: 'tool-end', toolUseId: 'cmd-1', status: 'ok', summary: 'exit 0', detail: 'ok\n' }
+    ]);
+  });
+
+  it('normalizes non-command Codex tool lifecycles and progress into tool events', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: unknown[] = [];
+    driver.onEvent((event) => events.push(event));
+    await driver.start();
+
+    transport.emit({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'mcpToolCall',
+          id: 'mcp-1',
+          server: 'github',
+          tool: 'search_issues',
+          status: 'inProgress',
+          arguments: { q: 'desk' },
+          appContext: null,
+          pluginId: null,
+          result: null,
+          error: null,
+          durationMs: null
+        }
+      }
+    });
+    transport.emit({ method: 'item/mcpToolCall/progress', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'mcp-1', message: 'calling github' } });
+    transport.emit({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'mcpToolCall',
+          id: 'mcp-1',
+          server: 'github',
+          tool: 'search_issues',
+          status: 'failed',
+          arguments: { q: 'desk' },
+          appContext: null,
+          pluginId: null,
+          result: null,
+          error: { message: 'rate limited' },
+          durationMs: 34
+        }
+      }
+    });
+    transport.emit({ method: 'item/fileChange/patchUpdated', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'patch-1', changes: [{ path: '/repo/src/a.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' }] } });
+
+    expect(events).toEqual([
+      { kind: 'tool-start', toolUseId: 'mcp-1', name: 'mcp', summary: 'github.search_issues', detail: '{"q":"desk"}' },
+      { kind: 'tool-output-delta', toolUseId: 'mcp-1', text: 'calling github' },
+      { kind: 'tool-end', toolUseId: 'mcp-1', status: 'error', summary: 'failed', detail: 'rate limited' },
+      { kind: 'tool-output-delta', toolUseId: 'patch-1', text: '/repo/src/a.ts' }
     ]);
   });
 

@@ -618,17 +618,25 @@ export class AgentSurfaceBroker {
         }
         return;
       case 'turn-complete':
+        this.attention.raise(session);
         this.attention.pushEvent(session, 'turn-complete');
         this.attention.notifySignal(session, 'turn-complete');
         return;
       case 'agent-error':
         if (event.fatal) {
+          this.attention.raise(session);
           this.attention.pushEvent(session, 'input-requested', event.message);
           this.attention.notifySignal(session, 'input-requested');
         }
         return;
       case 'attention-hint': {
         const mapped: AgentEventKind = event.attention === 'idle-prompt' ? 'input-requested' : event.attention === 'session-status' ? 'turn-complete' : 'input-requested';
+        if (mapped === 'input-requested') {
+          this.attention.raise(session);
+          this.attention.pushEvent(session, mapped, event.detail);
+          this.attention.notifySignal(session, mapped);
+          return;
+        }
         this.attention.pushEvent(session, mapped, event.detail);
         return;
       }
