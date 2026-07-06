@@ -6073,3 +6073,50 @@ button.layoutBadge:hover:not(:disabled) {
   font-variant-numeric: tabular-nums;
   opacity: 0.72;
 }
+
+/* UX item 9: slash-command palette above the composer. */
+.nativeAgentPalette {
+  position: absolute;
+  bottom: 58px;
+  left: 8px;
+  right: 8px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--desk-accent, #33bbcc);
+  border-radius: 6px;
+  background: var(--desk-bg-elevated, rgba(10, 25, 30, 0.97));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.nativeAgentPaletteItem {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nativeAgentPaletteItem:hover {
+  background: rgba(51, 187, 204, 0.15);
+}
+
+.nativeAgentPaletteName {
+  color: var(--desk-accent, #66ddee);
+  white-space: nowrap;
+}
+
+.nativeAgentPaletteDesc {
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

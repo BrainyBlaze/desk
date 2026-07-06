@@ -53,6 +53,8 @@ export interface ClaudeQueryHandle extends AsyncIterable<ClaudeSdkMessage> {
   interrupt(): Promise<void>;
   /** Live model switch without respawn (SDK Query.setModel); absent on old SDKs. */
   setModel?: (model?: string) => Promise<void>;
+  /** Slash-command discovery (SDK Query.supportedCommands); absent on old SDKs. */
+  supportedCommands?: () => Promise<Array<{ name: string; description?: string }>>;
   close?: () => void;
 }
 
@@ -222,6 +224,25 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
             ...(sessionId ? { agentSessionId: sessionId } : {}),
             ...(typeof message.model === 'string' ? { model: message.model } : {})
           });
+          // UX item 9: fetch the slash-command list once per spawn and surface it
+          // via a follow-up session-info so the composer palette can populate.
+          if (typeof handle?.supportedCommands === 'function') {
+            void handle
+              .supportedCommands()
+              .then((commands) => {
+                if (isShutdown || !Array.isArray(commands)) return;
+                emit({
+                  kind: 'session-info',
+                  ...(sessionId ? { agentSessionId: sessionId } : {}),
+                  commands: commands
+                    .filter((c) => c && typeof c.name === 'string' && c.name !== '')
+                    .map((c) => ({ name: c.name, ...(typeof c.description === 'string' ? { description: c.description } : {}) }))
+                });
+              })
+              .catch((err: unknown) => {
+                console.error('claude driver: supportedCommands discovery failed:', err instanceof Error ? err.message : String(err));
+              });
+          }
         }
         return;
       }

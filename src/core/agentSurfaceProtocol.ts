@@ -33,6 +33,12 @@ export interface AgentSurfacePermissionOption {
   treatment: AgentSurfacePermissionTreatment;
 }
 
+/** A slash command the agent supports (UX item 9: composer palette). */
+export interface AgentSurfaceCommand {
+  name: string;
+  description?: string;
+}
+
 /**
  * Event payloads without the seq/ts envelope. Drivers emit these; the adapter
  * host stamps seq/ts to produce AgentSurfaceEvent. Exported separately because
@@ -40,7 +46,7 @@ export interface AgentSurfacePermissionOption {
  */
 export type AgentSurfaceEventPayload =
   (
-    | { kind: 'session-info'; agentSessionId?: string; model?: string }
+    | { kind: 'session-info'; agentSessionId?: string; model?: string; commands?: AgentSurfaceCommand[] }
     | { kind: 'status'; state: AgentSurfaceState; detail?: string }
     | { kind: 'user-message'; id: string; text: string; source: 'ui' | 'channel' | 'external' }
     /** Transient; excluded from the replay ring. */
@@ -181,7 +187,8 @@ export function parseAgentSurfaceEvent(value: unknown): AgentSurfaceEvent {
         seq,
         ts,
         ...(event.agentSessionId === undefined ? {} : { agentSessionId: str(event.agentSessionId) }),
-        ...(event.model === undefined ? {} : { model: str(event.model) })
+        ...(event.model === undefined ? {} : { model: str(event.model) }),
+        ...(event.commands === undefined ? {} : { commands: parseCommands(event.commands) })
       };
     case 'status':
       return {
@@ -386,6 +393,19 @@ function asRecord(value: unknown): Record<string, unknown> {
     throw invalidFrame();
   }
   return value as Record<string, unknown>;
+}
+
+function parseCommands(value: unknown): AgentSurfaceCommand[] {
+  if (!Array.isArray(value)) {
+    throw invalidFrame();
+  }
+  return value.map((entry) => {
+    const record = asRecord(entry);
+    return {
+      name: nonEmptyString(record.name),
+      ...(record.description === undefined ? {} : { description: str(record.description) })
+    };
+  });
 }
 
 function nonEmptyString(value: unknown): string {

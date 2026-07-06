@@ -57,6 +57,7 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
   const [pendingAssistant, setPendingAssistant] = useState<Map<string, string>>(new Map());
   const [pipelineLive, setPipelineLive] = useState(false);
   const [agentModel, setAgentModel] = useState<string | undefined>(undefined);
+  const [agentCommands, setAgentCommands] = useState<Array<{ name: string; description?: string }>>([]);
   const [input, setInputState] = useState(() => composerDrafts.get(session) ?? '');
   const setInput = (value: string): void => {
     composerDrafts.set(session, value);
@@ -85,6 +86,9 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
         setPipelineLive(true);
         if (event.kind === 'session-info' && event.model) {
           setAgentModel(event.model);
+        }
+        if (event.kind === 'session-info' && event.commands && event.commands.length > 0) {
+          setAgentCommands(event.commands);
         }
         if (event.kind === 'assistant-delta') {
           setPendingAssistant((prev) => {
@@ -293,6 +297,21 @@ export function NativeAgentSurface({ session, revision, focused = false }: Nativ
           </div>
         ) : null}
       </div>
+      {input.startsWith('/') && !input.includes(' ') && agentCommands.length > 0 ? (
+        // UX item 9: slash palette — live-filtered from the agent's own command
+        // list (session-info commands); absent list = no palette.
+        <div className="nativeAgentPalette">
+          {agentCommands
+            .filter((c) => c.name.toLowerCase().startsWith(input.slice(1).toLowerCase()))
+            .slice(0, 8)
+            .map((c) => (
+              <button key={c.name} type="button" className="nativeAgentPaletteItem" onClick={() => setInput(`/${c.name} `)}>
+                <span className="nativeAgentPaletteName">/{c.name}</span>
+                {c.description ? <span className="nativeAgentPaletteDesc">{c.description}</span> : null}
+              </button>
+            ))}
+        </div>
+      ) : null}
       {unseenCount > 0 ? (
         <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
           {unseenCount} new message{unseenCount === 1 ? '' : 's'} ↓
