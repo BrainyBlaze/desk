@@ -49,6 +49,8 @@ const PRE_HELLO_BACKOFF_MS = 1_000;
 const POST_HELLO_INITIAL_BACKOFF_MS = 500;
 const POST_HELLO_MAX_BACKOFF_MS = 30_000;
 const POST_HELLO_BACKOFF_JITTER_MS = 500;
+const CODEX_RELOAD_TOOL_LIMITATION_DETAIL =
+  'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.';
 
 export interface AgentHostEnv {
   DESK_TMUX_SESSION: string;
@@ -130,6 +132,7 @@ export class AgentHost {
   /** Id of the last committed user/assistant message — the anchor for journaled tool events. */
   private lastMessageAnchorId: string | null = null;
   private lastMessageAnchorText: string | null = null;
+  private emittedCodexReloadToolLimitation = false;
 
   constructor(opts: AgentHostOptions) {
     this.env = opts.env;
@@ -457,14 +460,18 @@ export class AgentHost {
     // Splice desk-journaled tool events into the API history at their anchors;
     // toolUseId dedupe leaves agents whose APIs return tools untouched.
     history = this.toolJournal.merge(history);
-    for (const event of history) {
-      this.emitDriverEvent(event);
+    if (this.shouldEmitCodexReloadToolLimitation(history)) {
+      history.push({ kind: 'attention-hint', attention: 'session-status', detail: CODEX_RELOAD_TOOL_LIMITATION_DETAIL });
+      this.emittedCodexReloadToolLimitation = true;
     }
-    this.emitDriverEvent({ kind: 'history-boundary', backfillComplete: true });
+    for (const event of history) {
+      this.emitDriverEvent(event, { journal: false });
+    }
+    this.emitDriverEvent({ kind: 'history-boundary', backfillComplete: true }, { journal: false });
     this.logger.info(`backfill emitted ${history.length} events`);
   }
 
-  private handleDriverEvent(payload: DriverEvent): void {
+  private handleDriverEvent(payload: DriverEvent, opts: { journal?: boolean } = {}): void {
     if (this.shuttingDown) {
       return;
     }
@@ -483,7 +490,7 @@ export class AgentHost {
       this.lastMessageAnchorId = payload.id;
       this.lastMessageAnchorText = (payload.kind === 'user-message' ? payload.text : payload.markdown).slice(0, 200);
     }
-    if (payload.kind === 'tool-start' || payload.kind === 'tool-end') {
+    if (opts.journal !== false && (payload.kind === 'tool-start' || payload.kind === 'tool-end')) {
       this.toolJournal.append(this.lastMessageAnchorId, payload, this.lastMessageAnchorText ?? undefined);
     }
     const event: AgentSurfaceEvent = {
@@ -500,8 +507,18 @@ export class AgentHost {
     this.sendFrame({ type: 'event', event });
   }
 
-  private emitDriverEvent(payload: AgentSurfaceEventPayload): void {
-    this.handleDriverEvent(payload);
+  private emitDriverEvent(payload: AgentSurfaceEventPayload, opts: { journal?: boolean } = {}): void {
+    this.handleDriverEvent(payload, opts);
+  }
+
+  private shouldEmitCodexReloadToolLimitation(history: DriverEvent[]): boolean {
+    return (
+      !this.emittedCodexReloadToolLimitation &&
+      this.env.DESK_AGENT === 'codex' &&
+      Boolean(this.env.DESK_AGENT_RESUME) &&
+      history.some((event) => event.kind === 'user-message' || event.kind === 'assistant-message') &&
+      !history.some((event) => event.kind === 'tool-start' || event.kind === 'tool-end')
+    );
   }
 
   /**
@@ -670,4 +687,3 @@ function postHelloBackoff(attempt: number): number {
 function wsUrl(serverUrl: string): string {
   return serverUrl.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
 }
-

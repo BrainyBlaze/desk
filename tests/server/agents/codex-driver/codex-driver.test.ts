@@ -486,7 +486,7 @@ describe('createCodexDriver', () => {
     ]);
   });
 
-  it('surfaces an honest reload limitation when resumed Codex history has no recoverable tool items', async () => {
+  it('returns message-only resumed Codex history when app-server has no recoverable tool items', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
       'thread/resume': () => ({ thread: thread({ id: 'thread-1', status: { type: 'idle' } }) }),
@@ -526,12 +526,7 @@ describe('createCodexDriver', () => {
     expect(firstHistory).toEqual([
       { kind: 'user-message', id: 'user-1', text: 'please use tools', source: 'external' },
       { kind: 'assistant-message', id: 'assistant-1', turnId: 'turn-1', markdown: 'done' },
-      { kind: 'turn-complete', turnId: 'turn-1' },
-      {
-        kind: 'attention-hint',
-        attention: 'session-status',
-        detail: 'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.'
-      }
+      { kind: 'turn-complete', turnId: 'turn-1' }
     ]);
     expect(secondHistory).toEqual([
       { kind: 'user-message', id: 'user-1', text: 'please use tools', source: 'external' },

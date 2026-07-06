@@ -496,6 +496,10 @@ describe('AgentHost tool journal (codex reload: tool rows survive via desk-owned
     socket.sent.length = 0;
     socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
     await flush();
+    expect(journal.appended).toEqual([
+      { anchorId: 'u1', kind: 'tool-start' },
+      { anchorId: 'u1', kind: 'tool-end' }
+    ]);
     const kinds = sentFrames()
       .filter((f) => (f as { type?: string }).type === 'event')
       .map((f) => (f as { event: { kind: string } }).event.kind);
@@ -503,6 +507,67 @@ describe('AgentHost tool journal (codex reload: tool rows survive via desk-owned
     expect(kinds).toContain('tool-end');
     const uIdx = kinds.indexOf('user-message');
     expect(kinds.indexOf('tool-start')).toBeGreaterThan(uIdx);
+    void runPromise;
+  });
+
+  it('emits the Codex reload limitation only when no journaled tools can be merged', async () => {
+    const driver = makeMockDriver({
+      history: [
+        { kind: 'user-message', id: 'u1', text: 'run it', source: 'external' },
+        { kind: 'assistant-message', id: 'a1', turnId: 't1', markdown: 'done' }
+      ]
+    });
+    const { host, socket, sentFrames } = makeHost({
+      env: { DESK_AGENT: 'codex', DESK_AGENT_RESUME: 'thread-1' },
+      driver,
+      toolJournal: makeMemoryJournal()
+    });
+    const runPromise = host.run();
+    socket.fireOpen();
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+
+    const hints = sentFrames()
+      .filter((f) => (f as { type?: string }).type === 'event')
+      .map((f) => (f as { event: DriverEvent }).event)
+      .filter((e) => e.kind === 'attention-hint');
+    expect(hints).toEqual([
+      {
+        kind: 'attention-hint',
+        attention: 'session-status',
+        detail: 'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.',
+        seq: expect.any(Number),
+        ts: expect.any(String)
+      }
+    ]);
+    void runPromise;
+  });
+
+  it('does not emit the Codex reload limitation when the journal restores tool rows', async () => {
+    const journal = makeMemoryJournal();
+    journal.append('u1', { kind: 'tool-start', toolUseId: 'tool-1', name: 'Bash', summary: 'pwd' });
+    journal.append('u1', { kind: 'tool-end', toolUseId: 'tool-1', status: 'ok' });
+    const driver = makeMockDriver({
+      history: [
+        { kind: 'user-message', id: 'u1', text: 'run it', source: 'external' },
+        { kind: 'assistant-message', id: 'a1', turnId: 't1', markdown: 'done' }
+      ]
+    });
+    const { host, socket, sentFrames } = makeHost({
+      env: { DESK_AGENT: 'codex', DESK_AGENT_RESUME: 'thread-1' },
+      driver,
+      toolJournal: journal
+    });
+    const runPromise = host.run();
+    socket.fireOpen();
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+
+    const events = sentFrames()
+      .filter((f) => (f as { type?: string }).type === 'event')
+      .map((f) => (f as { event: DriverEvent }).event);
+    expect(events.some((e) => e.kind === 'tool-start')).toBe(true);
+    expect(events.some((e) => e.kind === 'attention-hint')).toBe(false);
     void runPromise;
   });
 });

@@ -17,7 +17,7 @@ afterEach(() => {
 
 const toolStart = (id: string): DriverEvent => ({ kind: 'tool-start', toolUseId: id, name: 'Bash', summary: 'pwd' });
 const toolEnd = (id: string): DriverEvent => ({ kind: 'tool-end', toolUseId: id, status: 'ok' });
-const user = (id: string): DriverEvent => ({ kind: 'user-message', id, text: 'run it', source: 'ui' });
+const user = (id: string, text = 'run it'): DriverEvent => ({ kind: 'user-message', id, text, source: 'ui' });
 const assistant = (id: string): DriverEvent => ({ kind: 'assistant-message', id, turnId: 't1', markdown: 'done' });
 
 describe('toolJournal merge (codex reload: API returns messages only)', () => {
@@ -51,6 +51,26 @@ describe('toolJournal merge (codex reload: API returns messages only)', () => {
     const first = j.merge([user('u1')]);
     const second = j.merge([user('u1')]);
     expect(second).toEqual(first);
+  });
+
+  it('text-anchor fallback consumes one live anchor group per repeated matching history message', () => {
+    const j = createToolJournal({ path: tempPath() });
+    j.append('live-u1', toolStart('tool-1'), 'same prompt');
+    j.append('live-u1', toolEnd('tool-1'), 'same prompt');
+    j.append('live-u2', toolStart('tool-2'), 'same prompt');
+    j.append('live-u2', toolEnd('tool-2'), 'same prompt');
+
+    const merged = j.merge([user('history-u1', 'same prompt'), assistant('a1'), user('history-u2', 'same prompt')]);
+
+    expect(merged.map((event) => (event.kind === 'tool-start' || event.kind === 'tool-end' ? event.toolUseId : event.kind))).toEqual([
+      'user-message',
+      'tool-1',
+      'tool-1',
+      'assistant-message',
+      'user-message',
+      'tool-2',
+      'tool-2'
+    ]);
   });
 
   it('persists across instances (host restart) and caps records', () => {

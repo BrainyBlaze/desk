@@ -65,8 +65,6 @@ const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
 const CODEX_GOAL_STATUSES = new Set(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
 const CODEX_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
 const CODEX_PERSONALITIES = new Set(['none', 'friendly', 'pragmatic']);
-const CODEX_RELOAD_TOOL_LIMITATION_DETAIL =
-  'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.';
 
 function parseSlashCommand(text: string): { name: string; args: string } | null {
   const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
@@ -277,7 +275,6 @@ class CodexDriver implements AgentDriver {
   private unsubscribeTransport: (() => void) | null = null;
   private stopped = false;
   private userMessageCounter = 0;
-  private emittedReloadToolLimitation = false;
 
   constructor(private readonly options: CodexDriverOptions & { transport: CodexAppServerTransport }) {
     this.unsubscribeTransport = this.options.transport.onEvent((event) => this.handleTransportEvent(event));
@@ -457,12 +454,7 @@ class CodexDriver implements AgentDriver {
       return [];
     }
     const turns = await this.hydrateHistoryTurns(threadId, thread.turns);
-    const events = flattenThreadHistory({ ...thread, turns });
-    if (!this.emittedReloadToolLimitation && shouldEmitReloadToolLimitation(turns, events, Boolean(this.options.resumeId))) {
-      events.push({ kind: 'attention-hint', attention: 'session-status', detail: CODEX_RELOAD_TOOL_LIMITATION_DETAIL });
-      this.emittedReloadToolLimitation = true;
-    }
-    return events;
+    return flattenThreadHistory({ ...thread, turns });
   }
 
   private async hydrateHistoryTurns(threadId: string, turns: Turn[]): Promise<Turn[]> {
@@ -680,15 +672,6 @@ function isToolThreadItem(item: ThreadItem): boolean {
     default:
       return false;
   }
-}
-
-function shouldEmitReloadToolLimitation(turns: Turn[], events: DriverEvent[], isResumedHistory: boolean): boolean {
-  return (
-    isResumedHistory &&
-    turns.some((turn) => turn.status === 'completed' && turn.items.some(isRenderableHistoryItem)) &&
-    events.some((event) => event.kind === 'user-message' || event.kind === 'assistant-message') &&
-    !events.some((event) => event.kind === 'tool-start' || event.kind === 'tool-end')
-  );
 }
 
 function threadStatusToDriverStatus(thread: Thread): DriverStatusEvent {

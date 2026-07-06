@@ -111,21 +111,41 @@ export function createToolJournal(opts: { path: string; cap?: number }): ToolJou
       if (pending.length === 0) {
         return history;
       }
+      const groups: Array<{ anchorId: string | null; anchorText?: string; records: ToolJournalRecord[] }> = [];
+      for (const record of pending) {
+        const previous = groups.at(-1);
+        if (previous && previous.anchorId === record.anchorId && previous.anchorText === record.anchorText) {
+          previous.records.push(record);
+        } else {
+          groups.push({ anchorId: record.anchorId, ...(record.anchorText ? { anchorText: record.anchorText } : {}), records: [record] });
+        }
+      }
       const merged: DriverEvent[] = [];
-      const used = new Set<ToolJournalRecord>();
+      const used = new Set<(typeof groups)[number]>();
+      const appendGroup = (group: (typeof groups)[number]): void => {
+        used.add(group);
+        for (const record of group.records) {
+          merged.push(record.event);
+        }
+      };
       for (const event of history) {
         merged.push(event);
         const id = 'id' in event ? (event as { id?: string }).id : undefined;
         const text =
           event.kind === 'user-message' ? event.text.slice(0, 200) : event.kind === 'assistant-message' ? event.markdown.slice(0, 200) : undefined;
-        for (const record of pending) {
-          if (used.has(record)) continue;
-          // Id match first; text-prefix fallback with ordered consumption handles
-          // agents whose live ids never appear in history (repeats resolve in order).
-          const hit = (id && record.anchorId === id) || (text !== undefined && record.anchorText !== undefined && record.anchorText === text);
-          if (hit) {
-            used.add(record);
-            merged.push(record.event);
+        let matchedById = false;
+        if (id) {
+          for (const group of groups) {
+            if (!used.has(group) && group.anchorId === id) {
+              appendGroup(group);
+              matchedById = true;
+            }
+          }
+        }
+        if (!matchedById && text !== undefined) {
+          const group = groups.find((candidate) => !used.has(candidate) && candidate.anchorText !== undefined && candidate.anchorText === text);
+          if (group) {
+            appendGroup(group);
           }
         }
       }
