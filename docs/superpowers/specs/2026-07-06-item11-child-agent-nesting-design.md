@@ -62,9 +62,11 @@ parentToolUseId?: string;
 
 ## Tests
 
-- Protocol: validator accepts/rejects the optional field (RED first).
-- Per driver: history + live mapping stamps the id (claude fixture with
-  parent_tool_use_id; codex fixture with collabAgentToolCall children).
+- Protocol: validator accepts/rejects the optional parentToolUseId (RED first).
+- claude driver: history + live mapping stamps parentToolUseId from
+  parent_tool_use_id.
+- codex fixture: asserts collabAgentToolCall remains tool-row-only and does
+  NOT stamp parentToolUseId in v1.
 - rowsModel: grouping, orphan fallback, separator-count exclusion.
 
 ## Out of scope (explicit)

@@ -23,6 +23,8 @@ export interface AgentSurfaceEventBase {
   seq: number;
   /** ISO timestamp assigned by the adapter host. */
   ts: string;
+  /** When set, this event belongs to the child agent spawned by that tool call (item 11). */
+  parentToolUseId?: string;
 }
 
 export type AgentSurfacePermissionTreatment = 'allow' | 'allow-session' | 'deny' | 'answer' | 'custom';
@@ -177,6 +179,15 @@ export function parseAgentUiClientFrame(value: unknown): AgentUiClientFrame {
 }
 
 export function parseAgentSurfaceEvent(value: unknown): AgentSurfaceEvent {
+  const parsed = parseAgentSurfaceEventInner(value);
+  const record = asRecord(value);
+  if (record.parentToolUseId !== undefined) {
+    return { ...parsed, parentToolUseId: nonEmptyString(record.parentToolUseId) };
+  }
+  return parsed;
+}
+
+function parseAgentSurfaceEventInner(value: unknown): AgentSurfaceEvent {
   const event = asRecord(value);
   const seq = nonNegativeInt(event.seq);
   const ts = nonEmptyString(event.ts);

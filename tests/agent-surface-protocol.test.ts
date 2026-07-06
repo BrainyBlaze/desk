@@ -340,3 +340,26 @@ describe('parseAgentHostClientFrame', () => {
     ).toThrow();
   });
 });
+
+describe('parentToolUseId envelope field (item 11)', () => {
+  it('carries the optional child-agent attribution through parsing', () => {
+    const event = parseAgentSurfaceEvent({
+      kind: 'assistant-message',
+      seq: 5,
+      ts: '2026-07-06T22:00:00.000Z',
+      id: 'a1',
+      turnId: 't1',
+      markdown: 'child says hi',
+      parentToolUseId: 'toolu_parent'
+    });
+    expect((event as { parentToolUseId?: string }).parentToolUseId).toBe('toolu_parent');
+  });
+
+  it('rejects an empty parentToolUseId and accepts absence', () => {
+    expect(() =>
+      parseAgentSurfaceEvent({ kind: 'status', seq: 1, ts: '2026-07-06T22:00:00.000Z', state: 'idle', parentToolUseId: '' })
+    ).toThrow();
+    const plain = parseAgentSurfaceEvent({ kind: 'status', seq: 1, ts: '2026-07-06T22:00:00.000Z', state: 'idle' });
+    expect((plain as { parentToolUseId?: string }).parentToolUseId).toBeUndefined();
+  });
+});
