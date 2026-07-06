@@ -56,6 +56,9 @@ input {
 }
 
 .deskShell {
+  --desk-chrome-line: color-mix(in srgb, var(--desk-line) 58%, transparent);
+  --desk-chrome-line-soft: color-mix(in srgb, var(--desk-line) 34%, transparent);
+  --desk-chrome-glow: color-mix(in srgb, var(--desk-glow) 48%, transparent);
   position: relative;
   width: 100vw;
   height: 100vh;
@@ -80,9 +83,9 @@ input {
   grid-template-rows: 84px minmax(0, 1fr) 22px;
   width: 100%;
   height: 100%;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line);
   background: var(--desk-bg);
-  box-shadow: inset 0 0 28px var(--desk-glow);
+  box-shadow: inset 0 0 18px var(--desk-chrome-glow);
 }
 
 .terminalFrame > svg {
@@ -91,7 +94,7 @@ input {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  opacity: 0.44;
+  opacity: 0.26;
   z-index: 0;
 }
 
@@ -103,10 +106,10 @@ input {
   min-width: 0;
   min-height: 84px;
   padding: 0 10px;
-  border-bottom: 1px solid var(--desk-line);
+  border-bottom: 1px solid var(--desk-chrome-line);
   background:
     linear-gradient(90deg, var(--desk-surface), var(--desk-surface)),
-    repeating-linear-gradient(90deg, var(--desk-glow) 0 1px, transparent 1px 18px);
+    repeating-linear-gradient(90deg, var(--desk-chrome-glow) 0 1px, transparent 1px 18px);
 }
 
 .topbarPrimary,
@@ -128,7 +131,7 @@ input {
   grid-auto-columns: minmax(120px, 1fr);
   gap: 8px;
   padding: 4px 0 5px;
-  border-top: 1px solid var(--desk-line);
+  border-top: 1px solid var(--desk-chrome-line-soft);
 }
 
 .brand {
@@ -233,7 +236,7 @@ input {
   min-width: 0;
   padding: 0 6px;
   overflow: hidden;
-  border-top: 1px solid var(--desk-line);
+  border-top: 1px solid var(--desk-chrome-line);
   background: var(--desk-surface);
   font-size: 10.5px;
   letter-spacing: 0.35px;
@@ -273,7 +276,7 @@ input {
 }
 
 .statusSegment + .statusSegment {
-  border-left: 1px solid var(--desk-line);
+  border-left: 1px solid var(--desk-chrome-line-soft);
 }
 
 .statusSegment svg {
@@ -352,14 +355,19 @@ button.statusSegment:hover {
   border: 0;
   background: none;
   padding: 0 12px;
-  color: var(--desk-text);
+  --arwes-frames-line-color: var(--desk-chrome-line-soft);
+  --arwes-frames-bg-color: transparent;
+  color: color-mix(in srgb, var(--desk-text) 72%, var(--desk-text-dim));
   cursor: pointer;
   font-size: 11px;
+  transition: color 0.15s ease, filter 0.15s ease;
 }
 
 .deskCmd .deskCmdBack {
   position: absolute;
   inset: 0;
+  opacity: 0.36;
+  transition: opacity 0.15s ease;
 }
 
 .deskCmd > svg {
@@ -376,8 +384,12 @@ button.statusSegment:hover {
 }
 
 .deskCmd:hover:not(:disabled) {
-  --arwes-frames-line-color: var(--desk-line-strong);
-  color: var(--desk-accent);
+  --arwes-frames-line-color: var(--desk-chrome-line);
+  color: var(--desk-text);
+}
+
+.deskCmd:hover:not(:disabled) .deskCmdBack {
+  opacity: 0.58;
 }
 
 .deskCmd:disabled {
@@ -388,7 +400,7 @@ button.statusSegment:hover {
 .telemetryCell {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line-soft);
   background: var(--desk-surface);
 }
 
@@ -408,7 +420,7 @@ button.statusSegment:hover {
   row-gap: 0;
   height: 100%;
   padding: 2px 11px;
-  box-shadow: inset 3px 0 0 var(--desk-line-strong);
+  box-shadow: inset 2px 0 0 var(--desk-chrome-line);
 }
 
 /* Sixty-sample history ribbon riding the cell's free right half. */
@@ -499,17 +511,17 @@ button.statusSegment:hover {
   min-width: 0;
   gap: 5px;
   padding: 0 8px;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line-soft);
   border-radius: 2px;
   background: var(--desk-surface);
-  color: var(--desk-text);
+  color: color-mix(in srgb, var(--desk-text) 76%, var(--desk-text-dim));
   cursor: pointer;
   font-size: 11px;
 }
 
 .thinButton:hover:not(:disabled) {
-  border-color: var(--desk-accent);
-  color: var(--desk-accent);
+  border-color: var(--desk-chrome-line);
+  color: var(--desk-text);
 }
 
 .thinButton:disabled {
@@ -1411,7 +1423,7 @@ select:focus {
   align-items: center;
   gap: 6px;
   padding: 6px 5px;
-  border-right: 1px solid var(--desk-line);
+  border-right: 1px solid var(--desk-chrome-line);
   background: var(--desk-surface);
 }
 
@@ -1435,8 +1447,8 @@ select:focus {
   width: 2px;
   height: 0;
   translate: 0 -50%;
-  background: var(--desk-line-strong);
-  box-shadow: 0 0 7px var(--desk-glow);
+  background: var(--desk-chrome-line);
+  box-shadow: 0 0 5px var(--desk-chrome-glow);
   transition: height 200ms ease;
 }
 
@@ -1449,7 +1461,7 @@ select:focus {
 
 .subsystemButton:hover {
   color: var(--desk-text);
-  background: var(--desk-glow);
+  background: var(--desk-chrome-glow);
 }
 
 .subsystemButton:active .subsystemButtonIcon {
@@ -1461,11 +1473,11 @@ select:focus {
 }
 
 .subsystemButton.selected .subsystemButtonBar {
-  height: 72%;
+  height: 62%;
 }
 
 .subsystemButton.selected .subsystemButtonIcon {
-  filter: drop-shadow(0 0 7px var(--desk-glow));
+  filter: drop-shadow(0 0 5px var(--desk-chrome-glow));
 }
 
 .subsystemButton.compact::after {
@@ -1521,7 +1533,7 @@ select:focus {
 .panelResizeHandle {
   position: relative;
   flex: 0 0 5px;
-  background: rgba(95, 247, 255, 0.08);
+  background: color-mix(in srgb, var(--desk-line) 10%, transparent);
   outline: none;
 }
 
@@ -1529,7 +1541,7 @@ select:focus {
   content: '';
   position: absolute;
   inset: 1px;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line-soft);
 }
 
 .subsystemPanels > .panelResizeHandle,
@@ -1545,7 +1557,7 @@ select:focus {
 
 .panelResizeHandle[data-resize-state],
 .panelResizeHandle:hover {
-  background: rgba(255, 209, 102, 0.26);
+  background: color-mix(in srgb, var(--desk-accent) 18%, transparent);
 }
 
 .subsystemPanels.agentSidebarCollapsed > .panelResizeHandle,
@@ -1587,7 +1599,7 @@ select:focus {
   /* header | filter row | tree */
   grid-template-rows: 32px auto minmax(0, 1fr);
   height: 100%;
-  border-right: 1px solid var(--desk-line);
+  border-right: 1px solid var(--desk-chrome-line);
   background: var(--desk-surface);
 }
 
@@ -1598,15 +1610,15 @@ select:focus {
   justify-content: space-between;
   min-width: 0;
   min-height: 32px;
-  padding: 4px 6px;
-  border-bottom: 1px solid var(--desk-line);
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--desk-chrome-line-soft);
   background: var(--desk-surface);
 }
 
 .projectTree {
   min-height: 0;
   overflow: auto;
-  padding: 5px;
+  padding: 7px;
 }
 
 .projectNode,
@@ -1623,8 +1635,8 @@ select:focus {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 4px;
-  min-height: 24px;
+  gap: 6px;
+  min-height: 26px;
   min-width: 0;
 }
 
@@ -1632,12 +1644,12 @@ select:focus {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  --arwes-frames-line-color: var(--desk-line-strong);
-  --arwes-frames-bg-color: var(--desk-glow);
+  --arwes-frames-line-color: var(--desk-chrome-line-soft);
+  --arwes-frames-bg-color: transparent;
 }
 
 .sessionNode:hover {
-  background: var(--desk-glow);
+  background: var(--desk-chrome-glow);
 }
 
 .treeToggle {
@@ -1664,12 +1676,13 @@ select:focus {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   min-width: 0;
-  height: 24px;
-  gap: 5px;
+  height: 26px;
+  gap: 6px;
+  padding: 0 3px;
   border: 1px solid transparent;
   border-radius: 2px;
   background: transparent;
-  color: var(--desk-text);
+  color: color-mix(in srgb, var(--desk-text) 80%, var(--desk-text-dim));
   cursor: pointer;
   text-align: left;
 }
@@ -1682,7 +1695,7 @@ select:focus {
 }
 
 .treeMain small {
-  color: var(--desk-accent);
+  color: color-mix(in srgb, var(--desk-accent) 68%, var(--desk-text-dim));
   font-size: 10px;
 }
 
@@ -1703,23 +1716,25 @@ select:focus {
 .projectNode.selected > .projectRow .treeMain,
 .groupNode.selected > .groupRow .treeMain,
 .sessionNode.selected .treeMain {
+  background: color-mix(in srgb, var(--desk-accent) 9%, transparent);
+  border-color: var(--desk-chrome-line);
   color: var(--desk-text);
 }
 
 .sessionNode.selected {
-  filter: drop-shadow(0 0 4px var(--desk-glow));
+  filter: none;
 }
 
 .groupBranch {
   margin-left: 8px;
   padding-left: 7px;
-  border-left: 1px solid var(--desk-line);
+  border-left: 1px solid var(--desk-chrome-line-soft);
 }
 
 .sessionBranch {
   margin-left: 8px;
   padding-left: 7px;
-  border-left: 1px solid var(--desk-line);
+  border-left: 1px solid var(--desk-chrome-line-soft);
 }
 
 .treeActions,
@@ -1800,7 +1815,7 @@ select:focus {
 .cellChromeBorder {
   position: absolute;
   inset: 0;
-  background: var(--desk-line);
+  background: var(--desk-chrome-line-soft);
 }
 
 .cellChromeBody {
@@ -1812,7 +1827,7 @@ select:focus {
 }
 
 .cellChrome:hover .cellChromeBorder {
-  background: var(--desk-line-strong);
+  background: var(--desk-chrome-line);
 }
 
 .cellChrome[data-focused='true'] .cellChromeBorder {
@@ -1830,7 +1845,7 @@ select:focus {
   min-width: 0;
   overflow: auto hidden;
   padding: 3px;
-  border-bottom: 1px solid var(--desk-line);
+  border-bottom: 1px solid var(--desk-chrome-line-soft);
 }
 
 .cellLabel {
@@ -1839,7 +1854,7 @@ select:focus {
   flex: 0 0 auto;
   min-width: 18px;
   height: 18px;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line-soft);
   color: var(--desk-text-dim);
   font-size: 10px;
 }
@@ -1851,7 +1866,7 @@ select:focus {
   max-width: 190px;
   height: 18px;
   gap: 4px;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line-soft);
   border-radius: 2px;
   background: var(--desk-surface);
   color: var(--desk-text);
@@ -1878,7 +1893,7 @@ select:focus {
   margin-left: auto;
   width: 18px;
   height: 18px;
-  border: 1px solid var(--desk-line);
+  border: 1px solid var(--desk-chrome-line-soft);
   border-radius: 2px;
   background: var(--desk-surface);
   color: var(--desk-text-dim);
@@ -1914,7 +1929,7 @@ select:focus {
 }
 
 .editorSidebar {
-  border-right: 1px solid var(--desk-line);
+  border-right: 1px solid var(--desk-chrome-line);
 }
 
 .editorStage {
@@ -2175,13 +2190,12 @@ select {
 
 /* ---------- Emergency kill switch ---------- */
 
-/* Danger Cmd (emergency KILL): same octagon frame as other toolbar buttons,
-   transparent fill, red line + red label. */
+/* Danger Cmd (emergency KILL): red enough to identify, quiet until hover. */
 .deskCmd.danger {
-  color: var(--desk-error);
-  --arwes-frames-line-color: var(--desk-error);
+  color: color-mix(in srgb, var(--desk-error) 72%, var(--desk-text-dim));
+  --arwes-frames-line-color: color-mix(in srgb, var(--desk-error) 44%, transparent);
   --arwes-frames-bg-color: transparent;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 1px;
 }
 
@@ -5543,12 +5557,15 @@ button.layoutBadge:hover:not(:disabled) {
 
 /* UX item 5: the composer action slot doubles as Stop while a turn runs. */
 .nativeAgentSend.nativeAgentSendStop {
-  border-color: #cc6666;
-  color: #ff9999;
+  background: transparent;
+  border-color: color-mix(in srgb, var(--desk-error, #ff4d6d) 62%, transparent);
+  color: color-mix(in srgb, var(--desk-error, #ff4d6d) 82%, var(--desk-text, #d6e4f0));
+  box-shadow: none;
+  font-weight: 600;
 }
 
 .nativeAgentSend.nativeAgentSendStop:hover {
-  filter: brightness(1.3);
+  filter: brightness(1.16) drop-shadow(0 0 8px color-mix(in srgb, var(--desk-error, #ff4d6d) 28%, transparent));
 }
 
 /* UX items 3 + 4: collapsed injected payloads and docked active permissions. */
@@ -5659,14 +5676,27 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentSend {
-  background: var(--desk-accent, #66aaff);
-  border: none;
-  color: #0b0e14;
+  min-height: 32px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--desk-accent, #66aaff) 92%, white 4%),
+    var(--desk-accent, #66aaff)
+  );
+  border: 1px solid color-mix(in srgb, var(--desk-accent, #66aaff) 72%, transparent);
+  color: #061113;
   font: inherit;
   font-size: 12px;
+  font-weight: 700;
   padding: 6px 14px;
   cursor: pointer;
   border-radius: 3px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--desk-accent, #66aaff) 45%, transparent), 0 0 16px color-mix(in srgb, var(--desk-accent, #66aaff) 22%, transparent);
+  transition: filter 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nativeAgentSend:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--desk-accent, #66aaff) 58%, transparent), 0 0 20px color-mix(in srgb, var(--desk-accent, #66aaff) 30%, transparent);
 }
 
 .nativeAgentSend:disabled {
