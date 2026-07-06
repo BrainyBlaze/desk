@@ -6211,3 +6211,11 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentPaletteItem.selected {
   background: rgba(51, 187, 204, 0.22);
 }
+
+/* Item 11: nested child-agent transcript under the spawning tool row. */
+.nativeAgentChildren {
+  margin: 2px 0 6px 20px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(102, 221, 238, 0.25);
+  font-size: 12px;
+}

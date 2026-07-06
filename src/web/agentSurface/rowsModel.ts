@@ -10,7 +10,9 @@ export interface AgentRow {
   id: string;
   turnId?: string;
   text: string;
-  authorLabel?: 'you' | 'assistant' | 'tool' | 'system';
+  authorLabel?: 'you' | 'assistant' | 'tool' | 'system' | 'subagent';
+  /** Item 11: rows emitted by a child agent, nested under the spawning tool row. */
+  children?: AgentRow[];
   createdAt?: string;
   updatedAt?: string;
   collapse?: RowCollapse;
@@ -143,6 +145,35 @@ export function buildAgentFeedItems(
  * double-render.
  */
 export function applyEvent(model: RowModel, event: AgentSurfaceEvent): void {
+  // Item 11: child-agent events nest under the spawning tool row. Attribution
+  // is stripped before the recursive apply so the child sub-model uses the
+  // exact same row logic (idempotency included). Orphans (parent pruned or
+  // never seen) render flat with a 'subagent' author so they are never lost.
+  if (
+    event.parentToolUseId &&
+    (event.kind === 'user-message' ||
+      event.kind === 'assistant-message' ||
+      event.kind === 'tool-start' ||
+      event.kind === 'tool-end' ||
+      event.kind === 'tool-output-delta')
+  ) {
+    const parent = model.rows.find((r) => r.kind === 'tool' && r.toolUseId === event.parentToolUseId);
+    const stripped = { ...event };
+    delete (stripped as { parentToolUseId?: string }).parentToolUseId;
+    if (parent) {
+      parent.children = parent.children ?? [];
+      const childModel: RowModel = { rows: parent.children, status: model.status, pendingPermission: null };
+      applyEvent(childModel, stripped as AgentSurfaceEvent);
+      return;
+    }
+    const before = model.rows.length;
+    applyEvent(model, stripped as AgentSurfaceEvent);
+    const added = model.rows.length > before ? model.rows[model.rows.length - 1] : undefined;
+    if (added && added.kind !== 'tool') {
+      added.authorLabel = 'subagent';
+    }
+    return;
+  }
   switch (event.kind) {
     case 'session-info':
       return;

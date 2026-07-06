@@ -316,3 +316,36 @@ describe('buildAgentFeedItems — turn collapse', () => {
     expect(items.some((item) => item.kind === 'turn-summary' && item.turnId === 'turn-2')).toBe(true);
   });
 });
+
+describe('applyEvent — child-agent nesting (item 11)', () => {
+  it('nests attributed events under the spawning tool row without growing top-level rows', () => {
+    const model = { rows: [], status: 'idle', pendingPermission: null } as never as import('../../src/web/agentSurface/rowsModel').RowModel;
+    applyEvent(model, { kind: 'tool-start', seq: 1, ts: '2026-07-06T22:00:00.000Z', toolUseId: 'task-1', name: 'Task', summary: 'spawn subagent' } as never);
+    const before = model.rows.length;
+    applyEvent(model, {
+      kind: 'assistant-message', seq: 2, ts: '2026-07-06T22:00:01.000Z', id: 'child-a1', turnId: 't1', markdown: 'child says hi', parentToolUseId: 'task-1'
+    } as never);
+    expect(model.rows.length).toBe(before);
+    const parent = model.rows.find((r) => r.toolUseId === 'task-1')!;
+    expect(parent.children).toHaveLength(1);
+    expect(parent.children![0]).toMatchObject({ kind: 'assistant-message', text: 'child says hi' });
+  });
+
+  it('renders orphaned child events flat with a subagent author instead of dropping them', () => {
+    const model = { rows: [], status: 'idle', pendingPermission: null } as never as import('../../src/web/agentSurface/rowsModel').RowModel;
+    applyEvent(model, {
+      kind: 'assistant-message', seq: 1, ts: '2026-07-06T22:00:00.000Z', id: 'orphan-1', turnId: 't1', markdown: 'lost child', parentToolUseId: 'task-gone'
+    } as never);
+    expect(model.rows).toHaveLength(1);
+    expect(model.rows[0]).toMatchObject({ kind: 'assistant-message', authorLabel: 'subagent' });
+  });
+
+  it('child event replay stays idempotent inside the nested transcript', () => {
+    const model = { rows: [], status: 'idle', pendingPermission: null } as never as import('../../src/web/agentSurface/rowsModel').RowModel;
+    applyEvent(model, { kind: 'tool-start', seq: 1, ts: '2026-07-06T22:00:00.000Z', toolUseId: 'task-1', name: 'Task', summary: 's' } as never);
+    const child = { kind: 'assistant-message', seq: 2, ts: '2026-07-06T22:00:01.000Z', id: 'child-a1', turnId: 't1', markdown: 'once', parentToolUseId: 'task-1' } as never;
+    applyEvent(model, child);
+    applyEvent(model, child);
+    expect(model.rows.find((r) => r.toolUseId === 'task-1')!.children).toHaveLength(1);
+  });
+});

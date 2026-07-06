@@ -555,7 +555,19 @@ function AgentRowView({
         </div>
       );
     case 'tool':
-      return <ToolCallBlock row={row} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />;
+      return (
+        <>
+          <ToolCallBlock row={row} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />
+          {row.children && row.children.length > 0 ? (
+            // Item 11: child-agent transcript nested under the spawning tool call.
+            <div className="nativeAgentChildren">
+              {row.children.map((child) => (
+                <AgentRowView key={child.id} row={child} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />
+              ))}
+            </div>
+          ) : null}
+        </>
+      );
     case 'turn-complete':
       return <div className="nativeAgentRow turnComplete">— turn complete —</div>;
     case 'system':
