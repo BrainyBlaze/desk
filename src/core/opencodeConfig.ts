@@ -49,17 +49,16 @@ export const OPENCODE_CONFIG_JSON = `${JSON.stringify(
  * permission key, broader than enumerating edit/bash/webfetch/etc.
  */
 export function opencodePermissionConfigContent(bypassPermissions: boolean): string {
-  return JSON.stringify({
-    permission: { '*': bypassPermissions ? 'allow' : 'ask' },
-    // Cap opencode's internal provider retry loop. Uncapped, a failing provider
-    // (quota rejection, dead key) retries SILENTLY for hours with zero /event
-    // frames and message.error null — the session looks alive while ignoring the
-    // user (observed live: AI_APICallError loop, attempt 15+, 7h). With a cap the
-    // run FAILS, opencode emits session.error, and the driver's existing
-    // mapSessionError path renders a visible agent-error. The driver's
-    // turn-liveness watchdog covers the in-between window.
-    experimental: { chatMaxRetries: 3 }
-  });
+  // NOTE on provider-retry visibility: opencode retries provider stream errors
+  // internally, silently and unbounded (observed live: AI_APICallError loop,
+  // attempt 15+, 7h, zero /event frames). The SDK's types declare an
+  // experimental.chatMaxRetries cap, but the pinned opencode 1.17.13 RUNTIME
+  // does not know the key (binary has no trace of it; boot-verified it is
+  // tolerated-and-ignored) — so desk does NOT ship it: an ignored knob would be
+  // a false claim. Visibility is owned by the opencode driver's turn-liveness
+  // watchdog (status-endpoint probe). Revisit the cap on the next opencode
+  // upgrade whose runtime honors it.
+  return JSON.stringify({ permission: { '*': bypassPermissions ? 'allow' : 'ask' } });
 }
 
 /** Default Desk-owned opencode config dir (NOT the user's ~/.config/opencode). */
