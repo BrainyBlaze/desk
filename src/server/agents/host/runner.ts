@@ -386,7 +386,11 @@ export class AgentHost {
       // id-dedupe makes replays harmless.
       setTimeout(() => {
         if (!this.shuttingDown && this.driver) {
-          this.runBackfill({ skipStatus: true }).catch(() => undefined);
+          // runBackfill handles fetchHistory failures internally (agent-error);
+          // anything reaching this catch is unexpected and must not vanish.
+          this.runBackfill({ skipStatus: true }).catch((err) => {
+            this.logger.error(`delayed re-backfill crashed: ${describeError(err)}`);
+          });
         }
       }, 2000).unref?.();
       this.logger.info('driver started');
@@ -583,8 +587,10 @@ export class AgentHost {
     if (this.driver) {
       try {
         await this.driver.shutdown();
-      } catch {
-        // best-effort
+      } catch (err) {
+        // Keep tearing down, but never silently: a failed driver shutdown can
+        // leak child processes (five orphaned `opencode serve` procs observed).
+        this.logger.error(`driver shutdown failed: ${describeError(err)}`);
       }
       this.driver = null;
       this.driverReady = false;

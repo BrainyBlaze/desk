@@ -184,7 +184,7 @@ export class AgentSurfaceClient {
       try {
         frame = JSON.parse(String(event.data)) as AgentUiServerFrame;
       } catch {
-        console.warn('agent-surface: dropping malformed broker frame', String(event.data).slice(0, 200));
+        console.error('agent-surface: dropping malformed broker frame', String(event.data).slice(0, 200));
         return;
       }
       this.handleServerFrame(frame);

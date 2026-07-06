@@ -49,7 +49,17 @@ export const OPENCODE_CONFIG_JSON = `${JSON.stringify(
  * permission key, broader than enumerating edit/bash/webfetch/etc.
  */
 export function opencodePermissionConfigContent(bypassPermissions: boolean): string {
-  return JSON.stringify({ permission: { '*': bypassPermissions ? 'allow' : 'ask' } });
+  return JSON.stringify({
+    permission: { '*': bypassPermissions ? 'allow' : 'ask' },
+    // Cap opencode's internal provider retry loop. Uncapped, a failing provider
+    // (quota rejection, dead key) retries SILENTLY for hours with zero /event
+    // frames and message.error null — the session looks alive while ignoring the
+    // user (observed live: AI_APICallError loop, attempt 15+, 7h). With a cap the
+    // run FAILS, opencode emits session.error, and the driver's existing
+    // mapSessionError path renders a visible agent-error. The driver's
+    // turn-liveness watchdog covers the in-between window.
+    experimental: { chatMaxRetries: 3 }
+  });
 }
 
 /** Default Desk-owned opencode config dir (NOT the user's ~/.config/opencode). */

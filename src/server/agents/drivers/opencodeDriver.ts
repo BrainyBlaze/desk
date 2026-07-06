@@ -89,6 +89,15 @@ export interface OpencodeDriverOptions {
   backend?: OpencodeBackend;
   /** Title for freshly-created sessions. */
   sessionTitle?: string;
+  /**
+   * Turn-liveness watchdog window in ms (default 90s). opencode broadcasts NOTHING
+   * over SSE while it retries provider stream errors internally (verified live
+   * against an AI_APICallError loop) — the truth only exists on the session-status
+   * polling endpoint. A turn with no events within this window triggers a status
+   * probe: retry states surface the real provider message, busy re-arms silently,
+   * idle emits a dropped-message error. 0 disables (probes/tests).
+   */
+  turnWatchdogMs?: number;
 }
 
 /** Map an AgentDriver optionId to opencode's permission response vocabulary. */
@@ -114,6 +123,10 @@ export class OpencodeDriver implements AgentDriver {
   private readonly injectedUserMessageIds = new Set<string>();
   private started = false;
   private shutDown = false;
+  /** Turn-liveness watchdog — armed per inject, slid by activity, disarmed on turn-complete. */
+  private turnWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /** Last retry attempt number reported to the surface — dedupes repeated probe hits. */
+  private lastReportedRetryAttempt: number | null = null;
 
   constructor(opts: OpencodeDriverOptions) {
     this.opts = opts;
@@ -198,6 +211,9 @@ export class OpencodeDriver implements AgentDriver {
     const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.injectedUserMessageIds.add(localId);
     this.emit({ kind: 'user-message', id: localId, text, source });
+    // Fresh inject = fresh turn expectation: reset the retry-report dedupe too.
+    this.disarmTurnWatchdog();
+    this.armTurnWatchdog();
   }
 
   async respondPermission(requestId: string, optionId: string, _note?: string): Promise<void> {
@@ -212,6 +228,7 @@ export class OpencodeDriver implements AgentDriver {
     if (!this.sessionId || !this.backend) {
       throw notStartedError();
     }
+    this.disarmTurnWatchdog();
     await this.backend.abort(this.sessionId);
   }
 
@@ -230,6 +247,7 @@ export class OpencodeDriver implements AgentDriver {
 
   async shutdown(): Promise<void> {
     this.shutDown = true;
+    this.disarmTurnWatchdog();
     if (this.unsubscribeEvents) {
       try {
         this.unsubscribeEvents();
@@ -308,6 +326,10 @@ export class OpencodeDriver implements AgentDriver {
     if (mapped === null) {
       return;
     }
+    // Mapped session activity proves the turn is alive RIGHT NOW — slide the
+    // watchdog window instead of disarming so a mid-turn silent stall is still
+    // caught. turn-complete disarms below.
+    this.feedTurnWatchdog();
     if (Array.isArray(mapped)) {
       // R5 fix: route session.status through expandRetryStatus so live retry states emit
       // the [status, attention-hint] pair, not just the bare status.
@@ -323,12 +345,16 @@ export class OpencodeDriver implements AgentDriver {
       // session.idle doesn't duplicate it.
       if (expanded.some((e) => e.kind === 'turn-complete')) {
         this.pendingTurnId = null;
+        this.disarmTurnWatchdog();
       }
       for (const e of expanded) {
         this.emit(e);
       }
     } else {
       // Single event — also route through expandRetryStatus for the retry case.
+      if (mapped.kind === 'turn-complete') {
+        this.disarmTurnWatchdog();
+      }
       if (mapped.kind === 'status') {
         for (const e of expandRetryStatus(mapped)) {
           this.emit(e);
@@ -345,6 +371,92 @@ export class OpencodeDriver implements AgentDriver {
    */
   private deriveHistorySource(_info: Message): 'ui' | 'channel' | 'external' {
     return 'external';
+  }
+
+  // ── Turn-liveness watchdog ──
+  // opencode retries provider stream errors internally and broadcasts NOTHING over
+  // /event while doing so (verified live against an AI_APICallError loop: zero SSE
+  // events, message.error stays null for 7+ hours). The TRUTH lives only in the
+  // session-status POLLING endpoint, which reports {type:'retry', attempt, message,
+  // next}. So: a turn that produces no events within the window triggers a status
+  // probe, and retry states flow through the existing expandRetryStatus pipeline —
+  // the user sees the real provider message instead of eternal silence. A busy
+  // status re-arms silently, so slow-but-healthy providers never false-positive.
+
+  private armTurnWatchdog(): void {
+    const windowMs = this.opts.turnWatchdogMs ?? 90_000;
+    if (windowMs <= 0) {
+      return;
+    }
+    this.clearTurnWatchdogTimer();
+    const timer = setTimeout(() => {
+      void this.fireTurnWatchdog(windowMs);
+    }, windowMs);
+    timer.unref?.();
+    this.turnWatchdog = timer;
+  }
+
+  /** Slide the window on live session activity; only ticks when already armed. */
+  private feedTurnWatchdog(): void {
+    if (this.turnWatchdog) {
+      this.armTurnWatchdog();
+    }
+  }
+
+  private clearTurnWatchdogTimer(): void {
+    if (this.turnWatchdog) {
+      clearTimeout(this.turnWatchdog);
+      this.turnWatchdog = null;
+    }
+  }
+
+  /** Full disarm — turn is over (turn-complete/interrupt/shutdown); reset dedupe state. */
+  private disarmTurnWatchdog(): void {
+    this.clearTurnWatchdogTimer();
+    this.lastReportedRetryAttempt = null;
+  }
+
+  private async fireTurnWatchdog(windowMs: number): Promise<void> {
+    this.turnWatchdog = null;
+    if (this.shutDown || !this.backend || !this.sessionId) {
+      return;
+    }
+    const seconds = Math.round(windowMs / 1000);
+    let status: SessionStatus | undefined;
+    try {
+      status = (await this.backend.status())[this.sessionId];
+    } catch (err) {
+      this.emit({
+        kind: 'agent-error',
+        message: `opencode produced no output for ${seconds}s and the status probe failed: ${err instanceof Error ? err.message : String(err)}`,
+        fatal: false
+      });
+      return;
+    }
+    if (status?.type === 'retry') {
+      // Report each retry state once per attempt — backoff grows, so this stays quiet
+      // between attempts instead of repeating the same row every window.
+      if (this.lastReportedRetryAttempt !== status.attempt) {
+        this.lastReportedRetryAttempt = status.attempt;
+        for (const event of expandRetryStatus(mapSessionStatus(status))) {
+          this.emit(event);
+        }
+      }
+      this.armTurnWatchdog();
+      return;
+    }
+    if (status?.type === 'busy') {
+      // Turn is alive, provider is just slow — keep watching silently.
+      this.armTurnWatchdog();
+      return;
+    }
+    this.emit({
+      kind: 'agent-error',
+      message:
+        `opencode produced no output for ${seconds}s and reports an idle session — ` +
+        `your message may have been dropped; send it again or restart the session`,
+      fatal: false
+    });
   }
 }
 
@@ -449,7 +561,7 @@ export async function createLiveBackend(opts: { cwd: string; bypass: boolean }):
             try {
               handler(JSON.parse(sseEvent.data as string) as Event);
             } catch (err) {
-              console.warn('opencode driver: dropping malformed SSE event', sseEvent.data instanceof String ? String(sseEvent.data).slice(0, 200) : '<non-string>', err);
+              console.error('opencode driver: dropping malformed SSE event', typeof sseEvent.data === 'string' ? sseEvent.data.slice(0, 200) : '<non-string>', err);
             }
             }
           });

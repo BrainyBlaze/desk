@@ -56,6 +56,10 @@ describe('opencodePermissionConfigContent (the per-session bypass toggle)', () =
     const parsed = JSON.parse(opencodePermissionConfigContent(false)) as { permission: Record<string, string> };
     expect(parsed.permission).toEqual({ '*': 'ask' });
   });
+  it('caps the provider retry loop so failures surface as session.error instead of silent eternity', () => {
+    const parsed = JSON.parse(opencodePermissionConfigContent(true)) as { experimental?: { chatMaxRetries?: number } };
+    expect(parsed.experimental?.chatMaxRetries).toBe(3);
+  });
 });
 
 describe('defaultOpencodeConfigDir', () => {

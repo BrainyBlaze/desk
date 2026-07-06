@@ -317,7 +317,7 @@ projects:
     expect(commands[3]).toContain('exec "$desk_opencode" --session \'ses_12a31855dffeHTCs6tcfOmsddP\'');
     expect(commands[3]).not.toContain('dangerously');
     // no bypassPermissions set -> defaults to yolo (allow) via per-session OPENCODE_CONFIG_CONTENT
-    expect(commands[3]).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"allow"}}\'');
+    expect(commands[3]).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"allow"},"experimental":{"chatMaxRetries":3}}\'');
   });
 
   it('falls back from claude resume to continue when the CLI cannot resume the id', () => {
@@ -403,8 +403,8 @@ projects:
       { homeDir: '/workspace' }
     )[0].command;
     // checked -> allow (no prompts); unchecked -> ask (OpenCode prompts per tool)
-    expect(yolo).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"allow"}}\'');
-    expect(gated).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"ask"}}\'');
+    expect(yolo).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"allow"},"experimental":{"chatMaxRetries":3}}\'');
+    expect(gated).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"ask"},"experimental":{"chatMaxRetries":3}}\'');
   });
 
   it('keeps opencode resume discovery out of the generated shell command', () => {

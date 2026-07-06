@@ -11,6 +11,10 @@ interface MockBackend extends OpencodeBackend {
   emitEvent(event: Event): void;
   /** Lists every call recorded against the backend. */
   readonly calls: Array<{ method: string; args: unknown[] }>;
+  /** Replace the session's polled status (watchdog probe tests). */
+  setStatus(status: SessionStatus): void;
+  /** Make the next status() calls reject (watchdog probe-failure tests). */
+  failStatus(error: Error): void;
 }
 
 function makeMockBackend(opts: {
@@ -26,11 +30,18 @@ function makeMockBackend(opts: {
   const statusMap: Record<string, SessionStatus> = {
     [sessionId]: opts.initialStatus ?? { type: 'idle' }
   };
+  let statusError: Error | null = null;
 
   return {
     calls,
     emitEvent(event) {
       for (const handler of subscribers) handler(event);
+    },
+    setStatus(status) {
+      statusMap[sessionId] = status;
+    },
+    failStatus(error) {
+      statusError = error;
     },
     async createSession(title) {
       calls.push({ method: 'createSession', args: [title] });
@@ -60,6 +71,7 @@ function makeMockBackend(opts: {
     },
     async status() {
       calls.push({ method: 'status', args: [] });
+      if (statusError) throw statusError;
       return statusMap;
     },
     async abort(id) {
@@ -441,5 +453,161 @@ describe('OpencodeDriver collect helper', () => {
     );
     expect(result).toBeUndefined();
     expect(vi.fn()).not.toHaveBeenCalled();
+  });
+});
+
+describe('OpencodeDriver turn-liveness watchdog', () => {
+  // opencode broadcasts NOTHING over SSE while it retries provider stream errors
+  // internally (verified live: an AI_APICallError retry loop emitted zero /event
+  // frames for 7+ hours and message.error stayed null). The ONLY observable truth
+  // is the session-status polling endpoint, which reports {type:'retry', attempt,
+  // message, next}. The watchdog probes it when a turn goes silent.
+
+  function makeWatchdogDriver(backend: MockBackend): OpencodeDriver {
+    return new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend, turnWatchdogMs: 60_000 });
+  }
+
+  it('surfaces the real provider retry message via status+attention-hint when a silent turn is stuck in retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string; detail?: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string; detail?: string }));
+      await driver.start();
+      await driver.inject('are you alive?', 'ui');
+      events.length = 0;
+      backend.setStatus({ type: 'retry', attempt: 15, message: 'Weekly Limit Exhausted', next: 9999 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const hint = events.find((e) => e.kind === 'attention-hint');
+      expect(hint).toBeDefined();
+      expect(hint!.detail).toContain('Weekly Limit Exhausted');
+      // Same attempt number → no duplicate report on the next probe.
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(events.filter((e) => e.kind === 'attention-hint')).toHaveLength(0);
+      // New attempt number → reported again.
+      backend.setStatus({ type: 'retry', attempt: 16, message: 'Weekly Limit Exhausted', next: 9999 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(events.filter((e) => e.kind === 'attention-hint')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits a dropped-message agent-error when a silent turn probes back idle', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string; fatal?: boolean; message?: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string; fatal?: boolean; message?: string }));
+      await driver.start();
+      await driver.inject('hello?', 'ui');
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(60_000);
+      const errors = events.filter((e) => e.kind === 'agent-error');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.fatal).toBe(false);
+      expect(errors[0]!.message).toContain('no output');
+      // Idle probe does not re-arm — no repeat fire without a new inject.
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(events.filter((e) => e.kind === 'agent-error')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-arms silently when the probe reports busy (slow but healthy provider)', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string }));
+      await driver.start();
+      await driver.inject('slow one', 'ui');
+      events.length = 0;
+      backend.setStatus({ type: 'busy' });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(events).toHaveLength(0);
+      // Turn completes later → disarm; still nothing after a long silence.
+      backend.emitEvent({
+        type: 'message.updated',
+        properties: {
+          info: { id: 'm-asst-1', sessionID: 'ses_mock', role: 'assistant', time: { created: 0 } } as Message
+        }
+      });
+      backend.emitEvent({ type: 'session.idle', properties: { sessionID: 'ses_mock' } });
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(events.filter((e) => e.kind === 'agent-error')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('slides the window on live session activity instead of firing', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string }));
+      await driver.start();
+      await driver.inject('hello', 'ui');
+      await vi.advanceTimersByTimeAsync(45_000);
+      backend.emitEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'p1', sessionID: 'ses_mock', messageID: 'm1', type: 'text', text: 'working' } as Part,
+          delta: 'working'
+        }
+      });
+      events.length = 0;
+      // 45s later: original window (60s from inject) has passed but the slide reset it.
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(events.filter((e) => e.kind === 'agent-error')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disarms on interrupt', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string }));
+      await driver.start();
+      await driver.inject('will interrupt', 'ui');
+      await driver.interrupt();
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(events.filter((e) => e.kind === 'agent-error')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits a probe-failure agent-error when the status endpoint itself fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string; message?: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string; message?: string }));
+      await driver.start();
+      await driver.inject('hello?', 'ui');
+      events.length = 0;
+      backend.failStatus(new Error('serve is gone'));
+      await vi.advanceTimersByTimeAsync(60_000);
+      const errors = events.filter((e) => e.kind === 'agent-error');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.message).toContain('serve is gone');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
