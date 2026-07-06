@@ -505,29 +505,54 @@ function mapHistoryMessage(message: ClaudeSdkMessage, index: number): DriverEven
   const record = message.message as Record<string, unknown> | undefined;
   const turnId = `history-${index}`;
   if (message.type === 'user') {
-    const text = historyText(record?.content);
-    if (text === undefined) {
-      return [];
+    const events: DriverEvent[] = [];
+    const blocks = Array.isArray(record?.content) ? (record?.content as Array<Record<string, unknown>>) : [];
+    // tool_result blocks live on USER messages in the claude store — without
+    // mapping them, every tool accordion vanished on restart (the live path
+    // emitted tool-start/tool-end but backfill dropped both halves).
+    for (const block of blocks) {
+      if (block.type === 'tool_result') {
+        events.push({
+          kind: 'tool-end',
+          toolUseId: String(block.tool_use_id ?? ''),
+          status: block.is_error === true ? 'error' : 'ok',
+          ...(typeof block.content === 'string' ? { summary: block.content.slice(0, 200) } : {})
+        });
+      }
     }
-    return [{ kind: 'user-message', id: String(message.uuid ?? `history-user-${index}`), text, source: 'external' }];
+    const text = historyText(record?.content);
+    if (text !== undefined) {
+      events.push({ kind: 'user-message', id: String(message.uuid ?? `history-user-${index}`), text, source: 'external' });
+    }
+    return events;
   }
   if (message.type === 'assistant') {
     const blocks = Array.isArray(record?.content) ? (record?.content as Array<Record<string, unknown>>) : [];
+    const events: DriverEvent[] = [];
+    for (const block of blocks) {
+      if (block.type === 'tool_use') {
+        events.push({
+          kind: 'tool-start',
+          toolUseId: String(block.id ?? ''),
+          name: String(block.name ?? 'tool'),
+          summary: summarizeToolInput(String(block.name ?? 'tool'), block.input as Record<string, unknown> | undefined)
+        });
+      }
+    }
     const markdown = blocks
       .filter((block) => block.type === 'text' && typeof block.text === 'string')
       .map((block) => block.text as string)
       .join('');
-    if (markdown === '') {
-      return [];
-    }
-    return [
-      {
+    if (markdown !== '') {
+      // tool-starts precede the message text — matches live emission order.
+      events.push({
         kind: 'assistant-message',
         id: String(record?.id ?? message.uuid ?? `history-assistant-${index}`),
         turnId,
         markdown
-      }
-    ];
+      });
+    }
+    return events;
   }
   return [];
 }

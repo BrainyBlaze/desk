@@ -392,6 +392,68 @@ describe('claudeDriver fetchHistory', () => {
     expect(events.some((event) => event.kind === 'history-boundary')).toBe(false);
   });
 
+  it('maps tool_use and tool_result blocks so accordions survive a restart (human BUG: tool calls vanish)', async () => {
+    const h = await startedHarness({
+      resume: 'sess-uuid-1',
+      history: [
+        { type: 'user', uuid: 'u1', message: { role: 'user', content: 'run pwd please' } },
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          message: {
+            id: 'a1',
+            content: [
+              { type: 'text', text: 'Running it now.' },
+              { type: 'tool_use', id: 'toolu_01', name: 'Bash', input: { command: 'pwd' } }
+            ]
+          }
+        },
+        {
+          type: 'user',
+          uuid: 'u2',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_01', content: '/tmp/workspace', is_error: false }]
+          }
+        },
+        {
+          type: 'assistant',
+          uuid: 'a2',
+          message: { id: 'a2', content: [{ type: 'text', text: 'You are in /tmp/workspace.' }] }
+        }
+      ]
+    });
+    const events = await h.driver.fetchHistory();
+    const kinds = events.map((event) => event.kind);
+    expect(kinds).toEqual(['user-message', 'tool-start', 'assistant-message', 'tool-end', 'assistant-message']);
+    expect(events[1]).toMatchObject({ kind: 'tool-start', toolUseId: 'toolu_01', name: 'Bash' });
+    expect(events[3]).toMatchObject({ kind: 'tool-end', toolUseId: 'toolu_01', status: 'ok', summary: '/tmp/workspace' });
+  });
+
+  it('maps an error tool_result to tool-end status=error', async () => {
+    const h = await startedHarness({
+      resume: 'sess-uuid-1',
+      history: [
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          message: { id: 'a1', content: [{ type: 'tool_use', id: 'toolu_02', name: 'Bash', input: { command: 'boom' } }] }
+        },
+        {
+          type: 'user',
+          uuid: 'u1',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_02', content: 'command failed', is_error: true }]
+          }
+        }
+      ]
+    });
+    const events = await h.driver.fetchHistory();
+    expect(events.map((e) => e.kind)).toEqual(['tool-start', 'tool-end']);
+    expect(events[1]).toMatchObject({ kind: 'tool-end', toolUseId: 'toolu_02', status: 'error' });
+  });
+
   it('returns empty history for sessions without a resume id', async () => {
     const h = await startedHarness();
     await expect(h.driver.fetchHistory()).resolves.toEqual([]);
