@@ -207,6 +207,12 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
   }
 
   function routeMessage(message: ClaudeSdkMessage): void {
+    // Item 11: subagent traffic carries the spawning Task tool's id.
+    const parentId =
+      typeof message.parent_tool_use_id === 'string' && message.parent_tool_use_id !== ''
+        ? message.parent_tool_use_id
+        : undefined;
+    const child = parentId ? { parentToolUseId: parentId } : {};
     switch (message.type) {
       case 'system': {
         if (message.subtype === 'init') {
@@ -270,14 +276,15 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
               kind: 'tool-start',
               toolUseId: String(block.id ?? ''),
               name: String(block.name ?? 'tool'),
-              summary: summarizeToolInput(String(block.name ?? 'tool'), block.input as Record<string, unknown> | undefined)
+              summary: summarizeToolInput(String(block.name ?? 'tool'), block.input as Record<string, unknown> | undefined),
+              ...child
             });
             status('tool-executing', String(block.name ?? 'tool'));
           }
         }
         if (markdown !== '') {
           const id = String(record?.id ?? message.uuid ?? `assistant-${currentTurnId}`);
-          emit({ kind: 'assistant-message', id, turnId: currentTurnId, markdown });
+          emit({ kind: 'assistant-message', id, turnId: currentTurnId, markdown, ...child });
         }
         return;
       }
@@ -290,7 +297,8 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
               kind: 'tool-end',
               toolUseId: String(block.tool_use_id ?? ''),
               status: block.is_error === true ? 'error' : 'ok',
-              ...(typeof block.content === 'string' ? { summary: block.content.slice(0, 200) } : {})
+              ...(typeof block.content === 'string' ? { summary: block.content.slice(0, 200) } : {}),
+              ...child
             });
           }
         }
@@ -590,6 +598,11 @@ function summarizeToolInput(toolName: string, input: Record<string, unknown> | u
 function mapHistoryMessage(message: ClaudeSdkMessage, index: number): DriverEvent[] {
   const record = message.message as Record<string, unknown> | undefined;
   const turnId = `history-${index}`;
+  const parentId =
+    typeof message.parent_tool_use_id === 'string' && message.parent_tool_use_id !== ''
+      ? message.parent_tool_use_id
+      : undefined;
+  const child = parentId ? { parentToolUseId: parentId } : {};
   if (message.type === 'user') {
     const events: DriverEvent[] = [];
     const blocks = Array.isArray(record?.content) ? (record?.content as Array<Record<string, unknown>>) : [];
@@ -602,13 +615,14 @@ function mapHistoryMessage(message: ClaudeSdkMessage, index: number): DriverEven
           kind: 'tool-end',
           toolUseId: String(block.tool_use_id ?? ''),
           status: block.is_error === true ? 'error' : 'ok',
-          ...(typeof block.content === 'string' ? { summary: block.content.slice(0, 200) } : {})
+          ...(typeof block.content === 'string' ? { summary: block.content.slice(0, 200) } : {}),
+          ...child
         });
       }
     }
     const text = historyText(record?.content);
     if (text !== undefined) {
-      events.push({ kind: 'user-message', id: String(message.uuid ?? `history-user-${index}`), text, source: 'external' });
+      events.push({ kind: 'user-message', id: String(message.uuid ?? `history-user-${index}`), text, source: 'external', ...child });
     }
     return events;
   }
@@ -621,7 +635,8 @@ function mapHistoryMessage(message: ClaudeSdkMessage, index: number): DriverEven
           kind: 'tool-start',
           toolUseId: String(block.id ?? ''),
           name: String(block.name ?? 'tool'),
-          summary: summarizeToolInput(String(block.name ?? 'tool'), block.input as Record<string, unknown> | undefined)
+          summary: summarizeToolInput(String(block.name ?? 'tool'), block.input as Record<string, unknown> | undefined),
+          ...child
         });
       }
     }
@@ -635,7 +650,8 @@ function mapHistoryMessage(message: ClaudeSdkMessage, index: number): DriverEven
         kind: 'assistant-message',
         id: String(record?.id ?? message.uuid ?? `history-assistant-${index}`),
         turnId,
-        markdown
+        markdown,
+        ...child
       });
     }
     return events;

@@ -21,7 +21,9 @@ import type { AgentSurfaceEventPayload, AgentUiErrorCode } from '../../../core/a
  * — TypeScript collapses the enveloped discriminated union through that `Omit`, breaking
  * the per-kind discriminant. See commit 93276e6 for the protocol-side split rationale.
  */
-export type DriverEvent = AgentSurfaceEventPayload;
+// Drivers may attach child-agent attribution (item 11); the runner's envelope
+// spread carries it into AgentSurfaceEvent.parentToolUseId.
+export type DriverEvent = AgentSurfaceEventPayload & { parentToolUseId?: string };
 
 /** Status-only driver event, narrowed for deterministic start() return values. */
 export type DriverStatusEvent = Extract<DriverEvent, { kind: 'status' }>;

@@ -543,3 +543,40 @@ describe('claudeDriver bare /model', () => {
     expect(h.pushedMessages).toHaveLength(0);
   });
 });
+
+describe('claudeDriver child-agent attribution (item 11)', () => {
+  it('stamps parentToolUseId on live subagent events', async () => {
+    const h = await startedHarness();
+    await h.driver.inject('spawn a subagent', 'ui');
+    h.events.length = 0;
+    h.query.push({
+      type: 'assistant',
+      uuid: 'sub-1',
+      parent_tool_use_id: 'toolu_task_1',
+      message: { id: 'sub-1', content: [{ type: 'text', text: 'child working' }] }
+    });
+    await drain();
+    const msg = h.events.find((e) => e.kind === 'assistant-message');
+    expect(msg).toMatchObject({ kind: 'assistant-message', parentToolUseId: 'toolu_task_1' });
+  });
+
+  it('stamps parentToolUseId on history events and leaves main-thread events unstamped', async () => {
+    const h = await startedHarness({
+      resume: 'sess-uuid-1',
+      history: [
+        { type: 'user', uuid: 'u1', message: { role: 'user', content: 'main thread' } },
+        {
+          type: 'assistant',
+          uuid: 'a-child',
+          parent_tool_use_id: 'toolu_task_9',
+          message: { id: 'a-child', content: [{ type: 'text', text: 'child history' }] }
+        }
+      ]
+    });
+    const events = await h.driver.fetchHistory();
+    const main = events.find((e) => e.kind === 'user-message');
+    const child = events.find((e) => e.kind === 'assistant-message');
+    expect((main as { parentToolUseId?: string }).parentToolUseId).toBeUndefined();
+    expect(child).toMatchObject({ parentToolUseId: 'toolu_task_9' });
+  });
+});

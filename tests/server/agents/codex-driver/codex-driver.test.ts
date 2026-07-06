@@ -1418,3 +1418,42 @@ describe('createCodexDriver', () => {
     expect(events).toEqual([{ kind: 'status', state: 'processing' }]);
   });
 });
+
+describe('codex child-agent scope (item 11 amended design)', () => {
+  it('collabAgentToolCall stays tool-row-only and never stamps parentToolUseId in v1', async () => {
+    // Design doc 2026-07-06-item11: codex child activity lives in separate
+    // threads the driver drops; v1 renders the call as a tool row with NO
+    // nested attribution. This fixture pins that contract.
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+    const events: Array<{ kind: string; parentToolUseId?: string }> = [];
+    driver.onEvent((e) => events.push(e as { kind: string; parentToolUseId?: string }));
+    await driver.start();
+    events.length = 0;
+    transport.emit({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-1',
+        item: {
+          id: 'collab-1',
+          type: 'collabAgentToolCall',
+          senderThreadId: 'thread-1',
+          receiverThreadIds: ['thread-child-1'],
+          prompt: 'do a subtask',
+          status: 'inProgress',
+          agentsStates: {}
+        }
+      }
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const toolStart = events.find((e) => e.kind === 'tool-start');
+    expect(toolStart).toBeDefined();
+    expect(toolStart!.parentToolUseId).toBeUndefined();
+  });
+});
