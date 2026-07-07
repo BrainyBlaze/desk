@@ -5714,7 +5714,7 @@ button.layoutBadge:hover:not(:disabled) {
   min-width: 0;
   border: 1px solid color-mix(in srgb, var(--desk-border, #2a3441) 82%, transparent);
   border-radius: 0;
-  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+  clip-path: polygon(7px 0, calc(100% - 7px) 0, 100% 7px, 100% calc(100% - 7px), calc(100% - 7px) 100%, 7px 100%, 0 calc(100% - 7px), 0 7px);
   background: color-mix(in srgb, var(--desk-bg, #0b0e14) 92%, var(--desk-accent, #66aaff) 4%);
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
@@ -5735,7 +5735,7 @@ button.layoutBadge:hover:not(:disabled) {
   font: inherit;
   font-size: 13px;
   line-height: 1.45;
-  padding: 8px 42px 8px 64px;
+  padding: 8px 88px 8px 8px;
   border-radius: inherit;
   min-height: 32px;
   max-height: 240px;
@@ -5743,16 +5743,6 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentInput:focus {
   outline: none;
-}
-
-.nativeAgentComposerLeftActions {
-  position: absolute;
-  bottom: 6px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  z-index: 1;
-  left: 8px;
 }
 
 .nativeAgentComposerRightActions {
@@ -5779,6 +5769,14 @@ button.layoutBadge:hover:not(:disabled) {
   cursor: pointer;
   border-radius: 999px;
   transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nativeAgentSlashGlyph {
+  display: inline-block;
+  font-family: var(--desk-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .nativeAgentComposerIconButton:hover:not(:disabled),

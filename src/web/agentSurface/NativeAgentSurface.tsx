@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Check, Copy, Paperclip, SendHorizontal, Slash, StickyNote, X } from 'lucide-react';
+import { Check, Copy, Paperclip, SendHorizontal, StickyNote, X } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -97,6 +97,7 @@ export function NativeAgentSurface({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const slashPointerHandledRef = useRef(false);
   const visibleRef = useRef(focused);
   visibleRef.current = focused;
 
@@ -353,6 +354,16 @@ export function NativeAgentSurface({
     window.requestAnimationFrame(() => inputRef.current?.focus());
   };
 
+  const toggleSlashCommands = (): void => {
+    if (slashPaletteVisible) {
+      setSlashPaletteOpen(false);
+      setPaletteIndex(0);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
+    openSlashCommands();
+  };
+
   const uploadNativeFiles = async (files: FileList | File[]): Promise<void> => {
     const list = [...files];
     if (list.length === 0) return;
@@ -551,40 +562,6 @@ export function NativeAgentSurface({
           }}
         />
         <div className="nativeAgentComposerInputWrap">
-          <div className="nativeAgentComposerLeftActions">
-            <button
-              type="button"
-              className="nativeAgentComposerIconButton nativeAgentSlashButton"
-              aria-label="Open slash commands"
-              title="Open slash commands"
-              onClick={openSlashCommands}
-            >
-              <Slash size={12} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className="nativeAgentComposerIconButton nativeAgentFileButton"
-              aria-label="Attach files"
-              title="Attach files"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-            >
-              <Paperclip size={12} aria-hidden="true" />
-            </button>
-            <input
-              ref={fileInputRef}
-              className="nativeAgentFileInput"
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => {
-                if (event.target.files) {
-                  void uploadNativeFiles(event.target.files);
-                  event.target.value = '';
-                }
-              }}
-            />
-          </div>
           <textarea
             ref={inputRef}
             className="nativeAgentInput"
@@ -649,6 +626,49 @@ export function NativeAgentSurface({
             rows={2}
           />
           <div className="nativeAgentComposerRightActions">
+            <button
+              type="button"
+              className="nativeAgentComposerIconButton nativeAgentSlashButton"
+              aria-label="Open slash commands"
+              title="Open slash commands"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                slashPointerHandledRef.current = true;
+                toggleSlashCommands();
+              }}
+              onClick={() => {
+                if (slashPointerHandledRef.current) {
+                  slashPointerHandledRef.current = false;
+                  return;
+                }
+                toggleSlashCommands();
+              }}
+            >
+              <span className="nativeAgentSlashGlyph" aria-hidden="true">/</span>
+            </button>
+            <button
+              type="button"
+              className="nativeAgentComposerIconButton nativeAgentFileButton"
+              aria-label="Attach files"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+            >
+              <Paperclip size={12} aria-hidden="true" />
+            </button>
+            <input
+              ref={fileInputRef}
+              className="nativeAgentFileInput"
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                if (event.target.files) {
+                  void uploadNativeFiles(event.target.files);
+                  event.target.value = '';
+                }
+              }}
+            />
             {model.status === 'processing' || model.status === 'tool-executing' ? (
               // UX item 5: while a turn runs, the composer's action slot IS the Stop
               // control — the user's cursor and attention live here, not the header.
