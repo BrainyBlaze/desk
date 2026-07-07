@@ -5398,8 +5398,10 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentRow.assistant {
   background: transparent;
+  border-left: 2px solid rgba(143, 212, 143, 0.45);
   margin-right: 24px;
-  padding-left: 12px;
+  padding-left: 10px;
+  border-radius: 0;
 }
 
 .nativeAgentRow.assistant.pending {
