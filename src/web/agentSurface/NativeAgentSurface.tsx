@@ -90,6 +90,7 @@ export function NativeAgentSurface({
     });
   };
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [awaitingResponse, setAwaitingResponse] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [manualInputHeight, setManualInputHeight] = useState<number | null>(null);
@@ -111,10 +112,12 @@ export function NativeAgentSurface({
     setAgentModel(undefined);
     setSlashPaletteOpen(false);
     setPipelineLive(false);
+    setAwaitingResponse(false);
 
     const handlers: SurfaceHandlers = {
       onSnapshot: ({ state, events }) => {
         if (disposed) return;
+        setAwaitingResponse(false);
         setModel(rowsFromSnapshot(events, state));
         // session-info lives in the ring: a fresh page load must recover the
         // model badge and the command palette from the snapshot, not only from
@@ -129,6 +132,9 @@ export function NativeAgentSurface({
       onEvent: (event) => {
         if (disposed) return;
         setPipelineLive(true);
+        if (event.kind !== 'session-info') {
+          setAwaitingResponse(false);
+        }
         if (event.kind === 'session-info' && event.model) {
           setAgentModel(event.model);
         }
@@ -159,14 +165,17 @@ export function NativeAgentSurface({
       },
       onError: (_code, message) => {
         if (disposed) return;
+        setAwaitingResponse(false);
         setErrorMsg(message);
       },
       onConnectionChange: (up) => {
         if (disposed) return;
+        if (!up) setAwaitingResponse(false);
         setPipelineLive(up);
       },
       onExit: () => {
         if (disposed) return;
+        setAwaitingResponse(false);
         setModel((prev) => ({ ...prev, status: 'exited' }));
       }
     };
@@ -398,7 +407,9 @@ export function NativeAgentSurface({
       agentSurfaceClient.send(surfaceId, session, text);
       setInput('');
       setErrorMsg(null);
+      setAwaitingResponse(true);
     } catch (err) {
+      setAwaitingResponse(false);
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   };
@@ -429,6 +440,9 @@ export function NativeAgentSurface({
     () => [...pendingAssistant.entries()].map(([turnId, text]) => ({ turnId, text })),
     [pendingAssistant]
   );
+  const showAgentThinking =
+    pendingAssistantEntries.length === 0 &&
+    (awaitingResponse || model.status === 'processing' || model.status === 'tool-executing');
 
   return (
     <div className="nativeAgentSurface">
@@ -471,12 +485,12 @@ export function NativeAgentSurface({
             <AgentMarkdown body={text} />
           </div>
         ))}
-        {(model.status === 'processing' || model.status === 'tool-executing') && pendingAssistantEntries.length === 0 ? (
+        {showAgentThinking ? (
           // UX item 1: between send and the first streamed token the transcript
-          // used to sit dead-still — slow providers read as broken. A quiet
+          // used to sit dead-still; slow providers read as broken. A quiet
           // animated row says the agent is working.
           <div className="nativeAgentRow working" aria-live="polite">
-            <span className="nativeAgentWorkingDots" aria-label="agent is working">
+            <span className="nativeAgentWorkingDots" aria-label="agent is thinking">
               <span>·</span>
               <span>·</span>
               <span>·</span>

@@ -25,6 +25,23 @@ describe('native agent markdown rendering', () => {
   });
 });
 
+describe('native agent thinking indicator', () => {
+  it('shows immediately after send and clears only on real agent activity or failure', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(/const \[awaitingResponse, setAwaitingResponse\] = useState\(false\)/);
+    expect(source).toMatch(/agentSurfaceClient\.send\(surfaceId, session, text\);[\s\S]*setAwaitingResponse\(true\);/);
+    expect(source).toMatch(/if \(event\.kind !== 'session-info'\) \{[\s\S]*setAwaitingResponse\(false\);[\s\S]*\}/);
+    expect(source).toMatch(/onSnapshot: \(\{ state, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
+    expect(source).toMatch(/onError: \(_code, message\) => \{[\s\S]*setAwaitingResponse\(false\);/);
+    expect(source).toMatch(/onExit: \(\) => \{[\s\S]*setAwaitingResponse\(false\);/);
+    expect(source).toMatch(/const showAgentThinking =\s*pendingAssistantEntries\.length === 0 &&/);
+    expect(source).toMatch(/\(awaitingResponse \|\| model\.status === 'processing' \|\| model\.status === 'tool-executing'\)/);
+    expect(source).toMatch(/\{showAgentThinking \? \(/);
+    expect(source).toMatch(/aria-label=\"agent is thinking\"/);
+  });
+});
+
 describe('native agent tool disclosure', () => {
   it('uses the reference-style disclosure structure with header and in/out boxes', () => {
     const source = nativeSurfaceSource();
