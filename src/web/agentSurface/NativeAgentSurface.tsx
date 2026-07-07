@@ -10,6 +10,7 @@ import {
   agentSurfaceClient,
   type SurfaceHandlers
 } from './agentSurfaceClient.js';
+import { resolveNativeFocusAnchorIndex } from './scrollAnchor.js';
 import {
   applyEvent as applyEventToModel,
   buildAgentFeedItems,
@@ -125,6 +126,7 @@ export function NativeAgentSurface({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const slashPointerHandledRef = useRef(false);
+  const focusAnchorPendingRef = useRef(false);
 
   // Subscribe to the broker.
   useEffect(() => {
@@ -233,16 +235,12 @@ export function NativeAgentSurface({
   const [unreadMarkerIndex, setUnreadMarkerIndex] = useState<number | null>(null);
   useEffect(() => {
     if (focused) {
+      focusAnchorPendingRef.current = true;
       const lastSeen = lastSeenRowCounts.get(session) ?? 0;
       setUnreadMarkerIndex(model.rows.length > lastSeen && lastSeen > 0 ? lastSeen : null);
     }
     // Falling out of focus freezes the stored count at whatever was last seen.
   }, [focused, session]);
-  useEffect(() => {
-    if (focused) {
-      touchSessionMemo(lastSeenRowCounts, session, model.rows.length);
-    }
-  }, [focused, session, model.rows.length]);
 
   const feedItems = useMemo(
     () => buildAgentFeedItems(model.rows, { expandedTurnIds }),
@@ -306,6 +304,36 @@ export function NativeAgentSurface({
       setUnseenCount((n) => n + (model.rows.length - prevCount));
     }
   }, [model.rows, pendingAssistant, model.pendingPermission]);
+
+  useEffect(() => {
+    if (!focused || !focusAnchorPendingRef.current || feedItems.length === 0) {
+      return;
+    }
+    const lastSeen = lastSeenRowCounts.get(session) ?? 0;
+    const rowCount = model.rows.length;
+    const targetIndex = resolveNativeFocusAnchorIndex(feedItems, { lastSeenRowCount: lastSeen, rowCount });
+    if (targetIndex === null) {
+      return;
+    }
+    setUnreadMarkerIndex(rowCount > lastSeen && lastSeen > 0 ? lastSeen : null);
+    virtualizer.scrollToIndex(targetIndex, { align: 'end' });
+    requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (current && targetIndex === feedItems.length - 1) {
+        current.scrollTop = current.scrollHeight;
+      }
+    });
+    const unseen = lastSeen > 0 ? Math.max(0, rowCount - lastSeen) : 0;
+    followingRef.current = unseen === 0;
+    setUnseenCount(unseen);
+    focusAnchorPendingRef.current = false;
+  }, [feedItems, focused, model.rows.length, session, virtualizer]);
+
+  useEffect(() => {
+    if (focused && model.rows.length > 0 && !focusAnchorPendingRef.current) {
+      touchSessionMemo(lastSeenRowCounts, session, model.rows.length);
+    }
+  }, [focused, session, model.rows.length]);
 
   const canSend = pipelineLive && model.status === 'idle' && input.trim().length > 0;
   const sendLabel = !pipelineLive
