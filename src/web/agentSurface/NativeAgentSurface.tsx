@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Check, Copy, Paperclip, SendHorizontal, StickyNote, X } from 'lucide-react';
+import { Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -679,7 +679,7 @@ export function NativeAgentSurface({
                 title="Stop agent"
                 onClick={handleInterrupt}
               >
-                <X size={13} aria-hidden="true" />
+                <Square size={11} fill="currentColor" aria-hidden="true" />
               </button>
             ) : (
               <button

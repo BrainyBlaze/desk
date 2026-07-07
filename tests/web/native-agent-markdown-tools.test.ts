@@ -75,7 +75,7 @@ describe('native agent Phase B tool state clarity', () => {
   it('uses compact status glyphs and hides subsecond elapsed noise in tool badges', () => {
     const source = nativeSurfaceSource();
 
-    expect(source).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, StickyNote, X \} from 'lucide-react'/);
+    expect(source).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X \} from 'lucide-react'/);
     expect(source).toMatch(/function ToolStatusGlyph/);
     expect(source).toMatch(/aria-label="tool done"/);
     expect(source).toMatch(/aria-label="tool failed"/);
@@ -159,7 +159,7 @@ describe('native agent message actions and notes', () => {
     const surface = nativeSurfaceSource();
     const styles = stylesSource();
 
-    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, StickyNote, X \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/<Copy size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/<StickyNote size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/aria-label=\{copyActionLabel\}/);
@@ -203,7 +203,7 @@ describe('native agent composer controls', () => {
     const surface = nativeSurfaceSource();
     const styles = stylesSource();
 
-    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, StickyNote, X \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/import \{ channelsUpload \} from '..\/channels\/channelsClient\.js'/);
     expect(surface).toMatch(/composerInputHeightFromTopResize/);
     expect(surface).toMatch(/const NATIVE_AGENT_FILE_CHANNEL = 'agent-files'/);
