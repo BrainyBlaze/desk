@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X } from 'lucide-react';
@@ -246,6 +246,10 @@ export function NativeAgentSurface({
   const feedItems = useMemo(
     () => buildAgentFeedItems(model.rows, { expandedTurnIds }),
     [model.rows, expandedTurnIds]
+  );
+  const expandTurn = useCallback(
+    (turnId: string) => setExpandedTurnIds((prev) => new Set(prev).add(turnId)),
+    []
   );
   const virtualizer = useVirtualizer({
     count: feedItems.length,
@@ -497,7 +501,7 @@ export function NativeAgentSurface({
                 ) : null}
                 <AgentFeedItemView
                   item={item}
-                  onExpandTurn={(turnId) => setExpandedTurnIds((prev) => new Set(prev).add(turnId))}
+                  onExpandTurn={expandTurn}
                   onMessageMenu={onMessageMenu}
                   onCreateNote={onCreateNote}
                 />
@@ -727,7 +731,7 @@ export function NativeAgentSurface({
   );
 }
 
-function AgentFeedItemView({
+const AgentFeedItemView = memo(function AgentFeedItemView({
   item,
   onExpandTurn,
   onMessageMenu,
@@ -742,7 +746,7 @@ function AgentFeedItemView({
     return <AgentRowView row={item.row} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />;
   }
   return <TurnSummaryRow item={item} onExpand={() => onExpandTurn(item.turnId)} />;
-}
+});
 
 function TurnSummaryRow({ item, onExpand }: { item: Extract<AgentFeedItem, { kind: 'turn-summary' }>; onExpand: () => void }): JSX.Element {
   return (
@@ -878,13 +882,15 @@ function CollapsiblePayloadRow({ row, onMessageMenu }: { row: AgentRow; onMessag
   );
 }
 
-function AgentMarkdown({ body }: { body: string }): JSX.Element {
+const NOOP_OPEN_FILE = (): undefined => undefined;
+
+const AgentMarkdown = memo(function AgentMarkdown({ body }: { body: string }): JSX.Element {
   return (
     <Suspense fallback={<span className="nativeAgentText">{body}</span>}>
-      <ChannelMarkdown body={body} channel={NATIVE_AGENT_FILE_CHANNEL} onOpenFile={() => undefined} />
+      <ChannelMarkdown body={body} channel={NATIVE_AGENT_FILE_CHANNEL} onOpenFile={NOOP_OPEN_FILE} />
     </Suspense>
   );
-}
+});
 
 function ToolCallBlock({
   row,

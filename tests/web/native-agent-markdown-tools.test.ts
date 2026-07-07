@@ -337,3 +337,19 @@ describe('native agent theme binding', () => {
     expect(cssBlock(styles, '.nativeAgentSurface')).toContain('var(--desk-text)');
   });
 });
+
+describe('native agent render memoization', () => {
+  it('keeps transcript rows and markdown referentially stable across composer keystrokes', () => {
+    const source = nativeSurfaceSource();
+
+    // A fresh inline callback here defeats ChannelMarkdown's memo and forces a
+    // markdown re-parse of every visible row on every parent render.
+    expect(source).toMatch(/const NOOP_OPEN_FILE = \(\): undefined => undefined;/);
+    expect(source).toMatch(/onOpenFile=\{NOOP_OPEN_FILE\}/);
+    expect(source).not.toMatch(/onOpenFile=\{\(\) => undefined\}/);
+    expect(source).toMatch(/const AgentMarkdown = memo\(function AgentMarkdown/);
+    expect(source).toMatch(/const AgentFeedItemView = memo\(function AgentFeedItemView/);
+    expect(source).toMatch(/const expandTurn = useCallback\(/);
+    expect(source).toMatch(/onExpandTurn=\{expandTurn\}/);
+  });
+});
