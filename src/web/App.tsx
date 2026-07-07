@@ -4483,6 +4483,7 @@ const MountedMux = memo(function MountedMuxImpl({
       <Animator combine manager="stagger" duration={{ stagger: 0.04, limit: 8 }}>
         <AgentMultiplexer
           group={group}
+          visible={visible}
           cells={cells}
           selectedTmux={selectedTmux}
           attention={attention}
@@ -4500,6 +4501,7 @@ const LAYOUT_KIND_OPTIONS: Array<Exclude<LayoutKind, 'custom'>> = ['1x1', '2x2',
 
 function AgentMultiplexerImpl({
   group,
+  visible,
   cells,
   selectedTmux,
   attention,
@@ -4519,6 +4521,7 @@ function AgentMultiplexerImpl({
   terminalRevisions
 }: {
   group: DeskGroupView;
+  visible: boolean;
   cells: PanelCell[];
   selectedTmux?: string;
   attention: Record<string, { attention: true; since: string }>;
@@ -4615,6 +4618,7 @@ function AgentMultiplexerImpl({
     <TerminalCell
       group={group}
       cell={cell}
+      visible={visible}
       selectedTmux={selectedTmux}
       attention={attention}
       onTouchSession={onTouchSession}
@@ -4810,6 +4814,7 @@ const AgentMultiplexer = memo(AgentMultiplexerImpl);
 function TerminalCellImpl({
   group,
   cell,
+  visible,
   selectedTmux,
   attention,
   onTouchSession,
@@ -4825,6 +4830,7 @@ function TerminalCellImpl({
 }: {
   group: DeskGroupView;
   cell: PanelCell;
+  visible: boolean;
   selectedTmux?: string;
   attention: Record<string, { attention: true; since: string }>;
   onTouchSession: (tmuxSession: string) => void;
@@ -4908,6 +4914,7 @@ function TerminalCellImpl({
                   <NativeAgentSurface
                     session={cell.activeSession.spec.tmuxSession}
                     revision={revision}
+                    visible={visible}
                     focused={cell.activeSession.spec.tmuxSession === selectedTmux}
                     onMessageMenu={onSelectionMenu}
                     onCreateNote={onCreateNoteFromText}

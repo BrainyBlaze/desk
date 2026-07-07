@@ -96,6 +96,7 @@ const lastSeenRowCounts = new Map<string, number>();
 export function NativeAgentSurface({
   session,
   revision,
+  visible = true,
   focused = false,
   onMessageMenu,
   onCreateNote
@@ -207,19 +208,16 @@ export function NativeAgentSurface({
       }
     };
 
-    // All mounted cells in a group are physically visible (the keep-alive system only
-    // unmounts whole non-warm groups). Broker visibility must track physical visibility,
-    // not focus — otherwise non-focused native cells in a layout grid get no snapshot
-    // and appear empty. Focus is a UI affordance (status badge highlight, etc.) only.
-    agentSurfaceClient.subscribe(surfaceId, session, true, handlers);
+    agentSurfaceClient.subscribe(surfaceId, session, visible, handlers);
     return () => {
       disposed = true;
       agentSurfaceClient.unsubscribe(surfaceId);
     };
   }, [session, surfaceId, revision]);
 
-  // Broker visibility stays true for mounted surfaces — the cell is physically on-screen.
-  // (The keep-alive unmount handles true-hidden cells by destroying the component entirely.)
+  useEffect(() => {
+    agentSurfaceClient.setVisibility(surfaceId, visible);
+  }, [surfaceId, visible]);
 
   // Scroll UX: land on the LATEST message when a session opens/reloads, follow
   // live output while the user is at the bottom, and NEVER yank the view while
@@ -235,13 +233,13 @@ export function NativeAgentSurface({
   // back shows only what actually arrived in between.
   const [unreadMarkerIndex, setUnreadMarkerIndex] = useState<number | null>(null);
   useEffect(() => {
-    if (focused) {
+    if (visible && focused) {
       focusAnchorPendingRef.current = true;
       const lastSeen = lastSeenRowCounts.get(session) ?? 0;
       setUnreadMarkerIndex(model.rows.length > lastSeen && lastSeen > 0 ? lastSeen : null);
     }
     // Falling out of focus freezes the stored count at whatever was last seen.
-  }, [focused, session]);
+  }, [visible, focused, session]);
 
   const feedItems = useMemo(
     () => buildAgentFeedItems(model.rows, { expandedTurnIds }),
@@ -292,7 +290,9 @@ export function NativeAgentSurface({
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!visible || !el || focusAnchorPendingRef.current) {
+      return;
+    }
     const prevCount = prevRowCountRef.current;
     prevRowCountRef.current = model.rows.length;
     // Snapshot replace (open/reload/backfill): the whole transcript arrives at
@@ -308,10 +308,10 @@ export function NativeAgentSurface({
     if (model.rows.length > prevCount) {
       setUnseenCount((n) => n + (model.rows.length - prevCount));
     }
-  }, [model.rows, pendingAssistant, model.pendingPermission]);
+  }, [visible, model.rows, pendingAssistant, model.pendingPermission]);
 
   useEffect(() => {
-    if (!focused || !focusAnchorPendingRef.current || feedItems.length === 0) {
+    if (!visible || !focused || !focusAnchorPendingRef.current || feedItems.length === 0) {
       return;
     }
     const lastSeen = lastSeenRowCounts.get(session) ?? 0;
@@ -331,13 +331,13 @@ export function NativeAgentSurface({
     followingRef.current = unseen === 0;
     setUnseenCount(unseen);
     focusAnchorPendingRef.current = false;
-  }, [feedItems, focused, model.rows.length, session, virtualizer]);
+  }, [feedItems, visible, focused, model.rows.length, session, virtualizer]);
 
   useEffect(() => {
-    if (focused && model.rows.length > 0 && !focusAnchorPendingRef.current) {
+    if (visible && focused && model.rows.length > 0 && !focusAnchorPendingRef.current) {
       touchSessionMemo(lastSeenRowCounts, session, model.rows.length);
     }
-  }, [focused, session, model.rows.length]);
+  }, [visible, focused, session, model.rows.length]);
 
   const canSend = pipelineLive && model.status === 'idle' && input.trim().length > 0;
   const sendLabel = !pipelineLive
@@ -776,7 +776,9 @@ export interface NativeAgentSurfaceProps {
   session: string;
   /** Bumped by the parent when restart/switch happens so we resubscribe fresh. */
   revision: number;
-  /** This cell holds the global selection — drives broker visibility. */
+  /** The containing warm group is physically visible, not display:none. */
+  visible?: boolean;
+  /** This cell holds the global selection. */
   focused?: boolean;
   /** Opens the shared Copy/Create note context menu for message-like rows. */
   onMessageMenu?: (text: string, x: number, y: number) => void;
