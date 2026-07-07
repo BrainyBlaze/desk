@@ -48,6 +48,16 @@
         ]
       },
       {
+        "group": "Best practices",
+        "icon": "lightbulb",
+        "pages": [
+          "playbook-research-consensus",
+          "playbook-supervised-development",
+          "playbook-multi-feature",
+          "playbook-multi-project"
+        ]
+      },
+      {
         "group": "Subsystems",
         "icon": "layers",
         "pages": [

@@ -19,6 +19,12 @@
   <img src="https://img.shields.io/badge/runtime-tmux-1bb91f" alt="tmux runtime">
 </p>
 
+<p align="center">
+  <a href="https://docs.desk.cloud">
+    <img src="docs/images/agents-multiplexer.png" alt="Desk product showcase: app rail, agent tree, host telemetry, fleet controls, and a 2x2 grid of live tmux-backed agent terminals">
+  </a>
+</p>
+
 ---
 
 ## Why Desk

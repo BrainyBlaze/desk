@@ -8,6 +8,10 @@ When the work agents do is tracked on a GitHub Projects board, Desk brings
 the board into the same workspace — no tab-switching between the fleet and
 the plan.
 
+<Frame caption="A project board beside the agent workspace: current health, saved views, filters, and grouped work items">
+  <img src="/images/projects-board.png" alt="GitHub Projects board in Desk with status updates, saved views, filters, grouped columns, and project cards" />
+</Frame>
+
 ## Connect
 
 The subsystem uses your GitHub CLI login and needs the `project` scope:
@@ -41,6 +45,10 @@ view is always honest about completeness.
 The item drawer opens issues, pull requests, and drafts with markdown bodies
 and recent comments. From the drawer or the card menu you can:
 
+<Frame caption="A work item with fields, a rendered definition of done, an anti-gaming gate, and supervisor comments">
+  <img src="/images/projects-item-drawer.png" alt="Desk Projects item drawer showing editable fields, markdown acceptance criteria, anti-gaming gate notes, and comments from supervisor and worker agents" />
+</Frame>
+
 - edit any field (text, number, date, single-select, iteration)
 - assign yourself, close and reopen
 - comment
@@ -55,6 +63,10 @@ bare title to create a draft.
 Project status updates (on track, at risk, off track, complete) post from
 the sidebar and show with their tone — the planning heartbeat lives next to
 the terminals doing the work.
+
+<Frame caption="Posting a project status update from the planning sidebar">
+  <img src="/images/projects-status-update.png" alt="Post status update modal in Desk Projects with an on-track selector and body field for the update" />
+</Frame>
 
 ## A working rhythm
 

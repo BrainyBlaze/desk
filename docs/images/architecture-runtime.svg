@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 700" width="1060" height="700" role="img" aria-label="Desk runtime architecture diagram">
+  <defs>
+    <style>
+      .bg { fill: #0B1220; }
+      .panel { fill: #0F1A2A; stroke: rgba(255,255,255,0.08); stroke-width: 1; }
+      .hub { fill: #0E1B2E; stroke: rgba(34,211,238,0.22); stroke-width: 1.2; }
+      .chip { fill: #16273C; stroke: rgba(255,255,255,0.07); stroke-width: 1; }
+      .node { fill: #16273C; stroke: rgba(34,211,238,0.20); stroke-width: 1; }
+      .accent { fill: #22D3EE; }
+      text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .title { fill: #E9F1F8; font-size: 22px; font-weight: 600; }
+      .subtitle { fill: #8AA0B6; font-size: 12.5px; }
+      .glabel { fill: #22D3EE; font-size: 12px; font-weight: 600; letter-spacing: 1.6px; }
+      .gsub { fill: #7F96AD; font-size: 11px; }
+      .chiptext { fill: #D9E6F3; font-size: 13px; font-weight: 500; }
+      .nodetext { fill: #E9F1F8; font-size: 14px; font-weight: 600; }
+      .nodesub { fill: #8AA0B6; font-size: 10.5px; }
+      .flow { fill: #93A7BC; font-size: 11px; }
+      .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; fill: #22D3EE; }
+      .foot { fill: #6F8398; font-size: 10.5px; }
+      .edge { stroke: #2C5566; stroke-width: 1.6; fill: none; }
+      .edgeflow { stroke: #22D3EE; stroke-width: 1.6; fill: none; }
+      .edgeup { stroke: #7C6CD8; stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+    </style>
+    <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22D3EE"/>
+    </marker>
+    <marker id="arwu" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7C6CD8"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1060" height="700" rx="16"/>
+
+  <!-- title -->
+  <rect class="accent" x="40" y="34" width="6" height="26" rx="2"/>
+  <text class="title" x="58" y="54">Desk runtime architecture</text>
+  <text class="subtitle" x="40" y="78">One local server coordinating the browser, the terminal runtime, and local tools — nothing hosted.</text>
+
+  <!-- Band 1: Browser -->
+  <rect class="panel" x="40" y="92" width="980" height="98" rx="14"/>
+  <text class="glabel" x="64" y="120">BROWSER · OPERATOR VIEW</text>
+  <g>
+    <rect class="chip" x="64" y="136" width="143" height="42" rx="9"/><text class="chiptext" x="135.5" y="162" text-anchor="middle">Terminals</text>
+    <rect class="chip" x="221" y="136" width="143" height="42" rx="9"/><text class="chiptext" x="292.5" y="162" text-anchor="middle">Channels</text>
+    <rect class="chip" x="378" y="136" width="143" height="42" rx="9"/><text class="chiptext" x="449.5" y="162" text-anchor="middle">Editor</text>
+    <rect class="chip" x="535" y="136" width="143" height="42" rx="9"/><text class="chiptext" x="606.5" y="162" text-anchor="middle">Git + GitHub</text>
+    <rect class="chip" x="692" y="136" width="143" height="42" rx="9"/><text class="chiptext" x="763.5" y="162" text-anchor="middle">Projects</text>
+    <rect class="chip" x="849" y="136" width="143" height="42" rx="9"/><text class="chiptext" x="920.5" y="162" text-anchor="middle">Notes</text>
+  </g>
+
+  <!-- connector 1: browser <-> server -->
+  <line class="edgeflow" x1="530" y1="190" x2="530" y2="248" marker-start="url(#arw)" marker-end="url(#arw)"/>
+  <text class="flow" x="548" y="214">WebSocket · REST <tspan class="mono">/api</tspan></text>
+  <text class="flow" x="548" y="230">terminal broker streams PTYs to the browser</text>
+
+  <!-- Band 2: Desk server -->
+  <rect class="hub" x="40" y="248" width="980" height="196" rx="14"/>
+  <text class="glabel" x="64" y="276">DESK SERVER · LOCAL COORDINATOR</text>
+  <text class="gsub" x="64" y="294">source mode: <tspan class="mono" style="fill:#7F96AD">desk serve</tspan> (Vite)   ·   standalone: embedded UI bundle + same backend routes</text>
+  <g>
+    <!-- row 1 -->
+    <rect class="chip" x="64" y="308" width="221" height="54" rx="10"/><rect class="accent" x="64" y="308" width="4" height="54" rx="2"/><text class="chiptext" x="84" y="340">Terminal broker</text>
+    <rect class="chip" x="301" y="308" width="221" height="54" rx="10"/><rect class="accent" x="301" y="308" width="4" height="54" rx="2"/><text class="chiptext" x="321" y="340">Channels store + delivery</text>
+    <rect class="chip" x="538" y="308" width="221" height="54" rx="10"/><rect class="accent" x="538" y="308" width="4" height="54" rx="2"/><text class="chiptext" x="558" y="340">Filesystem + editor APIs</text>
+    <rect class="chip" x="775" y="308" width="221" height="54" rx="10"/><rect class="accent" x="775" y="308" width="4" height="54" rx="2"/><text class="chiptext" x="795" y="340">git + gh operations</text>
+    <!-- row 2 -->
+    <rect class="chip" x="64" y="376" width="221" height="54" rx="10"/><rect class="accent" x="64" y="376" width="4" height="54" rx="2"/><text class="chiptext" x="84" y="408">LSP manager + MCP bridge</text>
+    <rect class="chip" x="301" y="376" width="221" height="54" rx="10"/><rect class="accent" x="301" y="376" width="4" height="54" rx="2"/><text class="chiptext" x="321" y="408">Attention + agent events</text>
+    <rect class="chip" x="538" y="376" width="221" height="54" rx="10"/><rect class="accent" x="538" y="376" width="4" height="54" rx="2"/><text class="chiptext" x="558" y="408">System telemetry</text>
+    <rect class="chip" x="775" y="376" width="221" height="54" rx="10"/><rect class="accent" x="775" y="376" width="4" height="54" rx="2"/><text class="chiptext" x="795" y="408">UI assets + local API</text>
+  </g>
+
+  <!-- connector 2: server <-> runtime -->
+  <line class="edgeflow" x1="360" y1="444" x2="360" y2="502" marker-end="url(#arw)"/>
+  <text class="flow" x="346" y="470" text-anchor="end">start · attach</text>
+  <text class="flow" x="346" y="486" text-anchor="end">capture · resize</text>
+  <line class="edgeup" x1="700" y1="502" x2="700" y2="444" marker-end="url(#arwu)"/>
+  <text class="flow" x="714" y="470">agent hooks</text>
+  <text class="flow" x="714" y="486">POST <tspan class="mono">/api/agent-event</tspan></text>
+
+  <!-- Band 3: Local runtime -->
+  <rect class="panel" x="40" y="502" width="980" height="150" rx="14"/>
+  <text class="glabel" x="64" y="530">LOCAL RUNTIME · PROCESSES YOU OWN</text>
+  <g>
+    <rect class="node" x="76" y="556" width="190" height="68" rx="11"/>
+    <text class="mono" x="171" y="588" text-anchor="middle" style="fill:#E9F1F8;font-size:14px;font-weight:600">desk.yml</text>
+    <text class="nodesub" x="171" y="606" text-anchor="middle">manifest · desired state</text>
+
+    <line class="edgeflow" x1="266" y1="590" x2="311" y2="590" marker-end="url(#arw)"/>
+
+    <rect class="node" x="311" y="556" width="190" height="68" rx="11"/>
+    <text class="nodetext" x="406" y="588" text-anchor="middle">Desk runner</text>
+    <text class="nodesub" x="406" y="606" text-anchor="middle">reconciles sessions</text>
+
+    <line class="edgeflow" x1="501" y1="590" x2="558" y2="590" marker-end="url(#arw)"/>
+
+    <rect class="node" x="558" y="556" width="190" height="68" rx="11"/>
+    <text class="nodetext" x="653" y="588" text-anchor="middle">tmux sessions</text>
+    <text class="nodesub" x="653" y="606" text-anchor="middle">own process lifetime</text>
+
+    <line class="edgeflow" x1="748" y1="590" x2="805" y2="590" marker-end="url(#arw)"/>
+
+    <rect class="node" x="805" y="556" width="190" height="68" rx="11"/>
+    <text class="nodetext" x="900" y="586" text-anchor="middle">Agents</text>
+    <text class="nodesub" x="900" y="604" text-anchor="middle">Codex · Claude · OpenCode</text>
+    <text class="nodesub" x="900" y="617" text-anchor="middle">Bash · custom commands</text>
+  </g>
+
+  <!-- footer -->
+  <text class="foot" x="530" y="682" text-anchor="middle">State on local disk: <tspan class="mono" style="fill:#6F8398">~/.config/desk</tspan> (manifest · channels · notes)   ·   your repos, gh, and agent credentials stay local</text>
+</svg>
