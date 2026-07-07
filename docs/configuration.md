@@ -161,6 +161,31 @@ Built-in agent values:
 
 For project sessions, `cwd` is optional because the project root is inherited. Root-level groups need `cwd` unless the session uses a command that handles its own directory.
 
+### UI mode
+
+`uiMode` selects how a session renders: `native` (the agent chat surface) or
+`terminal` (the CLI's own TUI in a terminal cell). Codex, Claude, and OpenCode
+sessions resolve to `native` when the field is omitted; write
+`uiMode: terminal` to keep a session on the raw TUI. Bash and custom-command
+sessions are always terminal — declaring `uiMode: native` on them is a
+manifest error.
+
+```yaml
+- name: api-codex
+  agent: codex
+  cwd: ~/projects/product
+
+- name: raw-tui
+  agent: claude
+  cwd: ~/projects/product
+  uiMode: terminal
+```
+
+The session edit modal switches a live session between modes; the switch
+restarts the agent process and carries the captured resume id across, so the
+conversation continues in the other surface. A session with no captured resume
+id asks for confirmation first, because switching starts it fresh.
+
 ### Resume metadata
 
 `resume` is optional in YAML. Omit it to let Desk start a fresh conversation and capture a resume id when the agent CLI exposes one.

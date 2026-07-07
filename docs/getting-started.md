@@ -100,11 +100,12 @@ Optional tools unlock additional features:
       you want tool prompts
 
     Desk writes the session to `desk.yml`, creates a deterministic tmux
-    session, and attaches the browser terminal through the terminal broker.
+    session, and attaches the cell — Codex, Claude, and OpenCode open as a
+    native chat surface, bash and custom commands as a browser terminal.
 
     <Check>
-    The new terminal cell should show the selected agent or shell TUI. `desk
-    status` should show a matching tmux session.
+    The new cell should show the agent's chat composer (or the shell TUI for
+    bash). `desk status` should show a matching tmux session.
     </Check>
   </Step>
 </Steps>

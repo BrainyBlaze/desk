@@ -28,7 +28,7 @@ channel handles organize around.
 
 ## 2. Add groups with layouts
 
-Each project holds groups — one terminal grid per group. Hover the project
+Each project holds groups — one cell grid per group, where each cell is an agent chat or a terminal. Hover the project
 row and click **Add group**. Pick the layout in the form:
 
 - `2x2` for a four-agent working set — the default choice
