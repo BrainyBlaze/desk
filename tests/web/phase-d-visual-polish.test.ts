@@ -62,7 +62,7 @@ describe('Phase D visual polish styles', () => {
     expect(cssBlock(source, '.deskCmd.danger')).toContain('--arwes-frames-line-color: color-mix(in srgb, var(--desk-error) 44%, transparent)');
     expect(cssBlock(source, '.deskCmd.danger:hover:not(:disabled)')).toContain('color: var(--desk-error)');
     expect(cssBlock(source, '.nativeAgentSend')).toContain('font-weight: 700');
-    expect(cssBlock(source, '.nativeAgentSend')).toContain('background: color-mix(in srgb, var(--desk-accent, #66aaff) 20%, transparent)');
+    expect(cssBlock(source, '.nativeAgentSend')).toContain('background: color-mix(in srgb, var(--desk-accent) 20%, transparent)');
     expect(cssBlock(source, '.nativeAgentSend')).not.toContain('box-shadow');
   });
 });

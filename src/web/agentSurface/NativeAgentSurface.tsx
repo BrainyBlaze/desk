@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X } from 'lucide-react';
+import { Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -670,7 +670,7 @@ export function NativeAgentSurface({
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
             >
-              <Paperclip size={12} aria-hidden="true" />
+              <Paperclip size={14} strokeWidth={2.1} aria-hidden="true" />
             </button>
             <input
               ref={fileInputRef}
@@ -695,7 +695,7 @@ export function NativeAgentSurface({
                 title="Stop agent"
                 onClick={handleInterrupt}
               >
-                <Square size={11} fill="currentColor" aria-hidden="true" />
+                <Square className="nativeAgentStopGlyph" size={14} fill="currentColor" strokeWidth={2.1} aria-hidden="true" />
               </button>
             ) : (
               <button
@@ -706,7 +706,7 @@ export function NativeAgentSurface({
                 onClick={handleSend}
                 disabled={!canSend || uploading}
               >
-                <SendHorizontal size={13} aria-hidden="true" />
+                <CornerDownLeft size={14} strokeWidth={2.1} aria-hidden="true" />
               </button>
             )}
           </div>

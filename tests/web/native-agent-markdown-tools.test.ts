@@ -95,7 +95,7 @@ describe('native agent Phase B tool state clarity', () => {
   it('uses compact status glyphs and hides subsecond elapsed noise in tool badges', () => {
     const source = nativeSurfaceSource();
 
-    expect(source).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X \} from 'lucide-react'/);
+    expect(source).toMatch(/import \{ Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X \} from 'lucide-react'/);
     expect(source).toMatch(/function ToolStatusGlyph/);
     expect(source).toMatch(/aria-label="tool done"/);
     expect(source).toMatch(/aria-label="tool failed"/);
@@ -179,7 +179,7 @@ describe('native agent message actions and notes', () => {
     const surface = nativeSurfaceSource();
     const styles = stylesSource();
 
-    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/<Copy size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/<StickyNote size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/aria-label=\{copyActionLabel\}/);
@@ -223,7 +223,7 @@ describe('native agent composer controls', () => {
     const surface = nativeSurfaceSource();
     const styles = stylesSource();
 
-    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, SendHorizontal, Square, StickyNote, X \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/import \{ channelsUpload \} from '..\/channels\/channelsClient\.js'/);
     expect(surface).toMatch(/composerInputHeightFromTopResize/);
     expect(surface).toMatch(/const NATIVE_AGENT_FILE_CHANNEL = 'agent-files'/);
@@ -250,13 +250,14 @@ describe('native agent composer controls', () => {
     expect(surface).toMatch(/nativeAgentFileButton/);
     expect(surface).toMatch(/type=\"file\"/);
     expect(surface).toMatch(/multiple/);
-    expect(surface).toMatch(/<Paperclip size=\{12\} aria-hidden=\"true\" \/>/);
+    expect(surface).toMatch(/<Paperclip size=\{14\} strokeWidth=\{2\.1\} aria-hidden=\"true\" \/>/);
     expect(surface).toMatch(/nativeAgentComposerInputWrap/);
     expect(surface).toMatch(/nativeAgentComposerRightActions/);
     expect(surface).toMatch(/<div className=\"nativeAgentComposerRightActions\">[\s\S]*nativeAgentSlashButton[\s\S]*nativeAgentFileButton[\s\S]*nativeAgentSend/);
     expect(surface).not.toMatch(/nativeAgentComposerLeftActions/);
     expect(surface).toMatch(/nativeAgentComposerIconButton/);
-    expect(surface).toMatch(/<SendHorizontal size=\{13\} aria-hidden=\"true\" \/>/);
+    expect(surface).toMatch(/<CornerDownLeft size=\{14\} strokeWidth=\{2\.1\} aria-hidden=\"true\" \/>/);
+    expect(surface).toMatch(/<Square className=\"nativeAgentStopGlyph\" size=\{14\} fill=\"currentColor\" strokeWidth=\{2\.1\} aria-hidden=\"true\" \/>/);
     expect(surface).toMatch(/onPaste=\{\(event\) => \{/);
     expect(surface).toMatch(/event\.dataTransfer\.files/);
     expect(surface).toMatch(/<ChannelMarkdown body=\{body\} channel=\{NATIVE_AGENT_FILE_CHANNEL\}/);
@@ -275,11 +276,25 @@ describe('native agent composer controls', () => {
     expect(inputWrapRule).toContain('border-radius: 0');
     expect(inputWrapRule).toContain('clip-path: polygon(7px 0, calc(100% - 7px) 0, 100% 7px, 100% calc(100% - 7px), calc(100% - 7px) 100%, 7px 100%, 0 calc(100% - 7px), 0 7px)');
     expect(inputWrapRule).toContain('display: grid');
-    expect(inputRule).toContain('padding: 8px 88px 8px 8px');
+    expect(inputRule).toContain('padding: 8px 96px 8px 8px');
     expect(rightActionsRule).toContain('right: 8px');
-    expect(buttonRule).toContain('width: 22px');
+    expect(rightActionsRule).toContain('gap: 3px');
+    expect(buttonRule).toContain('width: 24px');
+    expect(buttonRule).toContain('height: 24px');
+    expect(buttonRule).toContain('border: 1px solid color-mix');
+    expect(buttonRule).toContain('var(--desk-line)');
+    expect(buttonRule).toContain('var(--desk-text-dim)');
+    expect(buttonRule).not.toContain('--desk-border');
+    expect(buttonRule).toContain('border-radius: 3px');
     expect(buttonRule).toContain('justify-content: center');
-    expect(styles).toMatch(/\.nativeAgentSlashGlyph/);
+    const slashRule = cssBlock(styles, '.nativeAgentSlashGlyph');
+    expect(slashRule).toContain('width: 14px');
+    expect(slashRule).toContain('height: 14px');
+    expect(slashRule).toContain('display: inline-grid');
+    expect(slashRule).toContain('place-items: center');
+    expect(styles).toMatch(/\.nativeAgentComposerIconButton svg/);
+    expect(styles).toMatch(/\.nativeAgentComposerIconButton:active:not\(:disabled\)/);
+    expect(styles).toMatch(/\.nativeAgentStopGlyph/);
     expect(styles).toMatch(/\.nativeAgentPaletteEmpty/);
     expect(paletteRule).not.toContain('overflow-y');
     expect(paletteRule).not.toContain('max-height');

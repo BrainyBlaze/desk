@@ -5739,7 +5739,7 @@ button.layoutBadge:hover:not(:disabled) {
   font: inherit;
   font-size: 13px;
   line-height: 1.45;
-  padding: 8px 88px 8px 8px;
+  padding: 8px 96px 8px 8px;
   border-radius: inherit;
   min-height: 32px;
   max-height: 240px;
@@ -5754,40 +5754,58 @@ button.layoutBadge:hover:not(:disabled) {
   bottom: 6px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   z-index: 1;
   right: 8px;
 }
 
 .nativeAgentComposerIconButton {
-  width: 22px;
-  min-width: 22px;
-  height: 22px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: 0;
-  color: color-mix(in srgb, currentColor 82%, var(--desk-accent, #66aaff) 18%);
+  background: color-mix(in srgb, var(--desk-text-dim) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--desk-line) 72%, transparent);
+  color: color-mix(in srgb, var(--desk-text-dim) 78%, var(--desk-accent) 22%);
   padding: 0;
   cursor: pointer;
-  border-radius: 999px;
-  transition: background 0.12s ease, color 0.12s ease;
+  border-radius: 3px;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.08s ease;
 }
 
 .nativeAgentSlashGlyph {
-  display: inline-block;
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
   font-family: var(--desk-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1;
 }
 
+.nativeAgentComposerIconButton svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.nativeAgentStopGlyph {
+  transform: scale(0.82);
+  transform-origin: center;
+}
+
 .nativeAgentComposerIconButton:hover:not(:disabled),
 .nativeAgentComposerIconButton:focus-visible {
-  background: color-mix(in srgb, var(--desk-accent, #66aaff) 14%, transparent);
-  color: var(--desk-accent, #66aaff);
+  background: color-mix(in srgb, var(--desk-accent) 13%, transparent);
+  border-color: color-mix(in srgb, var(--desk-accent) 42%, var(--desk-line));
+  color: var(--desk-accent);
   outline: none;
+}
+
+.nativeAgentComposerIconButton:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .nativeAgentComposerIconButton:disabled {
@@ -5809,13 +5827,26 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentSend {
-  background: color-mix(in srgb, var(--desk-accent, #66aaff) 20%, transparent);
-  color: var(--desk-accent, #66aaff);
+  background: color-mix(in srgb, var(--desk-accent) 20%, transparent);
+  border-color: color-mix(in srgb, var(--desk-accent) 44%, var(--desk-line));
+  color: var(--desk-accent);
   font-weight: 700;
 }
 
 .nativeAgentSend:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--desk-accent, #66aaff) 30%, transparent);
+  background: color-mix(in srgb, var(--desk-accent) 27%, transparent);
+  border-color: color-mix(in srgb, var(--desk-accent) 62%, var(--desk-line));
+}
+
+.nativeAgentSend.nativeAgentSendStop {
+  background: color-mix(in srgb, var(--desk-error) 18%, transparent);
+  border-color: color-mix(in srgb, var(--desk-error) 42%, var(--desk-line));
+  color: var(--desk-error);
+}
+
+.nativeAgentSend.nativeAgentSendStop:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--desk-error) 30%, transparent);
+  border-color: color-mix(in srgb, var(--desk-error) 60%, var(--desk-line));
 }
 
 .nativeAgentSend:disabled {
