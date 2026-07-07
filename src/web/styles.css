@@ -5712,6 +5712,7 @@ button.layoutBadge:hover:not(:disabled) {
   min-width: 0;
   border: 1px solid color-mix(in srgb, var(--desk-border, #2a3441) 82%, transparent);
   border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
   background: color-mix(in srgb, var(--desk-bg, #0b0e14) 92%, var(--desk-accent, #66aaff) 4%);
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }

@@ -245,6 +245,7 @@ describe('native agent composer controls', () => {
     expect(handleRule).toContain('cursor: ns-resize');
     expect(handleRule).toContain('height: 5px');
     expect(inputWrapRule).toContain('border-radius: 0');
+    expect(inputWrapRule).toContain('clip-path: polygon(7px 0');
     expect(inputWrapRule).toContain('display: grid');
     expect(leftActionsRule).toContain('left: 8px');
     expect(rightActionsRule).toContain('right: 8px');
