@@ -11,4 +11,12 @@ describe('native agent grid visibility', () => {
     expect(source).not.toMatch(/agentSurfaceClient\.subscribe\(surfaceId, session, focused, handlers\)/);
     expect(source).not.toMatch(/agentSurfaceClient\.setVisibility\(surfaceId, focused\)/);
   });
+
+  it('treats a broker snapshot as live after page reload', () => {
+    const source = nativeSurfaceSource();
+
+    expect(source).toMatch(
+      /onSnapshot: \(\{ state, events \}\) => \{[\s\S]*?setPipelineLive\(true\);[\s\S]*?setModel\(rowsFromSnapshot\(events, state\)\);/
+    );
+  });
 });

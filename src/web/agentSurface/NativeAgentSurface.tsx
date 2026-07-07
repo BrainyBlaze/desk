@@ -144,6 +144,7 @@ export function NativeAgentSurface({
       onSnapshot: ({ state, events }) => {
         if (disposed) return;
         setAwaitingResponse(false);
+        setPipelineLive(true);
         setModel(rowsFromSnapshot(events, state));
         // session-info lives in the ring: a fresh page load must recover the
         // model badge and the command palette from the snapshot, not only from
