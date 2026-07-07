@@ -426,7 +426,6 @@ export function HelpIcon({ text }: { text: string }): JSX.Element {
         className="iconButton helpIconButton"
         type="button"
         aria-label="Help"
-        title={text}
         style={{ clipPath: CLIP_OCTAGON_TINY }}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
