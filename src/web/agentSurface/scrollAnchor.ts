@@ -14,17 +14,6 @@ export interface NativeFocusAnchorScrollOptions {
   maxPasses?: number;
 }
 
-export interface NativeFeedScrollGeometry {
-  scrollHeight: number;
-  scrollTop: number;
-  clientHeight: number;
-}
-
-export function isNativeFeedDetachedFromBottom(geometry: NativeFeedScrollGeometry, threshold = 80): boolean {
-  const bottomGap = Math.max(0, geometry.scrollHeight - geometry.scrollTop - geometry.clientHeight);
-  return bottomGap >= threshold;
-}
-
 export function resolveNativeFocusAnchorIndex(
   items: AgentFeedItem[],
   state: NativeFocusAnchorState
@@ -35,6 +24,10 @@ export function resolveNativeFocusAnchorIndex(
   const lastSeen = Math.max(0, Math.min(state.lastSeenRowCount, state.rowCount));
   if (lastSeen > 0 && state.rowCount > lastSeen) {
     const firstUnreadItem = items.findIndex((item) => item.lastRowIndex >= lastSeen);
+    if (firstUnreadItem === 0) {
+      // Everything on screen is unread: land at the top, not the latest.
+      return 0;
+    }
     if (firstUnreadItem > 0) {
       return firstUnreadItem - 1;
     }

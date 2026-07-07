@@ -10,11 +10,7 @@ import {
   agentSurfaceClient,
   type SurfaceHandlers
 } from './agentSurfaceClient.js';
-import {
-  isNativeFeedDetachedFromBottom,
-  resolveNativeFocusAnchorIndex,
-  settleNativeFocusAnchorScroll
-} from './scrollAnchor.js';
+import { resolveNativeFocusAnchorIndex } from './scrollAnchor.js';
 import {
   applyEvent as applyEventToModel,
   buildAgentFeedItems,
@@ -132,13 +128,6 @@ export function NativeAgentSurface({
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const slashPointerHandledRef = useRef(false);
   const focusAnchorPendingRef = useRef(false);
-  const visibleRef = useRef(visible);
-  const focusedRef = useRef(focused);
-  const geometryCollapsedRef = useRef(false);
-  const [geometryRevision, setGeometryRevision] = useState(0);
-  const [detachedFromLatest, setDetachedFromLatest] = useState(false);
-  visibleRef.current = visible;
-  focusedRef.current = focused;
 
   // Subscribe to the broker.
   useEffect(() => {
@@ -243,14 +232,20 @@ export function NativeAgentSurface({
   // while focused the stored count tracks the transcript so the next away-and-
   // back shows only what actually arrived in between.
   const [unreadMarkerIndex, setUnreadMarkerIndex] = useState<number | null>(null);
+  const prevVisibleRef = useRef(false);
   useEffect(() => {
-    if (visible && focused) {
+    // Key on the hidden->shown EDGE of the cell itself: group and subsystem
+    // switches hide via display:none without touching focus or selection, so
+    // anchoring must not depend on either. Every cell in the returning group
+    // re-anchors; a focus click inside an already-visible group must not.
+    if (visible && !prevVisibleRef.current) {
       focusAnchorPendingRef.current = true;
       const lastSeen = lastSeenRowCounts.get(session) ?? 0;
       setUnreadMarkerIndex(model.rows.length > lastSeen && lastSeen > 0 ? lastSeen : null);
     }
-    // Falling out of focus freezes the stored count at whatever was last seen.
-  }, [visible, focused, session]);
+    prevVisibleRef.current = visible;
+    // Falling hidden freezes the stored count at whatever was last seen.
+  }, [visible, session]);
 
   const feedItems = useMemo(
     () => buildAgentFeedItems(model.rows, { expandedTurnIds }),
@@ -264,7 +259,10 @@ export function NativeAgentSurface({
     count: feedItems.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 58,
-    overscan: 8
+    overscan: 8,
+    // display:none collapses every observed box to 0; without this the item
+    // size cache gets poisoned with zeros while the cell is hidden.
+    enabled: visible
   });
   const virtualItems = virtualizer.getVirtualItems();
   const totalVirtualSize = virtualizer.getTotalSize();
@@ -279,7 +277,6 @@ export function NativeAgentSurface({
       const current = scrollRef.current;
       if (current) current.scrollTop = current.scrollHeight;
     });
-    setDetachedFromLatest(false);
   };
 
   const jumpToLatest = () => {
@@ -287,40 +284,21 @@ export function NativeAgentSurface({
     if (!el) return;
     scrollToLatest();
     followingRef.current = true;
+    setDetached(false);
     setUnseenCount(0);
-    setDetachedFromLatest(false);
   };
 
+  const [detached, setDetached] = useState(false);
   const handleFeedScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const detached = isNativeFeedDetachedFromBottom(el);
-    followingRef.current = !detached;
-    setDetachedFromLatest(detached);
-    if (!detached && unseenCount !== 0) {
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    followingRef.current = nearBottom;
+    setDetached(!nearBottom);
+    if (nearBottom && unseenCount !== 0) {
       setUnseenCount(0);
     }
   };
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver((entries) => {
-      const height = entries[0]?.contentRect.height ?? el.clientHeight;
-      if (height <= 0) {
-        geometryCollapsedRef.current = true;
-        return;
-      }
-      setDetachedFromLatest(isNativeFeedDetachedFromBottom(el));
-      if (!geometryCollapsedRef.current) return;
-      geometryCollapsedRef.current = false;
-      if (!visibleRef.current || !focusedRef.current) return;
-      focusAnchorPendingRef.current = true;
-      setGeometryRevision((revision) => revision + 1);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -336,7 +314,6 @@ export function NativeAgentSurface({
       scrollToLatest();
       followingRef.current = true;
       if (unseenCount !== 0) setUnseenCount(0);
-      setDetachedFromLatest(false);
       return;
     }
     // Reading history: keep the view still, count what arrived below.
@@ -345,8 +322,35 @@ export function NativeAgentSurface({
     }
   }, [visible, model.rows, pendingAssistant, model.pendingPermission]);
 
+  /**
+   * Anchor application is driven by GEOMETRY, not frames: the hidden cell's
+   * scroll box collapsed to 0x0 and the browser clamped scrollTop, so the
+   * anchor scroll must be re-asserted as the element regains height and the
+   * virtualizer replaces estimated sizes with measured ones. Each measurement
+   * wave re-invokes the applier (via the totalSize effect and the element
+   * ResizeObserver below) until the offset is stable on real geometry.
+   */
+  const activeAnchorRef = useRef<{ target: number; latest: number; lastOffset: number | null; passes: number } | null>(null);
+  const applyActiveAnchor = useCallback((): void => {
+    const anchor = activeAnchorRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el) return;
+    if (el.clientHeight === 0) return; // still collapsed — the observer re-fires on restore
+    anchor.passes += 1;
+    virtualizer.scrollToIndex(anchor.target, { align: 'end' });
+    if (anchor.target === anchor.latest) {
+      el.scrollTop = el.scrollHeight;
+    }
+    const offset = el.scrollTop;
+    const settled = anchor.lastOffset !== null && Math.abs(offset - anchor.lastOffset) < 1;
+    anchor.lastOffset = offset;
+    if ((settled && el.scrollHeight > 0) || anchor.passes > 12) {
+      activeAnchorRef.current = null;
+    }
+  }, [virtualizer]);
+
   useEffect(() => {
-    if (!visible || !focused || !focusAnchorPendingRef.current || feedItems.length === 0) {
+    if (!visible || !focusAnchorPendingRef.current || feedItems.length === 0) {
       return;
     }
     const lastSeen = lastSeenRowCounts.get(session) ?? 0;
@@ -356,24 +360,42 @@ export function NativeAgentSurface({
       return;
     }
     setUnreadMarkerIndex(rowCount > lastSeen && lastSeen > 0 ? lastSeen : null);
-    settleNativeFocusAnchorScroll({
-      targetIndex,
-      latestIndex: feedItems.length - 1,
-      scrollToIndex: (index, options) => virtualizer.scrollToIndex(index, options),
-      getScrollElement: () => scrollRef.current
-    });
+    activeAnchorRef.current = { target: targetIndex, latest: feedItems.length - 1, lastOffset: null, passes: 0 };
+    applyActiveAnchor();
     const unseen = lastSeen > 0 ? Math.max(0, rowCount - lastSeen) : 0;
     followingRef.current = unseen === 0;
+    setDetached(unseen > 0);
     setUnseenCount(unseen);
-    setDetachedFromLatest(unseen > 0);
+    // Keep the follow effect's baseline in sync or the next arrival would
+    // count the anchored-past rows a second time (double pill).
+    prevRowCountRef.current = rowCount;
     focusAnchorPendingRef.current = false;
-  }, [feedItems, visible, focused, geometryRevision, model.rows.length, session, virtualizer]);
+  }, [feedItems, visible, model.rows.length, session, virtualizer, applyActiveAnchor]);
+
+  // Re-assert the pending anchor whenever the virtualizer's measured content
+  // size changes (estimated sizes being replaced by measured ones).
+  useEffect(() => {
+    if (activeAnchorRef.current) applyActiveAnchor();
+  }, [totalVirtualSize, applyActiveAnchor]);
+
+  // ...and whenever the scroll element itself regains a box after display:none.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (activeAnchorRef.current) applyActiveAnchor();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [applyActiveAnchor]);
 
   useEffect(() => {
-    if (visible && focused && model.rows.length > 0 && !focusAnchorPendingRef.current) {
+    // Rows rendered in a visible cell are seen — focus is not required to read
+    // a grid. Hidden cells freeze, so away-and-back anchors at true last-seen.
+    if (visible && model.rows.length > 0 && !focusAnchorPendingRef.current) {
       touchSessionMemo(lastSeenRowCounts, session, model.rows.length);
     }
-  }, [visible, focused, session, model.rows.length]);
+  }, [visible, session, model.rows.length]);
 
   const canSend = pipelineLive && model.status === 'idle' && input.trim().length > 0;
   const sendLabel = !pipelineLive
@@ -508,7 +530,6 @@ export function NativeAgentSurface({
   // dead-still for the whole tool duration.
   const showAgentThinking =
     awaitingResponse || model.status === 'processing' || model.status === 'tool-executing';
-  const showJumpToLatest = unseenCount > 0 || detachedFromLatest;
 
   return (
     <div className="nativeAgentSurface">
@@ -573,9 +594,9 @@ export function NativeAgentSurface({
           </div>
         ) : null}
       </div>
-      {showJumpToLatest ? (
+      {unseenCount > 0 || detached ? (
         <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
-          {unseenCount > 0 ? `${unseenCount} new message${unseenCount === 1 ? '' : 's'} ↓` : 'Jump to latest ↓'}
+          {unseenCount > 0 ? `${unseenCount} new message${unseenCount === 1 ? '' : 's'} ↓` : 'jump to latest ↓'}
         </button>
       ) : null}
       {model.pendingPermission ? (

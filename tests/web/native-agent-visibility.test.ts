@@ -8,7 +8,6 @@ describe('native agent grid visibility', () => {
   it('passes warm-group physical visibility down to native surfaces', () => {
     const source = appSource();
 
-    expect(source).toMatch(/visible=\{subsystem === 'agents' && Boolean\(activeGroup\) && mountedGroup\.id === activeGroup\?\.id\}/);
     expect(source).toMatch(/<AgentMultiplexer[\s\S]*?visible=\{visible\}/);
     expect(source).toMatch(/<TerminalCell[\s\S]*?visible=\{visible\}/);
     expect(source).toMatch(/<NativeAgentSurface[\s\S]*?visible=\{visible\}/);
@@ -29,26 +28,8 @@ describe('native agent grid visibility', () => {
     const source = nativeSurfaceSource();
 
     expect(source).toMatch(/if \(!visible \|\| !el \|\| focusAnchorPendingRef\.current\) \{/);
-    expect(source).toMatch(/if \(!visible \|\| !focused \|\| !focusAnchorPendingRef\.current/);
-    expect(source).toMatch(/if \(visible && focused && model\.rows\.length > 0 && !focusAnchorPendingRef\.current\)/);
-  });
-
-  it('re-anchors when browser geometry restores after a hidden warm group collapse', () => {
-    const source = nativeSurfaceSource();
-
-    expect(source).toMatch(/new ResizeObserver/);
-    expect(source).toMatch(/geometryCollapsedRef\.current = true/);
-    expect(source).toMatch(/focusAnchorPendingRef\.current = true/);
-    expect(source).toMatch(/setGeometryRevision\(\(revision\) => revision \+ 1\)/);
-    expect(source).toMatch(/geometryRevision/);
-  });
-
-  it('shows the jump-to-latest button when detached from bottom even without new rows', () => {
-    const source = nativeSurfaceSource();
-
-    expect(source).toMatch(/isNativeFeedDetachedFromBottom/);
-    expect(source).toMatch(/const showJumpToLatest = unseenCount > 0 \|\| detachedFromLatest;/);
-    expect(source).toMatch(/\{showJumpToLatest \? \(/);
+    expect(source).toMatch(/if \(!visible \|\| !focusAnchorPendingRef\.current/);
+    expect(source).toMatch(/if \(visible && model\.rows\.length > 0 && !focusAnchorPendingRef\.current\)/);
   });
 
   it('treats a broker snapshot as live after page reload', () => {

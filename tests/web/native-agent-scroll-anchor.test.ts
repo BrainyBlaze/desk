@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  isNativeFeedDetachedFromBottom,
-  resolveNativeFocusAnchorIndex,
-  settleNativeFocusAnchorScroll
-} from '../../src/web/agentSurface/scrollAnchor.js';
+import { resolveNativeFocusAnchorIndex, settleNativeFocusAnchorScroll } from '../../src/web/agentSurface/scrollAnchor.js';
 import type { AgentFeedItem } from '../../src/web/agentSurface/rowsModel.js';
 
 const rowItem = (rowIndex: number): AgentFeedItem => ({
@@ -81,13 +77,5 @@ describe('native agent focus scroll anchor', () => {
     expect(scrollToIndex).toHaveBeenCalledWith(9, { align: 'end' });
     expect(scrollEl.scrollTop).toBe(1200);
     expect(frames).toHaveLength(0);
-  });
-
-  it('detects when the native feed is detached from the physical bottom', () => {
-    expect(isNativeFeedDetachedFromBottom({ scrollHeight: 1200, scrollTop: 1000, clientHeight: 100 })).toBe(true);
-  });
-
-  it('keeps the native feed attached within the bottom threshold', () => {
-    expect(isNativeFeedDetachedFromBottom({ scrollHeight: 1200, scrollTop: 1025, clientHeight: 100 })).toBe(false);
   });
 });
