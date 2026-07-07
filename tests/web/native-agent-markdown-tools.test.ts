@@ -35,8 +35,11 @@ describe('native agent thinking indicator', () => {
     expect(source).toMatch(/onSnapshot: \(\{ state, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onError: \(_code, message\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onExit: \(\) => \{[\s\S]*setAwaitingResponse\(false\);/);
-    expect(source).toMatch(/const showAgentThinking =\s*pendingAssistantEntries\.length === 0 &&/);
-    expect(source).toMatch(/\(awaitingResponse \|\| model\.status === 'processing' \|\| model\.status === 'tool-executing'\)/);
+    expect(source).toMatch(/const showAgentThinking =\s*awaitingResponse \|\| model\.status === 'processing' \|\| model\.status === 'tool-executing';/);
+    // The indicator must NOT be gated on pending assistant text: a tool call
+    // that runs after a partial assistant message left the transcript dead-still
+    // for the whole tool duration (the operator's 15:41/15:51 report).
+    expect(source).not.toMatch(/pendingAssistantEntries\.length === 0 &&\s*\(awaitingResponse/);
     expect(source).toMatch(/\{showAgentThinking \? \(/);
     expect(source).toMatch(/aria-label=\"agent is thinking\"/);
   });

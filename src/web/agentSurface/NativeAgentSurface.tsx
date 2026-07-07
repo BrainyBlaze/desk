@@ -440,9 +440,11 @@ export function NativeAgentSurface({
     () => [...pendingAssistant.entries()].map(([turnId, text]) => ({ turnId, text })),
     [pendingAssistant]
   );
+  // Deliberately NOT gated on pendingAssistantEntries: a tool call that runs
+  // after a partial assistant message would otherwise leave the transcript
+  // dead-still for the whole tool duration.
   const showAgentThinking =
-    pendingAssistantEntries.length === 0 &&
-    (awaitingResponse || model.status === 'processing' || model.status === 'tool-executing');
+    awaitingResponse || model.status === 'processing' || model.status === 'tool-executing';
 
   return (
     <div className="nativeAgentSurface">

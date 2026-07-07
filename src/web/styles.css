@@ -5541,16 +5541,19 @@ button.layoutBadge:hover:not(:disabled) {
   filter: brightness(1.25);
 }
 
-/* UX item 1: working indicator — quiet pulse while the agent hasn't streamed yet. */
+/* UX item 1: working indicator — pulses for the whole working state so the
+   transcript is never dead-still mid-turn. Carries the assistant accent bar
+   so it reads as "the assistant's next row is coming". */
 .nativeAgentRow.working {
-  padding: 2px 8px;
-  opacity: 0.7;
+  padding: 4px 8px 4px 10px;
+  border-left: 2px solid rgba(143, 212, 143, 0.45);
+  margin-right: 24px;
 }
 
 .nativeAgentWorkingDots {
   display: inline-flex;
-  gap: 4px;
-  font-size: 18px;
+  gap: 5px;
+  font-size: 22px;
   line-height: 1;
   color: var(--desk-accent, #66ddee);
 }
@@ -6281,6 +6284,11 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentVirtualSpacer {
   position: relative;
   width: 100%;
+  /* The feed is a flex column: without this the explicit pixel height gets
+     flex-shrunk to the viewport, and every sibling after the spacer (pending
+     stream, thinking dots, error banners) flows thousands of px above the
+     scrolled viewport — permanently invisible. */
+  flex-shrink: 0;
 }
 
 .nativeAgentVirtualItem {
