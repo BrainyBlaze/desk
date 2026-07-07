@@ -10,7 +10,11 @@ import {
   agentSurfaceClient,
   type SurfaceHandlers
 } from './agentSurfaceClient.js';
-import { resolveNativeFocusAnchorIndex, settleNativeFocusAnchorScroll } from './scrollAnchor.js';
+import {
+  isNativeFeedDetachedFromBottom,
+  resolveNativeFocusAnchorIndex,
+  settleNativeFocusAnchorScroll
+} from './scrollAnchor.js';
 import {
   applyEvent as applyEventToModel,
   buildAgentFeedItems,
@@ -128,6 +132,13 @@ export function NativeAgentSurface({
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const slashPointerHandledRef = useRef(false);
   const focusAnchorPendingRef = useRef(false);
+  const visibleRef = useRef(visible);
+  const focusedRef = useRef(focused);
+  const geometryCollapsedRef = useRef(false);
+  const [geometryRevision, setGeometryRevision] = useState(0);
+  const [detachedFromLatest, setDetachedFromLatest] = useState(false);
+  visibleRef.current = visible;
+  focusedRef.current = focused;
 
   // Subscribe to the broker.
   useEffect(() => {
@@ -268,6 +279,7 @@ export function NativeAgentSurface({
       const current = scrollRef.current;
       if (current) current.scrollTop = current.scrollHeight;
     });
+    setDetachedFromLatest(false);
   };
 
   const jumpToLatest = () => {
@@ -276,17 +288,39 @@ export function NativeAgentSurface({
     scrollToLatest();
     followingRef.current = true;
     setUnseenCount(0);
+    setDetachedFromLatest(false);
   };
 
   const handleFeedScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    followingRef.current = nearBottom;
-    if (nearBottom && unseenCount !== 0) {
+    const detached = isNativeFeedDetachedFromBottom(el);
+    followingRef.current = !detached;
+    setDetachedFromLatest(detached);
+    if (!detached && unseenCount !== 0) {
       setUnseenCount(0);
     }
   };
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height ?? el.clientHeight;
+      if (height <= 0) {
+        geometryCollapsedRef.current = true;
+        return;
+      }
+      setDetachedFromLatest(isNativeFeedDetachedFromBottom(el));
+      if (!geometryCollapsedRef.current) return;
+      geometryCollapsedRef.current = false;
+      if (!visibleRef.current || !focusedRef.current) return;
+      focusAnchorPendingRef.current = true;
+      setGeometryRevision((revision) => revision + 1);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -302,6 +336,7 @@ export function NativeAgentSurface({
       scrollToLatest();
       followingRef.current = true;
       if (unseenCount !== 0) setUnseenCount(0);
+      setDetachedFromLatest(false);
       return;
     }
     // Reading history: keep the view still, count what arrived below.
@@ -330,8 +365,9 @@ export function NativeAgentSurface({
     const unseen = lastSeen > 0 ? Math.max(0, rowCount - lastSeen) : 0;
     followingRef.current = unseen === 0;
     setUnseenCount(unseen);
+    setDetachedFromLatest(unseen > 0);
     focusAnchorPendingRef.current = false;
-  }, [feedItems, visible, focused, model.rows.length, session, virtualizer]);
+  }, [feedItems, visible, focused, geometryRevision, model.rows.length, session, virtualizer]);
 
   useEffect(() => {
     if (visible && focused && model.rows.length > 0 && !focusAnchorPendingRef.current) {
@@ -472,6 +508,7 @@ export function NativeAgentSurface({
   // dead-still for the whole tool duration.
   const showAgentThinking =
     awaitingResponse || model.status === 'processing' || model.status === 'tool-executing';
+  const showJumpToLatest = unseenCount > 0 || detachedFromLatest;
 
   return (
     <div className="nativeAgentSurface">
@@ -536,9 +573,9 @@ export function NativeAgentSurface({
           </div>
         ) : null}
       </div>
-      {unseenCount > 0 ? (
+      {showJumpToLatest ? (
         <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
-          {unseenCount} new message{unseenCount === 1 ? '' : 's'} ↓
+          {unseenCount > 0 ? `${unseenCount} new message${unseenCount === 1 ? '' : 's'} ↓` : 'Jump to latest ↓'}
         </button>
       ) : null}
       {model.pendingPermission ? (

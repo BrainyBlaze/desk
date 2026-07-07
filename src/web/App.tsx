@@ -2181,7 +2181,7 @@ export function App(): JSX.Element {
                           <MountedMux
                             key={mountedGroup.id}
                             group={mountedGroup}
-                            visible={Boolean(activeGroup) && mountedGroup.id === activeGroup?.id}
+                            visible={subsystem === 'agents' && Boolean(activeGroup) && mountedGroup.id === activeGroup?.id}
                             assignments={cellAssignments[mountedGroup.id] ?? EMPTY_CELL_MAP}
                             activeByCell={cellActiveSessions[mountedGroup.id] ?? EMPTY_ACTIVE_MAP}
                             selectedTmux={selectedTmux}

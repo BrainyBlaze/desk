@@ -14,6 +14,17 @@ export interface NativeFocusAnchorScrollOptions {
   maxPasses?: number;
 }
 
+export interface NativeFeedScrollGeometry {
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+}
+
+export function isNativeFeedDetachedFromBottom(geometry: NativeFeedScrollGeometry, threshold = 80): boolean {
+  const bottomGap = Math.max(0, geometry.scrollHeight - geometry.scrollTop - geometry.clientHeight);
+  return bottomGap >= threshold;
+}
+
 export function resolveNativeFocusAnchorIndex(
   items: AgentFeedItem[],
   state: NativeFocusAnchorState
