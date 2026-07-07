@@ -14,12 +14,12 @@ function cssBlock(source: string, selector: string): string {
 }
 
 describe('native agent markdown rendering', () => {
-  it('renders committed and pending assistant text through the markdown renderer', () => {
+  it('renders committed and pending message text through the markdown renderer', () => {
     const source = nativeSurfaceSource();
 
     expect(source).toMatch(/const ChannelMarkdown = lazy/);
     expect(source).toMatch(/function AgentMarkdown/);
-    expect(source).toMatch(/<AgentMarkdown body=\{row\.text\} \/>/);
+    expect(source.match(/<AgentMarkdown body=\{row\.text\} \/>/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(source).toMatch(/<AgentMarkdown body=\{text\} \/>/);
     expect(source).not.toMatch(/<span className="nativeAgentText">\{text\}<\/span>/);
   });
@@ -75,7 +75,7 @@ describe('native agent Phase B tool state clarity', () => {
   it('uses compact status glyphs and hides subsecond elapsed noise in tool badges', () => {
     const source = nativeSurfaceSource();
 
-    expect(source).toMatch(/import \{ Check, Copy, StickyNote, X \} from 'lucide-react'/);
+    expect(source).toMatch(/import \{ Check, Copy, Paperclip, Slash, StickyNote, X \} from 'lucide-react'/);
     expect(source).toMatch(/function ToolStatusGlyph/);
     expect(source).toMatch(/aria-label="tool done"/);
     expect(source).toMatch(/aria-label="tool failed"/);
@@ -159,7 +159,7 @@ describe('native agent message actions and notes', () => {
     const surface = nativeSurfaceSource();
     const styles = stylesSource();
 
-    expect(surface).toMatch(/import \{ Check, Copy, StickyNote, X \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, Slash, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/<Copy size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/<StickyNote size=\{14\} aria-hidden="true" \/>/);
     expect(surface).toMatch(/aria-label=\{copyActionLabel\}/);
@@ -195,5 +195,46 @@ describe('native agent message actions and notes', () => {
     expect(styles).toMatch(/flex-shrink: 0/);
     expect(styles).toMatch(/\.nativeAgentPayloadPreviewLine/);
     expect(styles).toMatch(/min-width: 0/);
+  });
+});
+
+describe('native agent composer controls', () => {
+  it('mirrors channel composer resize and upload affordances', () => {
+    const surface = nativeSurfaceSource();
+    const styles = stylesSource();
+
+    expect(surface).toMatch(/import \{ Check, Copy, Paperclip, Slash, StickyNote, X \} from 'lucide-react'/);
+    expect(surface).toMatch(/import \{ channelsUpload \} from '..\/channels\/channelsClient\.js'/);
+    expect(surface).toMatch(/composerInputHeightFromTopResize/);
+    expect(surface).toMatch(/const NATIVE_AGENT_FILE_CHANNEL = 'agent-files'/);
+    expect(surface).toMatch(/const uploadNativeFiles = async/);
+    expect(surface).toMatch(/channelsUpload\(NATIVE_AGENT_FILE_CHANNEL, file\.name, btoa\(binary\)\)/);
+    expect(surface).toMatch(/className=\"nativeAgentComposerResizeHandle\"/);
+    expect(surface).toMatch(/aria-label=\"Resize native agent input\"/);
+    expect(surface).toMatch(/style=\{manualInputHeight \? \{ height: `\$\{manualInputHeight\}px` \} : undefined\}/);
+    expect(surface).toMatch(/nativeAgentSlashButton/);
+    expect(surface).toMatch(/aria-label=\"Open slash commands\"/);
+    expect(surface).toMatch(/<Slash size=\{14\} aria-hidden=\"true\" \/>/);
+    expect(surface).toMatch(/nativeAgentFileButton/);
+    expect(surface).toMatch(/type=\"file\"/);
+    expect(surface).toMatch(/multiple/);
+    expect(surface).toMatch(/<Paperclip size=\{14\} aria-hidden=\"true\" \/>/);
+    expect(surface).toMatch(/onPaste=\{\(event\) => \{/);
+    expect(surface).toMatch(/event\.dataTransfer\.files/);
+    expect(surface).toMatch(/<ChannelMarkdown body=\{body\} channel=\{NATIVE_AGENT_FILE_CHANNEL\}/);
+
+    const composerRule = cssBlock(styles, '.nativeAgentComposer');
+    const handleRule = cssBlock(styles, '.nativeAgentComposerResizeHandle');
+    const actionsRule = cssBlock(styles, '.nativeAgentComposerActions');
+    const buttonRule = cssBlock(styles, '.nativeAgentComposerButton');
+
+    expect(composerRule).toContain('position: relative');
+    expect(handleRule).toContain('cursor: ns-resize');
+    expect(handleRule).toContain('height: 6px');
+    expect(actionsRule).toContain('flex: 0 0 auto');
+    expect(buttonRule).toContain('width: 32px');
+    expect(buttonRule).toContain('justify-content: center');
+    expect(styles).toMatch(/\.nativeAgentComposer\.dragOver/);
+    expect(styles).toMatch(/\.nativeAgentComposerStatus/);
   });
 });

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
-import type { MouseEvent as ReactMouseEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Check, Copy, StickyNote, X } from 'lucide-react';
+import { Check, Copy, Paperclip, Slash, StickyNote, X } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -20,6 +20,8 @@ import {
   type PendingPermission,
   type RowModel
 } from './rowsModel.js';
+import { channelsUpload } from '../channels/channelsClient.js';
+import { composerInputHeightFromTopResize } from '../channels/channelsModel.js';
 
 // Reuse the channels markdown renderer (spec §9: ChannelMarkdown). Lazy-loaded +
 // memoized for code-splitting, same pattern as MessageList. AgentMarkdown wrapper
@@ -45,6 +47,10 @@ type MessageMenuHandler = (text: string, x: number, y: number) => void;
 type CreateNoteHandler = (text: string) => void;
 type CopyState = 'idle' | 'copied' | 'failed';
 const COPY_TIMEOUT_MS = 800;
+const NATIVE_AGENT_FILE_CHANNEL = 'agent-files';
+const NATIVE_AGENT_INPUT_MIN_HEIGHT = 32;
+const NATIVE_AGENT_INPUT_MAX_HEIGHT = 240;
+const NATIVE_AGENT_KEY_RESIZE_STEP = 12;
 
 /**
  * Per-session composer drafts, module-level so they survive the keep-alive
@@ -75,12 +81,21 @@ export function NativeAgentSurface({
   const [agentCommands, setAgentCommands] = useState<Array<{ name: string; description?: string }>>([]);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [input, setInputState] = useState(() => composerDrafts.get(session) ?? '');
-  const setInput = (value: string): void => {
-    composerDrafts.set(session, value);
-    setInputState(value);
+  const setInput = (value: string | ((current: string) => string)): void => {
+    setInputState((current) => {
+      const next = typeof value === 'function' ? value(current) : value;
+      composerDrafts.set(session, next);
+      return next;
+    });
   };
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [manualInputHeight, setManualInputHeight] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const visibleRef = useRef(focused);
   visibleRef.current = focused;
 
@@ -263,6 +278,86 @@ export function NativeAgentSurface({
         ? 'Send'
         : 'Wait...';
 
+  const inputHeightBounds = (): { minHeight: number; maxHeight: number } => ({
+    minHeight: NATIVE_AGENT_INPUT_MIN_HEIGHT,
+    maxHeight: Math.min(NATIVE_AGENT_INPUT_MAX_HEIGHT, Math.max(NATIVE_AGENT_INPUT_MIN_HEIGHT, window.innerHeight * 0.45))
+  });
+
+  const currentInputHeight = (): number =>
+    inputRef.current?.getBoundingClientRect().height ?? manualInputHeight ?? NATIVE_AGENT_INPUT_MIN_HEIGHT;
+
+  const setClampedManualInputHeight = (height: number): void => {
+    setManualInputHeight(composerInputHeightFromTopResize(height, 0, 0, inputHeightBounds()));
+  };
+
+  const startResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault();
+    resizeRef.current = { startY: event.clientY, startHeight: currentInputHeight() };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Automated pointer events do not always create an active capture target.
+    }
+  };
+
+  const dragResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    event.preventDefault();
+    setManualInputHeight(composerInputHeightFromTopResize(resize.startHeight, resize.startY, event.clientY, inputHeightBounds()));
+  };
+
+  const finishResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    resizeRef.current = null;
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // See setPointerCapture guard above.
+    }
+  };
+
+  const resizeFromKeyboard = (delta: number): void => {
+    setClampedManualInputHeight(currentInputHeight() + delta);
+  };
+
+  const openSlashCommands = (): void => {
+    setPaletteIndex(0);
+    setInput((current) => {
+      if (current.startsWith('/') && !current.includes(' ')) return current;
+      return current.trim().length === 0 ? '/' : current;
+    });
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const uploadNativeFiles = async (files: FileList | File[]): Promise<void> => {
+    const list = [...files];
+    if (list.length === 0) return;
+    setUploading(true);
+    try {
+      const links: string[] = [];
+      for (const file of list) {
+        const buffer = await file.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const CHUNK = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+        }
+        const result = await channelsUpload(NATIVE_AGENT_FILE_CHANNEL, file.name, btoa(binary));
+        links.push(result.markdown);
+      }
+      setInput((current) => `${current}${current.length > 0 && !current.endsWith('\n') && !current.endsWith(' ') ? ' ' : ''}${links.join(' ')}`);
+      setErrorMsg(null);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'upload failed');
+    } finally {
+      setUploading(false);
+      inputRef.current?.focus();
+    }
+  };
+
   const handleSend = (): void => {
     if (!canSend) return;
     const text = input.trim();
@@ -395,11 +490,56 @@ export function NativeAgentSurface({
           <PermissionCard permission={model.pendingPermission} onRespond={handlePermission} />
         </div>
       ) : null}
-      <div className="nativeAgentComposer">
+      <div
+        className={`nativeAgentComposer ${dragOver ? 'dragOver' : ''}`}
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes('Files')) {
+            event.preventDefault();
+            setDragOver(true);
+          }
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragOver(false);
+          void uploadNativeFiles(event.dataTransfer.files);
+        }}
+      >
+        <button
+          type="button"
+          className="nativeAgentComposerResizeHandle"
+          aria-label="Resize native agent input"
+          title="Drag to resize native agent input"
+          onPointerDown={startResize}
+          onPointerMove={dragResize}
+          onPointerUp={finishResize}
+          onPointerCancel={finishResize}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              resizeFromKeyboard(NATIVE_AGENT_KEY_RESIZE_STEP);
+            } else if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              resizeFromKeyboard(-NATIVE_AGENT_KEY_RESIZE_STEP);
+            }
+          }}
+        />
         <textarea
+          ref={inputRef}
           className="nativeAgentInput"
           value={input}
+          style={manualInputHeight ? { height: `${manualInputHeight}px` } : undefined}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={(event) => {
+            const files = [...event.clipboardData.items]
+              .filter((item) => item.kind === 'file')
+              .map((item) => item.getAsFile())
+              .filter((file): file is File => file !== null);
+            if (files.length > 0) {
+              event.preventDefault();
+              void uploadNativeFiles(files);
+            }
+          }}
           onKeyDown={(e) => {
             const paletteOpen = input.startsWith('/') && !input.includes(' ') && agentCommands.length > 0;
             if (paletteOpen) {
@@ -440,22 +580,57 @@ export function NativeAgentSurface({
           placeholder="Send a message…"
           rows={2}
         />
-        {model.status === 'processing' || model.status === 'tool-executing' ? (
-          // UX item 5: while a turn runs, the composer's action slot IS the Stop
-          // control — the user's cursor and attention live here, not the header.
-          <button type="button" className="nativeAgentSend nativeAgentSendStop" onClick={handleInterrupt}>
-            Stop
-          </button>
-        ) : (
+        <div className="nativeAgentComposerActions">
           <button
             type="button"
-            className="nativeAgentSend"
-            onClick={handleSend}
-            disabled={!canSend}
+            className="nativeAgentComposerButton nativeAgentSlashButton"
+            aria-label="Open slash commands"
+            title="Open slash commands"
+            onClick={openSlashCommands}
           >
-            {sendLabel}
+            <Slash size={14} aria-hidden="true" />
           </button>
-        )}
+          <button
+            type="button"
+            className="nativeAgentComposerButton nativeAgentFileButton"
+            aria-label="Attach files"
+            title="Attach files"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+          >
+            <Paperclip size={14} aria-hidden="true" />
+          </button>
+          <input
+            ref={fileInputRef}
+            className="nativeAgentFileInput"
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              if (event.target.files) {
+                void uploadNativeFiles(event.target.files);
+                event.target.value = '';
+              }
+            }}
+          />
+          {model.status === 'processing' || model.status === 'tool-executing' ? (
+            // UX item 5: while a turn runs, the composer's action slot IS the Stop
+            // control — the user's cursor and attention live here, not the header.
+            <button type="button" className="nativeAgentSend nativeAgentSendStop" onClick={handleInterrupt}>
+              Stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="nativeAgentSend"
+              onClick={handleSend}
+              disabled={!canSend || uploading}
+            >
+              {sendLabel}
+            </button>
+          )}
+        </div>
+        {uploading ? <div className="nativeAgentComposerStatus">uploading…</div> : null}
       </div>
     </div>
   );
@@ -541,7 +716,7 @@ function AgentRowView({
             <RowMeta row={row} fallbackAuthor="you" />
             <RowActions text={row.text} onCreateNote={onCreateNote} />
           </div>
-          <span className="nativeAgentText">{row.text}</span>
+          <AgentMarkdown body={row.text} />
         </div>
       );
     case 'assistant-message':
@@ -615,7 +790,7 @@ function CollapsiblePayloadRow({ row, onMessageMenu }: { row: AgentRow; onMessag
 function AgentMarkdown({ body }: { body: string }): JSX.Element {
   return (
     <Suspense fallback={<span className="nativeAgentText">{body}</span>}>
-      <ChannelMarkdown body={body} channel="" onOpenFile={() => undefined} />
+      <ChannelMarkdown body={body} channel={NATIVE_AGENT_FILE_CHANNEL} onOpenFile={() => undefined} />
     </Suspense>
   );
 }

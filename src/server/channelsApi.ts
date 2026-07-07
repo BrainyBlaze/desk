@@ -22,6 +22,7 @@ import {
   editChannelGoal,
   editMessage,
   ensureChannelsHome,
+  ensureUploadFileBucket,
   listChannelMembers,
   listChannels,
   readChannelDetail,
@@ -76,6 +77,7 @@ const CHANNEL_PAGE_INITIAL = 50;
 const CHANNEL_PAGE_MORE = 40;
 const CHANNEL_UNREAD_CONTEXT = 5;
 const REACTION_KINDS = new Set<ReactionKind>(['ack', 'seen', 'done', 'thumbs-up']);
+const UPLOAD_ONLY_CHANNELS = new Set(['agent-files']);
 
 interface ChannelsRuntime {
   home: string;
@@ -821,6 +823,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_UPLOAD_BYTES) {
         sendJson(res, 400, { error: `upload must be 1 byte – ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB` });
         return true;
+      }
+      if (UPLOAD_ONLY_CHANNELS.has(channel)) {
+        ensureUploadFileBucket(home, channel);
       }
       const saved = saveChannelFile(home, channel, name, bytes);
       sendJson(res, 200, { ok: true, file: saved, markdown: `[${saved}](_files/${saved})` });
