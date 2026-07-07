@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Check, Copy, Paperclip, Slash, StickyNote, X } from 'lucide-react';
+import { Check, Copy, Paperclip, SendHorizontal, Slash, StickyNote, X } from 'lucide-react';
 import type {
   AgentSurfaceEvent,
   AgentSurfaceState
@@ -79,6 +79,7 @@ export function NativeAgentSurface({
   const [pipelineLive, setPipelineLive] = useState(false);
   const [agentModel, setAgentModel] = useState<string | undefined>(undefined);
   const [agentCommands, setAgentCommands] = useState<Array<{ name: string; description?: string }>>([]);
+  const [slashPaletteOpen, setSlashPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [input, setInputState] = useState(() => composerDrafts.get(session) ?? '');
   const setInput = (value: string | ((current: string) => string)): void => {
@@ -105,6 +106,9 @@ export function NativeAgentSurface({
     setModel(initialRowModel());
     setPendingAssistant(new Map());
     setErrorMsg(null);
+    setAgentCommands([]);
+    setAgentModel(undefined);
+    setSlashPaletteOpen(false);
     setPipelineLive(false);
 
     const handlers: SurfaceHandlers = {
@@ -117,7 +121,7 @@ export function NativeAgentSurface({
         for (const event of events) {
           if (event.kind === 'session-info') {
             if (event.model) setAgentModel(event.model);
-            if (event.commands && event.commands.length > 0) setAgentCommands(event.commands);
+            if (Array.isArray(event.commands)) setAgentCommands(event.commands);
           }
         }
       },
@@ -127,7 +131,7 @@ export function NativeAgentSurface({
         if (event.kind === 'session-info' && event.model) {
           setAgentModel(event.model);
         }
-        if (event.kind === 'session-info' && event.commands && event.commands.length > 0) {
+        if (event.kind === 'session-info' && Array.isArray(event.commands)) {
           setAgentCommands(event.commands);
         }
         if (event.kind === 'assistant-delta') {
@@ -277,6 +281,16 @@ export function NativeAgentSurface({
       : model.status === 'idle'
         ? 'Send'
         : 'Wait...';
+  const filteredAgentCommands = useMemo(
+    () =>
+      input.startsWith('/') && !input.includes(' ')
+        ? agentCommands
+            .filter((command) => command.name.toLowerCase().startsWith(input.slice(1).toLowerCase()))
+            .slice(0, 8)
+        : [],
+    [agentCommands, input]
+  );
+  const slashPaletteVisible = slashPaletteOpen && input.startsWith('/') && !input.includes(' ');
 
   const inputHeightBounds = (): { minHeight: number; maxHeight: number } => ({
     minHeight: NATIVE_AGENT_INPUT_MIN_HEIGHT,
@@ -322,11 +336,19 @@ export function NativeAgentSurface({
     setClampedManualInputHeight(currentInputHeight() + delta);
   };
 
+  const pickSlashCommand = (name: string): void => {
+    setInput(`/${name} `);
+    setSlashPaletteOpen(false);
+    setPaletteIndex(0);
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
   const openSlashCommands = (): void => {
+    setSlashPaletteOpen(true);
     setPaletteIndex(0);
     setInput((current) => {
       if (current.startsWith('/') && !current.includes(' ')) return current;
-      return current.trim().length === 0 ? '/' : current;
+      return '/';
     });
     window.requestAnimationFrame(() => inputRef.current?.focus());
   };
@@ -460,26 +482,6 @@ export function NativeAgentSurface({
           </div>
         ) : null}
       </div>
-      {input.startsWith('/') && !input.includes(' ') && agentCommands.length > 0 ? (
-        // UX item 9: slash palette — live-filtered from the agent's own command
-        // list (session-info commands); absent list = no palette.
-        <div className="nativeAgentPalette">
-          {agentCommands
-            .filter((c) => c.name.toLowerCase().startsWith(input.slice(1).toLowerCase()))
-            .slice(0, 8)
-            .map((c, i) => (
-              <button
-                key={c.name}
-                type="button"
-                className={`nativeAgentPaletteItem${i === paletteIndex ? ' selected' : ''}`}
-                onClick={() => setInput(`/${c.name} `)}
-              >
-                <span className="nativeAgentPaletteName">/{c.name}</span>
-                {c.description ? <span className="nativeAgentPaletteDesc">{c.description}</span> : null}
-              </button>
-            ))}
-        </div>
-      ) : null}
       {unseenCount > 0 ? (
         <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
           {unseenCount} new message{unseenCount === 1 ? '' : 's'} ↓
@@ -505,6 +507,30 @@ export function NativeAgentSurface({
           void uploadNativeFiles(event.dataTransfer.files);
         }}
       >
+        {slashPaletteVisible ? (
+          // UX item 9: slash palette — explicitly opened from the embedded slash
+          // control, then live-filtered from the agent's session-info commands.
+          <div className="nativeAgentPalette">
+            {filteredAgentCommands.length > 0 ? (
+              filteredAgentCommands.map((c, i) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  className={`nativeAgentPaletteItem${i === paletteIndex ? ' selected' : ''}`}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    pickSlashCommand(c.name);
+                  }}
+                >
+                  <span className="nativeAgentPaletteName">/{c.name}</span>
+                  {c.description ? <span className="nativeAgentPaletteDesc">{c.description}</span> : null}
+                </button>
+              ))
+            ) : (
+              <div className="nativeAgentPaletteEmpty">No commands available</div>
+            )}
+          </div>
+        ) : null}
         <button
           type="button"
           className="nativeAgentComposerResizeHandle"
@@ -524,111 +550,130 @@ export function NativeAgentSurface({
             }
           }}
         />
-        <textarea
-          ref={inputRef}
-          className="nativeAgentInput"
-          value={input}
-          style={manualInputHeight ? { height: `${manualInputHeight}px` } : undefined}
-          onChange={(e) => setInput(e.target.value)}
-          onPaste={(event) => {
-            const files = [...event.clipboardData.items]
-              .filter((item) => item.kind === 'file')
-              .map((item) => item.getAsFile())
-              .filter((file): file is File => file !== null);
-            if (files.length > 0) {
-              event.preventDefault();
-              void uploadNativeFiles(files);
-            }
-          }}
-          onKeyDown={(e) => {
-            const paletteOpen = input.startsWith('/') && !input.includes(' ') && agentCommands.length > 0;
-            if (paletteOpen) {
-              const filtered = agentCommands
-                .filter((c) => c.name.toLowerCase().startsWith(input.slice(1).toLowerCase()))
-                .slice(0, 8);
-              if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                setPaletteIndex((i) => (i + 1) % Math.max(filtered.length, 1));
-                return;
-              }
-              if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                setPaletteIndex((i) => (i - 1 + Math.max(filtered.length, 1)) % Math.max(filtered.length, 1));
-                return;
-              }
-              if (e.key === 'Enter' && filtered.length > 0) {
-                e.preventDefault();
-                const pick = filtered[Math.min(paletteIndex, filtered.length - 1)]!;
-                setInput(`/${pick.name} `);
-                setPaletteIndex(0);
-                return;
-              }
-              if (e.key === 'Escape') {
-                e.preventDefault();
-                setInput('');
-                setPaletteIndex(0);
-                return;
-              }
-            }
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              if (canSend) {
-                handleSend();
-              }
-            }
-          }}
-          placeholder="Send a message…"
-          rows={2}
-        />
-        <div className="nativeAgentComposerActions">
-          <button
-            type="button"
-            className="nativeAgentComposerButton nativeAgentSlashButton"
-            aria-label="Open slash commands"
-            title="Open slash commands"
-            onClick={openSlashCommands}
-          >
-            <Slash size={14} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className="nativeAgentComposerButton nativeAgentFileButton"
-            aria-label="Attach files"
-            title="Attach files"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-          >
-            <Paperclip size={14} aria-hidden="true" />
-          </button>
-          <input
-            ref={fileInputRef}
-            className="nativeAgentFileInput"
-            type="file"
-            multiple
-            hidden
-            onChange={(event) => {
-              if (event.target.files) {
-                void uploadNativeFiles(event.target.files);
-                event.target.value = '';
-              }
-            }}
-          />
-          {model.status === 'processing' || model.status === 'tool-executing' ? (
-            // UX item 5: while a turn runs, the composer's action slot IS the Stop
-            // control — the user's cursor and attention live here, not the header.
-            <button type="button" className="nativeAgentSend nativeAgentSendStop" onClick={handleInterrupt}>
-              Stop
-            </button>
-          ) : (
+        <div className="nativeAgentComposerInputWrap">
+          <div className="nativeAgentComposerLeftActions">
             <button
               type="button"
-              className="nativeAgentSend"
-              onClick={handleSend}
-              disabled={!canSend || uploading}
+              className="nativeAgentComposerIconButton nativeAgentSlashButton"
+              aria-label="Open slash commands"
+              title="Open slash commands"
+              onClick={openSlashCommands}
             >
-              {sendLabel}
+              <Slash size={12} aria-hidden="true" />
             </button>
-          )}
+            <button
+              type="button"
+              className="nativeAgentComposerIconButton nativeAgentFileButton"
+              aria-label="Attach files"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+            >
+              <Paperclip size={12} aria-hidden="true" />
+            </button>
+            <input
+              ref={fileInputRef}
+              className="nativeAgentFileInput"
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                if (event.target.files) {
+                  void uploadNativeFiles(event.target.files);
+                  event.target.value = '';
+                }
+              }}
+            />
+          </div>
+          <textarea
+            ref={inputRef}
+            className="nativeAgentInput"
+            value={input}
+            style={manualInputHeight ? { height: `${manualInputHeight}px` } : undefined}
+            onChange={(e) => {
+              setInput(e.target.value);
+              const commandMode = e.target.value.startsWith('/') && !e.target.value.includes(' ');
+              setSlashPaletteOpen(commandMode);
+              if (!commandMode) {
+                setPaletteIndex(0);
+              }
+            }}
+            onPaste={(event) => {
+              const files = [...event.clipboardData.items]
+                .filter((item) => item.kind === 'file')
+                .map((item) => item.getAsFile())
+                .filter((file): file is File => file !== null);
+              if (files.length > 0) {
+                event.preventDefault();
+                void uploadNativeFiles(files);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (slashPaletteVisible) {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setPaletteIndex((i) => (i + 1) % Math.max(filteredAgentCommands.length, 1));
+                  return;
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setPaletteIndex((i) => (i - 1 + Math.max(filteredAgentCommands.length, 1)) % Math.max(filteredAgentCommands.length, 1));
+                  return;
+                }
+                if (e.key === 'Enter' || e.key === 'Tab') {
+                  e.preventDefault();
+                  const pick = filteredAgentCommands[Math.min(paletteIndex, filteredAgentCommands.length - 1)];
+                  if (pick) {
+                    pickSlashCommand(pick.name);
+                  }
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setSlashPaletteOpen(false);
+                  setPaletteIndex(0);
+                  if (input === '/') {
+                    setInput('');
+                  }
+                  return;
+                }
+              }
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (canSend) {
+                  handleSend();
+                }
+              }
+            }}
+            placeholder="Send a message…"
+            rows={2}
+          />
+          <div className="nativeAgentComposerRightActions">
+            {model.status === 'processing' || model.status === 'tool-executing' ? (
+              // UX item 5: while a turn runs, the composer's action slot IS the Stop
+              // control — the user's cursor and attention live here, not the header.
+              <button
+                type="button"
+                className="nativeAgentComposerIconButton nativeAgentSend nativeAgentSendStop"
+                aria-label="Stop agent"
+                title="Stop agent"
+                onClick={handleInterrupt}
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="nativeAgentComposerIconButton nativeAgentSend"
+                aria-label="Send message"
+                title={sendLabel}
+                onClick={handleSend}
+                disabled={!canSend || uploading}
+              >
+                <SendHorizontal size={13} aria-hidden="true" />
+              </button>
+            )}
+          </div>
         </div>
         {uploading ? <div className="nativeAgentComposerStatus">uploading…</div> : null}
       </div>

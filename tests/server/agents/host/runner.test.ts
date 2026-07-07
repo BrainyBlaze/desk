@@ -231,7 +231,11 @@ describe('AgentHost hello + hello-ack', () => {
   it('hello-ack lastSeq=0 triggers driver start + session-info + status + history-boundary', async () => {
     const driver = makeMockDriver({
       startReturn: {
-        session: { agentSessionId: 'ses_xyz', model: 'claude-sonnet' },
+        session: {
+          agentSessionId: 'ses_xyz',
+          model: 'claude-sonnet',
+          commands: [{ name: 'model', description: 'switch model' }]
+        },
         status: { kind: 'status', state: 'idle' }
       },
       history: [
@@ -254,6 +258,12 @@ describe('AgentHost hello + hello-ack', () => {
     expect(kinds).toContain('status');
     expect(kinds).toContain('user-message');
     expect(kinds).toContain('history-boundary');
+    expect(events.find((e) => e.kind === 'session-info')).toMatchObject({
+      kind: 'session-info',
+      agentSessionId: 'ses_xyz',
+      model: 'claude-sonnet',
+      commands: [{ name: 'model', description: 'switch model' }]
+    });
 
     // No double status emit: only ONE status event from the driver (claude R-review: runner
     // must not re-emit start() return status — driver already emits via onEvent).

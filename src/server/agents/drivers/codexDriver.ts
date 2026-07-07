@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
-import type { AgentSurfacePermissionOption } from '../../../core/agentSurfaceProtocol.js';
+import type { AgentSurfaceCommand, AgentSurfacePermissionOption } from '../../../core/agentSurfaceProtocol.js';
 import type { ServerNotification } from '../codexBindings/ServerNotification.js';
 import type { ServerRequest } from '../codexBindings/ServerRequest.js';
 import type { AskForApproval } from '../codexBindings/v2/AskForApproval.js';
@@ -68,6 +68,13 @@ const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
 const CODEX_GOAL_STATUSES = new Set(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
 const CODEX_REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
 const CODEX_PERSONALITIES = new Set(['none', 'friendly', 'pragmatic']);
+const CODEX_NATIVE_SLASH_COMMANDS: AgentSurfaceCommand[] = [
+  { name: 'model', description: 'switch the model live' },
+  { name: 'approval', description: 'set approval policy' },
+  { name: 'goal', description: 'set, update, complete, or clear the thread goal' },
+  { name: 'fast', description: 'set Codex service tier explicitly' },
+  { name: 'tier', description: 'set Codex service tier' }
+];
 
 function codexBypassThreadOverrides(bypassPermissions: boolean | undefined): {
   approvalPolicy?: AskForApproval;
@@ -294,7 +301,7 @@ class CodexDriver implements AgentDriver {
     return () => this.handlers.delete(handler);
   }
 
-  async start(): Promise<{ session: { agentSessionId?: string; model?: string }; status: DriverStatusEvent }> {
+  async start(): ReturnType<AgentDriver['start']> {
     await this.options.transport.request('initialize', {
       clientInfo: { name: 'desk', title: 'Desk', version: '0.2.0' },
       capabilities: { experimentalApi: true }
@@ -327,7 +334,11 @@ class CodexDriver implements AgentDriver {
     }
 
     return {
-      session: { agentSessionId: this.thread.id, ...(this.options.model ? { model: this.options.model } : {}) },
+      session: {
+        agentSessionId: this.thread.id,
+        ...(this.options.model ? { model: this.options.model } : {}),
+        commands: CODEX_NATIVE_SLASH_COMMANDS
+      },
       status: threadStatusToDriverStatus(this.thread)
     };
   }

@@ -1,4 +1,4 @@
-import type { AgentSurfaceEventPayload, AgentUiErrorCode } from '../../../core/agentSurfaceProtocol.js';
+import type { AgentSurfaceCommand, AgentSurfaceEventPayload, AgentUiErrorCode } from '../../../core/agentSurfaceProtocol.js';
 
 /**
  * Native UI mode — adapter-host driver contract (spec: docs/native-ui-mode-spec.md §5).
@@ -127,7 +127,7 @@ export interface AgentDriver {
    * and exits nonzero so the tmux pane surfaces the failure).
    */
   start(): Promise<{
-    session: { agentSessionId?: string; model?: string };
+    session: { agentSessionId?: string; model?: string; commands?: AgentSurfaceCommand[] };
     status: DriverStatusEvent;
   }>;
 

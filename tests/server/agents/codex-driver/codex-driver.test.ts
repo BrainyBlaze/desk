@@ -89,6 +89,14 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject };
 }
 
+const EXPECTED_CODEX_NATIVE_SLASH_COMMANDS = [
+  { name: 'model', description: 'switch the model live' },
+  { name: 'approval', description: 'set approval policy' },
+  { name: 'goal', description: 'set, update, complete, or clear the thread goal' },
+  { name: 'fast', description: 'set Codex service tier explicitly' },
+  { name: 'tier', description: 'set Codex service tier' }
+];
+
 function thread(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 'thread-1',
@@ -143,7 +151,7 @@ describe('createCodexDriver', () => {
     proc.stdout.write('{"id":"2","result":{}}\n');
 
     await expect(start).resolves.toEqual({
-      session: { agentSessionId: 'thread-1', model: 'gpt-5.5' },
+      session: { agentSessionId: 'thread-1', model: 'gpt-5.5', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
       status: { kind: 'status', state: 'idle' }
     });
     expect(proc.writes).toEqual([
@@ -168,7 +176,7 @@ describe('createCodexDriver', () => {
       proc.stdout.write('{"id":"2","result":{}}\n');
 
       await expect(start).resolves.toEqual({
-        session: { agentSessionId: 'thread-1' },
+        session: { agentSessionId: 'thread-1', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
         status: { kind: 'status', state: 'idle' }
       });
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('dropping malformed codex app-server stdout line'));
@@ -244,7 +252,7 @@ describe('createCodexDriver', () => {
       { type: 'request', method: 'thread/read', params: { threadId: 'thread-1', includeTurns: true } }
     ]);
     expect(started).toEqual({
-      session: { agentSessionId: 'thread-1', model: 'gpt-5.5' },
+      session: { agentSessionId: 'thread-1', model: 'gpt-5.5', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
       status: { kind: 'status', state: 'idle' }
     });
     expect(history).toEqual([
@@ -300,6 +308,23 @@ describe('createCodexDriver', () => {
         sandbox: 'danger-full-access'
       }
     });
+  });
+
+  it('advertises native-safe Codex slash commands on start for the composer palette', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo' });
+
+    const started = await driver.start();
+
+    expect(started.session.commands).toEqual([
+      ...EXPECTED_CODEX_NATIVE_SLASH_COMMANDS
+    ]);
   });
 
   it('backfills command executions with start and end events so tool rows survive restart', async () => {
@@ -650,7 +675,7 @@ describe('createCodexDriver', () => {
     const driver = createCodexDriver({ transport, cwd: '/repo' });
 
     await expect(driver.start()).resolves.toEqual({
-      session: { agentSessionId: 'thread-from-result' },
+      session: { agentSessionId: 'thread-from-result', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
       status: { kind: 'status', state: 'processing' }
     });
   });
@@ -663,7 +688,7 @@ describe('createCodexDriver', () => {
     const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-resumed' });
 
     await expect(driver.start()).resolves.toEqual({
-      session: { agentSessionId: 'thread-resumed' },
+      session: { agentSessionId: 'thread-resumed', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
       status: { kind: 'status', state: 'idle' }
     });
   });
@@ -691,7 +716,7 @@ describe('createCodexDriver', () => {
 
     started.resolve({});
     await expect(start).resolves.toEqual({
-      session: { agentSessionId: 'thread-starting' },
+      session: { agentSessionId: 'thread-starting', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
       status: { kind: 'status', state: 'idle' }
     });
   });
@@ -719,7 +744,7 @@ describe('createCodexDriver', () => {
 
     resumed.resolve({});
     await expect(start).resolves.toEqual({
-      session: { agentSessionId: 'thread-resuming' },
+      session: { agentSessionId: 'thread-resuming', commands: EXPECTED_CODEX_NATIVE_SLASH_COMMANDS },
       status: { kind: 'status', state: 'idle' }
     });
   });

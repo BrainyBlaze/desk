@@ -383,7 +383,8 @@ export class AgentHost {
       this.emitDriverEvent({
         kind: 'session-info',
         agentSessionId: session.agentSessionId,
-        model: session.model
+        model: session.model,
+        commands: session.commands
       });
       // emit deterministic status
       this.emitDriverEvent(status);

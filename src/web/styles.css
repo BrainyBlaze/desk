@@ -5576,15 +5576,12 @@ button.layoutBadge:hover:not(:disabled) {
 
 /* UX item 5: the composer action slot doubles as Stop while a turn runs. */
 .nativeAgentSend.nativeAgentSendStop {
-  background: transparent;
-  border-color: color-mix(in srgb, var(--desk-error, #ff4d6d) 62%, transparent);
+  background: color-mix(in srgb, var(--desk-error, #ff4d6d) 14%, transparent);
   color: color-mix(in srgb, var(--desk-error, #ff4d6d) 82%, var(--desk-text, #d6e4f0));
-  box-shadow: none;
-  font-weight: 600;
 }
 
 .nativeAgentSend.nativeAgentSendStop:hover {
-  filter: brightness(1.16) drop-shadow(0 0 8px color-mix(in srgb, var(--desk-error, #ff4d6d) 28%, transparent));
+  background: color-mix(in srgb, var(--desk-error, #ff4d6d) 24%, transparent);
 }
 
 /* UX items 3 + 4: collapsed injected payloads and docked active permissions. */
@@ -5668,10 +5665,7 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentComposer {
   position: relative;
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 6px 8px;
+  padding: 7px 8px 8px;
   border-top: 1px solid var(--desk-border, #1f2937);
   background: var(--desk-bg-elev, #11161d);
 }
@@ -5682,10 +5676,10 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentComposerResizeHandle {
   position: absolute;
-  top: -3px;
+  top: -2px;
   left: 12px;
   right: 12px;
-  height: 6px;
+  height: 5px;
   border: 0;
   padding: 0;
   background: transparent;
@@ -5697,8 +5691,8 @@ button.layoutBadge:hover:not(:disabled) {
   position: absolute;
   left: 35%;
   right: 35%;
-  top: 2px;
-  height: 2px;
+  top: 1px;
+  height: 1px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--desk-accent, #66aaff) 34%, transparent);
   opacity: 0;
@@ -5710,56 +5704,88 @@ button.layoutBadge:hover:not(:disabled) {
   opacity: 1;
 }
 
+.nativeAgentComposerInputWrap {
+  position: relative;
+  display: grid;
+  align-items: end;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--desk-border, #2a3441) 82%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--desk-bg, #0b0e14) 92%, var(--desk-accent, #66aaff) 4%);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.nativeAgentComposerInputWrap:focus-within {
+  border-color: color-mix(in srgb, var(--desk-accent, #66aaff) 58%, var(--desk-border, #2a3441));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--desk-accent, #66aaff) 20%, transparent);
+}
+
 .nativeAgentInput {
-  flex: 1;
+  grid-area: 1 / 1;
+  width: 100%;
   min-width: 0;
   resize: none;
-  background: var(--desk-bg, #0b0e14);
-  border: 1px solid var(--desk-border, #2a3441);
+  background: transparent;
+  border: 0;
   color: inherit;
   font: inherit;
   font-size: 13px;
-  padding: 6px 8px;
-  border-radius: 3px;
+  line-height: 1.45;
+  padding: 8px 42px 8px 64px;
+  border-radius: inherit;
   min-height: 32px;
   max-height: 240px;
 }
 
 .nativeAgentInput:focus {
   outline: none;
-  border-color: var(--desk-accent, #66aaff);
 }
 
-.nativeAgentComposerActions {
-  flex: 0 0 auto;
+.nativeAgentComposerLeftActions {
+  position: absolute;
+  bottom: 6px;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 4px;
+  z-index: 1;
+  left: 8px;
 }
 
-.nativeAgentComposerButton {
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
+.nativeAgentComposerRightActions {
+  position: absolute;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 1;
+  right: 8px;
+}
+
+.nativeAgentComposerIconButton {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--desk-bg, #0b0e14) 76%, var(--desk-accent, #66aaff) 5%);
-  border: 1px solid color-mix(in srgb, var(--desk-border, #2a3441) 82%, var(--desk-accent, #66aaff) 14%);
+  background: transparent;
+  border: 0;
   color: color-mix(in srgb, currentColor 82%, var(--desk-accent, #66aaff) 18%);
   padding: 0;
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: 999px;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
-.nativeAgentComposerButton:hover:not(:disabled),
-.nativeAgentComposerButton:focus-visible {
-  border-color: color-mix(in srgb, var(--desk-accent, #66aaff) 48%, var(--desk-border, #2a3441));
+.nativeAgentComposerIconButton:hover:not(:disabled),
+.nativeAgentComposerIconButton:focus-visible {
+  background: color-mix(in srgb, var(--desk-accent, #66aaff) 14%, transparent);
   color: var(--desk-accent, #66aaff);
   outline: none;
 }
 
-.nativeAgentComposerButton:disabled {
+.nativeAgentComposerIconButton:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -5778,27 +5804,13 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentSend {
-  min-height: 32px;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--desk-accent, #66aaff) 92%, white 4%),
-    var(--desk-accent, #66aaff)
-  );
-  border: 1px solid color-mix(in srgb, var(--desk-accent, #66aaff) 72%, transparent);
-  color: #061113;
-  font: inherit;
-  font-size: 12px;
+  background: color-mix(in srgb, var(--desk-accent, #66aaff) 20%, transparent);
+  color: var(--desk-accent, #66aaff);
   font-weight: 700;
-  padding: 6px 14px;
-  cursor: pointer;
-  border-radius: 3px;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--desk-accent, #66aaff) 45%, transparent), 0 0 16px color-mix(in srgb, var(--desk-accent, #66aaff) 22%, transparent);
-  transition: filter 0.15s ease, box-shadow 0.15s ease;
 }
 
 .nativeAgentSend:hover:not(:disabled) {
-  filter: brightness(1.08);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--desk-accent, #66aaff) 58%, transparent), 0 0 20px color-mix(in srgb, var(--desk-accent, #66aaff) 30%, transparent);
+  background: color-mix(in srgb, var(--desk-accent, #66aaff) 30%, transparent);
 }
 
 .nativeAgentSend:disabled {
@@ -6313,7 +6325,7 @@ button.layoutBadge:hover:not(:disabled) {
 /* UX item 9: slash-command palette above the composer. */
 .nativeAgentPalette {
   position: absolute;
-  bottom: 58px;
+  bottom: calc(100% + 6px);
   left: 8px;
   right: 8px;
   z-index: 4;
@@ -6355,6 +6367,12 @@ button.layoutBadge:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.nativeAgentPaletteEmpty {
+  padding: 8px 10px;
+  color: var(--desk-text-dim, #9aa7b2);
+  font-size: 12px;
 }
 
 .nativeAgentPaletteItem.selected {
