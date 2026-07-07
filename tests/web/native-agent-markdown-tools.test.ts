@@ -226,9 +226,12 @@ describe('native agent composer controls', () => {
     expect(surface).toMatch(/import \{ Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X \} from 'lucide-react'/);
     expect(surface).toMatch(/import \{ channelsUpload \} from '..\/channels\/channelsClient\.js'/);
     expect(surface).toMatch(/composerInputHeightFromTopResize/);
+    expect(surface).toMatch(/runComposerFileUpload/);
+    expect(surface).toMatch(/handleComposerFileDragOver/);
     expect(surface).toMatch(/const NATIVE_AGENT_FILE_CHANNEL = 'agent-files'/);
     expect(surface).toMatch(/const uploadNativeFiles = async/);
-    expect(surface).toMatch(/channelsUpload\(NATIVE_AGENT_FILE_CHANNEL, file\.name, btoa\(binary\)\)/);
+    expect(surface).toMatch(/channel: NATIVE_AGENT_FILE_CHANNEL/);
+    expect(surface).toMatch(/upload: channelsUpload/);
     expect(surface).toMatch(/className=\"nativeAgentComposerResizeHandle\"/);
     expect(surface).toMatch(/aria-label=\"Resize native agent input\"/);
     expect(surface).toMatch(/style=\{manualInputHeight \? \{ height: `\$\{manualInputHeight\}px` \} : undefined\}/);
@@ -259,7 +262,8 @@ describe('native agent composer controls', () => {
     expect(surface).toMatch(/<CornerDownLeft size=\{14\} strokeWidth=\{2\.1\} aria-hidden=\"true\" \/>/);
     expect(surface).toMatch(/<Square className=\"nativeAgentStopGlyph\" size=\{14\} fill=\"currentColor\" strokeWidth=\{2\.1\} aria-hidden=\"true\" \/>/);
     expect(surface).toMatch(/onPaste=\{\(event\) => \{/);
-    expect(surface).toMatch(/event\.dataTransfer\.files/);
+    expect(surface).toMatch(/handleComposerFilePaste\(event, uploadNativeFiles\)/);
+    expect(surface).toMatch(/handleComposerFileDrop\(event, setDragOver, uploadNativeFiles\)/);
     expect(surface).toMatch(/<ChannelMarkdown body=\{body\} channel=\{NATIVE_AGENT_FILE_CHANNEL\}/);
 
     const composerRule = cssBlock(styles, '.nativeAgentComposer');

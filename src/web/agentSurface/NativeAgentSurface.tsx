@@ -24,10 +24,15 @@ import { channelsUpload } from '../channels/channelsClient.js';
 import { composerInputHeightFromTopResize } from '../channels/channelsModel.js';
 import {
   appendComposerFileLinks,
-  composerDragIncludesFiles,
   composerPlainEnterShouldSend,
   composerResizeKeyDelta,
-  filesFromClipboardItems
+  dragComposerResize,
+  finishComposerResize,
+  handleComposerFileDragOver,
+  handleComposerFileDrop,
+  handleComposerFilePaste,
+  runComposerFileUpload,
+  startComposerResize
 } from '../composerInput.js';
 
 // Reuse the channels markdown renderer (spec §9: ChannelMarkdown). Lazy-loaded +
@@ -334,31 +339,17 @@ export function NativeAgentSurface({
   };
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    event.preventDefault();
-    resizeRef.current = { startY: event.clientY, startHeight: currentInputHeight() };
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Automated pointer events do not always create an active capture target.
-    }
+    startComposerResize(event, resizeRef, currentInputHeight());
   };
 
   const dragResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    const resize = resizeRef.current;
-    if (!resize) return;
-    event.preventDefault();
-    setManualInputHeight(composerInputHeightFromTopResize(resize.startHeight, resize.startY, event.clientY, inputHeightBounds()));
+    dragComposerResize(event, resizeRef, (resize, clientY) => {
+      setManualInputHeight(composerInputHeightFromTopResize(resize.startHeight, resize.startY, clientY, inputHeightBounds()));
+    });
   };
 
   const finishResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    resizeRef.current = null;
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // See setPointerCapture guard above.
-    }
+    finishComposerResize(event, resizeRef);
   };
 
   const resizeFromKeyboard = (delta: number): void => {
@@ -393,30 +384,15 @@ export function NativeAgentSurface({
   };
 
   const uploadNativeFiles = async (files: FileList | File[]): Promise<void> => {
-    const list = [...files];
-    if (list.length === 0) return;
-    setUploading(true);
-    try {
-      const links: string[] = [];
-      for (const file of list) {
-        const buffer = await file.arrayBuffer();
-        let binary = '';
-        const bytes = new Uint8Array(buffer);
-        const CHUNK = 0x8000;
-        for (let offset = 0; offset < bytes.length; offset += CHUNK) {
-          binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
-        }
-        const result = await channelsUpload(NATIVE_AGENT_FILE_CHANNEL, file.name, btoa(binary));
-        links.push(result.markdown);
-      }
-      setInput((current) => appendComposerFileLinks(current, links));
-      setErrorMsg(null);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'upload failed');
-    } finally {
-      setUploading(false);
-      inputRef.current?.focus();
-    }
+    await runComposerFileUpload(files, {
+      channel: NATIVE_AGENT_FILE_CHANNEL,
+      upload: channelsUpload,
+      setUploading,
+      appendLinks: (links) => setInput((current) => appendComposerFileLinks(current, links)),
+      onSuccess: () => setErrorMsg(null),
+      onError: setErrorMsg,
+      focus: () => inputRef.current?.focus()
+    });
   };
 
   const handleSend = (): void => {
@@ -541,16 +517,11 @@ export function NativeAgentSurface({
       <div
         className={`nativeAgentComposer ${dragOver ? 'dragOver' : ''}`}
         onDragOver={(event) => {
-          if (composerDragIncludesFiles(event.dataTransfer.types)) {
-            event.preventDefault();
-            setDragOver(true);
-          }
+          handleComposerFileDragOver(event, setDragOver);
         }}
         onDragLeave={() => setDragOver(false)}
         onDrop={(event) => {
-          event.preventDefault();
-          setDragOver(false);
-          void uploadNativeFiles(event.dataTransfer.files);
+          handleComposerFileDrop(event, setDragOver, uploadNativeFiles);
         }}
       >
         {slashPaletteVisible ? (
@@ -609,11 +580,7 @@ export function NativeAgentSurface({
               }
             }}
             onPaste={(event) => {
-              const files = filesFromClipboardItems(event.clipboardData.items);
-              if (files.length > 0) {
-                event.preventDefault();
-                void uploadNativeFiles(files);
-              }
+              handleComposerFilePaste(event, uploadNativeFiles);
             }}
             onKeyDown={(e) => {
               if (slashPaletteVisible) {
