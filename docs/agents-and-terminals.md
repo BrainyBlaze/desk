@@ -116,8 +116,9 @@ by assignment — drag a session tab onto a cell, or tap an empty cell to assign
 one from an inline picker.
 
 Group switches are cheap by design: recently visited groups stay mounted with
-live terminals (a warm budget of roughly 40 sessions on desktop), so flipping
-between groups opens no new connections and loses no terminal state.
+live cells (a warm budget of roughly 40 sessions on desktop), so flipping
+between groups opens no new connections and loses no transcript or terminal
+state.
 
 ## Terminal rendering
 
