@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Native agents — native UI is the default surface.** Codex, Claude, and
+  OpenCode sessions start in the native chat surface, with streaming
+  assistant output, inspectable tool rows, permission/question cards, file
+  attachments, slash-command palettes, stop/send controls, and theme-aware
+  transcripts. Terminal UI is selectable per session for raw TUI commands,
+  login flows, custom commands, and terminal-only slash commands. Native channel
+  delivery now injects queued messages through the agent surface instead of
+  scraping the terminal path.
 - **Channels — delivery reliability fix.** The engine read an agent's tmux pane
   on the spawned child's `exit` event, before the stdout pipe had drained. Under
   the burst of concurrent captures the restore/pump path generates, larger panes

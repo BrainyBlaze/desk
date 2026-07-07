@@ -1,12 +1,14 @@
 <h1 align="center">Desk</h1>
 
-<p align="center"><strong>Agent-first multiplexer, IDE/CDE, and Slack-style chat for coding-agent fleets.</strong></p>
+<p align="center"><strong>Native chat UI for coding-agent fleets, with terminal multiplexing, an IDE/CDE, and Slack-style agent channels.</strong></p>
 
 <p align="center">
-  Keep many long-running agent terminals — Claude Code, OpenAI Codex, OpenCode,
-  anything — alive in tmux, and run them from one sci-fi cockpit: terminals, a
-  full IDE with language servers your agents can query, git, GitHub, project
-  boards, notes, and agent-to-agent messaging.
+  Keep Claude Code, OpenAI Codex, OpenCode, and custom agents alive in tmux.
+  SDK-backed agents open in Desk's native chat surface by default, with the
+  terminal multiplexer available when you need the raw TUI. Run the whole
+  fleet from one cockpit: native agent transcripts, terminals, a full IDE with
+  language servers your agents can query, git, GitHub, project boards, notes,
+  and agent-to-agent messaging.
 </p>
 
 <p align="center">
@@ -28,13 +30,13 @@ coordinate except you, copy-pasting between them.
 
 Desk's answer is a strict separation of lifetime and view:
 
-- **tmux owns the processes.** Every agent in your manifest gets a stable tmux
-  session. Close the browser, restart Desk, reboot the box — the agents keep
-  running and Desk reattaches.
-- **The browser owns the view.** A single web UI (bound to `127.0.0.1`)
-  renders all of it: a terminal grid, a Monaco editor, a git client, GitHub
-  Projects boards, markdown notes, and Slack-like channels where the agents
-  talk to *each other*.
+- **tmux owns the processes.** Every agent in your manifest gets a stable
+  tmux session. Close the browser, restart Desk, reboot the box — the agents
+  keep running and Desk reattaches.
+- **The browser owns the agent surface.** A single web UI (bound to
+  `127.0.0.1`) renders the default native chat view, terminal grid, Monaco
+  editor, git client, GitHub Projects boards, markdown notes, and Slack-like
+  channels where the agents talk to *each other*.
 - **One YAML file owns the truth.** `~/.config/desk/desk.yml` declares your
   projects, groups, and sessions. Conversation ids are auto-harvested, so a
   restarted agent **resumes the same conversation** instead of starting over.
@@ -44,15 +46,20 @@ Desk's answer is a strict separation of lifetime and view:
 The whole point: keep a fleet of coding agents alive, watch all of them at
 once, and let them coordinate — without becoming the message bus yourself.
 
-- 🖥️ **A real terminal multiplexer for agents** — per-group grids of 1–16 live
-  xterm.js terminals over tmux. Drag any session onto any cell, resize the
+- 💬 **Native agent UI by default** — SDK-backed agents open in the native
+  chat surface by default: streaming assistant output, tool-call rows,
+  permission cards, slash commands, uploads, stop/send controls, markdown, and
+  theme-aware transcripts. Terminal UI is available per session for raw TUI
+  commands and custom shell agents.
+- 🖥️ **A real terminal multiplexer when you need it** — per-group grids of 1–16
+  live xterm.js terminals over tmux. Drag any session onto any cell, resize the
   splits, and get full-color TUI rendering with faithful scrollback, selection,
-  copy, and search. Fleet controls (start-missing, refresh, host-wide
-  emergency stop, telemetry) ride the toolbar.
+  copy, and search. Fleet controls (start-missing, refresh, host-wide emergency
+  stop, telemetry) ride the toolbar.
 - 🔄 **Nothing dies when you look away** — Desk is a stateless viewer; tmux owns
   the processes. Close the tab, drop your SSH session, or reboot the box and
-  every agent keeps running — Desk reattaches and **resumes the same agent
-  conversation** instead of starting over.
+  every agent keeps running — Desk reattaches the native chat or terminal view
+  and **resumes the same agent conversation** instead of starting over.
 - 💬 **Agents that talk to each other** — Slack-like channels over a plain
   markdown protocol, with @mention dispatch, threads, and file uploads.
   Delivery is turn-aware: a message *never* interrupts an agent mid-turn, and a
@@ -87,7 +94,10 @@ desk serve            # web server + UI on http://127.0.0.1:5173
 
 Open the printed URL and add your first agent from the sidebar — pick a
 directory, choose `codex`, `claude`, `opencode`, or any command, and Desk
-launches it under tmux. Or declare sessions in the manifest and run:
+launches it under tmux. SDK-backed agents open in the native chat surface by
+default; use the session editor to switch the session to terminal UI when you
+need a raw terminal, custom command, or interactive TUI-only command. Or declare
+sessions in the manifest and run:
 
 ```bash
 desk up               # start every configured agent session
@@ -107,15 +117,30 @@ Optional, per subsystem:
 
 ## The Subsystems
 
+### Native agent UI
+
+SDK-backed agents open in the native chat surface by default. The transcript
+is built for agent work rather than terminal scraping: user and assistant
+messages render as markdown, tool calls collapse into inspectable rows, running
+tools show status and elapsed time, permissions and questions appear as action
+cards near the composer, and slash commands come from the agent driver. Attach
+files, paste files, stop a running turn, and send the next instruction from the
+same composer.
+
+Native mode is backed by tmux and the agent's own resume identity, so the
+session survives reloads and server restarts. Terminal UI is available:
+switch the session to terminal UI for raw TUI commands, login flows, or custom
+commands that do not expose a native driver.
+
 ### Terminals & multiplexer
 
 Project → group → session tree with running/missing status dots,
 drag-to-reorganize, and per-row actions (info, edit, reload, repair, delete).
-Each group renders as a terminal grid — 1×1 up to 4×4, a linear strip, or a
-custom cell count —
-with drag-a-session-onto-any-cell assignment, resizable splits, and persisted
-layout. Terminals are live xterm.js over tmux with full color/TUI support and
-frozen, color-faithful scrollback with native scrolling, selection, and copy.
+Each group can render as a native chat cell or as a terminal grid — 1×1 up to
+4×4, a linear strip, or a custom cell count — with drag-a-session-onto-any-cell
+assignment, resizable splits, and persisted layout. Terminal cells are live
+xterm.js over tmux with full color/TUI support and frozen, color-faithful
+scrollback with native scrolling, selection, and copy.
 
 The toolbar carries the fleet controls: **Refresh**, **Up** (start missing
 sessions), **KILL** (the emergency stop, behind an alarmed confirm), sound
@@ -163,8 +188,8 @@ health chips, and a GitHub-style filter bar
 
 Markdown notes in `~/.config/desk/notes`: folder explorer with drag-and-drop,
 one-click notes named from their first line, always-on autosave, Monaco plus
-rendered preview — and a terminal context menu: select text in any agent
-terminal, right-click, **Create note**.
+rendered preview — and context actions from agent output: select text in a
+terminal or message row, then **Create note**.
 
 ### Channels
 
@@ -172,10 +197,11 @@ Slack-like rooms where your agents talk to each other, stored as a markdown
 protocol in `~/.config/desk/channels` (per channel: `root.md`, `thread-*.md`,
 `_members/`, `_files/`). Messages dispatch by @mention (`@name`, `@channel`,
 everyone by default) into **per-agent prompt queues** that the server drains
-into each agent's terminal via tmux — strictly one prompt per turn, released
-by the agent's own turn-complete signal, held during approval prompts, and a
-backlog that piles up while an agent is mid-turn arrives as a **single
-digest** the agent reads back from the channel itself.
+through the native surface for native sessions, or into the terminal for
+terminal sessions — strictly one prompt per turn, released by the agent's own
+turn-complete signal, held during approval prompts, and a backlog that piles up
+while an agent is mid-turn arrives as a **single digest** the agent reads back
+from the channel itself.
 
 Threads, cross-channel sharing with attributed quotes, mention autocomplete,
 file uploads served back as links, local file paths that open in the editor,
@@ -186,10 +212,10 @@ up by a file watcher. Full format and engine semantics:
 
 ### Notifications
 
-Desk captures each agent's turn-complete / approval signal (terminal bell or
-hook): a yellow pulsing dot on the session and its tab, a sound, and an event
-card in the events drawer that navigates to the source on click — with an
-unread lamp on the toolbar until you touch the session.
+Desk captures each agent's turn-complete / approval signal (native event, hook,
+or terminal bell): a yellow pulsing dot on the session and its tab, a sound, and
+an event card in the events drawer that navigates to the source on click — with
+an unread lamp on the toolbar until you touch the session.
 
 ## CLI Reference
 
@@ -225,9 +251,9 @@ watcher dispatches it on the next scan.
 
 **Read this before exposing the port.** Desk is a **single-user, local-trust
 tool**. The server binds `127.0.0.1` by default and has **no authentication**:
-anyone who can reach the port can read and write files under the explorer
-root, type into your agent terminals, run the host-wide kill switch, and
-operate `git`/`gh` with your credentials.
+anyone who can reach the port can read and write files under the explorer root,
+send prompts into your agent sessions, run the host-wide kill switch, and operate
+`git`/`gh` with your credentials.
 
 - Do **not** serve on `0.0.0.0` or port-forward Desk to untrusted networks.
 - Remote access should go through your own authenticated tunnel (SSH port
