@@ -5326,9 +5326,10 @@ button.layoutBadge:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--desk-border, #1f2937);
-  background: var(--desk-bg-elev, #11161d);
+  padding: 3px 10px;
+  min-height: 24px;
+  border-bottom: 1px solid rgba(42, 52, 65, 0.6);
+  background: transparent;
 }
 
 .nativeAgentStatus {
@@ -5370,28 +5371,35 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentFeed {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 12px;
+  padding: 10px 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  line-height: 1.5;
 }
 
 .nativeAgentRow {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 4px 8px;
-  border-radius: 4px;
+  gap: 3px;
+  padding: 5px 10px;
+  border-radius: 6px;
 }
 
+/* Design pass: user turns get a quiet accent bar + tint; assistant turns sit
+   flat on the background with a hanging indent — reads as conversation, not
+   stacked cards. */
 .nativeAgentRow.user {
-  background: rgba(80, 160, 240, 0.08);
+  background: rgba(80, 160, 240, 0.07);
+  border-left: 2px solid rgba(80, 160, 240, 0.45);
   margin-left: 24px;
+  border-radius: 2px 6px 6px 2px;
 }
 
 .nativeAgentRow.assistant {
-  background: rgba(120, 200, 120, 0.05);
+  background: transparent;
   margin-right: 24px;
+  padding-left: 12px;
 }
 
 .nativeAgentRow.assistant.pending {
@@ -5421,17 +5429,28 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentRow.turnComplete,
 .nativeAgentRow.system {
-  font-size: 11px;
+  font-size: 10px;
   text-align: center;
-  opacity: 0.5;
-  padding: 2px 0;
+  opacity: 0.32;
+  padding: 0;
+  letter-spacing: 0.08em;
 }
 
 .nativeAgentAuthor {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  opacity: 0.6;
+  opacity: 0.55;
+}
+
+.nativeAgentRow.user .nativeAgentAuthor {
+  color: #7db8f0;
+  opacity: 0.8;
+}
+
+.nativeAgentRow.assistant .nativeAgentAuthor {
+  color: #8fd48f;
+  opacity: 0.75;
 }
 
 .nativeAgentText {
