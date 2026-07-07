@@ -100,6 +100,20 @@ describe('toolJournal merge (codex reload: API returns messages only)', () => {
     ]);
   });
 
+  it('appends cheaply past the cap instead of rewriting the file every event', () => {
+    const path = tempPath();
+    const j = createToolJournal({ path, cap: 4 });
+    for (let i = 0; i < 5; i += 1) j.append('u1', toolStart(`t-${i}`));
+    // Hysteresis: one event over cap is not worth a full rewrite yet.
+    expect(readFileSync(path, 'utf8').trim().split('\n')).toHaveLength(5);
+    j.append('u1', toolStart('t-5'));
+    // Past the slack the journal snaps back to cap...
+    expect(readFileSync(path, 'utf8').trim().split('\n')).toHaveLength(4);
+    j.append('u1', toolStart('t-6'));
+    // ...and the next event is a cheap append again, not another rewrite.
+    expect(readFileSync(path, 'utf8').trim().split('\n')).toHaveLength(5);
+  });
+
   it('survives malformed journal lines without dying', () => {
     const path = tempPath();
     const j1 = createToolJournal({ path });

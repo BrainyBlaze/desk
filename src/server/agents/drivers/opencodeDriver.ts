@@ -128,6 +128,8 @@ export class OpencodeDriver implements AgentDriver {
   private started = false;
   private shutDown = false;
   /** Turn-liveness watchdog — armed per inject, slid by activity, disarmed on turn-complete. */
+  /** True after a probe-failure report until a status probe succeeds again. */
+  private probeFailureReported = false;
   private turnWatchdog: ReturnType<typeof setTimeout> | null = null;
   /** Last retry attempt number reported to the surface — dedupes repeated probe hits. */
   private lastReportedRetryAttempt: number | null = null;
@@ -150,8 +152,10 @@ export class OpencodeDriver implements AgentDriver {
     for (const handler of this.handlers) {
       try {
         handler(event);
-      } catch {
-        // a misbehaving handler must not break sibling handlers
+      } catch (err) {
+        // A misbehaving handler must not break sibling handlers — but the
+        // failure has to leave a trail, or the transcript just stops silently.
+        console.error(`opencode driver: event handler threw on ${event.kind}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
@@ -469,13 +473,21 @@ export class OpencodeDriver implements AgentDriver {
     try {
       status = (await this.backend.status())[this.sessionId];
     } catch (err) {
-      this.emit({
-        kind: 'agent-error',
-        message: `opencode produced no output for ${seconds}s and the status probe failed: ${err instanceof Error ? err.message : String(err)}`,
-        fatal: false
-      });
+      // A failed probe must not kill liveness detection for the turn: re-arm
+      // and try again next window, reporting only the first consecutive
+      // failure so a persistent outage does not spam one error per window.
+      if (!this.probeFailureReported) {
+        this.probeFailureReported = true;
+        this.emit({
+          kind: 'agent-error',
+          message: `opencode produced no output for ${seconds}s and the status probe failed: ${err instanceof Error ? err.message : String(err)}`,
+          fatal: false
+        });
+      }
+      this.armTurnWatchdog();
       return;
     }
+    this.probeFailureReported = false;
     if (status?.type === 'retry') {
       // Report each retry state once per attempt — backoff grows, so this stays quiet
       // between attempts instead of repeating the same row every window.

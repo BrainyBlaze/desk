@@ -77,7 +77,10 @@ export function createToolJournal(opts: { path: string; cap?: number }): ToolJou
     append(anchorId, event, anchorText) {
       const record: ToolJournalRecord = { anchorId, event, ...(anchorText ? { anchorText } : {}) };
       records.push(record);
-      if (records.length > cap) {
+      // Hysteresis: trimming on every event past the cap would turn each
+      // append into a full synchronous rewrite for the rest of the session.
+      // Let the journal run 20% over, then snap back to cap in one rewrite.
+      if (records.length > Math.ceil(cap * 1.2)) {
         records = records.slice(-cap);
         rewrite();
         return;

@@ -653,4 +653,48 @@ describe('OpencodeDriver turn-liveness watchdog', () => {
       vi.useRealTimers();
     }
   });
+
+  it('logs a throwing event handler instead of swallowing it silently', async () => {
+    const backend = makeMockBackend();
+    const driver = makeWatchdogDriver(backend);
+    const seen: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      driver.onEvent(() => {
+        throw new Error('handler exploded');
+      });
+      driver.onEvent((e) => seen.push(e.kind));
+      await driver.start();
+      await driver.inject('hi', 'ui');
+      expect(seen.length).toBeGreaterThan(0);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes('handler exploded'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps probing after a failed status probe instead of disarming for the turn', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = makeMockBackend();
+      const driver = makeWatchdogDriver(backend);
+      const events: Array<{ kind: string; message?: string }> = [];
+      driver.onEvent((e) => events.push(e as { kind: string; message?: string }));
+      await driver.start();
+      await driver.inject('hello?', 'ui');
+      events.length = 0;
+      backend.failStatus(new Error('serve is gone'));
+      await vi.advanceTimersByTimeAsync(60_000);
+      const probesAfterFirstFire = backend.calls.filter((c) => c.method === 'status').length;
+      // A transient probe failure must not kill liveness detection: the
+      // watchdog re-arms and probes again on the next window.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(backend.calls.filter((c) => c.method === 'status').length).toBeGreaterThan(probesAfterFirstFire);
+      // ...but a persistent failure reports once, not once per window.
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(events.filter((e) => e.kind === 'agent-error')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
