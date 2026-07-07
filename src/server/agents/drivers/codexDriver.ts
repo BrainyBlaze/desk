@@ -289,6 +289,8 @@ function summarizeJson(value: unknown): string {
 
 class CodexDriver implements AgentDriver {
   private readonly handlers = new Set<(event: DriverEvent) => void>();
+  /** Resume id that failed thread/resume — never reuse it for history/turn lookups. */
+  private deadResumeId: string | undefined;
   private thread: Thread | null = null;
   private activeTurnId: string | null = null;
   private pendingPermissions = 0;
@@ -315,21 +317,37 @@ class CodexDriver implements AgentDriver {
 
     let threadResult: unknown;
     const lspConfig = codexManagedLspConfig(this.options.lspEnvFilePath);
-    if (this.options.resumeId) {
-      threadResult = await this.options.transport.request('thread/resume', {
-        threadId: this.options.resumeId,
-        cwd: this.options.cwd,
-        model: this.options.model ?? null,
-        ...(lspConfig ? { config: lspConfig } : {}),
-        ...codexBypassThreadOverrides(this.options.bypassPermissions)
-      });
-    } else {
-      threadResult = await this.options.transport.request('thread/start', {
+    const startFresh = (): Promise<unknown> =>
+      this.options.transport.request('thread/start', {
         cwd: this.options.cwd,
         ...codexBypassThreadOverrides(this.options.bypassPermissions),
         ...(lspConfig ? { config: lspConfig } : {}),
         ...(this.options.model ? { model: this.options.model } : {})
       });
+    if (this.options.resumeId) {
+      try {
+        threadResult = await this.options.transport.request('thread/resume', {
+          threadId: this.options.resumeId,
+          cwd: this.options.cwd,
+          model: this.options.model ?? null,
+          ...(lspConfig ? { config: lspConfig } : {}),
+          ...codexBypassThreadOverrides(this.options.bypassPermissions)
+        });
+      } catch (err) {
+        // A dead resume id (rollout pruned, never flushed, or foreign) must not
+        // brick the session forever: fall back to a fresh thread and say so.
+        // Resume capture then overwrites the dead id with the fresh thread's,
+        // so the manifest self-heals on the next persist.
+        this.emit({
+          kind: 'agent-error',
+          message: `codex conversation ${this.options.resumeId} could not be resumed (${err instanceof Error ? err.message : String(err)}); starting a fresh conversation`,
+          fatal: false
+        });
+        this.deadResumeId = this.options.resumeId;
+        threadResult = await startFresh();
+      }
+    } else {
+      threadResult = await startFresh();
     }
 
     const returnedThread = threadFromRpcResult(threadResult);
@@ -349,6 +367,10 @@ class CodexDriver implements AgentDriver {
       },
       status: threadStatusToDriverStatus(this.thread)
     };
+  }
+
+  private liveResumeId(): string | undefined {
+    return this.options.resumeId === this.deadResumeId ? undefined : this.options.resumeId;
   }
 
   async inject(text: string, source: 'ui' | 'channel' | 'external'): Promise<void> {
@@ -471,7 +493,7 @@ class CodexDriver implements AgentDriver {
   }
 
   async fetchHistory(): Promise<DriverEvent[]> {
-    const threadId = this.thread?.id ?? this.options.resumeId;
+    const threadId = this.thread?.id ?? this.liveResumeId();
     if (!threadId) {
       throw driverCommandError('Cannot fetch Codex history before start', 'adapter-unavailable', false);
     }
@@ -497,7 +519,7 @@ class CodexDriver implements AgentDriver {
   private async hydrateHistoryTurns(threadId: string, turns: Turn[]): Promise<Turn[]> {
     const hydratedTurns: Turn[] = [];
     for (const turn of turns) {
-      if (!shouldFetchHistoryItems(turn, Boolean(this.options.resumeId))) {
+      if (!shouldFetchHistoryItems(turn, Boolean(this.liveResumeId()))) {
         hydratedTurns.push(turn);
         continue;
       }
@@ -555,7 +577,7 @@ class CodexDriver implements AgentDriver {
       this.emit({ kind: 'status', state: 'exited' });
       return;
     }
-    const currentThreadId = this.thread?.id ?? this.options.resumeId;
+    const currentThreadId = this.thread?.id ?? this.liveResumeId();
     const incomingThreadId = eventThreadId(event);
     if (currentThreadId && incomingThreadId && incomingThreadId !== currentThreadId) {
       return;
