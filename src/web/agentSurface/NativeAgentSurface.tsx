@@ -60,6 +60,21 @@ const NATIVE_AGENT_KEY_RESIZE_STEP = 12;
 const composerDrafts = new Map<string, string>();
 
 /**
+ * Both per-session Maps below live for the tab's lifetime and are keyed by
+ * tmux session name — without a cap they grow one entry per session ever
+ * visited. 200 sessions of drafts/counts is far beyond any real wall; evict
+ * the least-recently-touched entry past that.
+ */
+const SESSION_MEMO_CAP = 200;
+function touchSessionMemo<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > SESSION_MEMO_CAP) {
+    map.delete(map.keys().next().value as string);
+  }
+}
+
+/**
  * Per-session last-seen row counts (UX item 8): frozen while a surface is
  * unfocused/unmounted, advanced while the user is actually looking. On refocus,
  * rows beyond the frozen count sit below a "new since last view" separator.
@@ -85,7 +100,7 @@ export function NativeAgentSurface({
   const setInput = (value: string | ((current: string) => string)): void => {
     setInputState((current) => {
       const next = typeof value === 'function' ? value(current) : value;
-      composerDrafts.set(session, next);
+      touchSessionMemo(composerDrafts, session, next);
       return next;
     });
   };
@@ -99,8 +114,6 @@ export function NativeAgentSurface({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const slashPointerHandledRef = useRef(false);
-  const visibleRef = useRef(focused);
-  visibleRef.current = focused;
 
   // Subscribe to the broker.
   useEffect(() => {
@@ -216,7 +229,7 @@ export function NativeAgentSurface({
   }, [focused, session]);
   useEffect(() => {
     if (focused) {
-      lastSeenRowCounts.set(session, model.rows.length);
+      touchSessionMemo(lastSeenRowCounts, session, model.rows.length);
     }
   }, [focused, session, model.rows.length]);
 

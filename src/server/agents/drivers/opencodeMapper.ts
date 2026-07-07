@@ -297,6 +297,9 @@ export function mapLiveEvent(
       }
       ctx.assistantCommitted.add(assistant.id);
       const markdown = assembleMarkdown(ctx.assistantTextByMessageId.get(assistant.id));
+      // The accumulator has served its purpose once the message commits; keeping
+      // it would hold every past turn's full text for the driver's lifetime.
+      ctx.assistantTextByMessageId.delete(assistant.id);
       return {
         kind: 'assistant-message',
         id: assistant.id,

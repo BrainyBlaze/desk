@@ -1,4 +1,5 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { parseSlashCommand } from './slashCommand.js';
 import type { AgentSurfacePermissionOption } from '../../../core/agentSurfaceProtocol.js';
 import {
   driverCommandError,
@@ -65,14 +66,6 @@ export interface ClaudeQueryHandle extends AsyncIterable<ClaudeSdkMessage> {
  * into the stream where they would hang or corrupt the session.
  */
 const INTERACTIVE_SLASH_BLOCKLIST = new Set(['login', 'logout', 'exit', 'quit', 'clear', 'resume', 'theme', 'vim', 'terminal-setup']);
-
-function parseSlashCommand(text: string): { name: string; args: string } | null {
-  const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
-  if (!match) {
-    return null;
-  }
-  return { name: match[1]!.toLowerCase(), args: match[2]!.trim() };
-}
 
 export interface ClaudeSdkBoundary {
   query(config: ClaudeQueryConfig): ClaudeQueryHandle;

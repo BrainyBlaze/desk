@@ -1,3 +1,4 @@
+import { parseSlashCommand } from './slashCommand.js';
 import type {
   Event,
   Message,
@@ -229,16 +230,16 @@ export class OpencodeDriver implements AgentDriver {
     if (!this.sessionId || !this.backend) {
       throw notStartedError();
     }
-    const slash = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
+    const slash = parseSlashCommand(text);
     if (slash) {
       // opencode exposes session commands over POST /session/:id/command; an
       // unknown command errors there and surfaces as a typed unsupported-command
       // instead of being sent to the model as literal text.
       try {
-        await this.backend.runCommand(this.sessionId, slash[1]!.toLowerCase(), slash[2]!.trim(), this.opts.model);
+        await this.backend.runCommand(this.sessionId, slash.name, slash.args, this.opts.model);
       } catch (err) {
         throw driverCommandError(
-          `/${slash[1]!.toLowerCase()} failed in native mode: ${err instanceof Error ? err.message : String(err)} — switch to terminal UI if this is an interactive command`,
+          `/${slash.name} failed in native mode: ${err instanceof Error ? err.message : String(err)} — switch to terminal UI if this is an interactive command`,
           'unsupported-command',
           false
         );

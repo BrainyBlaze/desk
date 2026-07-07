@@ -1,3 +1,4 @@
+import { parseSlashCommand } from './slashCommand.js';
 import { spawn } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import type { AgentSurfaceCommand, AgentSurfacePermissionOption } from '../../../core/agentSurfaceProtocol.js';
@@ -81,14 +82,6 @@ function codexBypassThreadOverrides(bypassPermissions: boolean | undefined): {
   sandbox?: SandboxMode;
 } {
   return bypassPermissions ? { approvalPolicy: 'never', sandbox: 'danger-full-access' } : {};
-}
-
-function parseSlashCommand(text: string): { name: string; args: string } | null {
-  const match = /^\/([a-z][\w-]*)\s*(.*)$/is.exec(text.trim());
-  if (!match) {
-    return null;
-  }
-  return { name: match[1]!.toLowerCase(), args: match[2]!.trim() };
 }
 
 function codexSettingsSlashPatch(name: string, args: string): Record<string, unknown> | null {
