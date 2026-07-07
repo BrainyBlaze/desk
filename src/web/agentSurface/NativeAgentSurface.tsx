@@ -10,7 +10,7 @@ import {
   agentSurfaceClient,
   type SurfaceHandlers
 } from './agentSurfaceClient.js';
-import { resolveNativeFocusAnchorIndex } from './scrollAnchor.js';
+import { resolveNativeFocusAnchorIndex, settleNativeFocusAnchorScroll } from './scrollAnchor.js';
 import {
   applyEvent as applyEventToModel,
   buildAgentFeedItems,
@@ -321,12 +321,11 @@ export function NativeAgentSurface({
       return;
     }
     setUnreadMarkerIndex(rowCount > lastSeen && lastSeen > 0 ? lastSeen : null);
-    virtualizer.scrollToIndex(targetIndex, { align: 'end' });
-    requestAnimationFrame(() => {
-      const current = scrollRef.current;
-      if (current && targetIndex === feedItems.length - 1) {
-        current.scrollTop = current.scrollHeight;
-      }
+    settleNativeFocusAnchorScroll({
+      targetIndex,
+      latestIndex: feedItems.length - 1,
+      scrollToIndex: (index, options) => virtualizer.scrollToIndex(index, options),
+      getScrollElement: () => scrollRef.current
     });
     const unseen = lastSeen > 0 ? Math.max(0, rowCount - lastSeen) : 0;
     followingRef.current = unseen === 0;

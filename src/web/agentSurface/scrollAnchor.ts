@@ -5,6 +5,15 @@ export interface NativeFocusAnchorState {
   rowCount: number;
 }
 
+export interface NativeFocusAnchorScrollOptions {
+  targetIndex: number;
+  latestIndex: number;
+  scrollToIndex: (index: number, options: { align: 'end' }) => void;
+  getScrollElement: () => { scrollHeight: number; scrollTop: number } | null;
+  requestFrame?: (callback: FrameRequestCallback) => number;
+  maxPasses?: number;
+}
+
 export function resolveNativeFocusAnchorIndex(
   items: AgentFeedItem[],
   state: NativeFocusAnchorState
@@ -20,4 +29,33 @@ export function resolveNativeFocusAnchorIndex(
     }
   }
   return items.length - 1;
+}
+
+export function settleNativeFocusAnchorScroll(options: NativeFocusAnchorScrollOptions): () => void {
+  const maxPasses = Math.max(1, options.maxPasses ?? 3);
+  const requestFrame = options.requestFrame ?? ((callback: FrameRequestCallback) => requestAnimationFrame(callback));
+  let cancelled = false;
+  let pass = 0;
+  let lastScrollTop: number | null = null;
+
+  const scroll = (): void => {
+    if (cancelled) return;
+    pass += 1;
+    options.scrollToIndex(options.targetIndex, { align: 'end' });
+    const el = options.getScrollElement();
+    if (el && options.targetIndex === options.latestIndex) {
+      el.scrollTop = el.scrollHeight;
+    }
+    const scrollTop = el?.scrollTop ?? null;
+    const stable = scrollTop !== null && lastScrollTop !== null && Math.abs(scrollTop - lastScrollTop) < 1;
+    lastScrollTop = scrollTop;
+    if (pass < maxPasses && !stable) {
+      requestFrame(scroll);
+    }
+  };
+
+  scroll();
+  return () => {
+    cancelled = true;
+  };
 }
