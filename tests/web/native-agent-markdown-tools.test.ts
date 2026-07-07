@@ -236,6 +236,7 @@ describe('native agent composer controls', () => {
     const composerRule = cssBlock(styles, '.nativeAgentComposer');
     const handleRule = cssBlock(styles, '.nativeAgentComposerResizeHandle');
     const inputWrapRule = cssBlock(styles, '.nativeAgentComposerInputWrap');
+    const paletteRule = cssBlock(styles, '.nativeAgentPalette');
     const leftActionsRule = cssBlock(styles, '.nativeAgentComposerLeftActions');
     const rightActionsRule = cssBlock(styles, '.nativeAgentComposerRightActions');
     const buttonRule = cssBlock(styles, '.nativeAgentComposerIconButton');
@@ -243,13 +244,15 @@ describe('native agent composer controls', () => {
     expect(composerRule).toContain('position: relative');
     expect(handleRule).toContain('cursor: ns-resize');
     expect(handleRule).toContain('height: 5px');
-    expect(inputWrapRule).toContain('border-radius: 999px');
+    expect(inputWrapRule).toContain('border-radius: 0');
     expect(inputWrapRule).toContain('display: grid');
     expect(leftActionsRule).toContain('left: 8px');
     expect(rightActionsRule).toContain('right: 8px');
     expect(buttonRule).toContain('width: 22px');
     expect(buttonRule).toContain('justify-content: center');
     expect(styles).toMatch(/\.nativeAgentPaletteEmpty/);
+    expect(paletteRule).not.toContain('overflow-y');
+    expect(paletteRule).not.toContain('max-height');
     expect(styles).toMatch(/\.nativeAgentComposer\.dragOver/);
     expect(styles).toMatch(/\.nativeAgentComposerStatus/);
   });
