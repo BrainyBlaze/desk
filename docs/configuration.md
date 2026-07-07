@@ -223,7 +223,7 @@ Custom commands bypass built-in agent launch logic.
   command: npm run dev
 ```
 
-Desk still runs the command inside tmux and exposes it through the terminal broker, but it does not provide agent-specific resume, bypass, or attention hooks unless the command emits compatible terminal notifications.
+Desk runs the command inside tmux and exposes it through the terminal broker, but it does not provide agent-specific resume, bypass, or attention hooks unless the command emits compatible terminal notifications.
 
 ## Settings
 

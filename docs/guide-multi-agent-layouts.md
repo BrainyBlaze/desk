@@ -1,10 +1,10 @@
 ---
 title: "Multi-agent layouts"
 sidebarTitle: "Layouts"
-description: "Choose and tune terminal layouts for groups of agents: grids, linear lanes, custom cells, splits, and the mobile pager."
+description: "Choose and tune cell layouts for groups of agents: grids, linear lanes, custom cells, splits, and the mobile pager."
 ---
 
-Every group renders its sessions in a terminal grid, and the right layout
+Every group renders its sessions in a grid of cells — agent chats and terminals — and the right layout
 depends on what the group is for. This guide walks through each kind with the
 workspace from [Set up a multi-agent workspace](/guide-create-agent-fleet).
 
@@ -21,7 +21,7 @@ for a session you are actively pairing with.
 a pipeline of build/test/docs agents, or any lane you read left to right:
 
 <Frame caption="A linear 3-cell review lane: reviewer, tester, docs — with attention lamps in the sidebar">
-  <img src="/images/layout-linear.png" alt="Linear layout with three side-by-side terminals" />
+  <img src="/images/layout-linear.png" alt="Linear layout with three side-by-side session cells" />
 </Frame>
 
 ## Custom: exact cell counts
@@ -33,7 +33,7 @@ or grow it live with the **+** cell button.
 ## Tuning a layout live
 
 - **Switch kinds in place** — the layout badge in the multiplexer header is a
-  dropdown; changing it never restarts terminals.
+  dropdown; changing it never restarts sessions.
 - **Resize the splits** — drag the separators between cells. The proportions
   persist per group and restore exactly after a reload.
 - **Assign sessions to cells** — drag a session tab onto a cell, or tap an
@@ -43,10 +43,10 @@ or grow it live with the **+** cell button.
 
 ## Group switching is free
 
-Recently visited groups stay mounted with live terminals under a warm budget
+Recently visited groups stay mounted with live cells under a warm budget
 (about 40 sessions on desktop), so flipping between your `main` grid and a
-`review` lane opens no new connections and repaints instantly. Terminal state,
-scroll position, and selection survive the round trip.
+`review` lane opens no new connections and repaints instantly. Transcript and terminal
+state, scroll position, and selection survive the round trip.
 
 ## On phones: the pager
 
@@ -56,7 +56,7 @@ pill, and a pulsing diamond means that agent needs input, so triage works
 from the pager alone:
 
 <Frame caption="The mobile pager: one cell per screen, state-tinted diamonds, compact fleet strip">
-  <img src="/images/mobile-pager.png" alt="Desk on a phone showing the terminal pager" />
+  <img src="/images/mobile-pager.png" alt="Desk on a phone showing the one-cell-per-screen pager" />
 </Frame>
 
 ## Choosing by scenario

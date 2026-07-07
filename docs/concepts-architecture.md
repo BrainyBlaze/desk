@@ -16,6 +16,9 @@ flowchart LR
   Tmux --> Agents["Codex / Claude / OpenCode / Bash / custom commands"]
   Server["Desk server"] --> Broker["terminal broker"]
   Broker --> Browser["browser UI"]
+  Agents --> Host["agent host (native sessions)"]
+  Host --> SurfaceBroker["agent surface broker"]
+  SurfaceBroker --> Browser
   Server --> Channels["channel store"]
   Server --> FS["filesystem and editor APIs"]
   Server --> Git["git / gh APIs"]
@@ -32,7 +35,7 @@ flowchart LR
 `~/.config/desk/desk.yml` describes desired state:
 
 - projects and working directories
-- groups and terminal layouts
+- groups and cell layouts
 - sessions and agent kinds
 - custom commands
 - permission bypass settings
@@ -58,6 +61,10 @@ the same backend routes without Vite.
 The server also coordinates:
 
 - terminal broker connections
+- agent surface sessions: native-mode agents run a `desk agent-host` process
+  in their tmux session that drives the agent SDK; the agent surface broker
+  relays its transcript events to every subscribed browser and replays history
+  on reconnect
 - filesystem and editor operations
 - Git and GitHub operations through `git` and `gh`
 - channels storage and delivery
@@ -68,7 +75,7 @@ The server also coordinates:
 ### Browser
 
 The browser renders the operator workspace. It owns layout, selected views,
-terminal surfaces, channels panels, editor tabs, project boards, notes, and
+native agent chats, terminal surfaces, channels panels, editor tabs, project boards, notes, and
 theme state. Closing the browser does not stop tmux sessions.
 
 ### Terminal broker

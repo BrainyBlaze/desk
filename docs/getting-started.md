@@ -104,7 +104,7 @@ Optional tools unlock additional features:
     native chat surface, bash and custom commands as a browser terminal.
 
     <Check>
-    The new cell should show the agent's chat composer (or the shell TUI for
+    The cell should show the agent's chat composer (or the shell TUI for
     bash). `desk status` should show a matching tmux session.
     </Check>
   </Step>
