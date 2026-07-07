@@ -5,6 +5,13 @@ import { IconButton } from '../arwes/primitives.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { channelsUpload } from './channelsClient.js';
 import { applyMention, composerInputHeightFromTopResize, mentionQueryAt, type MentionQuery } from './channelsModel.js';
+import {
+  appendComposerFileLinks,
+  composerDragIncludesFiles,
+  composerPlainEnterShouldSend,
+  composerResizeKeyDelta,
+  filesFromClipboardItems
+} from '../composerInput.js';
 
 const COMPOSER_INPUT_MIN_HEIGHT = 38;
 const COMPOSER_INPUT_MAX_HEIGHT = 260;
@@ -193,7 +200,7 @@ export function Composer({
         const result = await channelsUpload(channel, file.name, btoa(binary));
         links.push(result.markdown);
       }
-      setText((current) => `${current}${current.length > 0 && !current.endsWith('\n') && !current.endsWith(' ') ? ' ' : ''}${links.join(' ')}`);
+      setText((current) => appendComposerFileLinks(current, links));
       bleeps.open?.play();
     } catch (error) {
       onError(error instanceof Error ? error.message : 'upload failed');
@@ -230,7 +237,7 @@ export function Composer({
     <div
       className={`chanComposer ${dragOver ? 'dragOver' : ''}`}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes('Files')) {
+        if (composerDragIncludesFiles(event.dataTransfer.types)) {
           event.preventDefault();
           setDragOver(true);
         }
@@ -252,12 +259,10 @@ export function Composer({
         onPointerUp={finishResize}
         onPointerCancel={finishResize}
         onKeyDown={(event) => {
-          if (event.key === 'ArrowUp') {
+          const delta = composerResizeKeyDelta(event.key, COMPOSER_KEY_RESIZE_STEP);
+          if (delta !== null) {
             event.preventDefault();
-            resizeFromKeyboard(COMPOSER_KEY_RESIZE_STEP);
-          } else if (event.key === 'ArrowDown') {
-            event.preventDefault();
-            resizeFromKeyboard(-COMPOSER_KEY_RESIZE_STEP);
+            resizeFromKeyboard(delta);
           }
         }}
       />
@@ -278,10 +283,7 @@ export function Composer({
           refreshMention(area.value, area.selectionStart ?? area.value.length);
         }}
         onPaste={(event) => {
-          const files = [...event.clipboardData.items]
-            .filter((item) => item.kind === 'file')
-            .map((item) => item.getAsFile())
-            .filter((file): file is File => file !== null);
+          const files = filesFromClipboardItems(event.clipboardData.items);
           if (files.length > 0) {
             event.preventDefault();
             void uploadFiles(files);
@@ -309,7 +311,7 @@ export function Composer({
               return;
             }
           }
-          if (event.key === 'Enter' && !event.shiftKey) {
+          if (composerPlainEnterShouldSend(event.key, event.shiftKey)) {
             event.preventDefault();
             void send();
           }

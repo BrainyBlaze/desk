@@ -21,6 +21,7 @@ import type { DeskAgent } from '../../../core/types.js';
  * Optional env:
  *   DESK_AGENT_RESUME     — existing agent-native session id to resume
  *   DESK_AGENT_CWD        — cwd for the driver (defaults to process.cwd())
+ *   DESK_LSP_ENV_FILE     — managed agent LSP MCP env file
  *   DESK_AGENT_HOST_LOG_LEVEL — debug | info | warn | error (default: info)
  */
 export function runAgentHostFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -61,6 +62,9 @@ export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
   }
   if (env.DESK_AGENT_MODEL) {
     result.DESK_AGENT_MODEL = env.DESK_AGENT_MODEL;
+  }
+  if (env.DESK_LSP_ENV_FILE) {
+    result.DESK_LSP_ENV_FILE = env.DESK_LSP_ENV_FILE;
   }
   const level = env.DESK_AGENT_HOST_LOG_LEVEL;
   if (level === 'debug' || level === 'info' || level === 'warn' || level === 'error') {

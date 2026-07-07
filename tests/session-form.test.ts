@@ -219,4 +219,9 @@ describe('session form modal source contract', () => {
     expect(source).toContain('resume-not-captured');
     expect(source).toMatch(/confirmDiscard/);
   });
+
+  it('does not replay the preliminary edit after the resume-discard switch gate', () => {
+    expect(source).toMatch(/if \(!uiModeSwitchDiscard\) \{\n\s+editedSnapshot = await editProjectSession/);
+    expect(source).toContain('setSnapshot(editedSnapshot)');
+  });
 });

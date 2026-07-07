@@ -56,7 +56,8 @@ describe('loadDriver', () => {
         DESK_AGENT: 'codex',
         DESK_AGENT_BYPASS: '1',
         DESK_AGENT_RESUME: 'thread-1',
-        DESK_AGENT_MODEL: 'gpt-5.5'
+        DESK_AGENT_MODEL: 'gpt-5.5',
+        DESK_LSP_ENV_FILE: '/tmp/desk-lsp/env.json'
       }),
       {} as never
     );
@@ -66,7 +67,8 @@ describe('loadDriver', () => {
       cwd: '/repo',
       resumeId: 'thread-1',
       model: 'gpt-5.5',
-      bypassPermissions: true
+      bypassPermissions: true,
+      lspEnvFilePath: '/tmp/desk-lsp/env.json'
     });
   });
 });

@@ -211,7 +211,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
   // so the agent-host command wins over any earlier spec rewrite. Without a
   // resolvable server URL the spec passes through unenriched and the host
   // fails visibly in its pane.
-  const nativeAgentLaunch = (spec: SessionSpec): SessionSpec => {
+  const nativeAgentLaunch = (spec: SessionSpec, lspEnvFilePath?: string): SessionSpec => {
     if (spec.uiMode !== 'native') {
       return spec;
     }
@@ -222,6 +222,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
     const secret = getOrCreateAgentHostSecret();
     return rewriteNativeLaunchCommand(spec, {
       serverUrl,
+      ...(lspEnvFilePath ? { lspEnvFilePath } : {}),
       token: deriveAgentHostToken(secret, spec.tmuxSession, spec.agent ?? '')
     });
   };
@@ -520,7 +521,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
               return;
             }
             const launch = managedAgentLsp.prepare(nextSession, updated.settings);
-            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession);
+            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath);
             const started = startSession(sessionToStart);
             if (!started.ok) {
               launch?.cleanup();
@@ -595,7 +596,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
               return;
             }
             const launch = managedAgentLsp.prepare(nextSession, updated.settings);
-            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession);
+            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath);
             const started = startSession(sessionToStart);
             if (!started.ok) {
               launch?.cleanup();
@@ -724,7 +725,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             if (shouldRespawnAfterEdit(oldSpec, newSpec, (t) => listTmuxSessions().has(t)) && newSpec) {
               managedAgentLsp.cleanup(newSpec.tmuxSession);
               const launch = managedAgentLsp.prepare(newSpec, readManifestFile(manifestPath).settings);
-              const restarted = restartSession(nativeAgentLaunch(launch?.session ?? newSpec));
+              const restarted = restartSession(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
               if (!restarted.ok) {
                 launch?.cleanup();
                 sendJson(res, 500, { error: `session edit saved but respawn failed: ${restarted.error}` });
@@ -787,7 +788,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             }
             managedAgentLsp.cleanup(session.tmuxSession);
             const launch = managedAgentLsp.prepare(session, readManifestFile(resolveManifestPath()).settings);
-            const restarted = restartSession(nativeAgentLaunch(launch?.session ?? session));
+            const restarted = restartSession(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
             if (!restarted.ok) {
               launch?.cleanup();
               sendJson(res, 500, { error: restarted.error });
@@ -835,7 +836,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
                   prepare: (spec) => {
                     managedAgentLsp.cleanup(spec.tmuxSession);
                     launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
-                    return nativeAgentLaunch(launch?.session ?? spec);
+                    return nativeAgentLaunch(launch?.session ?? spec, launch?.envFilePath);
                   },
                   restart: (spec) => restartSession(spec),
                   scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
@@ -1317,14 +1318,14 @@ function runManagedPlan(
   plan: TmuxPlanAction[],
   settings: DeskSettings | undefined,
   managedAgentLsp: ReturnType<typeof createManagedAgentLspWiring>,
-  nativeAgentLaunch: (spec: SessionSpec) => SessionSpec = (spec) => spec
+  nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec = (spec) => spec
 ): number {
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = startSession(nativeAgentLaunch(launch?.session ?? action.session));
+    const started = startSession(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
       return 1;

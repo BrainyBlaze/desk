@@ -5580,16 +5580,6 @@ button.layoutBadge:hover:not(:disabled) {
   }
 }
 
-/* UX item 5: the composer action slot doubles as Stop while a turn runs. */
-.nativeAgentSend.nativeAgentSendStop {
-  background: color-mix(in srgb, var(--desk-error, #ff4d6d) 14%, transparent);
-  color: color-mix(in srgb, var(--desk-error, #ff4d6d) 82%, var(--desk-text, #d6e4f0));
-}
-
-.nativeAgentSend.nativeAgentSendStop:hover {
-  background: color-mix(in srgb, var(--desk-error, #ff4d6d) 24%, transparent);
-}
-
 /* UX items 3 + 4: collapsed injected payloads and docked active permissions. */
 .nativeAgentRow.collapsible {
   gap: 5px;

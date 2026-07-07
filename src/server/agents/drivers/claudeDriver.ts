@@ -36,6 +36,7 @@ export interface ClaudeQueryOptions {
   cwd: string;
   systemPrompt: { type: 'preset'; preset: 'claude_code' };
   includePartialMessages: boolean;
+  mcpServers?: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   permissionMode?: string;
   allowDangerouslySkipPermissions?: boolean;
   canUseTool?: (
@@ -67,6 +68,16 @@ export interface ClaudeQueryHandle extends AsyncIterable<ClaudeSdkMessage> {
  */
 const INTERACTIVE_SLASH_BLOCKLIST = new Set(['login', 'logout', 'exit', 'quit', 'clear', 'resume', 'theme', 'vim', 'terminal-setup']);
 
+function claudeManagedLspMcpServers(envFilePath: string): Record<string, { command: string; args: string[]; env: Record<string, string> }> {
+  return {
+    desk_lsp: {
+      command: 'desk-lsp-mcp',
+      args: [],
+      env: { DESK_LSP_ENV_FILE: envFilePath }
+    }
+  };
+}
+
 export interface ClaudeSdkBoundary {
   query(config: ClaudeQueryConfig): ClaudeQueryHandle;
   getSessionMessages?(sessionId: string): Promise<ClaudeSdkMessage[]>;
@@ -76,6 +87,7 @@ export interface ClaudeDriverOptions {
   cwd: string;
   resume?: string;
   bypassPermissions: boolean;
+  lspEnvFilePath?: string;
   sdk?: ClaudeSdkBoundary;
 }
 
@@ -342,6 +354,7 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         includePartialMessages: true,
         ...(options.resume ? { resume: options.resume } : {}),
+        ...(options.lspEnvFilePath ? { mcpServers: claudeManagedLspMcpServers(options.lspEnvFilePath) } : {}),
         ...(options.bypassPermissions
           ? { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
           : { canUseTool })

@@ -69,7 +69,15 @@ interface Harness {
   readonly setModelCalls: Array<string | undefined>;
 }
 
-function harness(options: { resume?: string; history?: ClaudeSdkMessage[]; omitHistoryApi?: boolean; omitSetModel?: boolean } = {}): Harness {
+function harness(
+  options: {
+    resume?: string;
+    history?: ClaudeSdkMessage[];
+    omitHistoryApi?: boolean;
+    omitSetModel?: boolean;
+    lspEnvFilePath?: string;
+  } = {}
+): Harness {
   const query = new FakeQuery();
   if (options.omitSetModel) {
     (query as { setModel?: unknown }).setModel = undefined;
@@ -91,7 +99,13 @@ function harness(options: { resume?: string; history?: ClaudeSdkMessage[]; omitH
           getSessionMessages: async () => history
         })
   };
-  const driver = createClaudeDriver({ cwd: '/tmp/project', resume: options.resume, bypassPermissions: false, sdk });
+  const driver = createClaudeDriver({
+    cwd: '/tmp/project',
+    resume: options.resume,
+    bypassPermissions: false,
+    sdk,
+    ...(options.lspEnvFilePath ? { lspEnvFilePath: options.lspEnvFilePath } : {})
+  });
   const events: DriverEvent[] = [];
   driver.onEvent((event) => events.push(event));
   return {
@@ -136,6 +150,18 @@ async function drain(): Promise<void> {
 }
 
 describe('claudeDriver start', () => {
+  it('configures the managed LSP MCP server for native sessions when an env file is provided', async () => {
+    const h = await startedHarness({ lspEnvFilePath: '/tmp/desk-lsp/env.json' });
+
+    expect(h.config().options.mcpServers).toEqual({
+      desk_lsp: {
+        command: 'desk-lsp-mcp',
+        args: [],
+        env: { DESK_LSP_ENV_FILE: '/tmp/desk-lsp/env.json' }
+      }
+    });
+  });
+
   it('resolves before init, passes resume + parity options, and surfaces init as session-info', async () => {
     const h = harness({ resume: 'sess-uuid-1' });
     const result = await h.driver.start();

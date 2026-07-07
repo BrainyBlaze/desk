@@ -54,6 +54,11 @@ describe('rewriteNativeLaunchCommand', () => {
     expect(without.command).not.toContain('DESK_AGENT_MODEL');
   });
 
+  it('passes managed LSP env into native agent-host launches when present', () => {
+    const rewritten = rewriteNativeLaunchCommand(spec(), { ...ctx, lspEnvFilePath: '/tmp/desk-lsp/env.json' });
+    expect(rewritten.command).toContain("DESK_LSP_ENV_FILE='/tmp/desk-lsp/env.json'");
+  });
+
   it('shell-quotes hostile values', () => {
     const rewritten = rewriteNativeLaunchCommand(spec({ resume: "it's" }), { serverUrl: ctx.serverUrl, token: "to'k" });
     expect(rewritten.command).toContain("DESK_AGENT_RESUME='it'\\''s'");

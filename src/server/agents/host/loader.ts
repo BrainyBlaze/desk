@@ -24,6 +24,7 @@ export function loadDriver(env: AgentHostEnv, _logger: AgentHostLogger): AgentDr
   const bypass = env.DESK_AGENT_BYPASS === '1';
   const cwd = env.DESK_AGENT_CWD ?? process.cwd();
   const model = env.DESK_AGENT_MODEL;
+  const lspEnvFilePath = env.DESK_LSP_ENV_FILE;
 
   switch (agent) {
     case 'opencode':
@@ -37,13 +38,15 @@ export function loadDriver(env: AgentHostEnv, _logger: AgentHostLogger): AgentDr
       return createClaudeDriver({
         cwd,
         resume: env.DESK_AGENT_RESUME,
-        bypassPermissions: bypass
+        bypassPermissions: bypass,
+        ...(lspEnvFilePath ? { lspEnvFilePath } : {})
       });
     case 'codex':
       return createCodexDriver({
         cwd,
         resumeId: env.DESK_AGENT_RESUME,
         bypassPermissions: bypass,
+        ...(lspEnvFilePath ? { lspEnvFilePath } : {}),
         ...(model ? { model } : {})
       });
     default:

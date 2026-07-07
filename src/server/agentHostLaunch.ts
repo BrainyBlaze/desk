@@ -12,6 +12,7 @@ import type { SessionSpec } from '../core/types.js';
 export interface NativeLaunchContext {
   serverUrl: string;
   token: string;
+  lspEnvFilePath?: string;
 }
 
 export function rewriteNativeLaunchCommand(spec: SessionSpec, context: NativeLaunchContext): SessionSpec {
@@ -24,6 +25,7 @@ export function rewriteNativeLaunchCommand(spec: SessionSpec, context: NativeLau
     ...(spec.resume ? [`DESK_AGENT_RESUME=${shellQuote(spec.resume)}`] : []),
     `DESK_AGENT_BYPASS=${shellQuote(spec.bypassPermissions ? '1' : '0')}`,
     ...(spec.model ? [`DESK_AGENT_MODEL=${shellQuote(spec.model)}`] : []),
+    ...(context.lspEnvFilePath ? [`DESK_LSP_ENV_FILE=${shellQuote(context.lspEnvFilePath)}`] : []),
     `DESK_SERVER_URL=${shellQuote(context.serverUrl)}`,
     `DESK_AGENT_HOST_TOKEN=${shellQuote(context.token)}`
   ].join(' ');

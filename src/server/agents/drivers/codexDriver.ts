@@ -48,6 +48,7 @@ export interface CodexDriverOptions {
   model?: string;
   resumeId?: string;
   bypassPermissions?: boolean;
+  lspEnvFilePath?: string;
 }
 
 const CODEX_INTERACTIVE_SLASH_BLOCKLIST = new Set([
@@ -82,6 +83,17 @@ function codexBypassThreadOverrides(bypassPermissions: boolean | undefined): {
   sandbox?: SandboxMode;
 } {
   return bypassPermissions ? { approvalPolicy: 'never', sandbox: 'danger-full-access' } : {};
+}
+
+function codexManagedLspConfig(envFilePath: string | undefined): Record<string, unknown> | undefined {
+  if (!envFilePath) {
+    return undefined;
+  }
+  return {
+    'mcp_servers.desk_lsp.command': 'desk-lsp-mcp',
+    'mcp_servers.desk_lsp.args': [],
+    'mcp_servers.desk_lsp.env.DESK_LSP_ENV_FILE': envFilePath
+  };
 }
 
 function codexSettingsSlashPatch(name: string, args: string): Record<string, unknown> | null {
@@ -302,17 +314,20 @@ class CodexDriver implements AgentDriver {
     await this.options.transport.notify('initialized');
 
     let threadResult: unknown;
+    const lspConfig = codexManagedLspConfig(this.options.lspEnvFilePath);
     if (this.options.resumeId) {
       threadResult = await this.options.transport.request('thread/resume', {
         threadId: this.options.resumeId,
         cwd: this.options.cwd,
         model: this.options.model ?? null,
+        ...(lspConfig ? { config: lspConfig } : {}),
         ...codexBypassThreadOverrides(this.options.bypassPermissions)
       });
     } else {
       threadResult = await this.options.transport.request('thread/start', {
         cwd: this.options.cwd,
         ...codexBypassThreadOverrides(this.options.bypassPermissions),
+        ...(lspConfig ? { config: lspConfig } : {}),
         ...(this.options.model ? { model: this.options.model } : {})
       });
     }

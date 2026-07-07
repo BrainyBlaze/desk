@@ -22,6 +22,13 @@ import {
 } from './rowsModel.js';
 import { channelsUpload } from '../channels/channelsClient.js';
 import { composerInputHeightFromTopResize } from '../channels/channelsModel.js';
+import {
+  appendComposerFileLinks,
+  composerDragIncludesFiles,
+  composerPlainEnterShouldSend,
+  composerResizeKeyDelta,
+  filesFromClipboardItems
+} from '../composerInput.js';
 
 // Reuse the channels markdown renderer (spec §9: ChannelMarkdown). Lazy-loaded +
 // memoized for code-splitting, same pattern as MessageList. AgentMarkdown wrapper
@@ -36,10 +43,9 @@ const ChannelMarkdown = lazy(() => import('../channels/ChannelMarkdown.js'));
  * subscription. Tool rows render as compact disclosure blocks with input/output detail,
  * and permissions render as allow/deny cards.
  *
- * Reused channels primitives: Composer pattern from channels/Composer.tsx is mirrored
- * rather than imported (channels Composer carries channelsUpload coupling + channels-
- * specific mention handling; agentSurface/Composer.tsx will land with the uploadFn +
- * onSend SendResult contract per F2 in a follow-up).
+ * Reused channels primitives: file insertion, paste/drop guards, resize-key
+ * handling, and Enter-to-send live in composerInput.ts; this surface keeps the
+ * native-only slash palette and stop action local.
  */
 
 const SURFACE_ID = `native-${Math.random().toString(36).slice(2, 10)}`;
@@ -403,7 +409,7 @@ export function NativeAgentSurface({
         const result = await channelsUpload(NATIVE_AGENT_FILE_CHANNEL, file.name, btoa(binary));
         links.push(result.markdown);
       }
-      setInput((current) => `${current}${current.length > 0 && !current.endsWith('\n') && !current.endsWith(' ') ? ' ' : ''}${links.join(' ')}`);
+      setInput((current) => appendComposerFileLinks(current, links));
       setErrorMsg(null);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'upload failed');
@@ -535,7 +541,7 @@ export function NativeAgentSurface({
       <div
         className={`nativeAgentComposer ${dragOver ? 'dragOver' : ''}`}
         onDragOver={(event) => {
-          if (event.dataTransfer.types.includes('Files')) {
+          if (composerDragIncludesFiles(event.dataTransfer.types)) {
             event.preventDefault();
             setDragOver(true);
           }
@@ -581,12 +587,10 @@ export function NativeAgentSurface({
           onPointerUp={finishResize}
           onPointerCancel={finishResize}
           onKeyDown={(event) => {
-            if (event.key === 'ArrowUp') {
+            const delta = composerResizeKeyDelta(event.key, NATIVE_AGENT_KEY_RESIZE_STEP);
+            if (delta !== null) {
               event.preventDefault();
-              resizeFromKeyboard(NATIVE_AGENT_KEY_RESIZE_STEP);
-            } else if (event.key === 'ArrowDown') {
-              event.preventDefault();
-              resizeFromKeyboard(-NATIVE_AGENT_KEY_RESIZE_STEP);
+              resizeFromKeyboard(delta);
             }
           }}
         />
@@ -605,10 +609,7 @@ export function NativeAgentSurface({
               }
             }}
             onPaste={(event) => {
-              const files = [...event.clipboardData.items]
-                .filter((item) => item.kind === 'file')
-                .map((item) => item.getAsFile())
-                .filter((file): file is File => file !== null);
+              const files = filesFromClipboardItems(event.clipboardData.items);
               if (files.length > 0) {
                 event.preventDefault();
                 void uploadNativeFiles(files);
@@ -644,7 +645,7 @@ export function NativeAgentSurface({
                   return;
                 }
               }
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (composerPlainEnterShouldSend(e.key, e.shiftKey)) {
                 e.preventDefault();
                 if (canSend) {
                   handleSend();

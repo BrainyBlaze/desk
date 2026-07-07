@@ -1318,17 +1318,20 @@ export function App(): JSX.Element {
       return;
     }
     setBusy(true);
+    let editedSnapshot: DeskSnapshot | null = null;
     try {
       // Persist the non-mode edits first, carrying the CURRENT mode so the
       // manifest-only route never flips uiMode without a respawn; then run the
       // atomic switch, which re-reads the fresh manifest and kills + starts.
-      await editProjectSession({
-        projectId: modalGroup.projectId,
-        groupId: modalGroup.groupId,
-        currentName: modalSession.spec.name,
-        projectCwd: modalGroup.projectCwd,
-        session: buildSessionPayload({ ...sessionForm, uiMode: modalSession.spec.uiMode ?? 'terminal' })
-      });
+      if (!uiModeSwitchDiscard) {
+        editedSnapshot = await editProjectSession({
+          projectId: modalGroup.projectId,
+          groupId: modalGroup.groupId,
+          currentName: modalSession.spec.name,
+          projectCwd: modalGroup.projectCwd,
+          session: buildSessionPayload({ ...sessionForm, uiMode: modalSession.spec.uiMode ?? 'terminal' })
+        });
+      }
       const next = await setSessionUiMode({
         tmuxSession: modalSession.spec.tmuxSession,
         uiMode: sessionForm.uiMode,
@@ -1346,6 +1349,9 @@ export function App(): JSX.Element {
       if (err instanceof ApiCodeError && err.code === 'resume-not-captured' && !uiModeSwitchDiscard) {
         // Re-render the confirm as an explicit discard warning; the next
         // confirm retries with confirmDiscard so nothing is lost silently.
+        if (editedSnapshot) {
+          setSnapshot(editedSnapshot);
+        }
         setUiModeSwitchDiscard(true);
         setError(null);
       } else {

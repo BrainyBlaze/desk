@@ -9,6 +9,7 @@ const VALID_ENV: NodeJS.ProcessEnv = {
   DESK_AGENT_HOST_TOKEN: 'a]bH4shHex0123=',
   DESK_AGENT_RESUME: 'ses_abc',
   DESK_AGENT_CWD: '/tmp/proj',
+  DESK_LSP_ENV_FILE: '/tmp/desk-lsp/env.json',
   DESK_AGENT_HOST_LOG_LEVEL: 'info'
 };
 
@@ -34,6 +35,7 @@ describe('parseAgentHostEnv — required keys', () => {
       DESK_AGENT_HOST_TOKEN: 'a]bH4shHex0123=',
       DESK_AGENT_RESUME: 'ses_abc',
       DESK_AGENT_CWD: '/tmp/proj',
+      DESK_LSP_ENV_FILE: '/tmp/desk-lsp/env.json',
       DESK_AGENT_HOST_LOG_LEVEL: 'info'
     });
   });
@@ -43,11 +45,13 @@ describe('parseAgentHostEnv — required keys', () => {
       makeEnv({
         DESK_AGENT_RESUME: undefined,
         DESK_AGENT_CWD: undefined,
+        DESK_LSP_ENV_FILE: undefined,
         DESK_AGENT_HOST_LOG_LEVEL: undefined
       })
     );
     expect(env.DESK_AGENT_RESUME).toBeUndefined();
     expect(env.DESK_AGENT_CWD).toBeUndefined();
+    expect(env.DESK_LSP_ENV_FILE).toBeUndefined();
     expect(env.DESK_AGENT_HOST_LOG_LEVEL).toBeUndefined();
   });
 
@@ -98,6 +102,12 @@ describe('parseAgentHostEnv — optional keys', () => {
 
   it('carries DESK_AGENT_CWD when present', () => {
     expect(parseAgentHostEnv(makeEnv({ DESK_AGENT_CWD: '/home/user/project' })).DESK_AGENT_CWD).toBe('/home/user/project');
+  });
+
+  it('carries DESK_LSP_ENV_FILE when present', () => {
+    expect(parseAgentHostEnv(makeEnv({ DESK_LSP_ENV_FILE: '/tmp/desk-lsp/env.json' })).DESK_LSP_ENV_FILE).toBe(
+      '/tmp/desk-lsp/env.json'
+    );
   });
 
   it('accepts each log level', () => {

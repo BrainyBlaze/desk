@@ -285,6 +285,32 @@ describe('createCodexDriver', () => {
     });
   });
 
+  it('configures managed LSP MCP on native Codex threads when an env file is provided', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread() } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', lspEnvFilePath: '/tmp/desk-lsp/env.json' });
+
+    await driver.start();
+
+    expect(transport.calls).toContainEqual({
+      type: 'request',
+      method: 'thread/start',
+      params: {
+        cwd: '/repo',
+        config: {
+          'mcp_servers.desk_lsp.command': 'desk-lsp-mcp',
+          'mcp_servers.desk_lsp.args': [],
+          'mcp_servers.desk_lsp.env.DESK_LSP_ENV_FILE': '/tmp/desk-lsp/env.json'
+        }
+      }
+    });
+  });
+
   it('maps bypass permissions to Codex thread approval and sandbox overrides on resume', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
