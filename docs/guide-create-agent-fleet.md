@@ -9,7 +9,7 @@ projects, three groups with different layouts, and nine sessions — the shape
 you see throughout these docs:
 
 <Frame caption="The finished workspace: two projects, a linear review lane selected, attention lamps live">
-  <img src="/images/agents-two-projects.png" alt="Sidebar with Acme and Billing projects and a terminal grid" />
+  <img src="/images/agents-two-projects.png" alt="Sidebar with Acme and Billing projects and a session cell grid" />
 </Frame>
 
 Everything below can also be done by editing `~/.config/desk/desk.yml`
