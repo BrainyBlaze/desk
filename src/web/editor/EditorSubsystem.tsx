@@ -431,6 +431,10 @@ export function EditorSubsystem({
       restoringSidebarRef.current = false;
       return;
     }
+    // Guard: if we're currently animating a manual toggle, don't overwrite the layout.
+    if (restoringSidebarRef.current) {
+      return;
+    }
     restoringSidebarRef.current = true;
     const assertLayout = (): void => {
       if (sidebarCollapsed) {

@@ -15,7 +15,7 @@ import {
   styleFrameClipOctagon,
   useBleeps
 } from '@arwes/react';
-import { ChevronDown, X } from 'lucide-react';
+import { ChevronDown, HelpCircle, X } from 'lucide-react';
 import { createDeskTheme, type DeskBuiltTheme } from './theme.js';
 import { isReducedMotion } from './motion.js';
 import type { DeskBleepName } from './bleeps.js';
@@ -395,6 +395,75 @@ export function BackdropField(): JSX.Element {
   );
 }
 
+
+/* ---------- HelpIcon (shows tooltip on hover) ---------- */
+
+export function HelpIcon({ text }: { text: string }): JSX.Element {
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const bleeps = useBleeps<DeskBleepName>();
+
+  const handleMouseEnter = (): void => {
+    if (!buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setTooltipPos({
+      x: rect.left + rect.width / 2,
+      y: rect.top
+    });
+    setShowTooltip(true);
+    bleeps.hover?.play();
+  };
+
+  const handleMouseLeave = (): void => {
+    setShowTooltip(false);
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        className="iconButton helpIconButton"
+        type="button"
+        aria-label="Help"
+        title={text}
+        style={{ clipPath: CLIP_OCTAGON_TINY }}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        onClick={() => bleeps.click?.play()}
+      >
+        <HelpCircle size={13} />
+      </button>
+      {showTooltip && tooltipPos
+        ? createPortal(
+            <div
+              style={{
+                position: 'fixed',
+                left: `${tooltipPos.x}px`,
+                top: `${tooltipPos.y}px`,
+                transform: 'translate(-50%, -100%)',
+                marginTop: '-8px',
+                backgroundColor: 'rgba(20, 20, 30, 0.95)',
+                color: '#ccc',
+                padding: '8px 12px',
+                borderRadius: '4px',
+                fontSize: '12px',
+                maxWidth: '240px',
+                whiteSpace: 'normal',
+                zIndex: 100000,
+                border: '1px solid rgba(100, 200, 255, 0.3)',
+                pointerEvents: 'none'
+              }}
+            >
+              {text}
+            </div>,
+            document.body
+          )
+        : null}
+    </>
+  );
+}
+
 /* ---------- Modal (Kranox frame + enter choreography + open bleep) ---------- */
 
 export function Modal({
@@ -404,7 +473,8 @@ export function Modal({
   children,
   tone,
   alarm,
-  wide
+  wide,
+  help
 }: {
   title: string;
   icon: ReactNode;
@@ -414,6 +484,8 @@ export function Modal({
   alarm?: boolean;
   /** roomy two-pane layouts (settings) get a wider frame */
   wide?: boolean;
+  /** short explainer surfaced via a "?" icon next to the title */
+  help?: string;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [active, setActive] = useState(false);
@@ -455,6 +527,7 @@ export function Modal({
             <div className="railTitle">
               {icon}
               <TextReveal as="span" manager="decipher">{title}</TextReveal>
+              {help ? <HelpIcon text={help} /> : null}
             </div>
             <button
               className="iconButton"

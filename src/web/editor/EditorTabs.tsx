@@ -56,7 +56,7 @@ export function EditorTabs({
   onToggleRender,
   onMove,
   extraMenuItems
-}: EditorTabsProps): JSX.Element {
+}: EditorTabsProps): JSX.Element | null {
   const bleeps = useBleeps<DeskBleepName>();
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [menu, setMenu] = useState<TabMenuState | null>(null);
@@ -107,6 +107,10 @@ export function EditorTabs({
   );
 
   const menuMeta = menu ? meta.get(menu.path) : undefined;
+
+  if (tabs.length === 0) {
+    return null;
+  }
 
   return (
     <div className="editorTabs" role="tablist">

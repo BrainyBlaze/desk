@@ -711,6 +711,20 @@ button.statusSegment:hover {
   color: var(--desk-accent);
 }
 
+.railHelpIcon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--desk-text-dim);
+  cursor: help;
+  transition: color 140ms ease;
+}
+.railHelpIcon:hover {
+  color: var(--desk-accent);
+}
+
 .sessionRowFrame {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 22px;
@@ -2958,7 +2972,13 @@ select {
 .gitGraphRail { flex: none; display: block; }
 .gitGraphRail path { stroke-width: 1.4; opacity: 0.9; }
 .gitGraphNode { fill: var(--desk-bg); stroke-width: 1.6; }
-.gitCommitMain { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.gitCommitMain { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
+.gitCommitRefs {
+  display: flex; align-items: center; gap: 5px;
+  max-width: 100px; overflow: hidden;
+  mask-image: linear-gradient(to right, black calc(100% - 8px), transparent);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 8px), transparent);
+}
 .gitCommitSubject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--desk-text); }
 .gitCommitMeta { flex: none; color: var(--desk-text-dim); font-size: 10px; }
 .gitCommitTime { min-width: 24px; text-align: right; }
