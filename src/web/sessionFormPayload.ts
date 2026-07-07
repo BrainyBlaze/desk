@@ -48,7 +48,9 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
     resume: resume || undefined,
     ...(clearResume ? { clearResume: true } : {}),
     bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined,
-    ...(form.uiMode === 'native' && supportsNativeUi(form.agent, false) ? { uiMode: 'native' as const } : {}),
+    // Emit the concrete choice for native-capable agents: native is the
+    // resolved default now, so an omitted terminal would flip to native.
+    ...(supportsNativeUi(form.agent, false) ? { uiMode: form.uiMode } : {}),
     ...((form.model ?? '').trim() ? { model: (form.model ?? '').trim() } : {})
   };
 }

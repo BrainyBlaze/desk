@@ -261,7 +261,7 @@ const emptySessionForm: SessionForm = {
   initialResume: '',
   bypassPermissions: true,
   command: '',
-  uiMode: 'terminal',
+  uiMode: 'native',
   model: ''
 };
 

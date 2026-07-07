@@ -22,9 +22,10 @@ function manifest(): DeskManifest {
                 name: 'chat',
                 agent: 'claude',
                 resume: '00000000-0000-7000-8000-000000000001',
+                uiMode: 'terminal',
                 tmuxSession: 'agentdesk-alpha-main-chat-00000000'
               },
-              { name: 'fresh', agent: 'codex' },
+              { name: 'fresh', agent: 'codex', uiMode: 'terminal' },
               { name: 'shell', agent: 'bash' },
               { name: 'custom', command: 'htop' },
               {
@@ -114,7 +115,7 @@ describe('validateUiModeSwitch', () => {
     });
   });
 
-  it('switches native back to terminal by removing the manifest field', () => {
+  it('switches native back to terminal by pinning the field so the native default cannot resurrect it', () => {
     const result = validateUiModeSwitch(manifest(), {
       tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01',
       uiMode: 'terminal',
@@ -123,7 +124,7 @@ describe('validateUiModeSwitch', () => {
     if (!result.ok) {
       throw new Error(`expected ok, got ${result.code}`);
     }
-    expect(result.edit.session.uiMode).toBeUndefined();
+    expect(result.edit.session.uiMode).toBe('terminal');
     expect(result.edit.session.tmuxSession).toBe('agentdesk-alpha-main-native-chat-pinned01');
   });
 

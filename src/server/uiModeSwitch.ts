@@ -142,11 +142,9 @@ export function createInFlightGuard(): { begin: (key: string) => boolean; end: (
 
 function buildEdit(spec: SessionSpec, record: DeskSession, uiMode: DeskSessionUiMode): UiModeSwitchEdit {
   const session: DeskSession = { ...record, tmuxSession: spec.tmuxSession };
-  if (uiMode === 'native') {
-    session.uiMode = 'native';
-  } else {
-    delete session.uiMode;
-  }
+  // Always pin the mode explicitly: an absent field resolves to native for
+  // SDK-backed agents, so deleting it would silently undo a terminal switch.
+  session.uiMode = uiMode;
   return {
     projectId: spec.projectId,
     groupId: spec.groupId,

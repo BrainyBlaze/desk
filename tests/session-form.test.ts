@@ -21,7 +21,8 @@ describe('session form payload', () => {
       name: 'agent',
       cwd: '/tmp/override',
       agent: 'codex',
-      bypassPermissions: true
+      bypassPermissions: true,
+      uiMode: 'terminal'
     });
   });
 
@@ -65,7 +66,8 @@ describe('session form payload', () => {
       cwd: '/tmp/override',
       agent: 'opencode',
       resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
-      bypassPermissions: true
+      bypassPermissions: true,
+      uiMode: 'terminal'
     });
   });
 
@@ -92,7 +94,7 @@ describe('session form payload', () => {
     });
   });
 
-  it('omits uiMode when terminal is selected so manifests stay lean', () => {
+  it('emits an explicit terminal uiMode so the choice survives the native default', () => {
     const payload = buildSessionPayload({
       projectId: 'alpha',
       groupId: 'main',
@@ -105,7 +107,7 @@ describe('session form payload', () => {
       command: '',
       uiMode: 'terminal'
     });
-    expect('uiMode' in payload ? payload.uiMode : undefined).toBeUndefined();
+    expect(payload.uiMode).toBe('terminal');
   });
 
   it('drops native uiMode when an explicit command is present', () => {
@@ -194,9 +196,9 @@ describe('session form modal source contract', () => {
     expect(source).toContain('UI mode');
   });
 
-  it('tracks uiMode in the session form state with a terminal default', () => {
+  it('tracks uiMode in the session form state with a native default', () => {
     expect(source).toMatch(/uiMode: DeskSessionUiMode/);
-    expect(source).toMatch(/uiMode: 'terminal'/);
+    expect(source).toMatch(/uiMode: 'native',\n  model: ''/);
   });
 
   it('prefills the edit command field only for custom-command sessions', () => {

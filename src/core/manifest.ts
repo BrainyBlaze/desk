@@ -92,7 +92,7 @@ export function buildSessionSpecs(
         ...(hasCustomCommand ? { customCommand: true } : {}),
         tmuxSession,
         command,
-        uiMode: session.uiMode ?? 'terminal',
+        uiMode: resolveSessionUiMode(session),
         ...(session.model ? { model: session.model } : {})
       };
     })
@@ -170,6 +170,11 @@ export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' |
   return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
 }
 
+/** Undeclared uiMode resolves to native where supported; explicit values always win. */
+export function resolveSessionUiMode(session: Pick<DeskSession, 'agent' | 'command' | 'uiMode'>): 'terminal' | 'native' {
+  return session.uiMode ?? (sessionSupportsNativeUiMode(session) ? 'native' : 'terminal');
+}
+
 function buildProjectSessionSpec({
   namespace,
   project,
@@ -218,7 +223,7 @@ function buildProjectSessionSpec({
     ...(hasCustomCommand ? { customCommand: true } : {}),
     tmuxSession,
     command,
-    uiMode: session.uiMode ?? 'terminal',
+    uiMode: resolveSessionUiMode(session),
     ...(session.model ? { model: session.model } : {})
   };
 }
@@ -268,7 +273,7 @@ export function buildAgentCommand(
   tmuxSession: string,
   agentMcp?: AgentMcpLaunchConfig
 ): string {
-  if (session.uiMode === 'native') {
+  if (resolveSessionUiMode(session) === 'native') {
     // Static base only: runtime values (server URL, host token) are injected
     // at spawn time by the server-side rewrite (agentHostLaunch), keeping
     // manifest-derived commands deterministic.

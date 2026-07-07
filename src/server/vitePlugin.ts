@@ -1058,12 +1058,12 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
     if (uiMode !== 'terminal' && uiMode !== 'native') {
       throw new Error('session.uiMode must be terminal or native');
     }
-    if (uiMode === 'native') {
-      if (!sessionSupportsNativeUiMode({ agent: session.agent })) {
-        throw new Error(`session.uiMode native is not supported for agent ${session.agent}`);
-      }
-      session.uiMode = 'native';
+    if (uiMode === 'native' && !sessionSupportsNativeUiMode({ agent: session.agent })) {
+      throw new Error(`session.uiMode native is not supported for agent ${session.agent}`);
     }
+    // Persist terminal too: with native as the resolved default, dropping an
+    // explicit terminal choice would silently flip the session to native.
+    session.uiMode = uiMode;
   }
   const model = readOptionalString(record.model);
   if (model) {

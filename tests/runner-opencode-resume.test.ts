@@ -116,6 +116,7 @@ projects:
         sessions:
           - name: opencode
             agent: opencode
+            uiMode: terminal
 `),
         { homeDir: root }
       )[0]!;
@@ -186,6 +187,7 @@ projects:
         sessions:
           - name: opencode
             agent: opencode
+            uiMode: terminal
 `),
       { homeDir: root }
     )[0];

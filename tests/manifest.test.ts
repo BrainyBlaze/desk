@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest';
 
 describe('desk manifest ui mode', () => {
-  it('accepts native ui mode for SDK-backed agent sessions and carries it into specs', () => {
+  it('defaults SDK-backed agent sessions to native ui mode when none is declared', () => {
     const manifest = parseDeskManifest(`
 groups:
   - id: group-1
@@ -20,7 +20,24 @@ groups:
         agent: codex
 `);
     const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
-    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'terminal']);
+    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'native']);
+  });
+
+  it('honors an explicit terminal uiMode and keeps custom-command sessions terminal', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: old-school
+        cwd: ~/projects/alpha
+        agent: claude
+        uiMode: terminal
+      - name: scripted
+        cwd: ~/projects/alpha
+        command: htop
+`);
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    expect(specs.map((spec) => spec.uiMode)).toEqual(['terminal', 'terminal']);
   });
 
   it('carries an optional model through parse and spec derivation', () => {
@@ -117,6 +134,7 @@ groups:
         cwd: ${cwd}
         agent: claude
         resume: ${resume}
+        uiMode: terminal
 `),
     { homeDir: cwd }
   )[0].command;
@@ -212,9 +230,8 @@ groups:
         groupOrder: undefined,
         order: undefined,
         tmuxSession: 'agentdesk-group-1-alpha-00000000',
-        command:
-          "cd '/workspace/projects/alpha' && DESK_TMUX_SESSION='agentdesk-group-1-alpha-00000000' DESK_AGENT='codex' codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume '00000000-0000-7000-8000-000000000001'",
-        uiMode: 'terminal'
+        command: "cd '/workspace/projects/alpha' && exec desk agent-host",
+        uiMode: 'native'
       },
       {
         groupId: 'group-1',
@@ -228,9 +245,8 @@ groups:
         groupOrder: undefined,
         order: undefined,
         tmuxSession: 'agentdesk-group-1-project-mu-00000000',
-        command:
-          "cd '/workspace/projects/project-μ' && DESK_TMUX_SESSION='agentdesk-group-1-project-mu-00000000' DESK_AGENT='codex' codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume '00000000-0000-7000-8000-000000000002'",
-        uiMode: 'terminal'
+        command: "cd '/workspace/projects/project-μ' && exec desk agent-host",
+        uiMode: 'native'
       }
     ]);
   });
@@ -278,12 +294,15 @@ projects:
             agent: claude
             bypassPermissions: true
             resume: abc123
+            uiMode: terminal
           - name: codex
             agent: codex
             bypassPermissions: true
+            uiMode: terminal
           - name: opencode
             agent: opencode
             resume: ses_12a31855dffeHTCs6tcfOmsddP
+            uiMode: terminal
 `);
 
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
@@ -383,6 +402,7 @@ projects:
         sessions:
           - name: oc-yolo
             agent: opencode
+            uiMode: terminal
             bypassPermissions: true
 `),
       { homeDir: '/workspace' }
@@ -398,6 +418,7 @@ projects:
         sessions:
           - name: oc-gated
             agent: opencode
+            uiMode: terminal
             bypassPermissions: false
 `),
       { homeDir: '/workspace' }
@@ -418,6 +439,7 @@ projects:
         sessions:
           - name: opencode
             agent: opencode
+            uiMode: terminal
 `),
       { homeDir: '/workspace' }
     )[0].command;
@@ -435,10 +457,12 @@ groups:
       - name: claude
         cwd: ~/projects/sample
         agent: claude
+        uiMode: terminal
       - name: codex
         cwd: ~/projects/sample
         agent: codex
         resume: abc123
+        uiMode: terminal
 `);
 
     const base = buildSessionSpecs(manifest, { homeDir: '/workspace' });

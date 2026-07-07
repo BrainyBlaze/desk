@@ -23,9 +23,9 @@ projects:
     groups:
       - id: main
         sessions:
-          - { name: fresh, agent: codex }
-          - { name: resumed, agent: codex, resume: 11111111-aaaa-7000-8000-000000000001 }
-          - { name: open, agent: opencode }
+          - { name: fresh, agent: codex, uiMode: terminal }
+          - { name: resumed, agent: codex, resume: 11111111-aaaa-7000-8000-000000000001, uiMode: terminal }
+          - { name: open, agent: opencode, uiMode: terminal }
 `;
 
 const originalEnv = { ...process.env };
