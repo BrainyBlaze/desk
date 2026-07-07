@@ -5317,7 +5317,7 @@ button.layoutBadge:hover:not(:disabled) {
   height: 100%;
   width: 100%;
   background: var(--desk-bg, #0b0e14);
-  color: var(--desk-fg, #e6edf3);
+  color: var(--desk-text);
   font-family: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
   font-size: 13px;
 }
@@ -5328,7 +5328,7 @@ button.layoutBadge:hover:not(:disabled) {
   gap: 8px;
   padding: 3px 10px;
   min-height: 24px;
-  border-bottom: 1px solid rgba(42, 52, 65, 0.6);
+  border-bottom: 1px solid var(--desk-line);
   background: transparent;
 }
 
@@ -5341,22 +5341,22 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentStatus.state-processing,
 .nativeAgentStatus.state-tool-executing {
-  color: #ffcc66;
+  color: var(--desk-warn);
 }
 
 .nativeAgentStatus.state-awaiting-permission {
-  color: #ff9966;
+  color: color-mix(in srgb, var(--desk-warn) 55%, var(--desk-error));
 }
 
 .nativeAgentStatus.state-error,
 .nativeAgentStatus.state-exited {
-  color: #ff6666;
+  color: var(--desk-error);
 }
 
 .nativeAgentInterrupt {
   margin-left: auto;
   background: transparent;
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   color: inherit;
   font: inherit;
   font-size: 11px;
@@ -5392,14 +5392,14 @@ button.layoutBadge:hover:not(:disabled) {
    carry the you/assistant distinction. */
 .nativeAgentRow.user {
   background: transparent;
-  border-left: 2px solid rgba(80, 160, 240, 0.45);
+  border-left: 2px solid color-mix(in srgb, var(--desk-info) 45%, transparent);
   margin-left: 24px;
   border-radius: 0;
 }
 
 .nativeAgentRow.assistant {
   background: transparent;
-  border-left: 2px solid rgba(143, 212, 143, 0.45);
+  border-left: 2px solid color-mix(in srgb, var(--desk-ok) 45%, transparent);
   margin-right: 24px;
   padding-left: 10px;
   border-radius: 0;
@@ -5423,11 +5423,11 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentRow.tool.status-error {
-  color: #ff8888;
+  color: var(--desk-error);
 }
 
 .nativeAgentRow.tool.status-denied {
-  color: #ffaa66;
+  color: var(--desk-warn);
 }
 
 .nativeAgentRow.turnComplete,
@@ -5447,12 +5447,12 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentRow.user .nativeAgentAuthor {
-  color: #7db8f0;
+  color: var(--desk-info);
   opacity: 0.8;
 }
 
 .nativeAgentRow.assistant .nativeAgentAuthor {
-  color: #8fd48f;
+  color: var(--desk-ok);
   opacity: 0.75;
 }
 
@@ -5462,11 +5462,11 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentPermission {
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   border-radius: 4px;
   padding: 8px 12px;
   margin: 8px 0;
-  background: rgba(255, 153, 102, 0.06);
+  background: color-mix(in srgb, var(--desk-warn) 6%, transparent);
 }
 
 .nativeAgentPermissionTitle {
@@ -5482,7 +5482,7 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentPermissionOption {
   background: transparent;
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   color: inherit;
   font: inherit;
   font-size: 11px;
@@ -5493,30 +5493,30 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentPermissionOption.treatment-allow,
 .nativeAgentPermissionOption.treatment-allow-session {
-  border-color: #66cc88;
-  color: #88ddaa;
+  border-color: var(--desk-ok);
+  color: color-mix(in srgb, var(--desk-ok) 70%, var(--desk-text));
 }
 
 .nativeAgentPermissionOption.treatment-deny {
-  border-color: #cc6666;
-  color: #dd8888;
+  border-color: var(--desk-error);
+  color: color-mix(in srgb, var(--desk-error) 70%, var(--desk-text));
 }
 
 .nativeAgentPermissionOption:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--desk-text) 8%, transparent);
 }
 
 .nativeAgentError,
 .nativeAgentBridgeDown {
   font-size: 11px;
   padding: 4px 8px;
-  background: rgba(255, 102, 102, 0.1);
+  background: color-mix(in srgb, var(--desk-error) 12%, transparent);
   border-radius: 3px;
   margin: 4px 0;
 }
 
 .nativeAgentBridgeDown {
-  background: rgba(255, 204, 102, 0.1);
+  background: color-mix(in srgb, var(--desk-warn) 12%, transparent);
 }
 
 .nativeAgentJumpPill {
@@ -5546,7 +5546,7 @@ button.layoutBadge:hover:not(:disabled) {
    so it reads as "the assistant's next row is coming". */
 .nativeAgentRow.working {
   padding: 4px 8px 4px 10px;
-  border-left: 2px solid rgba(143, 212, 143, 0.45);
+  border-left: 2px solid color-mix(in srgb, var(--desk-ok) 45%, transparent);
   margin-right: 24px;
 }
 
@@ -5660,8 +5660,8 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentPermissionDock {
   padding: 6px 8px 0;
-  border-top: 1px solid var(--desk-border, #1f2937);
-  background: var(--desk-bg-elev, #11161d);
+  border-top: 1px solid var(--desk-line);
+  background: var(--desk-bg-elevated);
 }
 
 .nativeAgentPermissionDock .nativeAgentPermission {
@@ -5672,8 +5672,8 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentComposer {
   position: relative;
   padding: 7px 8px 8px;
-  border-top: 1px solid var(--desk-border, #1f2937);
-  background: var(--desk-bg-elev, #11161d);
+  border-top: 1px solid var(--desk-line);
+  background: var(--desk-bg-elevated);
 }
 
 .nativeAgentComposer.dragOver {
@@ -5716,7 +5716,7 @@ button.layoutBadge:hover:not(:disabled) {
   align-items: end;
   width: 100%;
   min-width: 0;
-  border: 1px solid color-mix(in srgb, var(--desk-border, #2a3441) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--desk-line) 82%, transparent);
   border-radius: 0;
   clip-path: polygon(7px 0, calc(100% - 7px) 0, 100% 7px, 100% calc(100% - 7px), calc(100% - 7px) 100%, 7px 100%, 0 calc(100% - 7px), 0 7px);
   background: color-mix(in srgb, var(--desk-bg, #0b0e14) 92%, var(--desk-accent, #66aaff) 4%);
@@ -5724,7 +5724,7 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentComposerInputWrap:focus-within {
-  border-color: color-mix(in srgb, var(--desk-accent, #66aaff) 58%, var(--desk-border, #2a3441));
+  border-color: color-mix(in srgb, var(--desk-accent, #66aaff) 58%, var(--desk-line));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--desk-accent, #66aaff) 20%, transparent);
 }
 
@@ -5819,7 +5819,7 @@ button.layoutBadge:hover:not(:disabled) {
   bottom: calc(100% + 4px);
   padding: 2px 6px;
   border: 1px solid color-mix(in srgb, var(--desk-accent, #66aaff) 36%, transparent);
-  background: var(--desk-bg-elev, #11161d);
+  background: var(--desk-bg-elevated);
   color: var(--desk-accent, #66aaff);
   font-size: 10px;
   border-radius: 3px;
@@ -5857,7 +5857,7 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentRetryButton {
   margin-left: 8px;
   background: transparent;
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   color: inherit;
   font: inherit;
   font-size: 11px;
@@ -5867,7 +5867,7 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentRetryButton:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--desk-text) 8%, transparent);
 }
 
 /* Tool call block */
@@ -5876,14 +5876,14 @@ button.layoutBadge:hover:not(:disabled) {
   height: 6px;
   border-radius: 999px;
   margin-top: 8px;
-  background: #66aaff;
+  background: var(--desk-info);
   flex: 0 0 auto;
 }
 
-.nativeAgentRow.tool.status-ok .nativeAgentToolDot { background: #66cc88; }
-.nativeAgentRow.tool.status-error .nativeAgentToolDot { background: #cc6666; }
-.nativeAgentRow.tool.status-denied .nativeAgentToolDot { background: #cc8844; }
-.nativeAgentRow.tool.status-running .nativeAgentToolDot { background: #66aaff; animation: nativeAgentPulse 1.2s ease-in-out infinite; }
+.nativeAgentRow.tool.status-ok .nativeAgentToolDot { background: var(--desk-ok); }
+.nativeAgentRow.tool.status-error .nativeAgentToolDot { background: var(--desk-error); }
+.nativeAgentRow.tool.status-denied .nativeAgentToolDot { background: var(--desk-warn); }
+.nativeAgentRow.tool.status-running .nativeAgentToolDot { background: var(--desk-info); animation: nativeAgentPulse 1.2s ease-in-out infinite; }
 
 @keyframes nativeAgentPulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 
@@ -5959,9 +5959,9 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentToolBox {
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.18);
+  background: color-mix(in srgb, var(--desk-text) 6%, transparent);
   padding: 5px 7px;
 }
 
@@ -5985,9 +5985,9 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 /* Permission card improvements */
-.nativeAgentPermission.variant-file-edit { border-color: #66aaff; background: rgba(102, 170, 255, 0.06); }
-.nativeAgentPermission.variant-command { border-color: #ffaa66; background: rgba(255, 170, 102, 0.06); }
-.nativeAgentPermission.variant-question { border-color: #cc88ff; background: rgba(204, 136, 255, 0.06); }
+.nativeAgentPermission.variant-file-edit { border-color: var(--desk-info); background: color-mix(in srgb, var(--desk-info) 8%, transparent); }
+.nativeAgentPermission.variant-command { border-color: var(--desk-warn); background: color-mix(in srgb, var(--desk-warn) 8%, transparent); }
+.nativeAgentPermission.variant-question { border-color: var(--desk-accent); background: color-mix(in srgb, var(--desk-accent) 8%, transparent); }
 
 .nativeAgentPermissionDetail {
   font-size: 11px;
@@ -5998,14 +5998,14 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentPermissionDiff {
   margin: 6px 0;
   font-size: 11px;
-  border: 1px solid var(--desk-border, #1f2937);
+  border: 1px solid var(--desk-line);
   border-radius: 3px;
   overflow: hidden;
 }
 
 .nativeAgentPermissionDiffPath {
   padding: 2px 6px;
-  background: rgba(255, 255, 255, 0.05);
+  background: color-mix(in srgb, var(--desk-text) 5%, transparent);
   font-size: 10px;
   opacity: 0.7;
 }
@@ -6020,8 +6020,8 @@ button.layoutBadge:hover:not(:disabled) {
   word-break: break-all;
 }
 
-.nativeAgentPermissionDiffBefore { background: rgba(255, 102, 102, 0.08); color: #ff9999; }
-.nativeAgentPermissionDiffAfter { background: rgba(102, 204, 136, 0.08); color: #99ddaa; }
+.nativeAgentPermissionDiffBefore { background: color-mix(in srgb, var(--desk-error) 10%, transparent); color: color-mix(in srgb, var(--desk-error) 65%, var(--desk-text)); }
+.nativeAgentPermissionDiffAfter { background: color-mix(in srgb, var(--desk-ok) 10%, transparent); color: color-mix(in srgb, var(--desk-ok) 65%, var(--desk-text)); }
 
 .nativeAgentPermissionCustom {
   display: flex;
@@ -6032,7 +6032,7 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentPermissionCustomInput {
   flex: 1;
   background: var(--desk-bg, #0b0e14);
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   color: inherit;
   font: inherit;
   font-size: 11px;
@@ -6076,7 +6076,7 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentSurface .markdownBody pre {
-  background: rgba(0, 0, 0, 0.3);
+  background: color-mix(in srgb, var(--desk-text) 10%, transparent);
   border-radius: 4px;
   padding: 8px 10px;
   overflow-x: auto;
@@ -6091,7 +6091,7 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentSurface .markdownBody :not(pre) > code {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--desk-text) 8%, transparent);
   padding: 1px 4px;
   border-radius: 3px;
 }
@@ -6114,7 +6114,7 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentSurface .markdownBody blockquote {
-  border-left: 3px solid var(--desk-border, #2a3441);
+  border-left: 3px solid var(--desk-line);
   margin: 6px 0;
   padding: 2px 10px;
   opacity: 0.8;
@@ -6128,7 +6128,7 @@ button.layoutBadge:hover:not(:disabled) {
 
 .nativeAgentSurface .markdownBody th,
 .nativeAgentSurface .markdownBody td {
-  border: 1px solid var(--desk-border, #2a3441);
+  border: 1px solid var(--desk-line);
   padding: 4px 8px;
 }
 
@@ -6145,7 +6145,7 @@ button.layoutBadge:hover:not(:disabled) {
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #cc8844;
+  color: var(--desk-warn);
   opacity: 0.85;
 }
 
@@ -6153,7 +6153,7 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentRow.unreadMarker::after {
   content: '';
   flex: 1;
-  border-top: 1px solid rgba(204, 136, 68, 0.5);
+  border-top: 1px solid color-mix(in srgb, var(--desk-warn) 50%, transparent);
 }
 
 /* UX items 6 + 7: row anatomy metadata/actions and clearer tool state. */
@@ -6182,7 +6182,7 @@ button.layoutBadge:hover:not(:disabled) {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  color: rgba(210, 225, 240, 0.62);
+  color: color-mix(in srgb, var(--desk-text) 62%, transparent);
 }
 
 .nativeAgentTimestamp {
@@ -6221,7 +6221,7 @@ button.layoutBadge:hover:not(:disabled) {
   height: 24px;
   border: 1px solid transparent;
   background: transparent;
-  color: rgba(210, 225, 240, 0.72);
+  color: color-mix(in srgb, var(--desk-text) 72%, transparent);
   line-height: 1;
   padding: 0;
   border-radius: 3px;
@@ -6229,21 +6229,21 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentRowAction:hover {
-  border-color: var(--desk-border, #2a3441);
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(235, 245, 255, 0.92);
+  border-color: var(--desk-line);
+  background: color-mix(in srgb, var(--desk-text) 6%, transparent);
+  color: var(--desk-text);
 }
 
 .nativeAgentRowAction.copied {
-  border-color: rgba(66, 214, 146, 0.45);
-  background: rgba(66, 214, 146, 0.12);
-  color: rgba(148, 255, 207, 0.96);
+  border-color: color-mix(in srgb, var(--desk-ok) 45%, transparent);
+  background: color-mix(in srgb, var(--desk-ok) 12%, transparent);
+  color: color-mix(in srgb, var(--desk-ok) 75%, var(--desk-text));
 }
 
 .nativeAgentRowAction.failed {
-  border-color: rgba(255, 120, 120, 0.45);
-  background: rgba(255, 120, 120, 0.12);
-  color: rgba(255, 175, 175, 0.96);
+  border-color: color-mix(in srgb, var(--desk-error) 45%, transparent);
+  background: color-mix(in srgb, var(--desk-error) 12%, transparent);
+  color: color-mix(in srgb, var(--desk-error) 70%, var(--desk-text));
 }
 
 .nativeAgentToolBadge {
@@ -6253,13 +6253,13 @@ button.layoutBadge:hover:not(:disabled) {
   justify-content: center;
   gap: 5px;
   width: 18px;
-  border: 1px solid rgba(102, 170, 255, 0.34);
+  border: 1px solid color-mix(in srgb, var(--desk-info) 34%, transparent);
   border-radius: 999px;
   padding: 0;
   font-size: 10px;
   line-height: 1.5;
-  color: rgba(205, 226, 255, 0.88);
-  background: rgba(102, 170, 255, 0.08);
+  color: color-mix(in srgb, var(--desk-info) 25%, var(--desk-text));
+  background: color-mix(in srgb, var(--desk-info) 8%, transparent);
   flex: 0 0 auto;
 }
 
@@ -6274,21 +6274,21 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentToolBadge.tone-ok {
-  border-color: rgba(102, 204, 136, 0.42);
-  color: #a8e5bd;
-  background: rgba(102, 204, 136, 0.08);
+  border-color: color-mix(in srgb, var(--desk-ok) 42%, transparent);
+  color: color-mix(in srgb, var(--desk-ok) 65%, var(--desk-text));
+  background: color-mix(in srgb, var(--desk-ok) 8%, transparent);
 }
 
 .nativeAgentToolBadge.tone-error {
-  border-color: rgba(204, 102, 102, 0.48);
-  color: #ffaaa8;
-  background: rgba(204, 102, 102, 0.08);
+  border-color: color-mix(in srgb, var(--desk-error) 48%, transparent);
+  color: color-mix(in srgb, var(--desk-error) 65%, var(--desk-text));
+  background: color-mix(in srgb, var(--desk-error) 8%, transparent);
 }
 
 .nativeAgentToolBadge.tone-denied {
-  border-color: rgba(204, 136, 68, 0.5);
-  color: #f0bd83;
-  background: rgba(204, 136, 68, 0.08);
+  border-color: color-mix(in srgb, var(--desk-warn) 50%, transparent);
+  color: color-mix(in srgb, var(--desk-warn) 65%, var(--desk-text));
+  background: color-mix(in srgb, var(--desk-warn) 8%, transparent);
 }
 
 .nativeAgentToolSpinner {
@@ -6332,17 +6332,17 @@ button.layoutBadge:hover:not(:disabled) {
 .nativeAgentTurnSummary {
   width: calc(100% - 24px);
   margin-right: 24px;
-  border: 1px dashed rgba(102, 170, 255, 0.28);
-  background: rgba(102, 170, 255, 0.05);
-  color: rgba(220, 235, 250, 0.86);
+  border: 1px dashed color-mix(in srgb, var(--desk-info) 28%, transparent);
+  background: color-mix(in srgb, var(--desk-info) 5%, transparent);
+  color: color-mix(in srgb, var(--desk-info) 20%, var(--desk-text));
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .nativeAgentTurnSummary:hover {
-  border-color: rgba(102, 170, 255, 0.48);
-  background: rgba(102, 170, 255, 0.08);
+  border-color: color-mix(in srgb, var(--desk-info) 48%, transparent);
+  background: color-mix(in srgb, var(--desk-info) 8%, transparent);
 }
 
 .nativeAgentTurnSummaryTitle {
@@ -6393,7 +6393,7 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentPaletteItem:hover {
-  background: rgba(51, 187, 204, 0.15);
+  background: color-mix(in srgb, var(--desk-accent) 15%, transparent);
 }
 
 .nativeAgentPaletteName {
@@ -6415,13 +6415,13 @@ button.layoutBadge:hover:not(:disabled) {
 }
 
 .nativeAgentPaletteItem.selected {
-  background: rgba(51, 187, 204, 0.22);
+  background: color-mix(in srgb, var(--desk-accent) 22%, transparent);
 }
 
 /* Item 11: nested child-agent transcript under the spawning tool row. */
 .nativeAgentChildren {
   margin: 2px 0 6px 20px;
   padding-left: 10px;
-  border-left: 2px solid rgba(102, 221, 238, 0.25);
+  border-left: 2px solid color-mix(in srgb, var(--desk-accent) 25%, transparent);
   font-size: 12px;
 }

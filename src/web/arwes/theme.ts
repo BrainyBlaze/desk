@@ -243,6 +243,8 @@ export function createDeskTheme(name: DeskThemeName): DeskBuiltTheme {
           '--desk-accent': hsl(p.accentHue, p.accentSat, Math.round(62 * c)),
           '--desk-error': 'hsl(10, 85%, 58%)',
           '--desk-ok': 'hsl(160, 85%, 52%)',
+          '--desk-warn': 'hsl(38, 90%, 60%)',
+          '--desk-info': 'hsl(212, 80%, 66%)',
           '--desk-glow': hsl(p.hue, 100, 60, 0.12 * c),
           // Brand wordmark sheen: specular band + aura. White reads as a glint
           // against dark backgrounds; the aura needs far more alpha than the
@@ -266,6 +268,8 @@ export function createDeskTheme(name: DeskThemeName): DeskBuiltTheme {
           '--desk-accent': hsl(p.accentHue, p.accentSat, 35),
           '--desk-error': 'hsl(8, 80%, 38%)',
           '--desk-ok': 'hsl(158, 85%, 25%)',
+          '--desk-warn': 'hsl(34, 90%, 34%)',
+          '--desk-info': 'hsl(212, 75%, 38%)',
           '--desk-glow': hsl(p.hue, 90, 32, 0.16),
           // Light mode: a white glint would erase dark glyphs into the ~96%
           // lightness background, so the "shine" is a lighter-than-text tint

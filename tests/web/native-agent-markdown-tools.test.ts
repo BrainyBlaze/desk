@@ -302,3 +302,34 @@ describe('native agent composer controls', () => {
     expect(styles).toMatch(/\.nativeAgentComposerStatus/);
   });
 });
+
+describe('native agent theme binding', () => {
+  const themeSource = () => readFileSync('src/web/arwes/theme.ts', 'utf8');
+
+  it('never references CSS vars the theme does not emit', () => {
+    const styles = stylesSource();
+
+    // Phantom vars silently pin to their hardcoded fallback and ignore theme
+    // switches (the operator's 16:10 report: chats unreadable on light themes).
+    expect(styles).not.toMatch(/var\(--desk-fg[,)]/);
+    expect(styles).not.toMatch(/var\(--desk-border[,)]/);
+    expect(styles).not.toMatch(/var\(--desk-bg-elev[,)]/);
+  });
+
+  it('emits the semantic warn/info vars in both dark and light modes', () => {
+    const theme = themeSource();
+
+    expect(theme.match(/'--desk-warn':/g)?.length).toBe(2);
+    expect(theme.match(/'--desk-info':/g)?.length).toBe(2);
+  });
+
+  it('keeps native chat role colors bound to theme vars, not literals', () => {
+    const styles = stylesSource();
+    const userRule = cssBlock(styles, '.nativeAgentRow.user');
+    const assistantRule = cssBlock(styles, '.nativeAgentRow.assistant');
+
+    expect(userRule).toContain('var(--desk-info)');
+    expect(assistantRule).toContain('var(--desk-ok)');
+    expect(cssBlock(styles, '.nativeAgentSurface')).toContain('var(--desk-text)');
+  });
+});
