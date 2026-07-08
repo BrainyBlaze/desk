@@ -448,7 +448,7 @@ export function HelpIcon({ text }: { text: string }): JSX.Element {
                 borderRadius: '4px',
                 fontSize: '12px',
                 maxWidth: '240px',
-                whiteSpace: 'normal',
+                whiteSpace: 'pre-wrap',
                 zIndex: 100000,
                 border: '1px solid rgba(100, 200, 255, 0.3)',
                 pointerEvents: 'none'
