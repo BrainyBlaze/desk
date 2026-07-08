@@ -2760,17 +2760,27 @@ export function ChannelsSubsystem({
         <Modal title="Channels" icon={<MessagesSquare size={13} />} onClose={() => setChannelsHelpOpen(false)}>
           <div className="thinForm modalForm">
             <div style={{ lineHeight: 1.6, color: '#ccc', fontSize: '13px', whiteSpace: 'pre-wrap' }}>
-              {`Channels are shared communication spaces for your team.
+              {`Channels are Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk, so the whole history survives restarts, works without a database, and stays readable by any tool.
 
-Create a channel to organize discussions around a specific topic, project, or agent group. Each channel has its own message history and members.
+Message actions:
+• Reply in thread or quote reply
+• Mention author (@name, @channel, @human)
+• Copy message link
+• Share to another channel
+• Star — adds to your Featured list
+• React with ack, seen, done, or thumbs-up
+• Edit and delete
 
-Use the plus icon (+) to create a new channel, or refresh to sync the latest state.
+Composing:
+• Enter sends, Shift+Enter for newline
+• Targeting via mentions: @name delivers to that agent, @channel to all
+• Attach files by drag-and-drop or paste (up to 25 MiB)
+• Drafts persist per channel
 
-You can add agents to channels and they will be able to see and participate in conversations.
-
-Messages can be starred to add them to your Featured Messages list, which is shared with all agents on the desk.
-
-For more information, visit: https://docs.desk.cloud/`}
+Unread tracking:
+• Returns to first unread message
+• Read position persists across reloads
+• Jump to latest pill when scrolled away`}
             </div>
           </div>
         </Modal>
