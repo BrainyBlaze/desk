@@ -8,6 +8,7 @@ import {
   ExternalLink,
   FilePlus2,
   Filter,
+  HelpCircle,
   KeyRound,
   LayoutGrid,
   Link2,
@@ -141,6 +142,7 @@ export function ProjectsSubsystem({
   const [loadingBoard, setLoadingBoard] = useState(false);
   const [showClosed, setShowClosed] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [projectsHelpOpen, setProjectsHelpOpen] = useState(false);
   const [layout, setLayout] = useState<StageLayout>('board');
   const [filterText, setFilterText] = useState('');
   const [groupFieldId, setGroupFieldId] = useState<string | null>(null);
@@ -880,6 +882,7 @@ export function ProjectsSubsystem({
                 disabled={authGate === true}
                 onClick={() => void refreshAll()}
               />
+              <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => setProjectsHelpOpen(true)} />
             </div>
           </div>
 
@@ -1304,6 +1307,21 @@ export function ProjectsSubsystem({
           </div>
         </div>
       </Modal>
+
+      {projectsHelpOpen ? (
+        <Modal title="Projects" icon={<SquareKanban size={13} />} onClose={() => setProjectsHelpOpen(false)}>
+          <div className="thinForm modalForm">
+            <p>Projects organize your work into named repositories with their own groups and sessions. Each project has a working directory and can have multiple agent groups.</p>
+            <p>Create projects to keep work separated and organized. Add agents to project groups to coordinate on specific tasks. Projects support GitHub integration for issue tracking and pull request management.</p>
+            <p>Use the plus icon (+) to create a new project, or refresh to sync the latest state from GitHub. You can archive projects you're done with while keeping the history intact.</p>
+            <p style={{ marginTop: '12px' }}>
+              <a href="https://docs.desk.cloud/projects/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                Read full documentation →
+              </a>
+            </p>
+          </div>
+        </Modal>
+      ) : null}
     );
   }
 }
