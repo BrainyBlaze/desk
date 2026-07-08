@@ -186,6 +186,14 @@ export function ExplorerTree({
     };
   }, [menu]);
 
+  // Update tree selection when active file changes (e.g., user clicks a different tab).
+  useEffect(() => {
+    if (activePath && activePath !== lastSelectedPath) {
+      setSelectedPaths(new Set([activePath]));
+      setLastSelectedPath(activePath);
+    }
+  }, [activePath]);
+
   const expandDir = useCallback(
     (path: string): void => {
       setExpanded((current) => new Set(current).add(path));
