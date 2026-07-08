@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Desk installer — downloads the prebuilt standalone `desk-server` binary from
-# the GitHub release and installs it. No Node, no npm, no build: the binary is
+# Desk installer — downloads the prebuilt standalone Desk binary from the GitHub
+# release and installs it as `desk`. No Node, no npm, no build: the binary is
 # self-contained (UI + LSP servers embedded, Bun-native terminals).
 #
 #   curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-#   desk-server                        # serve the web UI + API on http://127.0.0.1:5173
+#   desk                               # serve the web UI + API on http://127.0.0.1:5173
 #
 # Env overrides:
 #   DESK_VERSION=v0.2.0     pin a specific release (default: the latest release)
@@ -14,7 +14,8 @@
 set -euo pipefail
 
 REPO="BrainyBlaze/desk"
-BIN="desk-server"
+ASSET_BASE="desk-server"   # release-artifact name prefix (desk-server-<target>)
+CMD="desk"                 # what we install it as — the user's `desk` command
 
 info() { printf '\033[36m▸\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
@@ -38,7 +39,7 @@ if [ "$os_tag" = darwin ] && [ "$arch_tag" != arm64 ]; then
   die "Desk ships macOS binaries for Apple Silicon (arm64) only; got '$arch'."
 fi
 target="${os_tag}-${arch_tag}"
-asset="${BIN}-${target}"
+asset="${ASSET_BASE}-${target}"
 
 # --- resolve the release version --------------------------------------------
 version="${DESK_VERSION:-}"
@@ -49,11 +50,11 @@ if [ -z "$version" ]; then
   [ -n "$version" ] || die "could not resolve the latest release — set DESK_VERSION=vX.Y.Z."
 fi
 base="https://github.com/${REPO}/releases/download/${version}"
-info "Installing Desk ${version} (${target})…"
+info "Installing Desk ${version} (${target}) as \`${CMD}\`…"
 
 # --- download + verify checksum ---------------------------------------------
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-curl -fSL --progress-bar "${base}/${asset}" -o "${tmp}/${BIN}" \
+curl -fSL --progress-bar "${base}/${asset}" -o "${tmp}/${CMD}" \
   || die "download failed: ${base}/${asset} (does the release have this asset?)"
 
 if curl -fsSL "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" 2>/dev/null; then
@@ -61,11 +62,11 @@ if curl -fsSL "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" 2>/dev/null; then
   if [ -z "$want" ]; then
     warn "no checksum for ${asset} in SHA256SUMS — skipping verification."
   elif command -v sha256sum >/dev/null 2>&1; then
-    got="$(sha256sum "${tmp}/${BIN}" | awk '{print $1}')"
+    got="$(sha256sum "${tmp}/${CMD}" | awk '{print $1}')"
     [ "$want" = "$got" ] || die "checksum mismatch for ${asset} (want ${want}, got ${got})."
     info "checksum verified."
   elif command -v shasum >/dev/null 2>&1; then
-    got="$(shasum -a 256 "${tmp}/${BIN}" | awk '{print $1}')"
+    got="$(shasum -a 256 "${tmp}/${CMD}" | awk '{print $1}')"
     [ "$want" = "$got" ] || die "checksum mismatch for ${asset} (want ${want}, got ${got})."
     info "checksum verified."
   else
@@ -74,7 +75,7 @@ if curl -fsSL "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" 2>/dev/null; then
 else
   warn "SHA256SUMS not found for ${version} — skipping checksum verification."
 fi
-chmod +x "${tmp}/${BIN}"
+chmod +x "${tmp}/${CMD}"
 
 # --- install ----------------------------------------------------------------
 dir="${DESK_INSTALL_DIR:-}"
@@ -87,12 +88,12 @@ if [ -z "$dir" ]; then
 fi
 mkdir -p "$dir" 2>/dev/null || true
 
-if mv "${tmp}/${BIN}" "${dir}/${BIN}" 2>/dev/null; then
+if mv "${tmp}/${CMD}" "${dir}/${CMD}" 2>/dev/null; then
   :
 elif command -v sudo >/dev/null 2>&1; then
   warn "writing to ${dir} needs elevated permissions — using sudo."
   sudo mkdir -p "$dir"
-  sudo mv "${tmp}/${BIN}" "${dir}/${BIN}"
+  sudo mv "${tmp}/${CMD}" "${dir}/${CMD}"
 else
   die "cannot write to ${dir}; set DESK_INSTALL_DIR to a writable directory and re-run."
 fi
@@ -101,14 +102,14 @@ fi
 command -v tmux >/dev/null 2>&1 \
   || warn "tmux not found — Desk needs tmux at runtime (apt install tmux / brew install tmux)."
 
-printf '\n\033[32m✓ Desk %s installed → %s/%s\033[0m\n\n' "$version" "$dir" "$BIN"
+printf '\n\033[32m✓ Desk %s installed → %s/%s\033[0m\n\n' "$version" "$dir" "$CMD"
 case ":${PATH}:" in
   *":${dir}:"*) ;;
   *) warn "${dir} is not on your PATH — add it, e.g.  export PATH=\"${dir}:\$PATH\"" ;;
 esac
 cat <<NEXT
 Next:
-  ${BIN}                 # serve the web UI + API on http://127.0.0.1:5173
+  ${CMD}                   # serve the web UI + API on http://127.0.0.1:5173
                         # DESK_HOST / DESK_PORT override the bind address / port
 
 Then open the URL and add projects + agents from the UI.

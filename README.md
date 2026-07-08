@@ -94,12 +94,12 @@ runtime dependency is **tmux**:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-desk-server           # web UI + API on http://127.0.0.1:5173
+desk                  # web UI + API on http://127.0.0.1:5173
 ```
 
-`install.sh` downloads the latest release's `desk-server` binary, verifies its
-checksum, and installs it to `/usr/local/bin` (or `~/.local/bin`). Pin a
-release with `DESK_VERSION=vX.Y.Z`, or grab a binary straight from the
+`install.sh` downloads the latest release binary, verifies its checksum, and
+installs it as **`desk`** in `/usr/local/bin` (or `~/.local/bin`). Pin a release
+with `DESK_VERSION=vX.Y.Z`, or grab a binary straight from the
 [releases page](https://github.com/BrainyBlaze/desk/releases).
 
 <details>
