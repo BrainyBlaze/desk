@@ -3,6 +3,7 @@ import { Animated, Animator, useBleeps } from '@arwes/react';
 import {
   Activity,
   AtSign,
+  Briefcase,
   Bot,
   ChevronDown,
   ChevronRight,
@@ -16,7 +17,6 @@ import {
   History,
   Inbox,
   ListFilter,
-  LockKeyhole,
   MessageSquareReply,
   Star,
   MessagesSquare,
@@ -2099,7 +2099,7 @@ export function ChannelsSubsystem({
                               {member.type !== 'human' ? (
                                 <span className="gitRowActions">
                                   <IconButton
-                                    icon={<LockKeyhole size={11} />}
+                                    icon={<Briefcase size={11} />}
                                     label={`Add role for @${member.name}`}
                                     onClick={() => {
                                       setMemberRoleForm({ role: member.role ?? '', functions: member.functions ?? '' });
@@ -2817,7 +2817,7 @@ export function ChannelsSubsystem({
       ) : null}
 
       {memberRoleModal ? (
-        <Modal title={`Role for @${memberRoleModal.member}`} icon={<LockKeyhole size={13} />} onClose={() => setMemberRoleModal(null)}>
+        <Modal title={`Role for @${memberRoleModal.member}`} icon={<Briefcase size={13} />} onClose={() => setMemberRoleModal(null)}>
           <div className="thinForm modalForm">
             <div style={{ marginBottom: '12px' }}>
               <label style={{ display: 'block', fontSize: '11px', color: 'var(--desk-text-dim)', marginBottom: '4px' }}>Role</label>
@@ -2870,7 +2870,7 @@ export function ChannelsSubsystem({
               {memberRoleModal?.currentRole ? (
                 <Cmd icon={<Trash2 size={12} />} label="Clear role" tone="danger" onClick={handleClearMemberRole} />
               ) : null}
-              <Cmd icon={<LockKeyhole size={12} />} label="Save" onClick={handleSaveMemberRole} />
+              <Cmd icon={<Briefcase size={12} />} label="Save" onClick={handleSaveMemberRole} />
             </div>
           </div>
         </Modal>
