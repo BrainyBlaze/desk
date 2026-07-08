@@ -11,6 +11,7 @@ import {
   GitBranch,
   GitBranchPlus,
   GitPullRequest,
+  HelpCircle,
   RefreshCw,
   Rows2,
   Star,
@@ -185,6 +186,7 @@ export function GitSubsystem({
   const [branchFrom, setBranchFrom] = useState<string | null>(null);
   const [branchName, setBranchName] = useState('');
   const [sideBySide, setSideBySide] = useState(true);
+  const [gitHelpOpen, setGitHelpOpen] = useState(false);
   const repoSearchRef = useRef<HTMLInputElement | null>(null);
 
   // Repo picker: filter + recents-first grouping. Recents re-read per open.
@@ -1356,6 +1358,7 @@ export function GitSubsystem({
                   }
                 }}
               />
+              <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => setGitHelpOpen(true)} />
             </div>
           </div>
 
@@ -1699,6 +1702,21 @@ export function GitSubsystem({
                 disabled={branchName.trim() === ''}
                 onClick={handleCreateBranch}
               />
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
+      {gitHelpOpen ? (
+        <Modal title="Source Control" icon={<GitBranch size={13} />} onClose={() => setGitHelpOpen(false)}>
+          <div style={{ padding: '16px 14px', color: 'var(--desk-text-dim)', fontSize: '12px', lineHeight: '1.5' }}>
+            <div>Git source control tracks changes across repositories in your workspace. View uncommitted changes, staged files, commit history, and branch information all in one place.</div>
+            <div style={{ marginTop: '12px' }}>Stage changes by selecting files, write commit messages with templates, and push or pull from remotes. Browse commit history with full diffs to understand what changed and why. Create, switch, and compare branches without leaving Desk.</div>
+            <div style={{ marginTop: '12px' }}>Use the fetch button to download remote changes, rescan to refresh repositories, and interact with GitHub pull requests and issues directly from the history view.</div>
+            <div style={{ marginTop: '12px' }}>
+              <a href="https://docs.desk.cloud/github-operations/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                Read full documentation →
+              </a>
             </div>
           </div>
         </Modal>

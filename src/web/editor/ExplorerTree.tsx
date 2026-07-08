@@ -426,7 +426,15 @@ export function ExplorerTree({
   const onRowContextMenu = (event: MouseEvent, entry: FsEntry | null): void => {
     event.preventDefault();
     event.stopPropagation();
-    setMenu({ x: event.clientX, y: event.clientY, entry });
+    if (entry && selectedPaths.has(entry.path)) {
+      setMenu({ x: event.clientX, y: event.clientY, entry });
+    } else if (entry) {
+      setSelectedPaths(new Set([entry.path]));
+      setLastSelectedPath(entry.path);
+      setMenu({ x: event.clientX, y: event.clientY, entry });
+    } else {
+      setMenu({ x: event.clientX, y: event.clientY, entry: null });
+    }
   };
 
   const onDirDragOver = (event: DragEvent, path: string): void => {
@@ -662,38 +670,63 @@ export function ExplorerTree({
                   void copyWithDedupe(clip.path, clip.name, menuDir);
                 })
               : null}
-            {menu.entry
+            {menu.entry && selectedPaths.size <= 1
               ? menuItem(<Copy size={12} />, 'Copy', false, () => {
                   fileClipboard = { path: menu.entry!.path, name: menu.entry!.name };
                   setMenu(null);
                 })
               : null}
             {menu.entry
-              ? menuItem(<CopyPlus size={12} />, 'Duplicate', false, () => {
+              ? menuItem(<CopyPlus size={12} />, selectedPaths.size > 1 ? `Duplicate ${selectedPaths.size} files` : 'Duplicate', false, () => {
                   setMenu(null);
-                  const entry = menu.entry!;
-                  // The plain-name candidate is the source itself and gets
-                  // skipped, so dedupe lands on name-copy, name-copy-2, …
-                  void copyWithDedupe(entry.path, entry.name, parentOf(entry.path));
+                  for (const path of (selectedPaths.size > 1 ? selectedPaths : new Set([menu.entry!.path]))) {
+                    void copyWithDedupe(path, fileNameOf(path), parentOf(path));
+                  }
                 })
               : null}
-            {menu.entry
+            {menu.entry && selectedPaths.size <= 1
               ? menuItem(<ClipboardCopy size={12} />, 'Copy path', false, () => {
                   copyTextToClipboard(menu.entry!.path);
                   setMenu(null);
                 })
               : null}
-            {menu.entry
+            {menu.entry && selectedPaths.size <= 1
               ? menuItem(<Link2 size={12} />, 'Copy relative path', false, () => {
                   copyTextToClipboard(relativeToRoot(menu.entry!.path));
                   setMenu(null);
                 })
               : null}
-            {menu.entry ? menuItem(<Pencil size={12} />, 'Rename', false, () => startRename(menu.entry!)) : null}
+            {menu.entry && selectedPaths.size <= 1 ? menuItem(<Pencil size={12} />, 'Rename', false, () => startRename(menu.entry!)) : null}
             {menu.entry
-              ? menuItem(<Trash2 size={12} />, 'Delete', true, () => {
+              ? menuItem(<Trash2 size={12} />, selectedPaths.size > 1 ? `Delete ${selectedPaths.size} files` : 'Delete', true, () => {
                   setMenu(null);
-                  setConfirmDelete(menu.entry);
+                  if (selectedPaths.size > 1) {
+                    setConfirmDelete(null);
+                    const pathsToDelete = Array.from(selectedPaths);
+                    const performDeleteMultiple = async (): Promise<void> => {
+                      try {
+                        for (const path of pathsToDelete) {
+                          if (onDeleteFile) {
+                            const kindGuess = childrenByDirRef.current.has(path) ? 'dir' : 'file';
+                            await onDeleteFile(path, kindGuess);
+                          } else {
+                            await fsDelete(root, path);
+                          }
+                        }
+                        const parentDirs = new Set(pathsToDelete.map(p => parentOf(p)));
+                        for (const parent of parentDirs) {
+                          await loadDir(childrenByDirRef.current.has(parent) ? parent : root);
+                        }
+                        setSelectedPaths(new Set());
+                        setLastSelectedPath(null);
+                      } catch (err) {
+                        onError(err instanceof Error ? err.message : String(err));
+                      }
+                    };
+                    void performDeleteMultiple();
+                  } else {
+                    setConfirmDelete(menu.entry);
+                  }
                 })
               : null}
             {(() => {
