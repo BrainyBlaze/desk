@@ -412,20 +412,30 @@ export function buildTurnPrompt(options: {
   author: string;
   message: ChannelMessage;
   home: string;
+  role?: string;
+  functions?: string;
 }): string {
   const threadArg = options.file.startsWith('thread-') ? ` --thread ${options.file.slice('thread-'.length, -3)}` : '';
-  return [
+  const lines = [
     `[#${options.channel}] New message from @${options.author} (${options.message.id}) — you are @${options.member}.`,
-    '',
+    ''
+  ];
+  if (options.role || options.functions) {
+    if (options.role) {
+      lines.push(`Your role in this channel: ${options.role}`);
+    }
+    if (options.functions) {
+      lines.push(`Remember your functions: ${options.functions}`);
+    }
+    lines.push('');
+  }
+  lines.push(
     `1 new message from @${options.author}.`,
     `notificationId:${options.message.id}`,
     `Read message: desk channels read ${options.channel} --message ${options.message.id}`,
     `Read full conversation: desk channels read ${options.channel}`,
     '',
     `Full conversation: ${join(options.home, options.channel, options.file)}`,
-    // --as is load-bearing: agents whose exec environment strips TMUX (codex)
-    // cannot be identified from the calling shell, and an unidentified post
-    // would be misattributed to the human operator.
     `To reply, run: desk channels post ${options.channel}${threadArg} --as ${options.member} "<your message>" — mention members with @name (never @${options.member}). ` +
       `Run \`desk channels read ${options.channel} --message ${options.message.id}\` for this message or \`desk channels read ${options.channel}\` for history.`,
     `When you reference a file, write it as a markdown link with its ABSOLUTE path so the operator can open it in the editor with one click: ` +
@@ -433,7 +443,8 @@ export function buildTurnPrompt(options: {
     `Collaboration contract: when you finish the work this message calls for, post your outcome to the channel (what you did, evidence, who acts next). ` +
       `If it requires nothing from you, post one brief line saying so and why — unless this message is itself a pure acknowledgment/status (then do not reply; never acknowledge acknowledgments). ` +
       `Human guidelines posted in the channel override this cadence.`
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /**
@@ -497,16 +508,26 @@ export function buildOnboardingPrompt(options: {
   members: ChannelMember[];
   messageCount: number;
   home: string;
+  role?: string;
+  functions?: string;
 }): string {
   const roster = options.members
     .filter((member) => member.name !== options.handle)
     .map((member) => `@${member.name} (${member.type === 'human' ? 'human operator' : member.type})`)
     .join(', ');
-  return [
+  const lines = [
     `You have been added to the desk channel #${options.channel} as @${options.handle}. This is a multi-agent collaboration room — you are expected to participate actively, not observe.`,
     '',
     options.goal ? `Channel goal: ${options.goal}` : 'Channel goal: (not set — ask @human if direction is unclear)',
     `Members: ${roster || '(just you and the operator so far)'}`,
+  ];
+  if (options.role) {
+    lines.push(`Your role: ${options.role}`);
+  }
+  if (options.functions) {
+    lines.push(`Your functions in this channel: ${options.functions}`);
+  }
+  lines.push(
     '',
     'How it works:',
     `- New messages addressed to you arrive in this terminal automatically. If several pile up while you are working, you get ONE summary instead — read the channel yourself to catch up.`,
@@ -523,7 +544,8 @@ export function buildOnboardingPrompt(options: {
     `- If @human posts guidelines in the channel, they override these defaults — re-read them when they appear.`,
     '',
     `Start by reading the channel now and introducing yourself in one short message (who you are, what you are working on, current state).`
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /**
@@ -1310,7 +1332,9 @@ export class ChannelsEngine {
         member: target.name,
         author: message.author,
         message,
-        home: this.options.home
+        home: this.options.home,
+        role: target.role,
+        functions: target.functions
       });
       this.enqueue(target.tmuxSession, {
         channel,
