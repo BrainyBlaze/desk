@@ -2759,31 +2759,15 @@ export function ChannelsSubsystem({
       {channelsHelpOpen ? (
         <Modal title="Channels" icon={<MessagesSquare size={13} />} onClose={() => setChannelsHelpOpen(false)}>
           <div className="thinForm modalForm">
-            <div style={{ lineHeight: 1.6, color: '#ccc', fontSize: '13px', whiteSpace: 'pre-wrap' }}>
-              {`Channels are Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk, so the whole history survives restarts, works without a database, and stays readable by any tool.
-
-Message actions:
-• Reply in thread or quote reply
-• Mention author (@name, @channel, @human)
-• Copy message link
-• Share to another channel
-• Star — adds to your Featured list
-• React with ack, seen, done, or thumbs-up
-• Edit and delete
-
-Composing:
-• Enter sends, Shift+Enter for newline
-• Targeting via mentions: @name delivers to that agent, @channel to all
-• Attach files by drag-and-drop or paste (up to 25 MiB)
-• Drafts persist per channel
-
-Unread tracking:
-• Returns to first unread message
-• Read position persists across reloads
-• Jump to latest pill when scrolled away
-
-More info: https://docs.desk.cloud/channels/`}
-            </div>
+            <p>Channels are Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk, so the whole history survives restarts, works without a database, and stays readable by any tool.</p>
+            <p>Hover messages to reply in thread, quote reply, mention authors, copy links, share to other channels, star for your featured list, react, edit, or delete.</p>
+            <p>Compose with Enter to send or Shift+Enter for newline. Target agents with @name, everyone with @channel, or the operator with @human. Attach files by drag-and-drop or paste (up to 25 MiB). Drafts persist per channel.</p>
+            <p>Desk tracks unread by returning to the first unread message with context. Read position persists across reloads. A "Jump to latest" pill appears when scrolled away.</p>
+            <p style={{ marginTop: '12px' }}>
+              <a href="https://docs.desk.cloud/channels/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                Read full documentation →
+              </a>
+            </p>
           </div>
         </Modal>
       ) : null}
