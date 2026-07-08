@@ -39,6 +39,7 @@ import {
   FolderPlus,
   FolderTree,
   GitBranch,
+  HelpCircle,
   Palette,
   Info,
   LayoutGrid,
@@ -3909,6 +3910,7 @@ function AgentsSidebarImpl({
           <IconButton icon={<ChevronsDown size={12} />} label="Expand all" onClick={onExpandAll} />
           <IconButton icon={<ChevronsUp size={12} />} label="Collapse all" onClick={onCollapseAll} />
           <IconButton icon={<Plus size={12} />} label="Add project" onClick={onAddProject} />
+          <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => {}} />
         </div>
       </div>
       <div className="sidebarFilterRow">
