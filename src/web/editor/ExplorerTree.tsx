@@ -117,6 +117,8 @@ export function ExplorerTree({
   const [confirmDiscard, setConfirmDiscard] = useState<{ entry: FsEntry; spec: TreeGitMenuSpec } | null>(null);
   const [revealFlash, setRevealFlash] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
   const menuRef = useClampedMenu(menu);
 
   // Watch events arrive outside React's render cycle; refs keep the listener
@@ -478,7 +480,8 @@ export function ExplorerTree({
   const renderEntry = (entry: FsEntry): JSX.Element => {
     const isDir = entry.expandable;
     const isExpanded = isDir && expanded.has(entry.path);
-    const isSelected = !isDir && entry.path === activePath;
+    const isActive = !isDir && entry.path === activePath;
+    const isTreeSelected = selectedPaths.has(entry.path);
     if (pendingEdit?.kind === 'rename' && pendingEdit.targetPath === entry.path) {
       return <Fragment key={entry.path}>{renderEditRow()}</Fragment>;
     }
@@ -492,7 +495,8 @@ export function ExplorerTree({
             <div
               className={[
                 'fileNode',
-                isSelected ? 'selected' : '',
+                isActive ? 'selected' : '',
+                isTreeSelected ? 'treeSelected' : '',
                 entry.hidden ? 'fileNodeHidden' : '',
                 dropTarget === entry.path ? 'fileNodeDrop' : '',
                 revealFlash === entry.path ? 'fileNodeRevealFlash' : ''
@@ -510,7 +514,7 @@ export function ExplorerTree({
               onDragLeave={isDir ? () => setDropTarget((current) => (current === entry.path ? null : current)) : undefined}
               onDrop={isDir ? (event) => onDirDrop(event, entry.path) : undefined}
             >
-              {isSelected ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
+              {isActive ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
               {isDir ? (
                 <button
                   className="treeToggle"
@@ -528,12 +532,31 @@ export function ExplorerTree({
                 type="button"
                 title={badge ? `${entry.path} — ${badge.tone}` : entry.path}
                 onMouseEnter={() => bleeps.hover?.play()}
-                onClick={() => {
+                onClick={(event: MouseEvent) => {
                   bleeps.click?.play();
                   if (isDir) {
                     toggleDir(entry);
                   } else {
-                    onOpenFile(entry.path);
+                    if ((event as any).shiftKey && lastSelectedPath) {
+                      const newSelection = new Set(selectedPaths);
+                      newSelection.add(entry.path);
+                      newSelection.add(lastSelectedPath);
+                      setSelectedPaths(newSelection);
+                      setLastSelectedPath(entry.path);
+                    } else if ((event as any).ctrlKey || (event as any).metaKey) {
+                      const newSelection = new Set(selectedPaths);
+                      if (newSelection.has(entry.path)) {
+                        newSelection.delete(entry.path);
+                      } else {
+                        newSelection.add(entry.path);
+                      }
+                      setSelectedPaths(newSelection);
+                      setLastSelectedPath(entry.path);
+                    } else {
+                      setSelectedPaths(new Set([entry.path]));
+                      setLastSelectedPath(entry.path);
+                      onOpenFile(entry.path);
+                    }
                   }
                 }}
               >
