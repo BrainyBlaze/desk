@@ -2467,6 +2467,14 @@ select {
 .editorTab:hover .editorTabClose, .editorTabActive .editorTabClose { opacity: 1; }
 .editorTabClose:hover { color: var(--desk-error); }
 
+.editorTabDropBefore {
+  border-left: 2px solid var(--desk-accent);
+}
+
+.editorTabDropAfter {
+  border-right: 2px solid var(--desk-accent);
+}
+
 .monacoHost { flex: 1; min-height: 0; }
 
 .editorConflictBanner {
