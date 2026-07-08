@@ -1532,10 +1532,14 @@ export function App(): JSX.Element {
   }
 
   function openAddGroup(project?: DeskProjectView): void {
-    setModalProject(project ?? activeProject);
+    const targetProject = project ?? activeProject;
+    setModalProject(targetProject);
+    const isFirstGroup = (targetProject?.groups?.length ?? 0) === 0;
     setGroupForm({
       ...emptyGroupForm,
-      projectId: project?.id ?? activeProject?.id ?? ''
+      projectId: targetProject?.id ?? '',
+      groupId: isFirstGroup ? 'main' : '',
+      groupLabel: isFirstGroup ? 'Main' : ''
     });
     setModal('addGroup');
   }
@@ -2288,21 +2292,66 @@ export function App(): JSX.Element {
   function renderModal(): ReactNode {
     if (modal === 'addProject') {
       return (
-        <Modal title="Add project" icon={<FolderPlus size={13} />} onClose={() => setModal(null)}>
+        <Modal
+          title="Add project"
+          icon={<FolderPlus size={13} />}
+          help="Enter a project name and working directory where agents will operate. Projects organize agent groups and coordinate work across multiple tasks and agents."
+          onClose={() => setModal(null)}
+        >
           <ProjectFormView form={projectForm} busy={busy} onSubmit={submitProject} onFormChange={setProjectForm} />
         </Modal>
       );
     }
     if (modal === 'addGroup') {
       return (
-        <Modal title="Add group" icon={<LayoutGrid size={13} />} onClose={() => setModal(null)}>
+        <Modal
+          title="Add group"
+          icon={<LayoutGrid size={13} />}
+          help={
+            <>
+              <div>Each project holds groups — one cell grid per group, where each cell is an agent chat or a terminal. Pick the layout in the form:</div>
+              <div style={{ marginTop: '8px' }}>
+                <strong>2x2</strong> for a four-agent working set — the default choice
+              </div>
+              <div style={{ marginTop: '4px' }}>
+                <strong>linear</strong> with 3 cells for a review lane you want side by side
+              </div>
+              <div style={{ marginTop: '4px' }}>
+                <strong>custom</strong> with up to 16 cells when the fixed grids do not fit
+              </div>
+              <div style={{ marginTop: '8px' }}>
+                Layouts are not fixed after creation: the badge in the multiplexer header switches kinds in place, the + and − controls add and remove cells, and dragging the separators between cells persists your exact split proportions per group.
+              </div>
+              <div style={{ marginTop: '8px' }}>
+                <a href="https://docs.desk.cloud/guide-create-agent-fleet/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                  See Multi-agent layouts for the full tour →
+                </a>
+              </div>
+            </>
+          }
+          onClose={() => setModal(null)}
+        >
           <GroupFormView form={groupForm} busy={busy} onSubmit={submitGroup} onFormChange={setGroupForm} />
         </Modal>
       );
     }
     if (modal === 'addSession') {
       return (
-        <Modal title="Add session" icon={<Plus size={13} />} onClose={() => setModal(null)}>
+        <Modal
+          title="Add session"
+          icon={<Plus size={13} />}
+          help={
+            <>
+              <div>Terminals are tmux sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
+              <div style={{ marginTop: '8px' }}>
+                <a href="https://docs.desk.cloud/guide-create-agent-fleet/#3-add-agent-sessions" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                  Learn more →
+                </a>
+              </div>
+            </>
+          }
+          onClose={() => setModal(null)}
+        >
           <SessionFormView
             form={sessionForm}
             projects={snapshot?.view.projects ?? []}
@@ -2563,12 +2612,14 @@ function WorkspaceHeaderImpl({
             <CommandButton
               icon={<RefreshCw size={13} className={busy ? 'spinSlow' : undefined} />}
               label="Refresh"
+              title="Re-reads fleet state; 2-second pulse keeps liveness, attention, and telemetry current in background (paused when tab is hidden)"
               onClick={onRefresh}
               disabled={busy}
             />
             <CommandButton
               icon={<Zap size={13} />}
               label="Up"
+              title="Starts all missing sessions from manifest without touching running ones"
               onClick={() => {
                 bleeps.deploy?.play();
                 void onUp();
@@ -2577,7 +2628,7 @@ function WorkspaceHeaderImpl({
             />
           </span>
           <span className="toolbarGroup cmdMobileHidden">
-            <Cmd icon={<Skull size={13} />} label="KILL" tone="danger" onClick={onKillAll} />
+            <Cmd icon={<Skull size={13} />} label="KILL" title="Emergency stop: kills all Claude Code and Codex CLI processes on host. Confirms with alarm first. Last resort only." tone="danger" onClick={onKillAll} />
           </span>
           <span className="toolbarGroup">
             <span className="cmdSlot cmdMobileHidden">
@@ -3765,6 +3816,7 @@ function AgentsSidebarImpl({
   // filtering, collapse state is ignored so matches are always on screen.
   const [filter, setFilter] = useState('');
   const [attentionOnly, setAttentionOnly] = useState(false);
+  const [agentsHelpOpen, setAgentsHelpOpen] = useState(false);
   const filterText = filter.trim().toLowerCase();
   const filtering = filterText !== '' || attentionOnly;
   const attentionTotal = projects.reduce(
@@ -3910,7 +3962,7 @@ function AgentsSidebarImpl({
           <IconButton icon={<ChevronsDown size={12} />} label="Expand all" onClick={onExpandAll} />
           <IconButton icon={<ChevronsUp size={12} />} label="Collapse all" onClick={onCollapseAll} />
           <IconButton icon={<Plus size={12} />} label="Add project" onClick={onAddProject} />
-          <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => {}} />
+          <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => setAgentsHelpOpen(true)} />
         </div>
       </div>
       <div className="sidebarFilterRow">
@@ -4212,6 +4264,22 @@ function AgentsSidebarImpl({
           );
         })}
       </div>
+
+      {agentsHelpOpen ? (
+        <Modal title="Agents" icon={<Activity size={13} />} onClose={() => setAgentsHelpOpen(false)}>
+          <div style={{ padding: '16px 14px', color: 'var(--desk-text-dim)', fontSize: '12px', lineHeight: '1.5' }}>
+            <div>Agents are AI assistants and execution environments that work on tasks. Each agent is a tmux session with Claude or another AI running commands.</div>
+            <div style={{ marginTop: '12px' }}>Create agent projects to organize work, add groups to coordinate on related tasks, and create sessions for individual agents to execute work.</div>
+            <div style={{ marginTop: '12px' }}>Use the boot button to start missing sessions, edit to modify names and settings, and delete to remove sessions. Sessions show live status with a dot indicator — green for running, yellow for waiting for input, gray for inactive.</div>
+            <div style={{ marginTop: '12px' }}>Active sessions appear in the terminal multiplexer where you can see output and send input. Featured messages can reference agents with @name mentions to direct messages and task assignments.</div>
+            <div style={{ marginTop: '12px' }}>
+              <a href="https://docs.desk.cloud/agents-and-terminals/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                Read full documentation →
+              </a>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
     </aside>
   );
 }
@@ -5250,15 +5318,17 @@ function CommandButton({
   label,
   onClick,
   disabled,
-  submit
+  submit,
+  title
 }: {
   icon: ReactNode;
   label: string;
   onClick?: () => void;
   disabled?: boolean;
   submit?: boolean;
+  title?: string;
 }): JSX.Element {
-  return <Cmd icon={icon} label={label} onClick={onClick} disabled={disabled} submit={submit} />;
+  return <Cmd icon={icon} label={label} onClick={onClick} disabled={disabled} submit={submit} title={title} />;
 }
 
 function StatusDot({ state, attention }: { state: DeskSessionView['state']; attention?: boolean }): JSX.Element {
