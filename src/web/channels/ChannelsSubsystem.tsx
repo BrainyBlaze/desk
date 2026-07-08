@@ -2780,7 +2780,9 @@ Composing:
 Unread tracking:
 • Returns to first unread message
 • Read position persists across reloads
-• Jump to latest pill when scrolled away`}
+• Jump to latest pill when scrolled away
+
+More info: https://docs.desk.cloud/channels/`}
             </div>
           </div>
         </Modal>
