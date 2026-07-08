@@ -4,7 +4,7 @@ import { BookOpen, ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, Cop
 import { CLIP_OCTAGON_TINY, Cmd, Modal } from '../arwes/primitives.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from '../arwes/motion.js';
-import { fsCopy, fsCreate, fsDelete, fsList, fsRename, type FsEntry, type FsWatchSocket } from './fsClient.js';
+import { fsCopy, fsCreate, fsDelete, fsList, fsRename, fsUpload, type FsEntry, type FsWatchSocket } from './fsClient.js';
 import { duplicateName, fileNameOf } from './editorState.js';
 import { dirIcon, fileIcon } from './fileIcons.js';
 import { useClampedMenu } from '../menuPosition.js';
@@ -119,7 +119,10 @@ export function ExplorerTree({
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadDir, setUploadDir] = useState<string | null>(null);
   const menuRef = useClampedMenu(menu);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Watch events arrive outside React's render cycle; refs keep the listener
   // honest without re-subscribing on every listing change.
@@ -407,6 +410,32 @@ export function ExplorerTree({
     void navigator.clipboard?.writeText(text).catch(() => onError('clipboard unavailable'));
   };
 
+  const uploadFiles = async (files: FileList | File[], targetDir: string): Promise<void> => {
+    const list = [...files];
+    if (list.length === 0) {
+      return;
+    }
+    setUploading(true);
+    try {
+      for (const file of list) {
+        const buffer = await file.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const CHUNK = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+        }
+        await fsUpload(root, targetDir, file.name, btoa(binary));
+      }
+      await loadDir(targetDir);
+      setUploadDir(null);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'upload failed');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const relativeToRoot = (path: string): string =>
     path === root ? '.' : path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 
@@ -446,12 +475,14 @@ export function ExplorerTree({
   };
 
   const onDirDragOver = (event: DragEvent, path: string): void => {
-    if (!event.dataTransfer.types.includes(DRAG_MIME)) {
+    const hasFiles = event.dataTransfer.types.includes('Files');
+    const hasInternalDrag = event.dataTransfer.types.includes(DRAG_MIME);
+    if (!hasFiles && !hasInternalDrag) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
-    event.dataTransfer.dropEffect = 'move';
+    event.dataTransfer.dropEffect = hasFiles ? 'copy' : 'move';
     setDropTarget(path);
   };
 
@@ -459,6 +490,14 @@ export function ExplorerTree({
     event.preventDefault();
     event.stopPropagation();
     setDropTarget(null);
+
+    // Handle file uploads
+    if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
+      void uploadFiles(event.dataTransfer.files, path);
+      return;
+    }
+
+    // Handle internal file moves
     const source = event.dataTransfer.getData(DRAG_MIME);
     if (source) {
       void performMove(source, path);
@@ -671,6 +710,11 @@ export function ExplorerTree({
               : null}
             {menuItem(<FilePlus size={12} />, 'New file', false, () => startCreate('create-file', menuDir))}
             {menuItem(<FolderPlus size={12} />, 'New directory', false, () => startCreate('create-dir', menuDir))}
+            {menuItem(<Plus size={12} />, 'Upload files', false, () => {
+              setMenu(null);
+              setUploadDir(menuDir);
+              fileInputRef.current?.click();
+            })}
             {fileClipboard
               ? menuItem(<ClipboardPaste size={12} />, `Paste ${fileClipboard.name}`, false, () => {
                   setMenu(null);
@@ -835,6 +879,18 @@ export function ExplorerTree({
           </div>
         </Modal>
       ) : null}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          if (event.target.files && uploadDir) {
+            void uploadFiles(event.target.files, uploadDir);
+            event.target.value = '';
+          }
+        }}
+      />
     </div>
   );
 }

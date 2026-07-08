@@ -342,6 +342,16 @@ export async function fsSearchContent(
   return readJson(fetch(`/api/fs/search?root=${enc(root)}&q=${enc(query)}&mode=content`));
 }
 
+export async function fsUpload(root: string, dirPath: string, name: string, dataBase64: string): Promise<void> {
+  await readJson(
+    fetch('/api/fs/upload', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ root, dirPath, name, dataBase64 })
+    })
+  );
+}
+
 /**
  * /ws/fs client: watch/unwatch directories and files, auto-reconnect with
  * full resubscribe (same resilience pattern as the terminal socket).
