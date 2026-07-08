@@ -88,15 +88,33 @@ once, and let them coordinate — without becoming the message bus yourself.
 
 ## Quickstart
 
-You need **Node.js 20+**, **npm**, **tmux**, and **git** (plus a C/C++
-toolchain for `node-pty` — `build-essential` / Xcode CLT).
+Install the prebuilt binary (Linux x64/arm64, macOS Apple Silicon). It's
+self-contained — UI + LSP servers embedded, Bun-native terminals — so the only
+runtime dependency is **tmux**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+desk                  # web UI + API on http://127.0.0.1:5173
+```
+
+`install.sh` downloads the latest release binary, verifies its checksum, and
+installs it as **`desk`** in `/usr/local/bin` (or `~/.local/bin`). Pin a release
+with `DESK_VERSION=vX.Y.Z`, or grab a binary straight from the
+[releases page](https://github.com/BrainyBlaze/desk/releases).
+
+<details>
+<summary>Build from source (for development)</summary>
+
+You need **Node.js 20+**, **npm**, **tmux**, and a C/C++ toolchain (for
+`node-pty` — `build-essential` / Xcode CLT):
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git
 cd desk
-./install.sh          # checks prerequisites, installs deps, builds, links `desk` globally
-desk serve            # web server + UI on http://127.0.0.1:5173
+npm ci && npm run build && npm link   # global `desk` CLI
+desk serve            # web server + UI on http://127.0.0.1:5173 (Vite dev)
 ```
+</details>
 
 Open the printed URL and add your first agent from the sidebar — pick a
 directory, choose `codex`, `claude`, `opencode`, or any command, and Desk

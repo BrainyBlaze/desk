@@ -1,22 +1,52 @@
 ---
 title: "Distribution and deployment"
 sidebarTitle: "Distribution"
-description: "Run Desk from a source checkout or a standalone release binary, and understand what each runtime includes."
+description: "Run Desk from the standalone binary or a source checkout, and understand what each runtime includes."
 ---
 
 Desk has two runtime shapes:
 
-- source checkout with `desk serve`
-- standalone release binary
+- the standalone binary (installed as `desk`) — the default
+- a source checkout with the `desk` CLI (`desk serve`)
 
 They share the same backend API and browser UI. The difference is how the UI, language-server assets, and PTY backend are packaged.
 
-## Source-checkout runtime
+## Standalone runtime
 
-Use this when you are developing Desk or running from a clone:
+The standalone server is built with Bun's compile mode. It is self-contained and does not run Vite at runtime. Install it with the one-liner — it lands as `desk`:
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+desk
+```
+
+Host and port come from environment variables:
+
+```bash
+DESK_HOST=127.0.0.1 DESK_PORT=5173 desk
+```
+
+The standalone server:
+
+- starts the same Desk backend API on a plain HTTP server
+- serves the embedded UI bundle with SPA fallback
+- honors runtime `DESK_PLUGINS`
+- can include build-time embedded plugins in downstream builds
+- uses a Bun-native PTY backend instead of `node-pty`
+
+Downloaded a release artifact directly instead of using the installer? Make it executable and run it by its target name:
+
+```bash
+chmod +x ./desk-server-linux-x64
+DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
+```
+
+## Source-checkout runtime
+
+Use this when you are developing Desk or want the multi-command `desk` CLI. It needs Node.js 20+, npm, and a C/C++ toolchain for `node-pty`:
+
+```bash
+npm ci && npm run build && npm link
 desk serve
 ```
 
@@ -36,28 +66,6 @@ The source runtime uses:
 - Vite for serving the UI
 - `node-pty` for PTY sessions
 - dependencies installed in `node_modules`
-
-## Standalone runtime
-
-The standalone server is built with Bun's compile mode. It does not run Vite at runtime.
-
-```bash
-./desk-server-linux-x64
-```
-
-Host and port come from environment variables:
-
-```bash
-DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
-```
-
-The standalone server:
-
-- starts the same Desk backend API on a plain HTTP server
-- serves the embedded UI bundle with SPA fallback
-- honors runtime `DESK_PLUGINS`
-- can include build-time embedded plugins in downstream builds
-- uses a Bun-native PTY backend instead of `node-pty`
 
 ## Release artifacts
 
