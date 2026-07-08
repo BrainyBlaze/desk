@@ -1311,14 +1311,14 @@ export function ProjectsSubsystem({
       {projectsHelpOpen ? (
         <Modal title="Projects" icon={<SquareKanban size={13} />} onClose={() => setProjectsHelpOpen(false)}>
           <div className="thinForm modalForm">
-            <p>Projects organize your work into named repositories with their own groups and sessions. Each project has a working directory and can have multiple agent groups.</p>
-            <p>Create projects to keep work separated and organized. Add agents to project groups to coordinate on specific tasks. Projects support GitHub integration for issue tracking and pull request management.</p>
-            <p>Use the plus icon (+) to create a new project, or refresh to sync the latest state from GitHub. You can archive projects you're done with while keeping the history intact.</p>
-            <p style={{ marginTop: '12px' }}>
+            <span>Named work roots with their own groups and sessions. Each project has a working directory and can have multiple agent groups for coordinating on specific tasks.</span>
+            <span style={{ marginTop: '8px', display: 'block' }}>Create projects to keep work separated and organized. Add agents to project groups to coordinate. Projects support GitHub integration for issue tracking and pull request management.</span>
+            <span style={{ marginTop: '8px', display: 'block' }}>Use the plus icon (+) to create a new project, or refresh to sync the latest state from GitHub. You can archive projects you're done with while keeping the history intact.</span>
+            <span style={{ marginTop: '12px', display: 'block' }}>
               <a href="https://docs.desk.cloud/projects/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
                 Read full documentation →
               </a>
-            </p>
+            </span>
           </div>
         </Modal>
       ) : null}

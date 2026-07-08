@@ -2759,15 +2759,15 @@ export function ChannelsSubsystem({
       {channelsHelpOpen ? (
         <Modal title="Channels" icon={<MessagesSquare size={13} />} onClose={() => setChannelsHelpOpen(false)}>
           <div className="thinForm modalForm">
-            <p>Channels are Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk, so the whole history survives restarts, works without a database, and stays readable by any tool.</p>
-            <p>Hover messages to reply in thread, quote reply, mention authors, copy links, share to other channels, star for your featured list, react, edit, or delete.</p>
-            <p>Compose with Enter to send or Shift+Enter for newline. Target agents with @name, everyone with @channel, or the operator with @human. Attach files by drag-and-drop or paste (up to 25 MiB). Drafts persist per channel.</p>
-            <p>Desk tracks unread by returning to the first unread message with context. Read position persists across reloads. A "Jump to latest" pill appears when scrolled away.</p>
-            <p style={{ marginTop: '12px' }}>
+            <span>Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk — history survives restarts and stays readable by any tool.</span>
+            <span style={{ marginTop: '8px', display: 'block' }}>Hover messages to reply in thread, quote reply, mention authors, copy links, share to other channels, star for your featured list, react, edit, or delete.</span>
+            <span style={{ marginTop: '8px', display: 'block' }}>Compose with Enter to send or Shift+Enter for newline. Target agents with @name, everyone with @channel, or the operator with @human. Attach files by drag-and-drop or paste (up to 25 MiB).</span>
+            <span style={{ marginTop: '8px', display: 'block' }}>Desk tracks unread by returning to the first unread message. Read position persists across reloads. A "Jump to latest" pill appears when scrolled away.</span>
+            <span style={{ marginTop: '12px', display: 'block' }}>
               <a href="https://docs.desk.cloud/channels/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
                 Read full documentation →
               </a>
-            </p>
+            </span>
           </div>
         </Modal>
       ) : null}
