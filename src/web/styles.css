@@ -2359,7 +2359,7 @@ select {
   min-height: 24px;
   min-width: 0;
 }
-.fileNode:hover { background: var(--desk-glow); }
+.fileNode:hover { background: rgba(100, 200, 255, 0.15); }
 .fileNode.selected { filter: drop-shadow(0 0 4px var(--desk-glow)); }
 .fileNode.treeSelected { background: rgba(100, 200, 255, 0.15); }
 .fileNode > svg {
