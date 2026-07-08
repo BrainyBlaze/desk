@@ -1,5 +1,8 @@
 export type DeskAgent = 'codex' | 'claude' | 'bash' | 'opencode' | string;
 
+/** UI surface for a session's cell. Absent on the manifest record = 'terminal'. */
+export type DeskSessionUiMode = 'terminal' | 'native';
+
 export type DeskLayoutKind = '1x1' | '2x2' | '3x3' | '4x4' | 'custom' | 'linear';
 
 /** Persisted resizable-panel split sizes for a group's mosaic (percentages). */
@@ -103,6 +106,9 @@ export interface DeskSession {
   command?: string;
   tmuxSession?: string;
   order?: number;
+  uiMode?: DeskSessionUiMode;
+  /** Runtime model override (provider/model string, driver-interpreted). NOT part of session identity. */
+  model?: string;
 }
 
 export interface SessionSpec {
@@ -123,6 +129,8 @@ export interface SessionSpec {
   customCommand?: boolean;
   tmuxSession: string;
   command: string;
+  uiMode: DeskSessionUiMode;
+  model?: string;
 }
 
 export interface AgentMcpLaunchConfig {

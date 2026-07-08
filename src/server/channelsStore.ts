@@ -358,6 +358,16 @@ export function createChannel(home: string, name: string, goal: string): void {
   });
 }
 
+export function ensureUploadFileBucket(home: string, name: string): void {
+  if (!isValidChannelName(name)) {
+    throw new Error('upload bucket name must be lowercase alphanumeric with hyphens');
+  }
+  ensureChannelsHome(home);
+  withHomeLockSync(home, () => {
+    mkdirSync(join(home, name, '_files'), { recursive: true });
+  });
+}
+
 export function destroyChannel(home: string, name: string): void {
   // Serialize against createChannel (home lock) so a concurrent create+destroy
   // for the same name resolves deterministically — the caller of the LOSING

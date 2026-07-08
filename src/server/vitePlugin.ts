@@ -7,6 +7,9 @@ import { loadPluginsFromEnv } from './pluginLoader.js';
 import { handleFsRequest } from './fsApi.js';
 import { handleGitRequest } from './gitApi.js';
 import { handleProjectsRequest } from './projectsApi.js';
+import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
+import { shouldRespawnAfterEdit } from './editRespawn.js';
+import { deleteToolJournal } from './agents/host/toolJournal.js';
 import { disposeChannelsRuntime, handleChannelsRequest, initChannelsRuntime } from './channelsApi.js';
 import { installFsWatchBridge } from './fsWatchBridge.js';
 import { installLspWebSocketBridge } from './lspWebSocketBridge.js';
@@ -80,7 +83,10 @@ import {
   type MoveProjectSessionOptions
 } from '../core/config.js';
 import { applyLspUiSettingsPatch, toClientSettings } from '../core/lspSettings.js';
-import { buildSessionSpecs, expandHome } from '../core/manifest.js';
+import { buildSessionSpecs, expandHome, sessionSupportsNativeUiMode } from '../core/manifest.js';
+import { createInFlightGuard, performUiModeSwitch, validateUiModeSwitch } from './uiModeSwitch.js';
+import { rewriteNativeLaunchCommand } from './agentHostLaunch.js';
+import { deriveAgentHostToken, getOrCreateAgentHostSecret } from './agentHostToken.js';
 import { killSession, listTmuxSessions, listTmuxSessionsCached, loadDesk, planDeskUp, restartSession, runPlan, startSession } from '../core/runner.js';
 import { attentionTracker, notifyAgentSignal, setRaiseListener, startAttentionPolling, type AgentEventKind } from './attention.js';
 import {
@@ -95,6 +101,7 @@ import { executeKillSwitch } from './killSwitch.js';
 import { buildDeskSnapshot } from './snapshot.js';
 import { getSystemSnapshot, startSystemSampling } from './systemSampler.js';
 import { createDefaultTerminalBroker, installTerminalBroker } from './terminalBroker.js';
+import { AgentSurfaceBroker, installAgentSurfaceBroker } from './agentSurfaceBroker.js';
 import {
   captureTmuxPane,
   installTerminalBridge,
@@ -122,6 +129,10 @@ import { normalizeAgentEventForApi } from './agentEvents.js';
 // server (src/server/standalone.ts), so all three run byte-identical request
 // handling. Optional `plugins` contribute middleware, routes, and a single
 // central WebSocket upgrade guard (see ./plugin.ts).
+// One switch per tmux session at a time; safe as an in-process guard because a
+// single desk server process owns tmux lifecycle for a manifest (spec §7).
+const uiModeSwitchGuard = createInFlightGuard();
+
 export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptions = {}): void {
   const plugins = options.plugins ?? [];
   const pluginRoutes: DeskRoute[] = plugins.flatMap((plugin) => plugin.routes ?? []);
@@ -129,6 +140,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
     .map((plugin) => plugin.upgradeGuard)
     .filter((guard): guard is NonNullable<typeof guard> => typeof guard === 'function');
   const terminalBroker = createDefaultTerminalBroker();
+  const agentSurfaceBroker = new AgentSurfaceBroker();
   const lspDiagnosticsStore = new LspDiagnosticsStore();
   const lspManager = new LspManager(undefined, { diagnosticsStore: lspDiagnosticsStore });
   const lspRequestPlanner = {
@@ -195,6 +207,25 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
     tokenRegistry: lspCapabilityTokens,
     getApiBaseUrl: () => canonicalLocalApiBaseUrl(server.httpServer)
   });
+  // Native-mode launch enrichment (spec §5): applied LAST at every spawn site
+  // so the agent-host command wins over any earlier spec rewrite. Without a
+  // resolvable server URL the spec passes through unenriched and the host
+  // fails visibly in its pane.
+  const nativeAgentLaunch = (spec: SessionSpec, lspEnvFilePath?: string): SessionSpec => {
+    if (spec.uiMode !== 'native') {
+      return spec;
+    }
+    const serverUrl = canonicalLocalApiBaseUrl(server.httpServer);
+    if (!serverUrl) {
+      return spec;
+    }
+    const secret = getOrCreateAgentHostSecret();
+    return rewriteNativeLaunchCommand(spec, {
+      serverUrl,
+      ...(lspEnvFilePath ? { lspEnvFilePath } : {}),
+      token: deriveAgentHostToken(secret, spec.tmuxSession, spec.agent ?? '')
+    });
+  };
       if (server.httpServer) {
         // Single, central WebSocket upgrade guard. Registered BEFORE the bridges
         // so it runs first: any plugin guard that rejects closes the socket, and
@@ -212,6 +243,10 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
         installTerminalBridge(server.httpServer);
         const disposeTerminalBroker = installTerminalBroker(server.httpServer, terminalBroker);
         server.httpServer.once('close', disposeTerminalBroker);
+        // Native UI mode broker — Phase 2 server core. Two WS endpoints:
+        // /ws/agent-host (adapter hosts) and /ws/agent-ui (browser surfaces).
+        const disposeAgentSurfaceBroker = installAgentSurfaceBroker(server.httpServer, agentSurfaceBroker);
+        server.httpServer.once('close', disposeAgentSurfaceBroker);
         // installFsWatchBridge only listens for 'upgrade'; vite's union type
         // includes Http2SecureServer which is structurally fine for that.
         installFsWatchBridge(server.httpServer as NodeHttpServer);
@@ -247,7 +282,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
       startAttentionPolling();
       startSystemSampling();
       // Channels engine: watcher + per-agent delivery queues (gated on agent signals).
-      initChannelsRuntime();
+      initChannelsRuntime({ agentSurfaceBroker });
       restorePendingResumeCaptures(loadDesk({}).sessions);
       // Editing src/server/* restarts the vite server inside the SAME Node
       // process: the replacement plugin instance builds a fresh runtime, so
@@ -291,6 +326,10 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
           }
 
           if (await handleProjectsRequest(req, res, url)) {
+            return;
+          }
+
+          if (await handleAgentSessionInjectRequest(req, res, url, { broker: agentSurfaceBroker })) {
             return;
           }
 
@@ -445,7 +484,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             const desk = loadDesk({});
             const plan = planDeskUp(desk.sessions);
             const settings = readManifestFile(resolveManifestPath()).settings;
-            const exitCode = dryRun ? runPlan(plan, true) : runManagedPlan(plan, settings, managedAgentLsp);
+            const exitCode = dryRun ? runPlan(plan, true) : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
             if (!dryRun && exitCode === 0) {
               for (const action of plan) {
                 if (action.type === 'start') {
@@ -482,7 +521,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
               return;
             }
             const launch = managedAgentLsp.prepare(nextSession, updated.settings);
-            const sessionToStart = launch?.session ?? nextSession;
+            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath);
             const started = startSession(sessionToStart);
             if (!started.ok) {
               launch?.cleanup();
@@ -557,7 +596,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
               return;
             }
             const launch = managedAgentLsp.prepare(nextSession, updated.settings);
-            const sessionToStart = launch?.session ?? nextSession;
+            const sessionToStart = nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath);
             const started = startSession(sessionToStart);
             if (!started.ok) {
               launch?.cleanup();
@@ -666,14 +705,34 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             const manifestPath = resolveManifestPath();
             const manifest = readManifestFile(manifestPath);
             const session = readDeskSessionBody(body.session, { cwdRequired: false });
+            const sessionBody = body.session as Record<string, unknown> | undefined;
+            const projectId = readRequiredString(body.projectId, 'projectId');
+            const groupId = readRequiredString(body.groupId, 'groupId');
+            const currentName = readRequiredString(body.currentName, 'currentName');
+            const findSpec = (specs: SessionSpec[], name: string): SessionSpec | undefined =>
+              specs.find((s) => s.projectId === projectId && s.groupId === groupId && s.name === name);
+            const oldSpec = findSpec(loadDesk({}).sessions, currentName);
             const updated = editSessionInManifest(manifest, {
-              projectId: readRequiredString(body.projectId, 'projectId'),
-              groupId: readRequiredString(body.groupId, 'groupId'),
-              currentName: readRequiredString(body.currentName, 'currentName'),
+              projectId,
+              groupId,
+              currentName,
               projectCwd: readOptionalString(body.projectCwd),
+              clearResume: sessionBody?.clearResume === true,
               session
             });
             writeManifestFile(manifestPath, updated);
+            const newSpec = findSpec(loadDesk({}).sessions, session.name);
+            if (shouldRespawnAfterEdit(oldSpec, newSpec, (t) => listTmuxSessions().has(t)) && newSpec) {
+              managedAgentLsp.cleanup(newSpec.tmuxSession);
+              const launch = managedAgentLsp.prepare(newSpec, readManifestFile(manifestPath).settings);
+              const restarted = restartSession(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
+              if (!restarted.ok) {
+                launch?.cleanup();
+                sendJson(res, 500, { error: `session edit saved but respawn failed: ${restarted.error}` });
+                return;
+              }
+              scheduleAgentResumeCapture(newSpec);
+            }
             sendJson(res, 200, buildDeskSnapshot());
             return;
           }
@@ -703,6 +762,10 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             }
             for (const target of targets) {
               managedAgentLsp.cleanup(target);
+              agentSurfaceBroker.disposeSession(target);
+              // Same hygiene as disposeSession: a recreated same-name session must
+              // not inherit the deleted session's journaled tool events.
+              deleteToolJournal(target);
             }
             const updated = deleteSessionFromManifest(manifest, {
               projectId,
@@ -725,7 +788,7 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             }
             managedAgentLsp.cleanup(session.tmuxSession);
             const launch = managedAgentLsp.prepare(session, readManifestFile(resolveManifestPath()).settings);
-            const restarted = restartSession(launch?.session ?? session);
+            const restarted = restartSession(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
             if (!restarted.ok) {
               launch?.cleanup();
               sendJson(res, 500, { error: restarted.error });
@@ -733,6 +796,61 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
             }
             scheduleAgentResumeCapture(session);
             sendJson(res, 200, buildDeskSnapshot());
+            return;
+          }
+
+          if (req.method === 'POST' && url.pathname === '/api/set-session-ui-mode') {
+            const body = await readJsonBody(req);
+            const tmuxSession = readRequiredString(body.tmuxSession, 'tmuxSession');
+            const uiMode = readRequiredString(body.uiMode, 'uiMode');
+            if (uiMode !== 'terminal' && uiMode !== 'native') {
+              sendJson(res, 400, { error: 'uiMode must be terminal or native', code: 'ui-mode-invalid' });
+              return;
+            }
+            const manifestPath = resolveManifestPath();
+            const manifest = readManifestFile(manifestPath);
+            const validated = validateUiModeSwitch(manifest, {
+              tmuxSession,
+              uiMode,
+              confirmDiscard: body.confirmDiscard === true,
+              homeDir: homedir()
+            });
+            if (!validated.ok) {
+              sendJson(res, validated.status, { error: validated.error, code: validated.code });
+              return;
+            }
+            if (validated.noop) {
+              sendJson(res, 200, buildDeskSnapshot());
+              return;
+            }
+            if (!uiModeSwitchGuard.begin(tmuxSession)) {
+              sendJson(res, 409, { error: `ui-mode switch already in progress for ${tmuxSession}`, code: 'switch-in-progress' });
+              return;
+            }
+            try {
+              let launch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
+              const result = await performUiModeSwitch(
+                { manifest, validated, homeDir: homedir() },
+                {
+                  write: (next) => writeManifestFile(manifestPath, next),
+                  prepare: (spec) => {
+                    managedAgentLsp.cleanup(spec.tmuxSession);
+                    launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
+                    return nativeAgentLaunch(launch?.session ?? spec, launch?.envFilePath);
+                  },
+                  restart: (spec) => restartSession(spec),
+                  scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
+                }
+              );
+              if (!result.ok) {
+                launch?.cleanup();
+                sendJson(res, result.status, { error: result.error });
+                return;
+              }
+              sendJson(res, 200, buildDeskSnapshot());
+            } finally {
+              uiModeSwitchGuard.end(tmuxSession);
+            }
             return;
           }
 
@@ -877,8 +995,12 @@ export function installDeskApi(server: DeskApiHost, options: InstallDeskApiOptio
           }
 
           sendJson(res, 404, { error: `unknown API route ${url.pathname}` });
-        } catch {
-          sendJson(res, 500, { error: 'request failed' });
+        } catch (err) {
+          // Surface the real failure: log server-side with the route for operators,
+          // return the message so clients render an actionable error instead of a
+          // generic "request failed".
+          console.error(`[desk-api] ${req.method ?? ''} ${req.url ?? ''} failed:`, err);
+          sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
 }
@@ -921,6 +1043,10 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
   }
 
   if (command) {
+    // Custom-command sessions are terminal-only; a native uiMode here is a client bug.
+    if (record.uiMode === 'native') {
+      throw new Error('session.uiMode native is not supported for custom-command sessions');
+    }
     session.command = command;
     return session;
   }
@@ -928,6 +1054,22 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
   session.agent = readOptionalString(record.agent) ?? 'codex';
   session.resume = readOptionalString(record.resume);
   session.bypassPermissions = Boolean(record.bypassPermissions);
+  const uiMode = readOptionalString(record.uiMode);
+  if (uiMode !== undefined) {
+    if (uiMode !== 'terminal' && uiMode !== 'native') {
+      throw new Error('session.uiMode must be terminal or native');
+    }
+    if (uiMode === 'native' && !sessionSupportsNativeUiMode({ agent: session.agent })) {
+      throw new Error(`session.uiMode native is not supported for agent ${session.agent}`);
+    }
+    // Persist terminal too: with native as the resolved default, dropping an
+    // explicit terminal choice would silently flip the session to native.
+    session.uiMode = uiMode;
+  }
+  const model = readOptionalString(record.model);
+  if (model) {
+    session.model = model;
+  }
   return session;
 }
 
@@ -1175,14 +1317,15 @@ function canonicalLocalApiBaseUrl(httpServer: { address(): unknown } | null | un
 function runManagedPlan(
   plan: TmuxPlanAction[],
   settings: DeskSettings | undefined,
-  managedAgentLsp: ReturnType<typeof createManagedAgentLspWiring>
+  managedAgentLsp: ReturnType<typeof createManagedAgentLspWiring>,
+  nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec = (spec) => spec
 ): number {
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = startSession(launch?.session ?? action.session);
+    const started = startSession(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
       return 1;

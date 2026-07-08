@@ -12,6 +12,8 @@ import {
   createChannel,
   destroyChannel,
   ensureChannelsHome,
+  ensureUploadFileBucket,
+  listChannels,
   saveChannelFile
 } from '../src/server/channelsStore.js';
 
@@ -132,5 +134,27 @@ describe('save cap: saveChannelFile cap policy', () => {
     expect(saved[0]).toBe('report.json');
     expect(saved[1]).toBe('report-1.json');
     expect(saved[2]).toBe('report-2.json');
+  });
+});
+
+describe('upload-only buckets', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'desk-fu4-'));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('can store native agent attachments without exposing a conversation channel', () => {
+    ensureUploadFileBucket(home, 'agent-files');
+
+    const saved = saveChannelFile(home, 'agent-files', 'note.txt', Buffer.from('native upload'));
+
+    expect(saved).toBe('note.txt');
+    expect(existsSync(join(home, 'agent-files', '_files', 'note.txt'))).toBe(true);
+    expect(listChannels(home)).toEqual([]);
   });
 });

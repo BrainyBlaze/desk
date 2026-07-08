@@ -74,6 +74,7 @@ groups:
       - name: sample-agent
         cwd: ~/projects/sample
         agent: codex
+        uiMode: terminal
 `,
       new Set(),
       {

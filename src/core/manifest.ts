@@ -91,7 +91,9 @@ export function buildSessionSpecs(
         bypassPermissions: session.bypassPermissions,
         ...(hasCustomCommand ? { customCommand: true } : {}),
         tmuxSession,
-        command
+        command,
+        uiMode: resolveSessionUiMode(session),
+        ...(session.model ? { model: session.model } : {})
       };
     })
   );
@@ -137,6 +139,7 @@ function validateSession(groupId: string, session: DeskSession, inheritedCwd?: s
   if (!session || typeof session.name !== 'string' || session.name.trim() === '') {
     throw new Error(`group ${groupId} has a session without a name`);
   }
+  validateSessionUiMode(session);
   if (typeof session.command === 'string' && session.command.trim() !== '') {
     return;
   }
@@ -147,6 +150,29 @@ function validateSession(groupId: string, session: DeskSession, inheritedCwd?: s
     return;
   }
   throw new Error(`session ${session.name} requires a supported agent or command`);
+}
+
+function validateSessionUiMode(session: DeskSession): void {
+  if (session.uiMode === undefined || session.uiMode === 'terminal') {
+    return;
+  }
+  if (session.uiMode !== 'native') {
+    throw new Error(`session ${session.name} has an unknown uiMode; expected terminal or native`);
+  }
+  if (!sessionSupportsNativeUiMode(session)) {
+    throw new Error(`session ${session.name} cannot use native uiMode; only codex/claude/opencode agent sessions support it`);
+  }
+}
+
+/** Native UI mode is limited to SDK-backed agents launched without a custom command. */
+export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' | 'command'>): boolean {
+  const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
+  return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
+}
+
+/** Undeclared uiMode resolves to native where supported; explicit values always win. */
+export function resolveSessionUiMode(session: Pick<DeskSession, 'agent' | 'command' | 'uiMode'>): 'terminal' | 'native' {
+  return session.uiMode ?? (sessionSupportsNativeUiMode(session) ? 'native' : 'terminal');
 }
 
 function buildProjectSessionSpec({
@@ -196,7 +222,9 @@ function buildProjectSessionSpec({
     bypassPermissions: session.bypassPermissions,
     ...(hasCustomCommand ? { customCommand: true } : {}),
     tmuxSession,
-    command
+    command,
+    uiMode: resolveSessionUiMode(session),
+    ...(session.model ? { model: session.model } : {})
   };
 }
 
@@ -245,6 +273,12 @@ export function buildAgentCommand(
   tmuxSession: string,
   agentMcp?: AgentMcpLaunchConfig
 ): string {
+  if (resolveSessionUiMode(session) === 'native') {
+    // Static base only: runtime values (server URL, host token) are injected
+    // at spawn time by the server-side rewrite (agentHostLaunch), keeping
+    // manifest-derived commands deterministic.
+    return `cd ${shellQuote(cwd)} && exec desk agent-host`;
+  }
   if (session.agent === 'bash') {
     return `cd ${shellQuote(cwd)} && exec bash`;
   }
@@ -257,10 +291,11 @@ export function buildAgentCommand(
     if (session.bypassPermissions) {
       args.push('--dangerously-skip-permissions');
     }
+    const baseCommand = args.join(' ');
     if (session.resume) {
-      args.push('--resume', shellQuote(session.resume));
+      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume, cwd)}`;
     }
-    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
+    return `cd ${shellQuote(cwd)} && ${env} ${baseCommand}`;
   }
   if (session.agent === 'codex') {
     const args = ['codex', CODEX_NOTIFICATION_FLAGS];
@@ -316,6 +351,25 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
 
 function agentEnvPrefix(agent: string | undefined, tmuxSession: string): string {
   return `DESK_TMUX_SESSION=${shellQuote(tmuxSession)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
+}
+
+function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {
+  const sdkTranscript = shellDoubleQuoteHomePath(`/.claude/projects/${claudeProjectDirName(cwd)}/${resume}.jsonl`);
+  const resumeArg = shellQuote(resume);
+  return [
+    `desk_claude_session=${sdkTranscript}`,
+    `${env} ${baseCommand} --resume ${resumeArg}`,
+    'desk_claude_resume_status=$?',
+    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue" >&2; if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi; ${env} ${baseCommand} --continue; desk_claude_continue_status=$?; if [ "$desk_claude_continue_status" -ne 0 ]; then printf '%s\\n' "desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics" >&2; printf '%s\\n' "desk: claude resume id: ${resume}" >&2; exec "\${SHELL:-/bin/sh}"; fi; fi`
+  ].join('; ');
+}
+
+function claudeProjectDirName(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function shellDoubleQuoteHomePath(pathAfterHome: string): string {
+  return `"$HOME${pathAfterHome.replace(/(["\\`$])/g, '\\$1')}"`;
 }
 
 function sessionHashSeed(session: DeskSession, cwd: string): string {

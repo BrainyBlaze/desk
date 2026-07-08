@@ -16,11 +16,12 @@ one project with multiple groups when several agents work in the same repo.
 
 ## Groups
 
-A group is a terminal workspace inside a project. Groups are useful for:
+A group is a cell-grid workspace inside a project — each cell holds a session
+rendered as a native agent chat or a terminal. Groups are useful for:
 
 - separating roles such as frontend, backend, reviewer, and release
 - keeping noisy commands away from agent sessions
-- switching between related terminal grids
+- switching between related session grids
 - preserving layout and selected sessions per workstream
 
 Each group has a layout such as one cell, a grid, or custom split sizes. Desk

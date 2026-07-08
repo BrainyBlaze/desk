@@ -1,6 +1,6 @@
 ---
 title: "Agents and terminals"
-description: "Durable tmux sessions, the multiplexer, terminal rendering, attention signals, and fleet controls"
+description: "Durable tmux sessions, the multiplexer, terminal rendering, attention signals, native agent chat, and fleet controls"
 ---
 
 The agent multiplexer is Desk's core surface. It lets one operator supervise
@@ -27,6 +27,49 @@ in the session form. Resume behavior is agent-specific: Claude Code
 conversation ids are harvested from the session and validated before reuse,
 OpenCode sessions are recaptured from the CLI's own session list with a picker
 on restart, and Codex sessions accept an explicit resume id.
+
+Claude Code, Codex, and OpenCode sessions render as a native chat surface;
+bash and custom-command sessions render as terminals. Each SDK-backed session
+can instead run in terminal mode — the raw CLI TUI in a terminal cell — by
+setting `uiMode: terminal` on the session, and the edit modal switches a
+session between modes in place.
+
+## The native chat surface
+
+<Frame caption="Native agent sessions: markdown transcripts, tool rows, and a composer per cell">
+  <img src="/images/native-agent-chat.png" alt="Three native agent sessions with markdown transcripts, tool call rows, and per-cell composers" />
+</Frame>
+
+In native mode Desk speaks to the agent through its SDK and renders the
+conversation itself, instead of showing the CLI's terminal UI:
+
+- **Transcript** — user and assistant turns render as markdown with
+  role-accented rows and turn separators. Long feeds are virtualized, so
+  thousand-row histories scroll smoothly; an unread marker shows what arrived
+  since you last looked, and a jump pill returns you to the live tail after
+  scrolling up.
+- **Tool calls** — every tool invocation is a compact row with a status dot,
+  elapsed time, and a disclosure that opens the exact input and output the
+  agent saw. Sub-agent activity nests under the tool row that spawned it.
+- **Composer** — a resizable input with file attachments (button, paste, or
+  drag-and-drop), a slash-command palette fed by the commands the agent
+  actually advertises, and a Send control that becomes Stop while a turn
+  runs. A pulsing indicator marks the whole time the agent is working —
+  from the moment you send until the reply, including tool execution.
+- **Permissions** — approval requests dock above the composer with the
+  proposed command or file diff, and resolve inline.
+- **Continuity** — transcripts survive reloads and browser switches: the
+  server keeps the session's event history and replays it to every surface,
+  and the agent process itself lives in its tmux session, so nothing
+  dies with the tab.
+
+<Frame caption="The slash palette lists the commands the connected agent advertises">
+  <img src="/images/native-composer-slash.png" alt="Native composer with the slash command palette open" />
+</Frame>
+
+Messages sent from [channels](/channels) reach native sessions through the
+same injection path the composer uses, so agent-to-agent delivery works
+identically in both modes.
 
 ## Durable tmux sessions
 
@@ -73,13 +116,15 @@ by assignment — drag a session tab onto a cell, or tap an empty cell to assign
 one from an inline picker.
 
 Group switches are cheap by design: recently visited groups stay mounted with
-live terminals (a warm budget of roughly 40 sessions on desktop), so flipping
-between groups opens no new connections and loses no terminal state.
+live cells (a warm budget of roughly 40 sessions on desktop), so flipping
+between groups opens no new connections and loses no transcript or terminal
+state.
 
 ## Terminal rendering
 
-Desk uses xterm.js in the browser and a server-side terminal broker for
-transport. The broker keeps one WebSocket per browser for all terminals,
+Terminal cells — bash sessions, custom commands, and SDK agents running with
+`uiMode: terminal` — use xterm.js in the browser and a server-side terminal
+broker for transport. The broker keeps one WebSocket per browser for all terminals,
 maintains one PTY per tmux session fanned out to every viewer (a desktop tab
 and a phone share the same PTY — keystrokes from one appear on the other),
 replays recent output on attach, and renders only visible cells.

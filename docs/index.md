@@ -85,8 +85,8 @@ before designing a larger fleet.
 - [Architecture](/concepts-architecture) explains the runtime components.
 - [Workspace model](/concepts-workspace-model) explains projects, groups,
   sessions, layouts, tmux names, and resume ids.
-- [Agents and terminals](/agents-and-terminals) covers terminal behavior,
-  attention, rendering, and session controls.
+- [Agents and terminals](/agents-and-terminals) covers the native chat
+  surface, terminal behavior, attention, rendering, and session controls.
 - [Channels protocol](/channels-protocol) documents message storage, delivery,
   mentions, and diagnostics.
 

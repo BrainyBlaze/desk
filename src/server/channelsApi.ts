@@ -22,6 +22,7 @@ import {
   editChannelGoal,
   editMessage,
   ensureChannelsHome,
+  ensureUploadFileBucket,
   listChannelMembers,
   listChannels,
   readChannelDetail,
@@ -62,6 +63,7 @@ import {
 } from './channelsProtocol.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { AgentSurfaceBroker } from './agentSurfaceBroker.js';
 
 /**
  * /api/channels/* — slack-like messaging between desk agents over the
@@ -76,6 +78,7 @@ const CHANNEL_PAGE_INITIAL = 50;
 const CHANNEL_PAGE_MORE = 40;
 const CHANNEL_UNREAD_CONTEXT = 5;
 const REACTION_KINDS = new Set<ReactionKind>(['ack', 'seen', 'done', 'thumbs-up']);
+const UPLOAD_ONLY_CHANNELS = new Set(['agent-files']);
 
 interface ChannelsRuntime {
   home: string;
@@ -87,12 +90,24 @@ interface ChannelsRuntime {
 
 let runtime: ChannelsRuntime | undefined;
 
-export function initChannelsRuntime(options: { home?: string } = {}): ChannelsRuntime {
+export interface ChannelsRuntimeOptions {
+  home?: string;
+  agentSurfaceBroker?: ChannelDeliveryBroker;
+}
+
+export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): ChannelsRuntime {
   if (runtime) {
     return runtime;
   }
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
-  const engine = new ChannelsEngine({
+  let engine!: ChannelsEngine;
+  const sendChannelDelivery = createChannelDeliverySender({
+    agentSurfaceBroker: options.agentSurfaceBroker,
+    onNonRetryableNativeFailure: (tmuxSession, error) => {
+      pauseEngineSession(home, engine, tmuxSession, `native channel delivery failed (${error.code}): ${error.message}`);
+    }
+  });
+  engine = new ChannelsEngine({
     home,
     // sendText wrapper: on a false return (tmux unreachable / session vanished),
     // revert EVERY .delivering file for this session back to .json. The engine's
@@ -101,7 +116,7 @@ export function initChannelsRuntime(options: { home?: string } = {}): ChannelsRu
     // for this single failed send. The pump then re-drains the reverted items
     // when the session becomes reachable again.
     sendText: async (tmuxSession, text) => {
-      const ok = await sendTextToTmux(tmuxSession, text);
+      const ok = await sendChannelDelivery(tmuxSession, text);
       if (!ok) {
         revertAllDeliveringToJson(home, tmuxSession);
       }
@@ -229,6 +244,70 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
   '.json': 'application/json',
   '.log': 'text/plain; charset=utf-8'
 };
+
+type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage'>;
+
+interface ChannelDeliverySession {
+  tmuxSession: string;
+  uiMode?: 'terminal' | 'native';
+}
+
+export interface ChannelDeliveryFailure {
+  code: string;
+  message: string;
+  retryable?: boolean;
+}
+
+export interface ChannelDeliverySenderOptions {
+  agentSurfaceBroker?: ChannelDeliveryBroker;
+  terminalSender?: (tmuxSession: string, text: string) => Promise<boolean>;
+  lookupSession?: (tmuxSession: string) => ChannelDeliverySession | undefined;
+  onNonRetryableNativeFailure?: (tmuxSession: string, error: ChannelDeliveryFailure) => void;
+  log?: (message: string) => void;
+}
+
+export function createChannelDeliverySender(options: ChannelDeliverySenderOptions = {}): (tmuxSession: string, text: string) => Promise<boolean> {
+  const terminalSender = options.terminalSender ?? sendTextToTmux;
+  const lookupSession = options.lookupSession ?? lookupDeskSessionForDelivery;
+  const log = options.log ?? ((message: string) => console.warn(message));
+  return async (tmuxSession, text) => {
+    const session = lookupSession(tmuxSession);
+    if (session?.uiMode !== 'native') {
+      return terminalSender(tmuxSession, text);
+    }
+    if (!options.agentSurfaceBroker) {
+      log(`native channel delivery failed for ${tmuxSession}: no agent surface broker`);
+      return false;
+    }
+    try {
+      await options.agentSurfaceBroker.injectUserMessage(tmuxSession, text, 'channel');
+      return true;
+    } catch (error) {
+      const failure = channelDeliveryFailure(error);
+      log(`native channel delivery failed for ${tmuxSession}: ${failure.code}: ${failure.message}`);
+      if (failure.retryable === false) {
+        options.onNonRetryableNativeFailure?.(tmuxSession, failure);
+      }
+      return false;
+    }
+  };
+}
+
+function lookupDeskSessionForDelivery(tmuxSession: string): ChannelDeliverySession | undefined {
+  return loadDeskCached({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+}
+
+function channelDeliveryFailure(error: unknown): ChannelDeliveryFailure {
+  if (error instanceof Error) {
+    const record = error as { code?: unknown; retryable?: unknown };
+    return {
+      code: typeof record.code === 'string' ? record.code : 'adapter-unavailable',
+      message: error.message,
+      ...(typeof record.retryable === 'boolean' ? { retryable: record.retryable } : {})
+    };
+  }
+  return { code: 'adapter-unavailable', message: String(error) };
+}
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
@@ -748,6 +827,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         sendJson(res, 400, { error: `upload must be 1 byte – ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB` });
         return true;
       }
+      if (UPLOAD_ONLY_CHANNELS.has(channel)) {
+        ensureUploadFileBucket(home, channel);
+      }
       const saved = saveChannelFile(home, channel, name, bytes);
       sendJson(res, 200, { ok: true, file: saved, markdown: `[${saved}](_files/${saved})` });
       return true;
@@ -813,8 +895,11 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     sendJson(res, 404, { error: `unknown channels endpoint: ${url.pathname}` });
     return true;
-  } catch {
-    sendJson(res, 500, { error: 'channels request failed' });
+  } catch (err) {
+    // Last-resort net for the channels router: log the real failure with the
+    // route and return the message — a generic 500 hides every failure class.
+    console.error(`[desk-channels] ${req.method ?? ''} ${url.pathname} failed:`, err);
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     return true;
   }
 }

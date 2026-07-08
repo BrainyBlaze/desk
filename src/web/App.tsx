@@ -78,6 +78,8 @@ import {
   editProject,
   editProjectGroup,
   editProjectSession,
+  setSessionUiMode,
+  ApiCodeError,
   fetchDeskSnapshot,
   fetchPulse,
   killAllAgents,
@@ -99,6 +101,7 @@ import {
   type DeskFetchedUiSettings
 } from './api.js';
 import { TerminalSurface } from './TerminalSurface.js';
+import { NativeAgentSurface } from './agentSurface/NativeAgentSurface.js';
 import { StatusBar } from './StatusBar.js';
 import { publishStatus, type StatusSegment } from './statusSegments.js';
 import {
@@ -132,7 +135,8 @@ import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
 import { countSidebarAgents } from './sidebarCounts.js';
 import { buildSessionPayload } from './sessionFormPayload.js';
-import { SESSION_AGENT_OPTIONS, supportsBypassPermissions } from './sessionAgentOptions.js';
+import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
+import type { DeskSessionUiMode } from '../core/types.js';
 import { formatBytes, formatGpuMemory, formatPercent, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePoints } from './systemFormat.js';
 import type { DeskGroupView, DeskProjectView, DeskSessionView } from '../ui/model.js';
 import { buildWorkspaceState } from '../ui/workspace.js';
@@ -193,6 +197,7 @@ type ModalMode =
   | 'deleteGroup'
   | 'deleteSession'
   | 'restartSession'
+  | 'switchUiMode'
   | 'settings'
   | 'killAll'
   | null;
@@ -218,8 +223,11 @@ interface SessionForm {
   cwd: string;
   agent: string;
   resume: string;
+  initialResume: string;
   bypassPermissions: boolean;
   command: string;
+  uiMode: DeskSessionUiMode;
+  model: string;
 }
 
 interface PanelCell {
@@ -251,8 +259,11 @@ const emptySessionForm: SessionForm = {
   cwd: '',
   agent: 'codex',
   resume: '',
+  initialResume: '',
   bypassPermissions: true,
-  command: ''
+  command: '',
+  uiMode: 'native',
+  model: ''
 };
 
 export function App(): JSX.Element {
@@ -385,6 +396,9 @@ export function App(): JSX.Element {
   );
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState<ModalMode>(null);
+  // Second-stage confirm: true once the server answered resume-not-captured and
+  // the user must explicitly accept starting a fresh conversation.
+  const [uiModeSwitchDiscard, setUiModeSwitchDiscard] = useState(false);
   const [projectForm, setProjectForm] = useState<ProjectForm>(emptyProjectForm);
   const [groupForm, setGroupForm] = useState<GroupForm>(emptyGroupForm);
   const [sessionForm, setSessionForm] = useState<SessionForm>(emptySessionForm);
@@ -1005,6 +1019,11 @@ export function App(): JSX.Element {
         // Liveness self-heal: fold the live tmux set into the snapshot.
         // patchViewLiveness preserves identity of untouched sessions so
         // terminal sockets never churn on a state-only patch.
+        // Known constraint: pulse patches RUN STATES only. Manifest edits made
+        // out-of-band (another client, curl, hand-edit) — including uiMode
+        // switches — don't reach an open tab until a mutation response or a
+        // manual Refresh replaces the snapshot. Tracked separately as a
+        // manifest-fingerprint-in-pulse improvement.
         const running = new Set(pulse.running);
         setSnapshot((current) => {
           if (!current) {
@@ -1199,6 +1218,14 @@ export function App(): JSX.Element {
     if (!modalSession || !modalGroup) {
       return;
     }
+    // UI-mode changes must go through the atomic switch endpoint (spec §7):
+    // divert to a restart-style confirm instead of the manifest-only edit.
+    const currentUiMode = modalSession.spec.uiMode ?? 'terminal';
+    if (sessionForm.uiMode !== currentUiMode) {
+      setUiModeSwitchDiscard(false);
+      setModal('switchUiMode');
+      return;
+    }
     setBusy(true);
     try {
       const next = await editProjectSession({
@@ -1282,6 +1309,55 @@ export function App(): JSX.Element {
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmUiModeSwitch(): Promise<void> {
+    if (!modalSession || !modalGroup) {
+      return;
+    }
+    setBusy(true);
+    let editedSnapshot: DeskSnapshot | null = null;
+    try {
+      // Persist the non-mode edits first, carrying the CURRENT mode so the
+      // manifest-only route never flips uiMode without a respawn; then run the
+      // atomic switch, which re-reads the fresh manifest and kills + starts.
+      if (!uiModeSwitchDiscard) {
+        editedSnapshot = await editProjectSession({
+          projectId: modalGroup.projectId,
+          groupId: modalGroup.groupId,
+          currentName: modalSession.spec.name,
+          projectCwd: modalGroup.projectCwd,
+          session: buildSessionPayload({ ...sessionForm, uiMode: modalSession.spec.uiMode ?? 'terminal' })
+        });
+      }
+      const next = await setSessionUiMode({
+        tmuxSession: modalSession.spec.tmuxSession,
+        uiMode: sessionForm.uiMode,
+        confirmDiscard: uiModeSwitchDiscard
+      });
+      setSnapshot(next);
+      setTerminalRevisions((current) => ({
+        ...current,
+        [modalSession.spec.tmuxSession]: (current[modalSession.spec.tmuxSession] ?? 0) + 1
+      }));
+      setUiModeSwitchDiscard(false);
+      setModal(null);
+      setError(null);
+    } catch (err) {
+      if (err instanceof ApiCodeError && err.code === 'resume-not-captured' && !uiModeSwitchDiscard) {
+        // Re-render the confirm as an explicit discard warning; the next
+        // confirm retries with confirmDiscard so nothing is lost silently.
+        if (editedSnapshot) {
+          setSnapshot(editedSnapshot);
+        }
+        setUiModeSwitchDiscard(true);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -1590,8 +1666,13 @@ export function App(): JSX.Element {
       cwd: session.spec.cwd,
       agent: session.spec.agent ?? 'codex',
       resume: session.spec.resume ?? '',
+      initialResume: session.spec.resume ?? '',
       bypassPermissions: session.spec.bypassPermissions ?? true,
-      command: session.spec.command
+      // Only custom commands belong in the editable command field; the derived
+      // launch command must not be persisted back as a custom command.
+      command: session.spec.customCommand ? session.spec.command : '',
+      uiMode: session.spec.uiMode ?? 'terminal',
+      model: session.spec.model ?? ''
     });
     setModal(mode);
   }
@@ -1969,7 +2050,12 @@ export function App(): JSX.Element {
     onBootSession: bootSession,
     onChangeLayout: changeGroupLayout,
     onPersistLayoutSizes: persistGroupLayoutSizes,
-    onTerminalSelectionMenu: (text: string, x: number, y: number) => setTerminalMenu({ text, x, y })
+    onTerminalSelectionMenu: (text: string, x: number, y: number) => setTerminalMenu({ text, x, y }),
+    onCreateNoteFromText: (text: string) => {
+      setTerminalMenu(null);
+      setSubsystem('notes');
+      noteCreatorRef.current?.(text);
+    }
   });
   const headerHandlers = useStableCallbacks({
     onToggleMuted: () => setMuted((value) => !value),
@@ -2273,11 +2359,7 @@ export function App(): JSX.Element {
                     void navigator.clipboard?.writeText(text).catch(() => undefined);
                     setTerminalMenu(null);
                   }}
-                  onCreateNote={(text) => {
-                    setTerminalMenu(null);
-                    setSubsystem('notes');
-                    noteCreatorRef.current?.(text);
-                  }}
+                  onCreateNote={muxHandlers.onCreateNoteFromText}
                 />
               ) : null}
               <ToastStack toasts={toasts} onDismiss={dismissToast} />
@@ -2487,10 +2569,36 @@ export function App(): JSX.Element {
             label={`Restart ${modalSession?.spec.name ?? 'session'}`}
             detail="This kills the running tmux session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
             busy={busy}
+            confirmLabel="Restart session"
+            confirmIcon={<RotateCw size={12} />}
             onConfirm={() => {
               if (modalSession && modalGroup) {
                 void restartExistingSession(modalSession, modalGroup);
               }
+            }}
+          />
+        </Modal>
+      );
+    }
+    if (modal === 'switchUiMode') {
+      return (
+        <Modal title={modalTitle(modal)} icon={<RotateCw size={13} />} onClose={() => setModal(null)}>
+          <ConfirmAction
+            label={
+              uiModeSwitchDiscard
+                ? `Start fresh in ${sessionForm.uiMode} mode`
+                : `Switch ${modalSession?.spec.name ?? 'session'} to ${sessionForm.uiMode} UI`
+            }
+            detail={
+              uiModeSwitchDiscard
+                ? 'No resume id has been captured for this session yet, so the switch cannot rejoin the conversation. Confirming starts a FRESH conversation in the new mode; the current one stays only in the agent-native history.'
+                : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
+            }
+            busy={busy}
+            confirmLabel={uiModeSwitchDiscard ? 'Switch UI mode (start fresh)' : 'Switch UI mode'}
+            confirmIcon={<RotateCw size={12} />}
+            onConfirm={() => {
+              void confirmUiModeSwitch();
             }}
           />
         </Modal>
@@ -4301,6 +4409,7 @@ interface MuxHandlers {
   onChangeLayout: (group: DeskGroupView, kind: LayoutKind) => void;
   onPersistLayoutSizes: (group: DeskGroupView, sizes: { rows?: number[]; cols?: number[][] }) => void;
   onTerminalSelectionMenu: (text: string, x: number, y: number) => void;
+  onCreateNoteFromText: (text: string) => void;
 }
 
 /**
@@ -4406,6 +4515,7 @@ function AgentMultiplexerImpl({
   onChangeLayout,
   onPersistLayoutSizes,
   onTerminalSelectionMenu,
+  onCreateNoteFromText,
   terminalRevisions
 }: {
   group: DeskGroupView;
@@ -4424,6 +4534,7 @@ function AgentMultiplexerImpl({
   onChangeLayout: (group: DeskGroupView, kind: LayoutKind) => void;
   onPersistLayoutSizes: (group: DeskGroupView, sizes: { rows?: number[]; cols?: number[][] }) => void;
   onTerminalSelectionMenu: (text: string, x: number, y: number) => void;
+  onCreateNoteFromText: (text: string) => void;
   terminalRevisions: Record<string, number>;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
@@ -4515,6 +4626,7 @@ function AgentMultiplexerImpl({
       onBootSession={onBootSession}
       onRemoveCell={onRemoveCell}
       onSelectionMenu={onTerminalSelectionMenu}
+      onCreateNoteFromText={onCreateNoteFromText}
     />
   );
   const header = (
@@ -4708,7 +4820,8 @@ function TerminalCellImpl({
   onAssignSession,
   onBootSession,
   onRemoveCell,
-  onSelectionMenu
+  onSelectionMenu,
+  onCreateNoteFromText
 }: {
   group: DeskGroupView;
   cell: PanelCell;
@@ -4723,6 +4836,7 @@ function TerminalCellImpl({
   onBootSession: (session: DeskSessionView) => void;
   onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
   onSelectionMenu: (text: string, x: number, y: number) => void;
+  onCreateNoteFromText: (text: string) => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   // Tap-to-assign picker for empty cells — DnD-only assignment is hostile to
@@ -4790,12 +4904,22 @@ function TerminalCellImpl({
           <div className="terminalCellBody">
             {cell.activeSession ? (
               <>
-                <TerminalSurface
-                  session={cell.activeSession}
-                  revision={revision}
-                  focused={cell.activeSession.spec.tmuxSession === selectedTmux}
-                  onSelectionMenu={onSelectionMenu}
-                />
+                {cell.activeSession.spec.uiMode === 'native' ? (
+                  <NativeAgentSurface
+                    session={cell.activeSession.spec.tmuxSession}
+                    revision={revision}
+                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                    onMessageMenu={onSelectionMenu}
+                    onCreateNote={onCreateNoteFromText}
+                  />
+                ) : (
+                  <TerminalSurface
+                    session={cell.activeSession}
+                    revision={revision}
+                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                    onSelectionMenu={onSelectionMenu}
+                  />
+                )}
                 {cell.activeSession.state !== 'running' ? (
                   <div className="cellMissingOverlay">
                     <span className="cellMissingTitle">SESSION MISSING</span>
@@ -5151,11 +5275,33 @@ function SessionFormView({
             onFormChange({
               ...form,
               agent,
-              bypassPermissions: supportsBypassPermissions(agent) ? form.bypassPermissions : false
+              bypassPermissions: supportsBypassPermissions(agent) ? form.bypassPermissions : false,
+              uiMode: supportsNativeUi(agent, form.command.trim() !== '') ? form.uiMode : 'terminal'
             })
           }
         />
       </label>
+      {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
+        <label>
+          <span>UI mode</span>
+          <DeskSelect
+            value={form.uiMode}
+            options={[
+              { value: 'terminal', label: 'terminal' },
+              { value: 'native', label: 'native' }
+            ]}
+            onChange={(uiMode) => onFormChange({ ...form, uiMode: uiMode === 'native' ? 'native' : 'terminal' })}
+          />
+        </label>
+      ) : null}
+      {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
+        <TextInput
+          label="Model"
+          value={form.model}
+          placeholder="provider default"
+          onChange={(model) => onFormChange({ ...form, model })}
+        />
+      ) : null}
       {supportsBypassPermissions(form.agent) ? (
         <label className="checkLine">
           <input
@@ -5167,7 +5313,18 @@ function SessionFormView({
         </label>
       ) : null}
       <TextInput label="Resume id" value={form.resume} placeholder="codex resume id" onChange={(resume) => onFormChange({ ...form, resume })} />
-      <TextInput label="Command" value={form.command} placeholder="optional explicit command" onChange={(command) => onFormChange({ ...form, command })} />
+      <TextInput
+        label="Command"
+        value={form.command}
+        placeholder="optional explicit command"
+        onChange={(command) =>
+          onFormChange({
+            ...form,
+            command,
+            uiMode: supportsNativeUi(form.agent, command.trim() !== '') ? form.uiMode : 'terminal'
+          })
+        }
+      />
       <CommandButton icon={<Plus size={12} />} label="Store session" disabled={busy} submit />
     </form>
   );
@@ -5241,12 +5398,17 @@ function ConfirmAction({
   label,
   detail,
   busy,
-  onConfirm
+  onConfirm,
+  confirmLabel,
+  confirmIcon
 }: {
   label: string;
   detail: string;
   busy: boolean;
   onConfirm: () => void;
+  /** Confirm-button branding; defaults keep the historical destructive styling. */
+  confirmLabel?: string;
+  confirmIcon?: ReactNode;
 }): JSX.Element {
   return (
     <div className="thinForm modalForm">
@@ -5254,7 +5416,12 @@ function ConfirmAction({
         <strong>{label}</strong>
         <span>{detail}</span>
       </div>
-      <CommandButton icon={<Trash2 size={12} />} label="Confirm delete" disabled={busy} onClick={onConfirm} />
+      <CommandButton
+        icon={confirmIcon ?? <Trash2 size={12} />}
+        label={confirmLabel ?? 'Confirm delete'}
+        disabled={busy}
+        onClick={onConfirm}
+      />
     </div>
   );
 }

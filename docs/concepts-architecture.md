@@ -12,9 +12,10 @@ an operator view over that local runtime.
 <Frame>
   <img
     src="/images/architecture-runtime.svg"
-    alt="Desk runtime architecture. The browser operator view (terminals, channels, editor, git, projects, notes) connects over a WebSocket and the REST /api to a single local Desk server. The server coordinates the terminal broker, channels store, filesystem and editor APIs, git and gh operations, the LSP manager and MCP bridge, attention and agent events, telemetry, and UI assets. It drives the local runtime — the desk.yml manifest to the Desk runner to tmux sessions to agents (Codex, Claude, OpenCode, Bash, custom commands) — which report back through agent hooks that POST to /api/agent-event. State lives on local disk under ~/.config/desk."
+    alt="Desk runtime architecture. The browser operator view (terminals, channels, editor, git, projects, notes) connects over a WebSocket and the REST /api to a single local Desk server. The server coordinates the terminal broker, channels store, filesystem and editor APIs, git and gh operations, the LSP manager and MCP bridge, attention and agent events, telemetry, and UI assets. It drives the local runtime — the desk.yml manifest to the Desk runner to tmux sessions to agents (Codex, Claude, OpenCode, Bash, custom commands) — which report back through agent hooks that POST to /api/agent-event. Native-mode agent sessions run a desk agent-host process that drives the agent SDK and streams transcript events through the agent surface broker to the browser. State lives on local disk under ~/.config/desk."
   />
 </Frame>
+
 
 ## Ownership boundaries
 
@@ -23,7 +24,7 @@ an operator view over that local runtime.
 `~/.config/desk/desk.yml` describes desired state:
 
 - projects and working directories
-- groups and terminal layouts
+- groups and cell layouts
 - sessions and agent kinds
 - custom commands
 - permission bypass settings
@@ -49,6 +50,10 @@ the same backend routes without Vite.
 The server also coordinates:
 
 - terminal broker connections
+- agent surface sessions: native-mode agents run a `desk agent-host` process
+  in their tmux session that drives the agent SDK; the agent surface broker
+  relays its transcript events to every subscribed browser and replays history
+  on reconnect
 - filesystem and editor operations
 - Git and GitHub operations through `git` and `gh`
 - channels storage and delivery
@@ -59,7 +64,7 @@ The server also coordinates:
 ### Browser
 
 The browser renders the operator workspace. It owns layout, selected views,
-terminal surfaces, channels panels, editor tabs, project boards, notes, and
+native agent chats, terminal surfaces, channels panels, editor tabs, project boards, notes, and
 theme state. Closing the browser does not stop tmux sessions.
 
 ### Terminal broker

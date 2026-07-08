@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { buildSessionPayload } from '../src/web/sessionFormPayload';
 
@@ -11,14 +12,17 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'codex',
         resume: '',
+        initialResume: '',
         bypassPermissions: true,
-        command: ''
+        command: '',
+        uiMode: 'terminal'
       })
     ).toEqual({
       name: 'agent',
       cwd: '/tmp/override',
       agent: 'codex',
-      bypassPermissions: true
+      bypassPermissions: true,
+      uiMode: 'terminal'
     });
   });
 
@@ -31,8 +35,10 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'bash',
         resume: '',
+        initialResume: '',
         bypassPermissions: false,
-        command: 'bash'
+        command: 'bash',
+        uiMode: 'terminal'
       })
     ).toEqual({
       name: 'agent',
@@ -50,15 +56,172 @@ describe('session form payload', () => {
         cwd: '/tmp/override',
         agent: 'opencode',
         resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
+        initialResume: '',
         bypassPermissions: true,
-        command: ''
+        command: '',
+        uiMode: 'terminal'
       })
     ).toEqual({
       name: 'open',
       cwd: '/tmp/override',
       agent: 'opencode',
       resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
-      bypassPermissions: true
+      bypassPermissions: true,
+      uiMode: 'terminal'
     });
+  });
+
+  it('carries native uiMode for SDK-backed agents', () => {
+    expect(
+      buildSessionPayload({
+        projectId: 'alpha',
+        groupId: 'main',
+        name: 'chat',
+        cwd: '/tmp/override',
+        agent: 'claude',
+        resume: '',
+        initialResume: '',
+        bypassPermissions: false,
+        command: '',
+        uiMode: 'native'
+      })
+    ).toEqual({
+      name: 'chat',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      bypassPermissions: false,
+      uiMode: 'native'
+    });
+  });
+
+  it('emits an explicit terminal uiMode so the choice survives the native default', () => {
+    const payload = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: '',
+        initialResume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'terminal'
+    });
+    expect(payload.uiMode).toBe('terminal');
+  });
+
+  it('drops native uiMode when an explicit command is present', () => {
+    expect(
+      buildSessionPayload({
+        projectId: 'alpha',
+        groupId: 'main',
+        name: 'custom',
+        cwd: '/tmp/override',
+        agent: 'claude',
+        resume: '',
+        initialResume: '',
+        bypassPermissions: false,
+        command: 'htop',
+        uiMode: 'native'
+      })
+    ).toEqual({
+      name: 'custom',
+      cwd: '/tmp/override',
+      command: 'htop'
+    });
+  });
+
+  it('passes a model only when one is set', () => {
+    const base = {
+      projectId: 'alpha', groupId: 'main', name: 'chat', cwd: '/tmp/x', agent: 'opencode',
+      resume: '', initialResume: '', bypassPermissions: false, command: '', uiMode: 'native' as const
+    };
+    expect(buildSessionPayload({ ...base, model: 'zai-coding-plan/glm-5.2' }).model).toBe('zai-coding-plan/glm-5.2');
+    expect('model' in buildSessionPayload({ ...base, model: '' })).toBe(false);
+  });
+
+  it('marks a deliberate resume clear only when the field held a value at load', () => {
+    const cleared = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: '',
+      initialResume: 'sess-uuid-1',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'terminal'
+    });
+    expect(cleared.clearResume).toBe(true);
+
+    const staleEmpty = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: '',
+      initialResume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'terminal'
+    });
+    expect(staleEmpty.clearResume).toBeUndefined();
+    expect(staleEmpty.resume).toBeUndefined();
+  });
+
+  it('drops native uiMode for agents without SDK support', () => {
+    const payload = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'shell',
+      cwd: '/tmp/override',
+      agent: 'bash',
+      resume: '',
+        initialResume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'native'
+    });
+    expect('uiMode' in payload ? payload.uiMode : undefined).toBeUndefined();
+  });
+});
+
+describe('session form modal source contract', () => {
+  const source = readFileSync(new URL('../src/web/App.tsx', import.meta.url), 'utf8');
+
+  it('renders a UI mode selector gated by supportsNativeUi', () => {
+    expect(source).toContain('supportsNativeUi(');
+    expect(source).toContain('UI mode');
+  });
+
+  it('tracks uiMode in the session form state with a native default', () => {
+    expect(source).toMatch(/uiMode: DeskSessionUiMode/);
+    expect(source).toMatch(/uiMode: 'native',\n  model: ''/);
+  });
+
+  it('prefills the edit command field only for custom-command sessions', () => {
+    expect(source).toMatch(/command: session\.spec\.customCommand \? session\.spec\.command : ''/);
+  });
+
+  it('brands the ui-mode switch confirm as a switch, not a delete', () => {
+    expect(source).toContain("'Switch UI mode'");
+    expect(source).toMatch(/confirmLabel\?: string/);
+  });
+
+  it('routes edit-modal ui-mode changes through the atomic switch endpoint', () => {
+    const apiSource = readFileSync(new URL('../src/web/api.ts', import.meta.url), 'utf8');
+    expect(apiSource).toContain('/api/set-session-ui-mode');
+    expect(apiSource).toMatch(/export async function setSessionUiMode/);
+    expect(source).toContain("'switchUiMode'");
+    expect(source).toContain('setSessionUiMode(');
+    expect(source).toContain('resume-not-captured');
+    expect(source).toMatch(/confirmDiscard/);
+  });
+
+  it('does not replay the preliminary edit after the resume-discard switch gate', () => {
+    expect(source).toMatch(/if \(!uiModeSwitchDiscard\) \{\n\s+editedSnapshot = await editProjectSession/);
+    expect(source).toContain('setSnapshot(editedSnapshot)');
   });
 });

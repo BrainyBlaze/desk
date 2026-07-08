@@ -198,6 +198,16 @@ export function prepareSessionForLaunchWithMetadata(
   if (session.agent !== 'opencode' || session.resume) {
     return { session };
   }
+  // BUG-7 fix: skip the auto-resume heuristic for native-mode sessions. Native mode
+  // has explicit resume-id capture via session-info → persistSessionResume (broker
+  // harvests the id and writes it to the manifest). The heuristic is redundant for
+  // native mode and DANGEROUS on delete+recreate: a stale opencode session in the same
+  // cwd gets silently resumed, leaking the deleted conversation into the new agent.
+  // Terminal mode keeps the heuristic (it's the existing "restart picks up where you
+  // left off" UX).
+  if (session.uiMode === 'native') {
+    return { session };
+  }
   const resume = findOpencodeLaunchResume({
     cwd: session.cwd,
     env: options.env,

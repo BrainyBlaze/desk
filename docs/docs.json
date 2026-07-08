@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "Desk",
-  "description": "Agent-first multiplexer, IDE/CDE, and Slack-style chat for coding-agent fleets.",
+  "description": "Agent-first multiplexer with native agent chat, IDE/CDE, and Slack-style channels for coding-agent fleets.",
   "colors": {
     "primary": "#0E7490",
     "light": "#22D3EE",

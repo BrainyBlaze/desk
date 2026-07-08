@@ -56,6 +56,10 @@ describe('opencodePermissionConfigContent (the per-session bypass toggle)', () =
     const parsed = JSON.parse(opencodePermissionConfigContent(false)) as { permission: Record<string, string> };
     expect(parsed.permission).toEqual({ '*': 'ask' });
   });
+  it('ships NO retry-cap knob — opencode 1.17.13 ignores experimental.chatMaxRetries (boot-verified); the driver watchdog owns retry visibility', () => {
+    const parsed = JSON.parse(opencodePermissionConfigContent(true)) as { experimental?: unknown };
+    expect(parsed.experimental).toBeUndefined();
+  });
 });
 
 describe('defaultOpencodeConfigDir', () => {

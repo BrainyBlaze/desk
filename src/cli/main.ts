@@ -8,6 +8,7 @@ import { installAgentHooks } from '../core/agentHooks.js';
 import { createAttachArgv } from '../core/tmux.js';
 import { captureSession, findSession, loadDesk, planDeskUp, printStatus, runPlan } from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
+import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import type { DeskSession } from '../core/types.js';
 
 const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
@@ -22,6 +23,7 @@ Usage: desk <command> [options]
   attach <name|tmux|resume>                 Attach a terminal to a session
   capture <name|tmux|resume> [--lines N]    Print recent output of a session
   hooks install [--home DIR]                 Install global agent event hooks
+  agent-host                                Run the native UI adapter host (spawned by desk; not user-facing)
   channels <list|read|post> …               Agent messaging channels (desk channels help)
   config                                    Print the active config path
   help                                      Show this help
@@ -232,6 +234,15 @@ function requireOption(options: Map<string, string>, name: string): string {
 const cliArgs = process.argv.slice(2);
 if (cliArgs[0] === 'channels') {
   process.exitCode = await runChannelsCli(cliArgs.slice(1));
+} else if (cliArgs[0] === 'agent-host') {
+  // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
+  // fatal error, or signal — top-level await is the natural exit gate.
+  try {
+    await runAgentHostFromEnv();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
 } else {
   process.exitCode = main(cliArgs);
 }

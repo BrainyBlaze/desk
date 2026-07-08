@@ -5,6 +5,18 @@ import { IconButton } from '../arwes/primitives.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { channelsUpload } from './channelsClient.js';
 import { applyMention, composerInputHeightFromTopResize, mentionQueryAt, type MentionQuery } from './channelsModel.js';
+import {
+  appendComposerFileLinks,
+  composerPlainEnterShouldSend,
+  composerResizeKeyDelta,
+  dragComposerResize,
+  finishComposerResize,
+  handleComposerFileDragOver,
+  handleComposerFileDrop,
+  handleComposerFilePaste,
+  runComposerFileUpload,
+  startComposerResize
+} from '../composerInput.js';
 
 const COMPOSER_INPUT_MIN_HEIGHT = 38;
 const COMPOSER_INPUT_MAX_HEIGHT = 260;
@@ -104,35 +116,17 @@ export function Composer({
   };
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    event.preventDefault();
-    resizeRef.current = { startY: event.clientY, startHeight: currentInputHeight() };
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Synthetic pointer events used by automated checks do not always create
-      // an active pointer capture target; dragging still works through move events.
-    }
-    bleeps.hover?.play();
+    startComposerResize(event, resizeRef, currentInputHeight(), () => bleeps.hover?.play());
   };
 
   const dragResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    const resize = resizeRef.current;
-    if (!resize) {
-      return;
-    }
-    event.preventDefault();
-    setManualHeight(composerInputHeightFromTopResize(resize.startHeight, resize.startY, event.clientY, inputHeightBounds()));
+    dragComposerResize(event, resizeRef, (resize, clientY) => {
+      setManualHeight(composerInputHeightFromTopResize(resize.startHeight, resize.startY, clientY, inputHeightBounds()));
+    });
   };
 
   const finishResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    resizeRef.current = null;
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // See setPointerCapture guard above.
-    }
+    finishComposerResize(event, resizeRef);
   };
 
   const resizeFromKeyboard = (delta: number): void => {
@@ -175,32 +169,15 @@ export function Composer({
   };
 
   const uploadFiles = async (files: FileList | File[]): Promise<void> => {
-    const list = [...files];
-    if (list.length === 0) {
-      return;
-    }
-    setUploading(true);
-    try {
-      const links: string[] = [];
-      for (const file of list) {
-        const buffer = await file.arrayBuffer();
-        let binary = '';
-        const bytes = new Uint8Array(buffer);
-        const CHUNK = 0x8000;
-        for (let offset = 0; offset < bytes.length; offset += CHUNK) {
-          binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
-        }
-        const result = await channelsUpload(channel, file.name, btoa(binary));
-        links.push(result.markdown);
-      }
-      setText((current) => `${current}${current.length > 0 && !current.endsWith('\n') && !current.endsWith(' ') ? ' ' : ''}${links.join(' ')}`);
-      bleeps.open?.play();
-    } catch (error) {
-      onError(error instanceof Error ? error.message : 'upload failed');
-    } finally {
-      setUploading(false);
-      areaRef.current?.focus();
-    }
+    await runComposerFileUpload(files, {
+      channel,
+      upload: channelsUpload,
+      setUploading,
+      appendLinks: (links) => setText((current) => appendComposerFileLinks(current, links)),
+      onSuccess: () => bleeps.open?.play(),
+      onError,
+      focus: () => areaRef.current?.focus()
+    });
   };
 
   return (
@@ -230,16 +207,11 @@ export function Composer({
     <div
       className={`chanComposer ${dragOver ? 'dragOver' : ''}`}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes('Files')) {
-          event.preventDefault();
-          setDragOver(true);
-        }
+        handleComposerFileDragOver(event, setDragOver);
       }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(event) => {
-        event.preventDefault();
-        setDragOver(false);
-        void uploadFiles(event.dataTransfer.files);
+        handleComposerFileDrop(event, setDragOver, uploadFiles);
       }}
     >
       <button
@@ -252,12 +224,10 @@ export function Composer({
         onPointerUp={finishResize}
         onPointerCancel={finishResize}
         onKeyDown={(event) => {
-          if (event.key === 'ArrowUp') {
+          const delta = composerResizeKeyDelta(event.key, COMPOSER_KEY_RESIZE_STEP);
+          if (delta !== null) {
             event.preventDefault();
-            resizeFromKeyboard(COMPOSER_KEY_RESIZE_STEP);
-          } else if (event.key === 'ArrowDown') {
-            event.preventDefault();
-            resizeFromKeyboard(-COMPOSER_KEY_RESIZE_STEP);
+            resizeFromKeyboard(delta);
           }
         }}
       />
@@ -278,14 +248,7 @@ export function Composer({
           refreshMention(area.value, area.selectionStart ?? area.value.length);
         }}
         onPaste={(event) => {
-          const files = [...event.clipboardData.items]
-            .filter((item) => item.kind === 'file')
-            .map((item) => item.getAsFile())
-            .filter((file): file is File => file !== null);
-          if (files.length > 0) {
-            event.preventDefault();
-            void uploadFiles(files);
-          }
+          handleComposerFilePaste(event, uploadFiles);
         }}
         onKeyDown={(event) => {
           if (mention && mentionOptions.length > 0) {
@@ -309,7 +272,7 @@ export function Composer({
               return;
             }
           }
-          if (event.key === 'Enter' && !event.shiftKey) {
+          if (composerPlainEnterShouldSend(event.key, event.shiftKey)) {
             event.preventDefault();
             void send();
           }
