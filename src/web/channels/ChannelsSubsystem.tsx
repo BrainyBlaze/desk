@@ -16,6 +16,7 @@ import {
   History,
   Inbox,
   ListFilter,
+  LockKeyhole,
   MessageSquareReply,
   Star,
   MessagesSquare,
@@ -64,6 +65,8 @@ import {
   channelsFeaturedRemove,
   channelsMemberAdd,
   channelsMemberRemove,
+  channelsMemberRole,
+  channelsMemberRoleClear,
   channelsMessageDelete,
   channelsMessageEdit,
   channelsMessages,
@@ -249,6 +252,8 @@ export function ChannelsSubsystem({
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
   const [channelsHelpOpen, setChannelsHelpOpen] = useState(false);
+  const [memberRoleModal, setMemberRoleModal] = useState<{ member: string; channel: string; currentRole?: string; currentFunctions?: string } | null>(null);
+  const [memberRoleForm, setMemberRoleForm] = useState({ role: '', functions: '' });
   // the active saved-view filter applied to the feed (null = none).
   const [activeView, setActiveView] = useState<{ name: string; filter: ViewFilter } | null>(null);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
@@ -1299,6 +1304,36 @@ export function ChannelsSubsystem({
       .catch(report);
   };
 
+  const handleSaveMemberRole = (): void => {
+    if (!memberRoleModal) {
+      return;
+    }
+    const { member, channel } = memberRoleModal;
+    const role = memberRoleForm.role.trim() || undefined;
+    const functions = memberRoleForm.functions.trim() || undefined;
+    void channelsMemberRole(channel, member, role, functions)
+      .then(async () => {
+        setMemberRoleModal(null);
+        onInfo(`@${member} role updated`);
+        await refreshDetail(channel);
+      })
+      .catch(report);
+  };
+
+  const handleClearMemberRole = (): void => {
+    if (!memberRoleModal) {
+      return;
+    }
+    const { member, channel } = memberRoleModal;
+    void channelsMemberRoleClear(channel, member)
+      .then(async () => {
+        setMemberRoleModal(null);
+        onInfo(`@${member} role cleared`);
+        await refreshDetail(channel);
+      })
+      .catch(report);
+  };
+
   const handleShare = (): void => {
     if (!shareTarget || !selected || shareChannel === '') {
       return;
@@ -2045,6 +2080,7 @@ export function ChannelsSubsystem({
                             >
                               <span className={`chanMemberDot ${running ? 'running' : 'missing'}`} />
                               <span className="chanMemberName">@{member.name}</span>
+                              {member.role ? <Pill tone="ok" title={member.functions}>{member.role}</Pill> : null}
                               <Pill tone="muted">
                                 {member.type === 'claude-code' ? 'claude' : member.type === 'codex-cli' ? 'codex' : member.type}
                               </Pill>
@@ -2062,6 +2098,14 @@ export function ChannelsSubsystem({
                               ) : null}
                               {member.type !== 'human' ? (
                                 <span className="gitRowActions">
+                                  <IconButton
+                                    icon={<LockKeyhole size={11} />}
+                                    label={`Add role for @${member.name}`}
+                                    onClick={() => {
+                                      setMemberRoleForm({ role: member.role ?? '', functions: member.functions ?? '' });
+                                      setMemberRoleModal({ member: member.name, channel: detail.name, currentRole: member.role, currentFunctions: member.functions });
+                                    }}
+                                  />
                                   <IconButton icon={<X size={11} />} label={`Remove @${member.name}`} onClick={() => handleRemoveMember(member.name)} />
                                 </span>
                               ) : null}
@@ -2758,16 +2802,76 @@ export function ChannelsSubsystem({
 
       {channelsHelpOpen ? (
         <Modal title="Channels" icon={<MessagesSquare size={13} />} onClose={() => setChannelsHelpOpen(false)}>
-          <div className="thinForm modalForm">
-            <span>Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk — history survives restarts and stays readable by any tool.</span>
-            <span style={{ marginTop: '8px', display: 'block' }}>Hover messages to reply in thread, quote reply, mention authors, copy links, share to other channels, star for your featured list, react, edit, or delete.</span>
-            <span style={{ marginTop: '8px', display: 'block' }}>Compose with Enter to send or Shift+Enter for newline. Target agents with @name, everyone with @channel, or the operator with @human. Attach files by drag-and-drop or paste (up to 25 MiB).</span>
-            <span style={{ marginTop: '8px', display: 'block' }}>Desk tracks unread by returning to the first unread message. Read position persists across reloads. A "Jump to latest" pill appears when scrolled away.</span>
-            <span style={{ marginTop: '12px', display: 'block' }}>
+          <div style={{ padding: '16px 14px', color: 'var(--desk-text-dim)', fontSize: '12px', lineHeight: '1.5' }}>
+            <div>Slack-like rooms where agents and the operator coordinate work. Every message is a markdown block in a plain file on disk — history survives restarts and stays readable by any tool.</div>
+            <div style={{ marginTop: '12px' }}>Hover messages to reply in thread, quote reply, mention authors, copy links, share to other channels, star for your featured list, react, edit, or delete.</div>
+            <div style={{ marginTop: '12px' }}>Compose with Enter to send or Shift+Enter for newline. Target agents with @name, everyone with @channel, or the operator with @human. Attach files by drag-and-drop or paste (up to 25 MiB).</div>
+            <div style={{ marginTop: '12px' }}>Desk tracks unread by returning to the first unread message. Read position persists across reloads. A "Jump to latest" pill appears when scrolled away.</div>
+            <div style={{ marginTop: '12px' }}>
               <a href="https://docs.desk.cloud/channels/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
                 Read full documentation →
               </a>
-            </span>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
+      {memberRoleModal ? (
+        <Modal title={`Role for @${memberRoleModal.member}`} icon={<LockKeyhole size={13} />} onClose={() => setMemberRoleModal(null)}>
+          <div className="thinForm modalForm">
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--desk-text-dim)', marginBottom: '4px' }}>Role</label>
+              <input
+                type="text"
+                placeholder="e.g., code-reviewer, architect, documentation-writer"
+                value={memberRoleForm.role}
+                onChange={(e) => setMemberRoleForm({ ...memberRoleForm, role: e.target.value })}
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  backgroundColor: 'var(--desk-bg)',
+                  color: 'var(--desk-text)',
+                  border: '1px solid var(--desk-line)',
+                  borderRadius: '2px',
+                  fontSize: '12px',
+                  fontFamily: 'monospace'
+                }}
+              />
+            </div>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--desk-text-dim)', marginBottom: '4px' }}>Functions</label>
+              <textarea
+                placeholder="e.g., review pull requests, write documentation, suggest improvements"
+                value={memberRoleForm.functions}
+                onChange={(e) => setMemberRoleForm({ ...memberRoleForm, functions: e.target.value })}
+                rows={3}
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  backgroundColor: 'var(--desk-bg)',
+                  color: 'var(--desk-text)',
+                  border: '1px solid var(--desk-line)',
+                  borderRadius: '2px',
+                  fontSize: '12px',
+                  fontFamily: 'monospace',
+                  resize: 'vertical'
+                }}
+              />
+            </div>
+            <div className="confirmActions">
+              <Cmd
+                icon={<X size={12} />}
+                label="Cancel"
+                onClick={() => {
+                  setMemberRoleModal(null);
+                  setMemberRoleForm({ role: '', functions: '' });
+                }}
+              />
+              {memberRoleModal?.currentRole ? (
+                <Cmd icon={<Trash2 size={12} />} label="Clear role" tone="danger" onClick={handleClearMemberRole} />
+              ) : null}
+              <Cmd icon={<LockKeyhole size={12} />} label="Save" onClick={handleSaveMemberRole} />
+            </div>
           </div>
         </Modal>
       ) : null}
