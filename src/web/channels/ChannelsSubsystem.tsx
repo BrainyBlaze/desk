@@ -12,6 +12,7 @@ import {
   Forward,
   Gauge,
   Hash,
+  HelpCircle,
   History,
   Inbox,
   ListFilter,
@@ -247,6 +248,7 @@ export function ChannelsSubsystem({
   const [savedViewsOpen, setSavedViewsOpen] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
+  const [channelsHelpOpen, setChannelsHelpOpen] = useState(false);
   // the active saved-view filter applied to the feed (null = none).
   const [activeView, setActiveView] = useState<{ name: string; filter: ViewFilter } | null>(null);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
@@ -1925,6 +1927,7 @@ export function ChannelsSubsystem({
             <div className="railActions">
               <IconButton icon={<Plus size={12} />} label="Create channel" onClick={() => setCreateOpen(true)} />
               <IconButton icon={<RefreshCw size={12} />} label="Refresh channels" onClick={() => void refreshState()} />
+              <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => setChannelsHelpOpen(true)} />
             </div>
           </div>
 
@@ -2748,6 +2751,26 @@ export function ChannelsSubsystem({
             <div className="confirmActions">
               <Cmd icon={<X size={12} />} label="Cancel" onClick={() => setDestroyTarget(null)} />
               <Cmd icon={<Trash2 size={12} />} label="Destroy" onClick={handleDestroy} />
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
+      {channelsHelpOpen ? (
+        <Modal title="Channels" icon={<MessagesSquare size={13} />} onClose={() => setChannelsHelpOpen(false)}>
+          <div className="thinForm modalForm">
+            <div style={{ lineHeight: 1.6, color: '#ccc', fontSize: '13px', whiteSpace: 'pre-wrap' }}>
+              {`Channels are shared communication spaces for your team.
+
+Create a channel to organize discussions around a specific topic, project, or agent group. Each channel has its own message history and members.
+
+Use the plus icon (+) to create a new channel, or refresh to sync the latest state.
+
+You can add agents to channels and they will be able to see and participate in conversations.
+
+Messages can be starred to add them to your Featured Messages list, which is shared with all agents on the desk.
+
+For more information, visit: https://docs.desk.cloud/`}
             </div>
           </div>
         </Modal>
