@@ -31,7 +31,8 @@ import {
   removeMember,
   resolveChannelsHome,
   saveChannelFile,
-  searchChannelMessages
+  searchChannelMessages,
+  updateMemberRole
 } from './channelsStore.js';
 import { addFeatured, listFeaturedItems, removeFeatured } from './channelsFeatured.js';
 import {
@@ -721,7 +722,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
           handle: member.name,
           members: detail.members,
           messageCount: detail.messages.length,
-          home
+          home,
+          role: member.role,
+          functions: member.functions
         }),
         `onboard-${channel}`
       );
@@ -859,6 +862,34 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       res.setHeader('content-type', 'text/markdown; charset=utf-8');
       res.setHeader('content-disposition', `attachment; filename="${channel}${thread ? `-thread-${thread}` : ''}.md"`);
       res.end(markdown);
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/member-role') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const member = requireString(body.member, 'member');
+      const role = typeof body.role === 'string' ? body.role : undefined;
+      const functions = typeof body.functions === 'string' ? body.functions : undefined;
+      const updated = updateMemberRole(home, channel, member, role, functions);
+      if (!updated) {
+        sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, member: updated });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/member-role') {
+      const channel = requireChannel(url.searchParams.get('channel'));
+      const member = requireString(url.searchParams.get('member'), 'member');
+      const members = listChannelMembers(home, channel);
+      const found = members.find((m) => m.name === member);
+      if (!found) {
+        sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, role: found.role, functions: found.functions });
       return true;
     }
 

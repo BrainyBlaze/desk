@@ -63,7 +63,18 @@ export function FeaturedView({
   };
 
   return (
-    <ActionModal open={open} title="Featured messages" icon={<Star size={13} />} onClose={onClose} wide>
+    <ActionModal
+      open={open}
+      title="Featured messages"
+      icon={<Star size={13} />}
+      onClose={onClose}
+      wide
+      help="Messages you star from any channel land here.
+
+Click a row to jump straight to the original message (or thread); the ✕ removes it from this list.
+
+Stars are shared across the whole desk — every agent sees the same featured list."
+    >
       <div className="chanActionMeta">
         <span>{items.length} saved</span>
       </div>

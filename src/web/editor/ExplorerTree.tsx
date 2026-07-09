@@ -4,7 +4,7 @@ import { BookOpen, ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, Cop
 import { CLIP_OCTAGON_TINY, Cmd, Modal } from '../arwes/primitives.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from '../arwes/motion.js';
-import { fsCopy, fsCreate, fsDelete, fsList, fsRename, type FsEntry, type FsWatchSocket } from './fsClient.js';
+import { fsCopy, fsCreate, fsDelete, fsList, fsRename, fsUpload, type FsEntry, type FsWatchSocket } from './fsClient.js';
 import { duplicateName, fileNameOf } from './editorState.js';
 import { dirIcon, fileIcon } from './fileIcons.js';
 import { useClampedMenu } from '../menuPosition.js';
@@ -117,7 +117,12 @@ export function ExplorerTree({
   const [confirmDiscard, setConfirmDiscard] = useState<{ entry: FsEntry; spec: TreeGitMenuSpec } | null>(null);
   const [revealFlash, setRevealFlash] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadDir, setUploadDir] = useState<string | null>(null);
   const menuRef = useClampedMenu(menu);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Watch events arrive outside React's render cycle; refs keep the listener
   // honest without re-subscribing on every listing change.
@@ -183,6 +188,14 @@ export function ExplorerTree({
       window.removeEventListener('keydown', onKey);
     };
   }, [menu]);
+
+  // Update tree selection when active file changes (e.g., user clicks a different tab).
+  useEffect(() => {
+    if (activePath && activePath !== lastSelectedPath) {
+      setSelectedPaths(new Set([activePath]));
+      setLastSelectedPath(activePath);
+    }
+  }, [activePath]);
 
   const expandDir = useCallback(
     (path: string): void => {
@@ -397,6 +410,32 @@ export function ExplorerTree({
     void navigator.clipboard?.writeText(text).catch(() => onError('clipboard unavailable'));
   };
 
+  const uploadFiles = async (files: FileList | File[], targetDir: string): Promise<void> => {
+    const list = [...files];
+    if (list.length === 0) {
+      return;
+    }
+    setUploading(true);
+    try {
+      for (const file of list) {
+        const buffer = await file.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const CHUNK = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+        }
+        await fsUpload(root, targetDir, file.name, btoa(binary));
+      }
+      await loadDir(targetDir);
+      setUploadDir(null);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'upload failed');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const relativeToRoot = (path: string): string =>
     path === root ? '.' : path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 
@@ -424,16 +463,26 @@ export function ExplorerTree({
   const onRowContextMenu = (event: MouseEvent, entry: FsEntry | null): void => {
     event.preventDefault();
     event.stopPropagation();
-    setMenu({ x: event.clientX, y: event.clientY, entry });
+    if (entry && selectedPaths.has(entry.path)) {
+      setMenu({ x: event.clientX, y: event.clientY, entry });
+    } else if (entry) {
+      setSelectedPaths(new Set([entry.path]));
+      setLastSelectedPath(entry.path);
+      setMenu({ x: event.clientX, y: event.clientY, entry });
+    } else {
+      setMenu({ x: event.clientX, y: event.clientY, entry: null });
+    }
   };
 
   const onDirDragOver = (event: DragEvent, path: string): void => {
-    if (!event.dataTransfer.types.includes(DRAG_MIME)) {
+    const hasFiles = event.dataTransfer.types.includes('Files');
+    const hasInternalDrag = event.dataTransfer.types.includes(DRAG_MIME);
+    if (!hasFiles && !hasInternalDrag) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
-    event.dataTransfer.dropEffect = 'move';
+    event.dataTransfer.dropEffect = hasFiles ? 'copy' : 'move';
     setDropTarget(path);
   };
 
@@ -441,6 +490,14 @@ export function ExplorerTree({
     event.preventDefault();
     event.stopPropagation();
     setDropTarget(null);
+
+    // Handle file uploads
+    if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
+      void uploadFiles(event.dataTransfer.files, path);
+      return;
+    }
+
+    // Handle internal file moves
     const source = event.dataTransfer.getData(DRAG_MIME);
     if (source) {
       void performMove(source, path);
@@ -478,7 +535,8 @@ export function ExplorerTree({
   const renderEntry = (entry: FsEntry): JSX.Element => {
     const isDir = entry.expandable;
     const isExpanded = isDir && expanded.has(entry.path);
-    const isSelected = !isDir && entry.path === activePath;
+    const isActive = !isDir && entry.path === activePath;
+    const isTreeSelected = selectedPaths.has(entry.path);
     if (pendingEdit?.kind === 'rename' && pendingEdit.targetPath === entry.path) {
       return <Fragment key={entry.path}>{renderEditRow()}</Fragment>;
     }
@@ -492,7 +550,8 @@ export function ExplorerTree({
             <div
               className={[
                 'fileNode',
-                isSelected ? 'selected' : '',
+                isActive ? 'selected' : '',
+                isTreeSelected ? 'treeSelected' : '',
                 entry.hidden ? 'fileNodeHidden' : '',
                 dropTarget === entry.path ? 'fileNodeDrop' : '',
                 revealFlash === entry.path ? 'fileNodeRevealFlash' : ''
@@ -510,7 +569,7 @@ export function ExplorerTree({
               onDragLeave={isDir ? () => setDropTarget((current) => (current === entry.path ? null : current)) : undefined}
               onDrop={isDir ? (event) => onDirDrop(event, entry.path) : undefined}
             >
-              {isSelected ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
+              {isActive ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
               {isDir ? (
                 <button
                   className="treeToggle"
@@ -528,12 +587,31 @@ export function ExplorerTree({
                 type="button"
                 title={badge ? `${entry.path} — ${badge.tone}` : entry.path}
                 onMouseEnter={() => bleeps.hover?.play()}
-                onClick={() => {
+                onClick={(event: MouseEvent) => {
                   bleeps.click?.play();
                   if (isDir) {
                     toggleDir(entry);
                   } else {
-                    onOpenFile(entry.path);
+                    if ((event as any).shiftKey && lastSelectedPath) {
+                      const newSelection = new Set(selectedPaths);
+                      newSelection.add(entry.path);
+                      newSelection.add(lastSelectedPath);
+                      setSelectedPaths(newSelection);
+                      setLastSelectedPath(entry.path);
+                    } else if ((event as any).ctrlKey || (event as any).metaKey) {
+                      const newSelection = new Set(selectedPaths);
+                      if (newSelection.has(entry.path)) {
+                        newSelection.delete(entry.path);
+                      } else {
+                        newSelection.add(entry.path);
+                      }
+                      setSelectedPaths(newSelection);
+                      setLastSelectedPath(entry.path);
+                    } else {
+                      setSelectedPaths(new Set([entry.path]));
+                      setLastSelectedPath(entry.path);
+                      onOpenFile(entry.path);
+                    }
                   }
                 }}
               >
@@ -632,6 +710,11 @@ export function ExplorerTree({
               : null}
             {menuItem(<FilePlus size={12} />, 'New file', false, () => startCreate('create-file', menuDir))}
             {menuItem(<FolderPlus size={12} />, 'New directory', false, () => startCreate('create-dir', menuDir))}
+            {menuItem(<Plus size={12} />, 'Upload files', false, () => {
+              setMenu(null);
+              setUploadDir(menuDir);
+              fileInputRef.current?.click();
+            })}
             {fileClipboard
               ? menuItem(<ClipboardPaste size={12} />, `Paste ${fileClipboard.name}`, false, () => {
                   setMenu(null);
@@ -639,38 +722,63 @@ export function ExplorerTree({
                   void copyWithDedupe(clip.path, clip.name, menuDir);
                 })
               : null}
-            {menu.entry
+            {menu.entry && selectedPaths.size <= 1
               ? menuItem(<Copy size={12} />, 'Copy', false, () => {
                   fileClipboard = { path: menu.entry!.path, name: menu.entry!.name };
                   setMenu(null);
                 })
               : null}
             {menu.entry
-              ? menuItem(<CopyPlus size={12} />, 'Duplicate', false, () => {
+              ? menuItem(<CopyPlus size={12} />, selectedPaths.size > 1 ? `Duplicate ${selectedPaths.size} files` : 'Duplicate', false, () => {
                   setMenu(null);
-                  const entry = menu.entry!;
-                  // The plain-name candidate is the source itself and gets
-                  // skipped, so dedupe lands on name-copy, name-copy-2, …
-                  void copyWithDedupe(entry.path, entry.name, parentOf(entry.path));
+                  for (const path of (selectedPaths.size > 1 ? selectedPaths : new Set([menu.entry!.path]))) {
+                    void copyWithDedupe(path, fileNameOf(path), parentOf(path));
+                  }
                 })
               : null}
-            {menu.entry
+            {menu.entry && selectedPaths.size <= 1
               ? menuItem(<ClipboardCopy size={12} />, 'Copy path', false, () => {
                   copyTextToClipboard(menu.entry!.path);
                   setMenu(null);
                 })
               : null}
-            {menu.entry
+            {menu.entry && selectedPaths.size <= 1
               ? menuItem(<Link2 size={12} />, 'Copy relative path', false, () => {
                   copyTextToClipboard(relativeToRoot(menu.entry!.path));
                   setMenu(null);
                 })
               : null}
-            {menu.entry ? menuItem(<Pencil size={12} />, 'Rename', false, () => startRename(menu.entry!)) : null}
+            {menu.entry && selectedPaths.size <= 1 ? menuItem(<Pencil size={12} />, 'Rename', false, () => startRename(menu.entry!)) : null}
             {menu.entry
-              ? menuItem(<Trash2 size={12} />, 'Delete', true, () => {
+              ? menuItem(<Trash2 size={12} />, selectedPaths.size > 1 ? `Delete ${selectedPaths.size} files` : 'Delete', true, () => {
                   setMenu(null);
-                  setConfirmDelete(menu.entry);
+                  if (selectedPaths.size > 1) {
+                    setConfirmDelete(null);
+                    const pathsToDelete = Array.from(selectedPaths);
+                    const performDeleteMultiple = async (): Promise<void> => {
+                      try {
+                        for (const path of pathsToDelete) {
+                          if (onDeleteFile) {
+                            const kindGuess = childrenByDirRef.current.has(path) ? 'dir' : 'file';
+                            await onDeleteFile(path, kindGuess);
+                          } else {
+                            await fsDelete(root, path);
+                          }
+                        }
+                        const parentDirs = new Set(pathsToDelete.map(p => parentOf(p)));
+                        for (const parent of parentDirs) {
+                          await loadDir(childrenByDirRef.current.has(parent) ? parent : root);
+                        }
+                        setSelectedPaths(new Set());
+                        setLastSelectedPath(null);
+                      } catch (err) {
+                        onError(err instanceof Error ? err.message : String(err));
+                      }
+                    };
+                    void performDeleteMultiple();
+                  } else {
+                    setConfirmDelete(menu.entry);
+                  }
                 })
               : null}
             {(() => {
@@ -771,6 +879,18 @@ export function ExplorerTree({
           </div>
         </Modal>
       ) : null}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          if (event.target.files && uploadDir) {
+            void uploadFiles(event.target.files, uploadDir);
+            event.target.value = '';
+          }
+        }}
+      />
     </div>
   );
 }

@@ -70,6 +70,10 @@ export interface ChannelMember {
   joined: string;
   /** desk extension: tmux session backing this member */
   tmuxSession?: string;
+  /** agent role in this channel */
+  role?: string;
+  /** agent functions/responsibilities in this channel */
+  functions?: string;
 }
 
 /**
@@ -463,7 +467,9 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
     type: fields.type ?? 'human',
     status: fields.status ?? 'active',
     joined: fields.joined ?? '',
-    tmuxSession: fields.tmux || undefined
+    tmuxSession: fields.tmux || undefined,
+    role: fields.role || undefined,
+    functions: fields.functions || undefined
   };
 }
 
@@ -473,6 +479,8 @@ export interface MemberManifestOptions {
   joined: string;
   tmuxSession?: string;
   agentLabel?: string;
+  role?: string;
+  functions?: string;
 }
 
 export function formatMemberManifest(options: MemberManifestOptions): string {
@@ -485,6 +493,12 @@ export function formatMemberManifest(options: MemberManifestOptions): string {
   ];
   if (options.tmuxSession) {
     lines.push(`tmux: ${options.tmuxSession}`);
+  }
+  if (options.role) {
+    lines.push(`role: ${options.role}`);
+  }
+  if (options.functions) {
+    lines.push(`functions: ${options.functions}`);
   }
   lines.push('---', '', `# @${options.name}`, '', '## Identity', '', `- **Agent**: ${options.name}`, `- **Type**: ${options.type}`);
   if (options.agentLabel) {

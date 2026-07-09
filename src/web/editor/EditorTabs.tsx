@@ -56,9 +56,10 @@ export function EditorTabs({
   onToggleRender,
   onMove,
   extraMenuItems
-}: EditorTabsProps): JSX.Element {
+}: EditorTabsProps): JSX.Element | null {
   const bleeps = useBleeps<DeskBleepName>();
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropPosition, setDropPosition] = useState<number | null>(null);
   const [menu, setMenu] = useState<TabMenuState | null>(null);
   const menuRef = useClampedMenu(menu);
   const labels = labelsProp ?? tabLabels(tabs);
@@ -108,6 +109,10 @@ export function EditorTabs({
 
   const menuMeta = menu ? meta.get(menu.path) : undefined;
 
+  if (tabs.length === 0) {
+    return null;
+  }
+
   return (
     <div className="editorTabs" role="tablist">
       {tabs.map((path, index) => {
@@ -124,20 +129,43 @@ export function EditorTabs({
                   'editorTab',
                   isActive ? 'editorTabActive' : '',
                   tabMeta?.conflict ? 'editorTabConflict' : '',
-                  tabMeta?.deleted ? 'editorTabDeleted' : ''
+                  tabMeta?.deleted ? 'editorTabDeleted' : '',
+                  dropPosition === index ? 'editorTabDropBefore' : '',
+                  dropPosition === index + 1 ? 'editorTabDropAfter' : ''
                 ]
                   .filter(Boolean)
                   .join(' ')}
                 style={{ clipPath: CLIP_OCTAGON_PILL }}
                 draggable
                 onDragStart={() => setDragIndex(index)}
-                onDragOver={(event: DragEvent) => event.preventDefault()}
+                onDragOver={(event: DragEvent) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'move';
+                  if (dragIndex === null) return;
+                  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                  const midpoint = rect.left + rect.width / 2;
+                  const newPosition = event.clientX < midpoint ? index : index + 1;
+                  if (dragIndex < newPosition) {
+                    setDropPosition(newPosition > dragIndex ? newPosition : index);
+                  } else {
+                    setDropPosition(newPosition < dragIndex ? newPosition : index + 1);
+                  }
+                }}
+                onDragLeave={() => setDropPosition(null)}
                 onDrop={(event: DragEvent) => {
                   event.preventDefault();
                   if (dragIndex !== null && dragIndex !== index) {
-                    onMove(dragIndex, index);
+                    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                    const midpoint = rect.left + rect.width / 2;
+                    const targetIndex = event.clientX < midpoint ? index : index + 1;
+                    onMove(dragIndex, Math.max(0, Math.min(tabs.length - 1, targetIndex)));
                   }
                   setDragIndex(null);
+                  setDropPosition(null);
+                }}
+                onDragEnd={() => {
+                  setDragIndex(null);
+                  setDropPosition(null);
                 }}
                 onMouseEnter={() => bleeps.hover?.play()}
                 onClick={() => {

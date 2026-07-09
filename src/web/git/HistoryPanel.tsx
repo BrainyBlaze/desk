@@ -151,11 +151,18 @@ export function HistoryPanel({
                       >
                         <GraphRail row={graph[index]!} lanes={railLanes} />
                         <span className="gitCommitMain">
-                          {commit.refs.map((ref) => (
-                            <i key={`${ref.kind}:${ref.name}`} className={`gitRefChip gitRef-${ref.kind}`} title={ref.name}>
-                              {ref.name}
-                            </i>
-                          ))}
+                          {commit.refs.length > 0 ? (
+                            <span
+                              className="gitCommitRefs"
+                              title={commit.refs.map((ref) => ref.name).join(', ')}
+                            >
+                              {commit.refs.map((ref) => (
+                                <i key={`${ref.kind}:${ref.name}`} className={`gitRefChip gitRef-${ref.kind}`} title={ref.name}>
+                                  {ref.name}
+                                </i>
+                              ))}
+                            </span>
+                          ) : null}
                           <span className="gitCommitSubject">{commit.subject}</span>
                         </span>
                         <small className="gitCommitMeta">{commit.author.split(' ')[0]}</small>

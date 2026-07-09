@@ -406,6 +406,37 @@ export function removeMember(home: string, channel: string, name: string): void 
   rmSync(join(channelDir(home, channel), '_members', `${name}.md`), { force: true });
 }
 
+export function updateMemberRole(
+  home: string,
+  channel: string,
+  name: string,
+  role?: string,
+  functions?: string
+): ChannelMember | undefined {
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) {
+    throw new Error(`invalid member name: ${name}`);
+  }
+  const members = listChannelMembers(home, channel);
+  const member = members.find((m) => m.name === name);
+  if (!member) {
+    return undefined;
+  }
+  const manifestPath = join(channelDir(home, channel), '_members', `${name}.md`);
+  const updated: ChannelMember = { ...member, role, functions };
+  writeFileAtomic(
+    manifestPath,
+    formatMemberManifest({
+      name: member.name,
+      type: member.type,
+      joined: member.joined,
+      tmuxSession: member.tmuxSession,
+      role,
+      functions
+    })
+  );
+  return updated;
+}
+
 function addMemberUnlocked(
   home: string,
   channel: string,

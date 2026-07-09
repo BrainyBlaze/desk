@@ -316,6 +316,14 @@ export async function channelsMemberRemove(channel: string, name: string): Promi
   await post('/api/channels/member-remove', { channel, name });
 }
 
+export async function channelsMemberRole(channel: string, member: string, role?: string, functions?: string): Promise<void> {
+  await post('/api/channels/member-role', { channel, member, role, functions });
+}
+
+export async function channelsMemberRoleClear(channel: string, member: string): Promise<void> {
+  await post('/api/channels/member-role', { channel, member, role: undefined, functions: undefined });
+}
+
 export async function channelsQueueClear(tmuxSession: string): Promise<void> {
   await post('/api/channels/queue-clear', { tmuxSession });
 }

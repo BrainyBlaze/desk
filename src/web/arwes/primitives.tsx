@@ -15,7 +15,7 @@ import {
   styleFrameClipOctagon,
   useBleeps
 } from '@arwes/react';
-import { ChevronDown, X } from 'lucide-react';
+import { ChevronDown, HelpCircle, X } from 'lucide-react';
 import { createDeskTheme, type DeskBuiltTheme } from './theme.js';
 import { isReducedMotion } from './motion.js';
 import type { DeskBleepName } from './bleeps.js';
@@ -111,7 +111,8 @@ export function Cmd({
   pressed,
   expanded,
   controls,
-  onMouseEnter
+  onMouseEnter,
+  title
 }: {
   icon: ReactNode;
   label: string;
@@ -125,6 +126,7 @@ export function Cmd({
   expanded?: boolean;
   controls?: string;
   onMouseEnter?: () => void;
+  title?: string;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const builtTheme = useDeskTheme();
@@ -136,7 +138,7 @@ export function Cmd({
       aria-pressed={pressed}
       aria-expanded={expanded}
       aria-controls={controls}
-      title={label}
+      title={title ?? label}
       onMouseEnter={() => {
         bleeps.hover?.play();
         onMouseEnter?.();
@@ -223,7 +225,7 @@ export function CellChrome({
   return (
     <div className="cellChrome" data-focused={focused ? 'true' : undefined}>
       <div className="cellChromeBorder" style={{ clipPath: CLIP_OCTAGON_CELL }} />
-      <div className="cellChromeBody" style={{ clipPath: CLIP_OCTAGON_CELL }}>
+      <div className="cellChromeBody">
         {children}
       </div>
     </div>
@@ -395,6 +397,104 @@ export function BackdropField(): JSX.Element {
   );
 }
 
+
+/* ---------- HelpIcon (shows tooltip on hover) ---------- */
+
+export function HelpIcon({ text }: { text: string | ReactNode }): JSX.Element {
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [hoveringButton, setHoveringButton] = useState(false);
+  const [hoveringTooltip, setHoveringTooltip] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bleeps = useBleeps<DeskBleepName>();
+
+  const handleMouseEnter = (): void => {
+    if (hideTimeoutRef.current) {
+      clearTimeout(hideTimeoutRef.current);
+      hideTimeoutRef.current = null;
+    }
+    if (!buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setTooltipPos({
+      x: rect.left + rect.width / 2,
+      y: rect.top
+    });
+    setShowTooltip(true);
+    setHoveringButton(true);
+    bleeps.hover?.play();
+  };
+
+  const handleMouseLeave = (): void => {
+    setHoveringButton(false);
+    if (!hoveringTooltip) {
+      hideTimeoutRef.current = setTimeout(() => {
+        setShowTooltip(false);
+        hideTimeoutRef.current = null;
+      }, 150);
+    }
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        className="iconButton helpIconButton"
+        type="button"
+        aria-label="Help"
+        style={{ clipPath: CLIP_OCTAGON_TINY }}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        onClick={() => bleeps.click?.play()}
+      >
+        <HelpCircle size={13} />
+      </button>
+      {showTooltip && tooltipPos
+        ? createPortal(
+            <div
+              onMouseEnter={() => {
+                if (hideTimeoutRef.current) {
+                  clearTimeout(hideTimeoutRef.current);
+                  hideTimeoutRef.current = null;
+                }
+                setHoveringTooltip(true);
+              }}
+              onMouseLeave={() => {
+                setHoveringTooltip(false);
+                if (!hoveringButton) {
+                  hideTimeoutRef.current = setTimeout(() => {
+                    setShowTooltip(false);
+                    hideTimeoutRef.current = null;
+                  }, 150);
+                }
+              }}
+              style={{
+                position: 'fixed',
+                left: `${tooltipPos.x}px`,
+                top: `${tooltipPos.y}px`,
+                transform: 'translate(-50%, -100%)',
+                marginTop: '-8px',
+                backgroundColor: 'rgba(20, 20, 30, 0.95)',
+                color: '#ccc',
+                padding: '8px 12px',
+                borderRadius: '4px',
+                fontSize: '12px',
+                maxWidth: '320px',
+                whiteSpace: 'pre-wrap',
+                zIndex: 100000,
+                border: '1px solid rgba(100, 200, 255, 0.3)',
+                pointerEvents: 'auto'
+              }}
+            >
+              {text}
+            </div>,
+            document.body
+          )
+        : null}
+    </>
+  );
+}
+
 /* ---------- Modal (Kranox frame + enter choreography + open bleep) ---------- */
 
 export function Modal({
@@ -404,7 +504,8 @@ export function Modal({
   children,
   tone,
   alarm,
-  wide
+  wide,
+  help
 }: {
   title: string;
   icon: ReactNode;
@@ -414,6 +515,8 @@ export function Modal({
   alarm?: boolean;
   /** roomy two-pane layouts (settings) get a wider frame */
   wide?: boolean;
+  /** short explainer surfaced via a "?" icon next to the title */
+  help?: string | ReactNode;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [active, setActive] = useState(false);
@@ -455,6 +558,7 @@ export function Modal({
             <div className="railTitle">
               {icon}
               <TextReveal as="span" manager="decipher">{title}</TextReveal>
+              {help ? <HelpIcon text={help} /> : null}
             </div>
             <button
               className="iconButton"

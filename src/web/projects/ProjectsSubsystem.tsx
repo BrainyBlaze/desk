@@ -8,6 +8,7 @@ import {
   ExternalLink,
   FilePlus2,
   Filter,
+  HelpCircle,
   KeyRound,
   LayoutGrid,
   Link2,
@@ -141,6 +142,7 @@ export function ProjectsSubsystem({
   const [loadingBoard, setLoadingBoard] = useState(false);
   const [showClosed, setShowClosed] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [projectsHelpOpen, setProjectsHelpOpen] = useState(false);
   const [layout, setLayout] = useState<StageLayout>('board');
   const [filterText, setFilterText] = useState('');
   const [groupFieldId, setGroupFieldId] = useState<string | null>(null);
@@ -880,6 +882,7 @@ export function ProjectsSubsystem({
                 disabled={authGate === true}
                 onClick={() => void refreshAll()}
               />
+              <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => setProjectsHelpOpen(true)} />
             </div>
           </div>
 
@@ -1210,6 +1213,21 @@ export function ProjectsSubsystem({
       ) : null}
 
       {renderModal()}
+
+      {projectsHelpOpen ? (
+        <Modal title="Projects" icon={<SquareKanban size={13} />} onClose={() => setProjectsHelpOpen(false)}>
+          <div style={{ padding: '16px 14px', color: 'var(--desk-text-dim)', fontSize: '12px', lineHeight: '1.5' }}>
+            <div>GitHub Projects are structured issue trackers that integrate with repositories. Desk syncs project boards to organize work, track issues, and coordinate pull requests across your agent teams.</div>
+            <div style={{ marginTop: '12px' }}>Each GitHub Project becomes a working space in Desk. Create agent groups within projects to divide work by feature, milestone, or team. Items on the board include issues, drafts, and pull requests with full details and custom fields.</div>
+            <div style={{ marginTop: '12px' }}>Use the plus icon (+) to connect a new GitHub Project, or refresh to sync the latest changes. Filter items by status, label, iteration, or custom fields. Archive completed projects while preserving history for future reference.</div>
+            <div style={{ marginTop: '12px' }}>
+              <a href="https://docs.desk.cloud/github-projects/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                Read full documentation →
+              </a>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
     </Group>
   );
 
@@ -1233,7 +1251,7 @@ export function ProjectsSubsystem({
         </Modal>
       );
     }
-    const meta: Record<string, { title: string; icon: ReactNode; placeholder: string; multiline?: boolean }> = {
+    const meta: Record<string, { title: string; icon: ReactNode; placeholder: string; multiline?: boolean; help?: string }> = {
       'add-item': {
         title: modal.kind === 'add-item' && modal.column ? `Add to ${modal.column.label}` : 'Add item',
         icon: <FilePlus2 size={13} />,
@@ -1241,12 +1259,17 @@ export function ProjectsSubsystem({
       },
       'convert-draft': { title: 'Convert draft to issue', icon: <FilePlus2 size={13} />, placeholder: 'owner/repo' },
       'status-update': { title: 'Post status update', icon: <MessageSquarePlus size={13} />, placeholder: 'What changed?', multiline: true },
-      'new-project': { title: 'New project', icon: <Plus size={13} />, placeholder: 'Project title' },
+      'new-project': {
+        title: 'New project',
+        icon: <Plus size={13} />,
+        placeholder: 'Project title',
+        help: 'Create a new GitHub project for organizing work. Select an owner (user or organization), enter a project title, and specify the working directory where Desk will manage this project.'
+      },
       'link-repo': { title: 'Link repository', icon: <Link2 size={13} />, placeholder: 'owner/repo' }
     };
     const entry = meta[modal.kind]!;
     return (
-      <Modal title={entry.title} icon={entry.icon} onClose={() => setModal(null)}>
+      <Modal title={entry.title} icon={entry.icon} help={entry.help} onClose={() => setModal(null)}>
         <div className="thinForm modalForm">
           {modal.kind === 'new-project' ? (
             <DeskSelect

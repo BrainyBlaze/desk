@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
 import { resolveFsPath } from './fsSafety.js';
-import { copyEntry, createEntry, deleteEntry, listDirectory, readFileSafe, renameEntry, writeFileAtomic } from './fsOps.js';
+import { copyEntry, createEntry, deleteEntry, listDirectory, readFileSafe, renameEntry, writeFileAtomic, writeFileAtomicCreate } from './fsOps.js';
 import { searchContent, searchFiles } from './fsSearch.js';
 import { readManifestFile, resolveManifestPath, writeManifestFile } from '../core/config.js';
 import type { DeskNotesSettings } from '../core/types.js';
@@ -330,6 +330,33 @@ export async function handleFsRequest(
       }
       const result = await options.fileOperationCoordinator.applyDelete({ workspaceRoot: root, previewId });
       sendFsOperationResult(res, result);
+      return true;
+    }
+
+    if (url.pathname === '/api/fs/upload') {
+      const dirPath = resolveFsPath(body.dirPath, root);
+      const fileName = typeof body.name === 'string' ? body.name : '';
+      const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : '';
+
+      if (!fileName || !dataBase64) {
+        sendJson(res, 400, { error: 'name and dataBase64 required' });
+        return true;
+      }
+
+      // Decode base64 to buffer
+      const buffer = Buffer.from(dataBase64, 'base64');
+      const filePath = join(dirPath, fileName);
+
+      // Write file atomically (creates parent dirs)
+      const result = writeFileAtomicCreate(filePath, buffer);
+      if (!result.ok) {
+        sendJson(res, 409, { error: 'file already exists' });
+        return true;
+      }
+      await notifyFileOperation(() =>
+        options.fileOperationCoordinator?.didCreate({ workspaceRoot: root, path: filePath, kind: 'file' })
+      );
+      sendJson(res, 200, { ok: true, path: filePath });
       return true;
     }
   }

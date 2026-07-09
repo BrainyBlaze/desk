@@ -9,7 +9,8 @@ export function ActionModal({
   icon,
   onClose,
   children,
-  wide
+  wide,
+  help
 }: {
   open: boolean;
   title: string;
@@ -17,12 +18,13 @@ export function ActionModal({
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  help?: string;
 }): JSX.Element | null {
   if (!open) {
     return null;
   }
   return (
-    <Modal title={title} icon={icon} onClose={onClose} wide={wide}>
+    <Modal title={title} icon={icon} onClose={onClose} wide={wide} help={help}>
       {children}
     </Modal>
   );
