@@ -4,24 +4,22 @@ description: "Install Desk, start the local server, and launch your first durabl
 ---
 
 This guide takes you from an empty machine to a running Desk workspace with one
-managed agent session. It uses the source-checkout runtime because that path
-also installs the global `desk` CLI.
+managed agent session, using the prebuilt `desk` binary.
 
 <Info>
-If you already use a standalone release binary, skip to
-[Run a standalone binary](#run-a-standalone-binary). The runtime behavior is
-the same, but the launch command is different.
+Prefer a source checkout — it also installs the multi-command `desk` CLI
+(`desk serve`, `desk up`, `desk init`, …)? Jump to [Build from
+source](#build-from-source). The runtime is the same; the binary's `desk` just
+starts the server, and you drive the rest from the UI.
 </Info>
 
 ## Requirements
 
-Install the required host tools first:
+The binary is self-contained — UI and language servers embedded, Bun-native
+terminals — so the runtime needs only:
 
-- Node.js 20 or newer
-- npm
 - tmux
-- git
-- a C/C++ build toolchain for `node-pty`
+- curl (to run the installer)
 
 Optional tools unlock additional features:
 
@@ -33,32 +31,16 @@ Optional tools unlock additional features:
 ## Five-minute setup
 
 <Steps>
-  <Step title="Clone and install">
+  <Step title="Install Desk">
     ```bash
-    git clone https://github.com/BrainyBlaze/desk.git
-    cd desk
-    ./install.sh
+    curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
     ```
 
-    The installer checks prerequisites, installs npm dependencies, builds the
-    CLI, and runs `npm link`.
+    The installer downloads the release binary for your platform, verifies its
+    checksum, and installs it as `desk` (in `/usr/local/bin` or `~/.local/bin`).
 
     <Check>
-    `desk help` should print the CLI command list.
-    </Check>
-  </Step>
-
-  <Step title="Create the manifest">
-    ```bash
-    desk init
-    desk config
-    ```
-
-    Desk writes the user manifest to `~/.config/desk/desk.yml`. The command is
-    safe to run before any sessions exist.
-
-    <Check>
-    `desk config` should print the active manifest path.
+    `command -v desk` prints the install path.
     </Check>
   </Step>
 
@@ -79,11 +61,11 @@ Optional tools unlock additional features:
 
   <Step title="Start the server">
     ```bash
-    desk serve
+    desk
     ```
 
-    Desk starts the source-checkout runtime and prints the local URL. By
-    default it binds to `127.0.0.1:5173`.
+    Desk starts the standalone server and prints the local URL. By default it
+    binds to `127.0.0.1:5173`; override with `DESK_HOST` / `DESK_PORT`.
 
     <Check>
     Open `http://127.0.0.1:5173` and confirm the Desk UI loads.
@@ -99,52 +81,49 @@ Optional tools unlock additional features:
     - permission bypass: enabled for a YOLO-style managed agent, disabled when
       you want tool prompts
 
-    Desk writes the session to `desk.yml`, creates a deterministic tmux
-    session, and attaches the cell — Codex, Claude, and OpenCode open as a
-    native chat surface, bash and custom commands as a browser terminal.
+    Desk writes the session to `~/.config/desk/desk.yml`, creates a
+    deterministic tmux session, and attaches the cell — Codex, Claude, and
+    OpenCode open as a native chat surface, bash and custom commands as a
+    browser terminal.
 
     <Check>
     The cell should show the agent's chat composer (or the shell TUI for
-    bash). `desk status` should show a matching tmux session.
+    bash), and `tmux ls` should list a matching session.
     </Check>
   </Step>
 </Steps>
 
-## Run a standalone binary
+## Build from source
 
-Standalone release artifacts are named by target, for example:
-
-```text
-desk-server-linux-x64
-desk-server-linux-arm64
-desk-server-darwin-arm64
-```
-
-After downloading the matching artifact from a GitHub Release, make it
-executable and run it:
+A source checkout gives you the full **`desk` CLI** — `desk serve`, `desk up`,
+`desk init`, `desk config`, `desk status`, and more — plus the Vite dev runtime.
+You need **Node.js 20+**, **npm**, **tmux**, and a C/C++ toolchain for `node-pty`
+(`build-essential` / Xcode CLT):
 
 ```bash
-chmod +x ./desk-server-linux-x64
-./desk-server-linux-x64
+git clone https://github.com/BrainyBlaze/desk.git
+cd desk
+npm ci && npm run build && npm link
+desk serve            # Vite runtime + UI on http://127.0.0.1:5173
 ```
 
-The standalone server uses the same backend as `desk serve`, but it does not
-run Vite at runtime. It serves the embedded UI bundle and mounts the Desk API on
-a plain HTTP server.
+`desk serve` runs the same backend as the binary, through a Vite server. See
+[Distribution and deployment](/distribution-deployment) for how the two runtimes
+differ, and [Run Desk securely](/guide-deploy-securely) before exposing either.
 
-Use environment variables for the standalone runtime:
+Want a specific prebuilt build instead of the installer? Download an artifact
+(`desk-server-linux-x64`, `desk-server-linux-arm64`, `desk-server-darwin-arm64`)
+from a [release](https://github.com/BrainyBlaze/desk/releases), `chmod +x`, and
+run it directly:
 
 ```bash
 DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
 ```
 
-See [Distribution and deployment](/distribution-deployment) and [Run Desk
-securely](/guide-deploy-securely) before choosing a source or standalone
-runtime.
-
 ## Bring a configured fleet up
 
-When `desk.yml` contains multiple sessions, use **Up** in the UI or the CLI:
+When `desk.yml` contains multiple sessions, use **Up** in the UI. From a source
+checkout you can also drive it from the CLI:
 
 ```bash
 desk up --dry-run
@@ -156,7 +135,9 @@ desk status
 sessions. Use [Create an agent fleet](/guide-create-agent-fleet) to build a
 larger manifest intentionally.
 
-## Useful CLI commands
+## Useful CLI commands (source checkout)
+
+The multi-command `desk` CLI ships with a source checkout (`npm link`):
 
 ```bash
 desk help

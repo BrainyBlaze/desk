@@ -114,15 +114,16 @@ before designing a larger fleet.
 Choose how you want to run Desk:
 
 <Tabs>
-  <Tab title="Source checkout">
-    Use this when you are developing Desk or want a linked `desk` CLI from a
-    clone. Start with [Getting started](/getting-started).
+  <Tab title="Standalone binary">
+    The default: `install.sh` drops a self-contained `desk` binary (no Vite,
+    embedded UI). Start with [Getting started](/getting-started), then read
+    [Distribution and deployment](/distribution-deployment) and
+    [Deploy and secure Desk](/guide-deploy-securely).
   </Tab>
 
-  <Tab title="Standalone binary">
-    Use this when you want a no-Vite runtime from a release artifact. Read
-    [Distribution and deployment](/distribution-deployment) and then
-    [Deploy and secure Desk](/guide-deploy-securely).
+  <Tab title="Source checkout">
+    Use this when you are developing Desk or want the multi-command `desk` CLI
+    from a clone. See [Getting started](/getting-started).
   </Tab>
 </Tabs>
 

@@ -18,6 +18,18 @@ control, and keep it bound to localhost.
 ## Choose a runtime
 
 <Tabs>
+  <Tab title="Standalone binary">
+    The default: install the binary (it lands as `desk`) and run it —
+    `DESK_HOST` / `DESK_PORT` set the bind address:
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+    DESK_HOST=127.0.0.1 DESK_PORT=5173 desk
+    ```
+
+    This serves the embedded UI and backend without Vite.
+  </Tab>
+
   <Tab title="Source runtime">
     Use `desk serve` when you work from a checkout:
 
@@ -26,16 +38,6 @@ control, and keep it bound to localhost.
     ```
 
     This starts Vite and the Desk API from the source tree.
-  </Tab>
-
-  <Tab title="Standalone runtime">
-    Use the standalone binary from a release artifact:
-
-    ```bash
-    DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
-    ```
-
-    This serves the embedded UI and backend without Vite.
   </Tab>
 </Tabs>
 
