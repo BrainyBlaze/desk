@@ -18,8 +18,8 @@ export function createDeskApiMiddleware(routes: DeskRoute[]): Connect.NextHandle
       }
       sendJson(res, 404, { error: `unknown API route ${url.pathname}` });
     } catch (error) {
-      console.error(`[desk-api] ${req.method ?? ''} ${req.url ?? ''} failed:`, error);
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      console.error('[desk-api] %s %s failed:', `${req.method ?? ''} ${req.url ?? ''}`, error);
+      sendJson(res, 500, { error: 'Internal server error' });
     }
   };
 }

@@ -25,7 +25,7 @@ function redactStackFields(value: unknown): unknown {
     return value;
   }
   if (value instanceof Error) {
-    return { name: value.name, message: value.message };
+    return { error: 'Request failed' };
   }
   if (Object.getPrototypeOf(value) !== Object.prototype) {
     return value;

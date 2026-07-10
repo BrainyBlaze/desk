@@ -58,7 +58,7 @@ describe('sendJson', () => {
 
     sendJson(res, 500, { error });
 
-    expect(JSON.parse(res.body)).toEqual({ error: { name: 'Error', message: 'boom' } });
+    expect(JSON.parse(res.body)).toEqual({ error: { error: 'Request failed' } });
     expect(res.body).not.toContain('stack');
     expect(res.body).not.toContain('http-util.test');
   });

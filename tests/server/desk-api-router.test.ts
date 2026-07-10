@@ -74,8 +74,8 @@ describe('createDeskApiMiddleware', () => {
     await createDeskApiMiddleware([route])(request('/api/fail'), res, vi.fn());
 
     expect(res.statusCode).toBe(500);
-    expect(JSON.parse(res.body ?? '')).toEqual({ error: 'route failed' });
-    expect(error).toHaveBeenCalledWith('[desk-api] GET /api/fail failed:', expect.any(Error));
+    expect(JSON.parse(res.body ?? '')).toEqual({ error: 'Internal server error' });
+    expect(error).toHaveBeenCalledWith('[desk-api] %s %s failed:', 'GET /api/fail', expect.any(Error));
     error.mockRestore();
   });
 });
