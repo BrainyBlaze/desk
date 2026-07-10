@@ -87,7 +87,9 @@ export function ItemDrawer({
           setLoadError(true);
         }
         // Route to the parent so a MissingScopeError still drives the auth-degradation UI.
-        onError?.(error);
+        if (requestSeqRef.current === seq) {
+          onError?.(error);
+        }
       })
       .finally(() => {
         if (requestSeqRef.current === seq) {

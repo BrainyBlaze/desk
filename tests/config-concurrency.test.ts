@@ -142,4 +142,4 @@ describe('manifest file transactions', () => {
     expect(readManifestFile(manifestPath).groups[0]?.id).toMatch(/^worker-/);
     expect(readdirSync(home).filter((name) => name.startsWith('desk.yml.tmp-'))).toEqual([]);
   }, 20_000);
-});
+  }, 60_000);

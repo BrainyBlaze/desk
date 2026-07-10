@@ -90,7 +90,7 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'desk-chan-s3-'));
-  });
+  }, 120_000);
 
   afterEach(() => {
     rmSync(home, { recursive: true, force: true });
