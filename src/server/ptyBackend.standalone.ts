@@ -2,8 +2,8 @@
 //
 // scripts/build-standalone.ts swaps ./ptyBackend.js to this file at compile time.
 // It implements node-pty's `spawn` -> IPty surface (the subset terminalBroker.ts
-// and terminalBridge.ts use: onData / onExit / write / resize / kill / pid) on
-// top of Bun's native PTY (Bun.Terminal + Bun.spawn{ terminal }).
+// uses: onData / onExit / write / resize / kill / pid) on top of Bun's native
+// PTY (Bun.Terminal + Bun.spawn{ terminal }).
 //
 // Why not node-pty here: under bun, node-pty's pty master reports EOF immediately
 // so onExit fires at once and interactive children (`tmux attach`) appear to die
@@ -28,8 +28,8 @@ interface PtyExitEvent {
   signal?: number;
 }
 
-// The IPty subset the broker / bridge consume. Typed locally so this file pulls
-// in no node-pty types (node-pty must not enter the standalone graph).
+// The IPty subset the broker consumes. Typed locally so this file pulls in no
+// node-pty types (node-pty must not enter the standalone graph).
 interface PtyHandle {
   readonly pid: number;
   onData(handler: (chunk: string) => void): { dispose(): void };

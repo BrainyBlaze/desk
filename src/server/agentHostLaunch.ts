@@ -1,4 +1,5 @@
 import type { SessionSpec } from '../core/types.js';
+import { shellQuote } from '../shared/shell.js';
 
 /**
  * Spawn-time enrichment for native-mode sessions (spec §5): the manifest keeps
@@ -30,8 +31,4 @@ export function rewriteNativeLaunchCommand(spec: SessionSpec, context: NativeLau
     `DESK_AGENT_HOST_TOKEN=${shellQuote(context.token)}`
   ].join(' ');
   return { ...spec, command: `cd ${shellQuote(spec.cwd)} && ${env} exec desk agent-host` };
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

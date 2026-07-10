@@ -3,13 +3,16 @@ export function hslStringToHex(input: string): string {
   if (input.startsWith('#')) {
     return input;
   }
-  const match = /^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/.exec(input);
+  const match = /^hsla?\(\s*(-?[\d.]+)(?:\s*,\s*|\s+)([\d.]+)%(?:\s*,\s*|\s+)([\d.]+)%/.exec(input);
   if (!match) {
     return '#000000';
   }
-  const h = Number(match[1]) / 360;
-  const s = Number(match[2]) / 100;
-  const l = Number(match[3]) / 100;
+  // Match CSS: wrap hue into [0,360) and clamp S/L to their valid range BEFORE conversion
+  // (clamping the derived RGB bytes instead yields a different colour than the browser).
+  const clamp = (value: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, value));
+  const h = (((Number(match[1]) % 360) + 360) % 360) / 360;
+  const s = clamp(Number(match[2]), 0, 100) / 100;
+  const l = clamp(Number(match[3]), 0, 100) / 100;
   const hueToRgb = (p: number, q: number, t: number): number => {
     let tt = t;
     if (tt < 0) tt += 1;
@@ -32,7 +35,7 @@ export function hslStringToHex(input: string): string {
     b = hueToRgb(p, q, h - 1 / 3);
   }
   const toHex = (value: number): string =>
-    Math.round(value * 255)
+    Math.max(0, Math.min(255, Math.round(value * 255)))
       .toString(16)
       .padStart(2, '0');
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;

@@ -89,6 +89,18 @@ describe('LSP settings surface', () => {
     });
   });
 
+  it('adds runtime-only missing built-in diagnostics without persisting server details', () => {
+    const settings = fullSettings();
+
+    expect(toClientSettings(settings, { missingBuiltins: [' python ', 'python', '', 'rust'] }).lsp).toEqual({
+      enabled: true,
+      languages: ['typescript', 'python'],
+      baseUrl: 'ws://127.0.0.1:5173',
+      missingBuiltins: ['python', 'rust']
+    });
+    expect(settings.lsp).not.toHaveProperty('missingBuiltins');
+  });
+
   it('omits absent LSP settings and returns disabled safe LSP settings for malformed blocks', () => {
     expect(toClientSettings({ theme: 'plain' })).toEqual({ theme: 'plain' });
     expect(toClientSettings({ theme: 'plain', lsp: 'bad' as unknown as DeskSettings['lsp'] })).toEqual({

@@ -124,6 +124,7 @@ export interface SessionResumeInfo {
   resume?: string;
   hasResume: boolean;
   bypassPermissions?: boolean;
+  uiMode?: 'terminal' | 'native';
 }
 
 export interface ChannelActivityEvent {
@@ -190,6 +191,22 @@ export type DeliveryBlockReason =
   | 'send-failed'
   | 'submit-stuck-paste'
   | 'submit-stuck-submit';
+
+/** Durable queue item shared by the delivery engine and persistence layer. */
+export interface QueuedPrompt {
+  seq: number;
+  channel: string;
+  messageId: string;
+  author: string;
+  prompt: string;
+  queuedAt: string;
+  /** 'prompt' = standalone briefing delivered verbatim; absent/'message' = channel dispatch. */
+  kind?: 'message' | 'prompt';
+  /** Conversation file the message lives in (root.md / thread-...). */
+  file?: string;
+  /** Receiving member channel handle, used by digest instructions. */
+  member?: string;
+}
 
 /** A queued prompt as exposed to the ops console (no full prompt body). */
 export interface QueuedItemMeta {

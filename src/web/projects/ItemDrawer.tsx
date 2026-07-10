@@ -33,6 +33,8 @@ export interface ItemDrawerProps {
   onConvertDraft: (item: ProjectItem) => void;
   onEditDraft: (item: ProjectItem, title: string, body: string) => void;
   onOpenExternal: (item: ProjectItem) => void;
+  /** routes a detail-load failure to the parent (e.g. MissingScopeError -> auth degradation) */
+  onError?: (error: unknown) => void;
 }
 
 export function ItemDrawer({
@@ -48,11 +50,14 @@ export function ItemDrawer({
   onArchive,
   onConvertDraft,
   onEditDraft,
-  onOpenExternal
+  onOpenExternal,
+  onError
 }: ItemDrawerProps): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [detail, setDetail] = useState<ItemDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [comment, setComment] = useState('');
   const [sending, setSending] = useState(false);
   const [editingBody, setEditingBody] = useState(false);
@@ -63,6 +68,7 @@ export function ItemDrawer({
   useEffect(() => {
     setDetail(null);
     setEditingBody(false);
+    setLoadError(false);
     if (!item) {
       return;
     }
@@ -76,13 +82,19 @@ export function ItemDrawer({
           setDraftBody(payload.item.content?.body ?? '');
         }
       })
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        if (requestSeqRef.current === seq) {
+          setLoadError(true);
+        }
+        // Route to the parent so a MissingScopeError still drives the auth-degradation UI.
+        onError?.(error);
+      })
       .finally(() => {
         if (requestSeqRef.current === seq) {
           setLoading(false);
         }
       });
-  }, [item, revision]);
+  }, [item, revision, reloadNonce, onError]);
 
   const isDraft = item?.type === 'DRAFT_ISSUE';
   const isClosed = item?.content?.state === 'CLOSED' || item?.content?.state === 'MERGED';
@@ -208,6 +220,13 @@ export function ItemDrawer({
                   </div>
                 ) : loading ? (
                   <div className="viewerStatus">loading…</div>
+                ) : loadError ? (
+                  <div className="viewerStatus">
+                    Could not load this item.{' '}
+                    <button type="button" onClick={() => setReloadNonce((n) => n + 1)}>
+                      Retry
+                    </button>
+                  </div>
                 ) : detail?.content?.body ? (
                   <Suspense fallback={<div className="viewerStatus">loading renderer…</div>}>
                     <ItemMarkdown body={detail.content.body} />

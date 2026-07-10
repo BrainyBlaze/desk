@@ -300,7 +300,7 @@ export const attentionTracker = new AttentionTracker();
 let raiseListener: ((tmuxSession: string) => void) | null = null;
 
 /** Invoked on every newly raised attention (a turn completed / approval rang). */
-export function setRaiseListener(listener: (tmuxSession: string) => void): void {
+export function setRaiseListener(listener: ((tmuxSession: string) => void) | null): void {
   raiseListener = listener;
 }
 
@@ -364,4 +364,12 @@ export function startAttentionPolling(intervalMs = 2000): void {
   };
   pollTimer = setInterval(() => void tick(), intervalMs);
   pollTimer.unref?.();
+}
+
+export function stopAttentionPolling(): void {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = undefined;
+  }
+  previousFlags = new Map();
 }

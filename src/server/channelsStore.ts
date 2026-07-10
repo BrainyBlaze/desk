@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { watch } from 'chokidar';
@@ -17,6 +17,7 @@ import {
   type ChannelMessage
 } from './channelsProtocol.js';
 import { writeFileAtomic, writeFileAtomicCreate } from './fsOps.js';
+import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
 
 /**
  * Channels store — the filesystem side of the messaging protocol.
@@ -375,7 +376,9 @@ export function destroyChannel(home: string, name: string): void {
   // mid-rename/rmSync race that leaves inconsistent caller-side state.
   // The rmSync itself is atomic; the lock is for cross-caller consistency.
   withHomeLockSync(home, () => {
-    rmSync(channelDir(home, name), { recursive: true, force: true });
+    withFileLockSync(channelLockPath(home, name), () => {
+      rmSync(channelDir(home, name), { recursive: true, force: true });
+    });
   });
 }
 
@@ -747,158 +750,51 @@ function serialized<T>(channel: string, action: () => T | Promise<T>): Promise<T
  * process lock, two callers race on the read-modify-write operations
  * (updateParentThreadLink, editMessage, deleteMessage, editChannelGoal) and
  * on the thread-file preamble create (`existsSync` then `writeFileSync`) —
- * losing data silently. The flock-style wrapper below acquires a per-channel
- * `.write.lock` file atomically via O_EXCL, recovers stale locks left by
- * dead holders, and releases on completion.
+ * losing data silently. The shared lock wrapper uses an atomic lock directory
+ * with an mtime heartbeat, bounded retries, and compromised-lock detection.
+ * Locks live under the channels home instead of inside a channel directory so
+ * destroyChannel can hold the same lock while removing the channel tree.
  */
-const CHANNEL_LOCKFILE = '.write.lock';
-const CHANNEL_LOCK_RETRY_MS = 25;
-const CHANNEL_LOCK_TIMEOUT_MS = 10_000;
-/** A lock older than this is presumed stale even if its holder pid looks alive
- *  — defends against pid-reuse where the dead holder's pid was reassigned to
- *  an unrelated running process. */
-const CHANNEL_LOCK_STALE_MS = 30_000;
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const CHANNEL_LOCKS_DIR = '.locks';
+const CHANNELS_HOME_LOCKFILE = '_home.lock';
+const ATOMIC_APPEND_RETRY_MS = 25;
 
 async function withChannelLock<T>(home: string, channel: string, action: () => T | Promise<T>): Promise<T> {
-  const lockPath = join(channelDir(home, channel), CHANNEL_LOCKFILE);
-  const start = Date.now();
-  let fd: number | undefined;
-  while (fd === undefined && Date.now() - start < CHANNEL_LOCK_TIMEOUT_MS) {
-    try {
-      fd = openSync(lockPath, 'wx'); // O_EXCL | O_CREAT | O_WRONLY | O_TRUNC — atomic acquire
-      writeSync(fd, `${process.pid}\n`);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') {
-        // channel directory does not exist — surface as a friendly protocol error
-        // (matches the existing "channel '...' not found" contract callers expect).
-        throw new Error(`channel '${channel}' not found`);
-      }
-      if (code !== 'EEXIST') {
-        throw err;
-      }
-      if (tryStealStaleLock(lockPath)) {
-        continue;
-      }
-      await new Promise((resolve) => setTimeout(resolve, CHANNEL_LOCK_RETRY_MS));
+  ensureChannelLockRoot(home);
+  return withFileLock(channelLockPath(home, channel), async () => {
+    if (!existsSync(channelDir(home, channel))) {
+      throw new Error(`channel '${channel}' not found`);
     }
-  }
-  if (fd === undefined) {
-    throw new Error(`could not acquire channel lock ${lockPath} within ${CHANNEL_LOCK_TIMEOUT_MS}ms`);
-  }
-  try {
-    return await action();
-  } finally {
-    closeSync(fd);
-    try {
-      unlinkSync(lockPath);
-    } catch {
-      // already gone — a concurrent stale-recovery path unlinked it; that is fine
-      // because we have already released via closeSync.
-    }
-  }
+    return action();
+  });
 }
 
 /**
  * Sync variant for callers that preserve a sync contract (editChannelGoal).
- * Same stale-recovery semantics as withChannelLock. Backs off via Atomics.wait
- * (blocks the worker thread for the backoff window only); the uncontended path
- * acquires in one openSync call with no wait.
+ * withFileLockSync provides the same ownership and bounded-contention contract.
  */
 function withChannelLockSync<T>(home: string, channel: string, action: () => T): T {
-  const lockPath = join(channelDir(home, channel), CHANNEL_LOCKFILE);
-  return withLockPathSync(lockPath, `channel '${channel}' not found`, action);
+  ensureChannelLockRoot(home);
+  return withFileLockSync(channelLockPath(home, channel), () => {
+    if (!existsSync(channelDir(home, channel))) {
+      throw new Error(`channel '${channel}' not found`);
+    }
+    return action();
+  });
 }
 
 function withHomeLockSync<T>(home: string, action: () => T): T {
   mkdirSync(home, { recursive: true });
-  return withLockPathSync(join(home, CHANNEL_LOCKFILE), `channels home '${home}' not found`, action);
+  ensureChannelLockRoot(home);
+  return withFileLockSync(join(home, CHANNEL_LOCKS_DIR, CHANNELS_HOME_LOCKFILE), action);
 }
 
-function withLockPathSync<T>(lockPath: string, notFoundMessage: string, action: () => T): T {
-  const start = Date.now();
-  while (Date.now() - start < CHANNEL_LOCK_TIMEOUT_MS) {
-    let fd: number;
-    try {
-      fd = openSync(lockPath, 'wx');
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') {
-        throw new Error(notFoundMessage);
-      }
-      if (code !== 'EEXIST') {
-        throw err;
-      }
-      if (tryStealStaleLock(lockPath)) {
-        continue;
-      }
-      syncBackoff(CHANNEL_LOCK_RETRY_MS);
-      continue;
-    }
-    try {
-      writeSync(fd, `${process.pid}\n`);
-      return action();
-    } finally {
-      closeSync(fd);
-      try {
-        unlinkSync(lockPath);
-      } catch {
-        // already gone (concurrent stale-recovery unlink); release-via-close is sufficient
-      }
-    }
-  }
-  throw new Error(`could not acquire channel lock ${lockPath} within ${CHANNEL_LOCK_TIMEOUT_MS}ms`);
+function ensureChannelLockRoot(home: string): void {
+  mkdirSync(join(home, CHANNEL_LOCKS_DIR), { recursive: true });
 }
 
-/**
- * Removes an existing lock only when the exact lockfile snapshot we classified
- * as stale is still present. Without the second read, a contender can observe a
- * disappearing old lock and accidentally unlink a fresh holder's lock.
- */
-function tryStealStaleLock(lockPath: string): boolean {
-  let first: { content: string; mtimeMs: number };
-  try {
-    first = { content: readFileSync(lockPath, 'utf8'), mtimeMs: statSync(lockPath).mtimeMs };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
-    }
-    return false;
-  }
-  const holderPid = Number(first.content.trim());
-  const holderDead = Number.isInteger(holderPid) && holderPid > 0 && holderPid !== process.pid && !isPidAlive(holderPid);
-  const staleByAge = Date.now() - first.mtimeMs > CHANNEL_LOCK_STALE_MS;
-  if (!holderDead && !staleByAge) {
-    return false;
-  }
-  try {
-    const current = { content: readFileSync(lockPath, 'utf8'), mtimeMs: statSync(lockPath).mtimeMs };
-    if (current.content !== first.content || current.mtimeMs !== first.mtimeMs) {
-      return false;
-    }
-    unlinkSync(lockPath);
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
-    }
-    throw err;
-  }
-}
-
-/** Bounded synchronous backoff via Atomics.wait (blocks only the calling thread). */
-function syncBackoff(ms: number): void {
-  const buffer = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(buffer, 0, 0, ms);
+function channelLockPath(home: string, channel: string): string {
+  return join(home, CHANNEL_LOCKS_DIR, `${channel}.lock`);
 }
 
 export interface AppendMessageOptions {
@@ -926,9 +822,14 @@ function appendBlockAtomic(filePath: string, block: string): void {
     if (!result.conflict) {
       throw new Error(`failed to append ${filePath}`);
     }
-    syncBackoff(Math.min(CHANNEL_LOCK_RETRY_MS, 5 + attempt));
+    syncBackoff(Math.min(ATOMIC_APPEND_RETRY_MS, 5 + attempt));
   }
   throw new Error(`could not append ${filePath}: concurrent writers did not settle`);
+}
+
+function syncBackoff(ms: number): void {
+  const buffer = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(buffer, 0, 0, ms);
 }
 
 export async function appendMessage(home: string, channel: string, options: AppendMessageOptions): Promise<AppendedMessage> {

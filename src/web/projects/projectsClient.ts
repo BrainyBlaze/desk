@@ -1,5 +1,7 @@
 /** Client for /api/projects/* — types mirror the server's GraphQL read model. */
 
+import { readJson as readJsonBase } from '../httpJson.js';
+
 export interface ProjectSummary {
   id: string;
   number: number;
@@ -151,15 +153,11 @@ export interface ProjectOwner {
 export class MissingScopeError extends Error {}
 
 async function readJson<T>(request: Promise<Response>): Promise<T> {
-  const response = await request;
-  const payload = (await response.json()) as T & { error?: string; missingScope?: boolean };
-  if (!response.ok) {
-    if (payload.missingScope) {
-      throw new MissingScopeError(payload.error ?? 'missing project scope');
-    }
-    throw new Error(payload.error ?? `request failed (${response.status})`);
-  }
-  return payload;
+  return readJsonBase<T>(request, ({ body }) =>
+    body?.missingScope
+      ? new MissingScopeError(typeof body.error === 'string' ? body.error : 'missing project scope')
+      : undefined
+  );
 }
 
 const enc = encodeURIComponent;

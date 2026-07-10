@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleFsRequest } from '../src/server/fsApi';
+import { MAX_EDITABLE_BYTES } from '../src/server/fsOps';
 import { createLspFileOperationCoordinator, type LspFileOperationCoordinator } from '../src/server/lsp/lspFileOperationCoordinator';
 
 let root: string;
@@ -27,6 +28,21 @@ describe('handleFsRequest LSP file-operation hooks', () => {
     expect(response).toEqual({ statusCode: 200, payload: { ok: true, path } });
     expect(existsSync(path)).toBe(true);
     expect(coordinator.didCreate).toHaveBeenCalledWith({ workspaceRoot: root, path, kind: 'file' });
+  });
+
+  it('allows saving editable-size content whose JSON envelope exceeds the default body cap', async () => {
+    const coordinator = fakeCoordinator();
+    const path = join(root, 'large.txt');
+    const content = '"'.repeat(Math.floor(MAX_EDITABLE_BYTES / 2) + 1);
+
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(MAX_EDITABLE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify({ root, path, content }), 'utf8')).toBeGreaterThan(1_048_576);
+
+    const response = await invokeFs('/api/fs/write', { root, path, content }, coordinator);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.payload.ok).toBe(true);
+    expect(readFileSync(path, 'utf8')).toBe(content);
   });
 
   it('captures rename and delete kind before mutation removes the original path', async () => {
@@ -411,11 +427,13 @@ function fakeResourceOpManager(input: { resourceUri: string }) {
 
 class JsonRequest extends EventEmitter {
   method = 'POST';
+  headers: Record<string, string>;
   private readonly payload: string;
 
   constructor(body: Record<string, unknown>) {
     super();
     this.payload = JSON.stringify(body);
+    this.headers = { 'content-length': String(Buffer.byteLength(this.payload, 'utf8')) };
   }
 
   setEncoding(): void {
@@ -423,6 +441,12 @@ class JsonRequest extends EventEmitter {
       this.emit('data', this.payload);
       this.emit('end');
     }, 0);
+  }
+
+  resume(): void {}
+
+  destroy(): this {
+    return this;
   }
 }
 

@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
+import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
 import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
 import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, SessionSpec } from './types.js';
 
@@ -114,6 +116,7 @@ export function readManifestFile(path: string): DeskManifest {
   return parseDeskManifest(source);
 }
 
+/** Atomic replacement only. Read-modify-write callers must use updateManifestFile. */
 export function writeManifestFile(path: string, manifest: DeskManifest): void {
   const serialized = serializeDeskManifest(manifest);
   // Never persist an empty/whitespace payload — that would wipe the config.
@@ -123,9 +126,50 @@ export function writeManifestFile(path: string, manifest: DeskManifest): void {
   mkdirSync(dirname(path), { recursive: true });
   // Atomic write: a crash mid-write leaves the temp file, never a truncated
   // or 0-byte manifest. rename(2) is atomic on the same filesystem.
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, serialized);
-  renameSync(tmp, path);
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(tmp, serialized, { flag: 'wx' });
+    renameSync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+export async function withManifestFileLock<T>(path: string, action: () => T | Promise<T>): Promise<T> {
+  mkdirSync(dirname(path), { recursive: true });
+  return withFileLock(`${path}.lock`, action);
+}
+
+/** Standalone-process helper; server code must use the async lock API. */
+export function withManifestFileLockSync<T>(path: string, action: () => T): T {
+  mkdirSync(dirname(path), { recursive: true });
+  return withFileLockSync(`${path}.lock`, action);
+}
+
+export async function updateManifestFile(
+  path: string,
+  update: (manifest: DeskManifest) => DeskManifest | null | Promise<DeskManifest | null>
+): Promise<DeskManifest | null> {
+  return withManifestFileLock(path, async () => {
+    const updated = await update(readManifestFile(path));
+    if (updated) {
+      writeManifestFile(path, updated);
+    }
+    return updated;
+  });
+}
+
+export function updateManifestFileSync(
+  path: string,
+  update: (manifest: DeskManifest) => DeskManifest | null
+): DeskManifest | null {
+  return withManifestFileLockSync(path, () => {
+    const updated = update(readManifestFile(path));
+    if (updated) {
+      writeManifestFile(path, updated);
+    }
+    return updated;
+  });
 }
 
 export function serializeDeskManifest(manifest: DeskManifest): string {
@@ -276,29 +320,12 @@ export function deleteProjectFromManifest(manifest: DeskManifest, options: Delet
 }
 
 export function editGroupInManifest(manifest: DeskManifest, options: EditProjectGroupOptions): DeskManifest {
-  const projects = cloneProjects(manifest);
-  const project = projects.find((candidate) => candidate.id === options.projectId);
   const currentGroupId = options.currentGroupId ?? options.groupId;
-  if (project) {
-    const group = project.groups.find((candidate) => candidate.id === currentGroupId);
-    if (!group) {
-      throw new Error(`group ${currentGroupId} does not exist in project ${options.projectId}`);
-    }
+  return updateTargetGroup(manifest, { projectId: options.projectId, groupId: currentGroupId }, (group) => {
     group.id = options.groupId;
     group.label = options.groupLabel;
     group.layout = options.layout;
-    return { ...manifest, projects };
-  }
-
-  const groups = cloneGroups(manifest);
-  const group = groups.find((candidate) => candidate.id === currentGroupId);
-  if (!group) {
-    throw new Error(`group ${currentGroupId} does not exist`);
-  }
-  group.id = options.groupId;
-  group.label = options.groupLabel;
-  group.layout = options.layout;
-  return { ...manifest, groups, projects: manifest.projects };
+  });
 }
 
 export function deleteGroupFromManifest(manifest: DeskManifest, options: DeleteProjectGroupOptions): DeskManifest {
@@ -327,49 +354,29 @@ export function deleteGroupFromManifest(manifest: DeskManifest, options: DeleteP
 }
 
 export function editSessionInManifest(manifest: DeskManifest, options: EditProjectSessionOptions): DeskManifest {
-  const projects = cloneProjects(manifest);
-  const project = projects.find((candidate) => candidate.id === options.projectId);
-  if (project) {
-    const group = project.groups.find((candidate) => candidate.id === options.groupId);
-    if (!group) {
-      throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
-    }
-    group.sessions = replaceSession(group.sessions, options.currentName, options.session, undefined, options.clearResume);
-    return { ...manifest, projects };
-  }
-
-  const groups = cloneGroups(manifest);
-  const group = groups.find((candidate) => candidate.id === options.groupId);
-  if (!group) {
-    throw new Error(`group ${options.groupId} does not exist`);
-  }
-  group.sessions = replaceSession(group.sessions, options.currentName, options.session, options.projectCwd, options.clearResume);
-  return { ...manifest, groups, projects: manifest.projects };
+  const projectExists = (manifest.projects ?? []).some((project) => project.id === options.projectId);
+  return updateTargetGroup(manifest, options, (group) => {
+    group.sessions = replaceSession(
+      group.sessions,
+      options.currentName,
+      options.session,
+      projectExists ? undefined : options.projectCwd,
+      options.clearResume
+    );
+  });
 }
 
 export function deleteSessionFromManifest(manifest: DeskManifest, options: DeleteProjectSessionOptions): DeskManifest {
-  const projects = cloneProjects(manifest);
-  const project = projects.find((candidate) => candidate.id === options.projectId);
-  if (project) {
-    const group = project.groups.find((candidate) => candidate.id === options.groupId);
-    if (!group) {
-      throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
-    }
-    group.sessions = group.sessions.filter((session) => session.name !== options.sessionName);
-    return { ...manifest, projects };
-  }
-
-  const groups = cloneGroups(manifest);
-  const group = groups.find((candidate) => candidate.id === options.groupId);
-  if (!group) {
-    throw new Error(`group ${options.groupId} does not exist`);
-  }
-  group.sessions = group.sessions.filter(
-    (session) =>
-      session.name !== options.sessionName ||
-      Boolean(options.projectCwd && session.cwd && !cwdMatches(session.cwd, options.projectCwd))
-  );
-  return { ...manifest, groups, projects: manifest.projects };
+  const projectExists = (manifest.projects ?? []).some((project) => project.id === options.projectId);
+  return updateTargetGroup(manifest, options, (group) => {
+    group.sessions = projectExists
+      ? group.sessions.filter((session) => session.name !== options.sessionName)
+      : group.sessions.filter(
+          (session) =>
+            session.name !== options.sessionName ||
+            Boolean(options.projectCwd && session.cwd && !cwdMatches(session.cwd, options.projectCwd))
+        );
+  });
 }
 
 export function moveSessionInManifest(manifest: DeskManifest, options: MoveProjectSessionOptions): DeskManifest {
@@ -414,24 +421,9 @@ export interface SetGroupLayoutSizesOptions {
  * resize never disturbs the layout kind or cell count.
  */
 export function setGroupLayoutSizesInManifest(manifest: DeskManifest, options: SetGroupLayoutSizesOptions): DeskManifest {
-  const projects = cloneProjects(manifest);
-  const project = projects.find((candidate) => candidate.id === options.projectId);
-  if (project) {
-    const group = project.groups.find((candidate) => candidate.id === options.groupId);
-    if (!group) {
-      throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
-    }
+  return updateTargetGroup(manifest, options, (group) => {
     group.layout = { ...(group.layout ?? {}), sizes: options.sizes };
-    return { ...manifest, projects };
-  }
-
-  const groups = cloneGroups(manifest);
-  const group = groups.find((candidate) => candidate.id === options.groupId);
-  if (!group) {
-    throw new Error(`group ${options.groupId} does not exist`);
-  }
-  group.layout = { ...(group.layout ?? {}), sizes: options.sizes };
-  return { ...manifest, groups, projects: manifest.projects };
+  });
 }
 
 /**
@@ -481,23 +473,9 @@ export interface ReorderSessionsOptions {
 }
 
 export function reorderSessionsInManifest(manifest: DeskManifest, options: ReorderSessionsOptions): DeskManifest {
-  const projects = cloneProjects(manifest);
-  const project = projects.find((candidate) => candidate.id === options.projectId);
-  if (project) {
-    const group = project.groups.find((candidate) => candidate.id === options.groupId);
-    if (!group) {
-      throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
-    }
+  return updateTargetGroup(manifest, options, (group) => {
     group.sessions = applyOrder(group.sessions, options.orderedSessionNames, (session) => session.name);
-    return { ...manifest, projects };
-  }
-  const groups = cloneGroups(manifest);
-  const group = groups.find((candidate) => candidate.id === options.groupId);
-  if (!group) {
-    throw new Error(`group ${options.groupId} does not exist`);
-  }
-  group.sessions = applyOrder(group.sessions, options.orderedSessionNames, (session) => session.name);
-  return { ...manifest, groups, projects: manifest.projects };
+  });
 }
 
 export function resolveManifestPath(path?: string): string {
@@ -522,6 +500,31 @@ function cloneGroups(manifest: DeskManifest): DeskGroup[] {
     ...group,
     sessions: [...group.sessions]
   }));
+}
+
+function updateTargetGroup(
+  manifest: DeskManifest,
+  options: { projectId?: string; groupId: string },
+  update: (group: DeskGroup) => void
+): DeskManifest {
+  const projects = cloneProjects(manifest);
+  const project = projects.find((candidate) => candidate.id === options.projectId);
+  if (project) {
+    const group = project.groups.find((candidate) => candidate.id === options.groupId);
+    if (!group) {
+      throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
+    }
+    update(group);
+    return { ...manifest, projects };
+  }
+
+  const groups = cloneGroups(manifest);
+  const group = groups.find((candidate) => candidate.id === options.groupId);
+  if (!group) {
+    throw new Error(`group ${options.groupId} does not exist`);
+  }
+  update(group);
+  return { ...manifest, groups, projects: manifest.projects };
 }
 
 function replaceSession(

@@ -3,7 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addSessionToManifest, createEmptyManifest, readManifestFile, resolveManifestPath, writeManifestFile } from '../core/config.js';
+import {
+  addSessionToManifest,
+  createEmptyManifest,
+  resolveManifestPath,
+  updateManifestFileSync,
+  withManifestFileLockSync,
+  writeManifestFile
+} from '../core/config.js';
 import { installAgentHooks } from '../core/agentHooks.js';
 import { createAttachArgv } from '../core/tmux.js';
 import { captureSession, findSession, loadDesk, planDeskUp, printStatus, runPlan } from '../core/runner.js';
@@ -104,20 +111,20 @@ function main(argv: string[]): number {
     }
 
     if (args.command === 'init') {
-      writeManifestFile(manifestPath, createEmptyManifest());
+      withManifestFileLockSync(manifestPath, () => writeManifestFile(manifestPath, createEmptyManifest()));
       console.log(`created ${manifestPath}`);
       return 0;
     }
 
     if (args.command === 'add') {
-      const manifest = readManifestFile(manifestPath);
       const session = readSessionOptions(args.options);
-      const updated = addSessionToManifest(manifest, {
-        groupId: requireOption(args.options, 'group'),
-        groupLabel: args.options.get('group-label'),
-        session
+      updateManifestFileSync(manifestPath, (manifest) => {
+        return addSessionToManifest(manifest, {
+          groupId: requireOption(args.options, 'group'),
+          groupLabel: args.options.get('group-label'),
+          session
+        });
       });
-      writeManifestFile(manifestPath, updated);
       console.log(`added ${session.name} to ${manifestPath}`);
       return 0;
     }

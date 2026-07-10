@@ -106,5 +106,13 @@ export function shortenBranch(branch: string, max = 21): string {
   }
   const head = Math.max(4, Math.floor((max - 1) * 0.4));
   const tail = max - 1 - head;
+  if (tail <= 0) {
+    // Tiny max: `slice(-0)` would splice the whole branch back. Reserve the last slot for
+    // the ellipsis; a non-positive max has no room even for that.
+    if (max <= 0) {
+      return '';
+    }
+    return `${branch.slice(0, max - 1)}…`;
+  }
   return `${branch.slice(0, head)}…${branch.slice(-tail)}`;
 }

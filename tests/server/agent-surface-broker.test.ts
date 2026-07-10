@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   AgentSurfaceBroker,
   installAgentSurfaceBroker,
+  type AgentSurfaceBrokerOptions,
   type AttentionSink
 } from '../../src/server/agentSurfaceBroker';
 import {
@@ -44,14 +45,17 @@ interface TestPeer {
   waitFor<T = unknown>(predicate: (frame: unknown) => boolean, timeoutMs?: number): Promise<T>;
 }
 
-async function startBroker(): Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer>; connectBrowser: () => Promise<TestPeer> }> {
+async function startBroker(
+  options: AgentSurfaceBrokerOptions = {},
+  installOptions: { maxPayloadBytes?: number } = {}
+): Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer>; connectBrowser: () => Promise<TestPeer> }> {
   const httpServer: Server = await new Promise((resolve) => {
     const s = createServer();
     s.listen(0, '127.0.0.1', () => resolve(s));
   });
   const addr = httpServer.address() as { port: number };
-  const broker = new AgentSurfaceBroker({ resolveSecret: () => SECRET, attention: NOOP_ATTENTION });
-  const dispose = installAgentSurfaceBroker(httpServer as never, broker);
+  const broker = new AgentSurfaceBroker({ ...options, resolveSecret: () => SECRET, attention: NOOP_ATTENTION });
+  const dispose = installAgentSurfaceBroker(httpServer as never, broker, installOptions);
   return {
     broker,
     port: addr.port,
@@ -136,6 +140,19 @@ describe('AgentSurfaceBroker — host handshake', () => {
   });
 });
 
+describe('AgentSurfaceBroker — transport payload limits', () => {
+  it('closes oversized raw frames on both host and browser sockets before parsing', async () => {
+    const harness = await startBroker({}, { maxPayloadBytes: 128 });
+    for (const connect of [harness.connectHost, harness.connectBrowser]) {
+      const peer = await connect();
+      const closed = new Promise<number>((resolve) => peer.ws.once('close', resolve));
+      peer.ws.send('x'.repeat(129));
+      await expect(closed).resolves.toBe(1009);
+    }
+    harness.close();
+  });
+});
+
 describe('AgentSurfaceBroker — surface subscription + snapshot', () => {
   it('sends ready on browser connect', async () => {
     const harness = await startBroker();
@@ -169,6 +186,61 @@ describe('AgentSurfaceBroker — surface subscription + snapshot', () => {
     if (!(snapshot as { events?: unknown[] }).events) throw new Error('events missing');
     expect((snapshot as { events: { kind: string }[] }).events.map((e) => e.kind)).toContain('assistant-message');
     browser.close();
+    host.close();
+    harness.close();
+  });
+
+  it('evicts the oldest committed events when the replay byte budget is reached', async () => {
+    const first = event(1, 'assistant-message', { id: 'm1', turnId: 't1', markdown: 'a'.repeat(256) });
+    const second = event(2, 'assistant-message', { id: 'm2', turnId: 't2', markdown: 'b'.repeat(256) });
+    const harness = await startBroker({ ringSize: 10, ringMaxBytes: Buffer.byteLength(JSON.stringify(second)) + 8 });
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    host.send({ type: 'event', event: first });
+    host.send({ type: 'event', event: second });
+
+    const browser = await harness.connectBrowser();
+    await browser.waitFor((f) => (f as { type?: string }).type === 'ready');
+    browser.send({ type: 'subscribe', session: 's1', surfaceId: 'surf-1', visible: true });
+    const snapshot = await browser.waitFor<{ type: string; events: AgentSurfaceEvent[] }>(
+      (f) => (f as { type?: string }).type === 'snapshot'
+    );
+
+    expect(snapshot.events.map((retained) => retained.seq)).toEqual([2]);
+    browser.close();
+    host.close();
+    harness.close();
+  });
+
+  it('live-forwards an individually oversized event without flushing prior replay history', async () => {
+    const retained = event(1, 'assistant-message', { id: 'm1', turnId: 't1', markdown: 'small' });
+    const oversized = event(2, 'assistant-message', { id: 'm2', turnId: 't2', markdown: 'x'.repeat(1024) });
+    const harness = await startBroker({ ringSize: 10, ringMaxBytes: Buffer.byteLength(JSON.stringify(retained)) + 8 });
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+    host.send({ type: 'event', event: retained });
+
+    const liveBrowser = await harness.connectBrowser();
+    await liveBrowser.waitFor((f) => (f as { type?: string }).type === 'ready');
+    liveBrowser.send({ type: 'subscribe', session: 's1', surfaceId: 'live', visible: true });
+    await liveBrowser.waitFor((f) => (f as { type?: string }).type === 'snapshot');
+    host.send({ type: 'event', event: oversized });
+    await liveBrowser.waitFor(
+      (f) => (f as { type?: string; event?: { seq?: number } }).type === 'event' && (f as { event?: { seq?: number } }).event?.seq === 2
+    );
+
+    const replayBrowser = await harness.connectBrowser();
+    await replayBrowser.waitFor((f) => (f as { type?: string }).type === 'ready');
+    replayBrowser.send({ type: 'subscribe', session: 's1', surfaceId: 'replay', visible: true });
+    const snapshot = await replayBrowser.waitFor<{ type: string; events: AgentSurfaceEvent[] }>(
+      (f) => (f as { type?: string }).type === 'snapshot'
+    );
+    expect(snapshot.events.map((event) => event.seq)).toEqual([1]);
+
+    replayBrowser.close();
+    liveBrowser.close();
     host.close();
     harness.close();
   });
@@ -570,7 +642,9 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     rmSync(manifestDir, { recursive: true, force: true });
   });
 
-  async function startBrokerWithResumeSink(): Promise<{
+  async function startBrokerWithResumeSink(
+    persistOverride?: NonNullable<AgentSurfaceBrokerOptions['persistResume']>
+  ): Promise<{
     broker: AgentSurfaceBroker;
     close: () => void;
     connectHost: () => Promise<TestPeer>;
@@ -581,22 +655,24 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     const broker = new AgentSurfaceBroker({
       resolveSecret: () => SECRET,
       attention: NOOP_ATTENTION,
-      persistResume: (tmuxSession, resume) => {
-        const manifest = readManifestFile(manifestPath);
-        let wrote = false;
-        for (const group of manifest.groups) {
-          for (const session of group.sessions) {
-            if (session.tmuxSession === tmuxSession && !session.resume) {
-              session.resume = resume;
-              wrote = true;
+      persistResume:
+        persistOverride ??
+        ((tmuxSession, resume) => {
+          const manifest = readManifestFile(manifestPath);
+          let wrote = false;
+          for (const group of manifest.groups) {
+            for (const session of group.sessions) {
+              if (session.tmuxSession === tmuxSession && !session.resume) {
+                session.resume = resume;
+                wrote = true;
+              }
             }
           }
-        }
-        if (wrote) {
-          writeManifestFile(manifestPath, manifest);
-        }
-        return wrote;
-      }
+          if (wrote) {
+            writeManifestFile(manifestPath, manifest);
+          }
+          return wrote;
+        })
     });
     const dispose = installAgentSurfaceBroker(httpServer as never, broker);
     return {
@@ -660,6 +736,42 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
 
     const updated = readManifestFile(manifestPath);
     expect(updated.groups[0]!.sessions[0]!.resume).toBe(validId);
+
+    host.close();
+    harness.close();
+  });
+
+  it('suppresses duplicate async persists while pending and retries after a false result', async () => {
+    const calls: string[] = [];
+    let resolveFirst!: (persisted: boolean) => void;
+    const first = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const harness = await startBrokerWithResumeSink((_tmuxSession, resume) => {
+      calls.push(resume);
+      return calls.length === 1 ? first : true;
+    });
+    const host = await harness.connectHost();
+    host.send({
+      type: 'hello',
+      session: 'sess-test-resume',
+      agent: 'opencode',
+      token: tokenFor('sess-test-resume', 'opencode'),
+      pid: 1
+    });
+    await host.waitFor((frame) => (frame as { type?: string }).type === 'hello-ack');
+
+    const validId = 'ses_async123456789012345678901234567890123456789';
+    host.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: validId }) });
+    host.send({ type: 'event', event: event(2, 'session-info', { agentSessionId: validId }) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls).toEqual([validId]);
+
+    resolveFirst(false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    host.send({ type: 'event', event: event(3, 'session-info', { agentSessionId: validId }) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls).toEqual([validId, validId]);
 
     host.close();
     harness.close();

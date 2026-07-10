@@ -5,15 +5,6 @@ export interface NativeFocusAnchorState {
   rowCount: number;
 }
 
-export interface NativeFocusAnchorScrollOptions {
-  targetIndex: number;
-  latestIndex: number;
-  scrollToIndex: (index: number, options: { align: 'end' }) => void;
-  getScrollElement: () => { scrollHeight: number; scrollTop: number } | null;
-  requestFrame?: (callback: FrameRequestCallback) => number;
-  maxPasses?: number;
-}
-
 export function resolveNativeFocusAnchorIndex(
   items: AgentFeedItem[],
   state: NativeFocusAnchorState
@@ -35,31 +26,29 @@ export function resolveNativeFocusAnchorIndex(
   return items.length - 1;
 }
 
-export function settleNativeFocusAnchorScroll(options: NativeFocusAnchorScrollOptions): () => void {
-  const maxPasses = Math.max(1, options.maxPasses ?? 3);
-  const requestFrame = options.requestFrame ?? ((callback: FrameRequestCallback) => requestAnimationFrame(callback));
-  let cancelled = false;
-  let pass = 0;
-  let lastScrollTop: number | null = null;
+export interface PrunedFocusAnchorState {
+  /** Last-seen row position in the model's ABSOLUTE (eviction-invariant) space. */
+  lastSeenAbsolute: number;
+  /** Top-level rows evicted from the front so far (RowModel.prunedRowCount). */
+  prunedRowCount: number;
+  /** Current retained top-level row count. */
+  rowCount: number;
+}
 
-  const scroll = (): void => {
-    if (cancelled) return;
-    pass += 1;
-    options.scrollToIndex(options.targetIndex, { align: 'end' });
-    const el = options.getScrollElement();
-    if (el && options.targetIndex === options.latestIndex) {
-      el.scrollTop = el.scrollHeight;
-    }
-    const scrollTop = el?.scrollTop ?? null;
-    const stable = scrollTop !== null && lastScrollTop !== null && Math.abs(scrollTop - lastScrollTop) < 1;
-    lastScrollTop = scrollTop;
-    if (pass < maxPasses && !stable) {
-      requestFrame(scroll);
-    }
-  };
-
-  scroll();
-  return () => {
-    cancelled = true;
-  };
+/**
+ * Prune-aware focus anchor. Converts an absolute last-seen position to a local
+ * index. If the last-seen boundary was ITSELF evicted (absolute > 0 but the local
+ * index is <= 0), every retained row is unread → land at the first retained row
+ * (index 0). Passing the clamped 0 straight into resolveNativeFocusAnchorIndex
+ * would instead read as no-history and jump to the LATEST row.
+ */
+export function resolveFocusAnchorIndex(items: AgentFeedItem[], state: PrunedFocusAnchorState): number | null {
+  if (items.length === 0) {
+    return null;
+  }
+  const rawLocal = state.lastSeenAbsolute - state.prunedRowCount;
+  if (state.lastSeenAbsolute > 0 && rawLocal <= 0) {
+    return 0;
+  }
+  return resolveNativeFocusAnchorIndex(items, { lastSeenRowCount: Math.max(0, rawLocal), rowCount: state.rowCount });
 }

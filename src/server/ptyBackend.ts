@@ -7,7 +7,7 @@
 // it exits at once, even though the tmux session is alive). Under Node the same
 // node-pty works, so the dev/Vite path keeps using it.
 //
-// terminalBroker.ts / terminalBridge.ts import { spawn, IPty } from here instead
-// of straight from 'node-pty' — that single seam is what the build swaps.
+// terminalBroker.ts imports { spawn, IPty } from here instead of straight from
+// 'node-pty' — that single seam is what the build swaps.
 export { spawn } from 'node-pty';
 export type { IPty } from 'node-pty';

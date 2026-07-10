@@ -11,6 +11,7 @@ function stubFetchReturning(body: unknown): { calls: Array<{ url: string; init: 
     calls.push({ url, init });
     return Promise.resolve({
       ok: true,
+      text: () => Promise.resolve(JSON.stringify(body)),
       json: () => Promise.resolve(body)
     } as Response);
   });

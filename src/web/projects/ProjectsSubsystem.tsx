@@ -36,13 +36,13 @@ import {
   isAgentSidebarCollapseSize,
   isSidebarHandleDragActive,
   setSidebarHandleDragActive,
-  defaultSidebarCollapsed,
   isNarrowViewport,
   surfaceMinSize,
   useNarrowViewport,
   readStoredSidebarCollapsed,
   readStoredSidebarWidth
 } from '../sidebarPanel.js';
+import { usePersistedCollapse } from '../usePersistedCollapse.js';
 import { saveSettings } from '../api.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import {
@@ -159,6 +159,8 @@ export function ProjectsSubsystem({
   const [owners, setOwners] = useState<ProjectOwner[]>([]);
   const [modalOwner, setModalOwner] = useState('');
   const [opBusy, setOpBusy] = useState(false);
+  const opInFlightRef = useRef(0);
+  const boardEpochRef = useRef(0);
 
   const projectIdRef = useRef<string | null>(null);
   projectIdRef.current = projectId;
@@ -209,9 +211,7 @@ export function ProjectsSubsystem({
   }, [auth, board, loadingBoard]);
 
   /* ---------- sidebar collapse (same mechanics as the other subsystems) ---------- */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(PROJECTS_SIDEBAR_STORAGE_KEY))
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistedCollapse(PROJECTS_SIDEBAR_STORAGE_KEY, onSidebarCollapsedChange);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringSidebarRef = useRef(false);
   // Persisted width: localStorage cache for instant boot, desk.yml as truth.
@@ -229,10 +229,6 @@ export function ProjectsSubsystem({
   const collapseSidebarRef = useRef<() => void>(() => undefined);
   const toggleSidebarRef = useRef<() => void>(() => undefined);
 
-  useEffect(() => {
-    localStorage.setItem(PROJECTS_SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
-    onSidebarCollapsedChange?.(sidebarCollapsed);
-  }, [sidebarCollapsed, onSidebarCollapsedChange]);
 
   useEffect(() => {
     // desk.yml width arrived (or changed in another browser): adopt it.
@@ -426,17 +422,23 @@ export function ProjectsSubsystem({
     [onError]
   );
 
-  const loadBoard = useCallback(async (id: string, quiet = false): Promise<void> => {
+  const loadBoard = useCallback(async (id: string, quiet = false, expectedEpoch?: number): Promise<void> => {
     const gen = (boardGenRef.current += quiet ? 0 : 1);
     if (!quiet) {
       setLoadingBoard(true);
     }
     try {
       const next = await projectsBoard(id);
-      if (projectIdRef.current === id && boardGenRef.current === gen) {
+      const current = projectIdRef.current === id && boardGenRef.current === gen;
+      // Any guarded fetch (a poll OR the coalesced post-op reload) is stale if a mutation
+      // started (epoch changed) or is still in flight since this fetch began — its snapshot
+      // must not overwrite newer optimistic state.
+      const epochStale =
+        expectedEpoch !== undefined && (boardEpochRef.current !== expectedEpoch || opInFlightRef.current > 0);
+      if (current && !epochStale) {
         setBoard(next);
         // keep the drawer's item reference fresh
-        setActiveItem((current) => (current ? next.items.find((item) => item.id === current.id) ?? null : null));
+        setActiveItem((currentItem) => (currentItem ? next.items.find((item) => item.id === currentItem.id) ?? null : null));
       }
     } catch (err) {
       report(err);
@@ -469,6 +471,7 @@ export function ProjectsSubsystem({
   );
 
   const refreshAll = useCallback(async (): Promise<void> => {
+    const pollEpoch = boardEpochRef.current;
     try {
       const list = await projectsList();
       setProjects(list.projects);
@@ -476,9 +479,13 @@ export function ProjectsSubsystem({
       report(err);
       return;
     }
+    // Bail if a mutation started while we were fetching — its optimistic state is truth now.
+    if (boardEpochRef.current !== pollEpoch || opInFlightRef.current > 0) {
+      return;
+    }
     const id = projectIdRef.current;
     if (id) {
-      await loadBoard(id, true);
+      await loadBoard(id, true, pollEpoch);
     }
   }, [loadBoard, report]);
 
@@ -512,7 +519,11 @@ export function ProjectsSubsystem({
       return;
     }
     const timer = window.setInterval(() => {
-      void refreshAll();
+      // Skip the background reload while any mutation is in flight, otherwise it clobbers
+      // the optimistic board (the card snaps back until the op's own reload lands).
+      if (opInFlightRef.current === 0) {
+        void refreshAll();
+      }
     }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [active, projectId, auth, refreshAll]);
@@ -521,25 +532,36 @@ export function ProjectsSubsystem({
 
   const runOp = useCallback(
     async (operation: () => Promise<unknown>, options: { deploy?: boolean; quietReload?: boolean } = {}): Promise<boolean> => {
-      const id = projectIdRef.current;
+      // Single-flight counter + board epoch: overlapping ops all release before the poll
+      // unblocks, and the epoch bump invalidates any poll already in flight (its board
+      // snapshot predates this optimistic change).
+      opInFlightRef.current += 1;
+      boardEpochRef.current += 1;
       setOpBusy(true);
       try {
         await operation();
         if (options.deploy) {
           bleeps.deploy?.play();
         }
-        if (id) {
-          await loadBoard(id, options.quietReload !== false);
-        }
         return true;
       } catch (err) {
         report(err);
-        if (id) {
-          await loadBoard(id, true); // roll back optimistic state to server truth
-        }
         return false;
       } finally {
-        setOpBusy(false);
+        opInFlightRef.current -= 1;
+        if (opInFlightRef.current === 0) {
+          setOpBusy(false);
+          // Coalesced reload after the LAST concurrent op settles: one authoritative sync
+          // to server truth (committing successes, rolling back any failed optimistic
+          // state) so an earlier op's reload can't clobber a later op still in flight.
+          // Guarded by its own epoch: if op B starts during this reload, its epoch bump
+          // rejects this now-stale response and B's own last-settler reload wins.
+          const id = projectIdRef.current;
+          if (id) {
+            const reloadEpoch = boardEpochRef.current;
+            await loadBoard(id, true, reloadEpoch);
+          }
+        }
       }
     },
     [bleeps, loadBoard, report]
@@ -640,13 +662,30 @@ export function ProjectsSubsystem({
   const dropOnCard = useCallback(
     (item: ProjectItem, column: BoardColumn, after: ProjectItem): void => {
       const id = projectIdRef.current;
-      if (!id) {
+      if (!id || !groupField) {
         return;
       }
-      moveToColumn(item, column);
-      void runOp(() => moveItemPosition(id, item.id, after.id));
+      const current = valueFor(item, groupField.id);
+      const sameColumn =
+        (current?.optionId ?? current?.iterationId ?? null) === (column.optionId ?? column.iterationId ?? null);
+      const payload: FieldValuePayload = column.optionId
+        ? { optionId: column.optionId }
+        : column.iterationId
+          ? { iterationId: column.iterationId }
+          : { clear: true };
+      if (!sameColumn) {
+        applyLocalFieldValue(item.id, groupField, payload);
+      }
+      // Sequence the field move then the position move inside ONE runOp so a single
+      // reload reflects both — two independent runOps raced and snapped the card back.
+      void runOp(async () => {
+        if (!sameColumn) {
+          await setFieldValue(id, item.id, groupField.id, payload);
+        }
+        await moveItemPosition(id, item.id, after.id);
+      });
     },
-    [moveToColumn, runOp]
+    [groupField, applyLocalFieldValue, runOp]
   );
 
   const openOnGitHub = useCallback((item: ProjectItem): void => {
@@ -1150,6 +1189,7 @@ export function ProjectsSubsystem({
                   onConvertDraft={(item) => openModal({ kind: 'convert-draft', item })}
                   onEditDraft={saveDraft}
                   onOpenExternal={openOnGitHub}
+                  onError={report}
                 />
               </div>
             </>

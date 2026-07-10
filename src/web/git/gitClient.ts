@@ -1,6 +1,7 @@
 /** Client for /api/git/* — same readJson conventions as fsClient. */
 
 import type { GitLineDiffResult, GitStatusMapRepo } from '../../shared/git.js';
+import { readJson } from '../httpJson.js';
 
 export type {
   GitBranchInfo,
@@ -65,14 +66,7 @@ export interface GitHubInfo {
 
 export type GitSyncOp = 'fetch' | 'pull' | 'push' | 'publish';
 
-async function readJson<T>(request: Promise<Response>): Promise<T> {
-  const response = await request;
-  const payload = (await response.json()) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error ?? `request failed (${response.status})`);
-  }
-  return payload;
-}
+// readJson now lives in ../httpJson.ts (text-first, ok-checked).
 
 const enc = encodeURIComponent;
 

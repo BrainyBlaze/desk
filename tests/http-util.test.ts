@@ -65,13 +65,42 @@ describe('sendJson', () => {
 });
 
 describe('readJsonBody', () => {
+  function makeRequest(headers: Record<string, string> = {}) {
+    return Object.assign(new PassThrough(), { headers }) as unknown as Parameters<typeof readJsonBody>[0];
+  }
+
   it('rejects invalid JSON with a generic public error', async () => {
-    const req = new PassThrough() as unknown as Parameters<typeof readJsonBody>[0];
+    const req = makeRequest();
     const promise = readJsonBody(req);
 
     req.end('{');
 
     await expect(promise).rejects.toThrow('Invalid JSON body');
     await expect(promise).rejects.not.toThrow(/Unexpected end/);
+  });
+
+  it('rejects a payload that grows beyond the configured byte cap', async () => {
+    const req = makeRequest();
+    const promise = readJsonBody(req, { maxBytes: 8 });
+
+    req.end('{"value":true}');
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'body-too-large',
+      statusCode: 413,
+      message: 'Request body too large'
+    });
+  });
+
+  it('rejects oversized content-length before reading the body', async () => {
+    const req = makeRequest({ 'content-length': '9' });
+    const promise = readJsonBody(req, { maxBytes: 8 });
+
+    req.end('ignored');
+
+    await expect(promise).rejects.toMatchObject({
+      code: 'body-too-large',
+      statusCode: 413
+    });
   });
 });

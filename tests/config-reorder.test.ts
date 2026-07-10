@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  editGroupInManifest,
   reorderProjectsInManifest,
   reorderGroupsInManifest,
   reorderSessionsInManifest,
@@ -58,6 +59,21 @@ describe('reorderSessionsInManifest', () => {
       reorderSessionsInManifest(manifest(), { projectId: 'alpha', groupId: 'nope', orderedSessionNames: [] })
     ).toThrow();
   });
+
+  it('falls back to a legacy top-level group when the project id is synthetic', () => {
+    const base: DeskManifest = {
+      groups: [{ id: 'legacy', sessions: [{ name: 's1' }, { name: 's2' }] }]
+    };
+    const next = reorderSessionsInManifest(base, {
+      projectId: 'cwd-project',
+      groupId: 'legacy',
+      projectCwd: '/legacy',
+      orderedSessionNames: ['s2', 's1']
+    });
+
+    expect(next.groups[0]?.sessions.map((session) => session.name)).toEqual(['s2', 's1']);
+    expect(next.groups[0]?.sessions.map((session) => session.order)).toEqual([0, 1]);
+  });
 });
 
 describe('setGroupLayoutSizesInManifest', () => {
@@ -73,5 +89,38 @@ describe('setGroupLayoutSizesInManifest', () => {
     expect(layout?.kind).toBe('linear');
     expect(layout?.cells).toBe(3);
     expect(layout?.sizes).toEqual({ rows: [60, 40], cols: [[50, 50]] });
+  });
+
+  it('updates a legacy top-level group without creating project data', () => {
+    const base: DeskManifest = {
+      groups: [{ id: 'legacy', layout: { kind: '2x2', cells: 4 }, sessions: [] }]
+    };
+    const next = setGroupLayoutSizesInManifest(base, {
+      projectId: 'cwd-project',
+      groupId: 'legacy',
+      projectCwd: '/legacy',
+      sizes: { rows: [40, 60] }
+    });
+
+    expect(next.groups[0]?.layout).toEqual({ kind: '2x2', cells: 4, sizes: { rows: [40, 60] } });
+    expect(next.projects).toBeUndefined();
+  });
+});
+
+describe('editGroupInManifest target parity', () => {
+  it('renames a legacy top-level group when the project id is synthetic', () => {
+    const base: DeskManifest = {
+      groups: [{ id: 'legacy', label: 'Old', sessions: [] }]
+    };
+    const next = editGroupInManifest(base, {
+      projectId: 'cwd-project',
+      currentGroupId: 'legacy',
+      groupId: 'renamed',
+      groupLabel: 'New',
+      projectCwd: '/legacy'
+    });
+
+    expect(next.groups[0]).toMatchObject({ id: 'renamed', label: 'New' });
+    expect(next.projects).toBeUndefined();
   });
 });

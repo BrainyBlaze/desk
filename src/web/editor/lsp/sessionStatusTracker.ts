@@ -7,6 +7,7 @@
 
 import type { LspExit, LspLifecycleStatus } from './connection.js';
 import type { LspProgress, LspSessionStatus } from './statusSegment.js';
+import { PROGRESS_OVERLAY_PHASES } from './statusSegment.js';
 
 export interface SessionStatusTracker {
   /** Fold a `type:'status'` lifecycle frame. */
@@ -20,7 +21,7 @@ export interface SessionStatusTracker {
 }
 
 /** Phases for which an active progress overlay is meaningful; others drop stale progress. */
-const PROGRESS_PHASES = new Set(['warming', 'ready']);
+// Progress-bearing phases live in statusSegment.ts (PROGRESS_OVERLAY_PHASES).
 
 interface ProgressValue {
   kind?: string;
@@ -81,7 +82,7 @@ export function createSessionStatusTracker(opts: {
       serverName = opts.serverName ?? status.serverConfigId;
       reason = status.reason;
       // A degraded/restarting/stopped session must not keep showing healthy indexing progress.
-      if (!PROGRESS_PHASES.has(status.state)) {
+      if (!PROGRESS_OVERLAY_PHASES.has(status.state)) {
         progress = undefined;
       }
       emit();

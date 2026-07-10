@@ -41,6 +41,16 @@ export interface DiskMetrics {
   writeBytesPerSecond?: number;
 }
 
+export interface SystemSamplerHealth {
+  /** Timestamp carried by the most recent successful snapshot. */
+  lastSampleAt: string;
+  /** Current wall-clock age of the most recent successful snapshot. */
+  staleForMs: number;
+  consecutiveFailures: number;
+  /** Stable, redacted failure code. Raw process and filesystem errors never reach clients. */
+  lastError?: 'sample-failed';
+}
+
 export interface SystemSnapshot {
   generatedAt: string;
   hostname: string;
@@ -55,4 +65,6 @@ export interface SystemSnapshot {
     nvidia: GpuMetrics;
     intel: GpuMetrics;
   };
+  /** Present on cached snapshots served by the background sampler. */
+  sampler?: SystemSamplerHealth;
 }

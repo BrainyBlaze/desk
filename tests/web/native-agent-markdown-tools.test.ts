@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 const nativeSurfaceSource = () => readFileSync('src/web/agentSurface/NativeAgentSurface.tsx', 'utf8');
 const stylesSource = () => readFileSync('src/web/styles.css', 'utf8');
 const appSource = () => readFileSync('src/web/App.tsx', 'utf8');
+const agentMultiplexerSource = () => readFileSync('src/web/AgentMultiplexer.tsx', 'utf8');
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -32,7 +33,7 @@ describe('native agent thinking indicator', () => {
     expect(source).toMatch(/const \[awaitingResponse, setAwaitingResponse\] = useState\(false\)/);
     expect(source).toMatch(/agentSurfaceClient\.send\(surfaceId, session, text\);[\s\S]*setAwaitingResponse\(true\);/);
     expect(source).toMatch(/if \(event\.kind !== 'session-info'\) \{[\s\S]*setAwaitingResponse\(false\);[\s\S]*\}/);
-    expect(source).toMatch(/onSnapshot: \(\{ state, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
+    expect(source).toMatch(/onSnapshot: \(\{ state, lastSeq, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onError: \(_code, message\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onExit: \(\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/const showAgentThinking =\s*awaitingResponse \|\| model\.status === 'processing' \|\| model\.status === 'tool-executing';/);
@@ -194,14 +195,15 @@ describe('native agent message actions and notes', () => {
   it('wires message context menus to the existing notes creator flow', () => {
     const surface = nativeSurfaceSource();
     const app = appSource();
+    const mux = agentMultiplexerSource();
 
     expect(surface).toMatch(/onMessageMenu\?: \(text: string, x: number, y: number\) => void/);
     expect(surface).toMatch(/onContextMenu=\{\(event\) => openMessageMenu\(event, row\.text\)\}/);
     expect(surface).toMatch(/<RowActions text=\{row\.text\} onCreateNote=\{onCreateNote\} \/>/);
     expect(app).toMatch(/onTerminalSelectionMenu: \(text: string, x: number, y: number\) => setTerminalMenu\(\{ text, x, y \}\)/);
-    expect(app).toMatch(/onSelectionMenu=\{onTerminalSelectionMenu\}/);
-    expect(app).toMatch(/onMessageMenu=\{onSelectionMenu\}/);
-    expect(app).toMatch(/onCreateNote=\{onCreateNoteFromText\}/);
+    expect(mux).toMatch(/onSelectionMenu=\{onTerminalSelectionMenu\}/);
+    expect(mux).toMatch(/onMessageMenu=\{onSelectionMenu\}/);
+    expect(mux).toMatch(/onCreateNote=\{onCreateNoteFromText\}/);
     expect(app).toMatch(/noteCreatorRef\.current\?\.\(text\)/);
   });
 

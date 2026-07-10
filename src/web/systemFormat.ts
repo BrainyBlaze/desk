@@ -1,3 +1,5 @@
+import type { SystemSnapshot } from './types.js';
+
 export function formatBytes(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) {
     return '-';
@@ -78,4 +80,35 @@ export function formatUptime(seconds: number): string {
     return `${hours}h ${minutes}m`;
   }
   return `${minutes}m`;
+}
+
+export function formatLoad(systemSnapshot: SystemSnapshot | null): string {
+  if (!systemSnapshot) {
+    return 'load init';
+  }
+  return `load ${systemSnapshot.cpu.loadAverage[0].toFixed(2)} / ${systemSnapshot.cpu.threads}t`;
+}
+
+/** Usage and VRAM together — the two numbers that matter while agents run models. */
+export function formatGpuValue(gpu: SystemSnapshot['gpu']['nvidia'] | undefined): string {
+  if (!gpu?.available) {
+    return 'N/A';
+  }
+  return `${formatPercent(gpu.utilizationGpuPercent)} | ${formatGpuMemory(gpu.memoryUsedMiB, gpu.memoryTotalMiB)}`;
+}
+
+/** Thermals and power; the marketing name lives in the tooltip instead of
+ * eating the line (it used to truncate the memory readout away). */
+export function formatGpuDetail(gpu: SystemSnapshot['gpu']['nvidia'] | undefined): string {
+  if (!gpu?.available) {
+    return gpu?.reason ?? 'unavailable';
+  }
+  const parts: string[] = [];
+  if (gpu.temperatureC !== undefined) {
+    parts.push(`${gpu.temperatureC}°C`);
+  }
+  if (gpu.powerDrawW !== undefined) {
+    parts.push(gpu.powerLimitW !== undefined ? `${Math.round(gpu.powerDrawW)}/${Math.round(gpu.powerLimitW)}W` : `${Math.round(gpu.powerDrawW)}W`);
+  }
+  return parts.length > 0 ? parts.join(' | ') : 'sensors n/a';
 }

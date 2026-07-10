@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import type { QueuedPrompt } from './channelsEngine.js';
+import type { QueuedPrompt } from './channelsProtocol.js';
 
 /**
  * Channels delivery durability — the on-disk lifecycle for a single queued

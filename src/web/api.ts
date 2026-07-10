@@ -1,5 +1,6 @@
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 import type { DeskLspUiSettings } from '../core/lspSettings.js';
+import { readJson } from './httpJson.js';
 
 interface LayoutPayload {
   kind: string;
@@ -204,33 +205,15 @@ export async function addSession(payload: {
   groupLabel?: string;
   session: SessionPayload;
 }): Promise<DeskSnapshot> {
-  return readJson(
-    fetch('/api/add', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
+  return postSnapshot('/api/add', payload);
 }
 
 export async function addGroup(payload: { groupId: string; groupLabel?: string }): Promise<DeskSnapshot> {
-  return readJson(
-    fetch('/api/add-group', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
+  return postSnapshot('/api/add-group', payload);
 }
 
 export async function addProject(payload: { projectId: string; projectLabel?: string; cwd: string }): Promise<DeskSnapshot> {
-  return readJson(
-    fetch('/api/add-project', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
+  return postSnapshot('/api/add-project', payload);
 }
 
 export async function addProjectGroup(payload: {
@@ -239,13 +222,7 @@ export async function addProjectGroup(payload: {
   groupLabel?: string;
   layout?: LayoutPayload;
 }): Promise<DeskSnapshot> {
-  return readJson(
-    fetch('/api/add-project-group', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
+  return postSnapshot('/api/add-project-group', payload);
 }
 
 export async function addProjectSession(payload: {
@@ -253,13 +230,7 @@ export async function addProjectSession(payload: {
   groupId: string;
   session: SessionPayload;
 }): Promise<DeskSnapshot> {
-  return readJson(
-    fetch('/api/add-project-session', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
+  return postSnapshot('/api/add-project-session', payload);
 }
 
 export async function editProject(payload: {
@@ -333,17 +304,18 @@ export async function setSessionUiMode(payload: {
   uiMode: 'terminal' | 'native';
   confirmDiscard?: boolean;
 }): Promise<DeskSnapshot> {
-  const response = await fetch('/api/set-session-ui-mode', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  const body = (await response.json()) as DeskSnapshot | { error?: string; code?: string };
-  if (!response.ok) {
-    const record = body as { error?: string; code?: string };
-    throw new ApiCodeError(record.error ?? `request failed ${response.status}`, record.code);
-  }
-  return body as DeskSnapshot;
+  return readJson<DeskSnapshot>(
+    fetch('/api/set-session-ui-mode', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    }),
+    ({ status, body }) => {
+      const code = typeof body?.code === 'string' ? body.code : undefined;
+      const error = typeof body?.error === 'string' ? body.error : undefined;
+      return new ApiCodeError(error ?? `request failed (${status})`, code);
+    }
+  );
 }
 
 export async function moveProjectSession(payload: {
@@ -441,15 +413,4 @@ function postSnapshot(path: string, payload: unknown): Promise<DeskSnapshot> {
   );
 }
 
-async function readJson<T>(responsePromise: Promise<Response>): Promise<T> {
-  const response = await responsePromise;
-  const payload = (await response.json()) as T | { error?: string };
-  if (!response.ok) {
-    const message =
-      typeof payload === 'object' && payload !== null && 'error' in payload && payload.error
-        ? payload.error
-        : `request failed ${response.status}`;
-    throw new Error(message);
-  }
-  return payload as T;
-}
+// readJson now lives in ./httpJson.ts (text-first, ok-checked, error-mappable).

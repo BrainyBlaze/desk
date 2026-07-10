@@ -1,5 +1,10 @@
 import type { DeskAgent } from './types.js';
 
+/** High but finite protocol caps. These guard allocation; they are not UI truncation limits. */
+export const MAX_AGENT_SURFACE_TEXT_LENGTH = 4 * 1024 * 1024;
+export const MAX_AGENT_SURFACE_OPTIONS = 100;
+export const MAX_AGENT_SURFACE_COMMANDS = 500;
+
 /**
  * Native UI mode — normalized agent-surface protocol (spec: docs/native-ui-mode-spec.md §4).
  *
@@ -7,6 +12,14 @@ import type { DeskAgent } from './types.js';
  * one broker fans it to browser surfaces. Type definitions are the frozen Phase 0
  * contract; parse-or-throw validators land with their RED tests in follow-up commits.
  */
+
+/**
+ * Bound on retained agent-surface rows/events. The broker keeps this many
+ * committed events in its per-session ring, and the client row model retains at
+ * most this many rows — a single shared ceiling so neither side out-buffers the
+ * other. Both the server broker and the client rowsModel import this.
+ */
+export const AGENT_SURFACE_RING_SIZE = 2000;
 
 export type AgentSurfaceState =
   | 'starting'
@@ -368,7 +381,7 @@ export function parseAgentHostClientFrame(value: unknown): AgentHostClientFrame 
 }
 
 function parseOptions(value: unknown): AgentSurfacePermissionOption[] {
-  if (!Array.isArray(value) || value.length === 0) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_AGENT_SURFACE_OPTIONS) {
     throw invalidFrame();
   }
   return value.map((entry) => {
@@ -407,7 +420,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function parseCommands(value: unknown): AgentSurfaceCommand[] {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > MAX_AGENT_SURFACE_COMMANDS) {
     throw invalidFrame();
   }
   return value.map((entry) => {
@@ -420,14 +433,15 @@ function parseCommands(value: unknown): AgentSurfaceCommand[] {
 }
 
 function nonEmptyString(value: unknown): string {
-  if (typeof value !== 'string' || value.trim() === '') {
+  const parsed = str(value);
+  if (parsed.trim() === '') {
     throw invalidFrame();
   }
-  return value;
+  return parsed;
 }
 
 function str(value: unknown): string {
-  if (typeof value !== 'string') {
+  if (typeof value !== 'string' || value.length > MAX_AGENT_SURFACE_TEXT_LENGTH) {
     throw invalidFrame();
   }
   return value;

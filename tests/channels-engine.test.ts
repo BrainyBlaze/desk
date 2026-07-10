@@ -114,6 +114,7 @@ describe('ChannelsEngine delivery gating', () => {
   });
 
   afterEach(() => {
+    engine.dispose();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -513,6 +514,44 @@ describe('ChannelsEngine delivery gating', () => {
         queued: 0
       });
       expect(diag.blockedItems).toEqual([]);
+      eng.dispose();
+    });
+
+    it('inspectSession surfaces durable stuck-unobservable items for operator action', async () => {
+      const eng = opsEngine({ blockedAfterCycles: 2 });
+      const dir = join(home, '_engine', 'queue', 'tmux-a');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, '0000000011.stuck-unobservable'),
+        JSON.stringify({
+          seq: 11,
+          channel: 'ops',
+          messageId: 'msg-stuck-unobservable-1',
+          author: 'human',
+          prompt: '@alpha unobservable prompt',
+          queuedAt: '2026-06-18T09:00:00.000Z',
+          kind: 'message'
+        })
+      );
+      const diag = await eng.inspectSession('tmux-a');
+      expect(diag).toMatchObject({
+        status: 'idle',
+        deliveryBlocked: false,
+        queued: 0
+      });
+      expect(diag.blockedItems).toEqual([
+        {
+          seq: 11,
+          kind: 'unobservable',
+          channel: 'ops',
+          messageId: 'msg-stuck-unobservable-1',
+          author: 'human',
+          queuedAt: '2026-06-18T09:00:00.000Z',
+          preview: '@alpha unobservable prompt'
+        }
+      ]);
+      eng.pauseSession('tmux-a');
+      expect(eng.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.blockedItemCount).toBe(1);
       eng.dispose();
     });
 
@@ -1618,7 +1657,7 @@ describe('ChannelsEngine delivery gating', () => {
     expect(isPaneBusy(workingNoAffordance)).toBe(true); // spinner family still fires
   });
 
-  it('boot grace does not gate forced notification delivery', async () => {
+  it('boot grace gates standalone prompts until the session is old enough', async () => {
     let createdAt = Math.floor(Date.now() / 1000); // just started
     const pushed: string[] = [];
     const graced = new ChannelsEngine({
@@ -1637,9 +1676,13 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '❯ '
     });
     graced.enqueuePrompt('tmux-a', 'ops', 'onboarding for a freshly started agent', 'onboard-ops');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(pushed).toEqual([]);
+    expect((await graced.inspectSession('tmux-a')).paneState).toBe('booting');
+    createdAt = Math.floor(Date.now() / 1000) - 3600;
+    graced.handleAgentSignal('tmux-a', 'turn-complete');
     await waitFor(() => pushed.length === 1);
     expect(pushed[0]).toContain('onboarding for a freshly started agent');
-    createdAt = Math.floor(Date.now() / 1000) - 3600;
     graced.dispose();
   });
 
@@ -1698,6 +1741,32 @@ describe('ChannelsEngine delivery gating', () => {
     owner.dispose();
     intruder.dispose();
     successor.dispose();
+    rmSync(lockedHome, { recursive: true, force: true });
+  });
+
+  it('single-engine guard: corrupt engine.pid fails closed instead of dispatching as owner', async () => {
+    const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-corrupt-'));
+    mkdirSync(join(lockedHome, '_engine', 'engine.pid'), { recursive: true });
+    const pushed: string[] = [];
+    const engine = new ChannelsEngine({
+      home: lockedHome,
+      pid: 400,
+      sendText: async (_session, text) => {
+        pushed.push(text);
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => '❯ '
+    });
+
+    expect(engine.passive).toBe(true);
+    expect(engine.lockError).toMatch(/engine\.pid/i);
+    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-lock-corrupt', 'human', '@alpha hi') }, members);
+    await flush();
+    expect(pushed).toHaveLength(0);
+
+    engine.dispose();
     rmSync(lockedHome, { recursive: true, force: true });
   });
 
@@ -1765,7 +1834,7 @@ describe('ChannelsEngine delivery gating', () => {
     expect(prompt).toContain('introducing yourself');
   });
 
-  it('enqueuePrompt rides the same forced delivery path as dispatches', async () => {
+  it('enqueuePrompt waits for a ready pane while notifications remain force-delivered', async () => {
     let pane = '✻ Working… (esc to interrupt)';
     const pushed: string[] = [];
     const onboarding = new ChannelsEngine({
@@ -1782,37 +1851,69 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => pane
     });
     onboarding.enqueuePrompt('tmux-a', 'ops', 'welcome aboard @alpha', 'onboard-ops');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(pushed).toEqual([]);
+    pane = '❯ ';
+    onboarding.handleAgentSignal('tmux-a', 'turn-complete');
     await waitFor(() => pushed.length === 1);
     expect(pushed).toEqual(['welcome aboard @alpha']);
-    pane = '❯ ';
     onboarding.dispose();
+  });
+
+  it('acknowledges native prompts from broker injection without tmux verification', async () => {
+    const pushed: string[] = [];
+    const native = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 10,
+      sendText: async (_session, text) => {
+        pushed.push(text);
+        return true;
+      },
+      sessionInfo: () => ({ uiMode: 'native' }),
+      nativeSessionState: () => 'ready',
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => {
+        throw new Error('native delivery must not inspect tmux');
+      }
+    });
+    native.enqueuePrompt('tmux-a', 'ops', 'native onboarding', 'native-onboard');
+    await waitFor(() => pushed.length === 1);
+    await waitFor(() => native.lifecycleStates()[0]?.submitState === 'submitted');
+    expect(pushed).toEqual(['native onboarding']);
+    native.dispose();
   });
 
   it('clears a stale busy flag when an idle agent never sent its release signal', async () => {
     const pane = '❯ '; // idle prompt the whole time
-    const reconciling = new ChannelsEngine({
+    let busyAtSend: boolean | undefined;
+    let reconciling!: ChannelsEngine;
+    reconciling = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
-      // Small override window (not 0): keeps the post-delivery busy flag stable long
-      // enough for the immediate assertion below, then the pump clears it. busyOverrideMs:0
-      // raced the pump under full-suite load and made this test flaky (load-sensitive).
-      busyOverrideMs: 80,
       enterVerifyDelayMs: 1,
-      sendText: async () => true,
+      sendText: async () => {
+        busyAtSend = reconciling.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.busy;
+        return true;
+      },
       sendEnter: async () => true,
       sessionRunning: () => true,
       sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     const busyOf = () => reconciling.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy;
-    reconciling.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-r-aaaa', 'human', '@alpha go') }, members);
-    await flush();
-    expect(busyOf()).toBe(true); // delivered → flagged busy
-    // No release signal arrives; the pane is idle → the pump must clear the flag.
-    await waitFor(() => busyOf() === false);
-    expect(busyOf()).toBe(false);
-    reconciling.dispose();
+    try {
+      reconciling.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-r-aaaa', 'human', '@alpha go') }, members);
+      await waitFor(() => busyAtSend !== undefined);
+      expect(busyAtSend).toBe(true); // delivery claims busy before the async paste
+      // No release signal arrives; the pane is idle → the pump must clear the flag.
+      await waitFor(() => busyOf() === false);
+      expect(busyOf()).toBe(false);
+    } finally {
+      reconciling.dispose();
+    }
   });
 
   it('keeps the busy flag while the pane still shows a running turn', async () => {
@@ -2077,6 +2178,53 @@ describe('engine drain race safety', () => {
     resolvePush?.();
     await flush();
     expect(sent).toHaveLength(1);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('does not apply a stale prompt-gate decision after the queue head changes', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-gate-race-'));
+    const sent: string[] = [];
+    let releaseFirstCapture: ((pane: string) => void) | undefined;
+    let markFirstCaptureStarted: (() => void) | undefined;
+    const firstCaptureStarted = new Promise<void>((resolve) => {
+      markFirstCaptureStarted = resolve;
+    });
+    let firstCapture = true;
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 60_000,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => {
+        if (!firstCapture) {
+          return '❯ ';
+        }
+        firstCapture = false;
+        markFirstCaptureStarted?.();
+        return await new Promise<string>((resolve) => {
+          releaseFirstCapture = resolve;
+        });
+      }
+    });
+
+    engine.enqueuePrompt('tmux-a', 'ops', 'stale head', 'stale-head');
+    await firstCaptureStarted;
+    const staleSeq = engine.queuedItems('tmux-a')[0]!.seq;
+    expect(engine.dropMessage('tmux-a', staleSeq)).toBe(true);
+    engine.enqueuePrompt('tmux-a', 'ops', 'replacement head', 'replacement-head');
+    releaseFirstCapture?.('❯ ');
+    await flush();
+
+    expect(sent).toEqual([]);
+    engine.handleAgentSignal('tmux-a', 'turn-complete');
+    await waitFor(() => sent.length === 1);
+    expect(sent).toEqual(['replacement head']);
+    engine.dispose();
     rmSync(home, { recursive: true, force: true });
   });
 });

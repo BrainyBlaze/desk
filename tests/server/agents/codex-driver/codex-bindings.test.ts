@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 
 describe('Codex app-server generated bindings', () => {
@@ -30,5 +31,29 @@ describe('Codex app-server generated bindings', () => {
     );
 
     expect(source).toContain("codex-cli 0.142.5");
+  });
+
+  it('keeps handwritten driver imports behind one protocol adapter', async () => {
+    const adapterUrl = new URL('../../../../src/server/agents/codexProtocol.ts', import.meta.url);
+    expect(existsSync(adapterUrl)).toBe(true);
+    if (!existsSync(adapterUrl)) {
+      return;
+    }
+    const [adapter, driver] = await Promise.all([
+      readFile(adapterUrl, 'utf8'),
+      readFile(new URL('../../../../src/server/agents/drivers/codexDriver.ts', import.meta.url), 'utf8')
+    ]);
+
+    expect(adapter).toContain("codexBindings/ServerNotification.js");
+    expect(adapter).toContain("codexBindings/v2/Thread.js");
+    expect(driver).toContain("from '../codexProtocol.js'");
+    expect(driver).not.toContain('codexBindings/');
+  });
+
+  it('exposes the guarded bindings generator as an npm script', async () => {
+    const pkg = JSON.parse(await readFile(new URL('../../../../package.json', import.meta.url), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    expect(pkg.scripts?.['generate:codex-bindings']).toBe('node scripts/generate-codex-bindings.mjs');
   });
 });

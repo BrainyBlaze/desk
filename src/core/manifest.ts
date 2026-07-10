@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { shellQuote } from '../shared/shell.js';
 import type {
   AgentMcpLaunchConfig,
   BuildSessionOptions,
@@ -360,7 +361,7 @@ function buildClaudeResumeCommand(env: string, baseCommand: string, resume: stri
     `desk_claude_session=${sdkTranscript}`,
     `${env} ${baseCommand} --resume ${resumeArg}`,
     'desk_claude_resume_status=$?',
-    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue" >&2; if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi; ${env} ${baseCommand} --continue; desk_claude_continue_status=$?; if [ "$desk_claude_continue_status" -ne 0 ]; then printf '%s\\n' "desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics" >&2; printf '%s\\n' "desk: claude resume id: ${resume}" >&2; exec "\${SHELL:-/bin/sh}"; fi; fi`
+    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue" >&2; if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi; ${env} ${baseCommand} --continue; desk_claude_continue_status=$?; if [ "$desk_claude_continue_status" -ne 0 ]; then printf '%s\\n' "desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi; fi`
   ].join('; ');
 }
 
@@ -379,9 +380,7 @@ function sessionHashSeed(session: DeskSession, cwd: string): string {
   return [session.agent ?? 'command', session.name, cwd, session.bypassPermissions === false ? 'ask' : 'allow'].join('|');
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+// shellQuote now lives in ../shared/shell.ts (single audited copy).
 
 function slugPart(value: string): string {
   return value

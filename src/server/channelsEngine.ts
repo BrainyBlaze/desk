@@ -13,6 +13,7 @@ import {
   type SessionResumeInfo,
   type SubmitState,
   type DeliveryBlockReason,
+  type QueuedPrompt,
   type QueuedItemMeta,
   type BlockedItemMeta,
   type SessionDiagnostic
@@ -43,41 +44,22 @@ import { listPausedSessions } from './channelsPaused.js';
 import { writeFileAtomic } from './fsOps.js';
 import { AgentPresenceModel } from './agentPresence.js';
 import type { AgentEventV2 } from './agentEvents.js';
+import { NativePromptDeliveryStrategy, NotificationDeliveryStrategy, PromptDeliveryStrategy, type NativeDeliveryState } from './channelsDeliveryStrategy.js';
 
 /**
- * Channels engine — per-agent delivery queues gated on desk's agent signals.
+ * Channels engine — per-agent delivery queues with explicit delivery contracts.
  *
  * Every finalised channel message is resolved to its @mention targets; each
- * target gets a prompt queued under its tmux session. A queued prompt is
- * pushed into the agent terminal (tmux send-keys: literal body, pause, Enter)
- * only while the agent's input is released:
- *
- *   - delivery marks the agent BUSY (its turn is now in flight);
- *   - a turn-complete / bell signal (the same events that light the desk
- *     notification lamp) releases it and drains the next queued prompt;
- *   - approval-requested does NOT release — the agent is waiting on a human
- *     and injected text would answer the approval dialog.
+ * target gets a notification queued under its tmux session. Notification-only
+ * items are idempotent and force-delivered without pane gating. Standalone
+ * prompts, such as onboarding, require a fresh ready-pane snapshot so injected
+ * text cannot answer an approval dialog or interrupt a running turn. Explicit
+ * operator force-delivery bypasses that prompt gate.
  *
  * Queues survive server restarts via _engine/queue/<tmux>/<seq>.json files.
  */
 
 export type AgentSignalKind = 'turn-complete' | 'approval-requested' | 'input-requested' | 'bell';
-
-export interface QueuedPrompt {
-  seq: number;
-  channel: string;
-  messageId: string;
-  author: string;
-  prompt: string;
-  queuedAt: string;
-  /** 'prompt' = standalone briefing (onboarding) that must deliver verbatim;
-      absent/'message' = channel dispatch, eligible for digest coalescing */
-  kind?: 'message' | 'prompt';
-  /** conversation file the message lives in (root.md / thread-…) — digest pointer */
-  file?: string;
-  /** the receiving member's channel handle (for --as in digest instructions) */
-  member?: string;
-}
 
 // MemberDeliveryState / PaneState / SubmitState / DeliveryBlockReason /
 // QueuedItemMeta / SessionDiagnostic are DEFINED in channelsProtocol.ts now —
@@ -94,7 +76,8 @@ export type {
   BlockedItemMeta,
   SessionDiagnostic,
   ChannelActivityEvent,
-  SessionResumeInfo
+  SessionResumeInfo,
+  QueuedPrompt
 };
 
 export interface ChannelsEngineOptions {
@@ -150,6 +133,7 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (tmuxSession: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  nativeSessionState?: (tmuxSession: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
   /** never deliver to a tmux session younger than this (TUIs swallow input while booting) */
   bootGraceMs?: number;
   /** epoch-seconds session creation lookup (injectable for tests) */
@@ -195,6 +179,12 @@ function parsePidFile(content: string): { pid: number; starttime: number | null 
   }
   const starttime = Number(starttimeRaw);
   return { pid, starttime: Number.isFinite(starttime) ? starttime : null };
+}
+
+function engineLockErrorMessage(lockPath: string, error: unknown): string {
+  const err = error as NodeJS.ErrnoException;
+  const message = err instanceof Error ? err.message : String(error);
+  return `channels engine lock ${lockPath}: ${err.code ? `${err.code}: ` : ''}${message}`;
 }
 
 function threadParentIdFromFile(file: string): string | undefined {
@@ -635,10 +625,14 @@ export class ChannelsEngine {
   private readonly onSubmitStateChange?: (tmuxSession: string, state: SubmitState, context: { seq: number }) => void;
   private readonly staleAfterMs: number;
   private readonly sessionInfo: (tmuxSession: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  private readonly nativeSessionState?: (tmuxSession: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
   private readonly bootGraceMs: number;
   private readonly sessionCreatedAt: (tmuxSession: string) => Promise<number | null>;
   /** single shared pane classifier — drain, verify, signal-release, and the ops console all read it */
   private readonly probe: SessionProbe;
+  private readonly promptDeliveryStrategy: PromptDeliveryStrategy;
+  private readonly nativePromptDeliveryStrategy?: NativePromptDeliveryStrategy;
+  private readonly notificationDeliveryStrategy = new NotificationDeliveryStrategy();
   private pumpTimer: NodeJS.Timeout | undefined;
   /** delivered (session:messageId) pairs — dispatch dedupe across all paths */
   private readonly delivered = new Set<string>();
@@ -649,6 +643,8 @@ export class ChannelsEngine {
   readonly passive: boolean;
   /** when passive: the pid of the desk process that owns dispatch, used for the operator recovery hint */
   passiveOwnerPid?: number;
+  /** set when the engine lock could not be inspected safely and dispatch is disabled */
+  lockError?: string;
 
   constructor(private readonly options: ChannelsEngineOptions) {
     this.sendText =
@@ -665,6 +661,7 @@ export class ChannelsEngine {
     this.onSubmitStateChange = options.onSubmitStateChange;
     this.staleAfterMs = options.staleAfterMs ?? 10 * 60 * 1000;
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
+    this.nativeSessionState = options.nativeSessionState;
     this.bootGraceMs = options.bootGraceMs ?? 15_000;
     this.sessionCreatedAt = options.sessionCreatedAt ?? defaultSessionCreatedAt;
     // One classifier for the whole engine: it owns sessionRunning(offline),
@@ -680,6 +677,10 @@ export class ChannelsEngine {
       bootGraceMs: this.bootGraceMs,
       ttlMs: options.probeTtlMs ?? DEFAULT_ENGINE_PROBE_TTL_MS
     });
+    this.promptDeliveryStrategy = new PromptDeliveryStrategy(this.probe);
+    this.nativePromptDeliveryStrategy = options.nativeSessionState
+      ? new NativePromptDeliveryStrategy(options.nativeSessionState)
+      : undefined;
     this.passive = !this.acquireEngineLock();
     if (!this.passive) {
       this.restorePausedSessions();
@@ -709,6 +710,8 @@ export class ChannelsEngine {
     const alive = this.options.pidAlive ?? defaultPidAlive;
     const readStarttime = this.options.pidStarttimeReader ?? defaultPidStarttimeReader;
     const lockPath = join(this.options.home, '_engine', 'engine.pid');
+    let lockStage: 'prepare' | 'create' | 'inspect' = 'prepare';
+    this.lockError = undefined;
     try {
       mkdirSync(join(this.options.home, '_engine'), { recursive: true });
       // Atomic acquire: O_EXCL means this call is the only one that can
@@ -716,6 +719,7 @@ export class ChannelsEngine {
       // hits EEXIST falls through to the holder inspection below.
       let fd: number | undefined;
       try {
+        lockStage = 'create';
         fd = openSync(lockPath, 'wx');
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
@@ -734,6 +738,7 @@ export class ChannelsEngine {
         return true;
       }
       // Lock exists — decide whether it is stale (steal) or valid (go passive).
+      lockStage = 'inspect';
       const parsed = parsePidFile(readFileSync(lockPath, 'utf8'));
       if (parsed === null) {
         // Unparseable — treat as stale and reclaim.
@@ -785,9 +790,11 @@ export class ChannelsEngine {
       // fresh — a real other desk process owns this engine. Go passive.
       this.passiveOwnerPid = holderPid;
       return false;
-    } catch {
-      // Unwritable home: act as owner rather than silently going mute.
-      return true;
+    } catch (error) {
+      this.lockError = engineLockErrorMessage(lockPath, error);
+      // Missing/unwritable lock storage at startup degrades to local ownership;
+      // an existing lock that cannot be inspected fails closed to prevent double dispatch.
+      return lockStage !== 'inspect';
     }
   }
 
@@ -829,6 +836,12 @@ export class ChannelsEngine {
    */
   private async reconcileBusy(runtime: MemberRuntime): Promise<void> {
     if (this.disposed || runtime.pausedByOperator) {
+      return;
+    }
+    if (this.sessionInfo(runtime.tmuxSession)?.uiMode === 'native' && this.nativeSessionState) {
+      const state = await this.nativeSessionState(runtime.tmuxSession);
+      runtime.busy = state === 'busy';
+      runtime.awaitingApproval = state === 'approval';
       return;
     }
     const snap = await this.diagnosticProbe(runtime.tmuxSession);
@@ -902,43 +915,6 @@ export class ChannelsEngine {
       if (timer) {
         clearTimeout(timer);
       }
-    }
-  }
-
-  /**
-   * Map a non-ready probe snapshot to the held-queue DeliveryBlockReason.
-   * Recognized menu families are carried precisely; unrecognized-shape still
-   * collapses to not-ready because it is not positive menu evidence.
-   */
-  private blockReasonFromSnapshot(snap: SessionProbeSnapshot): DeliveryBlockReason {
-    switch (snap.paneState) {
-      case 'working':
-        return 'busy';
-      case 'offline':
-        return 'offline';
-      case 'booting':
-        return 'booting';
-      case 'empty-capture':
-        return 'empty-capture';
-      case 'unobservable':
-        return 'capture-failed';
-      case 'blocked':
-        if (snap.blockedReason === 'approval') {
-          return 'approval';
-        }
-        if (snap.blockedReason === 'input-requested') {
-          return 'input-requested';
-        }
-        if (
-          snap.blockedReason === 'trust-menu' ||
-          snap.blockedReason === 'selection-menu' ||
-          snap.blockedReason === 'unknown-menu'
-        ) {
-          return snap.blockedReason;
-        }
-        return 'not-ready';
-      default:
-        return 'not-ready';
     }
   }
 
@@ -1551,16 +1527,24 @@ export class ChannelsEngine {
     runtime.draining = true;
     runtime.drainingSince = Date.now();
     try {
-      // Operator-required behavior: channel notifications are notification-only
-      // and idempotent, so regular delivery uses the same path as force delivery
-      // and never gates on live pane status, presence color, approval menus, or
-      // probe classifier output. If tmux accepts the paste, the notification was
-      // injected; ACK hooks are best-effort evidence, not delivery authority.
+      const next = runtime.queue[0];
+      if (!next) {
+        this.resetHold(runtime);
+        return;
+      }
+      const headSeq = next.seq;
+      const native = this.sessionInfo(runtime.tmuxSession)?.uiMode === 'native';
+      const strategy = next.kind !== 'prompt'
+        ? this.notificationDeliveryStrategy
+        : native && this.nativePromptDeliveryStrategy
+          ? this.nativePromptDeliveryStrategy
+          : this.promptDeliveryStrategy;
+      const decision = await strategy.decide(runtime.tmuxSession);
       if (process.env.DESK_CHANNELS_DEBUG) {
         try {
           appendFileSync(
             '/tmp/chan-engine-debug.log',
-            `${new Date().toISOString()} drain ${runtime.tmuxSession} force queued=${runtime.queue.length}\n`
+            `${new Date().toISOString()} drain ${runtime.tmuxSession} kind=${next.kind ?? 'message'} deliver=${decision.deliver} queued=${runtime.queue.length}\n`
           );
         } catch {
           // tracing must never break delivery
@@ -1569,16 +1553,26 @@ export class ChannelsEngine {
       if (runtime.drainGeneration !== generation) {
         return;
       }
-      if (this.disposed || runtime.queue.length === 0) {
-        if (runtime.queue.length === 0) {
+      const currentHead = runtime.queue[0];
+      if (this.disposed || !currentHead || currentHead.seq !== headSeq) {
+        if (!currentHead) {
           this.resetHold(runtime);
         }
+        return;
+      }
+      if (!decision.deliver) {
+        runtime.busy = decision.snapshot?.working ?? decision.reason === 'busy';
+        runtime.awaitingApproval =
+          decision.reason === 'approval' ||
+          (decision.snapshot?.paneState === 'blocked' &&
+            (decision.snapshot.blockedReason === 'approval' || decision.snapshot.blockedReason === 'input-requested'));
+        this.recordHold(runtime, decision.reason, countHoldCycle);
         return;
       }
       runtime.busy = false;
       runtime.awaitingApproval = false;
       this.resetHold(runtime);
-      await this.deliverNext(runtime, countHoldCycle);
+      await this.deliverNext(runtime, countHoldCycle, undefined, decision.snapshot);
     } finally {
       runtime.draining = false;
     }
@@ -1591,7 +1585,12 @@ export class ChannelsEngine {
    * decided the agent is eligible (drain's gates, or a forced operator override
    * from the ops console). Returns whether the push reached tmux.
    */
-  private async deliverNext(runtime: MemberRuntime, countHoldCycle = false, forceSeq?: number): Promise<boolean> {
+  private async deliverNext(
+    runtime: MemberRuntime,
+    countHoldCycle = false,
+    forceSeq?: number,
+    deliverySnapshot?: SessionProbeSnapshot
+  ): Promise<boolean> {
     // forceSeq targets a specific queue item (operator force-deliver by seq);
     // otherwise the head. A forced single-seq delivery never coalesces — the
     // operator is retrying THAT item, not flushing the whole backlog.
@@ -1613,7 +1612,8 @@ export class ChannelsEngine {
     // queue item(s) for the durability layer's per-file renames.
     const deliveredSeqs = digest ? digestItems.map((item) => item.seq) : [next.seq];
     const notificationId = digest ? `digest-${deliveredSeqs.join('-')}-${next.messageId}` : next.messageId;
-    const needsLegacyVerify = next.kind === 'prompt';
+    const native = this.sessionInfo(runtime.tmuxSession)?.uiMode === 'native';
+    const needsLegacyVerify = next.kind === 'prompt' && !native;
     runtime.busy = true; // claim before the async push so signals interleave safely
     // Claim the item(s): the durability slice renames <seq>.json → .delivering on
     // this synchronous transition, before the paste.
@@ -1631,7 +1631,9 @@ export class ChannelsEngine {
     // notification items, so keep the legacy pane verifier for them until that
     // path gets its own explicit ACK contract. Channel notifications are force
     // delivered: if tmux accepts the paste, the queue advances immediately.
-    const preSnap = needsLegacyVerify ? await this.probe.probe(runtime.tmuxSession, { source: 'verify', forceFresh: true }) : undefined;
+    const preSnap = needsLegacyVerify
+      ? deliverySnapshot ?? await this.probe.probe(runtime.tmuxSession, { source: 'verify', forceFresh: true })
+      : undefined;
     const delivered = await this.sendText(runtime.tmuxSession, payload);
     if (!delivered) {
       runtime.busy = false;
@@ -1848,7 +1850,8 @@ export class ChannelsEngine {
 
   /**
    * Queues a non-message prompt (onboarding briefing, operator nudge) for a
-   * session through the same gated delivery path as channel dispatches.
+   * session. Unlike notification-only channel dispatches, these prompts wait
+   * for a fresh ready-pane snapshot before delivery.
    */
   enqueuePrompt(tmuxSession: string, channel: string, prompt: string, idHint: string): void {
     if (this.disposed || this.passive) {
@@ -2007,10 +2010,19 @@ export class ChannelsEngine {
     }));
   }
 
-  /** Ops console: legacy .stuck-* files are historical only and never block notification delivery. */
+  /** Ops console: durable unobservable stuck files are actionable; legacy submit/paste stuck files stay historical. */
   private blockedItems(tmuxSession: string): BlockedItemMeta[] {
-    void tmuxSession;
-    return [];
+    return listStuckItems(this.options.home, tmuxSession)
+      .filter((stuck) => stuck.kind === 'unobservable')
+      .map((stuck) => ({
+        seq: stuck.seq,
+        kind: stuck.kind,
+        channel: stuck.item.channel,
+        messageId: stuck.item.messageId,
+        author: stuck.item.author,
+        queuedAt: stuck.item.queuedAt,
+        preview: stuck.item.prompt.split('\n').find((line) => line.trim() !== '')?.slice(0, 140) ?? ''
+      }));
   }
 
   /** Live deliverability of a session's pane (drives the ops-console badge). */

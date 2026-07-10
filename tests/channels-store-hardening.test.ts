@@ -79,6 +79,13 @@ describe('destroy serialization: destroyChannel serializes via home lock', () =>
     expect(existsSync(join(home, 'never-existed'))).toBe(false);
   });
 
+  it('destroys a channel named home without colliding with the global lock', () => {
+    createChannel(home, 'home', 'goal');
+
+    expect(() => destroyChannel(home, 'home')).not.toThrow();
+    expect(existsSync(join(home, 'home'))).toBe(false);
+  }, 15_000);
+
   // Race: a concurrent createChannel must not collide with destroyChannel.
   // Both acquire the home lock; serialized cleanly; one wins, the other throws
   // or no-ops deterministically (never partial state on disk).

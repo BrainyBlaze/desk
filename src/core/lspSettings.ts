@@ -9,6 +9,12 @@ export interface DeskLspUiSettings {
    */
   disabledLanguages?: string[];
   baseUrl?: string;
+  /** Runtime-only built-in server ids unavailable on this Desk installation. */
+  missingBuiltins?: string[];
+}
+
+export interface DeskLspRuntimeDiagnostics {
+  missingBuiltins?: unknown;
 }
 
 export type DeskClientSettings = Omit<DeskSettings, 'lsp'> & {
@@ -35,7 +41,10 @@ export function normalizeLspUiSettings(raw: unknown): DeskLspUiSettings {
   return settings;
 }
 
-export function toClientSettings(settings: DeskSettings | undefined): DeskClientSettings {
+export function toClientSettings(
+  settings: DeskSettings | undefined,
+  diagnostics: DeskLspRuntimeDiagnostics = {}
+): DeskClientSettings {
   if (!settings) {
     return {};
   }
@@ -43,6 +52,10 @@ export function toClientSettings(settings: DeskSettings | undefined): DeskClient
   const clientSettings: DeskClientSettings = { ...rest };
   if ('lsp' in settings) {
     clientSettings.lsp = normalizeLspUiSettings(_lsp);
+    const missingBuiltins = normalizeLanguageList(diagnostics.missingBuiltins);
+    if (missingBuiltins.length > 0) {
+      clientSettings.lsp.missingBuiltins = missingBuiltins;
+    }
   }
   return clientSettings;
 }

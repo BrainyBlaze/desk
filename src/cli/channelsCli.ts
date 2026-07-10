@@ -179,6 +179,9 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         }
         // Server unreachable: append directly; the watcher dispatches later.
         const author = as ?? resolveAuthorOffline(home, channel, tmux);
+        if (!readChannelDetail(home, channel).members.some((member) => member.name === author)) {
+          throw new Error(`@${author} is not a member of #${channel}`);
+        }
         const appended = await appendMessage(home, channel, { author, body, threadParentId: thread });
         console.log(appended.message.id);
         return 0;

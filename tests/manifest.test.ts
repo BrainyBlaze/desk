@@ -485,3 +485,29 @@ groups:
     expect(base[0].command).not.toContain('/tmp/app-lsp-managed-agents');
   });
 });
+
+describe('claude resume command shell safety', () => {
+  it('passes a hostile resume id as a shell-quoted argument, never raw in a double-quoted string', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: claude
+            agent: claude
+            bypassPermissions: true
+            resume: 'a$(id)b'
+            uiMode: terminal
+`);
+    const [claude] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
+    const command = claude!.command;
+    // The diagnostic echo prints the id via a shell-quoted %s arg (single quotes make $(id) inert)...
+    expect(command).toContain("printf 'desk: claude resume id: %s\\n' 'a$(id)b'");
+    // ...and never interpolates it raw into a double-quoted context (the pre-fix injection path).
+    expect(command).not.toContain('resume id: a$(id)b');
+    // The --resume argument stays quoted too.
+    expect(command).toContain("--resume 'a$(id)b'");
+  });
+});

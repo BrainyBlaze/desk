@@ -1,7 +1,7 @@
 import { constants, readdirSync, openSync, readSync, closeSync, statSync, accessSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readManifestFile, resolveManifestPath, writeManifestFile } from '../core/config.js';
+import { resolveManifestPath, updateManifestFile } from '../core/config.js';
 import { buildSessionSpecs } from '../core/manifest.js';
 import {
   findPendingResumeCapture,
@@ -298,15 +298,12 @@ export async function findOpencodeResume(
 }
 
 /** Reads, applies, writes. Returns true when the manifest was updated. */
-export function persistSessionResume(tmuxSession: string, resume: string): boolean {
+export async function persistSessionResume(tmuxSession: string, resume: string): Promise<boolean> {
   const manifestPath = resolveManifestPath();
-  const manifest = readManifestFile(manifestPath);
-  const updated = applyResumeToManifest(manifest, tmuxSession, resume, homedir());
-  if (!updated) {
-    return false;
-  }
-  writeManifestFile(manifestPath, updated);
-  return true;
+  const updated = await updateManifestFile(manifestPath, (manifest) => {
+    return applyResumeToManifest(manifest, tmuxSession, resume, homedir());
+  });
+  return updated !== null;
 }
 
 const pendingCaptures = new Map<string, PendingResumeCapture>();
@@ -337,13 +334,13 @@ export function scheduleCodexResumeCapture(
   });
   const interval = options.intervalMs ?? 2_000;
 
-  const tick = (): void => {
+  const tick = async (): Promise<void> => {
     if (!pendingCaptures.has(spec.tmuxSession)) {
       return;
     }
     try {
       const resume = findCodexSnapshotUuid(since) ?? findCodexResume(spec.cwd, since);
-      if (resume && persistSessionResume(spec.tmuxSession, resume)) {
+      if (resume && (await persistSessionResume(spec.tmuxSession, resume))) {
         pendingCaptures.delete(spec.tmuxSession);
         return;
       }
@@ -351,11 +348,11 @@ export function scheduleCodexResumeCapture(
       // best-effort: try again next tick
     }
     if (Date.now() < deadline) {
-      setTimeout(tick, interval).unref?.();
+      setTimeout(() => void tick(), interval).unref?.();
     }
     // past deadline the pending entry stays: the first-notification path takes over
   };
-  setTimeout(tick, interval).unref?.();
+  setTimeout(() => void tick(), interval).unref?.();
 }
 
 /**
@@ -402,8 +399,8 @@ function pollOpencodeResumeCapture(
       sinceMs: pending.sinceMs,
       launchResumeId: pending.launchResumeId
     })
-      .then((resume) => {
-        if (resume && persistSessionResume(spec.tmuxSession, resume)) {
+      .then(async (resume) => {
+        if (resume && (await persistSessionResume(spec.tmuxSession, resume))) {
           pendingCaptures.delete(spec.tmuxSession);
           removePendingResumeCapture(spec.tmuxSession, stateOptions);
           return;
@@ -429,7 +426,10 @@ function pollOpencodeResumeCapture(
  * turn guarantees the rollout exists). Also covers sessions created before a
  * server restart: any resume-less codex session gets a cwd-matched scan.
  */
-export function attemptResumeCaptureForSession(tmuxSession: string, lookupSpec: () => SessionSpec | undefined): void {
+export async function attemptResumeCaptureForSession(
+  tmuxSession: string,
+  lookupSpec: () => SessionSpec | undefined
+): Promise<void> {
   try {
     const spec = lookupSpec();
     if (!spec || spec.resume) {
@@ -442,7 +442,7 @@ export function attemptResumeCaptureForSession(tmuxSession: string, lookupSpec: 
     if (spec.agent === 'codex') {
       const since = pending?.sinceMs ?? 0;
       const resume = findCodexResume(spec.cwd, since) ?? (pending ? findCodexSnapshotUuid(pending.sinceMs) : null);
-      if (resume && persistSessionResume(tmuxSession, resume)) {
+      if (resume && (await persistSessionResume(tmuxSession, resume))) {
         pendingCaptures.delete(tmuxSession);
       }
       return;
@@ -455,8 +455,8 @@ export function attemptResumeCaptureForSession(tmuxSession: string, lookupSpec: 
         sinceMs: pending.sinceMs,
         launchResumeId: pending.launchResumeId
       })
-        .then((resume) => {
-          if (resume && persistSessionResume(tmuxSession, resume)) {
+        .then(async (resume) => {
+          if (resume && (await persistSessionResume(tmuxSession, resume))) {
             pendingCaptures.delete(tmuxSession);
             removePendingResumeCapture(tmuxSession);
           }

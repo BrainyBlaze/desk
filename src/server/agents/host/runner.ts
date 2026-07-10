@@ -7,7 +7,6 @@ import type {
   AgentUiErrorCode
 } from '../../../core/agentSurfaceProtocol.js';
 import { parseAgentHostServerFrame } from '../../../core/agentSurfaceProtocol.js';
-import type { DeskAgent } from '../../../core/types.js';
 import {
   isDriverCommandError,
   type AgentDriver,
@@ -17,6 +16,7 @@ import {
 import { loadDriver } from './loader.js';
 import { AgentHostLogger } from './logger.js';
 import { createToolJournal, toolJournalPath, type ToolJournal } from './toolJournal.js';
+import type { AgentHostEnv } from './types.js';
 
 /**
  * Adapter host runner — the in-tmux process that owns one agent driver and bridges it
@@ -51,19 +51,9 @@ const POST_HELLO_MAX_BACKOFF_MS = 30_000;
 const POST_HELLO_BACKOFF_JITTER_MS = 500;
 const CODEX_RELOAD_TOOL_LIMITATION_DETAIL =
   'Codex app-server does not expose pre-reload tool call details for this transcript; earlier tool accordions may be unavailable.';
+let processGroupExitGuardInstalled = false;
 
-export interface AgentHostEnv {
-  DESK_TMUX_SESSION: string;
-  DESK_AGENT: DeskAgent;
-  DESK_AGENT_RESUME?: string;
-  DESK_AGENT_BYPASS: string;
-  DESK_AGENT_CWD?: string;
-  DESK_AGENT_MODEL?: string;
-  DESK_LSP_ENV_FILE?: string;
-  DESK_SERVER_URL: string;
-  DESK_AGENT_HOST_TOKEN: string;
-  DESK_AGENT_HOST_LOG_LEVEL?: 'debug' | 'info' | 'warn' | 'error';
-}
+export type { AgentHostEnv } from './types.js';
 
 export interface AgentHostOptions {
   env: AgentHostEnv;
@@ -113,6 +103,7 @@ export class AgentHost {
   private readonly now: () => Date;
   private readonly scheduler: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
   private readonly signals: NodeJS.Signals[];
+  private readonly signalListeners: Array<{ signal: NodeJS.Signals; listener: () => void }> = [];
 
   private driver: AgentDriver | null = null;
   private driverReady = false;
@@ -157,36 +148,42 @@ export class AgentHost {
     this.logger.banner(this.env);
     this.installSignalHandlers();
 
-    let attempt = 0;
-    while (!this.shuttingDown) {
-      attempt += 1;
-      try {
-        await this.connectAndRun();
-        // connectAndRun resolves only when the socket drops cleanly; loop continues
-        // for reconnect handling per firstHelloCompleted state.
-      } catch (err) {
-        this.logger.error(`connection attempt ${attempt} failed: ${describeError(err)}`);
-        if (!this.firstHelloCompleted) {
-          if (attempt >= PRE_HELLO_MAX_ATTEMPTS) {
-            this.logger.error(`pre-hello retries exhausted (${PRE_HELLO_MAX_ATTEMPTS}); exiting`);
-            await this.maybeShutdownDriver();
-            this.exitFn(1);
-            return;
+    try {
+      let attempt = 0;
+      while (!this.shuttingDown) {
+        attempt += 1;
+        try {
+          await this.connectAndRun();
+          // connectAndRun resolves only when the socket drops cleanly; loop continues
+          // for reconnect handling per firstHelloCompleted state.
+        } catch (err) {
+          this.logger.error(`connection attempt ${attempt} failed: ${describeError(err)}`);
+          if (!this.firstHelloCompleted) {
+            if (attempt >= PRE_HELLO_MAX_ATTEMPTS) {
+              this.logger.error(`pre-hello retries exhausted (${PRE_HELLO_MAX_ATTEMPTS}); exiting`);
+              await this.maybeShutdownDriver();
+              this.exitFn(1);
+              return;
+            }
+            await this.sleep(preHelloBackoff(attempt));
+          } else {
+            await this.sleep(postHelloBackoff(attempt));
           }
-          await this.sleep(preHelloBackoff(attempt));
-        } else {
-          await this.sleep(postHelloBackoff(attempt));
         }
       }
+    } finally {
+      this.removeSignalHandlers();
     }
   }
 
   private installSignalHandlers(): void {
     for (const sig of this.signals) {
-      process.on(sig, () => {
+      const listener = (): void => {
         this.logger.info(`received ${sig}; initiating graceful shutdown`);
         void this.shutdown().then(() => this.exitFn(0));
-      });
+      };
+      process.on(sig, listener);
+      this.signalListeners.push({ signal: sig, listener });
     }
     // BUG-16 fix: synchronous process-group kill on exit ensures opencode serve
     // grandchildren (and any other spawned subprocesses) die with the host, even
@@ -194,13 +191,14 @@ export class AgentHost {
     // covers the cases that CAN be caught). process.kill(-pid, sig) targets the
     // entire process group — all children spawned without detaching inherit the
     // host's group.
-    process.on('exit', () => {
-      try {
-        process.kill(-process.pid, 'SIGTERM');
-      } catch {
-        // best-effort — group may already be gone or we lack permission
-      }
-    });
+    installProcessGroupExitGuard();
+  }
+
+  private removeSignalHandlers(): void {
+    for (const { signal, listener } of this.signalListeners) {
+      process.removeListener(signal, listener);
+    }
+    this.signalListeners.length = 0;
   }
 
   private async connectAndRun(): Promise<void> {
@@ -660,6 +658,20 @@ export class AgentHost {
 
 function isTransient(event: AgentSurfaceEvent): boolean {
   return event.kind === 'assistant-delta' || event.kind === 'tool-output-delta';
+}
+
+function installProcessGroupExitGuard(): void {
+  if (processGroupExitGuardInstalled) {
+    return;
+  }
+  processGroupExitGuardInstalled = true;
+  process.on('exit', () => {
+    try {
+      process.kill(-process.pid, 'SIGTERM');
+    } catch {
+      // best-effort — group may already be gone or we lack permission
+    }
+  });
 }
 
 function describeError(err: unknown): string {

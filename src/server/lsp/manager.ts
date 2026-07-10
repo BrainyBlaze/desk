@@ -527,18 +527,34 @@ export class LspManager {
       managed.state = 'stopped';
       managed.fileOperationRegistrations.clear();
     }
-    for (const listener of this.exitListeners) {
-      listener({
-        key: managed.key,
-        sessionId: managed.sessionId,
-        code: event.code,
-        signal: event.signal,
-        reason: event.reason,
-        ...(restart ? { restart } : {})
+    this.emitManagedSessionExit({
+      key: managed.key,
+      sessionId: managed.sessionId,
+      code: event.code,
+      signal: event.signal,
+      reason: event.reason,
+      ...(restart ? { restart } : {})
+    });
+    if (restartPromise && restart) {
+      void restartPromise.catch(() => {
+        if (this.sessions.get(managed.keyString) !== managed) {
+          return;
+        }
+        this.emitManagedSessionExit({
+          key: managed.key,
+          sessionId: managed.sessionId,
+          code: event.code,
+          signal: event.signal,
+          reason: event.reason,
+          restart: { state: 'stopped', attempt: restart.attempt, maxAttempts: restart.maxAttempts }
+        });
       });
     }
-    if (restartPromise) {
-      void restartPromise.catch(() => undefined);
+  }
+
+  private emitManagedSessionExit(event: LspManagedSessionExitEvent): void {
+    for (const listener of this.exitListeners) {
+      listener(event);
     }
   }
 

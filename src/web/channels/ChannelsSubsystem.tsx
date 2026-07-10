@@ -40,13 +40,13 @@ import {
   clampSidebarWidth,
   createSidebarWidthPersister,
   isAgentSidebarCollapseSize,
-  defaultSidebarCollapsed,
   isNarrowViewport,
   surfaceMinSize,
   useNarrowViewport,
   readStoredSidebarCollapsed,
   readStoredSidebarWidth
 } from '../sidebarPanel.js';
+import { usePersistedCollapse } from '../usePersistedCollapse.js';
 import { saveSettings } from '../api.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from '../arwes/motion.js';
@@ -466,9 +466,7 @@ export function ChannelsSubsystem({
   }, [active]);
 
   /* ---------- sidebar collapse (same mechanics as the other subsystems) ---------- */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(CHANNELS_SIDEBAR_STORAGE_KEY))
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistedCollapse(CHANNELS_SIDEBAR_STORAGE_KEY, onSidebarCollapsedChange);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringSidebarRef = useRef(false);
   const initialWidthRef = useRef(
@@ -572,10 +570,6 @@ export function ChannelsSubsystem({
     setChannelSidebarSectionCollapsed(which, size.inPixels <= 30);
   }
 
-  useEffect(() => {
-    localStorage.setItem(CHANNELS_SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
-    onSidebarCollapsedChange?.(sidebarCollapsed);
-  }, [sidebarCollapsed, onSidebarCollapsedChange]);
 
   useEffect(() => {
     if (!active) {
@@ -2297,7 +2291,7 @@ export function ChannelsSubsystem({
                       onLoadOlder={!filtering ? loadOlder : undefined}
                       onLoadNewer={!filtering ? () => loadNewer(detail.name) : undefined}
                       onJumpLatest={!filtering && detail.hasNewer ? () => jumpToLatest(detail.name) : undefined}
-                      onReadProgress={active && query === '' ? (id) => markChannelRead(detail.name, id) : undefined}
+                      onReadProgress={active && !filtering ? (id) => markChannelRead(detail.name, id) : undefined}
                       onOpenThread={openThread}
                       onMenu={setMenuTarget}
                       onMention={mentionAuthor}

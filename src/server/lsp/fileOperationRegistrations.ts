@@ -200,7 +200,7 @@ function toEffectiveFilter(filter: FileOperationFilter): Record<string, unknown>
     pattern: {
       glob: filter.pattern.glob,
       ...(filter.pattern.matches ? { matches: filter.pattern.matches } : {}),
-      ...(filter.pattern.options?.ignoreCase === true ? { ignoreCase: true } : {})
+      ...(filter.pattern.options?.ignoreCase === true ? { options: { ignoreCase: true } } : {})
     }
   };
 }

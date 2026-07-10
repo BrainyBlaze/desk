@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Terminal transport cleanup.** Removed the retired direct `/ws/terminal`
+  bridge; the multiplexed `/ws/terminal-broker` is now the only terminal
+  WebSocket. Global tmux mouse and OSC-passthrough policy is applied through one
+  retryable helper instead of three independent setup paths.
 - **Native agents — native UI is the default surface.** Codex, Claude, and
   OpenCode sessions start in the native chat surface, with streaming
   assistant output, inspectable tool rows, permission/question cards, file

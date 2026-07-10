@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { resolveNativeFocusAnchorIndex, settleNativeFocusAnchorScroll } from '../../src/web/agentSurface/scrollAnchor.js';
+import {
+  resolveFocusAnchorIndex,
+  resolveNativeFocusAnchorIndex
+} from '../../src/web/agentSurface/scrollAnchor.js';
 import type { AgentFeedItem } from '../../src/web/agentSurface/rowsModel.js';
 
 const rowItem = (rowIndex: number): AgentFeedItem => ({
@@ -25,57 +28,21 @@ describe('native agent focus scroll anchor', () => {
     expect(resolveNativeFocusAnchorIndex(items, { lastSeenRowCount: 3, rowCount: 3 })).toBe(2);
   });
 
-  it('retries the focus anchor scroll until measured row heights settle', () => {
-    const frames: FrameRequestCallback[] = [];
-    const measuredTops = [100, 240, 240];
-    let pass = 0;
-    const scrollEl = { scrollHeight: 1200, scrollTop: 0 };
-    const scrollToIndex = vi.fn(() => {
-      scrollEl.scrollTop = measuredTops[Math.min(pass, measuredTops.length - 1)];
-      pass += 1;
-    });
-
-    settleNativeFocusAnchorScroll({
-      targetIndex: 7,
-      latestIndex: 9,
-      scrollToIndex,
-      getScrollElement: () => scrollEl,
-      requestFrame: (callback) => {
-        frames.push(callback);
-        return frames.length;
-      },
-      maxPasses: 5
-    });
-
-    expect(scrollToIndex).toHaveBeenCalledTimes(1);
-
-    frames.shift()?.(16);
-    expect(scrollToIndex).toHaveBeenCalledTimes(2);
-
-    frames.shift()?.(32);
-    expect(scrollToIndex).toHaveBeenCalledTimes(3);
-    expect(frames).toHaveLength(0);
+  it('resolveFocusAnchorIndex lands on the first retained row when the last-seen boundary was evicted', () => {
+    const items = [rowItem(0), rowItem(1), rowItem(2), rowItem(3)];
+    // Seen through absolute position 5, but 6 top-level rows have been pruned, so
+    // the boundary is below the retained window: everything on screen is unread.
+    expect(resolveFocusAnchorIndex(items, { lastSeenAbsolute: 5, prunedRowCount: 6, rowCount: 4 })).toBe(0);
   });
 
-  it('pins the latest target to the physical bottom on each pass', () => {
-    const frames: FrameRequestCallback[] = [];
-    const scrollToIndex = vi.fn();
-    const scrollEl = { scrollHeight: 1200, scrollTop: 0 };
+  it('resolveFocusAnchorIndex converts an in-window absolute boundary to a local anchor', () => {
+    const items = [rowItem(0), rowItem(1), rowItem(2), rowItem(3)];
+    // Absolute 5 with 3 pruned -> local last-seen 2 -> anchor at the row before the first unread.
+    expect(resolveFocusAnchorIndex(items, { lastSeenAbsolute: 5, prunedRowCount: 3, rowCount: 4 })).toBe(1);
+  });
 
-    settleNativeFocusAnchorScroll({
-      targetIndex: 9,
-      latestIndex: 9,
-      scrollToIndex,
-      getScrollElement: () => scrollEl,
-      requestFrame: (callback) => {
-        frames.push(callback);
-        return frames.length;
-      },
-      maxPasses: 1
-    });
-
-    expect(scrollToIndex).toHaveBeenCalledWith(9, { align: 'end' });
-    expect(scrollEl.scrollTop).toBe(1200);
-    expect(frames).toHaveLength(0);
+  it('resolveFocusAnchorIndex treats no history (absolute 0) as latest, not top', () => {
+    const items = [rowItem(0), rowItem(1), rowItem(2)];
+    expect(resolveFocusAnchorIndex(items, { lastSeenAbsolute: 0, prunedRowCount: 0, rowCount: 3 })).toBe(2);
   });
 });

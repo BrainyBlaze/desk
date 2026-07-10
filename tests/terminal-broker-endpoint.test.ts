@@ -77,6 +77,29 @@ describe('terminal broker endpoint', () => {
     expect(output).toEqual({ type: 'output', session: 'agentdesk-a', data: 'live' });
     ws.close();
   });
+
+  it('closes oversized raw frames before JSON parsing', async () => {
+    const broker = new TerminalBroker({
+      sessions: [session],
+      runningSessions: () => new Set([session.tmuxSession]),
+      spawnPty: () => new FakePty()
+    });
+    server = createServer();
+    dispose = installTerminalBroker(server, broker, { maxPayloadBytes: 128 });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', () => resolve()));
+    const { port } = server.address() as AddressInfo;
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/terminal-broker`);
+    try {
+      await nextJsonMessage(ws);
+      const closed = waitForClose(ws);
+      ws.send('x'.repeat(129));
+
+      await expect(closed).resolves.toBe(1009);
+    } finally {
+      ws.terminate();
+    }
+  });
 });
 
 async function nextJsonMessage(ws: WebSocket): Promise<unknown> {
@@ -85,6 +108,20 @@ async function nextJsonMessage(ws: WebSocket): Promise<unknown> {
     ws.once('message', (data) => {
       clearTimeout(timer);
       resolve(JSON.parse(String(data)));
+    });
+    ws.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+async function waitForClose(ws: WebSocket): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out waiting for websocket close')), 1000);
+    ws.once('close', (code) => {
+      clearTimeout(timer);
+      resolve(code);
     });
     ws.once('error', (error) => {
       clearTimeout(timer);

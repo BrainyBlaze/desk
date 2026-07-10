@@ -2,14 +2,16 @@ import { parseSlashCommand } from './slashCommand.js';
 import { spawn } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import type { AgentSurfaceCommand, AgentSurfacePermissionOption } from '../../../core/agentSurfaceProtocol.js';
-import type { ServerNotification } from '../codexBindings/ServerNotification.js';
-import type { ServerRequest } from '../codexBindings/ServerRequest.js';
-import type { AskForApproval } from '../codexBindings/v2/AskForApproval.js';
-import type { SandboxMode } from '../codexBindings/v2/SandboxMode.js';
-import type { Thread } from '../codexBindings/v2/Thread.js';
-import type { ThreadItem } from '../codexBindings/v2/ThreadItem.js';
-import type { Turn } from '../codexBindings/v2/Turn.js';
-import type { UserInput } from '../codexBindings/v2/UserInput.js';
+import type {
+  AskForApproval,
+  SandboxMode,
+  ServerNotification,
+  ServerRequest,
+  Thread,
+  ThreadItem,
+  Turn,
+  UserInput
+} from '../codexProtocol.js';
 import { driverCommandError, type AgentDriver, type DriverEvent, type DriverStatusEvent } from '../host/driver.js';
 
 type CodexTransportClosedEvent = { method: 'transport/closed'; params: { message: string } };

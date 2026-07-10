@@ -25,9 +25,11 @@ describe('built-in LSP server resolution', () => {
 
     const { normalizeConfiguredLspServers } = await import('../../src/server/lsp/settings');
 
-    expect(normalizeConfiguredLspServers({ enabled: true }).languages.map((language) => language.serverConfigId)).toEqual([
+    const configured = normalizeConfiguredLspServers({ enabled: true });
+    expect(configured.languages.map((language) => language.serverConfigId)).toEqual([
       'typescript',
       'rust'
     ]);
+    expect(configured.missingBuiltins).toEqual(['python']);
   });
 });

@@ -2,6 +2,8 @@ import { chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as deskLspMcp from '../src/server/lsp/deskLspMcp';
 
 type McpToolCaller = (input: unknown, options: deskLspMcp.DeskLspMcpOptions) => Promise<any>;
@@ -11,12 +13,48 @@ const callLspHover = deskLspMcp.callLspHover;
 const tempRoots: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
 describe('desk-lsp-mcp lsp_hover', () => {
+  it('advertises the complete Desk LSP tool registry through MCP', async () => {
+    const server = deskLspMcp.createDeskLspMcpServer();
+    const client = new Client({ name: 'desk-lsp-mcp-registry-test', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toEqual([
+        'lsp_hover',
+        'lsp_format',
+        'lsp_document_symbols',
+        'lsp_folding_ranges',
+        'lsp_selection_ranges',
+        'lsp_semantic_tokens',
+        'lsp_completion',
+        'lsp_signature_help',
+        'lsp_prepare_rename',
+        'lsp_rename',
+        'lsp_document_highlights',
+        'lsp_definition',
+        'lsp_references',
+        'lsp_type_definition',
+        'lsp_implementation',
+        'lsp_declaration',
+        'lsp_code_actions',
+        'lsp_diagnostics'
+      ]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it('forwards hover to /api/lsp with bearer auth and no workspaceRoot body field', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetch = vi.fn(async (url: string, init: RequestInit) => {
@@ -67,7 +105,7 @@ describe('desk-lsp-mcp lsp_hover', () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toBe('LSP hover request failed');
+    expect(result).toEqual(toolErrorResult('LSP hover request failed', 'missing-token'));
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -115,7 +153,7 @@ describe('desk-lsp-mcp lsp_hover', () => {
       { env: { DESK_LSP_ENV_FILE: envFile }, fetch }
     );
 
-    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: 'LSP hover request failed' }] });
+    expect(result).toEqual(toolErrorResult('LSP hover request failed', 'missing-env'));
     expect(JSON.stringify(result)).not.toContain(envFile);
     expect(JSON.stringify(result)).not.toContain('file-token');
     expect(fetch).not.toHaveBeenCalled();
@@ -157,7 +195,7 @@ describe('desk-lsp-mcp lsp_hover', () => {
         { uri: 'file:///workspace/main.ts', position: { line: 0, character: 0 } },
         { env: { DESK_LSP_ENV_FILE: envFile }, fetch }
       );
-      expect(result).toEqual({ isError: true, content: [{ type: 'text', text: 'LSP hover request failed' }] });
+      expect(result).toEqual(toolErrorResult('LSP hover request failed', 'missing-env'));
       expect(JSON.stringify(result)).not.toContain(envFile);
       expect(JSON.stringify(result)).not.toContain('file-token');
       expect(fetch).not.toHaveBeenCalled();
@@ -166,7 +204,7 @@ describe('desk-lsp-mcp lsp_hover', () => {
 
   it('scrubs token, command, env, root, and raw network details from tool output and errors', async () => {
     const token = 'secret-token';
-    const root = '/tmp/secret-root';
+    const root = '/workspace';
     const fakeCommand = '/opt/secret-langserver';
     const fetch = vi.fn(async () => {
       throw new Error(`connect ECONNREFUSED token=${token} root=${root} command=${fakeCommand} env=SECRET`);
@@ -177,7 +215,8 @@ describe('desk-lsp-mcp lsp_hover', () => {
       { env: { DESK_API: 'http://127.0.0.1:5173', DESK_LSP_TOKEN: token, DESK_LSP_WORKSPACE_ROOT: root }, fetch }
     );
 
-    expect(failure).toEqual({ isError: true, content: [{ type: 'text', text: 'LSP hover request failed' }] });
+    expect(failure).toEqual(toolErrorResult('LSP hover request failed', 'fetch-failed'));
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(failure)).not.toContain(token);
     expect(JSON.stringify(failure)).not.toContain(root);
     expect(JSON.stringify(failure)).not.toContain(fakeCommand);
@@ -206,6 +245,87 @@ describe('desk-lsp-mcp lsp_hover', () => {
     expect(serialized).not.toContain(fakeCommand);
     expect(serialized).not.toContain('serverCommands');
     expect(serialized).not.toContain('SECRET');
+  });
+
+  it('returns distinct safe error codes without leaking failure details', async () => {
+    const token = 'safe-error-secret-token';
+    const root = '/workspace';
+    const input = { uri: 'file:///workspace/main.ts', position: { line: 0, character: 0 } };
+    const baseEnv = {
+      DESK_API: 'http://127.0.0.1:5173',
+      DESK_LSP_TOKEN: token,
+      DESK_LSP_WORKSPACE_ROOT: root
+    };
+
+    const cases: Array<{
+      code: deskLspMcp.LspToolErrorCode;
+      input?: unknown;
+      env: deskLspMcp.DeskLspMcpEnvironment;
+      fetch?: typeof fetch;
+    }> = [
+      { code: 'missing-env', env: {} },
+      { code: 'missing-token', env: { DESK_API: baseEnv.DESK_API } },
+      { code: 'invalid-input', input: { uri: 'file:///workspace/main.ts' }, env: baseEnv },
+      {
+        code: 'bad-api-url',
+        env: { ...baseEnv, DESK_API: 'file:///tmp/desk' },
+        fetch: vi.fn() as typeof fetch
+      },
+      {
+        code: 'http-failed',
+        env: baseEnv,
+        fetch: vi.fn(async () => jsonResponse(503, { ok: false, error: `server ${token}` })) as typeof fetch
+      },
+      {
+        code: 'bad-json',
+        env: baseEnv,
+        fetch: vi.fn(async () => ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new Error(`invalid json ${token}`);
+          }
+        })) as typeof fetch
+      },
+      {
+        code: 'bad-response',
+        env: baseEnv,
+        fetch: vi.fn(async () => jsonResponse(200, { ok: false, error: `backend ${token}` })) as typeof fetch
+      },
+      {
+        code: 'fetch-failed',
+        env: baseEnv,
+        fetch: vi.fn(async () => {
+          throw new Error(`connect ECONNREFUSED token=${token} root=${root}`);
+        }) as typeof fetch
+      }
+    ];
+
+    for (const entry of cases) {
+      const result = await callLspHover(entry.input ?? input, {
+        env: entry.env,
+        fetch: entry.fetch ?? (vi.fn() as typeof fetch)
+      });
+      expect(result.isError, entry.code).toBe(true);
+      expect(JSON.parse(result.content[0].text), entry.code).toEqual({
+        code: entry.code,
+        message: 'LSP hover request failed'
+      });
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(JSON.stringify(result)).not.toContain(root);
+      expect(JSON.stringify(result)).not.toContain('ECONNREFUSED');
+    }
+  });
+
+  it('reports a safe fetch-unavailable code when no transport exists', async () => {
+    vi.stubGlobal('fetch', undefined);
+
+    const result = await callLspHover(
+      { uri: 'file:///workspace/main.ts', position: { line: 0, character: 0 } },
+      { env: { DESK_API: 'http://127.0.0.1:5173', DESK_LSP_TOKEN: 'secret-token' } }
+    );
+
+    expect(result).toEqual(toolErrorResult('LSP hover request failed', 'fetch-unavailable'));
   });
 });
 
@@ -663,7 +783,7 @@ describe('desk-lsp-mcp requestApi tools', () => {
 
   it('maps new tool failures to static sanitized errors', async () => {
     const token = 'secret-token';
-    const root = '/tmp/secret-root';
+    const root = '/workspace';
     const fakeCommand = '/opt/secret-langserver';
     const fetch = vi.fn(async () => {
       throw new Error(`connect ECONNREFUSED token=${token} root=${root} command=${fakeCommand} env=SECRET`);
@@ -677,7 +797,8 @@ describe('desk-lsp-mcp requestApi tools', () => {
       { env: { DESK_API: 'http://127.0.0.1:5173', DESK_LSP_TOKEN: token, DESK_LSP_WORKSPACE_ROOT: root }, fetch }
     );
 
-    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: 'LSP declaration request failed' }] });
+    expect(result).toEqual(toolErrorResult('LSP declaration request failed', 'fetch-failed'));
+    expect(fetch).toHaveBeenCalledTimes(1);
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain(token);
     expect(serialized).not.toContain(root);
@@ -960,6 +1081,13 @@ function jsonResponse(status: number, body: unknown) {
     json: async () => body,
     text: async () => JSON.stringify(body)
   } as Response;
+}
+
+function toolErrorResult(message: string, code: deskLspMcp.LspToolErrorCode) {
+  return {
+    isError: true,
+    content: [{ type: 'text', text: JSON.stringify({ code, message }) }]
+  };
 }
 
 function makeManagedEnvFile(values: Record<string, string>): string {

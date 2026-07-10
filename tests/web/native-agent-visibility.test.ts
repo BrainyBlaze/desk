@@ -2,15 +2,17 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const appSource = () => readFileSync('src/web/App.tsx', 'utf8');
+const agentMultiplexerSource = () => readFileSync('src/web/AgentMultiplexer.tsx', 'utf8');
 const nativeSurfaceSource = () => readFileSync('src/web/agentSurface/NativeAgentSurface.tsx', 'utf8');
 
 describe('native agent grid visibility', () => {
   it('passes warm-group physical visibility down to native surfaces', () => {
     const source = appSource();
+    const mux = agentMultiplexerSource();
 
     expect(source).toMatch(/<AgentMultiplexer[\s\S]*?visible=\{visible\}/);
-    expect(source).toMatch(/<TerminalCell[\s\S]*?visible=\{visible\}/);
-    expect(source).toMatch(/<NativeAgentSurface[\s\S]*?visible=\{visible\}/);
+    expect(mux).toMatch(/<TerminalCell[\s\S]*?visible=\{visible\}/);
+    expect(mux).toMatch(/<NativeAgentSurface[\s\S]*?visible=\{visible\}/);
   });
 
   it('subscribes native cells with physical visibility, not focus or mountedness', () => {
@@ -36,7 +38,7 @@ describe('native agent grid visibility', () => {
     const source = nativeSurfaceSource();
 
     expect(source).toMatch(
-      /onSnapshot: \(\{ state, events \}\) => \{[\s\S]*?setPipelineLive\(true\);[\s\S]*?setModel\(rowsFromSnapshot\(events, state\)\);/
+      /onSnapshot: \(\{ state, lastSeq, events \}\) => \{[\s\S]*?setPipelineLive\(true\);[\s\S]*?setModel\(rowsFromSnapshot\(events, state, lastSeq\)\);/
     );
   });
 });

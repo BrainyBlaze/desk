@@ -5,6 +5,8 @@ export {
   resolveDefaultManifestPath,
   resolveManifestPath,
   serializeDeskManifest,
+  updateManifestFile,
+  updateManifestFileSync,
   writeManifestFile
 } from './core/config.js';
 export { buildSessionSpecs, parseDeskManifest } from './core/manifest.js';

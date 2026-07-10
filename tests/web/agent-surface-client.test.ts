@@ -123,4 +123,56 @@ describe('AgentSurfaceClient socket-identity guard (G1 regression)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('a re-subscribe during reconnect backoff cancels the pending reconnect (no orphaned socket)', () => {
+    vi.useFakeTimers();
+    try {
+      const { client, sockets } = makeClient();
+      client.subscribe('surf-1', 'sess-1', true, noopHandlers);
+      sockets[0]!.fireOpen();
+      // Connection drops → a reconnect is armed with backoff.
+      sockets[0]!.fireClose();
+      expect(sockets).toHaveLength(1);
+
+      // A surface (re)subscribes DURING the backoff window and a live socket opens.
+      client.subscribe('surf-2', 'sess-2', true, noopHandlers);
+      expect(sockets).toHaveLength(2);
+      sockets[1]!.fireOpen();
+      expect(client.isConnected).toBe(true);
+
+      // The stale reconnect timer must have been cancelled by ensureConnection: advancing
+      // past the backoff must NOT null the live socket or spin up a 3rd (orphaned) socket.
+      vi.advanceTimersByTime(60_000);
+      expect(sockets).toHaveLength(2);
+      expect(client.isConnected).toBe(true);
+
+      client.unsubscribe('surf-1');
+      client.unsubscribe('surf-2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('send delivers the frame when the socket is OPEN', () => {
+    const { client, sockets } = makeClient();
+    client.subscribe('surf-1', 'sess-1', true, noopHandlers);
+    const socket = sockets[0]!;
+    socket.fireOpen();
+    socket.readyState = 1; // OPEN
+    expect(() => client.send('surf-1', 'sess-1', 'hello')).not.toThrow();
+    expect(socket.sent.some((frame) => frame.includes('"type":"send"') && frame.includes('hello'))).toBe(true);
+    client.unsubscribe('surf-1');
+  });
+
+  it('send throws instead of silently dropping when connected but the socket is not OPEN', () => {
+    const { client, sockets } = makeClient();
+    client.subscribe('surf-1', 'sess-1', true, noopHandlers);
+    const socket = sockets[0]!;
+    socket.fireOpen(); // connected = true
+    socket.readyState = 2; // CLOSING: the reconnect gap
+    const before = socket.sent.length;
+    expect(() => client.send('surf-1', 'sess-1', 'hello')).toThrow(/not open|could not be delivered/i);
+    expect(socket.sent.length).toBe(before); // nothing delivered
+    client.unsubscribe('surf-1');
+  });
 });

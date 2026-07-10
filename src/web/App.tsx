@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -7,7 +6,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type DragEvent,
   type FormEvent,
   type ReactNode
 } from 'react';
@@ -18,7 +16,6 @@ import {
   BleepsOnAnimator,
   BleepsProvider,
   FrameLines,
-  FrameUnderline,
   useBleeps
 } from '@arwes/react';
 import {
@@ -29,24 +26,17 @@ import {
   Boxes,
   Braces,
   CheckCheck,
-  ChevronDown,
   Copy,
-  ChevronRight,
-  ChevronsDown,
-  ChevronsUp,
   FileCode,
   Folder,
   FolderPlus,
   FolderTree,
   GitBranch,
-  HelpCircle,
   Palette,
   Info,
   LayoutGrid,
-  Menu,
   MessagesSquare,
   NotebookPen,
-  Pencil,
   Plus,
   RefreshCw,
   RotateCw,
@@ -100,8 +90,8 @@ import {
   type DeskAutosaveMode,
   type DeskFetchedUiSettings
 } from './api.js';
+import { fireAndForget, toErrorMessage } from './asyncSafe.js';
 import { TerminalSurface } from './TerminalSurface.js';
-import { NativeAgentSurface } from './agentSurface/NativeAgentSurface.js';
 import { StatusBar } from './StatusBar.js';
 import { publishStatus, type StatusSegment } from './statusSegments.js';
 import {
@@ -112,37 +102,37 @@ import {
   AGENT_SIDEBAR_MAX_SIZE,
   AGENT_SIDEBAR_MIN_SIZE,
   AGENT_SIDEBAR_STORAGE_KEY,
-  EDITOR_SIDEBAR_STORAGE_KEY,
-  GIT_SIDEBAR_STORAGE_KEY,
-  NOTES_SIDEBAR_STORAGE_KEY,
-  PROJECTS_SIDEBAR_STORAGE_KEY,
-  CHANNELS_SIDEBAR_STORAGE_KEY,
   isAgentSidebarCollapseSize,
   isNarrowViewport,
   isSidebarHandleDragActive,
   setSidebarHandleDragActive,
-  defaultSidebarCollapsed,
   surfaceMinSize,
   useNarrowViewport,
   readStoredSidebarCollapsed
 } from './sidebarPanel.js';
-import { getMovedSessionTmux, getProjectDropGroup, getSidebarDropSessionTmux } from './sidebarMove.js';
-import { computeReorder, getReorderData, setReorderData } from './sidebarReorder.js';
+import { usePersistedCollapse } from './usePersistedCollapse.js';
+import { useSubsystemSidebars } from './useSubsystemSidebars.js';
+import { getMovedSessionTmux, getProjectDropGroup } from './sidebarMove.js';
 import { patchViewLiveness } from './pulse.js';
 import { emitBridgeRetry } from './terminalHeartbeat.js';
 import { useStableCallbacks } from './stableCallbacks.js';
 import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
-import { countSidebarAgents } from './sidebarCounts.js';
 import { buildSessionPayload } from './sessionFormPayload.js';
 import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
 import type { DeskSessionUiMode } from '../core/types.js';
-import { formatBytes, formatGpuMemory, formatPercent, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePoints } from './systemFormat.js';
+import { pushSparkSample } from './systemFormat.js';
+import { CommandButton } from './headerPrimitives.js';
+import { WorkspaceHeader } from './WorkspaceHeader.js';
+import { AgentsSidebar } from './AgentsSidebar.js';
+import { AgentMultiplexer } from './AgentMultiplexer.js';
+import { StatusDot } from './statusDot.js';
+import type { LayoutKind, PanelCell } from './muxLayout.js';
 import type { DeskGroupView, DeskProjectView, DeskSessionView } from '../ui/model.js';
 import { buildWorkspaceState } from '../ui/workspace.js';
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 import { createDeskBleepsSettings, readStoredMuted, MUTED_STORAGE_KEY, type DeskBleepName } from './arwes/bleeps.js';
-import { DESK_DURATIONS, LIST_REVEAL, LIST_ROW_DURATION, isReducedMotion } from './arwes/motion.js';
+import { DESK_DURATIONS, isReducedMotion } from './arwes/motion.js';
 import {
   DESK_THEMES,
   DESK_THEME_NAMES,
@@ -153,15 +143,11 @@ import {
 } from './arwes/theme.js';
 import {
   BackdropField,
-  CLIP_OCTAGON_PILL,
   CLIP_OCTAGON_TINY,
-  CellChrome,
-  Cmd,
   DeskSelect,
   DeskThemeContext,
   IconButton,
   Modal,
-  Pill,
   TextReveal
 } from './arwes/primitives.js';
 import { EditorSubsystem } from './editor/EditorSubsystem.js';
@@ -176,13 +162,16 @@ import { ProjectsSubsystem } from './projects/ProjectsSubsystem.js';
 import { ChannelsSubsystem } from './channels/ChannelsSubsystem.js';
 
 type Subsystem = 'agents' | 'editor' | 'git' | 'notes' | 'projects' | 'channels';
+const SUBSYSTEMS: readonly Subsystem[] = ['agents', 'editor', 'git', 'notes', 'projects', 'channels'];
+function readStoredSubsystem(value: string | null): Subsystem {
+  return value !== null && (SUBSYSTEMS as readonly string[]).includes(value) ? (value as Subsystem) : 'agents';
+}
 type ToastTone = 'error' | 'ok' | 'info';
 interface ToastItem {
   id: number;
   message: string;
   tone: ToastTone;
 }
-type LayoutKind = '1x1' | '2x2' | '3x3' | '4x4' | 'custom' | 'linear';
 type ModalMode =
   | 'addProject'
   | 'addGroup'
@@ -230,14 +219,6 @@ interface SessionForm {
   model: string;
 }
 
-interface PanelCell {
-  id: string;
-  label: string;
-  index: number;
-  sessions: DeskSessionView[];
-  activeSession?: DeskSessionView;
-}
-
 const emptyProjectForm: ProjectForm = {
   projectId: '',
   projectLabel: '',
@@ -281,7 +262,7 @@ export function App(): JSX.Element {
   });
   const [systemError, setSystemError] = useState<string | null>(null);
   const narrowViewport = useNarrowViewport();
-  const [subsystem, setSubsystem] = useState<Subsystem>(() => (localStorage.getItem('desk.subsystem') as Subsystem) || 'agents');
+  const [subsystem, setSubsystem] = useState<Subsystem>(() => readStoredSubsystem(localStorage.getItem('desk.subsystem')));
   // Keep-alive multiplexer mounts: the active group plus the most recently
   // visited ones stay mounted hidden, so switching back reuses live
   // terminals — no socket/PTY churn, no WebGL context churn, no tmux resize
@@ -312,31 +293,11 @@ export function App(): JSX.Element {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() =>
     readJsonStorage<Record<string, boolean>>('desk.collapsedGroups')
   );
-  const [agentSidebarCollapsed, setAgentSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(AGENT_SIDEBAR_STORAGE_KEY))
-  );
+  const [agentSidebarCollapsed, setAgentSidebarCollapsed] = usePersistedCollapse(AGENT_SIDEBAR_STORAGE_KEY);
   // Mirrors EditorSubsystem's collapsed state for rail-button styling only —
   // the editor subsystem owns the panel mechanics.
-  const [editorSidebarCollapsed, setEditorSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(EDITOR_SIDEBAR_STORAGE_KEY))
-  );
-  const editorSidebarToggleRef = useRef<() => void>(() => undefined);
-  const [gitSidebarCollapsed, setGitSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(GIT_SIDEBAR_STORAGE_KEY))
-  );
-  const gitSidebarToggleRef = useRef<() => void>(() => undefined);
-  const [notesSidebarCollapsed, setNotesSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(NOTES_SIDEBAR_STORAGE_KEY))
-  );
-  const notesSidebarToggleRef = useRef<() => void>(() => undefined);
-  const [projectsSidebarCollapsed, setProjectsSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(PROJECTS_SIDEBAR_STORAGE_KEY))
-  );
-  const projectsSidebarToggleRef = useRef<() => void>(() => undefined);
-  const [channelsSidebarCollapsed, setChannelsSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(CHANNELS_SIDEBAR_STORAGE_KEY))
-  );
-  const channelsSidebarToggleRef = useRef<() => void>(() => undefined);
+  const sidebars = useSubsystemSidebars();
+  const { editor: editorSidebar, git: gitSidebar, notes: notesSidebar, projects: projectsSidebar, channels: channelsSidebar } = sidebars;
   const [channelsUnread, setChannelsUnread] = useState(0);
   // Registered by the channels subsystem; jumps to a specific message.
   const channelsNavigatorRef = useRef<((channel: string, messageId?: string, thread?: string) => void) | null>(null);
@@ -578,7 +539,7 @@ export function App(): JSX.Element {
     // Never save before the server settings have loaded: the mount run would
     // clobber the stored theme with this browser's default.
     if (settingsLoadedRef.current) {
-      void saveSettings({ theme: themeName }).catch(() => undefined);
+      fireAndForget(saveSettings({ theme: themeName }), 'save theme');
     }
   }, [themeName]);
 
@@ -647,10 +608,16 @@ export function App(): JSX.Element {
         settingsLoadedRef.current = true;
         if (settings.theme === undefined) {
           // First run with no stored settings: adopt this browser's choice.
-          void saveSettings({ theme: themeName, muted }).catch(() => undefined);
+          fireAndForget(saveSettings({ theme: themeName, muted }), 'save initial settings');
         }
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        // The fetch failed, so there is no loaded server state to clobber —
+        // release the persistence gate so later user changes still save (partial
+        // saves merge server-side), and surface the failure instead of dropping it.
+        settingsLoadedRef.current = true;
+        console.warn(`[desk] initial settings load failed: ${toErrorMessage(error)}`);
+      });
     setBooted(true);
     const unlock = (): void => setInteracted(true);
     window.addEventListener('pointerdown', unlock, { once: true });
@@ -660,14 +627,14 @@ export function App(): JSX.Element {
   useEffect(() => {
     localStorage.setItem(MUTED_STORAGE_KEY, muted ? '1' : '0');
     if (settingsLoadedRef.current) {
-      void saveSettings({ muted }).catch(() => undefined);
+      fireAndForget(saveSettings({ muted }), 'save muted');
     }
   }, [muted]);
 
   useEffect(() => {
     // The server merges editor keys, so this never clobbers root/openFiles.
     if (settingsLoadedRef.current) {
-      void saveSettings({ editor: { autosave: autosaveMode, autosaveDelayMs } }).catch(() => undefined);
+      fireAndForget(saveSettings({ editor: { autosave: autosaveMode, autosaveDelayMs } }), 'save editor settings');
     }
   }, [autosaveMode, autosaveDelayMs]);
 
@@ -757,8 +724,14 @@ export function App(): JSX.Element {
         text: session.spec.tmuxSession,
         hint: `Copy tmux target — tmux attach -t ${session.spec.tmuxSession}`,
         onClick: () => {
-          void navigator.clipboard?.writeText(session.spec.tmuxSession).catch(() => undefined);
-          pushToast(`Copied ${session.spec.tmuxSession}`, 'ok');
+          const copied = navigator.clipboard?.writeText(session.spec.tmuxSession);
+          if (copied) {
+            void copied
+              .then(() => pushToast(`Copied ${session.spec.tmuxSession}`, 'ok'))
+              .catch(() => pushToast('Copy failed', 'error'));
+          } else {
+            pushToast('Copy failed', 'error');
+          }
         }
       }
     ];
@@ -846,10 +819,6 @@ export function App(): JSX.Element {
   useEffect(() => {
     localStorage.setItem('desk.collapsedGroups', JSON.stringify(collapsedGroups));
   }, [collapsedGroups]);
-
-  useEffect(() => {
-    localStorage.setItem(AGENT_SIDEBAR_STORAGE_KEY, String(agentSidebarCollapsed));
-  }, [agentSidebarCollapsed]);
 
   useEffect(() => {
     // A drag released below the collapse threshold snaps the sidebar shut
@@ -1693,7 +1662,7 @@ export function App(): JSX.Element {
   function openAgentEvent(event: AgentEvent): void {
     setAgentEvents((current) => current.map((e) => (e.id === event.id ? { ...e, read: true } : e)));
     setUnreadEvents((count) => Math.max(0, count - (event.read ? 0 : 1)));
-    void markEventsRead({ ids: [event.id] }).catch(() => undefined);
+    fireAndForget(markEventsRead({ ids: [event.id] }), 'mark event read');
     // Reading an event acknowledges its session's sidebar lamp, even when the
     // session is gone from the snapshot and cannot be revealed anymore.
     if (event.tmuxSession) {
@@ -1737,7 +1706,7 @@ export function App(): JSX.Element {
     // Acknowledging every event acknowledges every sidebar lamp with it
     // (the server mirrors this; clearing locally avoids the poll lag).
     setAttention({});
-    void markEventsRead({ all: true }).catch(() => undefined);
+    fireAndForget(markEventsRead({ all: true }), 'mark all events read');
   }
 
   async function confirmKillAll(): Promise<void> {
@@ -1760,7 +1729,7 @@ export function App(): JSX.Element {
     setAgentEvents([]);
     setUnreadEvents(0);
     setAttention({});
-    void clearAllEvents().catch(() => undefined);
+    fireAndForget(clearAllEvents(), 'clear all events');
   }
 
   function touchSession(tmuxSession: string): void {
@@ -1791,7 +1760,7 @@ export function App(): JSX.Element {
       }
       return current;
     });
-    void clearAttention(tmuxSession).catch(() => undefined);
+    fireAndForget(clearAttention(tmuxSession), 'clear attention');
   }
 
   function revealSidebarSession(group: DeskGroupView, tmuxSession: string): void {
@@ -2080,11 +2049,11 @@ export function App(): JSX.Element {
   const railHandlers = useStableCallbacks({
     onSelect: setSubsystem,
     onToggleAgentsSidebar: toggleAgentSidebar,
-    onToggleEditorSidebar: () => editorSidebarToggleRef.current(),
-    onToggleGitSidebar: () => gitSidebarToggleRef.current(),
-    onToggleNotesSidebar: () => notesSidebarToggleRef.current(),
-    onToggleProjectsSidebar: () => projectsSidebarToggleRef.current(),
-    onToggleChannelsSidebar: () => channelsSidebarToggleRef.current()
+    onToggleEditorSidebar: editorSidebar.toggle,
+    onToggleGitSidebar: gitSidebar.toggle,
+    onToggleNotesSidebar: notesSidebar.toggle,
+    onToggleProjectsSidebar: projectsSidebar.toggle,
+    onToggleChannelsSidebar: channelsSidebar.toggle
   });
   const drawerHandlers = useStableCallbacks({
     onResize: setNotifWidth,
@@ -2126,11 +2095,11 @@ export function App(): JSX.Element {
                 <AppRail
                   subsystem={subsystem}
                   agentsSidebarCollapsed={agentSidebarCollapsed}
-                  editorSidebarCollapsed={editorSidebarCollapsed}
-                  gitSidebarCollapsed={gitSidebarCollapsed}
-                  notesSidebarCollapsed={notesSidebarCollapsed}
-                  projectsSidebarCollapsed={projectsSidebarCollapsed}
-                  channelsSidebarCollapsed={channelsSidebarCollapsed}
+                  editorSidebarCollapsed={editorSidebar.collapsed}
+                  gitSidebarCollapsed={gitSidebar.collapsed}
+                  notesSidebarCollapsed={notesSidebar.collapsed}
+                  projectsSidebarCollapsed={projectsSidebar.collapsed}
+                  channelsSidebarCollapsed={channelsSidebar.collapsed}
                   channelsUnread={channelsUnread}
                   {...railHandlers}
                 />
@@ -2203,10 +2172,8 @@ export function App(): JSX.Element {
                     autosave={{ mode: autosaveMode, delayMs: autosaveDelayMs }}
                     createLspBinding={createLspBinding}
                     onError={setError}
-                    onSidebarCollapsedChange={setEditorSidebarCollapsed}
-                    registerSidebarToggle={(fn) => {
-                      editorSidebarToggleRef.current = fn;
-                    }}
+                    onSidebarCollapsedChange={editorSidebar.onCollapsedChange}
+                    registerSidebarToggle={editorSidebar.registerToggle}
                     registerFileOpener={(open) => {
                       editorFileOpenerRef.current = open;
                       const pending = pendingEditorOpenRef.current;
@@ -2254,10 +2221,8 @@ export function App(): JSX.Element {
                         pendingEditorRevealRef.current = path;
                       }
                     }}
-                    onSidebarCollapsedChange={setGitSidebarCollapsed}
-                    registerSidebarToggle={(fn) => {
-                      gitSidebarToggleRef.current = fn;
-                    }}
+                    onSidebarCollapsedChange={gitSidebar.onCollapsedChange}
+                    registerSidebarToggle={gitSidebar.registerToggle}
                     registerNavigator={(navigate) => {
                       gitNavigatorRef.current = navigate;
                       const pending = pendingGitNavRef.current;
@@ -2277,10 +2242,8 @@ export function App(): JSX.Element {
                     autosave={{ mode: autosaveMode, delayMs: autosaveDelayMs }}
                     createLspBinding={createLspBinding}
                     onError={setError}
-                    onSidebarCollapsedChange={setNotesSidebarCollapsed}
-                    registerSidebarToggle={(fn) => {
-                      notesSidebarToggleRef.current = fn;
-                    }}
+                    onSidebarCollapsedChange={notesSidebar.onCollapsedChange}
+                    registerSidebarToggle={notesSidebar.registerToggle}
                     registerNoteCreator={(create) => {
                       noteCreatorRef.current = create;
                     }}
@@ -2292,10 +2255,8 @@ export function App(): JSX.Element {
                     active={subsystem === 'projects'}
                     onError={setError}
                     onInfo={(message) => pushToast(message, 'ok')}
-                    onSidebarCollapsedChange={setProjectsSidebarCollapsed}
-                    registerSidebarToggle={(fn) => {
-                      projectsSidebarToggleRef.current = fn;
-                    }}
+                    onSidebarCollapsedChange={projectsSidebar.onCollapsedChange}
+                    registerSidebarToggle={projectsSidebar.registerToggle}
                     serverSidebarWidth={sidebarWidths?.projects}
                   />
                 </div>
@@ -2321,10 +2282,8 @@ export function App(): JSX.Element {
                         pendingEditorOpenRef.current = path;
                       }
                     }}
-                    onSidebarCollapsedChange={setChannelsSidebarCollapsed}
-                    registerSidebarToggle={(fn) => {
-                      channelsSidebarToggleRef.current = fn;
-                    }}
+                    onSidebarCollapsedChange={channelsSidebar.onCollapsedChange}
+                    registerSidebarToggle={channelsSidebar.registerToggle}
                     serverSidebarWidth={sidebarWidths?.channels}
                   />
                 </div>
@@ -2606,429 +2565,6 @@ export function App(): JSX.Element {
     }
     return null;
   }
-}
-
-function WorkspaceHeaderImpl({
-  snapshot,
-  systemSnapshot,
-  systemError,
-  telemetryHistory,
-  busy,
-  muted,
-  unreadEvents,
-  onToggleMuted,
-  onToggleNotifications,
-  onOpenSettings,
-  onKillAll,
-  onRefresh,
-  onUp,
-  onOpenConfig
-}: {
-  snapshot: DeskSnapshot | null;
-  systemSnapshot: SystemSnapshot | null;
-  systemError: string | null;
-  telemetryHistory: { cpu: number[]; ram: number[]; gpu: number[]; net: number[]; disk: number[] };
-  busy: boolean;
-  muted: boolean;
-  unreadEvents: number;
-  onToggleMuted: () => void;
-  onToggleNotifications: () => void;
-  onOpenSettings: () => void;
-  onKillAll: () => void;
-  onRefresh: () => Promise<void>;
-  onUp: () => Promise<void>;
-  onOpenConfig: () => void;
-}): JSX.Element {
-  const totals = snapshot?.view.totals;
-  const nvidia = systemSnapshot?.gpu.nvidia;
-  const intel = systemSnapshot?.gpu.intel;
-  const bleeps = useBleeps<DeskBleepName>();
-  // Phone band: the toolbar collapses into a burger; this owns that menu.
-  const [menuOpen, setMenuOpen] = useState(false);
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        setMenuOpen(false);
-      }
-    };
-    // Capture phase: the menu owns Escape ahead of subsystem handlers
-    // (thread panel close, etc.) while it is open.
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [menuOpen]);
-  const missing = totals?.missing ?? 0;
-  // One cell per adapter that actually exists; a permanently "N/A" adapter
-  // wasted a whole slot. With no GPU at all, a single N/A cell keeps the
-  // reason visible.
-  const gpuEntries = [
-    { label: 'NVIDIA', gpu: nvidia, spark: telemetryHistory.gpu },
-    { label: 'INTEL', gpu: intel, spark: undefined }
-  ];
-  const availableGpus = gpuEntries.filter((entry) => entry.gpu?.available);
-  const gpuCells = (availableGpus.length > 0 ? availableGpus : [gpuEntries[0]]).map((entry) => ({
-    label: entry.label,
-    value: formatGpuValue(entry.gpu),
-    sub: formatGpuDetail(entry.gpu),
-    tone: (entry.gpu?.available ? 'ok' : 'muted') as 'ok' | 'muted',
-    title:
-      entry.gpu?.available && entry.spark
-        ? `${entry.gpu.name ?? 'GPU'} | sparkline: last 2 min, 0–100%`
-        : entry.gpu?.name,
-    spark: entry.gpu?.available ? entry.spark : undefined
-  }));
-  return (
-    <header className="workspaceTopbar">
-      <div className="topbarPrimary">
-        <div className="brand">
-          <TerminalSquare size={14} />
-          <TextReveal as="strong" manager="decipher">Desk</TextReveal>
-          {snapshot?.configPath ? (
-            <button
-              type="button"
-              className="brandPath"
-              title={`${snapshot.configPath} — open in editor`}
-              onClick={() => {
-                bleeps.click?.play();
-                onOpenConfig();
-              }}
-            >
-              {snapshot.configPath}
-            </button>
-          ) : (
-            <span>loading config</span>
-          )}
-        </div>
-        <div className="projectStats" aria-label="Project stats">
-          <Pill title="Projects"><b>P</b> {totals?.projects ?? 0}</Pill>
-          <Pill title="Groups"><b>G</b> {totals?.groups ?? 0}</Pill>
-          <Pill title="Configured agent sessions"><b>A</b> {totals?.sessions ?? 0}</Pill>
-          <Pill tone="ok" title="Agents with a live tmux session"><b>RUN</b> {totals?.running ?? 0}</Pill>
-          <Pill
-            tone={totals?.missing ? 'warn' : 'ok'}
-            pulse={Boolean(totals?.missing)}
-            title={totals?.missing ? 'Configured sessions without a live tmux session — click to boot them (Up)' : 'Configured sessions without a live tmux session'}
-            onClick={totals?.missing && !busy ? () => void onUp() : undefined}
-          >
-            <b>MISS</b> {totals?.missing ?? 0}
-          </Pill>
-        </div>
-        <HeaderClock />
-        <div className="toolbar">
-          <span className="toolbarGroup cmdMobileHidden">
-            <CommandButton
-              icon={<RefreshCw size={13} className={busy ? 'spinSlow' : undefined} />}
-              label="Refresh"
-              title="Re-reads fleet state; 2-second pulse keeps liveness, attention, and telemetry current in background (paused when tab is hidden)"
-              onClick={onRefresh}
-              disabled={busy}
-            />
-            <CommandButton
-              icon={<Zap size={13} />}
-              label="Up"
-              title="Starts all missing sessions from manifest without touching running ones"
-              onClick={() => {
-                bleeps.deploy?.play();
-                void onUp();
-              }}
-              disabled={busy}
-            />
-          </span>
-          <span className="toolbarGroup cmdMobileHidden">
-            <Cmd icon={<Skull size={13} />} label="KILL" title="Emergency stop: kills all Claude Code and Codex CLI processes on host. Confirms with alarm first. Last resort only." tone="danger" onClick={onKillAll} />
-          </span>
-          <span className="toolbarGroup">
-            <span className="cmdSlot cmdMobileHidden">
-              <Cmd
-                icon={muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                label={muted ? 'Muted' : 'Sound'}
-                pressed={muted}
-                onClick={onToggleMuted}
-              />
-            </span>
-            <span className="notifButtonWrap">
-              <CommandButton icon={<Bell size={13} />} label="Events" onClick={onToggleNotifications} />
-              {unreadEvents > 0 ? (
-                <span className="notifLamp withCount" aria-label={`${unreadEvents} unread notifications`}>
-                  {unreadEvents > 99 ? '99+' : unreadEvents}
-                </span>
-              ) : null}
-            </span>
-            <span className="cmdSlot cmdMobileHidden">
-              <CommandButton icon={<SettingsIcon size={13} />} label="Settings" onClick={onOpenSettings} />
-            </span>
-            <span className="cmdSlot cmdMobileOnly">
-              <Cmd
-                icon={<Menu size={13} />}
-                label="Menu"
-                pressed={menuOpen}
-                expanded={menuOpen}
-                controls="desk-header-menu"
-                onClick={() => setMenuOpen((open) => !open)}
-              />
-            </span>
-          </span>
-        </div>
-      </div>
-      {menuOpen ? (
-        <>
-          <div className="headerMenuScrim" onClick={() => setMenuOpen(false)} />
-          <nav className="headerMenu" id="desk-header-menu" aria-label="Desk controls">
-            <button
-              type="button"
-              className="headerMenuItem"
-              disabled={busy}
-              onClick={() => {
-                bleeps.click?.play();
-                setMenuOpen(false);
-                void onRefresh();
-              }}
-            >
-              <RefreshCw size={14} className={busy ? 'spinSlow' : undefined} />
-              <span className="headerMenuLabel">
-                Refresh
-                <small>re-read the manifest and tmux state</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="headerMenuItem"
-              disabled={busy || missing === 0}
-              onClick={() => {
-                bleeps.deploy?.play();
-                setMenuOpen(false);
-                void onUp();
-              }}
-            >
-              <Zap size={14} />
-              <span className="headerMenuLabel">
-                Up
-                <small>
-                  {missing > 0
-                    ? `start ${missing} missing session${missing === 1 ? '' : 's'}`
-                    : 'all sessions running'}
-                </small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="headerMenuItem"
-              aria-pressed={muted}
-              onClick={() => {
-                bleeps.click?.play();
-                onToggleMuted();
-              }}
-            >
-              {muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-              <span className="headerMenuLabel">
-                Sound
-                <small>{muted ? 'muted — tap to enable' : 'on — tap to mute'}</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="headerMenuItem"
-              onClick={() => {
-                bleeps.click?.play();
-                setMenuOpen(false);
-                onOpenSettings();
-              }}
-            >
-              <SettingsIcon size={14} />
-              <span className="headerMenuLabel">
-                Settings
-                <small>theme &amp; preferences</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="headerMenuItem danger"
-              onClick={() => {
-                bleeps.click?.play();
-                setMenuOpen(false);
-                onKillAll();
-              }}
-            >
-              <Skull size={14} />
-              <span className="headerMenuLabel">
-                Kill all
-                <small>terminate every agent process</small>
-              </span>
-            </button>
-          </nav>
-        </>
-      ) : null}
-      <div className="topbarTelemetry">
-        {/* Phone-band fleet stats: the projectStats pills die with the wide
-            primary row, but RUN/MISS are the two operationally vital counts —
-            they reappear here as compact chips (desktop hides this cluster). */}
-        <div className="telemetryFleet" aria-label="Fleet stats">
-          <Pill tone="ok" title="Agents with a live tmux session"><b>RUN</b> {totals?.running ?? 0}</Pill>
-          <Pill
-            tone={totals?.missing ? 'warn' : 'ok'}
-            pulse={Boolean(totals?.missing)}
-            title={totals?.missing ? 'Configured sessions without a live tmux session — click to boot them (Up)' : 'Configured sessions without a live tmux session'}
-            onClick={totals?.missing && !busy ? () => void onUp() : undefined}
-          >
-            <b>MISS</b> {totals?.missing ?? 0}
-          </Pill>
-        </div>
-        <TelemetryCell
-          label="HOST"
-          value={systemSnapshot?.hostname ?? 'init'}
-          sub={systemSnapshot ? `up ${formatUptime(systemSnapshot.uptimeSeconds)} | ${systemSnapshot.kernel}` : systemError ?? 'init'}
-          title={systemSnapshot ? `${systemSnapshot.platform} ${systemSnapshot.kernel}` : undefined}
-          tone={systemError ? 'warn' : undefined}
-        />
-        <TelemetryCell
-          label="CPU"
-          value={formatPercent(systemSnapshot?.cpu.usagePercent)}
-          sub={formatLoad(systemSnapshot)}
-          title="CPU utilization | sparkline: last 2 min, 0–100%"
-          spark={telemetryHistory.cpu}
-        />
-        <TelemetryCell
-          label="RAM"
-          value={formatPercent(systemSnapshot?.memory.usedPercent)}
-          sub={
-            systemSnapshot
-              ? `${formatBytes(systemSnapshot.memory.usedBytes)} / ${formatBytes(systemSnapshot.memory.totalBytes)}`
-              : 'init'
-          }
-          title="Memory used / total | sparkline: last 2 min, 0–100%"
-          spark={telemetryHistory.ram}
-        />
-        {gpuCells.map((cell) => (
-          <TelemetryCell
-            key={cell.label}
-            label={cell.label}
-            value={cell.value}
-            sub={cell.sub}
-            tone={cell.tone}
-            title={cell.title}
-            spark={cell.spark}
-          />
-        ))}
-        <TelemetryCell
-          label="NET"
-          value={`${formatRate(systemSnapshot?.network.rxBytesPerSecond)} down`}
-          sub={`${formatRate(systemSnapshot?.network.txBytesPerSecond)} up`}
-          title="Aggregate throughput across interfaces | sparkline: download, autoscaled to 2-min peak"
-          spark={telemetryHistory.net}
-          sparkFloor={1}
-        />
-        <TelemetryCell
-          label="DISK"
-          value={
-            systemSnapshot?.disk
-              ? `${formatPercent(systemSnapshot.disk.usedPercent)} | ${formatStorage(systemSnapshot.disk.usedBytes, systemSnapshot.disk.totalBytes)}`
-              : 'init'
-          }
-          sub={
-            systemSnapshot?.disk?.readBytesPerSecond !== undefined
-              ? `r ${formatRate(systemSnapshot.disk.readBytesPerSecond)} | w ${formatRate(systemSnapshot.disk.writeBytesPerSecond)}`
-              : 'io init'
-          }
-          title="Root filesystem usage and whole-disk I/O"
-          tone={systemSnapshot?.disk && systemSnapshot.disk.usedPercent >= 90 ? 'warn' : undefined}
-          spark={telemetryHistory.disk}
-          sparkFloor={1}
-        />
-      </div>
-    </header>
-  );
-}
-
-function HeaderClock(): JSX.Element {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const pad = (value: number): string => String(value).padStart(2, '0');
-  return (
-    <div className="headerClock" title={now.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}>
-      <span>{pad(now.getHours())}:{pad(now.getMinutes())}</span>
-      <small>{pad(now.getSeconds())}</small>
-    </div>
-  );
-}
-
-const WorkspaceHeader = memo(WorkspaceHeaderImpl);
-
-function TelemetryCell({
-  label,
-  value,
-  sub,
-  tone,
-  title,
-  spark,
-  sparkFloor = 100
-}: {
-  label: string;
-  value: string;
-  sub: string;
-  tone?: 'ok' | 'warn' | 'muted';
-  title?: string;
-  /** history ring rendered as a right-aligned sparkline (percent series by default) */
-  spark?: number[];
-  /** scale ceiling floor: 100 anchors percent series; 1 lets rates autoscale to their window peak */
-  sparkFloor?: number;
-}): JSX.Element {
-  const points = spark ? sparklinePoints(spark, sparkFloor) : '';
-  return (
-    <Animator>
-      <Animated
-        className={`telemetryCell ${tone ?? ''}`}
-        animated={['flicker', ['y', 6, 0]]}
-        style={{ clipPath: CLIP_OCTAGON_PILL }}
-        title={title}
-        data-cell={label.toLowerCase()}
-      >
-        {/* Label is static -> safe to decipher once. Value/sub update every 2s -> must stay plain text. */}
-        <TextReveal as="span" manager="decipher">{label}</TextReveal>
-        <strong>{value}</strong>
-        <small>{sub}</small>
-        {points ? (
-          <svg className="telemetrySpark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-            <polyline points={points} />
-          </svg>
-        ) : null}
-      </Animated>
-    </Animator>
-  );
-}
-
-function formatLoad(systemSnapshot: SystemSnapshot | null): string {
-  if (!systemSnapshot) {
-    return 'load init';
-  }
-  return `load ${systemSnapshot.cpu.loadAverage[0].toFixed(2)} / ${systemSnapshot.cpu.threads}t`;
-}
-
-/** Usage and VRAM together — the two numbers that matter while agents run models. */
-function formatGpuValue(gpu: SystemSnapshot['gpu']['nvidia'] | undefined): string {
-  if (!gpu?.available) {
-    return 'N/A';
-  }
-  return `${formatPercent(gpu.utilizationGpuPercent)} | ${formatGpuMemory(gpu.memoryUsedMiB, gpu.memoryTotalMiB)}`;
-}
-
-/** Thermals and power; the marketing name lives in the tooltip instead of
- * eating the line (it used to truncate the memory readout away). */
-function formatGpuDetail(gpu: SystemSnapshot['gpu']['nvidia'] | undefined): string {
-  if (!gpu?.available) {
-    return gpu?.reason ?? 'unavailable';
-  }
-  const parts: string[] = [];
-  if (gpu.temperatureC !== undefined) {
-    parts.push(`${gpu.temperatureC}°C`);
-  }
-  if (gpu.powerDrawW !== undefined) {
-    parts.push(gpu.powerLimitW !== undefined ? `${Math.round(gpu.powerDrawW)}/${Math.round(gpu.powerLimitW)}W` : `${Math.round(gpu.powerDrawW)}W`);
-  }
-  return parts.length > 0 ? parts.join(' | ') : 'sensors n/a';
 }
 
 function AppRailImpl({
@@ -3842,558 +3378,6 @@ function AttentionAnnouncer({ attention }: { attention: Record<string, { attenti
   return null;
 }
 
-function AgentsSidebarImpl({
-  projects,
-  attention,
-  activeProjectId,
-  activeGroupId,
-  activeTmux,
-  collapsedProjects,
-  collapsedGroups,
-  onAddProject,
-  onExpandAll,
-  onCollapseAll,
-  onToggleProject,
-  onToggleGroup,
-  onAddGroup,
-  onAddSession,
-  onProjectInfo,
-  onProjectEdit,
-  onProjectDelete,
-  onGroupInfo,
-  onGroupEdit,
-  onGroupDelete,
-  onSessionInfo,
-  onSessionEdit,
-  onSessionDelete,
-  onSessionRestart,
-  onSessionRepair,
-  onGroupBoot,
-  onDragSession,
-  onDropSession,
-  onDropSessionToProject,
-  onReorderProjects,
-  onReorderGroups,
-  onReorderSessions,
-  onSelectProject,
-  onSelectGroup,
-  onSelectSession
-}: {
-  projects: DeskProjectView[];
-  attention: Record<string, { attention: true; since: string }>;
-  activeProjectId?: string;
-  activeGroupId?: string;
-  activeTmux?: string;
-  collapsedProjects: Record<string, boolean>;
-  collapsedGroups: Record<string, boolean>;
-  onAddProject: () => void;
-  onExpandAll: () => void;
-  onCollapseAll: () => void;
-  onToggleProject: (project: DeskProjectView) => void;
-  onToggleGroup: (group: DeskGroupView) => void;
-  onAddGroup: (project: DeskProjectView) => void;
-  onAddSession: (group: DeskGroupView) => void;
-  onProjectInfo: (project: DeskProjectView) => void;
-  onProjectEdit: (project: DeskProjectView) => void;
-  onProjectDelete: (project: DeskProjectView) => void;
-  onGroupInfo: (group: DeskGroupView) => void;
-  onGroupEdit: (group: DeskGroupView) => void;
-  onGroupDelete: (group: DeskGroupView) => void;
-  onSessionInfo: (session: DeskSessionView, group: DeskGroupView) => void;
-  onSessionEdit: (session: DeskSessionView, group: DeskGroupView) => void;
-  onSessionDelete: (session: DeskSessionView, group: DeskGroupView) => void;
-  onSessionRestart: (session: DeskSessionView, group: DeskGroupView) => void;
-  onSessionRepair: () => void;
-  onGroupBoot: (group: DeskGroupView) => void;
-  onDragSession: (value: { session: DeskSessionView; group: DeskGroupView } | null) => void;
-  onDropSession: (group: DeskGroupView, tmuxSession?: string) => void;
-  onDropSessionToProject: (project: DeskProjectView, tmuxSession?: string) => void;
-  onReorderProjects: (orderedProjectIds: string[]) => void;
-  onReorderGroups: (projectId: string, orderedGroupIds: string[]) => void;
-  onReorderSessions: (projectId: string, groupId: string, projectCwd: string, orderedSessionNames: string[]) => void;
-  onSelectProject: (project: DeskProjectView) => void;
-  onSelectGroup: (group: DeskGroupView) => void;
-  onSelectSession: (session: DeskSessionView, group: DeskGroupView) => void;
-}): JSX.Element {
-  const treeRef = useRef<HTMLDivElement | null>(null);
-  const pointerDragTmuxRef = useRef<string | undefined>(undefined);
-  const pointerDragIdRef = useRef<number | undefined>(undefined);
-  const bleeps = useBleeps<DeskBleepName>();
-  // Tree filter: substring on session name / tmux target (group and project
-  // labels match their whole subtree), plus a needs-input-only chip. While
-  // filtering, collapse state is ignored so matches are always on screen.
-  const [filter, setFilter] = useState('');
-  const [attentionOnly, setAttentionOnly] = useState(false);
-  const [agentsHelpOpen, setAgentsHelpOpen] = useState(false);
-  const filterText = filter.trim().toLowerCase();
-  const filtering = filterText !== '' || attentionOnly;
-  const attentionTotal = projects.reduce(
-    (total, project) =>
-      total +
-      project.groups.reduce(
-        (groupTotal, group) =>
-          groupTotal + group.sessions.filter((session) => attention[session.spec.tmuxSession]).length,
-        0
-      ),
-    0
-  );
-  const visibleGroupSessions = (group: DeskGroupView, labelMatched: boolean): DeskSessionView[] => {
-    let sessions = group.sessions;
-    if (attentionOnly) {
-      sessions = sessions.filter((session) => attention[session.spec.tmuxSession]);
-    }
-    if (filterText === '' || labelMatched || group.label.toLowerCase().includes(filterText)) {
-      return sessions;
-    }
-    return sessions.filter(
-      (session) =>
-        session.spec.name.toLowerCase().includes(filterText) ||
-        session.spec.tmuxSession.toLowerCase().includes(filterText)
-    );
-  };
-
-  useEffect(() => {
-    const tree = treeRef.current;
-    if (!tree) {
-      return;
-    }
-    const findProject = (projectId: string | undefined): DeskProjectView | undefined =>
-      projectId ? projects.find((project) => project.id === projectId) : undefined;
-    const findGroup = (projectId: string | undefined, groupId: string | undefined): DeskGroupView | undefined =>
-      findProject(projectId)?.groups.find((group) => group.groupId === groupId);
-
-    // A pointerdown only ARMS a candidate; it becomes a drag after real
-    // movement. Without the threshold every click/tap was swallowed by the
-    // drop path (pointerup stopPropagation), so sessions could never be
-    // plainly selected — the row's own onClick never fired.
-    let armedX = 0;
-    let armedY = 0;
-    let dragging = false;
-    const handlePointerDown = (event: PointerEvent): void => {
-      if (event.button !== 0) {
-        return;
-      }
-      pointerDragTmuxRef.current = undefined;
-      pointerDragIdRef.current = undefined;
-      dragging = false;
-      onDragSession(null);
-      if (!(event.target instanceof Element)) {
-        return;
-      }
-      const sessionNode = event.target.closest<HTMLElement>('[data-sidebar-session="true"]');
-      const tmuxSession = sessionNode?.dataset.tmuxSession;
-      if (!tmuxSession) {
-        return;
-      }
-      pointerDragTmuxRef.current = tmuxSession;
-      pointerDragIdRef.current = event.pointerId;
-      armedX = event.clientX;
-      armedY = event.clientY;
-    };
-
-    const handlePointerMove = (event: PointerEvent): void => {
-      const tmuxSession = pointerDragTmuxRef.current;
-      if (!tmuxSession || dragging || event.pointerId !== pointerDragIdRef.current) {
-        return;
-      }
-      if (Math.abs(event.clientX - armedX) < 6 && Math.abs(event.clientY - armedY) < 6) {
-        return;
-      }
-      dragging = true;
-      const sessionNode = tree.querySelector<HTMLElement>(`[data-tmux-session="${CSS.escape(tmuxSession)}"]`);
-      const groupNode = sessionNode?.closest<HTMLElement>('[data-sidebar-group="true"]');
-      const group = findGroup(groupNode?.dataset.projectId, groupNode?.dataset.groupId);
-      const session = group?.sessions.find((candidate) => candidate.spec.tmuxSession === tmuxSession);
-      if (group && session) {
-        onDragSession({ session, group });
-      }
-    };
-
-    const handlePointerUp = (event: PointerEvent): void => {
-      const tmuxSession = pointerDragTmuxRef.current;
-      const pointerId = pointerDragIdRef.current;
-      if (pointerId !== undefined && event.pointerId !== pointerId) {
-        return;
-      }
-      pointerDragTmuxRef.current = undefined;
-      pointerDragIdRef.current = undefined;
-      if (!dragging) {
-        // plain click/tap: let the row's own onClick handle selection
-        onDragSession(null);
-        return;
-      }
-      dragging = false;
-      if (!tmuxSession || !(event.target instanceof Element)) {
-        onDragSession(null);
-        return;
-      }
-      const groupNode = event.target.closest<HTMLElement>('[data-sidebar-group="true"]');
-      if (groupNode) {
-        const group = findGroup(groupNode.dataset.projectId, groupNode.dataset.groupId);
-        if (group) {
-          event.preventDefault();
-          event.stopPropagation();
-          onDropSession(group, tmuxSession);
-          onDragSession(null);
-          return;
-        }
-      }
-      const projectNode = event.target.closest<HTMLElement>('[data-sidebar-project="true"]');
-      const project = findProject(projectNode?.dataset.projectId);
-      if (project) {
-        event.preventDefault();
-        event.stopPropagation();
-        onDropSessionToProject(project, tmuxSession);
-      }
-      onDragSession(null);
-    };
-
-    tree.addEventListener('pointerdown', handlePointerDown, true);
-    tree.addEventListener('pointermove', handlePointerMove, true);
-    tree.addEventListener('pointerup', handlePointerUp, true);
-    return () => {
-      tree.removeEventListener('pointerdown', handlePointerDown, true);
-      tree.removeEventListener('pointermove', handlePointerMove, true);
-      tree.removeEventListener('pointerup', handlePointerUp, true);
-    };
-  }, [onDragSession, onDropSession, onDropSessionToProject, projects]);
-
-  return (
-    <aside className="agentsSidebar">
-      <div className="sidebarHeader">
-        <div className="railTitle">
-          <Activity size={12} />
-          <span>Agents</span>
-          <small>{countSidebarAgents(projects)}</small>
-        </div>
-        <div className="railActions">
-          <IconButton icon={<ChevronsDown size={12} />} label="Expand all" onClick={onExpandAll} />
-          <IconButton icon={<ChevronsUp size={12} />} label="Collapse all" onClick={onCollapseAll} />
-          <IconButton icon={<Plus size={12} />} label="Add project" onClick={onAddProject} />
-          <IconButton icon={<HelpCircle size={12} />} label="Help" onClick={() => setAgentsHelpOpen(true)} />
-        </div>
-      </div>
-      <div className="sidebarFilterRow">
-        <input
-          className="treeInlineInput sidebarFilterInput"
-          placeholder="filter sessions…"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Escape' && filter !== '') {
-              event.stopPropagation();
-              setFilter('');
-            }
-          }}
-        />
-        <button
-          type="button"
-          className={`sidebarFilterChip ${attentionOnly ? 'active' : ''}`}
-          title={attentionOnly ? 'Showing only sessions needing input' : 'Show only sessions needing input'}
-          aria-pressed={attentionOnly}
-          onMouseEnter={() => bleeps.hover?.play()}
-          onClick={() => {
-            bleeps.click?.play();
-            setAttentionOnly((value) => !value);
-          }}
-        >
-          <Bell size={10} />
-          {attentionTotal > 0 ? <span>{attentionTotal}</span> : null}
-        </button>
-      </div>
-      <div className="projectTree" ref={treeRef}>
-        {projects.map((project) => {
-          const projectLabelMatched = filterText !== '' && project.label.toLowerCase().includes(filterText);
-          const groupViews = project.groups.map((group) => ({
-            group,
-            sessions: visibleGroupSessions(group, projectLabelMatched)
-          }));
-          if (filtering && !projectLabelMatched && groupViews.every((view) => view.sessions.length === 0)) {
-            return null;
-          }
-          const projectAttention = project.groups.some((group) =>
-            group.sessions.some((session) => attention[session.spec.tmuxSession])
-          );
-          const projectCollapsed = filtering ? false : Boolean(collapsedProjects[project.id]);
-          return (
-          <section
-            key={project.id}
-            className={`projectNode ${project.id === activeProjectId ? 'selected' : ''}`}
-            data-sidebar-project="true"
-            data-project-id={project.id}
-          >
-            <div
-              className="treeRow projectRow"
-              draggable
-              onDragStart={(event) => {
-                setReorderData(event.dataTransfer, { kind: 'project', projectId: project.id, id: project.id });
-                event.dataTransfer.effectAllowed = 'move';
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = 'move';
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                // Reorder takes priority over the session-move drop; the two use
-                // different dataTransfer MIME types so they never collide.
-                const reorder = getReorderData(event.dataTransfer);
-                if (reorder?.kind === 'project') {
-                  const ids = projects.map((candidate) => candidate.id);
-                  const ordered = computeReorder(ids, reorder.id, project.id);
-                  if (ordered !== ids) {
-                    onReorderProjects(ordered);
-                  }
-                  return;
-                }
-                onDropSessionToProject(project, getSidebarDropSessionTmux(event.dataTransfer));
-              }}
-            >
-              <button
-                className="treeToggle"
-                type="button"
-                aria-label={projectCollapsed ? 'Expand project' : 'Collapse project'}
-                onClick={() => onToggleProject(project)}
-              >
-                {projectCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-              </button>
-              {project.id === activeProjectId ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
-              <button
-                className="treeMain"
-                onMouseEnter={() => bleeps.hover?.play()}
-                onClick={() => {
-                  bleeps.click?.play();
-                  onSelectProject(project);
-                }}
-                title={project.cwd}
-              >
-                <Folder size={13} />
-                <span>{project.label}</span>
-                <span className="treeMeta">
-                  <small>{project.running}/{project.running + project.missing}</small>
-                  {projectCollapsed && projectAttention ? (
-                    <i className="treeAttnDot" title="A session inside needs input" aria-label="needs input" />
-                  ) : null}
-                </span>
-              </button>
-              <ActionCluster>
-                <IconButton icon={<Plus size={11} />} label="Add group" onClick={() => onAddGroup(project)} />
-                <IconButton icon={<Info size={11} />} label="Project info" onClick={() => onProjectInfo(project)} />
-                <IconButton icon={<Pencil size={11} />} label="Edit project" onClick={() => onProjectEdit(project)} />
-                <IconButton icon={<Trash2 size={11} />} label="Delete project" onClick={() => onProjectDelete(project)} />
-              </ActionCluster>
-            </div>
-            {!projectCollapsed ? (
-              <div className="groupBranch">
-                {groupViews.map(({ group, sessions: visibleSessions }) => {
-                  if (filtering && visibleSessions.length === 0 && !projectLabelMatched) {
-                    return null;
-                  }
-                  const groupAttention = group.sessions.some((session) => attention[session.spec.tmuxSession]);
-                  const groupCollapsed = filtering ? false : Boolean(collapsedGroups[group.id]);
-                  return (
-                  <section
-                    key={group.id}
-                    className={`groupNode ${group.id === activeGroupId ? 'selected' : ''}`}
-                    data-sidebar-group="true"
-                    data-project-id={project.id}
-                    data-group-id={group.groupId}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = 'move';
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      const reorder = getReorderData(event.dataTransfer);
-                      // Group reorder only within the same project; session reorder
-                      // lands on a session row (handled below), not here.
-                      if (reorder?.kind === 'group' && reorder.projectId === project.id) {
-                        const ids = project.groups.map((candidate) => candidate.groupId);
-                        const ordered = computeReorder(ids, reorder.id, group.groupId);
-                        if (ordered !== ids) {
-                          onReorderGroups(project.id, ordered);
-                        }
-                        return;
-                      }
-                      if (reorder?.kind === 'session' && reorder.projectId === project.id && reorder.groupId === group.groupId) {
-                        return; // same-group session on the group area is a no-op (reorder by dropping on a session row)
-                      }
-                      // Cross-group session move (the session drag also carries its tmux id).
-                      onDropSession(group, getSidebarDropSessionTmux(event.dataTransfer));
-                    }}
-                  >
-                  <div
-                    className="treeRow groupRow"
-                    draggable
-                    onDragStart={(event) => {
-                      event.stopPropagation();
-                      setReorderData(event.dataTransfer, { kind: 'group', projectId: project.id, groupId: group.groupId, id: group.groupId });
-                      event.dataTransfer.effectAllowed = 'move';
-                    }}
-                  >
-                    <button
-                      className="treeToggle"
-                      type="button"
-                      aria-label={groupCollapsed ? 'Expand group' : 'Collapse group'}
-                      onClick={() => onToggleGroup(group)}
-                    >
-                      {groupCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                    </button>
-                    {group.id === activeGroupId ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
-                    <button
-                      className="treeMain"
-                      onMouseEnter={() => bleeps.hover?.play()}
-                      onClick={() => {
-                        bleeps.click?.play();
-                        onSelectGroup(group);
-                      }}
-                      title={group.label}
-                    >
-                      <LayoutGrid size={12} />
-                      <span>{group.label}</span>
-                      {/* Liveness over config trivia: layout kind moves to the
-                          tooltip; the count mirrors the project rows. Count and
-                          the needs-input lamp share one cell (count first) so the
-                          lamp never bumps the count off the row's single line. */}
-                      <span className="treeMeta">
-                        <small title={group.layout.kind}>
-                          {group.sessions.filter((candidate) => candidate.state === 'running').length}/{group.sessions.length}
-                        </small>
-                        {groupCollapsed && groupAttention ? (
-                          <i className="treeAttnDot" title="A session inside needs input" aria-label="needs input" />
-                        ) : null}
-                      </span>
-                    </button>
-                    <ActionCluster>
-                      {group.missing > 0 ? (
-                        <IconButton
-                          icon={<Zap size={11} />}
-                          label={`Boot ${group.missing} missing session${group.missing === 1 ? '' : 's'}`}
-                          onClick={() => {
-                            bleeps.deploy?.play();
-                            onGroupBoot(group);
-                          }}
-                        />
-                      ) : null}
-                      <IconButton icon={<Plus size={11} />} label="Add session" onClick={() => onAddSession(group)} />
-                      <IconButton icon={<Info size={11} />} label="Group info" onClick={() => onGroupInfo(group)} />
-                      <IconButton icon={<Pencil size={11} />} label="Edit group" onClick={() => onGroupEdit(group)} />
-                      <IconButton icon={<Trash2 size={11} />} label="Delete group" onClick={() => onGroupDelete(group)} />
-                    </ActionCluster>
-                  </div>
-                  {!groupCollapsed ? (
-                    <Animator combine manager="stagger" duration={{ stagger: LIST_REVEAL.stagger, limit: LIST_REVEAL.limit }}>
-                      <div className="sessionBranch">
-                        {visibleSessions.map((session) => (
-                          <Animator key={session.spec.tmuxSession} duration={LIST_ROW_DURATION}>
-                            <Animated
-                              className={`treeRow sessionNode ${session.spec.tmuxSession === activeTmux ? 'selected' : ''}`}
-                              animated={['fade', ['x', -10, 0]]}
-                              data-sidebar-session="true"
-                              data-tmux-session={session.spec.tmuxSession}
-                              draggable
-                              onDragStart={(event: DragEvent<HTMLDivElement>) => {
-                                event.stopPropagation();
-                                setReorderData(event.dataTransfer, {
-                                  kind: 'session',
-                                  projectId: group.projectId,
-                                  groupId: group.groupId,
-                                  id: session.spec.name
-                                });
-                                // Also expose the tmux session so a cross-group drop still moves it.
-                                event.dataTransfer.setData('application/x-desk-session', session.spec.tmuxSession);
-                                event.dataTransfer.effectAllowed = 'move';
-                              }}
-                              onDragOver={(event: DragEvent<HTMLDivElement>) => {
-                                event.preventDefault();
-                                event.dataTransfer.dropEffect = 'move';
-                              }}
-                              onDrop={(event: DragEvent<HTMLDivElement>) => {
-                                const reorder = getReorderData(event.dataTransfer);
-                                if (reorder?.kind === 'session' && reorder.projectId === group.projectId && reorder.groupId === group.groupId) {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  const names = group.sessions.map((candidate) => candidate.spec.name);
-                                  const ordered = computeReorder(names, reorder.id, session.spec.name);
-                                  if (ordered !== names) {
-                                    onReorderSessions(group.projectId, group.groupId, group.projectCwd, ordered);
-                                  }
-                                }
-                                // A cross-group session drop falls through to the group section's onDrop (move).
-                              }}
-                            >
-                              {session.spec.tmuxSession === activeTmux ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
-                              <span className="treeToggle spacer" aria-hidden="true" />
-                              <button
-                                className="treeMain"
-                                onMouseEnter={() => bleeps.hover?.play()}
-                                onClick={() => {
-                                  bleeps.click?.play();
-                                  onSelectSession(session, group);
-                                }}
-                                title={session.spec.tmuxSession}
-                              >
-                                <StatusDot state={session.state} attention={Boolean(attention[session.spec.tmuxSession])} />
-                                <span>{session.spec.name}</span>
-                              </button>
-                              <ActionCluster>
-                                <IconButton icon={<Info size={10} />} label="Session info" onClick={() => onSessionInfo(session, group)} />
-                                <IconButton icon={<Pencil size={10} />} label="Edit session" onClick={() => onSessionEdit(session, group)} />
-                                <IconButton
-                                  icon={<RotateCw size={10} />}
-                                  label="Reload session"
-                                  onClick={() => {
-                                    bleeps.deploy?.play();
-                                    onSessionRestart(session, group);
-                                  }}
-                                />
-                                {/*
-                                  Repair remains wired for non-sidebar recovery paths, but the
-                                  per-session sidebar action is intentionally hidden: accidental
-                                  clicks can mutate live tmux windows.
-                                  <IconButton icon={<Wrench size={10} />} label="Repair session" onClick={onSessionRepair} />
-                                */}
-                                <IconButton icon={<Trash2 size={10} />} label="Delete session" onClick={() => onSessionDelete(session, group)} />
-                              </ActionCluster>
-                            </Animated>
-                          </Animator>
-                        ))}
-                      </div>
-                    </Animator>
-                  ) : null}
-                </section>
-                  );
-                })}
-              </div>
-            ) : null}
-          </section>
-          );
-        })}
-      </div>
-
-      {agentsHelpOpen ? (
-        <Modal title="Agents" icon={<Activity size={13} />} onClose={() => setAgentsHelpOpen(false)}>
-          <div style={{ padding: '16px 14px', color: 'var(--desk-text-dim)', fontSize: '12px', lineHeight: '1.5' }}>
-            <div>Agents are AI assistants and execution environments that work on tasks. Each agent is a tmux session with Claude or another AI running commands.</div>
-            <div style={{ marginTop: '12px' }}>Create agent projects to organize work, add groups to coordinate on related tasks, and create sessions for individual agents to execute work.</div>
-            <div style={{ marginTop: '12px' }}>Use the boot button to start missing sessions, edit to modify names and settings, and delete to remove sessions. Sessions show live status with a dot indicator — green for running, yellow for waiting for input, gray for inactive.</div>
-            <div style={{ marginTop: '12px' }}>Active sessions appear in the terminal multiplexer where you can see output and send input. Featured messages can reference agents with @name mentions to direct messages and task assignments.</div>
-            <div style={{ marginTop: '12px' }}>
-              <a href="https://docs.desk.cloud/agents-and-terminals/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
-                Read full documentation →
-              </a>
-            </div>
-          </div>
-        </Modal>
-      ) : null}
-    </aside>
-  );
-}
-
-const AgentsSidebar = memo(AgentsSidebarImpl);
-
 /** Stable empty maps so keep-alive mounts without assignments memo cleanly. */
 const EMPTY_CELL_MAP: Record<string, number> = {};
 const EMPTY_ACTIVE_MAP: Record<string, string> = {};
@@ -4496,506 +3480,6 @@ const MountedMux = memo(function MountedMuxImpl({
     </div>
   );
 }, mountedMuxPropsEqual);
-
-const LAYOUT_KIND_OPTIONS: Array<Exclude<LayoutKind, 'custom'>> = ['1x1', '2x2', '3x3', '4x4', 'linear'];
-
-function AgentMultiplexerImpl({
-  group,
-  visible,
-  cells,
-  selectedTmux,
-  attention,
-  onTouchSession,
-  busy,
-  onAddCell,
-  onRemoveCell,
-  onSelectSession,
-  onDragSession,
-  onDropSession,
-  onAssignSession,
-  onBootSession,
-  onChangeLayout,
-  onPersistLayoutSizes,
-  onTerminalSelectionMenu,
-  onCreateNoteFromText,
-  terminalRevisions
-}: {
-  group: DeskGroupView;
-  visible: boolean;
-  cells: PanelCell[];
-  selectedTmux?: string;
-  attention: Record<string, { attention: true; since: string }>;
-  onTouchSession: (tmuxSession: string) => void;
-  busy: boolean;
-  onAddCell: (group: DeskGroupView) => void;
-  onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
-  onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
-  onDragSession: (tmuxSession: string | null) => void;
-  onDropSession: (group: DeskGroupView, cell: PanelCell) => void;
-  onAssignSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
-  onBootSession: (session: DeskSessionView) => void;
-  onChangeLayout: (group: DeskGroupView, kind: LayoutKind) => void;
-  onPersistLayoutSizes: (group: DeskGroupView, sizes: { rows?: number[]; cols?: number[][] }) => void;
-  onTerminalSelectionMenu: (text: string, x: number, y: number) => void;
-  onCreateNoteFromText: (text: string) => void;
-  terminalRevisions: Record<string, number>;
-}): JSX.Element {
-  const bleeps = useBleeps<DeskBleepName>();
-  // Phones stack cells vertically: side-by-side terminals at 120px min each
-  // are unreadable and the column separators are undraggable by thumb.
-  const narrowViewport = useNarrowViewport();
-  // Linear packs every cell into one row (N columns); all other kinds use the
-  // square-ish sqrt grid. Phones always stack to a single-column pager.
-  const columns = narrowViewport
-    ? 1
-    : group.layout.kind === 'linear'
-      ? group.layout.cellCount
-      : Math.ceil(Math.sqrt(group.layout.cellCount));
-  const rows = chunkCells(cells, columns);
-
-  // Persisted drag-resized split sizes. defaultSize is applied only when the
-  // stored shape still matches the current grid (cell count / column changes
-  // invalidate old sizes, which then fall back to an even split). Sizes are
-  // captured from the panel refs at the end of a drag gesture and handed up to
-  // persist (debounced there).
-  const storedSizes = group.layout.sizes;
-  const sizesMatchShape = Boolean(
-    storedSizes?.rows &&
-      storedSizes.rows.length === rows.length &&
-      storedSizes.cols &&
-      storedSizes.cols.length === rows.length &&
-      rows.every((row, index) => storedSizes.cols?.[index]?.length === row.length)
-  );
-  const rowPanelRefs = useRef<(PanelImperativeHandle | null)[]>([]);
-  const cellPanelRefs = useRef<(PanelImperativeHandle | null)[][]>([]);
-  const panelDraggingRef = useRef(false);
-  const captureAndPersistSizes = useCallback((): void => {
-    const toPct = (panel: PanelImperativeHandle | null): number | null =>
-      panel ? Math.round(panel.getSize().asPercentage * 100) / 100 : null;
-    const rowSizes = rowPanelRefs.current.map(toPct).filter((n): n is number => n !== null);
-    const colSizes = cellPanelRefs.current.map((rowRefs) =>
-      rowRefs.map(toPct).filter((n): n is number => n !== null)
-    );
-    // Only persist when there is something resizable: more than one row, or a
-    // row with more than one cell. A 1x1 group has no separators.
-    const hasSplits = rowSizes.length > 1 || colSizes.some((row) => row.length > 1);
-    if (hasSplits) {
-      onPersistLayoutSizes(group, { rows: rowSizes, cols: colSizes });
-    }
-  }, [group, onPersistLayoutSizes]);
-  // A drag ends on pointerup anywhere; capture the final sizes once per gesture.
-  useEffect(() => {
-    const onPointerUp = (): void => {
-      if (panelDraggingRef.current) {
-        panelDraggingRef.current = false;
-        captureAndPersistSizes();
-      }
-    };
-    window.addEventListener('pointerup', onPointerUp);
-    return () => window.removeEventListener('pointerup', onPointerUp);
-  }, [captureAndPersistSizes]);
-  const onSeparatorPointerDown = (): void => {
-    panelDraggingRef.current = true;
-  };
-  // Mobile pager state: which slide the scroll-snap carousel rests on.
-  const [pageIndex, setPageIndex] = useState(0);
-  const pagerRef = useRef<HTMLDivElement | null>(null);
-  // Layout badge dropdown (1x1/2x2/3x3/4x4); +/- keeps covering custom counts.
-  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
-  useEffect(() => {
-    if (!layoutMenuOpen) {
-      return;
-    }
-    const close = (): void => setLayoutMenuOpen(false);
-    window.addEventListener('click', close);
-    window.addEventListener('keydown', close);
-    return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('keydown', close);
-    };
-  }, [layoutMenuOpen]);
-  const renderCell = (cell: PanelCell): JSX.Element => (
-    <TerminalCell
-      group={group}
-      cell={cell}
-      visible={visible}
-      selectedTmux={selectedTmux}
-      attention={attention}
-      onTouchSession={onTouchSession}
-      revision={cell.activeSession ? terminalRevisions[cell.activeSession.spec.tmuxSession] ?? 0 : 0}
-      onSelectSession={onSelectSession}
-      onDragSession={onDragSession}
-      onDropSession={onDropSession}
-      onAssignSession={onAssignSession}
-      onBootSession={onBootSession}
-      onRemoveCell={onRemoveCell}
-      onSelectionMenu={onTerminalSelectionMenu}
-      onCreateNoteFromText={onCreateNoteFromText}
-    />
-  );
-  const header = (
-    <div className="subsystemHeader">
-      <div className="railTitle">
-        <Boxes size={13} />
-        <TextReveal as="span" manager="decipher">{group.projectLabel ?? group.label}</TextReveal>
-        <small>{group.label}</small>
-      </div>
-      <div className="railActions">
-        <IconButton
-          icon={<Plus size={12} />}
-          label="Add layout cell"
-          disabled={busy || group.layout.cellCount >= 16}
-          onClick={() => onAddCell(group)}
-        />
-        <div className="layoutBadgeWrap">
-          <button
-            type="button"
-            className="layoutBadge"
-            style={{ clipPath: CLIP_OCTAGON_PILL }}
-            title="Change layout"
-            aria-haspopup="menu"
-            aria-expanded={layoutMenuOpen}
-            disabled={busy}
-            onMouseEnter={() => bleeps.hover?.play()}
-            onClick={(event) => {
-              event.stopPropagation();
-              bleeps.click?.play();
-              setLayoutMenuOpen((open) => !open);
-            }}
-          >
-            {group.layout.kind} / {group.layout.cellCount}
-          </button>
-          {layoutMenuOpen ? (
-            <div className="layoutMenu treeMenu" role="menu">
-              {LAYOUT_KIND_OPTIONS.map((kind) => (
-                <button
-                  key={kind}
-                  type="button"
-                  role="menuitem"
-                  className={`treeMenuItem ${group.layout.kind === kind ? 'selected' : ''}`}
-                  onMouseEnter={() => bleeps.hover?.play()}
-                  onClick={() => {
-                    bleeps.click?.play();
-                    setLayoutMenuOpen(false);
-                    if (kind !== group.layout.kind) {
-                      onChangeLayout(group, kind);
-                    }
-                  }}
-                >
-                  <LayoutGrid size={11} />
-                  {kind}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-  if (narrowViewport) {
-    // One full-screen terminal at a time; swipe (native scroll-snap) between
-    // cells. No resizable splits — a phone gets a pager, not a mosaic.
-    return (
-      <section className="agentSubsystem mobileMux">
-        {header}
-        <div
-          className="mobileMuxPager"
-          ref={pagerRef}
-          onScroll={(event) => {
-            const pager = event.currentTarget;
-            const index = Math.round(pager.scrollLeft / Math.max(1, pager.clientWidth));
-            if (index !== pageIndex) {
-              setPageIndex(index);
-            }
-          }}
-        >
-          {cells.map((cell) => (
-            <div className="mobileMuxSlide" key={cell.id}>
-              {renderCell(cell)}
-            </div>
-          ))}
-        </div>
-        {cells.length > 1 ? (
-          <div className="mobileMuxDots" role="tablist" aria-label="Terminal pager">
-            {cells.map((cell, index) => {
-              const session = cell.activeSession;
-              const active = index === pageIndex;
-              const hasAttention = Boolean(session && attention[session.spec.tmuxSession]);
-              // Inactive cells keep the arwes diamond, tinted by session state
-              // (attention pulses); the active one expands into a named pill —
-              // 9 anonymous dots told you nothing about who was screaming.
-              const stateClass = session ? (hasAttention ? 'attn' : session.state) : 'empty';
-              return (
-                <button
-                  key={cell.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  aria-label={`${session?.spec.name ?? 'empty cell'} — terminal ${index + 1} of ${cells.length}`}
-                  className={`mobileMuxDot ${active ? `mobileMuxPill active` : ''} state-${stateClass}`}
-                  onClick={() => {
-                    const pager = pagerRef.current;
-                    pager?.scrollTo({ left: index * pager.clientWidth, behavior: 'smooth' });
-                  }}
-                >
-                  {active ? (
-                    <>
-                      {session ? (
-                        <StatusDot state={session.state} attention={hasAttention} />
-                      ) : null}
-                      <span className="mobileMuxPillName">{session?.spec.name ?? 'empty'}</span>
-                    </>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-      </section>
-    );
-  }
-  // Rebuild the panel-ref slots for this render's grid; stale slots from a
-  // previous (larger) grid are dropped so captureAndPersistSizes reads only
-  // live panels.
-  rowPanelRefs.current = [];
-  cellPanelRefs.current = rows.map(() => []);
-  return (
-    <section className="agentSubsystem">
-      {header}
-      <div className="multiplexerGrid">
-        <Group orientation="vertical" className="terminalPanelRows" id={`desk-layout-${group.id}-rows`}>
-          {rows.map((row, rowIndex) => (
-            <Fragment key={`${group.id}:row-${rowIndex}`}>
-              {rowIndex > 0 ? (
-                <Separator className="panelResizeHandle" onPointerDown={onSeparatorPointerDown} />
-              ) : null}
-              <Panel
-                minSize={90}
-                className="terminalPanelRow"
-                defaultSize={sizesMatchShape ? `${storedSizes?.rows?.[rowIndex]}%` : undefined}
-                panelRef={(handle) => {
-                  rowPanelRefs.current[rowIndex] = handle;
-                }}
-              >
-                <Group
-                  orientation="horizontal"
-                  className="terminalPanelCols"
-                  id={`desk-layout-${group.id}-row-${rowIndex}`}
-                >
-                  {row.map((cell, cellIndex) => (
-                    <Fragment key={cell.id}>
-                      {cellIndex > 0 ? (
-                        <Separator className="panelResizeHandle" onPointerDown={onSeparatorPointerDown} />
-                      ) : null}
-                      <Panel
-                        minSize={120}
-                        className="terminalPanelCell"
-                        defaultSize={sizesMatchShape ? `${storedSizes?.cols?.[rowIndex]?.[cellIndex]}%` : undefined}
-                        panelRef={(handle) => {
-                          (cellPanelRefs.current[rowIndex] ??= [])[cellIndex] = handle;
-                        }}
-                      >
-                        {renderCell(cell)}
-                      </Panel>
-                    </Fragment>
-                  ))}
-                </Group>
-              </Panel>
-            </Fragment>
-          ))}
-        </Group>
-      </div>
-    </section>
-  );
-}
-
-const AgentMultiplexer = memo(AgentMultiplexerImpl);
-
-function TerminalCellImpl({
-  group,
-  cell,
-  visible,
-  selectedTmux,
-  attention,
-  onTouchSession,
-  revision,
-  onSelectSession,
-  onDragSession,
-  onDropSession,
-  onAssignSession,
-  onBootSession,
-  onRemoveCell,
-  onSelectionMenu,
-  onCreateNoteFromText
-}: {
-  group: DeskGroupView;
-  cell: PanelCell;
-  visible: boolean;
-  selectedTmux?: string;
-  attention: Record<string, { attention: true; since: string }>;
-  onTouchSession: (tmuxSession: string) => void;
-  revision: number;
-  onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
-  onDragSession: (tmuxSession: string | null) => void;
-  onDropSession: (group: DeskGroupView, cell: PanelCell) => void;
-  onAssignSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
-  onBootSession: (session: DeskSessionView) => void;
-  onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
-  onSelectionMenu: (text: string, x: number, y: number) => void;
-  onCreateNoteFromText: (text: string) => void;
-}): JSX.Element {
-  const bleeps = useBleeps<DeskBleepName>();
-  // Tap-to-assign picker for empty cells — DnD-only assignment is hostile to
-  // touch and undiscoverable elsewhere.
-  const [pickerOpen, setPickerOpen] = useState(false);
-  return (
-    <Animator>
-      <Animated
-        as="section"
-        className="terminalCell"
-        animated={['flicker', ['scale', 0.96, 1], ['y', 10, 0]]}
-        onMouseEnter={() => bleeps.hover?.play()}
-        onMouseDownCapture={() => {
-          const active = cell.activeSession;
-          if (!active) {
-            return;
-          }
-          onTouchSession(active.spec.tmuxSession);
-          if (active.spec.tmuxSession !== selectedTmux) {
-            // Clicking anywhere in the terminal selects it, like a sidebar click.
-            bleeps.click?.play();
-            onSelectSession(group, cell, active);
-          }
-        }}
-        onDragOver={(event: DragEvent<HTMLElement>) => event.preventDefault()}
-        onDrop={() => onDropSession(group, cell)}
-      >
-        <CellChrome focused={Boolean(cell.activeSession && cell.activeSession.spec.tmuxSession === selectedTmux)}>
-          <div className="cellTabs">
-            <span className="cellLabel">{cell.label}</span>
-            {cell.sessions.map((session) => (
-              <button
-                key={session.spec.tmuxSession}
-                className={`cellTab ${session.spec.tmuxSession === cell.activeSession?.spec.tmuxSession ? 'selected' : ''} ${
-                  session.spec.tmuxSession === selectedTmux ? 'globalSelected' : ''
-                }`}
-                draggable
-                onDragStart={(event: DragEvent<HTMLButtonElement>) => {
-                  event.dataTransfer.effectAllowed = 'move';
-                  onDragSession(session.spec.tmuxSession);
-                }}
-                onDragEnd={() => onDragSession(null)}
-                onMouseEnter={() => bleeps.hover?.play()}
-                onClick={() => {
-                  bleeps.click?.play();
-                  onSelectSession(group, cell, session);
-                }}
-                title={session.spec.tmuxSession}
-              >
-                <StatusDot state={session.state} attention={Boolean(attention[session.spec.tmuxSession])} />
-                <span>{session.spec.name}</span>
-              </button>
-            ))}
-            <button
-              className="cellRemove"
-              type="button"
-              aria-label="Remove layout cell"
-              onClick={() => onRemoveCell(group, cell)}
-              disabled={group.layout.cellCount <= 1}
-              title="Remove layout cell"
-            >
-              <X size={10} />
-            </button>
-          </div>
-          <div className="terminalCellBody">
-            {cell.activeSession ? (
-              <>
-                {cell.activeSession.spec.uiMode === 'native' ? (
-                  <NativeAgentSurface
-                    session={cell.activeSession.spec.tmuxSession}
-                    revision={revision}
-                    visible={visible}
-                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
-                    onMessageMenu={onSelectionMenu}
-                    onCreateNote={onCreateNoteFromText}
-                  />
-                ) : (
-                  <TerminalSurface
-                    session={cell.activeSession}
-                    revision={revision}
-                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
-                    onSelectionMenu={onSelectionMenu}
-                  />
-                )}
-                {cell.activeSession.state !== 'running' ? (
-                  <div className="cellMissingOverlay">
-                    <span className="cellMissingTitle">SESSION MISSING</span>
-                    <small className="cellMissingMeta">{cell.activeSession.spec.tmuxSession}</small>
-                    <button
-                      type="button"
-                      className="cellMissingBoot"
-                      onMouseEnter={() => bleeps.hover?.play()}
-                      onClick={() => {
-                        bleeps.deploy?.play();
-                        onBootSession(cell.activeSession!);
-                      }}
-                    >
-                      <Zap size={11} />
-                      Boot session
-                    </button>
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <div className="emptyCell">
-                <button
-                  type="button"
-                  className="emptyCellAssign"
-                  onMouseEnter={() => bleeps.hover?.play()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    bleeps.click?.play();
-                    setPickerOpen((open) => !open);
-                  }}
-                >
-                  <TextReveal as="span" manager="sequence">Empty — tap to assign, or drop a session</TextReveal>
-                </button>
-                {pickerOpen ? (
-                  <div className="cellSessionPicker treeMenu" role="menu">
-                    {group.sessions.length === 0 ? (
-                      <span className="gitEmptyNote small">No sessions in this group.</span>
-                    ) : (
-                      group.sessions.map((session) => (
-                        <button
-                          key={session.spec.tmuxSession}
-                          type="button"
-                          role="menuitem"
-                          className="treeMenuItem"
-                          onMouseEnter={() => bleeps.hover?.play()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            bleeps.click?.play();
-                            setPickerOpen(false);
-                            onAssignSession(group, cell, session);
-                          }}
-                        >
-                          <StatusDot state={session.state} attention={Boolean(attention[session.spec.tmuxSession])} />
-                          {session.spec.name}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </div>
-        </CellChrome>
-      </Animated>
-    </Animator>
-  );
-}
-
-const TerminalCell = memo(TerminalCellImpl);
 
 /** Recently selected sessions ring — palette ranking, newest first. */
 const AGENT_RECENTS_KEY = 'desk.agentRecents';
@@ -5433,10 +3917,6 @@ function ConfirmAction({
   );
 }
 
-function ActionCluster({ children }: { children: ReactNode }): JSX.Element {
-  return <div className="treeActions">{children}</div>;
-}
-
 function SubsystemButton({
   icon,
   label,
@@ -5487,29 +3967,6 @@ function SubsystemButton({
   );
 }
 
-function CommandButton({
-  icon,
-  label,
-  onClick,
-  disabled,
-  submit,
-  title
-}: {
-  icon: ReactNode;
-  label: string;
-  onClick?: () => void;
-  disabled?: boolean;
-  submit?: boolean;
-  title?: string;
-}): JSX.Element {
-  return <Cmd icon={icon} label={label} onClick={onClick} disabled={disabled} submit={submit} title={title} />;
-}
-
-function StatusDot({ state, attention }: { state: DeskSessionView['state']; attention?: boolean }): JSX.Element {
-  const tone = attention && state === 'running' ? 'attention' : state === 'running' ? 'running' : 'missing';
-  return <span className={`statusDot ${tone}`} />;
-}
-
 function buildPanelCells(
   group: DeskGroupView,
   assignments: Record<string, number>,
@@ -5537,14 +3994,6 @@ function buildPanelCells(
   }
 
   return cells;
-}
-
-function chunkCells(cells: PanelCell[], columns: number): PanelCell[][] {
-  const rows: PanelCell[][] = [];
-  for (let index = 0; index < cells.length; index += columns) {
-    rows.push(cells.slice(index, index + columns));
-  }
-  return rows;
 }
 
 function buildLayoutPayload(form: GroupForm): { kind: LayoutKind; cells?: number } {

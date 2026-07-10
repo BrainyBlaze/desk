@@ -17,6 +17,7 @@ import {
 } from '@arwes/react';
 import { ChevronDown, HelpCircle, X } from 'lucide-react';
 import { createDeskTheme, type DeskBuiltTheme } from './theme.js';
+import { createExitCloser, type ExitCloser } from './exitCloser.js';
 import { isReducedMotion } from './motion.js';
 import type { DeskBleepName } from './bleeps.js';
 
@@ -523,12 +524,21 @@ export function Modal({
   useEffect(() => {
     setActive(true);
   }, []);
+  // Single exit timer: the X button and Escape both call requestClose. The
+  // closer runs onClose exactly once after the exit-animation window (ignoring
+  // repeat triggers) and disposes on unmount so onClose never lands on a
+  // torn-down tree. setActive(false) is idempotent, so it stays unguarded.
+  const closerRef = useRef<ExitCloser | null>(null);
+  if (closerRef.current === null) {
+    closerRef.current = createExitCloser(260);
+  }
   const requestClose = (): void => {
     setActive(false);
-    window.setTimeout(onClose, 260);
+    closerRef.current!.request(onClose);
   };
   const requestCloseRef = useRef(requestClose);
   requestCloseRef.current = requestClose;
+  useEffect(() => () => closerRef.current?.dispose(), []);
   useEffect(() => {
     // Escape cancels, with the same exit animation as the X button. Safe for
     // every desk modal: destructive flows confirm via an explicit button.

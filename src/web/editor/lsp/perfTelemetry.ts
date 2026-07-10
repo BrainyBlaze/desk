@@ -40,6 +40,8 @@ const defaultNow = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
 
 let enabled = false;
+let initialized = false;
+const PERF_RUNTIME_KEY = '__deskLspPerfRuntime';
 let nowFn: () => number = defaultNow;
 let t0: number | null = null;
 let methodCounts: Record<string, MethodCount> = {};
@@ -172,35 +174,52 @@ export function initPerfTelemetry(): void {
   if (flag !== true && flag !== '1') {
     return;
   }
+  // A second call within the SAME module instance is a no-op.
+  if (initialized) {
+    return;
+  }
+  initialized = true;
+  // But Vite HMR re-evaluates the module (resetting `initialized`) while the prior
+  // instance's observer + heartbeat stay alive on globalThis. Dispose that prior runtime
+  // before installing a fresh one so resources never stack.
+  const priorRuntime = (globalThis as Record<string, unknown>)[PERF_RUNTIME_KEY] as
+    | { dispose?: () => void }
+    | undefined;
+  priorRuntime?.dispose?.();
   setPerfEnabled(true);
   (globalThis as Record<string, unknown>).__deskLspPerfSnapshot = () => perfSnapshot();
   (globalThis as Record<string, unknown>).__deskLspPerfReset = () => perfReset();
+  let perfObserver: PerformanceObserver | undefined;
   try {
     if (typeof PerformanceObserver !== 'undefined') {
-      const observer = new PerformanceObserver((list) => {
+      perfObserver = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           recordLongTask(entry.duration);
         }
       });
-      observer.observe({ entryTypes: ['longtask'] });
+      perfObserver.observe({ entryTypes: ['longtask'] });
       longTasks.supported = true;
     }
   } catch {
     /* longtask not supported: rafLag below is the fallback responsiveness signal */
   }
-  // Heartbeat: schedule a timer every `intervalMs` for ~3s and record the worst drift (actual minus
-  // scheduled). A large max drift = the main thread was blocked (poor responsiveness). Timer-drift is
-  // used instead of requestAnimationFrame because RAF/longtask do not fire reliably in headless
-  // Chromium, so this signal is available in both the Playwright proof and a real browser.
+  // Heartbeat: schedule a timer every intervalMs for ~180s (the whole measurement session) and
+  // record the worst drift (actual minus scheduled). A large max drift = the main thread was
+  // blocked (poor responsiveness). Timer-drift is used instead of requestAnimationFrame because
+  // RAF/longtask do not fire reliably in headless Chromium, so this signal is available in both
+  // the Playwright proof and a real browser.
+  let heartbeatStopped = false;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     if (typeof setTimeout === 'function') {
-      // Run for the whole measurement session (not a one-shot at init) so the heartbeat is still
-      // sampling during each file-open window after perfReset clears the counters.
       const windowMs = 180000;
       const intervalMs = 50;
       const startedAt = nowFn();
       let expected = startedAt + intervalMs;
       const tick = (): void => {
+        if (heartbeatStopped) {
+          return;
+        }
         const t = nowFn();
         const drift = t - expected;
         uiLag.samples += 1;
@@ -209,12 +228,22 @@ export function initPerfTelemetry(): void {
         }
         expected += intervalMs;
         if (t - startedAt < windowMs) {
-          setTimeout(tick, intervalMs);
+          heartbeatTimer = setTimeout(tick, intervalMs);
         }
       };
-      setTimeout(tick, intervalMs);
+      heartbeatTimer = setTimeout(tick, intervalMs);
     }
   } catch {
     /* no setTimeout: skip the heartbeat */
   }
+  // Publish a disposer so the next module instance (HMR) can tear this runtime down.
+  (globalThis as Record<string, unknown>)[PERF_RUNTIME_KEY] = {
+    dispose: (): void => {
+      heartbeatStopped = true;
+      if (heartbeatTimer !== undefined) {
+        clearTimeout(heartbeatTimer);
+      }
+      perfObserver?.disconnect();
+    }
+  };
 }

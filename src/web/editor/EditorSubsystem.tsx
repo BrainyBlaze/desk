@@ -41,13 +41,13 @@ import {
   isAgentSidebarCollapseSize,
   isSidebarHandleDragActive,
   setSidebarHandleDragActive,
-  defaultSidebarCollapsed,
   isNarrowViewport,
   surfaceMinSize,
   useNarrowViewport,
   readStoredSidebarCollapsed,
   readStoredSidebarWidth
 } from '../sidebarPanel.js';
+import { usePersistedCollapse } from '../usePersistedCollapse.js';
 import { fetchSettings, saveSettings, type DeskAutosaveMode } from '../api.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { FsWatchSocket, fsCreate, fsCreateApply, fsCreatePreview, fsDelete, fsDeleteApply, fsDeletePreview, fsHome, fsNotesHome, fsNotesState, fsRead, fsRename, fsRenameApply, fsRenamePreview, fsRootFor, fsSaveNotesState, fsSearchFiles, fsValidate, fsWrite, enumerateSubtree, fileOpDirtyBlock, remapSubtreePath, resourceOpPaths, type FileOperationDescriptor, type FileOpPreviewResult, type LspFileResourceOperation, type LspRenamePreviewChange } from './fsClient.js';
@@ -287,9 +287,7 @@ export function EditorSubsystem({
     };
   }, [pickerOpen]);
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(collapseStorageKey))
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistedCollapse(collapseStorageKey, onSidebarCollapsedChange);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringSidebarRef = useRef(false);
   // Persisted width: localStorage cache for instant boot, desk.yml as truth.
@@ -379,11 +377,6 @@ export function EditorSubsystem({
       watcherRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(collapseStorageKey, String(sidebarCollapsed));
-    onSidebarCollapsedChange?.(sidebarCollapsed);
-  }, [sidebarCollapsed, onSidebarCollapsedChange]);
 
   useEffect(() => {
     // desk.yml width arrived (or changed in another browser): adopt it.
@@ -868,7 +861,8 @@ export function EditorSubsystem({
    * Cursor moves arrive per keystroke; routing them through React state would
    * re-render the whole subsystem, so the position lives in a ref and the
    * publish function (rebuilt each render to capture fresh state) is invoked
-   * directly. publishStatus dedupes, so unchanged segments cost nothing. */
+   * directly. publishStatus dedupes on segment identity (text/tone/hint/icon/onClick),
+   * so a re-publish with unchanged fields and stable handlers costs nothing. */
   // --- Problems / diagnostics panel. Aggregates Monaco markers for the CURRENT open
   // in-root text models (never the global marker store) and toggles a collapsible bottom panel from
   // a stable status-bar segment. Editor-only; no backend/settings/transport involvement. ---
@@ -1038,8 +1032,9 @@ export function EditorSubsystem({
         text: `Problems: ${errors}/${warnings}`,
         tone: errors > 0 ? 'danger' : warnings > 0 ? 'warn' : undefined,
         hint: `${errors} error${errors === 1 ? '' : 's'}, ${warnings} warning${warnings === 1 ? '' : 's'} - click to toggle the Problems panel`,
-        // Stable handler identity (publishStatus equality ignores onClick): the functional setter
-        // always reads/writes the live panel state, so a count-unchanged re-publish never strands it.
+        // toggleProblems has a stable identity, so a count-unchanged re-publish is deduped by the
+        // segment equality (which now includes onClick); the functional setter always reads/writes
+        // the live panel state, so it never strands.
         onClick: toggleProblems
       });
     }
@@ -1884,7 +1879,11 @@ export function EditorSubsystem({
         }
       }
     });
-  }, [bump, reloadFromDisk]);
+    // `active` must be a dep: the watcher is created lazily in the render body only once
+    // active flips true, so without it this effect runs once at mount (watcher null → no
+    // subscription) and never re-runs — open-file disk events then go unwatched for any
+    // session that did not boot with the editor active.
+  }, [active, bump, reloadFromDisk]);
 
   // Lazy boot: resolve the root from settings, falling back to home.
   useEffect(() => {

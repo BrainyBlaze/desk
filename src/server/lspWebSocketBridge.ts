@@ -44,6 +44,7 @@ export interface LspVirtualSession {
 
 export interface LspWebSocketBridgeOptions {
   createSession(options: LspVirtualSessionFactoryOptions): LspVirtualSession | Promise<LspVirtualSession>;
+  maxPayloadBytes?: number;
 }
 
 interface ActiveConnection {
@@ -61,9 +62,11 @@ interface LspReadyTelemetry {
 const WORKSPACE_ROOT_CLOSE_CODE = 1008;
 const SESSION_START_CLOSE_CODE = 1011;
 const BRIDGE_DISPOSE_CLOSE_CODE = 1001;
+const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
 export function installLspWebSocketBridge(httpServer: Server, options: LspWebSocketBridgeOptions): () => void {
-  const wss = new WebSocketServer({ noServer: true });
+  const maxPayload = positiveInteger(options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES, 'lsp websocket maxPayloadBytes');
+  const wss = new WebSocketServer({ noServer: true, maxPayload });
   const activeConnections = new Map<WebSocket, ActiveConnection>();
   const pendingSockets = new Set<WebSocket>();
   let disposed = false;
@@ -132,6 +135,11 @@ async function handleConnection(
 
   let socketClosed = false;
   ws.on('close', () => {
+    socketClosed = true;
+    pendingSockets.delete(ws);
+    disposeConnection(ws, activeConnections);
+  });
+  ws.on('error', () => {
     socketClosed = true;
     pendingSockets.delete(ws);
     disposeConnection(ws, activeConnections);
@@ -226,6 +234,13 @@ function createReadyEnvelope(capabilities: Record<string, unknown>, telemetry?: 
 
 function elapsedMs(start: number, end: number): number {
   return Math.max(0, Math.round((end - start) * 1000) / 1000);
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${label} must be a positive integer`);
+  }
+  return value;
 }
 
 function optionalSearchParam(url: URL, name: string): string | undefined {

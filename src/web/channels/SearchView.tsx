@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search } from 'lucide-react';
 import { ActionModal, useActionSounds } from './ActionModal.js';
 import { channelsSearch, type ChannelSearchResult } from './channelsClient.js';
 import { toSearchOptions } from './channelsModel.js';
+import { createSearchRunner } from './searchRunner.js';
 
 /**
  * cross-channel search. Searches root.md + thread-*.md across every channel
@@ -41,32 +42,27 @@ export function SearchView({
     return () => window.clearTimeout(id);
   }, [open]);
 
-  const run = useCallback(async () => {
-    if (query.trim() === '') {
-      setResults([]);
-      setError(null);
-      return;
-    }
-    setSearching(true);
-    try {
-      const res = await channelsSearch(toSearchOptions({ query, channel, author, mentionsMe, hasThread }));
-      setResults(res.items);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSearching(false);
-    }
-  }, [query, channel, author, mentionsMe, hasThread]);
+  const searchRunner = useMemo(
+    () =>
+      createSearchRunner<ReturnType<typeof toSearchOptions>, ChannelSearchResult>({
+        search: (params) => channelsSearch(params).then((res) => res.items),
+        onResults: setResults,
+        onError: setError,
+        onSearching: setSearching
+      }),
+    []
+  );
 
-  // Debounce: re-search 300ms after the latest input/filter change.
+  // Every open/query/filter change requests (or clears) a search; the runner debounces
+  // and invalidates any in-flight fetch on every change so a stale result can never land.
   useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-    const id = window.setTimeout(() => void run(), 300);
-    return () => window.clearTimeout(id);
-  }, [open, run]);
+    searchRunner.request(
+      open && query.trim() !== '' ? toSearchOptions({ query, channel, author, mentionsMe, hasThread }) : null
+    );
+  }, [open, query, channel, author, mentionsMe, hasThread, searchRunner]);
+
+  // Invalidate any in-flight fetch on unmount so a late resolve doesn't set state.
+  useEffect(() => () => searchRunner.cancel(), [searchRunner]);
 
   if (!open) {
     return null;

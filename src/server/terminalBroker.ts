@@ -1,5 +1,4 @@
 import type { IncomingMessage } from 'node:http';
-import { spawnSync } from 'node:child_process';
 import type { Duplex } from 'node:stream';
 import { spawn as spawnPty } from './ptyBackend.js';
 import { WebSocketServer } from 'ws';
@@ -11,10 +10,10 @@ import {
   captureTmuxPane,
   createTerminalAttachCommand,
   getLastGoodTerminalSize,
-  resizeAttachedTerminals,
   resizeTmuxWindow,
   stripTerminalMouseModeControls
 } from './terminalBridge.js';
+import { ensureTmuxGlobalOptions, markTmuxGlobalOptionsStale } from './tmuxOptions.js';
 import { TerminalOutputRing } from './terminalOutputRing.js';
 import { attentionTracker, extractTerminalNotifications, notifyAgentSignal, notifyRaise } from './attention.js';
 
@@ -82,7 +81,7 @@ const DEFAULT_RING_BYTES = 1024 * 1024;
 const DEFAULT_BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_IDLE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_MAX_WARM_PTYS = 40;
-let brokerTmuxOptionsApplied = false;
+const DEFAULT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 export class TerminalBroker {
   private readonly loadSessions: () => SessionSpec[];
@@ -343,6 +342,9 @@ export class TerminalBroker {
       return;
     }
     this.terminals.delete(tmuxSession);
+    if (this.terminals.size === 0) {
+      markTmuxGlobalOptionsStale();
+    }
     for (const transport of terminal.clients.keys()) {
       this.sendFrame(transport, { type: 'exit', session: tmuxSession, exitCode });
     }
@@ -389,6 +391,9 @@ export class TerminalBroker {
       return;
     }
     this.terminals.delete(tmuxSession);
+    if (this.terminals.size === 0) {
+      markTmuxGlobalOptionsStale();
+    }
     terminal.pty.kill();
   }
 
@@ -401,8 +406,17 @@ export class TerminalBroker {
   }
 }
 
-export function installTerminalBroker(httpServer: UpgradeServer, broker: TerminalBroker): () => void {
-  const wss = new WebSocketServer({ noServer: true });
+export interface TerminalBrokerInstallOptions {
+  maxPayloadBytes?: number;
+}
+
+export function installTerminalBroker(
+  httpServer: UpgradeServer,
+  broker: TerminalBroker,
+  options: TerminalBrokerInstallOptions = {}
+): () => void {
+  const maxPayload = positiveInteger(options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES, 'terminal broker maxPayloadBytes');
+  const wss = new WebSocketServer({ noServer: true, maxPayload });
   const sweepTimer = setInterval(() => broker.sweepIdle(), 30_000);
   sweepTimer.unref?.();
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
@@ -433,6 +447,7 @@ export function installTerminalBroker(httpServer: UpgradeServer, broker: Termina
       }
     });
     ws.on('close', () => broker.removeClient(ws));
+    ws.on('error', () => broker.removeClient(ws));
   });
   return () => {
     clearInterval(sweepTimer);
@@ -441,12 +456,19 @@ export function installTerminalBroker(httpServer: UpgradeServer, broker: Termina
   };
 }
 
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
 export function createDefaultTerminalBroker(): TerminalBroker {
   return new TerminalBroker({
     sessions: () => loadDeskCached().sessions,
     runningSessions: () => listTmuxSessionsCached(),
     spawnPty: (session) => {
-      ensureBrokerTmuxOptions();
+      ensureTmuxGlobalOptions();
       const command = createTerminalAttachCommand(session);
       const size = getLastGoodTerminalSize(session.tmuxSession) ?? {
         cols: DEFAULT_TERMINAL_COLS,
@@ -470,9 +492,6 @@ export function createDefaultTerminalBroker(): TerminalBroker {
       }),
     resizeTerminal: (session, cols, rows) => {
       const result = resizeTmuxWindow(session.tmuxSession, cols, rows);
-      if (result.ok && !('skipped' in result)) {
-        resizeAttachedTerminals(session.tmuxSession, result.cols, result.rows);
-      }
       return result.ok ? ('skipped' in result ? { ok: true, skipped: true } : { ok: true }) : result;
     }
   });
@@ -497,13 +516,4 @@ export function createTerminalBrokerSnapshot(
     return `${clear}${captured.lines.join('\r\n')}`;
   }
   return `${clear}${ringSnapshot}`;
-}
-
-function ensureBrokerTmuxOptions(): void {
-  if (brokerTmuxOptionsApplied) {
-    return;
-  }
-  spawnSync('tmux', ['set-option', '-g', 'mouse', 'off'], { encoding: 'utf8' });
-  spawnSync('tmux', ['set-option', '-g', 'allow-passthrough', 'on'], { encoding: 'utf8' });
-  brokerTmuxOptionsApplied = true;
 }

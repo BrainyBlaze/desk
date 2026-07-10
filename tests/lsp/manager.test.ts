@@ -128,6 +128,40 @@ describe('LspManager', () => {
     lease.release();
   });
 
+  it('emits a stopped restart event when automatic restart startup fails', async () => {
+    const exits: LspManagedSessionExitEvent[] = [];
+    const initial = new FakeVirtualSession({ hoverProvider: true, label: 'initial' });
+    let starts = 0;
+    const manager = createManager({
+      restartPolicy: { maxRestarts: 1, windowMs: 1_000 },
+      createSession: async () => {
+        starts += 1;
+        if (starts === 1) {
+          return initial;
+        }
+        throw new Error('restart startup failed');
+      }
+    });
+    manager.onManagedSessionExit((exit) => exits.push(exit));
+
+    const lease = await manager.acquireServer(serverOptions('typescript'));
+    initial.exit({ code: 9, signal: null });
+
+    await vi.waitFor(() => expect(exits).toHaveLength(2));
+    expect(exits[0].restart).toEqual({ state: 'restarting', attempt: 1, maxAttempts: 1 });
+    expect(exits[1]).toMatchObject({
+      key: lease.key,
+      sessionId: exits[0].sessionId,
+      code: 9,
+      signal: null,
+      reason: 'natural',
+      restart: { state: 'stopped', attempt: 1, maxAttempts: 1 }
+    });
+    await expect(manager.acquireServer(serverOptions('typescript'))).rejects.toThrow(/manual restart/i);
+
+    lease.release();
+  });
+
   it('waits for the pending restart when acquireServer reenters from an exit listener', async () => {
     const created: FakeVirtualSession[] = [];
     const startupResolvers: Array<(session: FakeVirtualSession) => void> = [];

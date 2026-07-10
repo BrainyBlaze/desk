@@ -29,7 +29,9 @@ export interface LspSessionStatus {
   reason?: string;
 }
 
-const PROGRESS_OVERLAY_PHASES: ReadonlySet<LspLifecycleState> = new Set<LspLifecycleState>(['warming', 'ready']);
+/** The lifecycle phases that carry a progress payload — single source of truth,
+ * shared with sessionStatusTracker so the overlay/clear invariant can't drift. */
+export const PROGRESS_OVERLAY_PHASES: ReadonlySet<LspLifecycleState> = new Set<LspLifecycleState>(['warming', 'ready']);
 
 function clampPercent(value: number): number {
   if (value < 0) {

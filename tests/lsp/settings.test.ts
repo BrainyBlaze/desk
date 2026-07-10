@@ -50,6 +50,7 @@ describe('normalizeLspSettings', () => {
           initializationOptions: {}
         }
       ],
+      missingBuiltins: [],
       maxSessions: 8,
       startupTimeoutMs: 6_000
     });

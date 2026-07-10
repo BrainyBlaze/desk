@@ -3,6 +3,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { DeskAgent } from '../core/types.js';
 import {
+  AGENT_SURFACE_RING_SIZE,
   parseAgentHostClientFrame,
   parseAgentUiClientFrame,
   type AgentHostClientFrame,
@@ -33,15 +34,21 @@ import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.j
  *    forwards commands to the host and routes command-result back via requestId.
  *
  * Per-session state: host connection, surface subscriptions, FSM state, lastSeq, and a
- * bounded committed-event ring (default 2000, FIFO) for snapshot replies to late or
- * reconnecting subscribers. Spec §6.
+ * bounded committed-event ring (default 2000 events / 16 MiB, FIFO) for snapshot
+ * replies to late or reconnecting subscribers. Spec §6.
  *
  * Attention synthesis (R3 amendment): one mapping from normalized events → existing
  * AttentionTracker/agentEvents so lamps/sounds/pulse/channel-engine behavior is identical
  * in native and terminal modes with zero driver-specific code.
  */
 
-const DEFAULT_RING_SIZE = 2000;
+const DEFAULT_RING_MAX_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+interface RetainedAgentSurfaceEvent {
+  event: AgentSurfaceEvent;
+  bytes: number;
+}
 
 interface SurfaceSubscription {
   surfaceId: string;
@@ -78,7 +85,8 @@ interface AgentSurfaceSession {
   lastHostPid: number | null;
   /** Browser surfaces grouped by transport; each transport may host multiple surfaceIds. */
   clients: Map<WebSocket, Map<string, SurfaceSubscription>>;
-  ring: AgentSurfaceEvent[];
+  ring: RetainedAgentSurfaceEvent[];
+  ringBytes: number;
   currentState: AgentSurfaceState | null;
   lastSeq: number;
   inflight: Map<string, InflightCommand>;
@@ -89,6 +97,7 @@ interface AgentSurfaceSession {
 
 export interface AgentSurfaceBrokerOptions {
   ringSize?: number;
+  ringMaxBytes?: number;
   commandTimeoutMs?: number;
   /** Inject the secret provider (test seam); production uses getOrCreateAgentHostSecret. */
   resolveSecret?: () => string;
@@ -101,7 +110,7 @@ export interface AgentSurfaceBrokerOptions {
    * writes to a temp manifest so the broker's session-info handling can be exercised
    * hermetically.
    */
-  persistResume?: (tmuxSession: string, resume: string) => boolean;
+  persistResume?: (tmuxSession: string, resume: string) => boolean | Promise<boolean>;
   now?: () => number;
 }
 
@@ -115,16 +124,18 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
 export class AgentSurfaceBroker {
   private readonly ringSize: number;
+  private readonly ringMaxBytes: number;
   private readonly commandTimeoutMs: number;
   private readonly resolveSecret: () => string;
   private readonly attention: AttentionSink;
-  private readonly persistResume: (tmuxSession: string, resume: string) => boolean;
+  private readonly persistResume: (tmuxSession: string, resume: string) => boolean | Promise<boolean>;
   private readonly now: () => number;
   private readonly sessions = new Map<string, AgentSurfaceSession>();
   private readonly browserClients = new Map<WebSocket, BrowserClient>();
 
   constructor(options: AgentSurfaceBrokerOptions = {}) {
-    this.ringSize = options.ringSize ?? DEFAULT_RING_SIZE;
+    this.ringSize = options.ringSize ?? AGENT_SURFACE_RING_SIZE;
+    this.ringMaxBytes = positiveInteger(options.ringMaxBytes ?? DEFAULT_RING_MAX_BYTES, 'agent surface ringMaxBytes');
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.resolveSecret = options.resolveSecret ?? defaultResolveSecret;
     this.attention = options.attention ?? defaultAttentionSink;
@@ -163,6 +174,19 @@ export class AgentSurfaceBroker {
       lastSeq: s.lastSeq,
       hostConnected: s.host !== null
     }));
+  }
+
+  nativeDeliveryState(session: string): 'ready' | 'busy' | 'booting' | 'offline' | 'approval' {
+    const current = this.sessions.get(session);
+    if (!current?.host) return 'offline';
+    switch (current.currentState) {
+      case 'idle': return 'ready';
+      case 'processing':
+      case 'tool-executing': return 'busy';
+      case 'awaiting-permission': return 'approval';
+      case 'starting': return 'booting';
+      default: return 'offline';
+    }
   }
 
   /**
@@ -222,6 +246,7 @@ export class AgentSurfaceBroker {
     // reset is keyed on pid change, not on current socket state.
     if (session.lastHostPid !== null && session.lastHostPid !== frame.pid) {
       session.ring = [];
+      session.ringBytes = 0;
       session.currentState = null;
       session.lastSeq = 0;
       // A new pid is a fresh spawn — the agent may mint a NEW session id (e.g.
@@ -282,9 +307,16 @@ export class AgentSurfaceBroker {
     }
     session.lastSeq = event.seq;
     if (!isTransient(event)) {
-      session.ring.push(event);
-      while (session.ring.length > this.ringSize) {
-        session.ring.shift();
+      const retained = { event, bytes: Buffer.byteLength(JSON.stringify(event)) };
+      if (retained.bytes <= this.ringMaxBytes) {
+        session.ring.push(retained);
+        session.ringBytes += retained.bytes;
+        while (session.ring.length > this.ringSize || session.ringBytes > this.ringMaxBytes) {
+          const removed = session.ring.shift();
+          if (removed) {
+            session.ringBytes -= removed.bytes;
+          }
+        }
       }
     }
     if (event.kind === 'status') {
@@ -299,9 +331,19 @@ export class AgentSurfaceBroker {
     if (event.kind === 'session-info' && event.agentSessionId && session.host && !session.persistedResumeGuard) {
       const agent = session.host.agent;
       if (isValidResumeIdForAgent(agent, event.agentSessionId)) {
-        if (this.persistResume(session.session, event.agentSessionId)) {
-          session.persistedResumeGuard = true;
-        }
+        const hostPid = session.host.pid;
+        session.persistedResumeGuard = true;
+        void Promise.resolve(this.persistResume(session.session, event.agentSessionId))
+          .then((persisted) => {
+            if (session.lastHostPid === hostPid) {
+              session.persistedResumeGuard = persisted;
+            }
+          })
+          .catch(() => {
+            if (session.lastHostPid === hostPid) {
+              session.persistedResumeGuard = false;
+            }
+          });
       }
     }
     this.synthesizeAttention(session.session, event);
@@ -471,6 +513,7 @@ export class AgentSurfaceBroker {
         lastHostPid: null,
         clients: new Map(),
         ring: [],
+        ringBytes: 0,
         currentState: null,
         lastSeq: 0,
         inflight: new Map(),
@@ -524,7 +567,7 @@ export class AgentSurfaceBroker {
   }
 
   private sendSnapshot(ws: WebSocket, session: AgentSurfaceSession, surfaceId: string): void {
-    const events = session.ring; // already committed-only (transients excluded on insert)
+    const events = session.ring.map((retained) => retained.event); // committed-only; transients are excluded on insert
     this.send(ws, {
       type: 'snapshot',
       session: session.session,
@@ -675,9 +718,18 @@ interface UpgradeServer {
   removeListener(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
 }
 
-export function installAgentSurfaceBroker(httpServer: UpgradeServer, broker: AgentSurfaceBroker): () => void {
-  const hostWss = new WebSocketServer({ noServer: true });
-  const uiWss = new WebSocketServer({ noServer: true });
+export interface AgentSurfaceBrokerInstallOptions {
+  maxPayloadBytes?: number;
+}
+
+export function installAgentSurfaceBroker(
+  httpServer: UpgradeServer,
+  broker: AgentSurfaceBroker,
+  options: AgentSurfaceBrokerInstallOptions = {}
+): () => void {
+  const maxPayload = positiveInteger(options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES, 'agent surface maxPayloadBytes');
+  const hostWss = new WebSocketServer({ noServer: true, maxPayload });
+  const uiWss = new WebSocketServer({ noServer: true, maxPayload });
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     if (socket.destroyed) {
@@ -710,6 +762,13 @@ export function installAgentSurfaceBroker(httpServer: UpgradeServer, broker: Age
 
 function isTransient(event: AgentSurfaceEvent): boolean {
   return event.kind === 'assistant-delta' || event.kind === 'tool-output-delta';
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${label} must be a positive integer`);
+  }
+  return value;
 }
 
 function describeError(err: unknown): string {

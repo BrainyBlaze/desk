@@ -3,7 +3,7 @@ import { createCodexDriver } from '../drivers/codexDriver.js';
 import { OpencodeDriver } from '../drivers/opencodeDriver.js';
 import type { DeskAgent } from '../../../core/types.js';
 import { driverCommandError, type AgentDriver } from './driver.js';
-import type { AgentHostEnv } from './runner.js';
+import type { AgentHostEnv } from './types.js';
 import type { AgentHostLogger } from './logger.js';
 
 /**
