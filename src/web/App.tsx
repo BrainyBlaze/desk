@@ -2239,239 +2239,256 @@ export function App(): JSX.Element {
   );
 
   function renderModal(): ReactNode {
-    if (modal === 'addProject') {
-      return (
-        <Modal
-          title="Add project"
-          icon={<FolderPlus size={13} />}
-          help="Enter a project name and working directory where agents will operate. Projects organize agent groups and coordinate work across multiple tasks and agents."
-          onClose={() => setModal(null)}
-        >
-          <ProjectFormView form={projectForm} busy={busy} onSubmit={submitProject} onFormChange={setProjectForm} />
-        </Modal>
-      );
+    if (!modal) {
+      return null;
     }
-    if (modal === 'addGroup') {
-      return (
-        <Modal
-          title="Add group"
-          icon={<LayoutGrid size={13} />}
-          help={
-            <>
-              <div>Each project holds groups — one cell grid per group, where each cell is an agent chat or a terminal. Pick the layout in the form:</div>
-              <div style={{ marginTop: '8px' }}>
-                <strong>2x2</strong> for a four-agent working set — the default choice
-              </div>
-              <div style={{ marginTop: '4px' }}>
-                <strong>linear</strong> with 3 cells for a review lane you want side by side
-              </div>
-              <div style={{ marginTop: '4px' }}>
-                <strong>custom</strong> with up to 16 cells when the fixed grids do not fit
-              </div>
-              <div style={{ marginTop: '8px' }}>
-                Layouts are not fixed after creation: the badge in the multiplexer header switches kinds in place, the + and − controls add and remove cells, and dragging the separators between cells persists your exact split proportions per group.
-              </div>
-              <div style={{ marginTop: '8px' }}>
-                <a href="https://docs.desk.cloud/guide-create-agent-fleet/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
-                  See Multi-agent layouts for the full tour →
-                </a>
-              </div>
-            </>
-          }
-          onClose={() => setModal(null)}
-        >
-          <GroupFormView form={groupForm} busy={busy} onSubmit={submitGroup} onFormChange={setGroupForm} />
-        </Modal>
-      );
+    interface ModalFrame {
+      title: string;
+      icon: ReactNode;
+      help?: string | ReactNode;
+      tone?: 'danger';
+      wide?: boolean;
+      alarm?: boolean;
+      body: ReactNode;
     }
-    if (modal === 'addSession') {
-      return (
-        <Modal
-          title="Add session"
-          icon={<Plus size={13} />}
-          help={
-            <>
-              <div>Terminals are tmux sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
-              <div style={{ marginTop: '8px' }}>
-                <a href="https://docs.desk.cloud/guide-create-agent-fleet/#3-add-agent-sessions" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
-                  Learn more →
-                </a>
-              </div>
-            </>
-          }
-          onClose={() => setModal(null)}
-        >
-          <SessionFormView
-            form={sessionForm}
-            projects={snapshot?.view.projects ?? []}
-            busy={busy}
-            onSubmit={submitSession}
-            onFormChange={setSessionForm}
-          />
-        </Modal>
-      );
+    const frame: ModalFrame | null = ((): ModalFrame | null => {
+      switch (modal) {
+        case 'addProject':
+          return {
+            title: 'Add project',
+            icon: <FolderPlus size={13} />,
+            help: 'Enter a project name and working directory where agents will operate. Projects organize agent groups and coordinate work across multiple tasks and agents.',
+            body: <ProjectFormView form={projectForm} busy={busy} onSubmit={submitProject} onFormChange={setProjectForm} />
+          };
+        case 'addGroup':
+          return {
+            title: 'Add group',
+            icon: <LayoutGrid size={13} />,
+            help: (
+              <>
+                <div>Each project holds groups — one cell grid per group, where each cell is an agent chat or a terminal. Pick the layout in the form:</div>
+                <div style={{ marginTop: '8px' }}>
+                  <strong>2x2</strong> for a four-agent working set — the default choice
+                </div>
+                <div style={{ marginTop: '4px' }}>
+                  <strong>linear</strong> with 3 cells for a review lane you want side by side
+                </div>
+                <div style={{ marginTop: '4px' }}>
+                  <strong>custom</strong> with up to 16 cells when the fixed grids do not fit
+                </div>
+                <div style={{ marginTop: '8px' }}>
+                  Layouts are not fixed after creation: the badge in the multiplexer header switches kinds in place, the + and − controls add and remove cells, and dragging the separators between cells persists your exact split proportions per group.
+                </div>
+                <div style={{ marginTop: '8px' }}>
+                  <a href="https://docs.desk.cloud/guide-create-agent-fleet/" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                    See Multi-agent layouts for the full tour →
+                  </a>
+                </div>
+              </>
+            ),
+            body: <GroupFormView form={groupForm} busy={busy} onSubmit={submitGroup} onFormChange={setGroupForm} />
+          };
+        case 'addSession':
+          return {
+            title: 'Add session',
+            icon: <Plus size={13} />,
+            help: (
+              <>
+                <div>Terminals are tmux sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
+                <div style={{ marginTop: '8px' }}>
+                  <a href="https://docs.desk.cloud/guide-create-agent-fleet/#3-add-agent-sessions" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
+                    Learn more →
+                  </a>
+                </div>
+              </>
+            ),
+            body: (
+              <SessionFormView
+                form={sessionForm}
+                projects={snapshot?.view.projects ?? []}
+                busy={busy}
+                onSubmit={submitSession}
+                onFormChange={setSessionForm}
+              />
+            )
+          };
+        case 'projectInfo':
+          return {
+            title: modalTitle(modal),
+            icon: <Folder size={13} />,
+            body: <ProjectInfo project={modalProject} />
+          };
+        case 'editProject':
+          return {
+            title: modalTitle(modal),
+            icon: <Folder size={13} />,
+            body: <ProjectFormView form={projectForm} busy={busy} onSubmit={submitProjectEdit} onFormChange={setProjectForm} />
+          };
+        case 'deleteProject':
+          return {
+            title: modalTitle(modal),
+            icon: <Trash2 size={13} />,
+            body: (
+              <ConfirmAction
+                label={`Delete ${modalProject?.label ?? 'project'}`}
+                detail="This kills the project's tmux sessions and removes the project from config. For legacy mixed groups, only sessions under this project CWD are removed."
+                busy={busy}
+                onConfirm={confirmDeleteProject}
+              />
+            )
+          };
+        case 'groupInfo':
+          return {
+            title: modalTitle(modal),
+            icon: <Boxes size={13} />,
+            body: <GroupInfo group={modalGroup} />
+          };
+        case 'editGroup':
+          return {
+            title: modalTitle(modal),
+            icon: <Boxes size={13} />,
+            body: <GroupFormView form={groupForm} busy={busy} onSubmit={submitGroupEdit} onFormChange={setGroupForm} />
+          };
+        case 'deleteGroup':
+          return {
+            title: modalTitle(modal),
+            icon: <Trash2 size={13} />,
+            body: (
+              <ConfirmAction
+                label={`Delete ${modalGroup?.label ?? 'group'}`}
+                detail="This kills the group's tmux sessions and removes the group from config. For legacy mixed groups, only sessions under this project CWD are removed."
+                busy={busy}
+                onConfirm={confirmDeleteGroup}
+              />
+            )
+          };
+        case 'sessionInfo':
+          return {
+            title: modalTitle(modal),
+            icon: <TerminalSquare size={13} />,
+            body: <SessionInfo session={modalSession} />
+          };
+        case 'editSession':
+          return {
+            title: modalTitle(modal),
+            icon: <TerminalSquare size={13} />,
+            body: (
+              <SessionFormView
+                form={sessionForm}
+                projects={snapshot?.view.projects ?? []}
+                busy={busy}
+                onSubmit={submitSessionEdit}
+                onFormChange={setSessionForm}
+              />
+            )
+          };
+        case 'killAll':
+          return {
+            title: 'Emergency Kill',
+            icon: <Skull size={13} />,
+            tone: 'danger',
+            alarm: true,
+            body: <KillConfirm busy={busy} onCancel={() => setModal(null)} onConfirm={confirmKillAll} />
+          };
+        case 'settings':
+          return {
+            title: 'Settings',
+            icon: <SettingsIcon size={13} />,
+            wide: true,
+            body: (
+              <SettingsView
+                themeName={themeName}
+                onThemeChange={setThemeName}
+                autosaveMode={autosaveMode}
+                autosaveDelayMs={autosaveDelayMs}
+                onAutosaveModeChange={setAutosaveMode}
+                onAutosaveDelayChange={setAutosaveDelayMs}
+                muted={muted}
+                onMutedChange={setMuted}
+                lspEnabled={lspEnabled}
+                lspDetectedLanguages={detectedLanguages}
+                lspDisabledLanguages={lspDisabledLanguages}
+                lspDetectionTruncated={lspDetectionTruncated}
+                lspDetectionState={lspDetectionState}
+                lspSaving={lspSaving}
+                lspSaveError={lspSaveError}
+                lspHasActiveRoot={activeEditorRoot !== null}
+                onLspEnabledChange={handleLspEnabledChange}
+                onLspLanguageToggle={handleLspLanguageToggle}
+                onLspRefresh={handleLspRefresh}
+              />
+            )
+          };
+        case 'deleteSession':
+          return {
+            title: modalTitle(modal),
+            icon: <Trash2 size={13} />,
+            body: (
+              <ConfirmAction
+                label={`Delete ${modalSession?.spec.name ?? 'session'}`}
+                detail="This kills the tmux session process and removes the session from config."
+                busy={busy}
+                onConfirm={confirmDeleteSession}
+              />
+            )
+          };
+        case 'restartSession':
+          return {
+            title: modalTitle(modal),
+            icon: <RotateCw size={13} />,
+            body: (
+              <ConfirmAction
+                label={`Restart ${modalSession?.spec.name ?? 'session'}`}
+                detail="This kills the running tmux session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
+                busy={busy}
+                confirmLabel="Restart session"
+                confirmIcon={<RotateCw size={12} />}
+                onConfirm={() => {
+                  if (modalSession && modalGroup) {
+                    void restartExistingSession(modalSession, modalGroup);
+                  }
+                }}
+              />
+            )
+          };
+        case 'switchUiMode':
+          return {
+            title: modalTitle(modal),
+            icon: <RotateCw size={13} />,
+            body: (
+              <ConfirmAction
+                label={
+                  uiModeSwitchDiscard
+                    ? `Start fresh in ${sessionForm.uiMode} mode`
+                    : `Switch ${modalSession?.spec.name ?? 'session'} to ${sessionForm.uiMode} UI`
+                }
+                detail={
+                  uiModeSwitchDiscard
+                    ? 'No resume id has been captured for this session yet, so the switch cannot rejoin the conversation. Confirming starts a FRESH conversation in the new mode; the current one stays only in the agent-native history.'
+                    : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
+                }
+                busy={busy}
+                confirmLabel={uiModeSwitchDiscard ? 'Switch UI mode (start fresh)' : 'Switch UI mode'}
+                confirmIcon={<RotateCw size={12} />}
+                onConfirm={() => {
+                  void confirmUiModeSwitch();
+                }}
+              />
+            )
+          };
+        default:
+          return null;
+      }
+    })();
+    if (!frame) {
+      return null;
     }
-    if (modal === 'projectInfo') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Folder size={13} />} onClose={() => setModal(null)}>
-          <ProjectInfo project={modalProject} />
-        </Modal>
-      );
-    }
-    if (modal === 'editProject') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Folder size={13} />} onClose={() => setModal(null)}>
-          <ProjectFormView form={projectForm} busy={busy} onSubmit={submitProjectEdit} onFormChange={setProjectForm} />
-        </Modal>
-      );
-    }
-    if (modal === 'deleteProject') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Trash2 size={13} />} onClose={() => setModal(null)}>
-          <ConfirmAction
-            label={`Delete ${modalProject?.label ?? 'project'}`}
-            detail="This kills the project's tmux sessions and removes the project from config. For legacy mixed groups, only sessions under this project CWD are removed."
-            busy={busy}
-            onConfirm={confirmDeleteProject}
-          />
-        </Modal>
-      );
-    }
-    if (modal === 'groupInfo') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Boxes size={13} />} onClose={() => setModal(null)}>
-          <GroupInfo group={modalGroup} />
-        </Modal>
-      );
-    }
-    if (modal === 'editGroup') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Boxes size={13} />} onClose={() => setModal(null)}>
-          <GroupFormView form={groupForm} busy={busy} onSubmit={submitGroupEdit} onFormChange={setGroupForm} />
-        </Modal>
-      );
-    }
-    if (modal === 'deleteGroup') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Trash2 size={13} />} onClose={() => setModal(null)}>
-          <ConfirmAction
-            label={`Delete ${modalGroup?.label ?? 'group'}`}
-            detail="This kills the group's tmux sessions and removes the group from config. For legacy mixed groups, only sessions under this project CWD are removed."
-            busy={busy}
-            onConfirm={confirmDeleteGroup}
-          />
-        </Modal>
-      );
-    }
-    if (modal === 'sessionInfo') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<TerminalSquare size={13} />} onClose={() => setModal(null)}>
-          <SessionInfo session={modalSession} />
-        </Modal>
-      );
-    }
-    if (modal === 'editSession') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<TerminalSquare size={13} />} onClose={() => setModal(null)}>
-          <SessionFormView
-            form={sessionForm}
-            projects={snapshot?.view.projects ?? []}
-            busy={busy}
-            onSubmit={submitSessionEdit}
-            onFormChange={setSessionForm}
-          />
-        </Modal>
-      );
-    }
-    if (modal === 'killAll') {
-      return (
-        <Modal title="Emergency Kill" icon={<Skull size={13} />} onClose={() => setModal(null)} tone="danger" alarm>
-          <KillConfirm busy={busy} onCancel={() => setModal(null)} onConfirm={confirmKillAll} />
-        </Modal>
-      );
-    }
-    if (modal === 'settings') {
-      return (
-        <Modal title="Settings" icon={<SettingsIcon size={13} />} onClose={() => setModal(null)} wide>
-          <SettingsView
-            themeName={themeName}
-            onThemeChange={setThemeName}
-            autosaveMode={autosaveMode}
-            autosaveDelayMs={autosaveDelayMs}
-            onAutosaveModeChange={setAutosaveMode}
-            onAutosaveDelayChange={setAutosaveDelayMs}
-            muted={muted}
-            onMutedChange={setMuted}
-            lspEnabled={lspEnabled}
-            lspDetectedLanguages={detectedLanguages}
-            lspDisabledLanguages={lspDisabledLanguages}
-            lspDetectionTruncated={lspDetectionTruncated}
-            lspDetectionState={lspDetectionState}
-            lspSaving={lspSaving}
-            lspSaveError={lspSaveError}
-            lspHasActiveRoot={activeEditorRoot !== null}
-            onLspEnabledChange={handleLspEnabledChange}
-            onLspLanguageToggle={handleLspLanguageToggle}
-            onLspRefresh={handleLspRefresh}
-          />
-        </Modal>
-      );
-    }
-    if (modal === 'deleteSession') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<Trash2 size={13} />} onClose={() => setModal(null)}>
-          <ConfirmAction
-            label={`Delete ${modalSession?.spec.name ?? 'session'}`}
-            detail="This kills the tmux session process and removes the session from config."
-            busy={busy}
-            onConfirm={confirmDeleteSession}
-          />
-        </Modal>
-      );
-    }
-    if (modal === 'restartSession') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<RotateCw size={13} />} onClose={() => setModal(null)}>
-          <ConfirmAction
-            label={`Restart ${modalSession?.spec.name ?? 'session'}`}
-            detail="This kills the running tmux session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
-            busy={busy}
-            confirmLabel="Restart session"
-            confirmIcon={<RotateCw size={12} />}
-            onConfirm={() => {
-              if (modalSession && modalGroup) {
-                void restartExistingSession(modalSession, modalGroup);
-              }
-            }}
-          />
-        </Modal>
-      );
-    }
-    if (modal === 'switchUiMode') {
-      return (
-        <Modal title={modalTitle(modal)} icon={<RotateCw size={13} />} onClose={() => setModal(null)}>
-          <ConfirmAction
-            label={
-              uiModeSwitchDiscard
-                ? `Start fresh in ${sessionForm.uiMode} mode`
-                : `Switch ${modalSession?.spec.name ?? 'session'} to ${sessionForm.uiMode} UI`
-            }
-            detail={
-              uiModeSwitchDiscard
-                ? 'No resume id has been captured for this session yet, so the switch cannot rejoin the conversation. Confirming starts a FRESH conversation in the new mode; the current one stays only in the agent-native history.'
-                : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
-            }
-            busy={busy}
-            confirmLabel={uiModeSwitchDiscard ? 'Switch UI mode (start fresh)' : 'Switch UI mode'}
-            confirmIcon={<RotateCw size={12} />}
-            onConfirm={() => {
-              void confirmUiModeSwitch();
-            }}
-          />
-        </Modal>
-      );
-    }
-    return null;
+    const { body, ...rest } = frame;
+    return (
+      <Modal {...rest} onClose={() => setModal(null)}>
+        {body}
+      </Modal>
+    );
   }
 }
 
