@@ -71,7 +71,6 @@ import {
   setSessionUiMode,
   ApiCodeError,
   fetchDeskSnapshot,
-  fetchPulse,
   killAllAgents,
   fetchSettings,
   clearAllEvents,
@@ -113,15 +112,13 @@ import {
 import { usePersistedCollapse } from './usePersistedCollapse.js';
 import { useSubsystemSidebars } from './useSubsystemSidebars.js';
 import { getMovedSessionTmux, getProjectDropGroup } from './sidebarMove.js';
-import { patchViewLiveness } from './pulse.js';
-import { emitBridgeRetry } from './terminalHeartbeat.js';
+import { usePulse } from './usePulse.js';
 import { useStableCallbacks } from './stableCallbacks.js';
 import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
 import { buildSessionPayload } from './sessionFormPayload.js';
 import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
 import type { DeskSessionUiMode } from '../core/types.js';
-import { pushSparkSample } from './systemFormat.js';
 import { CommandButton } from './headerPrimitives.js';
 import { WorkspaceHeader } from './WorkspaceHeader.js';
 import { AgentsSidebar } from './AgentsSidebar.js';
@@ -130,7 +127,7 @@ import { StatusDot } from './statusDot.js';
 import type { LayoutKind, PanelCell } from './muxLayout.js';
 import type { DeskGroupView, DeskProjectView, DeskSessionView } from '../ui/model.js';
 import { buildWorkspaceState } from '../ui/workspace.js';
-import type { DeskSnapshot, SystemSnapshot } from './types.js';
+import type { DeskSnapshot } from './types.js';
 import { createDeskBleepsSettings, readStoredMuted, MUTED_STORAGE_KEY, type DeskBleepName } from './arwes/bleeps.js';
 import { DESK_DURATIONS, isReducedMotion } from './arwes/motion.js';
 import {
@@ -250,17 +247,6 @@ const emptySessionForm: SessionForm = {
 export function App(): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [snapshot, setSnapshot] = useState<DeskSnapshot | null>(null);
-  const [systemSnapshot, setSystemSnapshot] = useState<SystemSnapshot | null>(null);
-  // Telemetry sparkline rings (one sample per poll tick); the snapshot state
-  // change is what re-renders the header, so a ref avoids double renders.
-  const telemetryHistoryRef = useRef({
-    cpu: [] as number[],
-    ram: [] as number[],
-    gpu: [] as number[],
-    net: [] as number[],
-    disk: [] as number[]
-  });
-  const [systemError, setSystemError] = useState<string | null>(null);
   const narrowViewport = useNarrowViewport();
   const [subsystem, setSubsystem] = useState<Subsystem>(() => readStoredSubsystem(localStorage.getItem('desk.subsystem')));
   // Keep-alive multiplexer mounts: the active group plus the most recently
@@ -368,13 +354,17 @@ export function App(): JSX.Element {
   const [modalSession, setModalSession] = useState<DeskSessionView | undefined>();
   const [attention, setAttention] = useState<Record<string, { attention: true; since: string }>>({});
   const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
-  // Last server payloads (serialized) for the pulse diff-and-bail. Optimistic
-  // local mutations clear these so the next pulse re-syncs unconditionally.
-  const pulseCacheRef = useRef({ attention: '', events: '' });
-  // Tracks whether the previous pulse failed, so a success transition can wake
-  // any terminal cells stranded on the manual Reconnect overlay (self-healing).
-  const pulseFailingRef = useRef(false);
   const [unreadEvents, setUnreadEvents] = useState(0);
+  // The 2s pulse loop (telemetry + attention/events + snapshot liveness) owns
+  // systemSnapshot/systemError/telemetryHistory/pulseCacheRef; it writes the
+  // attention/events/snapshot state below through these setters so the coupling
+  // is preserved exactly. App's own callbacks reset the returned pulseCacheRef.
+  const { systemSnapshot, systemError, telemetryHistoryRef, pulseCacheRef } = usePulse({
+    setSnapshot,
+    setAttention,
+    setAgentEvents,
+    setUnreadEvents
+  });
   const [notifOpen, setNotifOpen] = useState(() => localStorage.getItem('desk.notifOpen') === 'true');
   const [notifWidth, setNotifWidth] = useState(() => {
     const stored = Number(localStorage.getItem('desk.notifWidth'));
@@ -946,88 +936,6 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     void refresh();
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    async function pulseTick(): Promise<void> {
-      try {
-        const pulse = await fetchPulse();
-        if (!alive) {
-          return;
-        }
-        const system = pulse.system;
-        const history = telemetryHistoryRef.current;
-        pushSparkSample(history.cpu, system.cpu.usagePercent ?? 0);
-        pushSparkSample(history.ram, system.memory.usedPercent);
-        pushSparkSample(history.gpu, system.gpu.nvidia.utilizationGpuPercent ?? 0);
-        pushSparkSample(history.net, system.network.rxBytesPerSecond ?? 0);
-        pushSparkSample(history.disk, (system.disk?.readBytesPerSecond ?? 0) + (system.disk?.writeBytesPerSecond ?? 0));
-        setSystemSnapshot(system);
-        setSystemError(null);
-        // A pulse that succeeds after a run of failures proves the bridge is
-        // reachable again — wake any cells stranded behind the Reconnect button.
-        if (pulseFailingRef.current) {
-          pulseFailingRef.current = false;
-          emitBridgeRetry();
-        }
-        // Diff-and-bail: attention/events keep their object identity when the
-        // payload didn't change, so the memoized sidebar/multiplexer trees
-        // skip reconciliation entirely on a calm tick.
-        const attentionJson = JSON.stringify(pulse.attention.sessions);
-        if (attentionJson !== pulseCacheRef.current.attention) {
-          pulseCacheRef.current.attention = attentionJson;
-          setAttention(pulse.attention.sessions);
-        }
-        const eventsJson = JSON.stringify(pulse.attention.events);
-        if (eventsJson !== pulseCacheRef.current.events) {
-          pulseCacheRef.current.events = eventsJson;
-          setAgentEvents(pulse.attention.events ?? []);
-        }
-        setUnreadEvents(pulse.attention.unread ?? 0);
-        // Liveness self-heal: fold the live tmux set into the snapshot.
-        // patchViewLiveness preserves identity of untouched sessions so
-        // terminal sockets never churn on a state-only patch.
-        // Known constraint: pulse patches RUN STATES only. Manifest edits made
-        // out-of-band (another client, curl, hand-edit) — including uiMode
-        // switches — don't reach an open tab until a mutation response or a
-        // manual Refresh replaces the snapshot. Tracked separately as a
-        // manifest-fingerprint-in-pulse improvement.
-        const running = new Set(pulse.running);
-        setSnapshot((current) => {
-          if (!current) {
-            return current;
-          }
-          const view = patchViewLiveness(current.view, running);
-          return view === current.view ? current : { ...current, view };
-        });
-      } catch (err) {
-        if (alive) {
-          pulseFailingRef.current = true;
-          setSystemError(err instanceof Error ? err.message : String(err));
-        }
-      }
-    }
-    void pulseTick();
-    const timer = window.setInterval(() => {
-      // Hidden tabs stop polling; the visibilitychange handler below catches
-      // the tab back up the moment it returns.
-      if (document.hidden) {
-        return;
-      }
-      void pulseTick();
-    }, 2000);
-    const onVisibilityChange = (): void => {
-      if (!document.hidden) {
-        void pulseTick();
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
   }, []);
 
   async function refresh(): Promise<void> {
