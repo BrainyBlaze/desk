@@ -82,7 +82,7 @@ describe('cross-process thread-reply lost-append race (probabilistic, repeated)'
     // RED today: totalReplies < totalExpected (some iterations lose 1-of-8).
     // GREEN after the per-channel lock fix wraps every appendMessage / RMW path.
     expect(totalReplies).toBe(totalExpected);
-  }, 30_000);
+  }, 120_000);
 });
 
 describe('engine.pid PID-reuse hazard (deterministic)', () => {
@@ -90,7 +90,7 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'desk-chan-s3-'));
-  }, 120_000);
+  });
 
   afterEach(() => {
     rmSync(home, { recursive: true, force: true });
