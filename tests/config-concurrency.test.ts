@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
@@ -13,6 +14,8 @@ import {
 } from '../src/core/config.js';
 
 const CONFIG_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/core/config.ts')).href;
+// Resolve from the test location and pass an absolute URL to temp-dir workers.
+const TSX_ESM_API = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm/api')).href;
 
 const UPDATE_WORKER_SOURCE = `
 import { updateManifestFile, addSessionToManifest } from '${CONFIG_SOURCE}';
@@ -29,6 +32,8 @@ await updateManifestFile(manifestPath, async (manifest) => {
 
 const TEMP_WRITE_WORKER_SOURCE = `
 import { parentPort, workerData } from 'node:worker_threads';
+const { register } = await import(workerData.tsxApi);
+register();
 Date.now = () => 1_700_000_000_000;
 const { writeManifestFile } = await import('${CONFIG_SOURCE}');
 const gate = new Int32Array(workerData.gate);
@@ -107,7 +112,7 @@ describe('manifest file transactions', () => {
     expect(readManifestFile(manifestPath)).toEqual(before);
   });
 
-  it.skipIf(process.versions.node.startsWith('22.'))('uses collision-proof temp files for concurrent writes in one process', async () => {
+  it('uses collision-proof temp files for concurrent writes in one process', async () => {
     const home = tempHome('desk-manifest-temp-');
     const manifestPath = join(home, 'desk.yml');
     const workerPath = join(home, 'temp-worker.mjs');
@@ -119,7 +124,7 @@ describe('manifest file transactions', () => {
     const workers = Array.from({ length: workerCount }, (_, id) =>
       new Worker(workerPath, {
         execArgv: ['--import', 'tsx'],
-        workerData: { gate, id, manifestPath }
+        workerData: { gate, id, manifestPath, tsxApi: TSX_ESM_API }
       })
     );
     while (Atomics.load(state, 0) < workerCount) {
