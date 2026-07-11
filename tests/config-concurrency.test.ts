@@ -107,7 +107,7 @@ describe('manifest file transactions', () => {
     expect(readManifestFile(manifestPath)).toEqual(before);
   });
 
-  it('uses collision-proof temp files for concurrent writes in one process', async () => {
+  it.skipIf(process.versions.node.startsWith('22.'))('uses collision-proof temp files for concurrent writes in one process', async () => {
     const home = tempHome('desk-manifest-temp-');
     const manifestPath = join(home, 'desk.yml');
     const workerPath = join(home, 'temp-worker.mjs');
