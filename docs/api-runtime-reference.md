@@ -92,14 +92,11 @@ Terminal capture uses tmux `capture-pane` with bounded history and returns color
 
 ```text
 WS /ws/terminal-broker
-WS /ws/terminal
 ```
 
 `/ws/terminal-broker` is the current browser path. One browser connection can subscribe to multiple terminal surfaces. Hidden surfaces stay subscribed but do not receive live output to parse.
 
-`/ws/terminal` is the legacy direct terminal bridge.
-
-Both bridges attach to tmux with `ignore-size` behavior and use resize guards to avoid corrupting tmux windows with tiny dimensions.
+The broker attaches to tmux with `ignore-size` behavior and uses resize guards to avoid corrupting tmux windows with tiny dimensions. The retired direct `/ws/terminal` bridge is not installed.
 
 ## Filesystem routes
 

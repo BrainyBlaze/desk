@@ -124,21 +124,29 @@ export class AgentSurfaceClient {
     if (!this.connected) {
       throw new Error('agent-surface broker not connected');
     }
-    this.sendFrame({ type: 'send', session, surfaceId, text });
+    // `connected` can briefly be true while the socket is not yet OPEN (the reconnect
+    // gap); surface the drop instead of letting a typed message vanish silently.
+    if (!this.sendFrame({ type: 'send', session, surfaceId, text })) {
+      throw new Error('agent-surface message could not be delivered (socket not open)');
+    }
   }
 
   respondPermission(surfaceId: string, session: string, requestId: string, optionId: string, note?: string): void {
     if (!this.connected) {
       throw new Error('agent-surface broker not connected');
     }
-    this.sendFrame({ type: 'respond-permission', session, surfaceId, requestId, optionId, note });
+    if (!this.sendFrame({ type: 'respond-permission', session, surfaceId, requestId, optionId, note })) {
+      throw new Error('agent-surface permission response could not be delivered (socket not open)');
+    }
   }
 
   interrupt(surfaceId: string, session: string): void {
     if (!this.connected) {
       throw new Error('agent-surface broker not connected');
     }
-    this.sendFrame({ type: 'interrupt', session, surfaceId });
+    if (!this.sendFrame({ type: 'interrupt', session, surfaceId })) {
+      throw new Error('agent-surface interrupt could not be delivered (socket not open)');
+    }
   }
 
   forceReconnect(): void {
@@ -156,6 +164,10 @@ export class AgentSurfaceClient {
     if (this.socket || this.connecting) {
       return;
     }
+    // A fresh connection attempt supersedes any pending reconnect; cancel the armed
+    // timer so it cannot later null this live socket and orphan it (leaked WebSocket).
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     this.connecting = true;
     const socket = this.makeSocket(`${this.baseUrl}/ws/agent-ui`);
     this.socket = socket;
@@ -246,14 +258,15 @@ export class AgentSurfaceClient {
     }
   }
 
-  private sendFrame(frame: AgentUiClientFrame): void {
+  private sendFrame(frame: AgentUiClientFrame): boolean {
     if (!this.socket || this.socket.readyState !== OPEN) {
-      return;
+      return false;
     }
     try {
       this.socket.send(JSON.stringify(frame));
+      return true;
     } catch {
-      // best-effort
+      return false;
     }
   }
 

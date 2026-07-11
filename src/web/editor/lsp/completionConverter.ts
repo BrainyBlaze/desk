@@ -126,5 +126,9 @@ export function toMonacoCompletionList(result: LspCompletionResult): MonacoCompl
   if (Array.isArray(result)) {
     return { incomplete: false, suggestions: result.map(convertItem) };
   }
-  return { incomplete: result.isIncomplete === true, suggestions: result.items.map(convertItem) };
+  return {
+    incomplete: result.isIncomplete === true,
+    // Guard: a spec-violating server may omit `items`; don't throw a TypeError.
+    suggestions: Array.isArray(result.items) ? result.items.map(convertItem) : []
+  };
 }

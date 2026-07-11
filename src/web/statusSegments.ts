@@ -29,7 +29,15 @@ const EMPTY: StatusSegment[] = [];
 function segmentsEqual(a: StatusSegment[], b: StatusSegment[]): boolean {
   return (
     a.length === b.length &&
-    a.every((seg, i) => seg.key === b[i].key && seg.text === b[i].text && seg.tone === b[i].tone && seg.hint === b[i].hint)
+    a.every(
+      (seg, i) =>
+        seg.key === b[i].key &&
+        seg.text === b[i].text &&
+        seg.tone === b[i].tone &&
+        seg.hint === b[i].hint &&
+        seg.icon === b[i].icon &&
+        seg.onClick === b[i].onClick
+    )
   );
 }
 
@@ -49,14 +57,13 @@ export function getStatusSegments(scope: string): StatusSegment[] {
   return scopeSegments.get(scope) ?? EMPTY;
 }
 
+export function subscribeStatus(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function useStatusSegments(scope: string): StatusSegment[] {
-  return useSyncExternalStore(
-    (onChange) => {
-      listeners.add(onChange);
-      return () => listeners.delete(onChange);
-    },
-    () => getStatusSegments(scope)
-  );
+  return useSyncExternalStore(subscribeStatus, () => getStatusSegments(scope));
 }
 
 /* ---------- pure helpers (unit-tested) ---------- */

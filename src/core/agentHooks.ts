@@ -1,4 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
+import { shellQuote } from '../shared/shell.js';
+import { readJsonFileOr, writeTextFileAtomic } from '../shared/atomicFile.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,9 +58,7 @@ export function defaultAgentEventShimPath(homeDir: string = homedir()): string {
   return join(homeDir, '.local', 'share', 'desk', 'hooks', 'desk-agent-event');
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+// shellQuote now lives in ../shared/shell.ts (single audited copy).
 
 function command(shimPath: string, agent: string, event: string): string {
   return `${shellQuote(shimPath)} --agent ${shellQuote(agent)} --event ${shellQuote(event)}`;
@@ -163,17 +163,31 @@ process.stdin.on('end', async () => {
     message: mapped.message,
     status: mapped.status
   };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
-    await fetch((process.env.DESK_API || 'http://127.0.0.1:5173') + '/api/agent-event', {
+    const response = await fetch((process.env.DESK_API || 'http://127.0.0.1:5173') + '/api/agent-event', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
       signal: controller.signal
     });
+    // fetch resolves for 4xx/5xx, so a desk server that REJECTS the event would
+    // otherwise be swallowed with no trail. Treat a non-ok status as a failure.
+    if (!response.ok) {
+      throw new Error('HTTP ' + response.status);
+    }
+  } catch (err) {
+    // The event POST is best-effort: a down/slow/rejecting desk server must never
+    // break the agent's own hook, so the failure stays non-fatal. But swallowing it
+    // silently makes "notifications stopped working" undebuggable. Gate a one-line
+    // diagnostic behind DESK_DEBUG (off by default) so it never pollutes an alt-screen TUI.
+    if (process.env.DESK_DEBUG) {
+      process.stderr.write('[desk-hook] agent-event POST failed: ' + (err && err.message ? err.message : String(err)) + '\\n');
+    }
+  } finally {
     clearTimeout(timer);
-  } catch (_) {}
+  }
   finish(hookEventName);
 });
 process.stdin.resume();
@@ -235,7 +249,7 @@ function writeTextIfChanged(path: string, content: string): void {
     current = undefined;
   }
   if (current !== content) {
-    writeFileSync(path, content, 'utf8');
+    writeTextFileAtomic(path, content);
   }
 }
 
@@ -283,11 +297,9 @@ function isSameHook(existing: unknown, desired: HookHandler): boolean {
 }
 
 function readJsonObject(path: string): Record<string, unknown> {
-  if (!existsSync(path)) {
-    return {};
-  }
-  const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-  return isRecord(parsed) ? parsed : {};
+  // Atomic + parse-guarded: a crash mid-write can't truncate the user's config, and
+  // a hand-edited malformed JSON degrades to {} instead of throwing and aborting.
+  return readJsonFileOr<Record<string, unknown>>(path, {});
 }
 
 function writeJsonIfChanged(path: string, value: Record<string, unknown>): void {

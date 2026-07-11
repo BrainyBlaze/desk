@@ -26,6 +26,17 @@ export interface DeskLspMcpOptions {
   fetch?: typeof fetch;
 }
 
+export type LspToolErrorCode =
+  | 'missing-env'
+  | 'missing-token'
+  | 'fetch-unavailable'
+  | 'invalid-input'
+  | 'bad-api-url'
+  | 'http-failed'
+  | 'bad-json'
+  | 'bad-response'
+  | 'fetch-failed';
+
 export interface LspHoverToolInput {
   uri: string;
   position: {
@@ -205,15 +216,16 @@ const TOOL_ERROR_LABELS = {
   rename: 'LSP rename request failed',
   documentHighlights: 'LSP document highlights request failed',
   definition: 'LSP definition request failed',
-	  references: 'LSP references request failed',
-	  typeDefinition: 'LSP type definition request failed',
-	  implementation: 'LSP implementation request failed',
-	  declaration: 'LSP declaration request failed',
+  references: 'LSP references request failed',
+  typeDefinition: 'LSP type definition request failed',
+  implementation: 'LSP implementation request failed',
+  declaration: 'LSP declaration request failed',
+  codeActions: 'LSP code actions request failed',
   diagnostics: 'LSP diagnostics request failed',
   foldingRanges: 'LSP folding ranges request failed',
   selectionRanges: 'LSP selection ranges request failed',
   semanticTokens: 'LSP semantic tokens request failed'
-	} as const;
+} as const;
 
 const SENSITIVE_KEYS = new Set([
   'servercommands',
@@ -225,188 +237,157 @@ const SENSITIVE_KEYS = new Set([
   'workspaceroot'
 ]);
 
+interface DeskLspToolDefinition {
+  name: string;
+  title: string;
+  description: string;
+  inputSchema: Record<string, z.ZodTypeAny>;
+  handler: (input: unknown, options: DeskLspMcpOptions) => Promise<CallToolResult>;
+}
+
+const DESK_LSP_TOOL_DEFINITIONS = [
+  {
+    name: 'lsp_hover',
+    title: 'LSP hover',
+    description: 'Return hover information for an in-workspace file URI through Desk LSP.',
+    inputSchema: HOVER_INPUT_SCHEMA,
+    handler: callLspHover
+  },
+  {
+    name: 'lsp_format',
+    title: 'LSP format',
+    description: 'Return document formatting edits for an in-workspace file URI through Desk LSP.',
+    inputSchema: FORMAT_INPUT_SCHEMA,
+    handler: callLspFormat
+  },
+  {
+    name: 'lsp_document_symbols',
+    title: 'LSP document symbols',
+    description: 'Return document symbols for an in-workspace file URI through Desk LSP.',
+    inputSchema: DOCUMENT_SYMBOL_INPUT_SCHEMA,
+    handler: callLspDocumentSymbols
+  },
+  {
+    name: 'lsp_folding_ranges',
+    title: 'LSP folding ranges',
+    description: 'Return sanitized folding ranges for an in-workspace file URI through Desk LSP.',
+    inputSchema: FOLDING_RANGE_INPUT_SCHEMA,
+    handler: callLspFoldingRanges
+  },
+  {
+    name: 'lsp_selection_ranges',
+    title: 'LSP selection ranges',
+    description: 'Return sanitized selection ranges for positions in an in-workspace file URI through Desk LSP.',
+    inputSchema: SELECTION_RANGE_INPUT_SCHEMA,
+    handler: callLspSelectionRanges
+  },
+  {
+    name: 'lsp_semantic_tokens',
+    title: 'LSP semantic tokens',
+    description: 'Return sanitized full semantic tokens and legend context for an in-workspace file URI through Desk LSP.',
+    inputSchema: SEMANTIC_TOKENS_INPUT_SCHEMA,
+    handler: callLspSemanticTokens
+  },
+  {
+    name: 'lsp_completion',
+    title: 'LSP completion',
+    description: 'Return completion items for an in-workspace file URI through Desk LSP.',
+    inputSchema: COMPLETION_INPUT_SCHEMA,
+    handler: callLspCompletion
+  },
+  {
+    name: 'lsp_signature_help',
+    title: 'LSP signature help',
+    description: 'Return signature help for an in-workspace file URI through Desk LSP.',
+    inputSchema: SIGNATURE_HELP_INPUT_SCHEMA,
+    handler: callLspSignatureHelp
+  },
+  {
+    name: 'lsp_prepare_rename',
+    title: 'LSP prepare rename',
+    description: 'Return prepare-rename information for an in-workspace file URI through Desk LSP.',
+    inputSchema: POSITIONED_INPUT_SCHEMA,
+    handler: callLspPrepareRename
+  },
+  {
+    name: 'lsp_rename',
+    title: 'LSP rename',
+    description: 'Return rename workspace edits as data for an in-workspace file URI through Desk LSP.',
+    inputSchema: RENAME_INPUT_SCHEMA,
+    handler: callLspRename
+  },
+  {
+    name: 'lsp_document_highlights',
+    title: 'LSP document highlights',
+    description: 'Return document highlights for an in-workspace file URI through Desk LSP.',
+    inputSchema: DOCUMENT_HIGHLIGHT_INPUT_SCHEMA,
+    handler: callLspDocumentHighlights
+  },
+  {
+    name: 'lsp_definition',
+    title: 'LSP definition',
+    description: 'Return definition locations for an in-workspace file URI through Desk LSP.',
+    inputSchema: POSITIONED_INPUT_SCHEMA,
+    handler: callLspDefinition
+  },
+  {
+    name: 'lsp_references',
+    title: 'LSP references',
+    description: 'Return reference locations for an in-workspace file URI through Desk LSP.',
+    inputSchema: REFERENCES_INPUT_SCHEMA,
+    handler: callLspReferences
+  },
+  {
+    name: 'lsp_type_definition',
+    title: 'LSP type definition',
+    description: 'Return type-definition locations for an in-workspace file URI through Desk LSP.',
+    inputSchema: POSITIONED_INPUT_SCHEMA,
+    handler: callLspTypeDefinition
+  },
+  {
+    name: 'lsp_implementation',
+    title: 'LSP implementation',
+    description: 'Return implementation locations for an in-workspace file URI through Desk LSP.',
+    inputSchema: POSITIONED_INPUT_SCHEMA,
+    handler: callLspImplementation
+  },
+  {
+    name: 'lsp_declaration',
+    title: 'LSP declaration',
+    description: 'Return declaration locations for an in-workspace file URI through Desk LSP.',
+    inputSchema: POSITIONED_INPUT_SCHEMA,
+    handler: callLspDeclaration
+  },
+  {
+    name: 'lsp_code_actions',
+    title: 'LSP code actions',
+    description: 'Return code actions as data (no apply/execute) for a range in an in-workspace file URI through Desk LSP.',
+    inputSchema: CODE_ACTION_INPUT_SCHEMA,
+    handler: callLspCodeActions
+  },
+  {
+    name: 'lsp_diagnostics',
+    title: 'LSP diagnostics',
+    description: 'Return current diagnostics for an in-workspace file URI through Desk LSP.',
+    inputSchema: DIAGNOSTICS_INPUT_SCHEMA,
+    handler: callLspDiagnostics
+  }
+] satisfies readonly DeskLspToolDefinition[];
+
 export function createDeskLspMcpServer(options: DeskLspMcpOptions = {}): McpServer {
   const server = new McpServer({ name: 'desk-lsp-mcp', version: '0.1.0' });
 
-  server.registerTool(
-    'lsp_hover',
-    {
-      title: 'LSP hover',
-      description: 'Return hover information for an in-workspace file URI through Desk LSP.',
-      inputSchema: HOVER_INPUT_SCHEMA
-    },
-    async (input) => callLspHover(input, options)
-  );
-
-  server.registerTool(
-    'lsp_format',
-    {
-      title: 'LSP format',
-      description: 'Return document formatting edits for an in-workspace file URI through Desk LSP.',
-      inputSchema: FORMAT_INPUT_SCHEMA
-    },
-    async (input) => callLspFormat(input, options)
-  );
-
-  server.registerTool(
-    'lsp_document_symbols',
-    {
-      title: 'LSP document symbols',
-      description: 'Return document symbols for an in-workspace file URI through Desk LSP.',
-      inputSchema: DOCUMENT_SYMBOL_INPUT_SCHEMA
-    },
-    async (input) => callLspDocumentSymbols(input, options)
-  );
-
-  server.registerTool(
-    'lsp_folding_ranges',
-    {
-      title: 'LSP folding ranges',
-      description: 'Return sanitized folding ranges for an in-workspace file URI through Desk LSP.',
-      inputSchema: FOLDING_RANGE_INPUT_SCHEMA
-    },
-    async (input) => callLspFoldingRanges(input, options)
-  );
-
-  server.registerTool(
-    'lsp_selection_ranges',
-    {
-      title: 'LSP selection ranges',
-      description: 'Return sanitized selection ranges for positions in an in-workspace file URI through Desk LSP.',
-      inputSchema: SELECTION_RANGE_INPUT_SCHEMA
-    },
-    async (input) => callLspSelectionRanges(input, options)
-  );
-
-  server.registerTool(
-    'lsp_semantic_tokens',
-    {
-      title: 'LSP semantic tokens',
-      description: 'Return sanitized full semantic tokens and legend context for an in-workspace file URI through Desk LSP.',
-      inputSchema: SEMANTIC_TOKENS_INPUT_SCHEMA
-    },
-    async (input) => callLspSemanticTokens(input, options)
-  );
-
-  server.registerTool(
-    'lsp_completion',
-    {
-      title: 'LSP completion',
-      description: 'Return completion items for an in-workspace file URI through Desk LSP.',
-      inputSchema: COMPLETION_INPUT_SCHEMA
-    },
-    async (input) => callLspCompletion(input, options)
-  );
-
-  server.registerTool(
-    'lsp_signature_help',
-    {
-      title: 'LSP signature help',
-      description: 'Return signature help for an in-workspace file URI through Desk LSP.',
-      inputSchema: SIGNATURE_HELP_INPUT_SCHEMA
-    },
-    async (input) => callLspSignatureHelp(input, options)
-  );
-
-  server.registerTool(
-    'lsp_prepare_rename',
-    {
-      title: 'LSP prepare rename',
-      description: 'Return prepare-rename information for an in-workspace file URI through Desk LSP.',
-      inputSchema: POSITIONED_INPUT_SCHEMA
-    },
-    async (input) => callLspPrepareRename(input, options)
-  );
-
-  server.registerTool(
-    'lsp_rename',
-    {
-      title: 'LSP rename',
-      description: 'Return rename workspace edits as data for an in-workspace file URI through Desk LSP.',
-      inputSchema: RENAME_INPUT_SCHEMA
-    },
-    async (input) => callLspRename(input, options)
-  );
-
-  server.registerTool(
-    'lsp_document_highlights',
-    {
-      title: 'LSP document highlights',
-      description: 'Return document highlights for an in-workspace file URI through Desk LSP.',
-      inputSchema: DOCUMENT_HIGHLIGHT_INPUT_SCHEMA
-    },
-    async (input) => callLspDocumentHighlights(input, options)
-  );
-
-  server.registerTool(
-    'lsp_definition',
-    {
-      title: 'LSP definition',
-      description: 'Return definition locations for an in-workspace file URI through Desk LSP.',
-      inputSchema: POSITIONED_INPUT_SCHEMA
-    },
-    async (input) => callLspDefinition(input, options)
-  );
-
-  server.registerTool(
-    'lsp_references',
-    {
-      title: 'LSP references',
-      description: 'Return reference locations for an in-workspace file URI through Desk LSP.',
-      inputSchema: REFERENCES_INPUT_SCHEMA
-    },
-    async (input) => callLspReferences(input, options)
-  );
-
-  server.registerTool(
-    'lsp_type_definition',
-    {
-      title: 'LSP type definition',
-      description: 'Return type-definition locations for an in-workspace file URI through Desk LSP.',
-      inputSchema: POSITIONED_INPUT_SCHEMA
-    },
-    async (input) => callLspTypeDefinition(input, options)
-  );
-
-	  server.registerTool(
-	    'lsp_implementation',
-    {
-      title: 'LSP implementation',
-      description: 'Return implementation locations for an in-workspace file URI through Desk LSP.',
-      inputSchema: POSITIONED_INPUT_SCHEMA
-    },
-	    async (input) => callLspImplementation(input, options)
-	  );
-
-	  server.registerTool(
-	    'lsp_declaration',
-	    {
-	      title: 'LSP declaration',
-	      description: 'Return declaration locations for an in-workspace file URI through Desk LSP.',
-	      inputSchema: POSITIONED_INPUT_SCHEMA
-	    },
-	    async (input) => callLspDeclaration(input, options)
-	  );
-
-  server.registerTool(
-    'lsp_code_actions',
-    {
-      title: 'LSP code actions',
-      description: 'Return code actions as data (no apply/execute) for a range in an in-workspace file URI through Desk LSP.',
-      inputSchema: CODE_ACTION_INPUT_SCHEMA
-    },
-    async (input) => callLspCodeActions(input, options)
-  );
-
-  server.registerTool(
-    'lsp_diagnostics',
-    {
-      title: 'LSP diagnostics',
-      description: 'Return current diagnostics for an in-workspace file URI through Desk LSP.',
-      inputSchema: DIAGNOSTICS_INPUT_SCHEMA
-    },
-    async (input) => callLspDiagnostics(input, options)
-  );
+  for (const definition of DESK_LSP_TOOL_DEFINITIONS) {
+    server.registerTool(
+      definition.name,
+      {
+        title: definition.title,
+        description: definition.description,
+        inputSchema: definition.inputSchema
+      },
+      async (input) => definition.handler(input, options)
+    );
+  }
 
   return server;
 }
@@ -491,7 +472,7 @@ export async function callLspDeclaration(input: unknown, options: DeskLspMcpOpti
 }
 
 export async function callLspCodeActions(input: unknown, options: DeskLspMcpOptions = {}): Promise<CallToolResult> {
-  return callLspTool(input, options, buildCodeActionRequest, 'LSP code actions request failed', {
+  return callLspTool(input, options, buildCodeActionRequest, TOOL_ERROR_LABELS.codeActions, {
     preserveWorkspaceRootInResult: true,
     sanitizeResult: stripCodeActionExecutable,
     scrubResultKeys: true
@@ -521,7 +502,7 @@ async function callLspTool(
   const env = loadMcpEnvironment(options.env ?? process.env);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (!env) {
-    return toolError(errorMessage);
+    return toolError(errorMessage, 'missing-env');
   }
   const apiBase = typeof env.DESK_API === 'string' ? env.DESK_API.trim() : '';
   const token = typeof env.DESK_LSP_TOKEN === 'string' ? env.DESK_LSP_TOKEN.trim() : '';
@@ -531,24 +512,35 @@ async function callLspTool(
       : undefined;
   const secrets = [token, workspaceRoot].filter((value): value is string => Boolean(value));
 
-  if (!apiBase || !token || typeof fetchImpl !== 'function') {
-    return toolError(errorMessage);
+  if (!apiBase) {
+    return toolError(errorMessage, 'missing-env');
+  }
+  if (!token) {
+    return toolError(errorMessage, 'missing-token');
+  }
+  if (typeof fetchImpl !== 'function') {
+    return toolError(errorMessage, 'fetch-unavailable');
   }
 
   const request = buildRequest(input);
   if (!request || !passesOptionalWorkspacePreflight(request.uri, workspaceRoot)) {
-    return toolError(errorMessage);
+    return toolError(errorMessage, 'invalid-input');
   }
 
   let apiUrl: string;
   try {
-    apiUrl = new URL('/api/lsp', ensureTrailingSlash(apiBase)).toString();
+    const parsedApiUrl = new URL('/api/lsp', ensureTrailingSlash(apiBase));
+    if (parsedApiUrl.protocol !== 'http:' && parsedApiUrl.protocol !== 'https:') {
+      return toolError(errorMessage, 'bad-api-url');
+    }
+    apiUrl = parsedApiUrl.toString();
   } catch {
-    return toolError(errorMessage);
+    return toolError(errorMessage, 'bad-api-url');
   }
 
+  let response: Response;
   try {
-    const response = await fetchImpl(apiUrl, {
+    response = await fetchImpl(apiUrl, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${token}`,
@@ -560,15 +552,33 @@ async function callLspTool(
         params: request.params
       })
     });
-    const payload = await readJsonPayload(response);
-    if (!response.ok || !isRecord(payload) || payload.ok !== true || !('result' in payload)) {
-      return toolError(errorMessage);
-    }
+  } catch {
+    return toolError(errorMessage, 'fetch-failed');
+  }
+
+  if (!response || typeof response.ok !== 'boolean' || typeof response.json !== 'function') {
+    return toolError(errorMessage, 'bad-response');
+  }
+  if (!response.ok) {
+    return toolError(errorMessage, 'http-failed');
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return toolError(errorMessage, 'bad-json');
+  }
+  if (!isRecord(payload) || payload.ok !== true || !('result' in payload)) {
+    return toolError(errorMessage, 'bad-response');
+  }
+
+  try {
     const resultSecrets = toolOptions.preserveWorkspaceRootInResult ? [token] : secrets;
     const sanitizedResult = toolOptions.sanitizeResult ? toolOptions.sanitizeResult(payload.result) : payload.result;
     return toolSuccess(redactPayload(sanitizedResult, resultSecrets, { scrubKeys: toolOptions.scrubResultKeys === true }));
   } catch {
-    return toolError(errorMessage);
+    return toolError(errorMessage, 'bad-response');
   }
 }
 
@@ -1071,24 +1081,16 @@ function passesOptionalWorkspacePreflight(uriText: string, workspaceRoot: string
   }
 }
 
-async function readJsonPayload(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undefined;
-  }
-}
-
 function toolSuccess(value: unknown): CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify(value) }]
   };
 }
 
-function toolError(message: string): CallToolResult {
+function toolError(message: string, code: LspToolErrorCode): CallToolResult {
   return {
     isError: true,
-    content: [{ type: 'text', text: message }]
+    content: [{ type: 'text', text: JSON.stringify({ code, message }) }]
   };
 }
 

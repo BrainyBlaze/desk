@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runChannelsCli } from '../src/cli/channelsCli.js';
-import { appendMessage, createChannel, resolveChannelsHome } from '../src/server/channelsStore.js';
+import { addMember, appendMessage, createChannel, readChannelDetail, resolveChannelsHome } from '../src/server/channelsStore.js';
 
 describe('desk channels CLI', () => {
   let homeRoot: string;
@@ -21,6 +21,7 @@ describe('desk channels CLI', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     rmSync(homeRoot, { recursive: true, force: true });
   });
@@ -55,5 +56,20 @@ describe('desk channels CLI', () => {
     expect(output.join('\n')).toContain('thread reply');
     expect(output.join('\n')).not.toContain(parent.message.id);
     expect(output.join('\n')).not.toContain('parent message');
+  });
+
+  it('rejects a non-member --as override when posting through the offline fallback', async () => {
+    const home = resolveChannelsHome();
+    createChannel(home, 'ops', 'test channel');
+    addMember(home, 'ops', { name: 'alpha', type: 'codex', tmuxSession: 'tmux-alpha' });
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('server offline');
+    }));
+
+    const code = await runChannelsCli(['post', 'ops', '--as', 'intruder', 'message']);
+
+    expect(code).toBe(1);
+    expect(errors.join('\n')).toContain('@intruder is not a member of #ops');
+    expect(readChannelDetail(home, 'ops').messages).toEqual([]);
   });
 });

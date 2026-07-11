@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { shellQuote } from '../shared/shell.js';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { readManifestFile, resolveManifestPath } from './config.js';
@@ -348,6 +349,4 @@ function printPlanAction(action: TmuxPlanAction): void {
   console.log(`         cmd: ${action.session.command}`);
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+// shellQuote now lives in ../shared/shell.ts (single audited copy).

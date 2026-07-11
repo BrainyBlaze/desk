@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { Script } from 'node:vm';
+import { spawnSync } from 'node:child_process';
 import {
   buildClaudeHooksSettings,
   buildCodexHooksConfig,
@@ -77,6 +79,12 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('schemaVersion: 2');
     expect(shim).toContain('process.exit(0)');
     expect(shim).not.toContain('console.log');
+    // Failure diagnostic is present but debug-gated (must not spam an alt-screen TUI).
+    expect(shim).toContain('DESK_DEBUG');
+    // The emitted script must be syntactically valid — a broken template escape
+    // (e.g. the debug-write newline) would compile-fail here, not silently ship.
+    // Script compiles without running: syntax check only, no code execution.
+    expect(() => new Script(shim)).not.toThrow();
   });
 
   it('installs global hook files idempotently without clobbering existing hooks', () => {
@@ -113,5 +121,43 @@ describe('agent hook configuration generation', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe('agent hook shim runtime (child process)', () => {
+  // Runs the emitted shim as a real node process against an unreachable desk
+  // endpoint, so we exercise the actual fetch-failure path — not just syntax.
+  function runShim(env: Record<string, string | undefined>): { status: number | null; stderr: string; stdout: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-shim-'));
+    const shimPath = join(dir, 'shim.mjs');
+    writeFileSync(shimPath, buildDeskAgentEventShim());
+    try {
+      const result = spawnSync(process.execPath, [shimPath, '--event', 'Stop'], {
+        input: '{}',
+        // Unreachable endpoint => fetch rejects (ECONNREFUSED) well before the 1.5s abort.
+        env: { ...env, DESK_TMUX_SESSION: 'runtime-test', DESK_API: 'http://127.0.0.1:1' },
+        encoding: 'utf8',
+        timeout: 10_000
+      });
+      return { status: result.status, stderr: result.stderr ?? '', stdout: result.stdout ?? '' };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('stays silent and exits 0 when DESK_DEBUG is unset (POST failure swallowed)', () => {
+    const env = { ...process.env };
+    delete env.DESK_DEBUG;
+    const { status, stderr } = runShim(env);
+    expect(status).toBe(0);
+    expect(stderr).not.toContain('agent-event POST failed');
+  });
+
+  it('emits one diagnostic and still exits 0 under DESK_DEBUG when the POST fails', () => {
+    const { status, stderr } = runShim({ ...process.env, DESK_DEBUG: '1' });
+    expect(status).toBe(0); // best-effort: a failed POST never breaks the hook
+    // Exactly one diagnostic line — not merely present (the impl writes once).
+    const occurrences = stderr.split('[desk-hook] agent-event POST failed').length - 1;
+    expect(occurrences).toBe(1);
   });
 });

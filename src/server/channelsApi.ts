@@ -174,9 +174,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
         agent: spec.agent,
         cwd: spec.cwd,
         resume: spec.resume,
-        bypassPermissions: spec.bypassPermissions
+        bypassPermissions: spec.bypassPermissions,
+        uiMode: spec.uiMode
       };
-    }
+    },
+    nativeSessionState: (tmuxSession) => options.agentSurfaceBroker?.nativeDeliveryState(tmuxSession) ?? 'offline'
   });
   const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
   watcher.start();
@@ -245,7 +247,7 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
   '.log': 'text/plain; charset=utf-8'
 };
 
-type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage'>;
+type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage' | 'nativeDeliveryState'>;
 
 interface ChannelDeliverySession {
   tmuxSession: string;

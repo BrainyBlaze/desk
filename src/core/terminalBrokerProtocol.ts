@@ -1,5 +1,8 @@
 import { MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from './terminalSizing.js';
 
+export const MAX_TERMINAL_BROKER_INPUT_LENGTH = 1024 * 1024;
+export const MAX_TERMINAL_DIMENSION = 1000;
+
 export type TerminalBrokerClientFrame =
   | { type: 'subscribe'; session: string; surfaceId: string; visible: boolean }
   | { type: 'visibility'; session: string; surfaceId: string; visible: boolean }
@@ -29,7 +32,7 @@ export function parseBrokerClientFrame(value: unknown): TerminalBrokerClientFram
     case 'unsubscribe':
       return { type: 'unsubscribe', session, surfaceId };
     case 'input':
-      if (typeof frame.data !== 'string') {
+      if (typeof frame.data !== 'string' || frame.data.length > MAX_TERMINAL_BROKER_INPUT_LENGTH) {
         throw invalidBrokerFrame();
       }
       return { type: 'input', session, surfaceId, data: frame.data };
@@ -62,7 +65,7 @@ function readBoolean(value: unknown): boolean {
 }
 
 function readTerminalDimension(value: unknown, minimum: number): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > MAX_TERMINAL_DIMENSION) {
     throw invalidBrokerFrame();
   }
   return value;

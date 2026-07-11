@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 const nativeSurfaceSource = () => readFileSync('src/web/agentSurface/NativeAgentSurface.tsx', 'utf8');
 const stylesSource = () => readFileSync('src/web/styles.css', 'utf8');
 const appSource = () => readFileSync('src/web/App.tsx', 'utf8');
+const agentMultiplexerSource = () => readFileSync('src/web/AgentMultiplexer.tsx', 'utf8');
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -32,7 +33,7 @@ describe('native agent thinking indicator', () => {
     expect(source).toMatch(/const \[awaitingResponse, setAwaitingResponse\] = useState\(false\)/);
     expect(source).toMatch(/agentSurfaceClient\.send\(surfaceId, session, text\);[\s\S]*setAwaitingResponse\(true\);/);
     expect(source).toMatch(/if \(event\.kind !== 'session-info'\) \{[\s\S]*setAwaitingResponse\(false\);[\s\S]*\}/);
-    expect(source).toMatch(/onSnapshot: \(\{ state, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
+    expect(source).toMatch(/onSnapshot: \(\{ state, lastSeq, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onError: \(_code, message\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onExit: \(\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/const showAgentThinking =\s*awaitingResponse \|\| model\.status === 'processing' \|\| model\.status === 'tool-executing';/);
@@ -194,14 +195,15 @@ describe('native agent message actions and notes', () => {
   it('wires message context menus to the existing notes creator flow', () => {
     const surface = nativeSurfaceSource();
     const app = appSource();
+    const mux = agentMultiplexerSource();
 
     expect(surface).toMatch(/onMessageMenu\?: \(text: string, x: number, y: number\) => void/);
     expect(surface).toMatch(/onContextMenu=\{\(event\) => openMessageMenu\(event, row\.text\)\}/);
     expect(surface).toMatch(/<RowActions text=\{row\.text\} onCreateNote=\{onCreateNote\} \/>/);
     expect(app).toMatch(/onTerminalSelectionMenu: \(text: string, x: number, y: number\) => setTerminalMenu\(\{ text, x, y \}\)/);
-    expect(app).toMatch(/onSelectionMenu=\{onTerminalSelectionMenu\}/);
-    expect(app).toMatch(/onMessageMenu=\{onSelectionMenu\}/);
-    expect(app).toMatch(/onCreateNote=\{onCreateNoteFromText\}/);
+    expect(mux).toMatch(/onSelectionMenu=\{onTerminalSelectionMenu\}/);
+    expect(mux).toMatch(/onMessageMenu=\{onSelectionMenu\}/);
+    expect(mux).toMatch(/onCreateNote=\{onCreateNoteFromText\}/);
     expect(app).toMatch(/noteCreatorRef\.current\?\.\(text\)/);
   });
 
@@ -335,5 +337,21 @@ describe('native agent theme binding', () => {
     expect(userRule).toContain('var(--desk-info)');
     expect(assistantRule).toContain('var(--desk-ok)');
     expect(cssBlock(styles, '.nativeAgentSurface')).toContain('var(--desk-text)');
+  });
+});
+
+describe('native agent render memoization', () => {
+  it('keeps transcript rows and markdown referentially stable across composer keystrokes', () => {
+    const source = nativeSurfaceSource();
+
+    // A fresh inline callback here defeats ChannelMarkdown's memo and forces a
+    // markdown re-parse of every visible row on every parent render.
+    expect(source).toMatch(/const NOOP_OPEN_FILE = \(\): undefined => undefined;/);
+    expect(source).toMatch(/onOpenFile=\{NOOP_OPEN_FILE\}/);
+    expect(source).not.toMatch(/onOpenFile=\{\(\) => undefined\}/);
+    expect(source).toMatch(/const AgentMarkdown = memo\(function AgentMarkdown/);
+    expect(source).toMatch(/const AgentFeedItemView = memo\(function AgentFeedItemView/);
+    expect(source).toMatch(/const expandTurn = useCallback\(/);
+    expect(source).toMatch(/onExpandTurn=\{expandTurn\}/);
   });
 });

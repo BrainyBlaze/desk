@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_AGENT_SURFACE_COMMANDS,
+  MAX_AGENT_SURFACE_OPTIONS,
+  MAX_AGENT_SURFACE_TEXT_LENGTH,
   parseAgentHostClientFrame,
   parseAgentHostServerFrame,
   parseAgentSurfaceEvent,
@@ -200,6 +203,39 @@ describe('parseAgentSurfaceEvent', () => {
     expect(() => parseAgentSurfaceEvent({ ...base, kind: 'attention-hint', attention: 'vibes' })).toThrow();
     expect(() => parseAgentSurfaceEvent({ ...base, kind: 'history-boundary', backfillComplete: false })).toThrow();
     expect(() => parseAgentSurfaceEvent({ ...base, kind: 'agent-error', message: 'boom', fatal: 'yes' })).toThrow();
+  });
+
+  it('rejects unbounded text and collection payloads', () => {
+    expect(() =>
+      parseAgentSurfaceEvent({
+        ...base,
+        kind: 'assistant-message',
+        id: 'm1',
+        turnId: 't1',
+        markdown: 'x'.repeat(MAX_AGENT_SURFACE_TEXT_LENGTH + 1)
+      })
+    ).toThrow(/invalid agent surface frame/i);
+    expect(() =>
+      parseAgentSurfaceEvent({
+        ...base,
+        kind: 'permission-request',
+        requestId: 'req-1',
+        variant: 'question',
+        title: 'Pick one',
+        options: Array.from({ length: MAX_AGENT_SURFACE_OPTIONS + 1 }, (_, index) => ({
+          id: String(index),
+          label: String(index),
+          treatment: 'answer'
+        }))
+      })
+    ).toThrow(/invalid agent surface frame/i);
+    expect(() =>
+      parseAgentSurfaceEvent({
+        ...base,
+        kind: 'session-info',
+        commands: Array.from({ length: MAX_AGENT_SURFACE_COMMANDS + 1 }, (_, index) => ({ name: `command-${index}` }))
+      })
+    ).toThrow(/invalid agent surface frame/i);
   });
 });
 

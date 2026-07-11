@@ -263,7 +263,8 @@ function matchesFileOperationFilter(filter: unknown, workspaceRoot: string, file
   if (!relativePath) {
     return false;
   }
-  const ignoreCase = pattern.ignoreCase === true;
+  const options = asRecord(pattern.options);
+  const ignoreCase = options?.ignoreCase === true || pattern.ignoreCase === true;
   return matchesGlob(pattern.glob, relativePath, ignoreCase);
 }
 

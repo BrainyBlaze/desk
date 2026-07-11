@@ -17,6 +17,7 @@ import type {
   ViewFilter
 } from '../../server/channelsProtocol.js';
 import type { ReactionRef } from '../../server/channelsReactions.js';
+import { readJson } from '../httpJson.js';
 import type { SavedView } from '../../server/channelsViews.js';
 import type { DeliveryEvent, DeliveryEventKind } from '../../server/channelsEvents.js';
 
@@ -392,15 +393,4 @@ async function post<T>(path: string, payload: unknown): Promise<T> {
   );
 }
 
-async function readJson<T>(responsePromise: Promise<Response>): Promise<T> {
-  const response = await responsePromise;
-  const payload = (await response.json()) as T | { error?: string };
-  if (!response.ok) {
-    const message =
-      typeof payload === 'object' && payload !== null && 'error' in payload && payload.error
-        ? String(payload.error)
-        : `request failed ${response.status}`;
-    throw new Error(message);
-  }
-  return payload as T;
-}
+// readJson now lives in ../httpJson.ts (text-first, ok-checked).

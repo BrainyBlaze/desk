@@ -33,6 +33,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dev": "tsx src/cli/main.ts",
+    "generate:codex-bindings": "node scripts/generate-codex-bindings.mjs",
     "serve": "vite --host 127.0.0.1",
     "ui": "vite --host 127.0.0.1"
   },
@@ -43,6 +44,7 @@
     "chokidar": "^5.0.0",
     "connect": "^3.7.0",
     "node-pty": "^1.1.0",
+    "proper-lockfile": "^4.1.2",
     "pyright": "^1.1.410",
     "sirv": "^3.0.2",
     "typescript-language-server": "^5.3.0",
@@ -55,6 +57,7 @@
     "@tanstack/react-virtual": "^3.14.3",
     "@types/connect": "^3.4.38",
     "@types/node": "^24.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@types/ws": "^8.18.1",

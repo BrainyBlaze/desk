@@ -4,15 +4,27 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
 import { resolveFsPath } from './fsSafety.js';
-import { copyEntry, createEntry, deleteEntry, listDirectory, readFileSafe, renameEntry, writeFileAtomic, writeFileAtomicCreate } from './fsOps.js';
+import {
+  copyEntry,
+  createEntry,
+  deleteEntry,
+  listDirectory,
+  MAX_EDITABLE_BYTES,
+  readFileSafe,
+  renameEntry,
+  writeFileAtomic,
+  writeFileAtomicCreate
+} from './fsOps.js';
 import { searchContent, searchFiles } from './fsSearch.js';
-import { readManifestFile, resolveManifestPath, writeManifestFile } from '../core/config.js';
+import { readManifestFile, resolveManifestPath, updateManifestFile, withManifestFileLock } from '../core/config.js';
 import type { DeskNotesSettings } from '../core/types.js';
 import type { LspFileOperationCoordinator, LspFileOperationKind } from './lsp/lspFileOperationCoordinator.js';
 
 export interface FsRequestOptions {
   fileOperationCoordinator?: LspFileOperationCoordinator;
 }
+
+const FS_WRITE_JSON_BODY_MAX_BYTES = MAX_EDITABLE_BYTES * 6 + 64 * 1024;
 
 /**
  * Handle /api/fs/* requests. Returns false when the URL is not an fs route
@@ -71,17 +83,22 @@ export async function handleFsRequest(
   if (req.method === 'POST' && url.pathname === '/api/fs/notes-state') {
     const body = await readJsonBody(req);
     const manifestPath = resolveManifestPath();
-    const manifest = readManifestFile(manifestPath);
-    const next: DeskNotesSettings = { ...(manifest.settings?.notes ?? {}) };
-    if (Array.isArray(body.openFiles)) {
-      next.openFiles = body.openFiles.filter((file): file is string => typeof file === 'string');
+    let next: DeskNotesSettings | undefined;
+    await updateManifestFile(manifestPath, (manifest) => {
+      next = { ...(manifest.settings?.notes ?? {}) };
+      if (Array.isArray(body.openFiles)) {
+        next.openFiles = body.openFiles.filter((file): file is string => typeof file === 'string');
+      }
+      if (typeof body.activeFile === 'string') {
+        next.activeFile = body.activeFile;
+      } else if (body.activeFile === null) {
+        delete next.activeFile;
+      }
+      return { ...manifest, settings: { ...(manifest.settings ?? {}), notes: next } };
+    });
+    if (!next) {
+      throw new Error('notes update unexpectedly produced no state');
     }
-    if (typeof body.activeFile === 'string') {
-      next.activeFile = body.activeFile;
-    } else if (body.activeFile === null) {
-      delete next.activeFile;
-    }
-    writeManifestFile(manifestPath, { ...manifest, settings: { ...(manifest.settings ?? {}), notes: next } });
     sendJson(res, 200, next);
     return true;
   }
@@ -167,16 +184,20 @@ export async function handleFsRequest(
   }
 
   if (req.method === 'POST') {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, largeFsBodyRoute(url.pathname) ? { maxBytes: FS_WRITE_JSON_BODY_MAX_BYTES } : undefined);
     const root = requireRoot(typeof body.root === 'string' ? body.root : null);
 
     if (url.pathname === '/api/fs/write') {
       const path = resolveFsPath(body.path, root, [resolveManifestPath()]);
-      if (typeof body.content !== 'string') {
+      const content = body.content;
+      if (typeof content !== 'string') {
         throw new Error('content must be a string');
       }
       const expected = typeof body.mtimeMs === 'number' ? body.mtimeMs : undefined;
-      const result = writeFileAtomic(path, body.content, expected);
+      const result =
+        path === resolveManifestPath()
+          ? await withManifestFileLock(path, () => writeFileAtomic(path, content, expected))
+          : writeFileAtomic(path, content, expected);
       sendJson(res, result.ok ? 200 : 409, result);
       return true;
     }
@@ -388,6 +409,10 @@ function requireRoot(value: string | null): string {
     throw new Error('root query/body parameter is required');
   }
   return value;
+}
+
+function largeFsBodyRoute(pathname: string): boolean {
+  return pathname === '/api/fs/write' || pathname === '/api/fs/create';
 }
 
 /** Expands a leading ~ to the server's home directory. */

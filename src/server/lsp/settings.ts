@@ -24,6 +24,8 @@ export interface LspServerCommandInput {
 
 export interface NormalizedLspSettings {
   languages: NormalizedLspLanguage[];
+  /** Built-in server ids that were requested implicitly but could not be resolved. */
+  missingBuiltins: string[];
   maxSessions: number;
   startupTimeoutMs: number;
 }
@@ -65,6 +67,7 @@ export function normalizeLspSettings(input: unknown): NormalizedLspSettings {
 
   return {
     languages,
+    missingBuiltins: [],
     maxSessions: clampInteger(input.maxSessions, DEFAULT_MAX_SESSIONS, 1, MAX_MAX_SESSIONS),
     startupTimeoutMs: clampInteger(input.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS, 10, 30_000)
   };
@@ -76,7 +79,8 @@ export function normalizeConfiguredLspServers(input: unknown): NormalizedLspSett
   }
 
   const serverCommands = isRecord(input.serverCommands) ? input.serverCommands : {};
-  const languages = builtinServerCommands(Object.keys(serverCommands));
+  const builtins = builtinServerCommands(Object.keys(serverCommands));
+  const languages = builtins.languages;
   for (const [id, commandInput] of Object.entries(serverCommands)) {
     if (typeof id !== 'string' || id.trim() === '') {
       continue;
@@ -89,13 +93,18 @@ export function normalizeConfiguredLspServers(input: unknown): NormalizedLspSett
 
   return {
     languages,
+    missingBuiltins: builtins.missingBuiltins,
     maxSessions: clampInteger(input.maxSessions, DEFAULT_MAX_SESSIONS, 1, MAX_MAX_SESSIONS),
     startupTimeoutMs: clampInteger(input.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS, 10, 30_000)
   };
 }
 
-function builtinServerCommands(overriddenIds: string[]): NormalizedLspLanguage[] {
+function builtinServerCommands(overriddenIds: string[]): {
+  languages: NormalizedLspLanguage[];
+  missingBuiltins: string[];
+} {
   const languages: NormalizedLspLanguage[] = [];
+  const missingBuiltins: string[] = [];
   if (!overriddenIds.includes('typescript')) {
     const cli = resolveTypescriptCli();
     if (cli) {
@@ -109,6 +118,8 @@ function builtinServerCommands(overriddenIds: string[]): NormalizedLspLanguage[]
         extensions: ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'],
         initializationOptions: {}
       });
+    } else {
+      missingBuiltins.push('typescript');
     }
   }
 
@@ -125,6 +136,8 @@ function builtinServerCommands(overriddenIds: string[]): NormalizedLspLanguage[]
         extensions: ['.py', '.pyi'],
         initializationOptions: {}
       });
+    } else {
+      missingBuiltins.push('python');
     }
   }
 
@@ -141,10 +154,12 @@ function builtinServerCommands(overriddenIds: string[]): NormalizedLspLanguage[]
         extensions: ['.rs'],
         initializationOptions: {}
       });
+    } else {
+      missingBuiltins.push('rust');
     }
   }
 
-  return languages;
+  return { languages, missingBuiltins };
 }
 
 function resolveRustAnalyzerLauncherArgs(): string[] | undefined {
@@ -197,6 +212,7 @@ function normalizeServerCommand(id: string, input: unknown): NormalizedLspLangua
 function emptySettings(): NormalizedLspSettings {
   return {
     languages: [],
+    missingBuiltins: [],
     maxSessions: DEFAULT_MAX_SESSIONS,
     startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS
   };

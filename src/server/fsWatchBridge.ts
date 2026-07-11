@@ -55,11 +55,17 @@ export function parseWatchMessage(raw: string): WatchMessage | null {
 }
 
 const FS_EVENTS: FsChangeEvent['event'][] = ['add', 'addDir', 'change', 'unlink', 'unlinkDir'];
+const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
 
-export function installFsWatchBridge(httpServer: Server): void {
-  const wss = new WebSocketServer({ noServer: true });
+export interface FsWatchBridgeOptions {
+  maxPayloadBytes?: number;
+}
 
-  httpServer.on('upgrade', (request, socket, head) => {
+export function installFsWatchBridge(httpServer: Server, options: FsWatchBridgeOptions = {}): () => void {
+  const maxPayload = positiveInteger(options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES, 'fs watch maxPayloadBytes');
+  const wss = new WebSocketServer({ noServer: true, maxPayload });
+
+  const onUpgrade: Parameters<Server['on']>[1] = (request, socket, head) => {
     if (socket.destroyed) {
       return; // already rejected by the central upgrade guard
     }
@@ -70,7 +76,8 @@ export function installFsWatchBridge(httpServer: Server): void {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
-  });
+  };
+  httpServer.on('upgrade', onUpgrade);
 
   wss.on('connection', (ws) => {
     const registry = new WatchRegistry();
@@ -109,11 +116,33 @@ export function installFsWatchBridge(httpServer: Server): void {
       }
     });
 
-    ws.on('close', () => {
+    const closeWatchers = (): void => {
       for (const watcher of watchers.values()) {
         void watcher.close();
       }
       watchers.clear();
-    });
+    };
+    ws.on('close', closeWatchers);
+    ws.on('error', closeWatchers);
   });
+
+  let disposed = false;
+  return () => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    httpServer.off('upgrade', onUpgrade);
+    for (const ws of wss.clients) {
+      ws.close(1001, 'fs watch bridge disposed');
+    }
+    wss.close();
+  };
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${label} must be a positive integer`);
+  }
+  return value;
 }

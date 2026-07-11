@@ -14,6 +14,17 @@ import type { SystemSnapshot } from '../shared/systemMetrics.js';
 let cachedSnapshot: SystemSnapshot | null = null;
 let timer: NodeJS.Timeout | undefined;
 let inFlight = false;
+let lastSampleAtMs: number | undefined;
+let consecutiveFailures = 0;
+let lastError: 'sample-failed' | undefined;
+
+function recordSnapshot(snapshot: SystemSnapshot): void {
+  cachedSnapshot = snapshot;
+  const generatedAtMs = Date.parse(snapshot.generatedAt);
+  lastSampleAtMs = Number.isFinite(generatedAtMs) ? generatedAtMs : Date.now();
+  consecutiveFailures = 0;
+  lastError = undefined;
+}
 
 async function sample(): Promise<void> {
   if (inFlight) {
@@ -21,9 +32,11 @@ async function sample(): Promise<void> {
   }
   inFlight = true;
   try {
-    cachedSnapshot = await collectSystemSnapshotAsync();
+    recordSnapshot(await collectSystemSnapshotAsync());
   } catch {
     // keep the last good snapshot; a transient GPU/proc hiccup is not fatal
+    consecutiveFailures += 1;
+    lastError = 'sample-failed';
   } finally {
     inFlight = false;
   }
@@ -36,7 +49,7 @@ export function startSystemSampling(intervalMs = 2000): void {
   }
   // Seed synchronously so the very first pulse after boot has real data and the
   // CPU/net/disk deltas have a baseline; subsequent samples are async.
-  cachedSnapshot = collectSystemSnapshot();
+  recordSnapshot(collectSystemSnapshot());
   void sample();
   timer = setInterval(() => void sample(), intervalMs);
   timer.unref?.();
@@ -47,7 +60,18 @@ export function startSystemSampling(intervalMs = 2000): void {
  * if the sampler was never started (e.g. a unit test hitting the route directly).
  */
 export function getSystemSnapshot(): SystemSnapshot {
-  return cachedSnapshot ?? collectSystemSnapshot();
+  const snapshot = cachedSnapshot ?? collectSystemSnapshot();
+  const sampledAtMs = lastSampleAtMs ?? Date.parse(snapshot.generatedAt);
+  const safeSampledAtMs = Number.isFinite(sampledAtMs) ? sampledAtMs : Date.now();
+  return {
+    ...snapshot,
+    sampler: {
+      lastSampleAt: new Date(safeSampledAtMs).toISOString(),
+      staleForMs: Math.max(Date.now() - safeSampledAtMs, 0),
+      consecutiveFailures,
+      ...(lastError ? { lastError } : {})
+    }
+  };
 }
 
 /** Test hook: stop the sampler and clear cached state. */
@@ -57,4 +81,7 @@ export function stopSystemSampling(): void {
     timer = undefined;
   }
   cachedSnapshot = null;
+  lastSampleAtMs = undefined;
+  consecutiveFailures = 0;
+  lastError = undefined;
 }

@@ -366,6 +366,26 @@ describe('AgentHost command correlation', () => {
     expect(driver.shutdownCalls).toBe(1);
     expect(sentFrames().some((f) => f.type === 'command-result' && (f as { requestId?: string }).requestId === 'r1' && (f as { ok?: boolean }).ok === true)).toBe(true);
   });
+
+  it('does not accumulate process exit listeners across completed hosts', async () => {
+    const initialExitListeners = process.listenerCount('exit');
+    const runHost = async (): Promise<void> => {
+      const { host, socket } = makeHost();
+      const runPromise = host.run();
+      socket.fireOpen();
+      socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+      await flush();
+      socket.fireMessage({ type: 'shutdown', requestId: 'r1' });
+      await runPromise;
+    };
+
+    await runHost();
+    const afterFirstHost = process.listenerCount('exit');
+    await runHost();
+
+    expect(afterFirstHost).toBeLessThanOrEqual(initialExitListeners + 1);
+    expect(process.listenerCount('exit')).toBe(afterFirstHost);
+  });
 });
 
 describe('AgentHost driver event stamping', () => {

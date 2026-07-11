@@ -29,3 +29,6 @@ src/server/assets/*.tar.gz
 /desk-server
 /probe-server
 /probe-*.mjs
+
+# Internal working notes never enter the public tree
+docs/superpowers/

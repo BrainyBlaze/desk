@@ -1,19 +1,19 @@
 // Regression tests for cross-process lost-append races and PID-reuse hazards.
-// Target location when greenlit: tests/channels-store-concurrency.test.ts (NEW file, no collision).
 
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendMessage } from '../src/server/channelsStore.js';
 import { formatChannelPreamble, parseConversation } from '../src/server/channelsProtocol.js';
 import { ChannelsEngine } from '../src/server/channelsEngine.js';
 
-const DIST_STORE = '/workspace/projects/desk/dist/server/channelsStore.js';
+const STORE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/server/channelsStore.ts')).href;
 
 const WORKER_SOURCE = `
-import { appendMessage } from '${DIST_STORE}';
+import { appendMessage } from '${STORE_SOURCE}';
 const home = process.argv[2];
 const channel = process.argv[3];
 const id = process.argv[4];
@@ -40,7 +40,7 @@ describe('cross-process thread-reply lost-append race (probabilistic, repeated)'
 
   // The append race is probabilistic per run (~20% loss rate under 8-worker contention
   // on the test runner — measured 1 lost reply in 5 runs of the standalone reproducer).
-  // To converge reliably RED today (and reliably GREEN after the flock fix), we run K
+  // To converge reliably RED today (and reliably GREEN after the cross-process lock fix), we run K
   // independent iterations and assert ALL succeed. P(all pass today) ≈ 0.8^K;
   // K=30 → ~99.9% reliable RED, ~12s runtime.
   it('does not lose replies across 30 iterations of 8-way concurrent thread appends', async () => {
@@ -62,11 +62,14 @@ describe('cross-process thread-reply lost-append race (probabilistic, repeated)'
       const exits = await Promise.all(
         Array.from({ length: N }, (_, i) =>
           new Promise<number>((resolve) => {
-            const child = spawn('node', [workerFile, home, channel, `${iter}-${i}`, parentId], { stdio: 'pipe' });
+            const child = spawn(process.execPath, ['--import', 'tsx', workerFile, home, channel, `${iter}-${i}`, parentId], {
+              stdio: 'pipe'
+            });
             child.on('exit', resolve);
           })
         )
       );
+      expect(exits).toEqual(Array.from({ length: N }, () => 0));
       const succeeded = exits.filter((code) => code === 0).length;
       totalExpected += succeeded;
 
@@ -77,9 +80,9 @@ describe('cross-process thread-reply lost-append race (probabilistic, repeated)'
     }
 
     // RED today: totalReplies < totalExpected (some iterations lose 1-of-8).
-    // GREEN after the per-channel flock fix wraps every appendMessage / RMW path.
+    // GREEN after the per-channel lock fix wraps every appendMessage / RMW path.
     expect(totalReplies).toBe(totalExpected);
-  }, 30_000);
+  }, 120_000);
 });
 
 describe('engine.pid PID-reuse hazard (deterministic)', () => {

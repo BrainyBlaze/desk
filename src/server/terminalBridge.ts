@@ -1,12 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import type { IncomingMessage } from 'node:http';
-import type { Duplex } from 'node:stream';
-import { spawn as spawnPty, type IPty } from './ptyBackend.js';
-import { WebSocketServer, type WebSocket } from 'ws';
-import { findSession, listTmuxSessionsCached, loadDeskCached } from '../core/runner.js';
 import { DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from '../core/terminalSizing.js';
 import type { SessionSpec } from '../core/types.js';
-import { attentionTracker, extractTerminalNotifications, isLikelyUserInput, notifyRaise } from './attention.js';
 
 export interface TerminalAttachCommand {
   file: string;
@@ -42,45 +36,7 @@ export interface TinyTmuxWindowRepairResult {
   failed: Array<{ tmuxSession: string; error: string }>;
 }
 
-/**
- * One PTY per tmux session, fanned out to every websocket viewing it. Two
- * cells (or a desktop tab plus a phone) showing the same session used to
- * spawn two `tmux attach` processes; now they share one. Input from any
- * socket fans in; output broadcasts to all. The PTY dies with its last
- * subscriber.
- */
-interface SharedTerminal {
-  pty: IPty;
-  sockets: Set<WebSocket>;
-}
-
-const sharedTerminals = new Map<string, SharedTerminal>();
 const lastGoodTerminalSizes = new Map<string, TerminalSize>();
-/**
- * Per-socket send buffer cap. A throttled or backgrounded tab (or a slow link)
- * during a firehose would otherwise let ws queue output unbounded server-side. Past
- * this many buffered bytes we drop the chunk for that socket — terminal output is
- * self-correcting, so the next live frame (and the stabilize repaint) resyncs its
- * screen once it catches up. Other sockets on the same shared PTY are unaffected.
- */
-const SOCKET_BACKPRESSURE_MAX_BYTES = 4 * 1024 * 1024;
-/**
- * The two `tmux set-option -g` calls (mouse off + allow-passthrough for OSC 9) are
- * global and idempotent, but two spawnSync per attach showed up in the round-2
- * profile. They only need to be (re)applied once the tmux server is up. We run
- * them when the shared-terminal map transitions from empty to non-empty: that
- * covers the first attach and re-covers a tmux server restart (which kills every
- * attach, draining the map), without paying on every cell.
- */
-let globalTmuxOptionsApplied = false;
-function ensureGlobalTmuxOptions(): void {
-  if (globalTmuxOptionsApplied && sharedTerminals.size > 0) {
-    return;
-  }
-  spawnSync('tmux', ['set-option', '-g', 'mouse', 'off'], { encoding: 'utf8' });
-  spawnSync('tmux', ['set-option', '-g', 'allow-passthrough', 'on'], { encoding: 'utf8' });
-  globalTmuxOptionsApplied = true;
-}
 const copyModeSessions = new Set<string>();
 /** last repaint per session — several clients stabilizing at once repaint tmux once */
 const lastRepaintAt = new Map<string, number>();
@@ -99,14 +55,6 @@ export function createTerminalAttachCommand(session: SessionSpec): TerminalAttac
     file: 'tmux',
     args: ['attach-session', '-f', 'ignore-size', '-t', session.tmuxSession]
   };
-}
-
-export function resizeAttachedTerminals(tmuxSession: string, cols: number, rows: number): void {
-  const shared = sharedTerminals.get(tmuxSession);
-  if (!shared) {
-    return;
-  }
-  shared.pty.resize(cols, rows);
 }
 
 export function getLastGoodTerminalSize(tmuxSession: string): TerminalSize | undefined {
@@ -297,142 +245,6 @@ export function scrollTmuxPane(
   return { ok: true };
 }
 
-export function installTerminalBridge(httpServer: UpgradeServer): void {
-  const wss = new WebSocketServer({ noServer: true });
-
-  httpServer.on('upgrade', (request, socket, head) => {
-    if (socket.destroyed) {
-      return; // already rejected by the central upgrade guard
-    }
-    const url = new URL(request.url ?? '/', 'http://desk.local');
-    if (url.pathname !== '/ws/terminal') {
-      return;
-    }
-
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
-  });
-
-  wss.on('connection', (ws, request) => {
-    const url = new URL(request.url ?? '/', 'http://desk.local');
-    const query = url.searchParams.get('session');
-
-    if (!query) {
-      ws.close(1008, 'session query parameter is required');
-      return;
-    }
-
-    let shared: SharedTerminal;
-    let tmuxSession: string;
-    try {
-      const session = findSession(loadDeskCached().sessions, query);
-      // Attach-only, deliberately: starting here would silently resurrect a
-      // session that died (or was killed) while its cell was attached — the
-      // client's reconnect backoff would revive it within a second and the
-      // UI could never show the death. The pulse flips the cell to MISSING
-      // within one tick; booting is an explicit action (boot button, Repair,
-      // Up), never a side effect of attaching. The cached list is fine here:
-      // it is 1s-fresh and boot/kill invalidate it, and a stale "running" only
-      // costs one failed attach the client retries.
-      if (!listTmuxSessionsCached().has(session.tmuxSession)) {
-        throw new Error(`tmux session ${session.tmuxSession} is not running`);
-      }
-      tmuxSession = session.tmuxSession;
-      shared = acquireSharedTerminal(session);
-    } catch (error) {
-      ws.send(JSON.stringify({ type: 'error', message: error instanceof Error ? error.message : String(error) }));
-      ws.close(1011);
-      return;
-    }
-
-    subscribeSocket(ws, tmuxSession, shared);
-  });
-}
-
-function acquireSharedTerminal(session: SessionSpec): SharedTerminal {
-  const existing = sharedTerminals.get(session.tmuxSession);
-  if (existing) {
-    return existing;
-  }
-  const command = createTerminalAttachCommand(session);
-  ensureGlobalTmuxOptions();
-  const pty = spawnPty(command.file, command.args, {
-    cols: 120,
-    rows: 40,
-    cwd: session.cwd,
-    env: {
-      ...process.env,
-      TERM: 'xterm-256color'
-    },
-    name: 'xterm-256color'
-  });
-  const shared: SharedTerminal = { pty, sockets: new Set() };
-  sharedTerminals.set(session.tmuxSession, shared);
-  const tmuxSession = session.tmuxSession;
-
-  pty.onData((chunk) => {
-    const notifications = extractTerminalNotifications(chunk);
-    if (notifications.length > 0) {
-      // Agent TUI rang its turn-complete/approval notification.
-      attentionTracker.raise(tmuxSession);
-      notifyRaise(tmuxSession);
-      for (const notification of notifications) {
-        attentionTracker.pushEvent(tmuxSession, notification.kind, notification.message);
-      }
-    }
-    const payload = stripTerminalMouseModeControls(chunk);
-    for (const socket of shared.sockets) {
-      if (socket.readyState !== socket.OPEN) {
-        continue;
-      }
-      // Drop for a socket that's fallen far behind rather than buffer unbounded.
-      if (socket.bufferedAmount > SOCKET_BACKPRESSURE_MAX_BYTES) {
-        continue;
-      }
-      socket.send(payload);
-    }
-  });
-  pty.onExit(({ exitCode }) => {
-    if (sharedTerminals.get(tmuxSession) === shared) {
-      sharedTerminals.delete(tmuxSession);
-    }
-    for (const socket of shared.sockets) {
-      if (socket.readyState === socket.OPEN) {
-        socket.send(`\r\n[desk terminal exited: ${exitCode}]\r\n`);
-        socket.close();
-      }
-    }
-    shared.sockets.clear();
-  });
-  return shared;
-}
-
-function subscribeSocket(ws: WebSocket, tmuxSession: string, shared: SharedTerminal): void {
-  shared.sockets.add(ws);
-  // A subscriber joining an already-attached PTY gets the current screen via
-  // the client's own stabilize() repaint shortly after connect — the redraw
-  // broadcasts to everyone, which is visually idempotent for existing viewers.
-  ws.on('message', (message) => {
-    if (copyModeSessions.has(tmuxSession)) {
-      exitTmuxCopyMode(tmuxSession);
-    }
-    const data = Buffer.isBuffer(message) ? message.toString('utf8') : String(message);
-    // Deliberate user input touches the session; terminal auto-replies do not.
-    if (isLikelyUserInput(data)) {
-      attentionTracker.clear(tmuxSession);
-    }
-    shared.pty.write(data);
-  });
-  ws.on('close', () => {
-    shared.sockets.delete(ws);
-    if (shared.sockets.size === 0 && sharedTerminals.get(tmuxSession) === shared) {
-      sharedTerminals.delete(tmuxSession);
-      shared.pty.kill();
-    }
-  });
-}
-
 export function stripTerminalMouseModeControls(data: string): string {
   // Hot path: runs on every broadcast chunk. The mouse-mode (`\x1b[?…h/l`) and
   // cursor-style (`… q`) escapes appear on TUI startup/attach, essentially never in
@@ -484,11 +296,4 @@ function sendCopyModeCommand(
     return { ok: false, error: result.stderr.trim() || `tmux ${command} failed for ${tmuxSession}` };
   }
   return { ok: true };
-}
-
-interface UpgradeServer {
-  on(
-    event: 'upgrade',
-    listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void
-  ): unknown;
 }

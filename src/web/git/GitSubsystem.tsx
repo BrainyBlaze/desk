@@ -32,13 +32,13 @@ import {
   isAgentSidebarCollapseSize,
   isSidebarHandleDragActive,
   setSidebarHandleDragActive,
-  defaultSidebarCollapsed,
   isNarrowViewport,
   surfaceMinSize,
   useNarrowViewport,
   readStoredSidebarCollapsed,
   readStoredSidebarWidth
 } from '../sidebarPanel.js';
+import { usePersistedCollapse } from '../usePersistedCollapse.js';
 import { fetchSettings, saveSettings } from '../api.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { fsHome, fsValidate } from '../editor/fsClient.js';
@@ -256,9 +256,7 @@ export function GitSubsystem({
   const drainPendingNavRef = useRef<() => void>(() => undefined);
 
   /* ---------- sidebar collapse (same mechanics as EditorSubsystem) ---------- */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    defaultSidebarCollapsed(localStorage.getItem(GIT_SIDEBAR_STORAGE_KEY))
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistedCollapse(GIT_SIDEBAR_STORAGE_KEY, onSidebarCollapsedChange);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringSidebarRef = useRef(false);
   // Persisted width: localStorage cache for instant boot, desk.yml as truth.
@@ -276,10 +274,6 @@ export function GitSubsystem({
   const collapseSidebarRef = useRef<() => void>(() => undefined);
   const toggleSidebarRef = useRef<() => void>(() => undefined);
 
-  useEffect(() => {
-    localStorage.setItem(GIT_SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
-    onSidebarCollapsedChange?.(sidebarCollapsed);
-  }, [sidebarCollapsed, onSidebarCollapsedChange]);
 
   // Bottom status bar context: repo, branch, sync arrows, working-tree counts.
   useEffect(() => {
@@ -1257,28 +1251,32 @@ export function GitSubsystem({
   };
 
   const toggleCommitExpanded = (sha: string): void => {
+    const isExpanding = !expanded.has(sha);
+    // Keep the updater pure (React StrictMode invokes it twice): only toggle the set here.
     setExpanded((current) => {
       const next = new Set(current);
       if (next.has(sha)) {
         next.delete(sha);
-        return next;
-      }
-      next.add(sha);
-      if (!details.has(sha)) {
-        const target = requireRepo();
-        if (target) {
-          const gen = repoGenRef.current;
-          void gitCommitDetail(target.root, target.repo, sha)
-            .then((detail) => {
-              if (repoGenRef.current === gen) {
-                setDetails((map) => new Map(map).set(sha, detail));
-              }
-            })
-            .catch(report);
-        }
+      } else {
+        next.add(sha);
       }
       return next;
     });
+    // Fire the detail fetch once, outside the updater, only when expanding a commit we
+    // have not loaded yet.
+    if (isExpanding && !details.has(sha)) {
+      const target = requireRepo();
+      if (target) {
+        const gen = repoGenRef.current;
+        void gitCommitDetail(target.root, target.repo, sha)
+          .then((detail) => {
+            if (repoGenRef.current === gen) {
+              setDetails((map) => new Map(map).set(sha, detail));
+            }
+          })
+          .catch(report);
+      }
+    }
   };
 
   const handleLoadMore = (): void => {

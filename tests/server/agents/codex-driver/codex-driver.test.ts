@@ -336,6 +336,34 @@ describe('createCodexDriver', () => {
     });
   });
 
+  it('falls back to a fresh thread when resume fails instead of dying', async () => {
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/resume': () => {
+        throw new Error('no rollout found for thread id thread-gone');
+      },
+      'thread/start': () => {
+        transport.emit({ method: 'thread/started', params: { thread: thread({ id: 'thread-fresh' }) } });
+        return {};
+      }
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-gone' });
+    const events: Array<{ kind: string; message?: string; fatal?: boolean }> = [];
+    driver.onEvent((e) => events.push(e as { kind: string; message?: string; fatal?: boolean }));
+
+    const started = await driver.start();
+
+    // The dead resume id must not kill the session: a fresh thread starts and
+    // the failure surfaces as a non-fatal transcript notice.
+    expect(started.session.agentSessionId).toBe('thread-fresh');
+    expect(transport.calls).toContainEqual(
+      expect.objectContaining({ type: 'request', method: 'thread/start' })
+    );
+    const notice = events.find((e) => e.kind === 'agent-error');
+    expect(notice?.fatal).toBe(false);
+    expect(notice?.message).toContain('could not be resumed');
+  });
+
   it('advertises native-safe Codex slash commands on start for the composer palette', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),

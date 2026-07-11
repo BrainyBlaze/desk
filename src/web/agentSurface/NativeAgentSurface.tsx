@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, Suspense, lazy } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Check, Copy, CornerDownLeft, Paperclip, Square, StickyNote, X } from 'lucide-react';
@@ -10,7 +10,9 @@ import {
   agentSurfaceClient,
   type SurfaceHandlers
 } from './agentSurfaceClient.js';
+import { resolveFocusAnchorIndex } from './scrollAnchor.js';
 import {
+  appendPendingAssistant,
   applyEvent as applyEventToModel,
   buildAgentFeedItems,
   initialRowModel,
@@ -95,6 +97,7 @@ const lastSeenRowCounts = new Map<string, number>();
 export function NativeAgentSurface({
   session,
   revision,
+  visible = true,
   focused = false,
   onMessageMenu,
   onCreateNote
@@ -125,6 +128,7 @@ export function NativeAgentSurface({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const slashPointerHandledRef = useRef(false);
+  const focusAnchorPendingRef = useRef(false);
 
   // Subscribe to the broker.
   useEffect(() => {
@@ -139,10 +143,16 @@ export function NativeAgentSurface({
     setAwaitingResponse(false);
 
     const handlers: SurfaceHandlers = {
-      onSnapshot: ({ state, events }) => {
+      onSnapshot: ({ state, lastSeq, events }) => {
         if (disposed) return;
         setAwaitingResponse(false);
-        setModel(rowsFromSnapshot(events, state));
+        setPipelineLive(true);
+        // Seed the replay watermark from the broker's lastSeq (>= max retained
+        // event seq after eviction / transient-only tails), not from the events.
+        setModel(rowsFromSnapshot(events, state, lastSeq));
+        // A replace-snapshot supersedes mid-stream accumulation: clear pending
+        // assistant text so an abandoned pre-reconnect turn cannot linger.
+        setPendingAssistant(new Map());
         // session-info lives in the ring: a fresh page load must recover the
         // model badge and the command palette from the snapshot, not only from
         // live re-emits (found live: palette empty after reload).
@@ -166,14 +176,15 @@ export function NativeAgentSurface({
           setAgentCommands(event.commands);
         }
         if (event.kind === 'assistant-delta') {
-          setPendingAssistant((prev) => {
-            const next = new Map(prev);
-            next.set(event.turnId, (next.get(event.turnId) ?? '') + event.text);
-            return next;
-          });
+          // Bounded per-string AND in aggregate entry count (see appendPendingAssistant):
+          // a turn that streams but never emits a terminal assistant-message can't grow
+          // its string unbounded, and abandoned turnIds can't accumulate forever.
+          setPendingAssistant((prev) => appendPendingAssistant(prev, event.turnId, event.text));
           return;
         }
-        if (event.kind === 'assistant-message') {
+        if (event.kind === 'assistant-message' || event.kind === 'turn-complete') {
+          // Flush the committed turn's pending text (assistant-message) OR drop an
+          // abandoned turn's un-flushed text (turn-complete with no terminal message).
           setPendingAssistant((prev) => {
             if (!prev.has(event.turnId)) return prev;
             const next = new Map(prev);
@@ -182,7 +193,9 @@ export function NativeAgentSurface({
           });
         }
         setModel((prev) => {
-          const next: RowModel = { rows: [...prev.rows], status: prev.status, pendingPermission: prev.pendingPermission };
+          // Spread prev so retention state (prunedRowCount, appliedThroughSeq) is
+          // carried forward; applyEventToModel mutates the shallow-copied rows array.
+          const next: RowModel = { ...prev, rows: [...prev.rows] };
           applyEventToModel(next, event);
           return next;
         });
@@ -204,19 +217,16 @@ export function NativeAgentSurface({
       }
     };
 
-    // All mounted cells in a group are physically visible (the keep-alive system only
-    // unmounts whole non-warm groups). Broker visibility must track physical visibility,
-    // not focus — otherwise non-focused native cells in a layout grid get no snapshot
-    // and appear empty. Focus is a UI affordance (status badge highlight, etc.) only.
-    agentSurfaceClient.subscribe(surfaceId, session, true, handlers);
+    agentSurfaceClient.subscribe(surfaceId, session, visible, handlers);
     return () => {
       disposed = true;
       agentSurfaceClient.unsubscribe(surfaceId);
     };
   }, [session, surfaceId, revision]);
 
-  // Broker visibility stays true for mounted surfaces — the cell is physically on-screen.
-  // (The keep-alive unmount handles true-hidden cells by destroying the component entirely.)
+  useEffect(() => {
+    agentSurfaceClient.setVisibility(surfaceId, visible);
+  }, [surfaceId, visible]);
 
   // Scroll UX: land on the LATEST message when a session opens/reloads, follow
   // live output while the user is at the bottom, and NEVER yank the view while
@@ -226,33 +236,53 @@ export function NativeAgentSurface({
   const [unseenCount, setUnseenCount] = useState(0);
   const [expandedTurnIds, setExpandedTurnIds] = useState<Set<string>>(() => new Set());
 
+  // Absolute row position across this model's life: retention evicts from the
+  // front, so a raw model.rows.length is non-monotonic (it can stay flat while
+  // new rows arrive). prunedRowCount + i is the stable absolute position of
+  // rows[i]; unread counts use the absolute total and marker/anchor indices
+  // convert an absolute last-seen back to a local index (absolute - prunedRowCount).
+  const absoluteRowCount = model.prunedRowCount + model.rows.length;
+
   // UX item 8: "new since last view" separator. The marker index is fixed at
   // refocus/remount time (rows beyond the stored last-seen count are new);
   // while focused the stored count tracks the transcript so the next away-and-
   // back shows only what actually arrived in between.
   const [unreadMarkerIndex, setUnreadMarkerIndex] = useState<number | null>(null);
+  const prevVisibleRef = useRef(false);
   useEffect(() => {
-    if (focused) {
+    // Key on the hidden->shown EDGE of the cell itself: group and subsystem
+    // switches hide via display:none without touching focus or selection, so
+    // anchoring must not depend on either. Every cell in the returning group
+    // re-anchors; a focus click inside an already-visible group must not.
+    if (visible && !prevVisibleRef.current) {
+      focusAnchorPendingRef.current = true;
+      // lastSeen is an ABSOLUTE position; convert to a local marker index. If the
+      // last-seen boundary was itself evicted (localMarker <= 0) there is no
+      // in-window divider to draw.
       const lastSeen = lastSeenRowCounts.get(session) ?? 0;
-      setUnreadMarkerIndex(model.rows.length > lastSeen && lastSeen > 0 ? lastSeen : null);
+      const localMarker = lastSeen - model.prunedRowCount;
+      setUnreadMarkerIndex(absoluteRowCount > lastSeen && localMarker > 0 ? localMarker : null);
     }
-    // Falling out of focus freezes the stored count at whatever was last seen.
-  }, [focused, session]);
-  useEffect(() => {
-    if (focused) {
-      touchSessionMemo(lastSeenRowCounts, session, model.rows.length);
-    }
-  }, [focused, session, model.rows.length]);
+    prevVisibleRef.current = visible;
+    // Falling hidden freezes the stored count at whatever was last seen.
+  }, [visible, session]);
 
   const feedItems = useMemo(
     () => buildAgentFeedItems(model.rows, { expandedTurnIds }),
     [model.rows, expandedTurnIds]
   );
+  const expandTurn = useCallback(
+    (turnId: string) => setExpandedTurnIds((prev) => new Set(prev).add(turnId)),
+    []
+  );
   const virtualizer = useVirtualizer({
     count: feedItems.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 58,
-    overscan: 8
+    overscan: 8,
+    // display:none collapses every observed box to 0; without this the item
+    // size cache gets poisoned with zeros while the cell is hidden.
+    enabled: visible
   });
   const virtualItems = virtualizer.getVirtualItems();
   const totalVirtualSize = virtualizer.getTotalSize();
@@ -274,14 +304,17 @@ export function NativeAgentSurface({
     if (!el) return;
     scrollToLatest();
     followingRef.current = true;
+    setDetached(false);
     setUnseenCount(0);
   };
 
+  const [detached, setDetached] = useState(false);
   const handleFeedScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     followingRef.current = nearBottom;
+    setDetached(!nearBottom);
     if (nearBottom && unseenCount !== 0) {
       setUnseenCount(0);
     }
@@ -289,23 +322,123 @@ export function NativeAgentSurface({
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!visible || !el || focusAnchorPendingRef.current) {
+      return;
+    }
     const prevCount = prevRowCountRef.current;
-    prevRowCountRef.current = model.rows.length;
+    // Absolute count only decreases when a snapshot REPLACES the model (its
+    // pruned-offset restarts at 0). Rebase on such a replace so a reconnect isn't
+    // stranded in the old, larger absolute space (which would suppress new-row
+    // counting until it caught back up).
+    if (absoluteRowCount < prevCount) {
+      prevRowCountRef.current = absoluteRowCount;
+      if (followingRef.current) {
+        scrollToLatest();
+        if (unseenCount !== 0) setUnseenCount(0);
+      }
+      return;
+    }
+    prevRowCountRef.current = absoluteRowCount;
     // Snapshot replace (open/reload/backfill): the whole transcript arrives at
     // once while scrollTop is still 0 — land on the latest message.
-    const snapshotReplace = prevCount === 0 && model.rows.length > 0;
+    const snapshotReplace = prevCount === 0 && absoluteRowCount > 0;
     if (snapshotReplace || followingRef.current) {
       scrollToLatest();
       followingRef.current = true;
       if (unseenCount !== 0) setUnseenCount(0);
       return;
     }
-    // Reading history: keep the view still, count what arrived below.
-    if (model.rows.length > prevCount) {
-      setUnseenCount((n) => n + (model.rows.length - prevCount));
+    // Reading history: keep the view still, count what arrived below. The absolute
+    // count stays monotonic under front-eviction, so steady-cap arrivals (where
+    // model.rows.length no longer grows) are still counted.
+    if (absoluteRowCount > prevCount) {
+      setUnseenCount((n) => n + (absoluteRowCount - prevCount));
     }
-  }, [model.rows, pendingAssistant, model.pendingPermission]);
+  }, [visible, model.rows, pendingAssistant, model.pendingPermission]);
+
+  /**
+   * Anchor application is driven by GEOMETRY, not frames: the hidden cell's
+   * scroll box collapsed to 0x0 and the browser clamped scrollTop, so the
+   * anchor scroll must be re-asserted as the element regains height and the
+   * virtualizer replaces estimated sizes with measured ones. Each measurement
+   * wave re-invokes the applier (via the totalSize effect and the element
+   * ResizeObserver below) until the offset is stable on real geometry.
+   */
+  const activeAnchorRef = useRef<{ target: number; latest: number; lastOffset: number | null; passes: number } | null>(null);
+  const applyActiveAnchor = useCallback((): void => {
+    const anchor = activeAnchorRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el) return;
+    if (el.clientHeight === 0) return; // still collapsed — the observer re-fires on restore
+    anchor.passes += 1;
+    virtualizer.scrollToIndex(anchor.target, { align: 'end' });
+    if (anchor.target === anchor.latest) {
+      el.scrollTop = el.scrollHeight;
+    }
+    const offset = el.scrollTop;
+    const settled = anchor.lastOffset !== null && Math.abs(offset - anchor.lastOffset) < 1;
+    anchor.lastOffset = offset;
+    if ((settled && el.scrollHeight > 0) || anchor.passes > 12) {
+      activeAnchorRef.current = null;
+    }
+  }, [virtualizer]);
+
+  useEffect(() => {
+    if (!visible || !focusAnchorPendingRef.current || feedItems.length === 0) {
+      return;
+    }
+    // lastSeen is ABSOLUTE; the prune-aware resolver converts it to a local index
+    // (and lands on the first retained row when the boundary was itself evicted),
+    // while the unseen COUNT uses the absolute delta (correct under eviction).
+    const lastSeen = lastSeenRowCounts.get(session) ?? 0;
+    const rawLocal = lastSeen - model.prunedRowCount;
+    const targetIndex = resolveFocusAnchorIndex(feedItems, {
+      lastSeenAbsolute: lastSeen,
+      prunedRowCount: model.prunedRowCount,
+      rowCount: model.rows.length
+    });
+    if (targetIndex === null) {
+      return;
+    }
+    setUnreadMarkerIndex(absoluteRowCount > lastSeen && rawLocal > 0 ? rawLocal : null);
+    activeAnchorRef.current = { target: targetIndex, latest: feedItems.length - 1, lastOffset: null, passes: 0 };
+    applyActiveAnchor();
+    const unseen = lastSeen > 0 ? Math.max(0, absoluteRowCount - lastSeen) : 0;
+    followingRef.current = unseen === 0;
+    setDetached(unseen > 0);
+    setUnseenCount(unseen);
+    // Keep the follow effect's baseline in sync or the next arrival would
+    // count the anchored-past rows a second time (double pill).
+    prevRowCountRef.current = absoluteRowCount;
+    focusAnchorPendingRef.current = false;
+  }, [feedItems, visible, absoluteRowCount, model.prunedRowCount, session, virtualizer, applyActiveAnchor]);
+
+  // Re-assert the pending anchor whenever the virtualizer's measured content
+  // size changes (estimated sizes being replaced by measured ones).
+  useEffect(() => {
+    if (activeAnchorRef.current) applyActiveAnchor();
+  }, [totalVirtualSize, applyActiveAnchor]);
+
+  // ...and whenever the scroll element itself regains a box after display:none.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (activeAnchorRef.current) applyActiveAnchor();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [applyActiveAnchor]);
+
+  useEffect(() => {
+    // Rows rendered in a visible cell are seen — focus is not required to read
+    // a grid. Hidden cells freeze, so away-and-back anchors at true last-seen.
+    if (visible && model.rows.length > 0 && !focusAnchorPendingRef.current) {
+      // Store the ABSOLUTE position seen; the dep is absoluteRowCount (not
+      // rows.length) so this still fires at a steady cap where rows.length is flat.
+      touchSessionMemo(lastSeenRowCounts, session, absoluteRowCount);
+    }
+  }, [visible, session, absoluteRowCount]);
 
   const canSend = pipelineLive && model.status === 'idle' && input.trim().length > 0;
   const sendLabel = !pipelineLive
@@ -468,7 +601,7 @@ export function NativeAgentSurface({
                 ) : null}
                 <AgentFeedItemView
                   item={item}
-                  onExpandTurn={(turnId) => setExpandedTurnIds((prev) => new Set(prev).add(turnId))}
+                  onExpandTurn={expandTurn}
                   onMessageMenu={onMessageMenu}
                   onCreateNote={onCreateNote}
                 />
@@ -504,9 +637,9 @@ export function NativeAgentSurface({
           </div>
         ) : null}
       </div>
-      {unseenCount > 0 ? (
+      {unseenCount > 0 || detached ? (
         <button type="button" className="nativeAgentJumpPill" onClick={jumpToLatest}>
-          {unseenCount} new message{unseenCount === 1 ? '' : 's'} ↓
+          {unseenCount > 0 ? `${unseenCount} new message${unseenCount === 1 ? '' : 's'} ↓` : 'jump to latest ↓'}
         </button>
       ) : null}
       {model.pendingPermission ? (
@@ -698,7 +831,7 @@ export function NativeAgentSurface({
   );
 }
 
-function AgentFeedItemView({
+const AgentFeedItemView = memo(function AgentFeedItemView({
   item,
   onExpandTurn,
   onMessageMenu,
@@ -713,7 +846,7 @@ function AgentFeedItemView({
     return <AgentRowView row={item.row} onMessageMenu={onMessageMenu} onCreateNote={onCreateNote} />;
   }
   return <TurnSummaryRow item={item} onExpand={() => onExpandTurn(item.turnId)} />;
-}
+});
 
 function TurnSummaryRow({ item, onExpand }: { item: Extract<AgentFeedItem, { kind: 'turn-summary' }>; onExpand: () => void }): JSX.Element {
   return (
@@ -744,7 +877,9 @@ export interface NativeAgentSurfaceProps {
   session: string;
   /** Bumped by the parent when restart/switch happens so we resubscribe fresh. */
   revision: number;
-  /** This cell holds the global selection — drives broker visibility. */
+  /** The containing warm group is physically visible, not display:none. */
+  visible?: boolean;
+  /** This cell holds the global selection. */
   focused?: boolean;
   /** Opens the shared Copy/Create note context menu for message-like rows. */
   onMessageMenu?: (text: string, x: number, y: number) => void;
@@ -849,13 +984,15 @@ function CollapsiblePayloadRow({ row, onMessageMenu }: { row: AgentRow; onMessag
   );
 }
 
-function AgentMarkdown({ body }: { body: string }): JSX.Element {
+const NOOP_OPEN_FILE = (): undefined => undefined;
+
+const AgentMarkdown = memo(function AgentMarkdown({ body }: { body: string }): JSX.Element {
   return (
     <Suspense fallback={<span className="nativeAgentText">{body}</span>}>
-      <ChannelMarkdown body={body} channel={NATIVE_AGENT_FILE_CHANNEL} onOpenFile={() => undefined} />
+      <ChannelMarkdown body={body} channel={NATIVE_AGENT_FILE_CHANNEL} onOpenFile={NOOP_OPEN_FILE} />
     </Suspense>
   );
-}
+});
 
 function ToolCallBlock({
   row,

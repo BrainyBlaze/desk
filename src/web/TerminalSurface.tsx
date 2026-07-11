@@ -437,7 +437,6 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     const shell = shellRef.current;
     const rail = scrollRailRef.current;
     let railDragLastY: number | undefined;
-    let railDragGripY: number | undefined;
     const handleHostMouseDown = (event: MouseEvent): void => {
       if (event.button !== 0) {
         return;
@@ -528,7 +527,6 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       rail?.setPointerCapture(event.pointerId);
       if (event.clientY >= thumbBounds.top && event.clientY <= thumbBounds.bottom) {
         railDragLastY = event.clientY;
-        railDragGripY = event.clientY - thumbBounds.top;
         return;
       }
       requestScroll(event.clientY < thumbBounds.top ? -terminal.rows * 3 : terminal.rows * 3);
@@ -552,7 +550,6 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         event.stopPropagation();
       }
       railDragLastY = undefined;
-      railDragGripY = undefined;
     };
     const handlePaste = (event: ClipboardEvent): void => {
       event.preventDefault();
@@ -1063,10 +1060,6 @@ function detectAcceleratedWebgl2(): boolean {
 
 function getSelectedText(terminal: Terminal): string {
   return terminal.getSelection() || window.getSelection()?.toString() || '';
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function copyText(text: string): void {

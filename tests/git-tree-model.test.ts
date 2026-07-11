@@ -101,4 +101,12 @@ describe('shortenBranch', () => {
   it('respects a custom max', () => {
     expect(shortenBranch('abcdefghijklmnop', 10).length).toBeLessThanOrEqual(10);
   });
+
+  it('respects exact max boundaries for tiny max (tail <= 0), never splicing the whole branch back', () => {
+    expect(shortenBranch('abcdefghijklmnop', 0)).toBe('');
+    expect(shortenBranch('abcdefghijklmnop', 1)).toBe('…');
+    const five = shortenBranch('abcdefghijklmnop', 5);
+    expect(five.length).toBe(5);
+    expect(five).not.toContain('klmnop');
+  });
 });

@@ -150,11 +150,11 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
       <div className="chanEngineDrawer chanEngineDrawerModal">
         <div className="chanEngineHead">
           <div className="chanEngineHealth">
-            <span className={`chanEnginePill ${diag?.pumpAlive ? 'ok' : 'warn'}`}>
-              {diag?.pumpAlive ? 'pump live' : 'pump down'}
+            <span className={`chanEnginePill ${!diag ? 'muted' : diag.pumpAlive ? 'ok' : 'warn'}`}>
+              {!diag ? 'pump —' : diag.pumpAlive ? 'pump live' : 'pump down'}
             </span>
             {diag?.passive ? <span className="chanEnginePill warn">passive</span> : null}
-            <span className="chanEnginePill muted">{diag?.totalQueued ?? 0} queued</span>
+            <span className="chanEnginePill muted">{diag ? `${diag.totalQueued} queued` : '— queued'}</span>
           </div>
         </div>
 

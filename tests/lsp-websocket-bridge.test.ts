@@ -87,6 +87,18 @@ describe('installLspWebSocketBridge', () => {
     expect(ready).toEqual({ type: 'ready', capabilities: { hoverProvider: true } });
   });
 
+  it('closes oversized raw frames before parsing LSP messages', async () => {
+    const session = new FakeLspSession({ hoverProvider: true });
+    ({ server, dispose } = await startBridge(() => session, { maxPayloadBytes: 128 }));
+    const ws = openWs(server);
+    await nextJsonMessage(ws);
+    const closed = nextClose(ws);
+    ws.send('x'.repeat(129));
+
+    await expect(closed).resolves.toMatchObject({ code: 1009 });
+    await waitFor(() => session.disposed.mock.calls.length === 1);
+  });
+
   it('queues lifecycle status until after the legacy ready envelope', async () => {
     const session = new FakeLspSession({ hoverProvider: true });
     const createSession = vi.fn((options: LspVirtualSessionFactoryOptions) => {
@@ -362,9 +374,12 @@ describe('installLspWebSocketBridge', () => {
   });
 });
 
-async function startBridge(createSession: (options: LspVirtualSessionFactoryOptions) => LspVirtualSession | Promise<LspVirtualSession>) {
+async function startBridge(
+  createSession: (options: LspVirtualSessionFactoryOptions) => LspVirtualSession | Promise<LspVirtualSession>,
+  options: { maxPayloadBytes?: number } = {}
+) {
   const server = createServer();
-  const dispose = installLspWebSocketBridge(server, { createSession });
+  const dispose = installLspWebSocketBridge(server, { createSession, ...options });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   return { server, dispose };
 }

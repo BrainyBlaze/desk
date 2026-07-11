@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseBrokerClientFrame } from '../src/core/terminalBrokerProtocol';
+import {
+  MAX_TERMINAL_BROKER_INPUT_LENGTH,
+  MAX_TERMINAL_DIMENSION,
+  parseBrokerClientFrame
+} from '../src/core/terminalBrokerProtocol';
 
 describe('terminal broker protocol', () => {
   it('parses subscribe, visibility, unsubscribe, input, and resize frames', () => {
@@ -50,7 +54,15 @@ describe('terminal broker protocol', () => {
       { type: 'visibility', session: 'agentdesk-a', surfaceId: 'cell-a' },
       { type: 'resize', session: 'agentdesk-a', surfaceId: 'cell-a', cols: 39, rows: 40 },
       { type: 'resize', session: 'agentdesk-a', surfaceId: 'cell-a', cols: 120, rows: 11 },
-      { type: 'resize', session: 'agentdesk-a', surfaceId: 'cell-a', cols: 120.5, rows: 40 }
+      { type: 'resize', session: 'agentdesk-a', surfaceId: 'cell-a', cols: 120.5, rows: 40 },
+      {
+        type: 'input',
+        session: 'agentdesk-a',
+        surfaceId: 'cell-a',
+        data: 'x'.repeat(MAX_TERMINAL_BROKER_INPUT_LENGTH + 1)
+      },
+      { type: 'resize', session: 'agentdesk-a', surfaceId: 'cell-a', cols: MAX_TERMINAL_DIMENSION + 1, rows: 40 },
+      { type: 'resize', session: 'agentdesk-a', surfaceId: 'cell-a', cols: 120, rows: MAX_TERMINAL_DIMENSION + 1 }
     ];
 
     for (const frame of invalid) {

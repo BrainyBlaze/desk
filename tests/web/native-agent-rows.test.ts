@@ -145,8 +145,9 @@ describe('applyEvent — no-op kinds', () => {
     expect(model.status).toBe('starting');
     expect(model.pendingPermission).toBeNull();
 
-    // BUG-14: attention-hint MUST be visible (was silently skipped → user saw nothing during retry)
-    applyEvent(model, ev(2, { kind: 'attention-hint', attention: 'session-status', detail: 'retry: rate limited' }));
+    // BUG-14: attention-hint MUST be visible (was silently skipped → user saw nothing during retry).
+    // seq 4: events are delivered in monotonic seq order, so the hint follows the seq-3 boundary.
+    applyEvent(model, ev(4, { kind: 'attention-hint', attention: 'session-status', detail: 'retry: rate limited' }));
     expect(model.rows).toHaveLength(1);
     expect(model.rows[0]).toMatchObject({ kind: 'system', text: 'status: retry: rate limited' });
   });
@@ -347,5 +348,23 @@ describe('applyEvent — child-agent nesting (item 11)', () => {
     applyEvent(model, child);
     applyEvent(model, child);
     expect(model.rows.find((r) => r.toolUseId === 'task-1')!.children).toHaveLength(1);
+  });
+});
+
+describe('duplicate hint/error idempotency', () => {
+  it('does not create a duplicate row when an attention-hint replays', () => {
+    const model = initialRowModel();
+    const hint = ev(7, { kind: 'attention-hint', attention: 'session-status', detail: 'retrying' });
+    applyEvent(model, hint);
+    applyEvent(model, hint); // replay via rowsFromSnapshot or a live reconnect overlap
+    expect(model.rows.filter((r) => r.id === 'hint-7')).toHaveLength(1);
+  });
+
+  it('does not create a duplicate row when an agent-error replays', () => {
+    const model = initialRowModel();
+    const err = ev(8, { kind: 'agent-error', message: 'boom' });
+    applyEvent(model, err);
+    applyEvent(model, err);
+    expect(model.rows.filter((r) => r.id === 'err-8')).toHaveLength(1);
   });
 });

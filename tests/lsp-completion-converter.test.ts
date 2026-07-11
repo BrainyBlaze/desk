@@ -54,4 +54,9 @@ describe('toMonacoCompletionList', () => {
     expect(toMonacoCompletionList(null)).toEqual({ incomplete: false, suggestions: [] });
     expect(toMonacoCompletionList(undefined)).toEqual({ incomplete: false, suggestions: [] });
   });
+
+  it('does not throw when a CompletionList omits items (spec-violating server)', () => {
+    const malformed = { isIncomplete: true } as Parameters<typeof toMonacoCompletionList>[0];
+    expect(toMonacoCompletionList(malformed)).toEqual({ incomplete: true, suggestions: [] });
+  });
 });

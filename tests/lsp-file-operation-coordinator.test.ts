@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mergeFileOperationCapabilities } from '../src/server/lsp/fileOperationRegistrations';
 import { createLspFileOperationCoordinator } from '../src/server/lsp/lspFileOperationCoordinator';
 
 let root: string;
@@ -56,7 +57,7 @@ describe('LspFileOperationCoordinator', () => {
         fileOperations: {
           didCreate: {
             filters: [
-              { pattern: { glob: 'SRC', matches: 'folder', ignoreCase: true } },
+              { pattern: { glob: 'SRC', matches: 'folder', options: { ignoreCase: true } } },
               { pattern: { glob: '[unsafe]*.ts' } }
             ]
           }
@@ -69,6 +70,29 @@ describe('LspFileOperationCoordinator', () => {
 
     await expect(coordinator.didCreate({ workspaceRoot: root, path: join(root, 'src'), kind: 'folder' })).resolves.toBe(1);
     await expect(coordinator.didCreate({ workspaceRoot: root, path: join(root, 'unsafe.ts'), kind: 'file' })).resolves.toBe(0);
+  });
+
+  it('preserves spec-shaped ignoreCase options when merging dynamic registrations', () => {
+    const merged = mergeFileOperationCapabilities(
+      {},
+      [
+        {
+          id: 'folders',
+          method: 'workspace/didCreateFiles',
+          filters: [{ pattern: { glob: 'SRC', matches: 'folder', options: { ignoreCase: true } } }]
+        }
+      ]
+    );
+
+    expect(merged).toEqual({
+      workspace: {
+        fileOperations: {
+          didCreate: {
+            filters: [{ pattern: { glob: 'SRC', matches: 'folder', options: { ignoreCase: true } } }]
+          }
+        }
+      }
+    });
   });
 
   it('sends didRename and didDelete payloads without leaking capabilities', async () => {

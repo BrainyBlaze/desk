@@ -1,4 +1,5 @@
-import { AgentHost, type AgentHostEnv } from './runner.js';
+import { AgentHost } from './runner.js';
+import type { AgentHostEnv } from './types.js';
 import { AgentHostLogger, type AgentHostLogLevel } from './logger.js';
 import type { DeskAgent } from '../../../core/types.js';
 

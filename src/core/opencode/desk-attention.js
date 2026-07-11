@@ -5,10 +5,15 @@
 async function post(kind, extra = {}) {
   const session = process.env.DESK_TMUX_SESSION;
   if (!session) return;
+  // Bound the POST so a half-open / stalled server cannot hang the awaited event hook
+  // (the sibling agentHooks shim bounds its fetch the same way).
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
   try {
     await fetch(`${process.env.DESK_API || "http://127.0.0.1:5173"}/api/agent-event`, {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         schemaVersion: 2,
         kind,
@@ -20,6 +25,8 @@ async function post(kind, extra = {}) {
     });
   } catch (_) {
     // Hook delivery must never break the agent session.
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
