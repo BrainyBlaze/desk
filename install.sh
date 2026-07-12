@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # Desk installer — downloads the prebuilt standalone Desk binary from the GitHub
-# release and installs it as `desk`. No Node, no npm, no build: the binary is
+# release and installs it as `desk-server`. No Node, no npm, no build: the binary is
 # self-contained (UI + LSP servers embedded, Bun-native terminals).
 #
 #   curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-#   desk                               # serve the web UI + API on http://127.0.0.1:5173
+#   desk-server                        # serve the web UI + API on http://127.0.0.1:5173
 #
 # Env overrides:
 #   DESK_VERSION=v0.2.0     pin a specific release (default: the latest release)
@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO="BrainyBlaze/desk"
 ASSET_BASE="desk-server"   # release-artifact name prefix (desk-server-<target>)
-CMD="desk"                 # what we install it as — the user's `desk` command
+CMD="desk-server"          # standalone web UI + API server command
 
 info() { printf '\033[36m▸\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
@@ -103,6 +103,9 @@ command -v tmux >/dev/null 2>&1 \
   || warn "tmux not found — Desk needs tmux at runtime (apt install tmux / brew install tmux)."
 
 printf '\n\033[32m✓ Desk %s installed → %s/%s\033[0m\n\n' "$version" "$dir" "$CMD"
+if [ -e "${dir}/desk" ]; then
+  warn "existing ${dir}/desk left unchanged. Earlier standalone installers used that name; inspect 'type -a desk' and 'command -v desk' before removing or renaming it."
+fi
 case ":${PATH}:" in
   *":${dir}:"*) ;;
   *) warn "${dir} is not on your PATH — add it, e.g.  export PATH=\"${dir}:\$PATH\"" ;;
