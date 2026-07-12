@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   addSessionToManifest,
   createEmptyManifest,
@@ -85,7 +85,7 @@ interface ParsedArgs {
   options: Map<string, string>;
 }
 
-function main(argv: string[]): number {
+export function main(argv: string[]): number {
   try {
     const args = parseArgs(argv);
 
@@ -277,18 +277,24 @@ function requireOption(options: Map<string, string>, name: string): string {
   return value;
 }
 
-const cliArgs = process.argv.slice(2);
-if (cliArgs[0] === 'channels') {
-  process.exitCode = await runChannelsCli(cliArgs.slice(1));
-} else if (cliArgs[0] === 'agent-host') {
-  // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
-  // fatal error, or signal — top-level await is the natural exit gate.
-  try {
-    await runAgentHostFromEnv();
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
+// Only dispatch when run AS the CLI entry point, not when imported (tests import
+// `main` directly and drive it in-process — importing must have no side effects).
+const isCliEntry =
+  typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isCliEntry) {
+  const cliArgs = process.argv.slice(2);
+  if (cliArgs[0] === 'channels') {
+    process.exitCode = await runChannelsCli(cliArgs.slice(1));
+  } else if (cliArgs[0] === 'agent-host') {
+    // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
+    // fatal error, or signal — top-level await is the natural exit gate.
+    try {
+      await runAgentHostFromEnv();
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  } else {
+    process.exitCode = main(cliArgs);
   }
-} else {
-  process.exitCode = main(cliArgs);
 }

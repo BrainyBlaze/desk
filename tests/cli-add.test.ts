@@ -1,24 +1,22 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { main } from '../src/cli/main.js';
 
 // `desk add` must validate --agent at the write boundary (finding C5): an
 // unsupported agent was written to the config and then bricked every later
-// command on load. Subprocess-invoked so it exercises the real CLI.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-const tsx = join(repoRoot, 'node_modules', '.bin', 'tsx');
-const cliEntry = join(repoRoot, 'src', 'cli', 'main.ts');
-
+// command. Driven in-process via main() (subprocess-per-case was flaky under
+// full-suite parallel load).
 function runAdd(args: string[]): { code: number; stderr: string } {
+  const errors: string[] = [];
+  const errSpy = vi.spyOn(console, 'error').mockImplementation((line = '') => errors.push(String(line)));
+  const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   try {
-    execFileSync(tsx, [cliEntry, 'add', ...args], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    return { code: 0, stderr: '' };
-  } catch (err) {
-    const e = err as { status?: number; stderr?: string };
-    return { code: e.status ?? 1, stderr: e.stderr ?? '' };
+    return { code: main(['add', ...args]), stderr: errors.join('\n') };
+  } finally {
+    errSpy.mockRestore();
+    logSpy.mockRestore();
   }
 }
 

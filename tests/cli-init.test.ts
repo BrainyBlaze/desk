@@ -1,29 +1,21 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { main } from '../src/cli/main.js';
 
-// `desk init` must never silently destroy an existing config (finding C1). We
-// invoke the real CLI in a subprocess so the test exercises exactly the command
-// a user runs — the module has import-time side effects that preclude importing
-// main() directly.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-const tsx = join(repoRoot, 'node_modules', '.bin', 'tsx');
-const cliEntry = join(repoRoot, 'src', 'cli', 'main.ts');
-
-function runInit(args: string[]): { code: number; stdout: string; stderr: string } {
+// `desk init` must never silently destroy an existing config (finding C1). Driven
+// in-process via main() with console spies (a subprocess-per-case was flaky under
+// full-suite parallel load — many concurrent tsx spawns).
+function runInit(args: string[]): { code: number; stderr: string } {
+  const errors: string[] = [];
+  const errSpy = vi.spyOn(console, 'error').mockImplementation((line = '') => errors.push(String(line)));
+  const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   try {
-    const stdout = execFileSync(tsx, [cliEntry, 'init', ...args], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    return { code: 0, stdout, stderr: '' };
-  } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string };
-    return { code: e.status ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
+    return { code: main(['init', ...args]), stderr: errors.join('\n') };
+  } finally {
+    errSpy.mockRestore();
+    logSpy.mockRestore();
   }
 }
 
