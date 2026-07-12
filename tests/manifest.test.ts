@@ -513,6 +513,10 @@ projects:
 });
 
 describe('desk manifest malformed top-level keys (finding N12)', () => {
+  it('rejects unknown top-level keys instead of silently dropping a misspelled groups key', () => {
+    expect(() => parseDeskManifest('gropus: []')).toThrow(/unknown top-level key "gropus"/);
+  });
+
   it('throws when groups is present but not a list (does not silently empty the config)', () => {
     // An indentation slip that turns `groups:` into a scalar used to be coerced
     // to [] — dropping every project/session with no diagnostic, then persisted

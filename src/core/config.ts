@@ -107,11 +107,11 @@ export function readManifestFile(path: string): DeskManifest {
     return createEmptyManifest();
   }
   const source = readFileSync(path, 'utf8');
-  // A blank file is corruption (e.g. an interrupted write), not a valid
-  // manifest — treat it as empty so the app degrades instead of throwing on
-  // every request. A real manifest is never just whitespace.
+  // A present blank file is corruption (e.g. an interrupted external write),
+  // not a valid empty desk. Failing closed prevents the next mutation from
+  // persisting an empty manifest over data the operator still needs to repair.
   if (source.trim() === '') {
-    return createEmptyManifest();
+    throw new Error(`desk manifest is empty: ${path}`);
   }
   return parseDeskManifest(source);
 }
@@ -310,10 +310,17 @@ export function deleteProjectFromManifest(manifest: DeskManifest, options: Delet
   if (!options.cwd) {
     throw new Error(`project ${options.projectId} does not exist`);
   }
+  let removedSessions = 0;
   const groups = cloneGroups(manifest)
     .map((group) => ({
       group,
-      kept: group.sessions.filter((session) => !session.cwd || !cwdMatches(session.cwd, options.cwd!))
+      kept: group.sessions.filter((session) => {
+        const matches = Boolean(session.cwd && cwdMatches(session.cwd, options.cwd!));
+        if (matches) {
+          removedSessions += 1;
+        }
+        return !matches;
+      })
     }))
     // Drop a group only if THIS delete emptied it (it had sessions and they all
     // matched the removed cwd). A group that was already empty and unrelated to
@@ -321,6 +328,9 @@ export function deleteProjectFromManifest(manifest: DeskManifest, options: Delet
     // user's freshly-created empty groups as a side effect.
     .filter(({ group, kept }) => kept.length > 0 || group.sessions.length === 0)
     .map(({ group, kept }) => ({ ...group, sessions: kept }));
+  if (removedSessions === 0) {
+    throw new Error(`project ${options.projectId} does not exist`);
+  }
   return { ...manifest, groups, projects: manifest.projects };
 }
 

@@ -13,12 +13,19 @@ import type {
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
 
 const DEFAULT_NAMESPACE = 'agentdesk';
+const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
 
 export function parseDeskManifest(source: string): DeskManifest {
   const parsed = YAML.parse(source) as unknown;
 
   if (!isRecord(parsed)) {
     throw new Error('desk manifest must be an object');
+  }
+
+  for (const key of Object.keys(parsed)) {
+    if (!MANIFEST_TOP_LEVEL_KEYS.has(key)) {
+      throw new Error(`desk manifest has unknown top-level key "${key}"`);
+    }
   }
 
   const manifest = {
