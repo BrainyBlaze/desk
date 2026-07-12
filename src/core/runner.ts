@@ -5,7 +5,27 @@ import { homedir } from 'node:os';
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
 import { createCaptureArgv, createKillSessionArgv, createStartSessionArgv } from './tmux.js';
+import { resolveSessionUiMode } from './manifest.js';
 import type { SessionSpec, TmuxPlanAction } from './types.js';
+
+/**
+ * Human-readable message when a `spawnSync('tmux', …)` never actually ran the
+ * process (produced no exit status) — most commonly tmux missing from PATH,
+ * which yields `{ status: null, error: ENOENT, stdout/stderr: undefined }`.
+ * Returns undefined when tmux ran. Callers must check this BEFORE touching
+ * `result.stderr` (undefined on this path → `.trim()` throws) and must not treat
+ * `status ?? 0` as success. Returned message tells the user tmux is missing
+ * instead of failing silently or with a cryptic TypeError.
+ */
+function tmuxSpawnError(result: { error?: Error }): string | undefined {
+  if (!result.error) {
+    return undefined;
+  }
+  const code = (result.error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT'
+    ? 'tmux not found — is it installed and on your PATH?'
+    : `tmux could not run: ${result.error.message}`;
+}
 import { ensureOpencodeConfigDir } from './opencodeConfig.js';
 import { findOpencodeLaunchResume } from './opencodeResume.js';
 import { upsertPendingResumeCapture } from './resumeCaptureState.js';
@@ -129,6 +149,20 @@ export function runPlan(plan: TmuxPlanAction[], dryRun: boolean): number {
       continue;
     }
 
+    // Native-mode sessions run `exec desk agent-host`, which needs env the
+    // running desk server injects at spawn (DESK_SERVER_URL, host token). The
+    // bare CLI can't provide it, so the pane would exec, throw, and exit at once
+    // — which used to leave `desk up` printing "start" and exiting 0 while the
+    // session was already gone. Refuse up front with a clear pointer instead of
+    // booting into silent death. (Terminal/bash/command sessions are fine.)
+    if (resolveSessionUiMode(action.session) === 'native') {
+      console.error(
+        `session ${action.session.tmuxSession} is native-mode and needs a running desk server; ` +
+          'start it with `desk serve` instead of `desk up`.'
+      );
+      return 1;
+    }
+
     const prepared = prepareSessionStart(action.session);
     if (!prepared.ok) {
       console.error(prepared.error);
@@ -138,6 +172,11 @@ export function runPlan(plan: TmuxPlanAction[], dryRun: boolean): number {
     const result = spawnSync('tmux', action.argv, {
       stdio: 'inherit'
     });
+    const spawnErr = tmuxSpawnError(result);
+    if (spawnErr) {
+      console.error(spawnErr);
+      return 1;
+    }
     if (result.status !== 0) {
       return result.status ?? 1;
     }
@@ -160,8 +199,12 @@ export function startSession(session: SessionSpec): { ok: boolean; error?: strin
   const launch = prepareSessionForLaunchWithMetadata(session);
   const pendingCapture = pendingCaptureForLaunch(launch.session, launch.opencodeLaunchResumeId);
   const result = spawnSync('tmux', createStartSessionArgv(launch.session), { encoding: 'utf8' });
+  const spawnErr = tmuxSpawnError(result);
+  if (spawnErr) {
+    return { ok: false, error: spawnErr };
+  }
   if (result.status !== 0) {
-    return { ok: false, error: result.stderr.trim() || `tmux start failed for ${session.tmuxSession}` };
+    return { ok: false, error: (result.stderr ?? '').trim() || `tmux start failed for ${session.tmuxSession}` };
   }
   if (!listTmuxSessions().has(session.tmuxSession)) {
     return { ok: false, error: `tmux session exited during startup for ${session.tmuxSession}` };
@@ -282,8 +325,12 @@ export function killSession(tmuxSession: string): { ok: boolean; error?: string 
     return { ok: true };
   }
   const result = spawnSync('tmux', createKillSessionArgv(tmuxSession), { encoding: 'utf8' });
+  const spawnErr = tmuxSpawnError(result);
+  if (spawnErr) {
+    return { ok: false, error: spawnErr };
+  }
   if (result.status !== 0) {
-    return { ok: false, error: result.stderr.trim() || `tmux kill failed for ${tmuxSession}` };
+    return { ok: false, error: (result.stderr ?? '').trim() || `tmux kill failed for ${tmuxSession}` };
   }
   invalidateTmuxSessionsCache(); // a killed session must flip to MISSING this tick
   return { ok: true };
@@ -302,6 +349,11 @@ export function captureSession(session: SessionSpec, lines: number): number {
     encoding: 'utf8'
   });
 
+  const spawnErr = tmuxSpawnError(result);
+  if (spawnErr) {
+    process.stderr.write(`${spawnErr}\n`);
+    return 1; // never report success (exit 0) when tmux never ran
+  }
   if (result.stdout) {
     process.stdout.write(result.stdout);
   }
@@ -309,7 +361,7 @@ export function captureSession(session: SessionSpec, lines: number): number {
     process.stderr.write(result.stderr);
   }
 
-  return result.status ?? 0;
+  return result.status ?? 1;
 }
 
 export function findSession(sessions: SessionSpec[], query: string): SessionSpec {
