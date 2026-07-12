@@ -6,25 +6,29 @@ description: "Run Desk from the standalone binary or a source checkout, and unde
 
 Desk has two runtime shapes:
 
-- the standalone binary (installed as `desk`) — the default
+- the standalone binary (installed as `desk-server`) — the default
 - a source checkout with the `desk` CLI (`desk serve`)
 
 They share the same backend API and browser UI. The difference is how the UI, language-server assets, and PTY backend are packaged.
 
 ## Standalone runtime
 
-The standalone server is built with Bun's compile mode. It is self-contained and does not run Vite at runtime. Install it with the one-liner — it lands as `desk`:
+The standalone server is built with Bun's compile mode. It is self-contained and does not run Vite at runtime. Install it with the one-liner — it lands as `desk-server`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-desk
+desk-server
 ```
 
 Host and port come from environment variables:
 
 ```bash
-DESK_HOST=127.0.0.1 DESK_PORT=5173 desk
+DESK_HOST=127.0.0.1 DESK_PORT=5173 desk-server
 ```
+
+`desk-server` is intentionally server-only and rejects CLI subcommands. Use the
+source checkout's `desk` command for `serve`, `up`, `channels`, and other CLI
+operations.
 
 The standalone server:
 

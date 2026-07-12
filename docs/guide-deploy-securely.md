@@ -19,12 +19,12 @@ control, and keep it bound to localhost.
 
 <Tabs>
   <Tab title="Standalone binary">
-    The default: install the binary (it lands as `desk`) and run it —
+    The default: install the binary (it lands as `desk-server`) and run it —
     `DESK_HOST` / `DESK_PORT` set the bind address:
 
     ```bash
     curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-    DESK_HOST=127.0.0.1 DESK_PORT=5173 desk
+    DESK_HOST=127.0.0.1 DESK_PORT=5173 desk-server
     ```
 
     This serves the embedded UI and backend without Vite.

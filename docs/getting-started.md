@@ -4,13 +4,13 @@ description: "Install Desk, start the local server, and launch your first durabl
 ---
 
 This guide takes you from an empty machine to a running Desk workspace with one
-managed agent session, using the prebuilt `desk` binary.
+managed agent session, using the prebuilt `desk-server` binary.
 
 <Info>
-Prefer a source checkout — it also installs the multi-command `desk` CLI
-(`desk serve`, `desk up`, `desk init`, …)? Jump to [Build from
-source](#build-from-source). The runtime is the same; the binary's `desk` just
-starts the server, and you drive the rest from the UI.
+Prefer a source checkout — it installs the multi-command `desk` CLI
+(`desk serve`, `desk up`, `desk init`, …). Jump to [Build from
+source](#build-from-source). The prebuilt `desk-server` command only starts the
+server; drive the rest from the UI.
 </Info>
 
 ## Requirements
@@ -37,10 +37,11 @@ Optional tools unlock additional features:
     ```
 
     The installer downloads the release binary for your platform, verifies its
-    checksum, and installs it as `desk` (in `/usr/local/bin` or `~/.local/bin`).
+    checksum, and installs it as `desk-server` (in `/usr/local/bin` or
+    `~/.local/bin`).
 
     <Check>
-    `command -v desk` prints the install path.
+    `command -v desk-server` prints the install path.
     </Check>
   </Step>
 
@@ -61,11 +62,12 @@ Optional tools unlock additional features:
 
   <Step title="Start the server">
     ```bash
-    desk
+    desk-server
     ```
 
-    Desk starts the standalone server and prints the local URL. By default it
-    binds to `127.0.0.1:5173`; override with `DESK_HOST` / `DESK_PORT`.
+    `desk-server` starts the standalone server and prints the local URL. By
+    default it binds to `127.0.0.1:5173`; override with `DESK_HOST` /
+    `DESK_PORT`.
 
     <Check>
     Open `http://127.0.0.1:5173` and confirm the Desk UI loads.

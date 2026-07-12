@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Standalone command contract.** The release installer now installs the
+  server-only binary as `desk-server`, preserving `desk` for the full source
+  CLI. Unsupported standalone arguments fail before server startup, and the
+  installer warns without modifying an existing legacy `desk` executable.
 - **Terminal transport cleanup.** Removed the retired direct `/ws/terminal`
   bridge; the multiplexed `/ws/terminal-broker` is now the only terminal
   WebSocket. Global tmux mouse and OSC-passthrough policy is applied through one
