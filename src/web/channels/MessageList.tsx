@@ -374,6 +374,9 @@ export function MessageList({
   activeRef.current = active;
   const stickToBottomRef = useRef(true);
   const lastIdRef = useRef<string | null>(null);
+  // The cursor id we last scrolled/focused, so a poll append (new `rows`) does
+  // not re-yank the viewport or re-steal focus for an unchanged cursor.
+  const cursorHandledRef = useRef<string | null>(null);
   const [showJump, setShowJump] = useState(false);
   // Anchor/read bookkeeping. Refs (not state) so the scroll handler can read
   // the latest values without re-subscribing and without re-rendering.
@@ -725,14 +728,30 @@ export function MessageList({
 
   useLayoutEffect(() => {
     if (!cursorId) {
+      cursorHandledRef.current = null;
+      return;
+    }
+    // Act only when the cursor actually MOVES (j/k, a deep link, a jump). `rows`
+    // is in the deps so the cursor is scrolled into view when the list first
+    // renders it, but every 2.5s poll append also mints a new `rows` identity —
+    // re-running here on every tick used to yank the viewport back to the cursor
+    // and steal focus from the composer mid-typing. Guard on a genuine change.
+    if (cursorHandledRef.current === cursorId) {
       return;
     }
     if (!scrollToMessage(cursorId, 'auto')) {
       return;
     }
+    cursorHandledRef.current = cursorId;
     const focusCursor = (): void => {
       const node = scrollRef.current;
       if (!node) {
+        return;
+      }
+      // Never pull focus out of an input — the operator may be typing in the
+      // composer while agents chat.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
         return;
       }
       const escaped =
