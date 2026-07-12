@@ -1,5 +1,6 @@
 import YAML from 'yaml';
 import { shellQuote } from '../shared/shell.js';
+import { isSupportedAgent } from './types.js';
 import type {
   AgentMcpLaunchConfig,
   BuildSessionOptions,
@@ -147,7 +148,7 @@ function validateSession(groupId: string, session: DeskSession, inheritedCwd?: s
   if ((!inheritedCwd || inheritedCwd.trim() === '') && (typeof session.cwd !== 'string' || session.cwd.trim() === '')) {
     throw new Error(`session ${session.name} requires cwd`);
   }
-  if (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'bash' || session.agent === 'opencode') {
+  if (isSupportedAgent(session.agent)) {
     return;
   }
   throw new Error(`session ${session.name} requires a supported agent or command`);

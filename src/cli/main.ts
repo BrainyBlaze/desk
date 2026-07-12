@@ -16,6 +16,7 @@ import { createAttachArgv } from '../core/tmux.js';
 import { captureSession, findSession, loadDesk, planDeskUp, printStatus, runPlan } from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
+import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
 import type { DeskSession } from '../core/types.js';
 
 const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
@@ -244,7 +245,16 @@ function readSessionOptions(options: Map<string, string>): DeskSession {
     return session;
   }
 
-  session.agent = options.get('agent') ?? 'codex';
+  const agent = options.get('agent') ?? 'codex';
+  // Validate at the write boundary. `parseDeskManifest` only rejects an
+  // unsupported agent on the next READ, so a typo like --agent gemini (or a
+  // case slip) used to write fine and then brick every later desk command.
+  if (!isSupportedAgent(agent)) {
+    throw new Error(
+      `unsupported --agent '${agent}'; use one of ${SUPPORTED_AGENTS.join(', ')}, or --command for a custom command`
+    );
+  }
+  session.agent = agent;
   session.resume = requireOption(options, 'resume');
   return session;
 }
