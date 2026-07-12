@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,6 +9,11 @@ import {
   parseServeOptions,
   type ServeOptions
 } from '../src/cli/serveCommand.js';
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
 
 const temporaryRoots: string[] = [];
 
@@ -37,6 +42,14 @@ function thrownMessage(fn: () => unknown): string {
   }
   throw new Error('expected function to throw');
 }
+
+function expectOnlyArtifactLookup(artifact: string): void {
+  expect(vi.mocked(existsSync).mock.calls).toEqual([[artifact]]);
+}
+
+beforeEach(() => {
+  vi.mocked(existsSync).mockClear();
+});
 
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) {
@@ -127,15 +140,31 @@ describe('serve launch planning', () => {
   const viteOptions: ServeOptions = { mode: 'vite', host: '127.0.0.1', port: 5173 };
   const standaloneOptions: ServeOptions = { mode: 'standalone', host: '0.0.0.0', port: 6000 };
 
-  it('finds a package root from a nested module URL', () => {
+  it('finds a source package root with only vite.config.ts as its marker', () => {
     const root = makePackageRoot();
     writeFileSync(join(root, 'vite.config.ts'), '');
+    const nestedModule = addArtifact(root, 'src/cli/serveCommand.ts');
+
+    expect(findPackageRoot(pathToFileURL(nestedModule).href)).toBe(root);
+  });
+
+  it('finds a built package root with only dist/cli/main.js as its marker', () => {
+    const root = makePackageRoot();
     const nestedModule = addArtifact(root, 'dist/cli/main.js');
 
     expect(findPackageRoot(pathToFileURL(nestedModule).href)).toBe(root);
   });
 
-  it('selects the Vite JavaScript entry with strict port handling', () => {
+  it('rejects a package tree with neither package-root marker', () => {
+    const root = makePackageRoot();
+    const nestedModule = addArtifact(root, 'src/cli/serveCommand.ts');
+
+    expect(() => findPackageRoot(pathToFileURL(nestedModule).href)).toThrow(
+      'cannot locate the desk package root (reinstall desk)'
+    );
+  });
+
+  it('selects the Vite JavaScript entry with strict port handling and probes only that artifact', () => {
     const root = makePackageRoot();
     const viteEntry = addArtifact(root, 'node_modules/vite/bin/vite.js');
 
@@ -144,9 +173,10 @@ describe('serve launch planning', () => {
       args: [viteEntry, '--host', '127.0.0.1', '--port', '5173', '--strictPort'],
       cwd: root
     });
+    expectOnlyArtifactLookup(viteEntry);
   });
 
-  it('selects the private standalone executable and passes host and port through the environment', () => {
+  it('selects the private standalone executable, probes only it, and passes the resolved environment', () => {
     const root = makePackageRoot();
     const standaloneEntry = addArtifact(root, 'libexec/desk-standalone');
     const parentEnv = { KEEP_ME: 'yes' };
@@ -157,25 +187,30 @@ describe('serve launch planning', () => {
       cwd: root,
       env: { KEEP_ME: 'yes', DESK_HOST: '0.0.0.0', DESK_PORT: '6000' }
     });
+    expectOnlyArtifactLookup(standaloneEntry);
   });
 
   it('reports only the missing Vite artifact and asks for reinstall', () => {
     const root = makePackageRoot();
     addArtifact(root, 'libexec/desk-standalone');
+    const viteEntry = join(root, 'node_modules', 'vite', 'bin', 'vite.js');
 
     const message = thrownMessage(() => createServeLaunch(root, viteOptions, '/runtime/node'));
 
     expect(message).toMatch(/vite.*reinstall/i);
     expect(message).not.toMatch(/standalone|bun/i);
+    expectOnlyArtifactLookup(viteEntry);
   });
 
   it('reports only the missing standalone artifact and asks for reinstall', () => {
     const root = makePackageRoot();
     addArtifact(root, 'node_modules/vite/bin/vite.js');
+    const standaloneEntry = join(root, 'libexec', 'desk-standalone');
 
     const message = thrownMessage(() => createServeLaunch(root, standaloneOptions, '/runtime/node'));
 
     expect(message).toMatch(/standalone.*reinstall/i);
     expect(message).not.toMatch(/vite/i);
+    expectOnlyArtifactLookup(standaloneEntry);
   });
 });
