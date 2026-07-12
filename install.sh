@@ -9,6 +9,7 @@ REPO="BrainyBlaze/desk"
 NODE_VERSION="22.23.1"
 NPM_VERSION="10.9.8"
 BUN_VERSION="1.3.14"
+PYTHON_MIN_VERSION="3.6"
 LOCK_TOKEN=""
 LOCK_OWNED=0
 MAIN_COMPLETED=0
@@ -230,7 +231,7 @@ probe_python() {
   for candidate in python3 python; do
     have "$candidate" || continue
     value="$($candidate -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
-    if [ -n "$value" ] && version_ge "$value" "3.8"; then
+    if [ -n "$value" ] && version_ge "$value" "$PYTHON_MIN_VERSION"; then
       PYTHON_BIN="$(command -v "$candidate")"
       return 0
     fi
@@ -292,7 +293,7 @@ probe_host_capabilities() {
   probe_bootstrap_capabilities
   probe_tmux || MISSING_CAPABILITIES+=("tmux>=3.2")
   probe_git || MISSING_CAPABILITIES+=("git>=2.30")
-  probe_python || MISSING_CAPABILITIES+=("python>=3.8")
+  probe_python || MISSING_CAPABILITIES+=("python>=${PYTHON_MIN_VERSION}")
   have make || MISSING_CAPABILITIES+=("make")
   probe_compiler || MISSING_CAPABILITIES+=("working C++ compiler")
 }
@@ -1123,7 +1124,7 @@ PY
 
 uninstall_desk() {
   [ -d "$DESK_HOME" ] || die "Desk is not installed at $DESK_HOME."
-  probe_python || die "Python 3.8+ is required to verify ownership before uninstalling."
+  probe_python || die "Python ${PYTHON_MIN_VERSION}+ is required to verify ownership before uninstalling."
   select_launcher_destination
   [ -f "$LAUNCHER_PATH" ] && grep -Fqx '# desk-managed-launcher-v1' "$LAUNCHER_PATH" || die "refusing uninstall: launcher is absent or unidentified at $LAUNCHER_PATH"
   validate_uninstall_tree || die "refusing uninstall because managed ownership validation failed."

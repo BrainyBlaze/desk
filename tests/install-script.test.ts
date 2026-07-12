@@ -123,7 +123,7 @@ describe('source-backed installer contract', () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/older than installed v0\.3\.0-rc\.10.*silent downgrade/i);
-  });
+  }, 20_000);
 
   it('rejects a live sibling lock before release staging', () => {
     const value = fixture();

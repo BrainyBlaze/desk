@@ -203,7 +203,7 @@ probe that triggered it:
 | SHA-256 | Either `sha256sum` or `shasum -a 256` produces a valid digest. |
 | tmux | `tmux -V` succeeds and reports version 3.2 or newer. |
 | Git | `git --version` succeeds with Git 2.30 or newer. |
-| Native build | Python 3.8 or newer, `make`, and a C++ compiler can build a trivial native program. |
+| Native build | Python 3.6 or newer, `make`, and a C++ compiler can build a trivial native program. |
 | Node/npm | The Desk-owned Node version declared by the release (CI baseline 22.23.1) and its bundled npm pass exact version checks. |
 | Bun | The Desk-owned Bun version declared by the release passes an exact version check and can compile a trivial executable. |
 
