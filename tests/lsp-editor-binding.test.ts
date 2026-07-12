@@ -19,17 +19,39 @@ class FakeController {
     (_params: { workspaceRoot: string; languageId: string; uri: string; edit: { changes: unknown; fullText: string } }) => {}
   );
   readonly closeDocument = vi.fn((_params: { workspaceRoot: string; languageId: string; uri: string }) => {});
+  readonly pullDiagnostics = vi.fn((_params: { workspaceRoot: string; languageId: string; uri: string }) => {});
+  private readonly lossListeners = new Set<
+    (event: { workspaceRoot: string; languageId: string; exit: { code: number | null; signal: string | null } }) => void
+  >();
+  readonly onSessionLost = vi.fn(
+    (listener: (event: { workspaceRoot: string; languageId: string; exit: { code: number | null; signal: string | null } }) => void) => {
+      this.lossListeners.add(listener);
+      return () => this.lossListeners.delete(listener);
+    }
+  );
+
+  emitSessionLost(languageId: string): void {
+    const event = { workspaceRoot: ROOT, languageId, exit: { code: 1, signal: null } };
+    for (const listener of [...this.lossListeners]) {
+      listener(event);
+    }
+  }
 }
 
 const EDIT = { changes: [{ range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 }, text: 'x' }], fullText: 'x' };
 
 const ROOT = '/workspace';
-function bindingWith(controller: FakeController, enabled: (id: string) => boolean = (id) => id === 'typescript') {
+function bindingWith(
+  controller: FakeController,
+  enabled: (id: string) => boolean = (id) => id === 'typescript',
+  reconnectDelaysMs?: readonly number[]
+) {
   return createEditorLspBinding<string>({
     controller,
     workspaceRoot: ROOT,
     isLanguageEnabled: enabled,
-    toSelector: (languageId) => languageId
+    toSelector: (languageId) => languageId,
+    reconnectDelaysMs
   });
 }
 
@@ -181,6 +203,102 @@ describe('createEditorLspBinding document sync (didOpen/didChange/didClose)', ()
     expect(controller.openDocument).not.toHaveBeenCalled();
     expect(controller.changeDocument).not.toHaveBeenCalled();
     expect(controller.closeDocument).not.toHaveBeenCalled();
+  });
+
+  it('reconnects after unexpected loss and replays every open model with its latest full text', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new FakeController();
+      const binding = bindingWith(controller, undefined, [10]);
+      binding.openModel({ uri: 'file:///a.ts', languageId: 'typescript' }, 'const a = 1;');
+      controller.openDocument.mockClear();
+      controller.changeDocument.mockClear();
+      controller.pullDiagnostics.mockClear();
+
+      controller.emitSessionLost('typescript');
+      binding.changeModel(
+        { uri: 'file:///a.ts', languageId: 'typescript' },
+        { changes: EDIT.changes, fullText: 'const a = 2;' }
+      );
+      binding.openModel({ uri: 'file:///b.ts', languageId: 'typescript' }, 'const b = 1;');
+      expect(controller.changeDocument).not.toHaveBeenCalled();
+      expect(controller.openDocument).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(controller.ensureSession).toHaveBeenCalledTimes(2);
+      expect(controller.openDocument.mock.calls).toEqual([
+        [{ workspaceRoot: ROOT, languageId: 'typescript', uri: 'file:///a.ts', text: 'const a = 2;' }],
+        [{ workspaceRoot: ROOT, languageId: 'typescript', uri: 'file:///b.ts', text: 'const b = 1;' }]
+      ]);
+      expect(controller.pullDiagnostics).toHaveBeenCalledTimes(2);
+      binding.disposeAll();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses capped retry delays when reconnect attempts fail', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new FakeController();
+      controller.ensureSession
+        .mockResolvedValueOnce({ status: 'ready', capabilities: {} })
+        .mockResolvedValueOnce({ status: 'failed', closeInfo: null })
+        .mockResolvedValueOnce({ status: 'failed', closeInfo: null })
+        .mockResolvedValueOnce({ status: 'ready', capabilities: {} });
+      const binding = bindingWith(controller, undefined, [10, 20]);
+      binding.openModel({ uri: 'file:///a.ts', languageId: 'typescript' }, 'text');
+      await Promise.resolve();
+
+      controller.emitSessionLost('typescript');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(controller.ensureSession).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(20);
+      expect(controller.ensureSession).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(19);
+      expect(controller.ensureSession).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(controller.ensureSession).toHaveBeenCalledTimes(4);
+      binding.disposeAll();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending reconnect when the last model closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new FakeController();
+      const binding = bindingWith(controller, undefined, [10]);
+      const ref = { uri: 'file:///a.ts', languageId: 'typescript' };
+      binding.openModel(ref, 'text');
+      controller.emitSessionLost('typescript');
+      binding.closeModel(ref);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(controller.ensureSession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels pending reconnects when the binding is disposed', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new FakeController();
+      const binding = bindingWith(controller, undefined, [10]);
+      binding.openModel({ uri: 'file:///a.ts', languageId: 'typescript' }, 'text');
+      controller.emitSessionLost('typescript');
+      binding.disposeAll();
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(controller.ensureSession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

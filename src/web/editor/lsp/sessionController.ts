@@ -68,6 +68,12 @@ export type EnsureResult =
   | { status: 'ready'; capabilities: ServerCapabilities }
   | { status: 'failed'; closeInfo: { code: number; reason: string } | null };
 
+export interface SessionLostEvent {
+  workspaceRoot: string;
+  languageId: string;
+  exit: LspExit;
+}
+
 interface SessionEntry {
   session: ControllerSession;
   ready: Promise<EnsureResult>;
@@ -86,6 +92,7 @@ interface SessionEntry {
 export class LspSessionController<TSelector = unknown> {
   private readonly deps: SessionControllerDeps<TSelector>;
   private readonly entries = new Map<string, SessionEntry>();
+  private readonly sessionLostListeners = new Set<(event: SessionLostEvent) => void>();
 
   constructor(deps: SessionControllerDeps<TSelector>) {
     this.deps = deps;
@@ -94,6 +101,22 @@ export class LspSessionController<TSelector = unknown> {
   private keyOf(workspaceRoot: string, languageId: string): string {
     // Array form is ASCII, deterministic, and collision-safe across path/lang delimiters.
     return JSON.stringify([workspaceRoot, languageId]);
+  }
+
+  /** Subscribe to unexpected transport/session exits. Intentional close/dispose never emits. */
+  onSessionLost(listener: (event: SessionLostEvent) => void): () => void {
+    this.sessionLostListeners.add(listener);
+    return () => this.sessionLostListeners.delete(listener);
+  }
+
+  private notifySessionLost(event: SessionLostEvent): void {
+    for (const listener of [...this.sessionLostListeners]) {
+      try {
+        listener(event);
+      } catch {
+        // Lifecycle cleanup must not be interrupted by an observer failure.
+      }
+    }
   }
 
   /**
@@ -126,11 +149,12 @@ export class LspSessionController<TSelector = unknown> {
     };
 
     // Subscribe before awaiting ready so a death during startup is observed; identity-guarded.
-    entry.unsubscribeExit = session.onExit(() => {
+    entry.unsubscribeExit = session.onExit((exit) => {
       if (this.entries.get(key) !== entry) {
         return;
       }
       this.teardownEntry(key, entry);
+      this.notifySessionLost({ workspaceRoot: params.workspaceRoot, languageId: params.languageId, exit });
     });
 
     entry.ready = this.startSession(key, entry, params.languageSelector);
