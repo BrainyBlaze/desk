@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the macOS/Linux curl installer provide the complete `desk` CLI, make `desk serve` run Vite and `desk serve --standalone` run only the private Bun runtime, and remove the public `desk-server` contract everywhere.
+**Goal:** Make the macOS/Linux curl installer provide the complete `desk` CLI, make `desk serve` run only the private Bun runtime and `desk serve --dev` run Vite, and remove the public `desk-server` contract everywhere.
 
 **Architecture:** Keep `src/cli/main.ts` as the only public dispatcher and move serve parsing/path planning into a focused CLI module. Tagged releases publish a source archive plus validated install/checksum metadata; `install.sh` provisions host dependencies and Desk-owned Node/Bun toolchains, builds into immutable release instances, then activates a stable launcher transactionally. Vite and Bun remain distinct, explicitly selected runtimes with no fallback.
 
@@ -73,20 +73,21 @@ Baseline result: 199 test files passed, 3 skipped; 2,124 tests passed, 6 skipped
 
 - [ ] **Step 1: Write failing serve-option tests**
 
-Cover default Vite mode, boolean `--standalone`, flag order, flag-over-environment precedence, environment defaults, empty host, nonnumeric/out-of-range port, duplicate flags, missing values, unknown flags, and unexpected positional arguments.
+Cover default standalone mode, boolean `--dev`, flag order, flag-over-environment precedence, environment defaults, empty host, nonnumeric/out-of-range port, duplicate flags, missing values, unknown flags, the retired `--standalone` flag, and unexpected positional arguments.
 
 ```ts
 expect(parseServeOptions([], {})).toEqual({
-  mode: 'vite',
+  mode: 'standalone',
   host: '127.0.0.1',
   port: 5173
 });
-expect(parseServeOptions(['--standalone', '--port', '6000'], {})).toEqual({
-  mode: 'standalone',
+expect(parseServeOptions(['--dev', '--port', '6000'], {})).toEqual({
+  mode: 'vite',
   host: '127.0.0.1',
   port: 6000
 });
-expect(() => parseServeOptions(['--standalone', 'true'], {})).toThrow('unexpected argument true');
+expect(() => parseServeOptions(['--dev', 'true'], {})).toThrow('unexpected argument true');
+expect(() => parseServeOptions(['--standalone'], {})).toThrow('unknown option --standalone');
 expect(() => parseServeOptions(['--port', '5173', '--port', '5174'], {})).toThrow(
   '--port may be specified only once'
 );
@@ -126,7 +127,7 @@ export function parseServeOptions(
 ): ServeOptions;
 ```
 
-Use one cursor loop and a `Set` for duplicate detection. Only `--standalone` is boolean; `--host` and `--port` consume exactly one value. Validate before returning.
+Use one cursor loop and a `Set` for duplicate detection. Only `--dev` is boolean; `--host` and `--port` consume exactly one value. Validate before returning.
 
 - [ ] **Step 4: Run the focused test and confirm GREEN**
 
@@ -203,8 +204,8 @@ git commit -m "refactor: isolate desk serve command planning"
 
 - [ ] **Step 1: Write failing CLI-dispatch and supervised-child tests**
 
-Spawn `npx tsx src/cli/main.ts` and prove `serve --standalone true`, `serve
---port`, and `status --standalone` fail before opening a port. Assert `desk help`
+Spawn `npx tsx src/cli/main.ts` and prove `serve --dev true`, `serve
+--port`, `serve --standalone`, and `status --dev` fail before opening a port. Assert `desk help`
 documents both serve forms and no second public server command.
 
 In `tests/serve-runtime.integration.test.ts`, start the current CLI with a real
@@ -232,7 +233,7 @@ In `src/cli/main.ts`:
 - detect `serve` before the manifest-dependent general command path;
 - call `parseServeOptions`, `findPackageRoot(import.meta.url)`, `createServeLaunch`, and `runServeLaunch`;
 - keep every non-serve command on the existing parser;
-- reject `--standalone` outside `serve` as an unknown option/argument;
+- reject `--dev` outside `serve` and reject retired `--standalone` everywhere as unknown options/arguments;
 - update `HELP` to show both exact commands and host/port environment precedence.
 
 `runServeLaunch` uses asynchronous `spawn` with inherited stdio. It registers
@@ -325,10 +326,11 @@ The script must:
    same script can probe either the checkout build or an installed launcher;
    default to the checkout's `dist/cli/main.js` only when `--desk` is omitted;
 2. locate an unused port;
-3. start the selected Desk command with `serve` and prove `/@vite/client` is available;
+3. start the selected Desk command with `serve` and prove `/` is 200 but
+   `/@vite/client` is not a Vite route;
 4. stop it and prove the port closes;
-5. start the selected Desk command with `serve --standalone` and prove `/` is 200
-   but `/@vite/client` is not a Vite route;
+5. start the selected Desk command with `serve --dev` and prove `/@vite/client`
+   is available;
 6. send SIGINT and SIGTERM only to the CLI PID in separate runs and prove the
    private Bun child exits and its port closes;
 7. pre-bind the requested standalone port and prove Bun fails without an
@@ -921,7 +923,7 @@ Set:
 ```dockerfile
 RUN ln -s /opt/desk/dist/cli/main.js /usr/local/bin/desk
 ENTRYPOINT ["desk"]
-CMD ["serve", "--standalone", "--host", "0.0.0.0", "--port", "5173"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "5173"]
 ```
 
 - [ ] **Step 4: Remove retired Docker artifact names**
@@ -1001,8 +1003,8 @@ Document:
 - WSL uses Linux; native Windows is unsupported;
 - required dependencies automatically provisioned vs optional integrations;
 - versioned layout and immediate PATH behavior;
-- `desk serve` default Vite mode;
-- `desk serve --standalone` private Bun mode;
+- `desk serve` default private Bun mode;
+- `desk serve --dev` opt-in Vite mode;
 - no fallback between modes.
 
 - [ ] **Step 3: Rewrite distribution, upgrade, uninstall, Docker, and security docs**
@@ -1101,7 +1103,7 @@ Run the Task 9 Docker smoke and Task 10 Mintlify/MkDocs commands.
 
 - [ ] **Step 6: Audit no-fallback and no-legacy behavior**
 
-Corrupt only the Vite artifact and prove default serve fails without Bun. Corrupt only the private Bun artifact and prove standalone fails without Vite. Audit public paths/artifacts/help/docs for the retired command.
+Corrupt only the private Bun artifact and prove default serve fails without Vite fallback. Corrupt only the Vite artifact and prove `serve --dev` fails without Bun fallback. Audit public paths/artifacts/help/docs for the retired command and flag.
 
 - [ ] **Step 7: Review complexity and remove test-only production hooks**
 
@@ -1145,6 +1147,6 @@ Do not claim completion until all are true:
 - Supported installer matrix passes; Alpine fails only at the documented unsupported toolchain gate.
 - Docker full-CLI entrypoint and HTTP health pass.
 - Mintlify/MkDocs validation passes.
-- `desk serve` and `desk serve --standalone` each fail closed when their own artifact is absent.
+- `desk serve` and `desk serve --dev` each fail closed when their own artifact is absent.
 - No public `desk-server` executable, release asset, installer path, Docker path, help contract, or operating-doc instruction remains.
 - Required/optional dependency, platform, upgrade, reinstall, downgrade, uninstall, and security docs match observed behavior.

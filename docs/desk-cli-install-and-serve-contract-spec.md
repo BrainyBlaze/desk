@@ -15,8 +15,8 @@ supported by the proposed change.
 
 The serve contract is explicit:
 
-- `desk serve` starts the Node/Vite development runtime.
-- `desk serve --standalone` starts the private Bun-compiled standalone runtime.
+- `desk serve` starts the private Bun-compiled standalone runtime.
+- `desk serve --dev` starts the Node/Vite development runtime.
 - Neither mode falls back to the other.
 - The former public `desk-server` executable and every release, installer, code,
   test, Docker, and documentation path that exposes it are removed.
@@ -38,11 +38,12 @@ That avoided the name collision, but it did not meet the intended product
 contract: a curl installation still did not provide the full Desk CLI, and users
 had to understand two top-level commands and two incompatible argument models.
 
-The underlying packaging constraint is that the default runtime is genuinely a
-Vite source runtime. It requires the Desk source tree and its Node dependencies.
-The standalone runtime is a separate Bun build because it embeds the UI and uses
-the Bun PTY backend. A correct package must install both runtime shapes behind a
-single CLI dispatcher instead of pretending either runtime is the whole CLI.
+The underlying packaging constraint is that the development runtime is genuinely
+a Vite source runtime. It requires the Desk source tree and its Node dependencies.
+The default standalone runtime is a separate Bun build because it embeds the UI
+and uses the Bun PTY backend. A correct package must install both runtime shapes
+behind a single CLI dispatcher instead of pretending either runtime is the whole
+CLI.
 
 ## Goals
 
@@ -52,8 +53,8 @@ single CLI dispatcher instead of pretending either runtime is the whole CLI.
    versions using the current host's supported package manager.
 4. Install a versioned source tree, its locked Node dependencies, the built CLI,
    and a private Bun standalone executable.
-5. Make `desk serve` deterministically select Vite and
-   `desk serve --standalone` deterministically select Bun.
+5. Make `desk serve` deterministically select Bun and
+   `desk serve --dev` deterministically select Vite.
 6. Remove the separate public standalone command and all legacy/fallback paths.
 7. Keep upgrades atomic so a failed download, dependency installation, or build
    cannot replace the last working Desk installation.
@@ -78,15 +79,16 @@ single CLI dispatcher instead of pretending either runtime is the whole CLI.
 
 | Command | Runtime | Required behavior |
 | --- | --- | --- |
-| `desk serve` | Node + Vite | Runs Vite from the active installed source tree with the Desk API middleware and HMR. |
-| `desk serve --host H --port P` | Node + Vite | Runs the same Vite runtime with validated host and port overrides. |
-| `desk serve --standalone` | Private Bun executable | Runs the embedded UI/API runtime without Vite. |
-| `desk serve --standalone --host H --port P` | Private Bun executable | Runs Bun with the same validated host and port values. |
+| `desk serve` | Private Bun executable | Runs the embedded UI/API runtime without Vite. |
+| `desk serve --host H --port P` | Private Bun executable | Runs Bun with validated host and port overrides. |
+| `desk serve --dev` | Node + Vite | Runs Vite from the active installed source tree with the Desk API middleware and HMR. |
+| `desk serve --dev --host H --port P` | Node + Vite | Runs Vite with the same validated host and port values. |
 | `desk <other-command>` | Node CLI | Preserves the existing `up`, `status`, `init`, `add`, `attach`, `capture`, `hooks`, `channels`, and internal host behavior. |
 
-`--standalone` is a boolean flag owned only by `serve`. It consumes no value.
-Using it with another command, repeating it, or following it with an unexpected
-positional argument is a usage error.
+`--dev` is a boolean flag owned only by `serve`. It consumes no value. Using it
+with another command, repeating it, or following it with an unexpected positional
+argument is a usage error. The retired `--standalone` flag is rejected rather
+than retained as an alias.
 
 Host and port resolution is shared by both serve modes:
 
@@ -433,13 +435,13 @@ the private Bun executable. It uses this exec-form contract:
 
 ```dockerfile
 ENTRYPOINT ["desk"]
-CMD ["serve", "--standalone", "--host", "0.0.0.0", "--port", "5173"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "5173"]
 ```
 
 Arguments supplied to `docker run` replace `CMD`, so `docker run IMAGE status`,
 `docker run IMAGE serve --host 0.0.0.0`, and
-`docker run IMAGE serve --standalone --host 0.0.0.0` all go through the same full
-CLI. The container-only `0.0.0.0` default makes the published port reachable;
+`docker run IMAGE serve --dev --host 0.0.0.0` all go through the same full CLI.
+The container-only `0.0.0.0` default makes the published port reachable;
 host installs retain the secure `127.0.0.1` default. Documentation must state
 that publishing this unauthenticated port is safe only on a trusted local bind or
 behind an authenticated tunnel/proxy.
@@ -482,8 +484,8 @@ implemented behavior. At minimum, update or remove:
   serve modes, CLI reference, and source contributor setup.
 - `docs/getting-started.md`: empty-machine install through the full CLI and a
   first launch with `desk serve`.
-- `docs/distribution-deployment.md`: versioned source-backed layout, Vite default,
-  private standalone mode, releases, upgrade/downgrade/reinstall retention,
+- `docs/distribution-deployment.md`: versioned source-backed layout, standalone
+  default, opt-in Vite development mode, releases, upgrade/downgrade/reinstall retention,
   ownership-safe uninstall, and Docker behavior.
 - `docs/guide-deploy-securely.md`: correct commands for both modes while retaining
   the localhost/no-authentication warning.
@@ -524,7 +526,7 @@ path, or unrelated internal artifact.
 
 ### CLI behavior
 
-- Parser tests prove `--standalone` is boolean, remains serve-only, and composes
+- Parser tests prove `--dev` is boolean, remains serve-only, and composes
   correctly with host and port flags in either order.
 - Invalid flags, duplicate flags, missing values, extra positional arguments,
   and invalid ports fail before any child process starts.
@@ -534,11 +536,11 @@ path, or unrelated internal artifact.
 
 ### Runtime integration
 
-- Start `desk serve` on an ephemeral port, fetch the root and `/@vite/client`,
-  and prove both return successfully before terminating the process.
-- Build the real private Bun executable, start
-  `desk serve --standalone` on another ephemeral port, fetch the root, and prove
-  the application loads without a Vite client route.
+- Build the real private Bun executable, start `desk serve` on an ephemeral port,
+  fetch the root, and prove the application loads without a Vite client route.
+- Start `desk serve --dev` on another ephemeral port, fetch the root and
+  `/@vite/client`, and prove both return successfully before terminating the
+  process.
 - Pre-bind the requested port and prove both Vite and Bun fail without selecting
   another port.
 - Remove or relocate each required runtime artifact in an isolated staged
@@ -553,8 +555,8 @@ path, or unrelated internal artifact.
 - Build a real versioned source archive and checksum manifest into a temporary
   release endpoint, then run the installer with temporary `HOME`, `DESK_HOME`,
   and `DESK_BIN_DIR` values.
-- Prove the installed `desk help`, `desk serve`, and
-  `desk serve --standalone` paths execute from outside the source checkout.
+- Prove the installed `desk help`, `desk serve`, and `desk serve --dev` paths
+  execute from outside the source checkout.
 - Prove source, Node, and Bun checksum absence, mismatch, wrong-platform assets,
   and interrupted downloads fail without changing `current` or promoting a
   partial toolchain.
@@ -603,8 +605,8 @@ path, or unrelated internal artifact.
   installs all required dependencies and a working full `desk` CLI.
 - The command is resolvable immediately from the invoking shell's existing
   `PATH`; `curl ... | bash && desk serve` is a valid documented flow.
-- `desk serve` starts the Vite runtime from the installed source tree.
-- `desk serve --standalone` starts only the private Bun runtime.
+- `desk serve` starts only the private Bun runtime.
+- `desk serve --dev` starts the Vite runtime from the installed source tree.
 - Host and port flags/environment behave identically in both modes.
 - An occupied requested port fails in both modes.
 - Neither runtime ever falls back to the other.
