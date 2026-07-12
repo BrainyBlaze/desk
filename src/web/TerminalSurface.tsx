@@ -319,6 +319,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         shellRef.current.dataset.terminalScrollback = 'false';
       }
       updateScrollRail();
+      // Entering scrollback moved focus to the overlay div; leaving it (Escape,
+      // or wheeling past the bottom) left focus on <body>, so the next keystroke
+      // was silently dropped. Return focus to the live terminal.
+      terminalRef.current?.focus();
     };
     exitScrollbackRef.current = exitScrollback;
 
@@ -379,12 +383,17 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }
 
       if ((event.ctrlKey || event.metaKey) && key === 'c') {
-        const selection = getSelectedText(terminal);
+        // Copy ONLY when the terminal itself has a selection. getSelectedText
+        // falls back to window.getSelection(), so a stray DOM selection anywhere
+        // else (a channel message, the sidebar) used to hijack Ctrl+C and copy
+        // that text instead of sending SIGINT to interrupt the running process.
+        const selection = terminal.getSelection();
         if (selection) {
           event.preventDefault();
           copyText(selection);
           return false;
         }
+        // No terminal selection: fall through so Ctrl+C reaches the shell.
       }
 
       if ((event.ctrlKey || event.metaKey) && key === 'v') {
