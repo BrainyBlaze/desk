@@ -312,10 +312,15 @@ export function deleteProjectFromManifest(manifest: DeskManifest, options: Delet
   }
   const groups = cloneGroups(manifest)
     .map((group) => ({
-      ...group,
-      sessions: group.sessions.filter((session) => !session.cwd || !cwdMatches(session.cwd, options.cwd!))
+      group,
+      kept: group.sessions.filter((session) => !session.cwd || !cwdMatches(session.cwd, options.cwd!))
     }))
-    .filter((group) => group.sessions.length > 0);
+    // Drop a group only if THIS delete emptied it (it had sessions and they all
+    // matched the removed cwd). A group that was already empty and unrelated to
+    // this project must be preserved — filtering every empty group deleted the
+    // user's freshly-created empty groups as a side effect.
+    .filter(({ group, kept }) => kept.length > 0 || group.sessions.length === 0)
+    .map(({ group, kept }) => ({ ...group, sessions: kept }));
   return { ...manifest, groups, projects: manifest.projects };
 }
 
@@ -336,20 +341,17 @@ export function deleteGroupFromManifest(manifest: DeskManifest, options: DeleteP
     return { ...manifest, projects };
   }
 
-  const groups = cloneGroups(manifest)
-    .map((group) => {
-      if (group.id !== options.groupId) {
-        return group;
-      }
-      if (!options.projectCwd) {
-        return undefined;
-      }
-      return {
-        ...group,
-        sessions: group.sessions.filter((session) => !session.cwd || !cwdMatches(session.cwd, options.projectCwd!))
-      };
-    })
-    .filter((group): group is DeskGroup => Boolean(group && group.sessions.length > 0));
+  const groups = cloneGroups(manifest).flatMap((group): DeskGroup[] => {
+    if (group.id !== options.groupId) {
+      return [group]; // untouched — keep regardless of session count (don't drop unrelated empty groups)
+    }
+    if (!options.projectCwd) {
+      return []; // delete the whole target group
+    }
+    const kept = group.sessions.filter((session) => !session.cwd || !cwdMatches(session.cwd, options.projectCwd!));
+    // Drop the target group only if this delete emptied it.
+    return kept.length > 0 || group.sessions.length === 0 ? [{ ...group, sessions: kept }] : [];
+  });
   return { ...manifest, groups, projects: manifest.projects };
 }
 

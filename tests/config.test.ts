@@ -4,6 +4,7 @@ import {
   addGroupToManifest,
   addProjectToManifest,
   addSessionToManifest,
+  deleteProjectFromManifest,
   deleteSessionFromManifest,
   editGroupInManifest,
   editProjectInManifest,
@@ -443,5 +444,25 @@ describe('manifest write robustness', () => {
     // guard by checking a manifest that stringifies to content still works and
     // the guard exists for the empty-serialization edge.
     expect(() => writeManifestFile(path, { groups: [], projects: [] })).not.toThrow();
+  });
+});
+
+describe('deleteProjectFromManifest (legacy cwd) — finding N14', () => {
+  it('removes only the emptied group and preserves an unrelated empty group', () => {
+    // Legacy (groups-based) manifest: group `a` has the session being deleted,
+    // group `b` is an unrelated empty group the user just created.
+    const manifest = {
+      groups: [
+        { id: 'a', label: 'A', sessions: [{ name: 's', cwd: '/proj/a', command: 'bash' }] },
+        { id: 'b', label: 'B', sessions: [] }
+      ],
+      projects: undefined
+    } as unknown as Parameters<typeof deleteProjectFromManifest>[0];
+
+    const result = deleteProjectFromManifest(manifest, { projectId: 'unmatched', cwd: '/proj/a' });
+
+    // `a` emptied by the delete → removed; `b` was already empty and unrelated →
+    // must survive (the old `.filter(sessions.length > 0)` deleted it too).
+    expect(result.groups.map((group) => group.id)).toEqual(['b']);
   });
 });
