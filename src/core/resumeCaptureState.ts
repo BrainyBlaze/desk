@@ -50,33 +50,45 @@ export function upsertPendingResumeCapture(
   capture: PendingResumeCapture,
   options: ResumeCaptureStateOptions = {}
 ): void {
-  // Lock the read-modify-write: the CLI (`desk up`) and the server's capture
-  // scan both mutate this file across processes. writeFileAtomic prevents a torn
-  // file but not a lost update — two readers each filter+write and one loses. A
-  // sync file lock (same medium the manifest uses) serializes them.
-  withFileLockWithParent(options, () => {
-    const captures = readPendingResumeCaptures(options).filter((entry) => entry.tmuxSession !== capture.tmuxSession);
-    captures.push(capture);
-    writePendingResumeCaptures(captures, options);
-  });
+  updatePendingResumeCaptures((captures) => {
+    const updated = captures.filter((entry) => entry.tmuxSession !== capture.tmuxSession);
+    updated.push(capture);
+    return updated;
+  }, options);
 }
 
 export function removePendingResumeCapture(tmuxSession: string, options: ResumeCaptureStateOptions = {}): void {
-  withFileLockWithParent(options, () => {
-    const captures = readPendingResumeCaptures(options).filter((entry) => entry.tmuxSession !== tmuxSession);
+  updatePendingResumeCaptures(
+    (captures) => captures.filter((entry) => entry.tmuxSession !== tmuxSession),
+    options
+  );
+}
+
+/**
+ * Serialize a read-modify-write on the resume-capture file across processes.
+ * The CLI (`desk up`) and server startup both mutate this state, so an atomic
+ * write alone cannot prevent one process from overwriting another's update.
+ */
+export function updatePendingResumeCaptures(
+  update: (captures: PendingResumeCapture[]) => PendingResumeCapture[],
+  options: ResumeCaptureStateOptions = {}
+): PendingResumeCapture[] {
+  return withFileLockWithParent(options, () => {
+    const captures = update(readPendingResumeCaptures(options));
     writePendingResumeCaptures(captures, options);
+    return captures;
   });
 }
 
 /** Serialize a read-modify-write on the resume-capture file across processes.
  *  Ensures the parent dir exists first so the lock can be acquired on first use. */
-function withFileLockWithParent(options: ResumeCaptureStateOptions, action: () => void): void {
+function withFileLockWithParent<T>(options: ResumeCaptureStateOptions, action: () => T): T {
   const path = resolveResumeCaptureStatePath(options);
   mkdirSync(dirname(path), { recursive: true });
   // Lock a SEPARATE `.lock` path (proper-lockfile materializes the lock as a
   // directory at lockfilePath) — locking the data file itself would turn it into
   // a directory. Mirrors withManifestFileLockSync.
-  withFileLockSync(`${path}.lock`, action);
+  return withFileLockSync(`${path}.lock`, action);
 }
 
 export function findPendingResumeCapture(
