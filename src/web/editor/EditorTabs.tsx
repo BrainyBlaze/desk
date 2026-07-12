@@ -3,7 +3,7 @@ import { Animated, Animator, useBleeps } from '@arwes/react';
 import { BookOpen, CopyX, FileCode, X, XCircle } from 'lucide-react';
 import { CLIP_OCTAGON_PILL, CLIP_OCTAGON_TINY } from '../arwes/primitives.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
-import { fileNameOf, tabLabels } from './editorState.js';
+import { fileNameOf, tabDropTargetIndex, tabLabels } from './editorState.js';
 import { fileIcon } from './fileIcons.js';
 import { useClampedMenu } from '../menuPosition.js';
 
@@ -144,21 +144,18 @@ export function EditorTabs({
                   if (dragIndex === null) return;
                   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
                   const midpoint = rect.left + rect.width / 2;
-                  const newPosition = event.clientX < midpoint ? index : index + 1;
-                  if (dragIndex < newPosition) {
-                    setDropPosition(newPosition > dragIndex ? newPosition : index);
-                  } else {
-                    setDropPosition(newPosition < dragIndex ? newPosition : index + 1);
-                  }
+                  setDropPosition(event.clientX < midpoint ? index : index + 1);
                 }}
                 onDragLeave={() => setDropPosition(null)}
                 onDrop={(event: DragEvent) => {
                   event.preventDefault();
-                  if (dragIndex !== null && dragIndex !== index) {
+                  if (dragIndex !== null) {
                     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
                     const midpoint = rect.left + rect.width / 2;
-                    const targetIndex = event.clientX < midpoint ? index : index + 1;
-                    onMove(dragIndex, Math.max(0, Math.min(tabs.length - 1, targetIndex)));
+                    const targetIndex = tabDropTargetIndex(dragIndex, index, event.clientX >= midpoint, tabs.length);
+                    if (targetIndex !== dragIndex) {
+                      onMove(dragIndex, targetIndex);
+                    }
                   }
                   setDragIndex(null);
                   setDropPosition(null);

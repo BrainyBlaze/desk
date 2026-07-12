@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { closeTab, duplicateName, moveTab, openTab, tabLabels } from '../src/web/editor/editorState';
+import { closeTab, duplicateName, moveTab, openTab, tabDropTargetIndex, tabLabels } from '../src/web/editor/editorState';
 
 describe('openTab', () => {
   it('appends a new path and activates it', () => {
@@ -32,6 +32,18 @@ describe('moveTab', () => {
   it('ignores out-of-range moves', () => {
     expect(moveTab(['/a'], 0, 5)).toEqual(['/a']);
     expect(moveTab(['/a'], 3, 0)).toEqual(['/a']);
+  });
+});
+
+describe('tabDropTargetIndex', () => {
+  it('accounts for removal when dragging right', () => {
+    expect(tabDropTargetIndex(0, 1, true, 3)).toBe(1);
+    expect(tabDropTargetIndex(1, 2, true, 3)).toBe(2);
+  });
+
+  it('keeps the hovered insertion index when dragging left', () => {
+    expect(tabDropTargetIndex(2, 1, false, 3)).toBe(1);
+    expect(tabDropTargetIndex(2, 0, true, 3)).toBe(1);
   });
 });
 

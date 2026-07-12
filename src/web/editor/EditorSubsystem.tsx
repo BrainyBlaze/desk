@@ -57,6 +57,7 @@ import { SearchPanel } from './SearchPanel.js';
 import { EditorTabs, type TabMeta } from './EditorTabs.js';
 import { MonacoHost, type RevealTarget } from './MonacoHost.js';
 import { closeTab, fileNameOf, moveTab, openTab } from './editorState.js';
+import { createSaveQueue } from './saveQueue.js';
 import { initMonaco, languageForPath, monaco } from './monacoSetup.js';
 import type { EditorLspBinding } from './lsp/editorLspBinding.js';
 import { perfMarkFirst, perfMarkOpen } from './lsp/perfTelemetry.js';
@@ -327,10 +328,10 @@ export function EditorSubsystem({
   // Autosave config mirror so timers and listeners always read fresh values.
   const autosaveRef = useRef(effectiveAutosave);
   autosaveRef.current = effectiveAutosave;
-  // Per-file idle timers (after-delay mode) and an in-flight write guard so a
-  // slow disk can never produce overlapping writes for the same path.
+  // Per-file idle timers (after-delay mode) and a coalescing queue so a slow
+  // disk never overlaps writes or drops a save requested during one.
   const autosaveTimersRef = useRef(new Map<string, number>());
-  const savingPathsRef = useRef(new Set<string>());
+  const saveQueueRef = useRef(createSaveQueue());
   // Notes variant: assigned below (declaration order), invoked from writeFile.
   const renameNoteRef = useRef<(path: string, content: string) => void>(() => undefined);
 
@@ -1077,43 +1078,46 @@ export function EditorSubsystem({
       if (!root) {
         return;
       }
-      const file = filesRef.current.get(path);
-      if (!file?.model || savingPathsRef.current.has(path)) {
-        return;
-      }
-      savingPathsRef.current.add(path);
-      try {
-        // Snapshot content and version together: keystrokes typed while the
-        // write is in flight must stay dirty (they are not on disk).
-        const contentAtSave = file.model.getValue();
-        const versionAtSave = file.model.getAlternativeVersionId();
-        const result = await fsWrite(root, path, contentAtSave, overwrite ? undefined : file.mtimeMs);
-        // The tab may have closed (or the root switched) while writing.
-        if (filesRef.current.get(path) !== file || !file.model) {
+      const generation = rootGenRef.current;
+      await saveQueueRef.current.run(path, overwrite, async (queuedOverwrite) => {
+        if (rootGenRef.current !== generation) {
           return;
         }
-        if (result.ok) {
-          file.mtimeMs = result.mtimeMs;
-          file.savedVersionId = versionAtSave;
-          file.dirty = file.model.getAlternativeVersionId() !== versionAtSave;
-          file.conflict = false;
-          file.deleted = false;
-          if (isNotes && isUntitledNote(fileNameOf(file.path)) && contentAtSave.trim() !== '') {
-            // First save with real content: adopt a content-derived filename.
-            renameNoteRef.current(file.path, contentAtSave);
-          }
-          // Disk changed: tree badges and the gutter both need a re-read.
-          scheduleGitRefresh();
-          setGutterTick((tick) => tick + 1);
-        } else {
-          file.conflict = true;
+        const file = filesRef.current.get(path);
+        if (!file?.model) {
+          return;
         }
-        bump();
-      } catch (err) {
-        onError(err instanceof Error ? err.message : String(err));
-      } finally {
-        savingPathsRef.current.delete(path);
-      }
+        try {
+          // Snapshot content and version together: keystrokes typed while the
+          // write is in flight must stay dirty (they are not on disk).
+          const contentAtSave = file.model.getValue();
+          const versionAtSave = file.model.getAlternativeVersionId();
+          const result = await fsWrite(root, path, contentAtSave, queuedOverwrite ? undefined : file.mtimeMs);
+          // The tab may have closed (or the root switched) while writing.
+          if (filesRef.current.get(path) !== file || !file.model) {
+            return;
+          }
+          if (result.ok) {
+            file.mtimeMs = result.mtimeMs;
+            file.savedVersionId = versionAtSave;
+            file.dirty = file.model.getAlternativeVersionId() !== versionAtSave;
+            file.conflict = false;
+            file.deleted = false;
+            if (isNotes && isUntitledNote(fileNameOf(file.path)) && contentAtSave.trim() !== '') {
+              // First save with real content: adopt a content-derived filename.
+              renameNoteRef.current(file.path, contentAtSave);
+            }
+            // Disk changed: tree badges and the gutter both need a re-read.
+            scheduleGitRefresh();
+            setGutterTick((tick) => tick + 1);
+          } else {
+            file.conflict = true;
+          }
+          bump();
+        } catch (err) {
+          onError(err instanceof Error ? err.message : String(err));
+        }
+      });
     },
     [root, bump, onError, isNotes, scheduleGitRefresh]
   );

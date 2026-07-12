@@ -32,6 +32,15 @@ export function moveTab(tabs: string[], from: number, to: number): string[] {
   return next;
 }
 
+export function tabDropTargetIndex(from: number, hovered: number, after: boolean, length: number): number {
+  if (from < 0 || from >= length || hovered < 0 || hovered >= length) {
+    return from;
+  }
+  const insertionIndex = hovered + (after ? 1 : 0);
+  const finalIndex = insertionIndex > from ? insertionIndex - 1 : insertionIndex;
+  return Math.max(0, Math.min(length - 1, finalIndex));
+}
+
 export function fileNameOf(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1) || path;
 }
