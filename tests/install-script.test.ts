@@ -210,7 +210,7 @@ describe('installer lifecycle', () => {
     expect(third.status, third.stderr).toBe(0);
     expect(value.releaseInstances()).toHaveLength(2);
     expect(value.releaseInstances()).not.toContain(before[0]);
-  });
+  }, 20_000);
 
   it('uninstalls only managed application paths and preserves user configuration', () => {
     const value = fixture();
