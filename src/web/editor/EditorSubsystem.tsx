@@ -1968,6 +1968,16 @@ export function EditorSubsystem({
         return;
       }
       const resolved = check.resolved ?? path;
+      // Switching root disposes every open model and clears the tab list. Confirm
+      // first if any buffer is unsaved — otherwise switching root silently threw
+      // away in-progress edits (only per-tab close had a dirty guard).
+      const dirtyPaths = [...filesRef.current.entries()].filter(([, file]) => file.dirty).map(([openPath]) => openPath);
+      if (dirtyPaths.length > 0) {
+        const summary = dirtyPaths.length === 1 ? dirtyPaths[0] : `${dirtyPaths.length} files`;
+        if (!window.confirm(`Discard unsaved changes in ${summary} and switch workspace root?`)) {
+          return;
+        }
+      }
       // Invalidate in-flight opens/restores from the previous root and stop
       // suppressing persistence so the new root is written out.
       rootGenRef.current += 1;

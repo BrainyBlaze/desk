@@ -753,8 +753,14 @@ export function ExplorerTree({
               ? menuItem(<Trash2 size={12} />, selectedPaths.size > 1 ? `Delete ${selectedPaths.size} files` : 'Delete', true, () => {
                   setMenu(null);
                   if (selectedPaths.size > 1) {
-                    setConfirmDelete(null);
                     const pathsToDelete = Array.from(selectedPaths);
+                    // Confirm the bulk delete — single-file delete shows a danger
+                    // modal, but multi-select used to delete immediately with no
+                    // prompt and no undo.
+                    if (!window.confirm(`Delete ${pathsToDelete.length} selected items? This cannot be undone.`)) {
+                      return;
+                    }
+                    setConfirmDelete(null);
                     const performDeleteMultiple = async (): Promise<void> => {
                       try {
                         for (const path of pathsToDelete) {
