@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { copyFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -78,6 +78,7 @@ interface ParsedArgs {
   command: string;
   manifestPath?: string;
   dryRun: boolean;
+  force: boolean;
   target?: string;
   lines: number;
   options: Map<string, string>;
@@ -111,7 +112,22 @@ function main(argv: string[]): number {
     }
 
     if (args.command === 'init') {
-      withManifestFileLockSync(manifestPath, () => writeManifestFile(manifestPath, createEmptyManifest()));
+      // Never silently destroy an existing config. Overwriting with an empty
+      // manifest is irreversible (atomic rename), so refuse unless --force, and
+      // even then keep a .bak copy. Run `desk config` to find the file.
+      if (existsSync(manifestPath) && !args.force) {
+        console.error(
+          `desk: ${manifestPath} already exists — refusing to overwrite it.\n` +
+            `Run 'desk config' to see it, or 'desk init --force' to replace it (a .bak copy is kept).`
+        );
+        return 1;
+      }
+      withManifestFileLockSync(manifestPath, () => {
+        if (existsSync(manifestPath)) {
+          copyFileSync(manifestPath, `${manifestPath}.bak`);
+        }
+        writeManifestFile(manifestPath, createEmptyManifest());
+      });
       console.log(`created ${manifestPath}`);
       return 0;
     }
@@ -182,6 +198,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   const command = args.shift() ?? 'help';
   let manifestPath: string | undefined;
   let dryRun = false;
+  let force = false;
   let target: string | undefined;
   let lines = 200;
   const options = new Map<string, string>();
@@ -192,6 +209,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       manifestPath = requireValue(next, args.shift());
     } else if (next === '--dry-run') {
       dryRun = true;
+    } else if (next === '--force') {
+      force = true;
     } else if (next === '--lines') {
       lines = Number.parseInt(requireValue(next, args.shift()), 10);
     } else if (next?.startsWith('--')) {
@@ -203,7 +222,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { command, manifestPath, dryRun, target, lines, options };
+  return { command, manifestPath, dryRun, force, target, lines, options };
 }
 
 function requireValue(flag: string, value: string | undefined): string {

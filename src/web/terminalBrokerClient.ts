@@ -160,6 +160,14 @@ export class TerminalBrokerClient {
       this.socket = undefined;
     }
     this.connected = false;
+    // Clear `connecting` too. If forceReconnect fires while a socket is still
+    // mid-CONNECTING (wake-from-sleep triggers online + visibilitychange + pulse
+    // in sequence, and SYN retries can hold the socket in CONNECTING for
+    // seconds), we just orphaned that socket above — its close handler bails on
+    // the `this.socket !== socket` guard and never resets the flag, so leaving
+    // it true wedges every future ensureConnection() on the early-return and the
+    // Reconnect button becomes a permanent no-op. Mirrors agentSurfaceClient.
+    this.connecting = false;
     if (this.surfaces.size > 0) {
       this.ensureConnection();
     }

@@ -5,6 +5,11 @@ import type { TerminalBrokerServerFrame } from '../src/core/terminalBrokerProtoc
 class FakeSocket implements BrokerSocket {
   readyState = 0; // CONNECTING
   sent: string[] = [];
+  /** When true, close() defers the 'close' event (models a real browser
+   * WebSocket, whose close is async — the event fires a task later, after the
+   * caller may have replaced this.socket). Flush with fireDeferredClose(). */
+  deferredClose = false;
+  private pendingClose = false;
   private handlers: Record<string, ((e: any) => void)[]> = {};
   addEventListener(type: string, handler: (e: any) => void): void {
     (this.handlers[type] ??= []).push(handler);
@@ -13,6 +18,17 @@ class FakeSocket implements BrokerSocket {
     this.sent.push(data);
   }
   close(): void {
+    if (this.deferredClose) {
+      this.readyState = 2; // CLOSING
+      this.pendingClose = true;
+      return;
+    }
+    this.fire('close', {});
+  }
+  fireDeferredClose(): void {
+    if (!this.pendingClose) return;
+    this.pendingClose = false;
+    this.readyState = 3; // CLOSED
     this.fire('close', {});
   }
   open(): void {
@@ -138,6 +154,32 @@ describe('TerminalBrokerClient', () => {
     // pendingResize was cleared after the first send, so a clean reconnect with
     // no NEW resize must not duplicate it; the subscribe carries current state.
     expect(latest.parsedSent().some((f) => f.type === 'subscribe' && f.surfaceId === 's1')).toBe(true);
+  });
+
+  it('does not wedge when Reconnect fires while the socket is still CONNECTING (wake-from-sleep)', () => {
+    const { client, sockets } = makeClient();
+    client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
+    expect(sockets).toHaveLength(1);
+    // Socket 0 is CONNECTING (never opened) — the wake-from-sleep window where SYN
+    // retries hold it open for seconds. Model the real browser: close() is async.
+    sockets[0].deferredClose = true;
+    // online + visibilitychange + pulse recovery all call forceReconnect here.
+    client.forceReconnect();
+    // A NEW connection attempt MUST be made. Before the fix, `connecting` stayed
+    // true (the orphaned socket's async close bails on the stale-socket guard and
+    // never resets it), so ensureConnection early-returned — permanently wedged,
+    // and the Reconnect button became a no-op.
+    expect(sockets).toHaveLength(2);
+    // The orphaned socket's async close now arrives; it must not corrupt the new one.
+    sockets[0].fireDeferredClose();
+    sockets[1].open();
+    const sub = sockets[1].parsedSent().find((f) => f.type === 'subscribe' && f.surfaceId === 's1');
+    expect(sub).toBeTruthy();
+    // Genuinely reconnected: live output flows again.
+    const out: string[] = [];
+    client.subscribe('s1', 'sess', true, { onOutput: (d) => out.push(d), onSnapshot: () => {} });
+    sockets[1].emit({ type: 'output', session: 'sess', data: 'ok' });
+    expect(out).toEqual(['ok']);
   });
 
   it('tears down the socket when the last surface unsubscribes', () => {
