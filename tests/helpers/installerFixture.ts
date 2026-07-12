@@ -206,7 +206,7 @@ exit 92
 
   run(options: InstallerRunOptions = {}): SpawnSyncReturns<string> {
     const args = options.args ?? [];
-    const result = spawnSync('bash', [...(process.platform === 'darwin' ? ['-x'] : []), INSTALLER, ...args], {
+    const result = spawnSync('bash', [INSTALLER, ...args], {
       cwd: this.outside,
       env: {
         ...process.env,

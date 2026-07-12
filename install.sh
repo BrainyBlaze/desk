@@ -11,6 +11,7 @@ NPM_VERSION="10.9.8"
 BUN_VERSION="1.3.14"
 LOCK_TOKEN=""
 LOCK_OWNED=0
+MAIN_COMPLETED=0
 WORK_DIR=""
 STAGED_RELEASE=""
 PROMOTED_RELEASE=""
@@ -194,6 +195,9 @@ LOCK
 cleanup_on_exit() {
   set -- "$?"
   local status="$1" active=""
+  if [ "$status" -eq 0 ] && [ "$MAIN_COMPLETED" -ne 1 ]; then
+    status=1
+  fi
   trap - EXIT
   if [ -n "$STAGED_RELEASE" ] && [ -e "$STAGED_RELEASE" ]; then
     rm -rf -- "$STAGED_RELEASE"
@@ -335,7 +339,7 @@ install_missing_packages() {
   [ -n "${MISSING_CAPABILITIES[*]-}" ] || return 0
   detect_package_manager
   [ -n "$PACKAGE_MANAGER" ] || die "missing required host capabilities and no supported package manager was found: ${MISSING_CAPABILITIES[*]}"
-  info "Provisioning required host capabilities (${MISSING_CAPABILITIES[*]}) with $PACKAGE_MANAGER…"
+  info "Provisioning required host capabilities (${MISSING_CAPABILITIES[*]}) with ${PACKAGE_MANAGER}…"
   case "$PACKAGE_MANAGER" in
     brew)
       ensure_macos_tooling
@@ -774,7 +778,7 @@ build_release() {
   mkdir -p -- "$version_dir"
   STAGED_RELEASE="$DESK_HOME/releases/.staging-$install_id"
   mv -- "$source_root" "$STAGED_RELEASE"
-  info "Installing locked application dependencies with Desk Node $NODE_VERSION…"
+  info "Installing locked application dependencies with Desk Node ${NODE_VERSION}…"
   (
     cd "$STAGED_RELEASE"
     PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" ci
@@ -1137,7 +1141,7 @@ install_desk() {
   mkdir -p -- "$DESK_HOME" "$DESK_HOME/releases" "$DESK_HOME/toolchains"
   WORK_DIR="$(mktemp -d "$DESK_HOME/.install-work.XXXXXX")"
   resolve_release_version
-  info "Installing Desk $VERSION for $TARGET/$HOST_LIBC…"
+  info "Installing Desk $VERSION for $TARGET/${HOST_LIBC}…"
   download_release_metadata
   validate_install_manifest
   ensure_node_toolchain
@@ -1173,6 +1177,7 @@ main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   if [ "${1:-}" = "--uninstall" ]; then uninstall_desk; else install_desk; fi
+  MAIN_COMPLETED=1
 }
 
 main "$@"

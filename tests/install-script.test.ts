@@ -55,6 +55,7 @@ describe('source-backed installer contract', () => {
     expect(source).toContain('${DESK_HOME}.install-lock');
     expect(source).not.toContain('DESK_INSTALL_DIR');
     expect(source).not.toContain(['desk', 'server'].join('-'));
+    expect(source).not.toMatch(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/u);
   });
 
   it('has valid Bash syntax', () => {
