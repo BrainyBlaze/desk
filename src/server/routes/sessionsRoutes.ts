@@ -274,24 +274,30 @@ function readLayoutSizesBody(value: unknown): DeskLayoutSizes | undefined {
   return sizes;
 }
 
-function runManagedPlan(
+export interface ManagedPlanResult {
+  exitCode: number;
+  error?: string;
+}
+
+export function runManagedPlan(
   plan: TmuxPlanAction[],
   settings: DeskSettings | undefined,
   managedAgentLsp: ManagedAgentLsp,
-  nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec
-): number {
+  nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec,
+  start: typeof startSession = startSession
+): ManagedPlanResult {
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = startSession(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
+    const started = start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
-      return 1;
+      return { exitCode: 1, error: started.error ?? `tmux start failed for ${action.session.tmuxSession}` };
     }
   }
-  return 0;
+  return { exitCode: 0 };
 }
 
 export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute {
@@ -303,7 +309,10 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const desk = loadDesk({});
       const plan = planDeskUp(desk.sessions);
       const settings = readManifestFile(resolveManifestPath()).settings;
-      const exitCode = dryRun ? runPlan(plan, true) : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
+      const result = dryRun
+        ? { exitCode: runPlan(plan, true) }
+        : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
+      const { exitCode } = result;
       if (!dryRun && exitCode === 0) {
         for (const action of plan) {
           if (action.type === 'start') {
@@ -313,6 +322,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       }
       sendJson(res, exitCode === 0 ? 200 : 500, {
         exitCode,
+        ...('error' in result && result.error ? { error: result.error } : {}),
         actions: plan.map((action) => ({
           type: action.type,
           session: action.session.name,
