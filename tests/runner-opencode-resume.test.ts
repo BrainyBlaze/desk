@@ -16,6 +16,66 @@ afterEach(() => {
 });
 
 describe('opencode launch resume fallback', () => {
+  it('does not auto-resume custom commands that carry opencode metadata', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-custom-opencode-runner-'));
+    try {
+      const cwd = join(root, 'project');
+      mkdirSync(cwd);
+      const sessionsPath = join(root, 'sessions.json');
+      const stubPath = join(root, 'opencode-stub.js');
+      writeFileSync(
+        sessionsPath,
+        JSON.stringify([
+          {
+            id: 'ses_recent',
+            title: 'recent',
+            created: Date.now() - 2000,
+            updated: Date.now() - 1000,
+            projectId: 'global',
+            directory: cwd
+          }
+        ])
+      );
+      writeFileSync(
+        stubPath,
+        `#!/usr/bin/env node
+const fs = require('node:fs');
+process.stdout.write(fs.readFileSync(process.env.TEST_OPENCODE_SESSIONS, 'utf8'));
+`
+      );
+      chmodSync(stubPath, 0o755);
+      const spec = buildSessionSpecs(
+        parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ${cwd}
+    groups:
+      - id: main
+        sessions:
+          - name: custom
+            command: printf custom
+            agent: opencode
+            uiMode: terminal
+`),
+        { homeDir: root }
+      )[0]!;
+
+      const prepared = prepareSessionForLaunch(spec, {
+        env: {
+          ...process.env,
+          DESK_OPENCODE_BIN: stubPath,
+          TEST_OPENCODE_SESSIONS: sessionsPath
+        },
+        homeDir: root
+      });
+
+      expect(prepared.command).toBe(spec.command);
+      expect(prepared.command).not.toContain('DESK_OPENCODE_RESUME_ID');
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it('launches opencode with the single recent cwd session when resume is unset', async () => {
     const now = Date.now();
     const result = await runPreparedOpencodeCommandWithSessions([
@@ -83,6 +143,52 @@ describe('opencode launch resume fallback', () => {
 });
 
 describe('opencode launch config materialization', () => {
+  it('does not create pending resume captures for custom commands with opencode metadata', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-custom-opencode-capture-'));
+    try {
+      const cwd = join(root, 'project');
+      const bin = join(root, 'bin');
+      const statePath = join(root, 'resume-captures.json');
+      mkdirSync(cwd);
+      mkdirSync(bin);
+      const tmuxPath = join(bin, 'tmux');
+      writeFileSync(
+        tmuxPath,
+        `#!/usr/bin/env node
+process.exit(0);
+`
+      );
+      chmodSync(tmuxPath, 0o755);
+      process.env = {
+        ...originalEnv,
+        PATH: `${bin}:${originalEnv.PATH ?? ''}`,
+        DESK_OPENCODE_CONFIG_DIR: join(root, 'opencode-config'),
+        DESK_RESUME_CAPTURE_STATE_PATH: statePath
+      };
+      const spec = buildSessionSpecs(
+        parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ${cwd}
+    groups:
+      - id: main
+        sessions:
+          - name: custom
+            command: printf custom
+            agent: opencode
+            uiMode: terminal
+`),
+        { homeDir: root }
+      )[0]!;
+      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.tmuxSession] }];
+
+      expect(runPlan(plan, false)).toBe(0);
+      expect(readPendingResumeCaptures({ path: statePath })).toEqual([]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it('prepares the Desk-owned opencode config for real runPlan starts but not dry-run', () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-opencode-config-launch-'));
     try {

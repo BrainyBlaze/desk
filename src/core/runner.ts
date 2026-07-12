@@ -256,7 +256,7 @@ export function prepareSessionForLaunchWithMetadata(
   session: SessionSpec,
   options: PrepareSessionForLaunchOptions = {}
 ): PreparedSessionForLaunch {
-  if (session.agent !== 'opencode' || session.resume) {
+  if (session.customCommand || session.agent !== 'opencode' || session.resume) {
     return { session };
   }
   // BUG-7 fix: skip the auto-resume heuristic for native-mode sessions. Native mode
@@ -303,7 +303,7 @@ function prepareSessionStart(session: SessionSpec): { ok: true } | { ok: false; 
 }
 
 function pendingCaptureForLaunch(session: SessionSpec, launchResumeId?: string) {
-  if (session.agent !== 'opencode' || session.resume) {
+  if (session.customCommand || session.agent !== 'opencode' || session.resume) {
     return null;
   }
   const now = Date.now();
