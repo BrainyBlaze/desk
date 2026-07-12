@@ -1,6 +1,6 @@
 {
   "name": "desk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Agent-first from the ground up: a terminal multiplexer for whole agent fleets, an IDE/CDE with LSPs visible to agents out of the box, and Slack-style inter-agent chat — plus git, notes, and more.",
   "license": "BUSL-1.1",
@@ -35,6 +35,7 @@
     "test": "vitest run",
     "dev": "tsx src/cli/main.ts",
     "generate:codex-bindings": "node scripts/generate-codex-bindings.mjs",
+    "release:assets": "node scripts/create-release-assets.mjs",
     "smoke:serve-modes": "node scripts/smoke-serve-modes.mjs",
     "serve": "vite --host 127.0.0.1",
     "ui": "vite --host 127.0.0.1"
