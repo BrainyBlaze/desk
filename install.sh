@@ -103,7 +103,7 @@ command -v tmux >/dev/null 2>&1 \
   || warn "tmux not found — Desk needs tmux at runtime (apt install tmux / brew install tmux)."
 
 printf '\n\033[32m✓ Desk %s installed → %s/%s\033[0m\n\n' "$version" "$dir" "$CMD"
-if [ -e "${dir}/desk" ]; then
+if [ -e "${dir}/desk" ] || [ -L "${dir}/desk" ]; then
   warn "existing ${dir}/desk left unchanged. Earlier standalone installers used that name; inspect 'type -a desk' and 'command -v desk' before removing or renaming it."
 fi
 case ":${PATH}:" in

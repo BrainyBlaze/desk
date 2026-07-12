@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +22,7 @@ const roots: string[] = [];
 
 interface RunInstallerOptions {
   legacyDesk?: string;
+  legacyDeskSymlink?: string;
 }
 
 function runInstaller(options: RunInstallerOptions = {}) {
@@ -65,6 +69,9 @@ cp "$FAKE_DESK_ASSET" "$out"
   if (options.legacyDesk !== undefined) {
     writeFileSync(join(installDir, 'desk'), options.legacyDesk);
   }
+  if (options.legacyDeskSymlink !== undefined) {
+    symlinkSync(options.legacyDeskSymlink, join(installDir, 'desk'));
+  }
 
   const result = spawnSync('bash', [INSTALLER], {
     env: {
@@ -108,6 +115,17 @@ describe('release installer command contract', () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(readFileSync(join(result.installDir, 'desk'), 'utf8')).toBe('keep-this-cli');
+    expect(result.stdout).toContain('existing');
+    expect(result.stdout).toContain('/desk');
+  });
+
+  it('warns about but does not mutate a dangling desk symlink', () => {
+    const result = runInstaller({ legacyDeskSymlink: 'missing-cli-target' });
+    const legacyDesk = join(result.installDir, 'desk');
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(lstatSync(legacyDesk).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(legacyDesk)).toBe('missing-cli-target');
     expect(result.stdout).toContain('existing');
     expect(result.stdout).toContain('/desk');
   });
