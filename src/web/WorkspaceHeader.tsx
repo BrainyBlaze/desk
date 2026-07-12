@@ -14,6 +14,7 @@ import {
 import { Cmd, Pill, TextReveal } from './arwes/primitives.js';
 import type { DeskBleepName } from './arwes/bleeps.js';
 import { CommandButton, HeaderClock, TelemetryCell } from './headerPrimitives.js';
+import { useNarrowViewport } from './sidebarPanel.js';
 import {
   formatBytes,
   formatGpuDetail,
@@ -61,8 +62,14 @@ function WorkspaceHeaderImpl({
   const nvidia = systemSnapshot?.gpu.nvidia;
   const intel = systemSnapshot?.gpu.intel;
   const bleeps = useBleeps<DeskBleepName>();
+  const narrowViewport = useNarrowViewport();
   // Phone band: the toolbar collapses into a burger; this owns that menu.
   const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!narrowViewport) {
+      setMenuOpen(false);
+    }
+  }, [narrowViewport]);
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (event: KeyboardEvent) => {
