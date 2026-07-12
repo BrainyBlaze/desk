@@ -397,8 +397,16 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }
 
       if ((event.ctrlKey || event.metaKey) && key === 'v') {
+        // On a plain-HTTP LAN/mobile deployment the async clipboard API is
+        // absent (non-secure context). Intercepting Ctrl+V there produced a
+        // silent no-op AND suppressed the browser's native paste event that
+        // xterm handles on its own — so paste was impossible. When readText is
+        // unavailable, do NOT preventDefault: let the native paste flow to xterm.
+        if (!navigator.clipboard?.readText) {
+          return true;
+        }
         event.preventDefault();
-        void navigator.clipboard?.readText().then((text) => {
+        void navigator.clipboard.readText().then((text) => {
           if (text) {
             setInputActive(true);
             resetLiveScroll();
