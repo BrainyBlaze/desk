@@ -166,6 +166,7 @@ export function ProjectsSubsystem({
   projectIdRef.current = projectId;
   const boardGenRef = useRef(0);
   const pickerRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   // Bottom status bar context: which board, item pressure, gh identity.
   useEffect(() => {
@@ -390,10 +391,19 @@ export function ProjectsSubsystem({
       return;
     }
     const onPointerDown = (event: PointerEvent): void => {
-      if (pickerRef.current && event.target instanceof Node && !pickerRef.current.contains(event.target)) {
+      const target = event.target instanceof Node ? event.target : null;
+      if (pickerRef.current && target && !pickerRef.current.contains(target)) {
         setPickerOpen(false);
       }
-      setMenu(null);
+      // Only dismiss the context menu when the press is OUTSIDE it. Dismissing
+      // unconditionally on pointerdown unmounted the menu before the button's
+      // click could land, so every menu action (Open details, Archive, Assign
+      // me, Copy URL, Remove) was dead. menuItem's own onClick closes the menu.
+      if (menuRef.current && target && !menuRef.current.contains(target)) {
+        setMenu(null);
+      } else if (!menuRef.current) {
+        setMenu(null);
+      }
     };
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
@@ -1206,7 +1216,7 @@ export function ProjectsSubsystem({
       </Panel>
 
       {menu ? (
-        <div className="treeContextMenu" style={{ left: menu.x, top: menu.y, clipPath: CLIP_OCTAGON_TINY }}>
+        <div ref={menuRef} className="treeContextMenu" style={{ left: menu.x, top: menu.y, clipPath: CLIP_OCTAGON_TINY }}>
           <Animator combine manager="stagger" duration={{ stagger: 0.015 }}>
             {menuItem(<ScanEye size={12} />, 'Open details', false, () => setActiveItem(menu.item))}
             {menu.item.content?.url
