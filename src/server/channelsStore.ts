@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -87,6 +88,8 @@ export interface ChannelSummary {
   goal: string;
   members: ChannelMember[];
   messageCount: number;
+  /** Opaque content-addressed revision of the root conversation. */
+  contentRevision: string;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
 }
 
@@ -102,6 +105,8 @@ export interface ChannelDetail {
   members: ChannelMember[];
   messages: ChannelMessage[];
   files: ChannelFileEntry[];
+  /** Matches ChannelSummary.contentRevision for the same root conversation. */
+  contentRevision: string;
   /** more messages exist before the first loaded one (scroll up to fetch) */
   hasOlder: boolean;
   /** more messages exist after the last loaded one (scroll down / jump-to-latest) */
@@ -267,11 +272,46 @@ export function listChannelMembers(home: string, channel: string): ChannelMember
 }
 
 /**
- * Channel-summary cache keyed by root.md + _members mtimes. The UI polls the
- * state endpoint every few seconds per client; without this, every poll
- * re-parses every conversation in full.
+ * Channel-summary cache keyed by a root.md stat fingerprint + _members mtime.
+ * The UI polls the state endpoint every few seconds per client; without this,
+ * every poll re-parses and hashes every conversation in full.
  */
-const summaryCache = new Map<string, { rootMtimeMs: number; membersMtimeMs: number; summary: ChannelSummary }>();
+const summaryCache = new Map<string, { rootFingerprint: string; membersMtimeMs: number; summary: ChannelSummary }>();
+
+function summaryCacheKey(home: string, channel: string): string {
+  return `${home}/${channel}`;
+}
+
+function invalidateChannelSummary(home: string, channel: string): void {
+  summaryCache.delete(summaryCacheKey(home, channel));
+}
+
+interface RootSnapshot {
+  text: string;
+  fingerprint: string;
+  contentRevision: string;
+}
+
+function fileFingerprint(path: string): string {
+  const stats = statSync(path, { bigint: true });
+  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+}
+
+function rootContentRevision(text: string): string {
+  return `sha256:${createHash('sha256').update(text).digest('hex')}`;
+}
+
+function readStableRoot(rootFile: string): RootSnapshot {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const before = fileFingerprint(rootFile);
+    const text = readFileSync(rootFile, 'utf8');
+    const after = fileFingerprint(rootFile);
+    if (before === after) {
+      return { text, fingerprint: after, contentRevision: rootContentRevision(text) };
+    }
+  }
+  throw new Error(`channel changed repeatedly while reading ${rootFile}`);
+}
 
 function mtimeOf(path: string): number {
   try {
@@ -294,23 +334,25 @@ export function listChannels(home = resolveChannelsHome()): ChannelSummary[] {
     if (!existsSync(rootFile)) {
       continue;
     }
-    const cacheKey = `${home}/${entry.name}`;
-    const rootMtimeMs = mtimeOf(rootFile);
-    // Dir mtime moves on member add/remove; manifests are never edited in place.
-    const membersMtimeMs = mtimeOf(join(home, entry.name, '_members'));
-    const cached = summaryCache.get(cacheKey);
-    if (cached && cached.rootMtimeMs === rootMtimeMs && cached.membersMtimeMs === membersMtimeMs) {
-      summaries.push(cached.summary);
-      continue;
-    }
+    const cacheKey = summaryCacheKey(home, entry.name);
     try {
-      const { preamble, messages } = parseConversation(readFileSync(rootFile, 'utf8'));
+      const rootFingerprint = fileFingerprint(rootFile);
+      // Dir mtime moves on member add/remove; manifests are never edited in place.
+      const membersMtimeMs = mtimeOf(join(home, entry.name, '_members'));
+      const cached = summaryCache.get(cacheKey);
+      if (cached && cached.rootFingerprint === rootFingerprint && cached.membersMtimeMs === membersMtimeMs) {
+        summaries.push(cached.summary);
+        continue;
+      }
+      const snapshot = readStableRoot(rootFile);
+      const { preamble, messages } = parseConversation(snapshot.text);
       const last = messages[messages.length - 1];
       const summary: ChannelSummary = {
         name: entry.name,
         goal: channelGoal(preamble),
         members: listChannelMembers(home, entry.name),
         messageCount: messages.length,
+        contentRevision: snapshot.contentRevision,
         lastMessage: last
           ? {
               id: last.id,
@@ -320,7 +362,7 @@ export function listChannels(home = resolveChannelsHome()): ChannelSummary[] {
             }
           : undefined
       };
-      summaryCache.set(cacheKey, { rootMtimeMs, membersMtimeMs, summary });
+      summaryCache.set(cacheKey, { rootFingerprint: snapshot.fingerprint, membersMtimeMs, summary });
       summaries.push(summary);
     } catch {
       // unreadable channel — skip
@@ -357,6 +399,7 @@ export function createChannel(home: string, name: string, goal: string): void {
       throw err;
     }
   });
+  invalidateChannelSummary(home, name);
 }
 
 export function ensureUploadFileBucket(home: string, name: string): void {
@@ -380,6 +423,7 @@ export function destroyChannel(home: string, name: string): void {
       rmSync(channelDir(home, name), { recursive: true, force: true });
     });
   });
+  invalidateChannelSummary(home, name);
 }
 
 export function addMember(
@@ -407,6 +451,7 @@ export function removeMember(home: string, channel: string, name: string): void 
     throw new Error(`invalid member name: ${name}`);
   }
   rmSync(join(channelDir(home, channel), '_members', `${name}.md`), { force: true });
+  invalidateChannelSummary(home, channel);
 }
 
 export function updateMemberRole(
@@ -437,6 +482,7 @@ export function updateMemberRole(
       functions
     })
   );
+  invalidateChannelSummary(home, channel);
   return updated;
 }
 
@@ -464,6 +510,7 @@ function addMemberUnlocked(
       agentLabel: member.agentLabel
     })
   );
+  invalidateChannelSummary(home, channel);
   return { name: member.name, type: member.type, status: 'active', joined, tmuxSession: member.tmuxSession };
 }
 
@@ -492,7 +539,8 @@ export function readChannelDetail(home: string, channel: string, opts?: MessageS
   if (!existsSync(rootFile)) {
     throw new Error(`channel '${channel}' not found`);
   }
-  const { preamble, messages } = parseConversation(readFileSync(rootFile, 'utf8'));
+  const snapshot = readStableRoot(rootFile);
+  const { preamble, messages } = parseConversation(snapshot.text);
   const window = opts
     ? sliceMessages(messages, opts)
     : { messages, hasOlder: false, hasNewer: false, total: messages.length, startIndex: 0 };
@@ -502,6 +550,7 @@ export function readChannelDetail(home: string, channel: string, opts?: MessageS
     members: listChannelMembers(home, channel),
     messages: window.messages,
     files: listChannelFiles(home, channel),
+    contentRevision: snapshot.contentRevision,
     hasOlder: window.hasOlder,
     hasNewer: window.hasNewer,
     total: window.total,
@@ -730,6 +779,7 @@ export function editChannelGoal(home: string, channel: string, goal: string): vo
       lines.splice(1, 0, '', clean);
     }
     writeFileAtomic(rootFile, lines.join('\n'));
+    invalidateChannelSummary(home, channel);
   });
 }
 
@@ -865,6 +915,7 @@ export async function appendMessage(home: string, channel: string, options: Appe
         appendBlockAtomic(rootFile, block);
       }
 
+      invalidateChannelSummary(home, channel);
       const message: ChannelMessage = { id, author: options.author, timestamp, body: options.body.trim(), hasEndTurn: true };
       return { message, file: fileName };
     })
@@ -959,6 +1010,7 @@ export async function editMessage(
       target.body = body.replace(/\r\n/g, '\n').trim();
       target.hasEndTurn = true;
       writeFileAtomic(filePath, rebuildConversation(parsed.preamble, parsed.messages));
+      invalidateChannelSummary(home, channel);
       return target;
     })
   );
@@ -988,6 +1040,7 @@ export async function deleteMessage(home: string, channel: string, fileName: str
       if (fileName.startsWith('thread-')) {
         updateParentThreadLink(home, channel, fileName.slice('thread-'.length, -'.md'.length));
       }
+      invalidateChannelSummary(home, channel);
     })
   );
 }
@@ -1136,6 +1189,9 @@ export class ChannelsWatcher {
       messages = parseConversation(readFileSync(filePath, 'utf8')).messages;
     } catch {
       return;
+    }
+    if (fileName === 'root.md') {
+      invalidateChannelSummary(this.home, channel);
     }
     for (const message of messages) {
       if (!message.hasEndTurn || this.hasSeen(channel, fileName, message.id)) {

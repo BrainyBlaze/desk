@@ -1989,6 +1989,41 @@ describe('channels store', () => {
     expect(listChannels(home)[0]).toMatchObject({ name: 'ops', messageCount: 1 });
   });
 
+  it('changes the channel content revision for root-message add, edit, and delete', async () => {
+    createChannel(home, 'ops', 'goal');
+
+    const initialSummary = listChannels(home)[0];
+    const initialDetail = readChannelDetail(home, 'ops');
+    expect(initialSummary.contentRevision).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(initialDetail.contentRevision).toBe(initialSummary.contentRevision);
+
+    const first = await appendMessage(home, 'ops', { author: 'human', body: 'first' });
+    const afterAppend = listChannels(home)[0].contentRevision;
+    expect(afterAppend).not.toBe(initialSummary.contentRevision);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterAppend);
+
+    const rootFile = join(home, 'ops', 'root.md');
+    const watcher = new ChannelsWatcher(home, () => undefined);
+    watcher.prewarm();
+    writeFileSync(rootFile, readFileSync(rootFile, 'utf8').replace('first', 'other'));
+    watcher.scanFile('ops', 'root.md');
+    const afterExternalEdit = listChannels(home)[0].contentRevision;
+    expect(afterExternalEdit).not.toBe(afterAppend);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterExternalEdit);
+    watcher.stop();
+
+    await editMessage(home, 'ops', 'root.md', first.message.id, 'edited');
+    const afterEdit = listChannels(home)[0].contentRevision;
+    expect(afterEdit).not.toBe(afterExternalEdit);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterEdit);
+
+    await deleteMessage(home, 'ops', 'root.md', first.message.id);
+    const afterDelete = listChannels(home)[0].contentRevision;
+    expect(afterDelete).not.toBe(afterEdit);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterDelete);
+    expect(listChannels(home)[0].contentRevision).toBe(afterDelete);
+  });
+
   it('creates thread files and back-links the parent message', async () => {
     createChannel(home, 'ops', 'goal');
     const parent = await appendMessage(home, 'ops', { author: 'human', body: 'root question' });
