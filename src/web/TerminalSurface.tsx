@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { terminalBroker } from './terminalBrokerClient.js';
+import { terminalSessionKey } from './terminalSessionKey.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -882,7 +883,14 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       onDataDisposable.dispose();
       terminalBroker.unsubscribe(surfaceId);
     };
-  }, [session, revision]);
+    // Keyed on the STABLE session identity (tmux target, state, name, cwd), not
+    // the session object: a mutation elsewhere ships a fresh snapshot whose
+    // session objects have new identities but identical content, and re-running
+    // this effect then would clear/resubscribe/reflash every mounted terminal
+    // (the reported "flaky rendering"). terminalSessionKey captures exactly the
+    // fields this effect body reads, so it re-runs iff one of them changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalSessionKey(session), revision]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
