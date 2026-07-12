@@ -205,7 +205,8 @@ exit 92
   }
 
   run(options: InstallerRunOptions = {}): SpawnSyncReturns<string> {
-    return spawnSync('bash', [INSTALLER, ...(options.args ?? [])], {
+    const args = options.args ?? [];
+    const result = spawnSync('bash', [...(process.platform === 'darwin' ? ['-x'] : []), INSTALLER, ...args], {
       cwd: this.outside,
       env: {
         ...process.env,
@@ -220,6 +221,10 @@ exit 92
       encoding: 'utf8',
       timeout: 30_000
     });
+    if (result.status === 0 && !args.includes('--uninstall') && !existsSync(this.launcher())) {
+      throw new Error(`installer exited successfully without activating a launcher\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    }
+    return result;
   }
 
   launcher(): string {
