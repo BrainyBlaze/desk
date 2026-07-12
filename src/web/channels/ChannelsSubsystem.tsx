@@ -350,6 +350,15 @@ export function ChannelsSubsystem({
     }
     const onKey = (event: KeyboardEvent): void => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return; // don't hijack Cmd-K while the user is typing in a field
+        }
+        // An App-level modal (e.g. Settings) owns the keyboard; navState.blocked
+        // only sees Channels-owned overlays, so check the DOM for any .deskModal.
+        if (document.querySelector('.deskModal')) {
+          return; // don't open the palette over an open modal
+        }
         event.preventDefault();
         setPaletteOpen((prev) => !prev);
       }
@@ -412,6 +421,12 @@ export function ChannelsSubsystem({
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return; // typing, not navigating
+      }
+      // An App-level modal (e.g. Settings) owns the keyboard; navState.blocked
+      // only tracks Channels-owned overlays, so j/k/s/t could otherwise mutate
+      // the hidden feed from a non-input control inside that modal.
+      if (document.querySelector('.deskModal')) {
+        return;
       }
       const state = navStateRef.current;
       if (state.blocked) {

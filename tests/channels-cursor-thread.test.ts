@@ -43,4 +43,14 @@ describe('ChannelsSubsystem cursor/thread wiring', () => {
     expect(source).toContain('void refreshThread(channel, parentId)');
     expect(source).not.toContain('void refreshThread(selected, parentId)');
   });
+
+  it('both Channels key listeners ignore an open App modal (Settings), which navState.blocked cannot see', () => {
+    // One .deskModal guard in the Cmd-K listener, one in the j/k/s/t listener.
+    const modalGuards = source.match(/document\.querySelector\('\.deskModal'\)/g) ?? [];
+    expect(modalGuards.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('the Cmd-K palette toggle also ignores editable targets (no hijack while typing)', () => {
+    expect(source).toContain("don't hijack Cmd-K while the user is typing in a field");
+  });
 });
