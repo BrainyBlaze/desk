@@ -84,6 +84,7 @@ import {
 } from './gitClient.js';
 import { bumpGitRevision } from '../gitRevision.js';
 import { getEditorRoot, useEditorRoot } from '../editorRoot.js';
+import { startGitStatusPolling } from './gitPolling.js';
 
 const REPO_STORAGE_KEY = 'desk.gitRepo';
 const STATUS_POLL_MS = 3000;
@@ -844,10 +845,9 @@ export function GitSubsystem({
     if (!active || !repoPath) {
       return;
     }
-    const timer = window.setInterval(() => {
+    return startGitStatusPolling(() => {
       void refreshAll();
     }, STATUS_POLL_MS);
-    return () => window.clearInterval(timer);
   }, [active, repoPath, refreshAll]);
 
   useEffect(() => {

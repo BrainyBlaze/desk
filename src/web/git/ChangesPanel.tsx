@@ -21,6 +21,7 @@ import { fileIcon } from '../editor/fileIcons.js';
 import { fileNameOf } from '../editor/editorState.js';
 import type { GitStatus, GitStatusEntry } from './gitClient.js';
 import { dirOf, groupChanges, statusBadge } from './gitStatusMeta.js';
+import { useClampedMenu } from '../menuPosition.js';
 
 export type ChangeGroup = 'staged' | 'changes' | 'merge';
 
@@ -70,6 +71,7 @@ export function ChangesPanel({
   const bleeps = useBleeps<DeskBleepName>();
   const [menu, setMenu] = useState<RowMenuState | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState<GitStatusEntry[] | null>(null);
+  const menuRef = useClampedMenu(menu);
 
   useEffect(() => {
     if (!menu) {
@@ -282,7 +284,7 @@ export function ChangesPanel({
         </div>
       ) : null}
       {menu ? (
-        <div className="treeContextMenu" style={{ left: menu.x, top: menu.y, clipPath: CLIP_OCTAGON_TINY }}>
+        <div ref={menuRef} className="treeContextMenu" style={{ left: menu.x, top: menu.y, clipPath: CLIP_OCTAGON_TINY }}>
           <Animator combine manager="stagger" duration={{ stagger: 0.015 }}>
             {menuItem(<GitCompareArrows size={12} />, 'Open diff', false, () => onOpenDiff(menu.entry, menu.group))}
             {menuItem(<FileCode size={12} />, 'Open file', false, () => onOpenFile(menu.entry.path))}

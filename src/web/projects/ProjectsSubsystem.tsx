@@ -87,6 +87,7 @@ import {
 import { BoardView } from './BoardView.js';
 import { TableView } from './TableView.js';
 import { ItemDrawer } from './ItemDrawer.js';
+import { useClampedMenu } from '../menuPosition.js';
 
 const PROJECT_STORAGE_KEY = 'desk.ghProject';
 const POLL_MS = 45_000;
@@ -166,7 +167,7 @@ export function ProjectsSubsystem({
   projectIdRef.current = projectId;
   const boardGenRef = useRef(0);
   const pickerRef = useRef<HTMLDivElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useClampedMenu(menu);
 
   // Bottom status bar context: which board, item pressure, gh identity.
   useEffect(() => {

@@ -11,7 +11,7 @@ import {
 import type { GitStatusEntry } from '../src/web/git/gitClient.js';
 
 function entry(partial: Partial<GitStatusEntry>): GitStatusEntry {
-  return { path: 'f', index: ' ', worktree: ' ', untracked: false, conflicted: false, ...partial };
+  return { path: 'f', index: '.', worktree: '.', untracked: false, conflicted: false, ...partial };
 }
 
 describe('gitStatusCounts', () => {
@@ -31,6 +31,10 @@ describe('gitStatusCounts', () => {
 
   it('empty tree is clean', () => {
     expect(gitStatusCounts([])).toEqual({ staged: 0, changed: 0, conflicted: 0 });
+  });
+
+  it('does not count porcelain-v2 dot sentinels as changes', () => {
+    expect(gitStatusCounts([entry({})])).toEqual({ staged: 0, changed: 0, conflicted: 0 });
   });
 });
 

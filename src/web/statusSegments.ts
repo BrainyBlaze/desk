@@ -84,10 +84,10 @@ export function gitStatusCounts(entries: GitStatusEntry[]): GitStatusCounts {
       counts.conflicted += 1;
       continue;
     }
-    if (!entry.untracked && entry.index !== ' ' && entry.index !== '?') {
+    if (!entry.untracked && entry.index !== '.') {
       counts.staged += 1;
     }
-    if (entry.untracked || (entry.worktree !== ' ' && entry.worktree !== '?')) {
+    if (entry.untracked || entry.worktree !== '.') {
       counts.changed += 1;
     }
   }
