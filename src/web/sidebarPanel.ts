@@ -24,9 +24,12 @@ export function readStoredSidebarCollapsed(value: string | null): boolean {
 
 /* ---------- narrow-viewport (mobile/tablet) layout decisions ---------- */
 
-/** Sampled per call; boot-time consumers capture the value once. */
+/** Sampled per call; boot-time consumers capture the value once. Uses the SAME
+ *  boundary as the CSS `@media (max-width: 860px)` block (inclusive of 860), so
+ *  JS drawer behavior and CSS drawer styling never disagree at exactly 860px —
+ *  the width where the sidebar became a CSS overlay with no JS scrim/tap-out. */
 export function isNarrowViewport(): boolean {
-  return typeof window !== 'undefined' && window.innerWidth < 860;
+  return typeof window !== 'undefined' && window.innerWidth <= 860;
 }
 
 /** Live narrow-viewport flag: tracks the same 860px boundary as the CSS
@@ -35,7 +38,7 @@ export function isNarrowViewport(): boolean {
 export function useNarrowViewport(): boolean {
   const [narrow, setNarrow] = useState(isNarrowViewport);
   useEffect(() => {
-    const query = window.matchMedia('(max-width: 859px)');
+    const query = window.matchMedia('(max-width: 860px)');
     const onChange = (): void => setNarrow(query.matches);
     onChange();
     query.addEventListener('change', onChange);
