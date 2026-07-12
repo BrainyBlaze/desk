@@ -58,7 +58,8 @@ import { EditorTabs, type TabMeta } from './EditorTabs.js';
 import { MonacoHost, type RevealTarget } from './MonacoHost.js';
 import { closeTab, fileNameOf, moveTab, openTab } from './editorState.js';
 import { createSaveQueue } from './saveQueue.js';
-import { initMonaco, languageForPath, monaco } from './monacoSetup.js';
+import { initMonaco, monaco } from './monacoSetup.js';
+import { acquireSharedTextModel } from './sharedTextModels.js';
 import type { EditorLspBinding } from './lsp/editorLspBinding.js';
 import { perfMarkFirst, perfMarkOpen } from './lsp/perfTelemetry.js';
 import { isMarkdownFile, rawFileUrl, viewerKindFor, type ViewerKind } from './fileKinds.js';
@@ -74,6 +75,8 @@ interface OpenFile {
   /** current absolute path — updated in place when an untitled note is renamed */
   path: string;
   model: monaco.editor.ITextModel | null;
+  modelChangeSubscription: monaco.IDisposable | null;
+  releaseModel: (() => void) | null;
   savedVersionId: number;
   mtimeMs: number;
   dirty: boolean;
@@ -87,6 +90,14 @@ interface OpenFile {
   renderMarkdown: boolean;
   /** bumped on disk changes so viewers re-fetch the raw bytes */
   rawRevision: number;
+}
+
+function releaseOpenFileModel(file: OpenFile): void {
+  file.modelChangeSubscription?.dispose();
+  file.modelChangeSubscription = null;
+  file.releaseModel?.();
+  file.releaseModel = null;
+  file.model = null;
 }
 
 interface ExistingTextModelForLsp {
@@ -364,7 +375,7 @@ export function EditorSubsystem({
   useEffect(() => {
     return () => {
       for (const file of filesRef.current.values()) {
-        file.model?.dispose();
+        releaseOpenFileModel(file);
       }
       filesRef.current.clear();
       if (persistTimerRef.current !== null) {
@@ -1220,6 +1231,8 @@ export function EditorSubsystem({
           files.set(path, {
             path,
             model: null,
+            modelChangeSubscription: null,
+            releaseModel: null,
             savedVersionId: 0,
             mtimeMs: 0,
             dirty: false,
@@ -1242,20 +1255,16 @@ export function EditorSubsystem({
           }
           if (result.ok) {
             initMonaco();
-            const uri = monaco.Uri.file(path);
-            // A model for this Uri may survive a previous open (createModel
-            // throws on duplicates) — reuse it with fresh content.
-            const existing = monaco.editor.getModel(uri);
-            if (existing) {
-              existing.setValue(result.content);
-            }
-            const model = existing ?? monaco.editor.createModel(result.content, languageForPath(path), uri);
+            const lease = acquireSharedTextModel(path, result.content);
+            const model = lease.model;
             const file: OpenFile = {
               path,
               model,
-              savedVersionId: model.getAlternativeVersionId(),
+              modelChangeSubscription: null,
+              releaseModel: lease.release,
+              savedVersionId: lease.diskMatches ? model.getAlternativeVersionId() : -1,
               mtimeMs: result.mtimeMs,
-              dirty: false,
+              dirty: !lease.diskMatches,
               conflict: false,
               deleted: false,
               readonlyReason: null,
@@ -1264,7 +1273,7 @@ export function EditorSubsystem({
               renderMarkdown: false,
               rawRevision: 0
             };
-            model.onDidChangeContent((event) => {
+            file.modelChangeSubscription = model.onDidChangeContent((event) => {
               const dirty = model.getAlternativeVersionId() !== file.savedVersionId;
               if (dirty !== file.dirty) {
                 file.dirty = dirty;
@@ -1293,6 +1302,8 @@ export function EditorSubsystem({
             files.set(path, {
               path,
               model: null,
+              modelChangeSubscription: null,
+              releaseModel: null,
               savedVersionId: 0,
               mtimeMs: 0,
               dirty: false,
@@ -1409,11 +1420,13 @@ export function EditorSubsystem({
         return;
       }
       cancelAutosave(path);
-      // Capture uri/languageId before disposing the model (dispose loses both).
+      // Capture uri/languageId before releasing the model (the final lease disposes it).
       if (file?.model) {
         lspBindingRef.current?.closeModel({ uri: file.model.uri.toString(), languageId: file.model.getLanguageId() });
       }
-      file?.model?.dispose();
+      if (file) {
+        releaseOpenFileModel(file);
+      }
       filesRef.current.delete(path);
       watcherRef.current?.unwatch(path);
       const next = closeTab(tabsRef.current, activeTabRef.current, path);
@@ -2000,7 +2013,7 @@ export function EditorSubsystem({
       }
       autosaveTimersRef.current.clear();
       for (const [openPath, file] of filesRef.current) {
-        file.model?.dispose();
+        releaseOpenFileModel(file);
         watcherRef.current?.unwatch(openPath);
       }
       filesRef.current.clear();
