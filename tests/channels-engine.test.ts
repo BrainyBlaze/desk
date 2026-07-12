@@ -2227,6 +2227,99 @@ describe('engine drain race safety', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  it('does not force-deliver while the physical paste is in flight past the watchdog', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-watchdog-'));
+    const sent: string[] = [];
+    let resolvePush: (() => void) | undefined;
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        if (sent.length === 1) {
+          await new Promise<void>((resolve) => {
+            resolvePush = resolve;
+          });
+        }
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => '❯ '
+    });
+    const members = [member('alpha', 'tmux-a')];
+    try {
+      engine.handleMessage(
+        { channel: 'ops', file: 'root.md', message: message('msg-force-watchdog', 'human', '@alpha go') },
+        members
+      );
+      await waitFor(() => sent.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(await engine.forceDeliver('tmux-a')).toBe(false);
+      expect(sent).toHaveLength(1);
+    } finally {
+      resolvePush?.();
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('invalidates a stale gated drain before force-delivering another queued item', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-generation-'));
+    const sent: string[] = [];
+    let captureCalls = 0;
+    let resolveFirstCapture: ((pane: string) => void) | undefined;
+    let markFirstCaptureStarted: (() => void) | undefined;
+    const firstCaptureStarted = new Promise<void>((resolve) => {
+      markFirstCaptureStarted = resolve;
+    });
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 60_000,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => {
+        captureCalls += 1;
+        if (captureCalls === 1) {
+          markFirstCaptureStarted?.();
+          return new Promise<string>((resolve) => {
+            resolveFirstCapture = resolve;
+          });
+        }
+        return '❯ ';
+      }
+    });
+    try {
+      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-force-first');
+      await firstCaptureStarted;
+      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-force-second');
+      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
+      expect(targetSeq).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(true);
+      expect(sent).toEqual(['second prompt']);
+
+      resolveFirstCapture?.('❯ ');
+      await flush();
+      expect(sent).toEqual(['second prompt']);
+    } finally {
+      resolveFirstCapture?.('❯ ');
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('does not apply a stale prompt-gate decision after the queue head changes', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-gate-race-'));
     const sent: string[] = [];

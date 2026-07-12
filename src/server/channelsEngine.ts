@@ -2009,18 +2009,25 @@ export class ChannelsEngine {
         return false;
       }
     }
-    // Respect a genuinely in-flight drain (within the watchdog window) so a
-    // forced push can't race the gated one into a double delivery.
-    if (runtime.draining && Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs) {
+    // Respect a physical paste regardless of watchdog age. The watchdog may
+    // reclaim a pre-paste await, but it must never launch a second paste while
+    // the first sendText call is still unresolved.
+    if (
+      runtime.draining &&
+      (runtime.deliveryInFlight || Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs)
+    ) {
       return false;
     }
+    const generation = ++runtime.drainGeneration;
     runtime.draining = true;
     runtime.drainingSince = Date.now();
     try {
       this.resetHold(runtime);
       return await this.deliverNext(runtime, false, seq);
     } finally {
-      runtime.draining = false;
+      if (runtime.drainGeneration === generation) {
+        runtime.draining = false;
+      }
     }
   }
 
