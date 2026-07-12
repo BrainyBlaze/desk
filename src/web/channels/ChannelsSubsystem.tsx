@@ -123,6 +123,7 @@ import {
   shouldSwitchChannelForNavigation
 } from './channelsModel.js';
 import type { AddableAgentRuntimeState, ChannelSidebarSectionId } from './channelsModel.js';
+import { createDetailRefreshGate } from './detailRefreshGate.js';
 import { Composer } from './Composer.js';
 import { EngineConsole } from './EngineConsole.js';
 import { CommandPalette, type PaletteCommand } from './CommandPalette.js';
@@ -733,7 +734,18 @@ export function ChannelsSubsystem({
   // message with context around it. Cached channel switches use this path only
   // when unread messages arrived while away; no-new switches restore the
   // memoized window and viewport.
+  const detailGateRef = useRef(createDetailRefreshGate());
   const refreshDetail = useCallback(async (channel: string, options: { initialWindow?: boolean; summary?: ChannelSummary } = {}): Promise<void> => {
+    // Reconcile refetches (the live poll's revision-diff + stale-cursor recovery
+    // — options.initialWindow falsey) are single-flight per channel: skip when
+    // one is already running so a slow refetch is not relaunched every tick. An
+    // explicit reload (initialWindow — channel switch / reanchor / jump) always
+    // runs. Either way the token sequences the apply, so a slow older response
+    // can never overwrite a newer mutation.
+    const token = detailGateRef.current.begin(channel, !options.initialWindow);
+    if (token === null) {
+      return;
+    }
     try {
       const summary = options.summary ?? channelsRef.current.find((entry) => entry.name === channel);
       const since = options.initialWindow && summary ? channelInitialLoadSince(summary, seenMapRef.current[channel]) : null;
@@ -742,7 +754,10 @@ export function ChannelsSubsystem({
         setRestoreScrollChannel(null);
       }
       const next = await channelsDetail(channel, since);
-      if (selectedRef.current === channel) {
+      // Apply only if still selected AND this is still the latest refresh for the
+      // channel — a newer refresh bumps the token and wins, so a stale response
+      // is dropped instead of overwriting fresher content.
+      if (selectedRef.current === channel && detailGateRef.current.isCurrent(channel, token)) {
         setDetail(next);
         if (threadRef.current) {
           const stillExists = next.messages.some((message) => message.id === threadRef.current);
@@ -754,6 +769,8 @@ export function ChannelsSubsystem({
       }
     } catch (err) {
       report(err);
+    } finally {
+      detailGateRef.current.end(channel, token);
     }
   }, [beginVisit, report]);
 
