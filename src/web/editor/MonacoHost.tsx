@@ -66,7 +66,19 @@ export function MonacoHost({ model, activePath, reveal, onRevealConsumed, onSave
       scrollBeyondLastLine: false,
       padding: { top: 8 }
     });
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current());
+    // Instance-scoped Ctrl/Cmd+S via onKeyDown, NOT editor.addCommand: addCommand
+    // registers in Monaco's shared standalone keybinding service with no `when`
+    // clause, so the most-recently-mounted MonacoHost (editor vs notes) owned
+    // Ctrl+S for EVERY Monaco editor on the page, including the git diff view —
+    // pressing save could save (or no-op against) the wrong file. onKeyDown fires
+    // only for the editor that has focus.
+    editor.onKeyDown((e) => {
+      if ((e.ctrlKey || e.metaKey) && e.keyCode === monaco.KeyCode.KeyS) {
+        e.preventDefault();
+        e.stopPropagation();
+        onSaveRef.current();
+      }
+    });
     editor.onDidChangeCursorPosition((event) => {
       onCursorRef.current?.({ line: event.position.lineNumber, column: event.position.column });
     });
