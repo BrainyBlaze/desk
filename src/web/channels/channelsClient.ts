@@ -53,6 +53,11 @@ export interface ChannelSummary {
   members: ChannelMember[];
   messageCount: number;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
+  /** Opaque content-addressed revision of the channel's root conversation.
+   *  Changes on ANY mutation the count/last-id/preview signature can miss —
+   *  a mid-history delete, or an in-place edit of an existing message. Compare
+   *  for equality only (server-minted sha256); never parse or order it. */
+  contentRevision: string;
 }
 
 export interface ChannelFileEntry {
@@ -79,6 +84,10 @@ export interface ChannelDetail {
   firstMessageAt?: string;
   /** protocol timestamp of the channel's most recent message (last activity) */
   lastMessageAt?: string;
+  /** Matches ChannelSummary.contentRevision for the same root conversation, so
+   *  the poll can reconcile a loaded detail against the freshly polled summary
+   *  by equality even when the tail signature is unchanged. */
+  contentRevision: string;
 }
 
 /** A contiguous slice of a channel's messages plus its boundary flags. */

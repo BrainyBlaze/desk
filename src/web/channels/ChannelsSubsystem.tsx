@@ -977,6 +977,19 @@ export function ChannelsSubsystem({
           if (threadRef.current) {
             void refreshThread(selectedSummary.name, threadRef.current);
           }
+        } else if (!loaded.hasNewer && selectedSummary.contentRevision !== loaded.contentRevision) {
+          // The tail signature (count / last-id / preview) is UNCHANGED yet the
+          // server's content-addressed revision moved: a message was edited in
+          // place, or one was deleted from mid-history. Neither shifts the tail,
+          // so the loadNewer path above is blind to it and the feed would show
+          // stale content until the next hard reload. A partial append also
+          // leaves the loaded revision deliberately stale (loadNewer fetches
+          // only after-cursor messages and cannot safely adopt the whole-root
+          // revision), so this same branch performs the reconciling full reload
+          // one tick later. We are at the tail (!hasNewer), so refreshDetail
+          // lands the reader on the newest with no scroll yank; a scrolled-up
+          // reader (hasNewer) is left undisturbed and reconciles on return.
+          void refreshDetail(selectedSummary.name);
         }
         // Member join/leave only touches metadata, never the message window.
         if (loaded.members.length !== selectedSummary.members.length) {
