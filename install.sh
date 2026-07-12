@@ -79,7 +79,7 @@ validate_install_paths() {
 
 validate_requested_inputs() {
   if [ -n "${DESK_VERSION:-}" ] &&
-    ! [[ "$DESK_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+    ! printf '%s\n' "$DESK_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'; then
     die "DESK_VERSION must be a canonical vX.Y.Z release tag: $DESK_VERSION"
   fi
   if [ -n "${DESK_RELEASE_BASE_URL:-}" ]; then
@@ -87,6 +87,13 @@ validate_requested_inputs() {
     case "$DESK_RELEASE_BASE_URL" in *'?'*|*'#'*|*'@'*) die "DESK_RELEASE_BASE_URL contains forbidden URL syntax." ;; esac
     [ -n "${DESK_VERSION:-}" ] || die "DESK_VERSION is required with DESK_RELEASE_BASE_URL."
   fi
+}
+
+is_nonnegative_integer() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 detect_target() {
@@ -164,8 +171,8 @@ acquire_install_lock() {
     owner_host="$(lock_field host || true)"
     owner_pid="$(lock_field pid || true)"
     owner_started="$(lock_field started || true)"
-    if [ "$owner_host" = "$host" ] && [[ "$owner_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$owner_pid" 2>/dev/null &&
-      [[ "$owner_started" =~ ^[0-9]+$ ]] && [ $((now - owner_started)) -gt 600 ]; then
+    if [ "$owner_host" = "$host" ] && is_nonnegative_integer "$owner_pid" && ! kill -0 "$owner_pid" 2>/dev/null &&
+      is_nonnegative_integer "$owner_started" && [ $((now - owner_started)) -gt 600 ]; then
       stale="${LOCK_DIR}.stale.$LOCK_TOKEN"
       mv -- "$LOCK_DIR" "$stale" 2>/dev/null || die "install lock changed while checking staleness: $LOCK_DIR"
       rm -rf -- "$stale"
