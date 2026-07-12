@@ -154,6 +154,12 @@ function parseArgs(argv: string[]): ParsedArgs {
   let target: string | undefined;
   let lines = 200;
   const options = new Map<string, string>();
+  const valueOptions =
+    command === 'add'
+      ? new Set(['group', 'group-label', 'name', 'cwd', 'command', 'agent', 'resume'])
+      : command === 'hooks'
+        ? new Set(['home'])
+        : new Set<string>();
 
   while (args.length > 0) {
     const next = args.shift();
@@ -163,10 +169,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       dryRun = true;
     } else if (next === '--lines') {
       lines = Number.parseInt(requireValue(next, args.shift()), 10);
-    } else if (next === '--standalone') {
-      throw new Error('unknown option --standalone');
     } else if (next?.startsWith('--')) {
-      options.set(next.slice(2), requireValue(next, args.shift()));
+      const name = next.slice(2);
+      if (!valueOptions.has(name)) {
+        throw new Error(`unknown option ${next}`);
+      }
+      options.set(name, requireValue(next, args.shift()));
     } else if (next && !target) {
       target = next;
     } else if (next) {
@@ -210,24 +218,22 @@ function requireOption(options: Map<string, string>, name: string): string {
 }
 
 const cliArgs = process.argv.slice(2);
-const rejectedTopLevelOption = cliArgs.includes('--standalone')
-  ? '--standalone'
-  : cliArgs[0] !== 'serve' && cliArgs.includes('--dev')
-    ? '--dev'
-    : undefined;
-if (rejectedTopLevelOption !== undefined) {
-  console.error(`unknown option ${rejectedTopLevelOption}`);
-  process.exitCode = 1;
-} else if (cliArgs[0] === 'channels') {
+if (cliArgs[0] === 'channels') {
   process.exitCode = await runChannelsCli(cliArgs.slice(1));
 } else if (cliArgs[0] === 'agent-host') {
-  // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
-  // fatal error, or signal — top-level await is the natural exit gate.
-  try {
-    await runAgentHostFromEnv();
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
+  const argument = cliArgs[1];
+  if (argument !== undefined) {
+    console.error(argument.startsWith('--') ? `unknown option ${argument}` : `unexpected argument ${argument}`);
     process.exitCode = 1;
+  } else {
+    // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
+    // fatal error, or signal — top-level await is the natural exit gate.
+    try {
+      await runAgentHostFromEnv();
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
   }
 } else {
   process.exitCode = await main(cliArgs);
