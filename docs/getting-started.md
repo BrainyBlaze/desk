@@ -37,8 +37,8 @@ Optional tools unlock additional features:
     ```
 
     The installer downloads the release binary for your platform, verifies its
-    checksum, and installs it as `desk-server` (in `/usr/local/bin` or
-    `~/.local/bin`).
+    checksum when a matching release checksum and a SHA-256 tool are available,
+    and installs it as `desk-server` (in `/usr/local/bin` or `~/.local/bin`).
 
     <Check>
     `command -v desk-server` prints the install path.

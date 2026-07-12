@@ -1,17 +1,17 @@
 # Desk CLI installation and serve contract
 
-**Status:** Approved design
+**Status:** Approved future design; implementation pending
 
 **Date:** 2026-07-12
 
-**Supersedes:** `docs/standalone-command-contract-spec.md`
+**Supersedes after implementation:** `docs/standalone-command-contract-spec.md`
 
 ## Summary
 
 Desk will expose one user-facing command: `desk`. The curl installer will install
 the complete source-backed CLI on supported macOS and Linux hosts, including WSL,
 and will provision every missing required dependency. Native Windows is not
-supported in this change.
+supported by the proposed change.
 
 The serve contract is explicit:
 

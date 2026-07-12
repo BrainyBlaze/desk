@@ -49,7 +49,7 @@ The `package.json` `bin.desk` mapping remains pointed at `dist/cli/main.js`. No 
 
 ### 2. Install the standalone as `desk-server`
 
-`install.sh` keeps its current platform detection, release resolution, checksum verification, install-directory selection, and sudo fallback. Only the installed command contract changes:
+`install.sh` keeps its current platform detection, release resolution, best-effort checksum verification, install-directory selection, and sudo fallback. A checksum mismatch fails the install; missing checksum metadata or local SHA-256 tooling emits a warning and skips verification. Only the installed command contract changes:
 
 - the downloaded `desk-server-<target>` asset is installed as `${dir}/desk-server`;
 - success and next-step output tells the user to run `desk-server`;
