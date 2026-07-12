@@ -898,6 +898,13 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     // this effect then would clear/resubscribe/reflash every mounted terminal
     // (the reported "flaky rendering"). terminalSessionKey captures exactly the
     // fields this effect body reads, so it re-runs iff one of them changes.
+    //
+    // `revision` is NOT a global mutation counter — it is this session's entry in
+    // the per-session terminalRevisions map (AgentMultiplexer passes
+    // terminalRevisions[tmuxSession]), bumped ONLY by restartExistingSession and
+    // confirmUiModeSwitch for THAT session (App.tsx). Those genuinely replace the
+    // tmux target/mode, so re-attaching this one terminal is required and correct;
+    // an unrelated boot/layout/reorder never changes it. Keep it in the deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terminalSessionKey(session), revision]);
 
