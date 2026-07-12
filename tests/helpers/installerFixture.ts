@@ -167,6 +167,7 @@ exit 92
     chmodSync(sourceRoot, 0o775);
     writeFileSync(join(sourceRoot, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
     writeFileSync(join(sourceRoot, 'package-lock.json'), '{}\n');
+    chmodSync(join(sourceRoot, 'package.json'), 0o664);
     symlinkSync('package.json', join(sourceRoot, 'package-link.json'));
     const sourceAsset = 'desk-v0.3.0-source.tar.gz';
     const sourcePath = join(this.releaseDir, sourceAsset);

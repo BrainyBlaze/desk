@@ -582,7 +582,7 @@ def normalized(name):
     if value in seen: raise ValueError(f"duplicate archive path: {value}")
     seen.add(value); roots.add(parts[0]); return value
 def safe_mode(mode, is_dir=False):
-    if mode & 0o7000 or mode & 0o002 or (not is_dir and mode & 0o020): raise ValueError(f"unsafe archive mode: {mode:o}")
+    if mode & 0o7000 or mode & 0o002: raise ValueError(f"unsafe archive mode: {mode:o}")
     return (mode & 0o755) or (0o755 if is_dir else 0o644)
 def inside(path):
     resolved=os.path.realpath(path)
