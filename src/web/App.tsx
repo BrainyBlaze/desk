@@ -852,7 +852,23 @@ export function App(): JSX.Element {
     }
     const onKey = (event: KeyboardEvent): void => {
       const key = event.key;
-      const inTerminal = event.target instanceof HTMLElement && Boolean(event.target.closest('.terminalSurfaceShell'));
+      // Never hijack keys while a modal is open or the user is typing in a field.
+      // Ctrl+Alt+digit is indistinguishable from AltGr+digit on European layouts,
+      // so typing an AltGr symbol into a modal field or the sidebar filter used to
+      // be swallowed and refocus a cell; and the palette / cell-focus / session-nav
+      // shortcuts must not fire behind an open modal.
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (
+        modal !== null ||
+        (target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable))
+      ) {
+        return;
+      }
+      const inTerminal = target !== null && Boolean(target.closest('.terminalSurfaceShell'));
       if (event.ctrlKey && !event.altKey && key.toLowerCase() === 'k' && (event.shiftKey || !inTerminal)) {
         event.preventDefault();
         event.stopPropagation();
@@ -900,7 +916,7 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey, true);
     // selectCellSession/revealAgentSession are per-render closures over the same state
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroup, cellActiveSessions, cellAssignments, selectedTmux, snapshot, subsystem]);
+  }, [activeGroup, cellActiveSessions, cellAssignments, selectedTmux, snapshot, subsystem, modal]);
 
   useEffect(() => {
     // The agents group REMOUNTS on subsystem switches and gets its width from
