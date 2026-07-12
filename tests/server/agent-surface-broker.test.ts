@@ -283,6 +283,42 @@ describe('AgentSurfaceBroker — visibility-gated forwarding', () => {
 });
 
 describe('AgentSurfaceBroker — surface → host command routing', () => {
+  it('rejects commands from a subscribed but hidden surface', async () => {
+    const harness = await startBroker();
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+
+    const browser = await harness.connectBrowser();
+    await browser.waitFor((f) => (f as { type?: string }).type === 'ready');
+    browser.send({ type: 'subscribe', session: 's1', surfaceId: 'hidden', visible: false });
+    browser.send({ type: 'send', session: 's1', surfaceId: 'hidden', text: 'must not send' });
+    browser.send({ type: 'respond-permission', session: 's1', surfaceId: 'hidden', requestId: 'perm-1', optionId: 'allow' });
+    browser.send({ type: 'interrupt', session: 's1', surfaceId: 'hidden' });
+
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 500;
+      const poll = (): void => {
+        if (browser.received.filter((f) => (f as { type?: string }).type === 'error').length >= 3) {
+          resolve();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new Error('timed out waiting for hidden-surface errors'));
+          return;
+        }
+        setTimeout(poll, 10);
+      };
+      poll();
+    });
+
+    expect(browser.received.filter((f) => (f as { type?: string }).type === 'error')).toHaveLength(3);
+    expect(host.received.filter((f) => ['inject', 'respond-permission', 'interrupt'].includes((f as { type?: string }).type ?? ''))).toHaveLength(0);
+    browser.close();
+    host.close();
+    harness.close();
+  });
+
   it('rejects permission responses and interrupts from an unsubscribed surface', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
