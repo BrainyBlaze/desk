@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { terminalBroker } from './terminalBrokerClient.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
+import { shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -417,7 +418,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }
 
       if (event.ctrlKey && event.altKey && key === 'c') {
-        void navigator.clipboard?.writeText(serializeAddon.serialize());
+        // Route through copyText so a plain-HTTP (non-secure) context still
+        // copies via the execCommand fallback instead of silently no-oping when
+        // the async clipboard is absent.
+        copyText(serializeAddon.serialize());
         return false;
       }
 
@@ -588,8 +592,16 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       event.clipboardData?.setData('text/plain', selection);
     };
     const handleContextMenu = (event: MouseEvent): void => {
-      event.preventDefault();
       const selection = getSelectedText(terminal);
+      const canRead = Boolean(navigator.clipboard?.readText);
+      // Only swallow the native menu when we can offer something better: a
+      // selection to copy, or async-clipboard paste. On plain HTTP with no
+      // selection, let the browser's native menu (and its Paste item) through
+      // rather than preventDefaulting into a dead no-op.
+      if (!shouldSuppressContextMenu(Boolean(selection), canRead)) {
+        return;
+      }
+      event.preventDefault();
       if (selection) {
         const openMenu = selectionMenuRef.current;
         if (openMenu) {
@@ -599,7 +611,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         }
         return;
       }
-      void navigator.clipboard?.readText().then((text) => {
+      void navigator.clipboard!.readText().then((text) => {
         if (text) {
           setInputActive(true);
           resetLiveScroll();
@@ -1030,7 +1042,9 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
               const viewer = viewerRef.current;
               if (viewer?.hasSelection()) {
                 event.preventDefault();
-                void navigator.clipboard?.writeText(viewer.getSelection()).catch(() => undefined);
+                // copyText falls back to execCommand on plain HTTP; a bare
+                // navigator.clipboard?.writeText would copy nothing there.
+                copyText(viewer.getSelection());
               }
             }
           }}
