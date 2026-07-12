@@ -15,16 +15,20 @@
  *     read/unread boundary, so the SAVED viewport anchor may be off-window;
  *     seed the read anchor (readAnchorId), which sits at that boundary instead.
  *
- * Falling back to null is harmless: it is no worse than the pre-seed behaviour
- * (first j → oldest row) for a channel never visited or read.
+ * When neither a saved nor a read anchor exists (a never-visited channel), fall
+ * back to the newest in-window message: a fresh/newest window loads at the tail
+ * and a cached window's last row is always present, so seeding it keeps the
+ * first j in-window (it becomes a no-op — nothing follows the newest — rather
+ * than the jump-to-oldest). Only a truly empty channel yields null.
  */
 export function channelSwitchCursorSeed(
   savedAnchorMessageId: string | null | undefined,
   readAnchorId: string | null | undefined,
-  useSavedAnchor: boolean
+  useSavedAnchor: boolean,
+  newestInWindowId: string | null | undefined
 ): string | null {
   if (useSavedAnchor) {
-    return savedAnchorMessageId ?? readAnchorId ?? null;
+    return savedAnchorMessageId ?? readAnchorId ?? newestInWindowId ?? null;
   }
-  return readAnchorId ?? null;
+  return readAnchorId ?? newestInWindowId ?? null;
 }

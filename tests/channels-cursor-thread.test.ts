@@ -4,23 +4,30 @@ import { channelSwitchCursorSeed } from '../src/web/channels/channelCursorSeed.j
 
 describe('channelSwitchCursorSeed', () => {
   it('seeds the saved viewport anchor on a plain cached restore (useSavedAnchor=true)', () => {
-    expect(channelSwitchCursorSeed('saved-1', 'read-1', true)).toBe('saved-1');
+    expect(channelSwitchCursorSeed('saved-1', 'read-1', true, 'newest-1')).toBe('saved-1');
   });
 
   it('falls back to the read anchor when there is no saved viewport anchor', () => {
-    expect(channelSwitchCursorSeed(undefined, 'read-1', true)).toBe('read-1');
-    expect(channelSwitchCursorSeed(null, 'read-1', true)).toBe('read-1');
+    expect(channelSwitchCursorSeed(undefined, 'read-1', true, 'newest-1')).toBe('read-1');
+    expect(channelSwitchCursorSeed(null, 'read-1', true, 'newest-1')).toBe('read-1');
   });
 
   it('ignores the saved anchor on a fresh/reanchor visit and seeds the read anchor', () => {
     // The saved viewport anchor may be off the re-fetched window, which would
     // re-trigger the oldest-row jump; the read anchor sits in the new window.
-    expect(channelSwitchCursorSeed('saved-1', 'read-1', false)).toBe('read-1');
+    expect(channelSwitchCursorSeed('saved-1', 'read-1', false, 'newest-1')).toBe('read-1');
   });
 
-  it('returns null only when the channel was never visited or read', () => {
-    expect(channelSwitchCursorSeed(null, null, true)).toBeNull();
-    expect(channelSwitchCursorSeed(undefined, undefined, false)).toBeNull();
+  it('falls back to the newest in-window id for a never-visited channel (no saved/read anchor)', () => {
+    // The exact gap: without this, the seed is null, adjacentMessageId treats
+    // null like unknown, and the first j still jumps to the oldest row.
+    expect(channelSwitchCursorSeed(null, null, true, 'newest-1')).toBe('newest-1');
+    expect(channelSwitchCursorSeed(undefined, undefined, false, 'newest-1')).toBe('newest-1');
+  });
+
+  it('returns null only for a truly empty channel (no anchors AND no messages)', () => {
+    expect(channelSwitchCursorSeed(null, null, true, null)).toBeNull();
+    expect(channelSwitchCursorSeed(undefined, undefined, false, undefined)).toBeNull();
   });
 });
 
@@ -28,8 +35,12 @@ describe('ChannelsSubsystem cursor/thread wiring', () => {
   const source = readFileSync(new URL('../src/web/channels/ChannelsSubsystem.tsx', import.meta.url), 'utf8');
 
   it('selectChannel reseeds the keyboard cursor on switch (no stale cross-channel cursor)', () => {
-    expect(source).toContain('setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, true))');
-    expect(source).toContain('setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false))');
+    // Three seed sites — reanchor, plain cached restore, fresh — each passing an
+    // in-window newest fallback as the 4th arg.
+    const seedCalls = source.match(/setCursorId\(channelSwitchCursorSeed\(savedAnchor, readAnchor, /g) ?? [];
+    expect(seedCalls.length).toBe(3);
+    expect(source).toContain('cached.messages.at(-1)?.id ?? null'); // cached-restore newest fallback
+    expect(source).toContain(', newestFromSummary)'); // fresh/reanchor newest fallback
   });
 
   it('navigateToMessage preserves an explicit target by not reseeding when a message is given', () => {
@@ -52,5 +63,15 @@ describe('ChannelsSubsystem cursor/thread wiring', () => {
 
   it('the Cmd-K palette toggle also ignores editable targets (no hijack while typing)', () => {
     expect(source).toContain("don't hijack Cmd-K while the user is typing in a field");
+  });
+
+  it('both listeners guard SELECT/INPUT/TEXTAREA/contenteditable, matching the App shortcut guard', () => {
+    // SELECT included so j/k on a focused channel select does not also navigate
+    // the hidden feed, and Cmd-K cannot open from it.
+    const editableGuards =
+      source.match(
+        /tagName === 'INPUT' \|\| target\.tagName === 'TEXTAREA' \|\| target\.tagName === 'SELECT' \|\| target\.isContentEditable/g
+      ) ?? [];
+    expect(editableGuards.length).toBeGreaterThanOrEqual(2);
   });
 });

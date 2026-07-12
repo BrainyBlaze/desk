@@ -351,7 +351,7 @@ export function ChannelsSubsystem({
     const onKey = (event: KeyboardEvent): void => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         const target = event.target as HTMLElement | null;
-        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) {
           return; // don't hijack Cmd-K while the user is typing in a field
         }
         // An App-level modal (e.g. Settings) owns the keyboard; navState.blocked
@@ -419,7 +419,7 @@ export function ChannelsSubsystem({
         return; // leave Cmd-K and friends alone
       }
       const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) {
         return; // typing, not navigating
       }
       // An App-level modal (e.g. Settings) owns the keyboard; navState.blocked
@@ -1191,6 +1191,10 @@ export function ChannelsSubsystem({
     const seedCursor = options.seedCursor !== false;
     const savedAnchor = scrollAnchorByChannelRef.current.get(name)?.messageId ?? null;
     const readAnchor = seenMapRef.current[name]?.id ?? null;
+    // Newest in-window fallback for a never-visited channel (no saved/read
+    // anchor): a fresh/reanchor window loads at the tail, so the summary's newest
+    // message is in it (cached restore uses its own last row below instead).
+    const newestFromSummary = (summary ?? channelsRef.current.find((entry) => entry.name === name))?.lastMessage?.id ?? null;
     localStorage.setItem(CHANNEL_STORAGE_KEY, name);
     // Load memoization: if we have a channel window and no unread messages
     // arrived while it was hidden, restore it instantly with its saved viewport.
@@ -1208,9 +1212,10 @@ export function ChannelsSubsystem({
         // failed reanchor fetch left the mismatch on screen indefinitely.
         setDetail(cached);
         // Reanchor re-fetches a window centred on unread, so the old saved
-        // viewport anchor may be off-window — seed the read anchor.
+        // viewport anchor may be off-window — seed the read anchor, or the
+        // newest message (also in the re-fetched tail) when there is no read.
         if (seedCursor) {
-          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false));
+          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false, newestFromSummary));
         }
         void refreshDetail(name, { initialWindow: true, summary });
       } else {
@@ -1218,18 +1223,20 @@ export function ChannelsSubsystem({
         setRestoreScrollChannel(restoreScrollChannelForSelection(name, options));
         setDetail(cached);
         // Plain restore lands on the remembered viewport — its anchor is in the
-        // cached window.
+        // cached window; if there is no saved/read anchor, the cached window's
+        // last row is the in-window newest.
         if (seedCursor) {
-          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, true));
+          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, true, cached.messages.at(-1)?.id ?? null));
         }
       }
     } else {
       setRestoreScrollChannel(null);
       setDetail(null);
-      // Fresh visit: the window loads centred on the read/unread boundary, so
-      // the read anchor (not a stale saved viewport) is the in-window seed.
+      // Fresh visit: the window loads centred on the read/unread boundary (or
+      // at the tail when never read), so seed the read anchor, falling back to
+      // the newest message which the tail-loaded window contains.
       if (seedCursor) {
-        setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false));
+        setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false, newestFromSummary));
       }
       void refreshDetail(name, { initialWindow: true, summary });
     }
