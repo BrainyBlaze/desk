@@ -796,19 +796,27 @@ export function ChannelsSubsystem({
   // Scroll-down (and the live poll): fetch messages after the newest loaded one
   // and APPEND them. Used both to page forward through a deep unread backlog and
   // to pick up live messages while the window already includes the newest.
-  /** Append newer messages. Returns false when it could NOT advance — the server
-   *  returned nothing new for our `after` cursor. That happens both when we are
-   *  genuinely up to date AND when our newest loaded message was DELETED
-   *  externally (a stale cursor), so the caller reconciles a persistent mismatch
-   *  with a full window refetch instead of freezing on it. */
-  const loadNewer = useCallback(async (channel: string): Promise<boolean> => {
+  /**
+   * Append newer messages. Returns a DISCRIMINATED outcome so the caller only
+   * force-refetches on a genuinely stale cursor, never on a transient skip:
+   *  - 'appended'  fetched newer messages (or hasNewer changed).
+   *  - 'stale'     the server returned nothing for our `after` cursor. In the
+   *                poll's mismatch context (summary shows a newer last) this means
+   *                our newest loaded message was deleted externally — recover with
+   *                a window refetch.
+   *  - 'skipped'   nothing to do (no detail / wrong channel / a load already in
+   *                flight). Must NOT trigger a refetch — an overlapping full
+   *                refetch on the next tick was the bug in the first cut.
+   *  - 'error'     the fetch failed; leave the window as-is.
+   */
+  const loadNewer = useCallback(async (channel: string): Promise<'appended' | 'stale' | 'skipped' | 'error'> => {
     const loaded = detailRef.current;
     if (!loaded || loaded.name !== channel || loadingMoreRef.current) {
-      return false;
+      return 'skipped';
     }
     const newest = loaded.messages[loaded.messages.length - 1]?.id;
     if (!newest) {
-      return false;
+      return 'skipped';
     }
     loadingMoreRef.current = true;
     try {
@@ -825,11 +833,12 @@ export function ChannelsSubsystem({
           const freshNow = page.messages.filter((message) => !knownNow.has(message.id));
           return { ...current, messages: [...current.messages, ...freshNow], hasNewer: page.hasNewer };
         });
+        return 'appended';
       }
-      return progressed;
+      return 'stale';
     } catch (err) {
       report(err);
-      return false;
+      return 'error';
     } finally {
       loadingMoreRef.current = false;
     }
@@ -953,14 +962,15 @@ export function ChannelsSubsystem({
           void refreshDetail(selectedSummary.name, { initialWindow: true, summary: selectedSummary });
         } else if (!loaded.hasNewer && newestLoaded !== summaryLast) {
           const target = selectedSummary.name;
-          void loadNewer(target).then((progressed) => {
-            // If loadNewer could not advance yet the summary still shows a
-            // different last message, our newest cursor is stale (the newest
-            // loaded message was deleted externally) — the feed would otherwise
-            // freeze on this mismatch every tick. Refetch the window to recover.
-            // We are at the tail here (!hasNewer), so this does not disturb a
-            // scrolled-up reader.
-            if (!progressed && activeRef.current && selectedRef.current === target && detailRef.current?.name === target) {
+          void loadNewer(target).then((outcome) => {
+            // Recover ONLY on a genuinely stale cursor (fetched, nothing came
+            // back, yet the summary shows a newer last = our newest was deleted
+            // externally) — the feed would otherwise freeze on this mismatch
+            // every tick. A 'skipped' (a load already in flight) or 'error' must
+            // NOT refetch, or a slow load would spawn overlapping full refetches.
+            // We are at the tail here (!hasNewer), so the refetch does not
+            // disturb a scrolled-up reader.
+            if (outcome === 'stale' && activeRef.current && selectedRef.current === target && detailRef.current?.name === target) {
               void refreshDetail(target);
             }
           });
