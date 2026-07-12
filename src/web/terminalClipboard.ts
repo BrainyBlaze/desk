@@ -17,3 +17,42 @@
 export function shouldSuppressContextMenu(hasSelection: boolean, canReadAsyncClipboard: boolean): boolean {
   return hasSelection || canReadAsyncClipboard;
 }
+
+type ClipboardWriter = Pick<Clipboard, 'writeText'>;
+
+export async function copyTextWithFallback(
+  text: string,
+  clipboard: ClipboardWriter | undefined = globalThis.navigator?.clipboard,
+  fallback: (value: string) => boolean = copyTextWithDocumentFallback
+): Promise<boolean> {
+  if (text.length === 0) {
+    return false;
+  }
+  if (clipboard?.writeText) {
+    try {
+      await clipboard.writeText(text);
+      return true;
+    } catch {
+      // The permission can be denied even when the API exists.
+    }
+  }
+  return fallback(text);
+}
+
+function copyTextWithDocumentFallback(text: string): boolean {
+  const doc = globalThis.document;
+  if (!doc?.body || typeof doc.execCommand !== 'function') {
+    return false;
+  }
+  const textarea = doc.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  doc.body.appendChild(textarea);
+  textarea.select();
+  const copied = doc.execCommand('copy');
+  textarea.remove();
+  return copied;
+}

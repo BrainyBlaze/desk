@@ -93,6 +93,7 @@ import {
 import { fireAndForget, toErrorMessage } from './asyncSafe.js';
 import { reconcileInitialSetting } from './initialSettingsReconcile.js';
 import { TerminalSurface } from './TerminalSurface.js';
+import { copyTextWithFallback } from './terminalClipboard.js';
 import { StatusBar } from './StatusBar.js';
 import { publishStatus, type StatusSegment } from './statusSegments.js';
 import {
@@ -2340,7 +2341,7 @@ export function App(): JSX.Element {
                 <TerminalSelectionMenu
                   menu={terminalMenu}
                   onCopy={(text) => {
-                    void navigator.clipboard?.writeText(text).catch(() => undefined);
+                    void copyTextWithFallback(text);
                     setTerminalMenu(null);
                   }}
                   onCreateNote={muxHandlers.onCreateNoteFromText}

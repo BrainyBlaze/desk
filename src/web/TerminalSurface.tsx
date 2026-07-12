@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { terminalBroker } from './terminalBrokerClient.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
-import { shouldSuppressContextMenu } from './terminalClipboard.js';
+import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -391,7 +391,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         const selection = terminal.getSelection();
         if (selection) {
           event.preventDefault();
-          copyText(selection);
+          void copyTextWithFallback(selection);
           return false;
         }
         // No terminal selection: fall through so Ctrl+C reaches the shell.
@@ -421,7 +421,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // Route through copyText so a plain-HTTP (non-secure) context still
         // copies via the execCommand fallback instead of silently no-oping when
         // the async clipboard is absent.
-        copyText(serializeAddon.serialize());
+        void copyTextWithFallback(serializeAddon.serialize());
         return false;
       }
 
@@ -607,7 +607,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         if (openMenu) {
           openMenu(selection, event.clientX, event.clientY);
         } else {
-          copyText(selection);
+          void copyTextWithFallback(selection);
         }
         return;
       }
@@ -1044,7 +1044,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
                 event.preventDefault();
                 // copyText falls back to execCommand on plain HTTP; a bare
                 // navigator.clipboard?.writeText would copy nothing there.
-                copyText(viewer.getSelection());
+                void copyTextWithFallback(viewer.getSelection());
               }
             }
           }}
@@ -1106,30 +1106,4 @@ function detectAcceleratedWebgl2(): boolean {
 
 function getSelectedText(terminal: Terminal): string {
   return terminal.getSelection() || window.getSelection()?.toString() || '';
-}
-
-function copyText(text: string): void {
-  if (!text) {
-    return;
-  }
-
-  if (navigator.clipboard?.writeText) {
-    void navigator.clipboard.writeText(text).catch(() => fallbackCopyText(text));
-    return;
-  }
-
-  fallbackCopyText(text);
-}
-
-function fallbackCopyText(text: string): void {
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', 'true');
-  textarea.style.position = 'fixed';
-  textarea.style.left = '-9999px';
-  textarea.style.top = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand('copy');
-  textarea.remove();
 }
