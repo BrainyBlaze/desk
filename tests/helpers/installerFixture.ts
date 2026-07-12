@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -46,7 +47,7 @@ export interface InstallerRunOptions {
 }
 
 export class InstallerFixture {
-  readonly root = mkdtempSync(join(tmpdir(), 'desk-installer-fixture-'));
+  readonly root = realpathSync(mkdtempSync(join(tmpdir(), 'desk-installer-fixture-')));
   readonly deskHome = join(this.root, 'desk-home');
   readonly binDir = join(this.root, 'bin');
   readonly releaseDir = join(this.root, 'release');
