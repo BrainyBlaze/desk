@@ -1,0 +1,80 @@
+name: installer matrix
+
+on:
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'scripts/create-release-assets.mjs'
+      - 'scripts/distribution/**'
+      - 'tests/install-script.test.ts'
+      - 'tests/helpers/installerFixture.ts'
+      - '.github/workflows/installer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu, image: 'ubuntu:24.04', bootstrap: 'apt-get update && apt-get install -y bash curl ca-certificates' }
+          - { name: fedora, image: 'fedora:42', bootstrap: 'dnf install -y bash curl ca-certificates' }
+          - { name: archlinux, image: 'archlinux:latest', bootstrap: 'pacman -Sy --noconfirm bash curl ca-certificates' }
+          - { name: opensuse, image: 'opensuse/leap:15.6', bootstrap: 'zypper --non-interactive install bash curl ca-certificates' }
+          - { name: alpine, image: 'alpine:3.21', bootstrap: 'apk add bash curl ca-certificates' }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - run: npm ci
+      - name: Build a checksum-valid fail-closed release fixture
+        shell: bash
+        run: |
+          npm run release:assets -- --version v0.3.0 --out-dir "$RUNNER_TEMP/installer-release"
+          node --input-type=module - "$RUNNER_TEMP/installer-release" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const root = process.argv[2];
+          const manifestPath = join(root, 'desk-install-manifest.json');
+          const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+          for (const target of Object.values(manifest.node.targets)) target.sha256 = '0'.repeat(64);
+          writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          const names = ['desk-install-manifest.json', 'desk-v0.3.0-source.tar.gz'].sort();
+          const sums = names.map((name) => `${createHash('sha256').update(readFileSync(join(root, name))).digest('hex')}  ${name}`);
+          writeFileSync(join(root, 'SHA256SUMS'), `${sums.join('\n')}\n`);
+          NODE
+      - name: Provision and re-probe ${{ matrix.name }}
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            -v "$RUNNER_TEMP/installer-release:/release:ro" \
+            "${{ matrix.image }}" \
+            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_VERSION=v0.3.0 DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; tmux -V; git --version; python3 --version || python --version; make --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, arch: arm64 }
+          - { os: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "${{ matrix.arch }}"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - run: npm ci
+      - run: brew install tmux
+      - run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts
