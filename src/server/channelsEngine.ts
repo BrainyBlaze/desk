@@ -1577,7 +1577,9 @@ export class ChannelsEngine {
       this.resetHold(runtime);
       await this.deliverNext(runtime, countHoldCycle, undefined, decision.snapshot);
     } finally {
-      runtime.draining = false;
+      if (runtime.drainGeneration === generation) {
+        runtime.draining = false;
+      }
     }
   }
 
@@ -2013,8 +2015,8 @@ export class ChannelsEngine {
     // reclaim a pre-paste await, but it must never launch a second paste while
     // the first sendText call is still unresolved.
     if (
-      runtime.draining &&
-      (runtime.deliveryInFlight || Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs)
+      runtime.deliveryInFlight ||
+      (runtime.draining && Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs)
     ) {
       return false;
     }

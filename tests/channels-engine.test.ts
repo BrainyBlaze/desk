@@ -2355,6 +2355,69 @@ describe('engine drain race safety', () => {
     }
   });
 
+  it('keeps a newer forced paste single-flight when a stale gated drain settles', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-stale-finally-'));
+    const sent: string[] = [];
+    let captureCalls = 0;
+    let resolveFirstCapture: ((pane: string) => void) | undefined;
+    let markFirstCaptureStarted: (() => void) | undefined;
+    let resolveForcedPaste: (() => void) | undefined;
+    const firstCaptureStarted = new Promise<void>((resolve) => {
+      markFirstCaptureStarted = resolve;
+    });
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 60_000,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        if (sent.length === 1) {
+          await new Promise<void>((resolve) => {
+            resolveForcedPaste = resolve;
+          });
+        }
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => {
+        captureCalls += 1;
+        if (captureCalls === 1) {
+          markFirstCaptureStarted?.();
+          return new Promise<string>((resolve) => {
+            resolveFirstCapture = resolve;
+          });
+        }
+        return '❯ ';
+      }
+    });
+    try {
+      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-stale-first');
+      await firstCaptureStarted;
+      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-stale-second');
+      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
+      expect(targetSeq).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const forced = engine.forceDeliver('tmux-a', targetSeq);
+      await waitFor(() => sent.length === 1);
+      resolveFirstCapture?.('❯ ');
+      await flush();
+
+      expect(await engine.forceDeliver('tmux-a')).toBe(false);
+      expect(sent).toEqual(['second prompt']);
+      resolveForcedPaste?.();
+      expect(await forced).toBe(true);
+    } finally {
+      resolveFirstCapture?.('❯ ');
+      resolveForcedPaste?.();
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('does not apply a stale prompt-gate decision after the queue head changes', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-gate-race-'));
     const sent: string[] = [];
