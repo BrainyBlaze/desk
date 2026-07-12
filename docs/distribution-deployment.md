@@ -1,161 +1,160 @@
 ---
 title: "Distribution and deployment"
 sidebarTitle: "Distribution"
-description: "Run Desk from the standalone binary or a source checkout, and understand what each runtime includes."
+description: "Understand Desk's source-backed installer, explicit Bun and Vite server modes, release assets, and container contract."
 ---
 
-Desk has two runtime shapes:
+Desk distributes one public CLI with two explicit server modes:
 
-- the standalone binary (installed as `desk-server`) — the default
-- a source checkout with the `desk` CLI (`desk serve`)
+| Command | Runtime | Intended use |
+| --- | --- | --- |
+| `desk serve` | Private compiled Bun runtime with embedded UI | Default local operation |
+| `desk serve --dev` | Node and Vite with source UI | Desk development and debugging |
 
-They share the same backend API and browser UI. The difference is how the UI, language-server assets, and PTY backend are packaged.
+Both mount the same backend API. Neither command falls back to the other when its
+runtime is missing or fails.
 
-## Standalone runtime
-
-The standalone server is built with Bun's compile mode. It is self-contained and does not run Vite at runtime. Install it with the one-liner — it lands as `desk-server`:
+## Source-backed installation
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-desk-server
-```
-
-Host and port come from environment variables:
-
-```bash
-DESK_HOST=127.0.0.1 DESK_PORT=5173 desk-server
-```
-
-`desk-server` is intentionally server-only and rejects CLI subcommands. Use the
-source checkout's `desk` command for `serve`, `up`, `channels`, and other CLI
-operations.
-
-The standalone server:
-
-- starts the same Desk backend API on a plain HTTP server
-- serves the embedded UI bundle with SPA fallback
-- honors runtime `DESK_PLUGINS`
-- can include build-time embedded plugins in downstream builds
-- uses a Bun-native PTY backend instead of `node-pty`
-
-Downloaded a release artifact directly instead of using the installer? Make it executable and run it by its target name:
-
-```bash
-chmod +x ./desk-server-linux-x64
-DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
-```
-
-## Source-checkout runtime
-
-Use this when you are developing Desk or want the multi-command `desk` CLI. It needs Node.js 20+, npm, and a C/C++ toolchain for `node-pty`:
-
-```bash
-npm ci && npm run build && npm link
 desk serve
 ```
 
-`desk serve` starts a Vite server bound to `127.0.0.1:5173` by default. Desk mounts its API, WebSocket bridges, file watchers, terminal broker, LSP endpoint, and plugin routes into Vite server middleware.
+The installer:
 
-The Vite server is the supported source runtime. It is not only a development preview.
+1. detects macOS or Linux, x64 or arm64, and the host libc;
+2. acquires a sibling install lock before package provisioning;
+3. provisions and rechecks the required host capabilities;
+4. verifies the release checksum and install manifests;
+5. downloads and verifies the source archive plus pinned Node/npm and Bun
+   toolchains;
+6. safely extracts each archive into an empty staging directory;
+7. runs `npm ci` and `npm run build:distribution` with the Desk-owned toolchains;
+8. smokes the staged CLI, activates it atomically, and smokes the public launcher.
 
-Change host and port with flags:
+The default install root is
+`${XDG_DATA_HOME:-$HOME/.local/share}/desk`. `DESK_HOME` overrides that root.
+`DESK_BIN_DIR` overrides the launcher directory only when that canonical, safe
+directory is already on `PATH` and no earlier command shadows it.
 
-```bash
-desk serve --host 127.0.0.1 --port 5173
+```text
+desk/
+├── releases/<version>/<install-id>/
+│   ├── .desk-release
+│   ├── node_modules/
+│   ├── runtime/node
+│   ├── dist/cli/main.js
+│   └── libexec/desk-standalone
+├── toolchains/node-22.23.1/
+├── toolchains/bun-1.3.14/
+└── current -> releases/<version>/<install-id>
 ```
 
-The source runtime uses:
+The stable `desk` launcher resolves `current`, verifies that the release remains
+under the managed root, and executes the release-bound Node runtime and CLI.
 
-- Node.js for the CLI and server
-- Vite for serving the UI
-- `node-pty` for PTY sessions
-- dependencies installed in `node_modules`
+## Install lifecycle
 
-## Release artifacts
+- A first install does not expose a launcher until staging and smoke checks pass.
+- An upgrade or explicit downgrade preserves the active instance until the new
+  instance is verified.
+- A same-version reinstall creates a new install ID; it never mutates the active
+  directory.
+- After successful activation, Desk retains the current and immediately previous
+  valid instances and their referenced toolchains.
+- Latest-version resolution refuses to silently downgrade. Setting
+  `DESK_VERSION=vX.Y.Z` explicitly permits a downgrade.
+- Any activation failure restores the previous `current` target and launcher.
 
-The release workflow builds standalone binaries for:
-
-- `linux-x64`
-- `linux-arm64`
-- `darwin-arm64`
-
-Tagged releases publish:
-
-- `desk-server-linux-x64`
-- `desk-server-linux-arm64`
-- `desk-server-darwin-arm64`
-- `SHA256SUMS`
-
-The release job only publishes on version tags that match `package.json`.
-
-## Embedded assets
-
-The standalone build creates tarballs before compiling the binary:
-
-- `ui.tar.gz`: the Vite UI bundle from `dist/public`
-- `lsp.tar.gz`: TypeScript Language Server, TypeScript, and Pyright in `node_modules` layout
-
-On first use, the binary extracts these assets under `~/.cache/desk/...` and reuses the cache for later starts of the same binary.
-
-Rust analyzer is handled separately. Desk downloads a pinned upstream Rust Analyzer release on demand, verifies SHA-256, and caches it under `~/.cache/desk/lsp/rust-analyzer`.
-
-## Host dependencies
-
-The standalone binary still calls host tools:
-
-- `tmux` for session lifetime
-- `git` for Git operations
-- `gh` for GitHub and Projects operations
-- agent CLIs such as `codex`, `claude`, and `opencode`
-- `tar` for extracting embedded assets
-- optional telemetry tools such as `nvidia-smi` and `intel_gpu_top`
-
-Install and authenticate those tools on the host before expecting the corresponding Desk subsystem to work.
-
-## Build commands
-
-Source build:
+Rerun the installer to upgrade or repair. Use the same installer for ownership-
+safe uninstall:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
+  | bash -s -- --uninstall
+```
+
+Uninstall preserves user configuration, projects, tmux sessions, credentials,
+and optional tools.
+
+## Release assets
+
+Tagged releases publish only:
+
+- `desk-vX.Y.Z-source.tar.gz`
+- `desk-install-manifest.json`
+- `SHA256SUMS`
+
+The install manifest declares the source digest and exact target-qualified Node
+and Bun assets. It contains no caller-controlled URLs. The installer constructs
+toolchain URLs only from the official Node and Bun release origins.
+
+There is no separately installable server executable. The compiled runtime is a
+private release component at `libexec/desk-standalone`.
+
+## Build ordering
+
+Contributors and CI pin Node 22.23.1, npm 10.9.8, and Bun 1.3.14.
+
+```bash
+npm ci
+npm run check
+npm test
+npm run build:distribution
+npm run smoke:serve-modes
 npm run build
 ```
 
-UI build check:
+`build:distribution` runs the compiled-runtime build first and the TypeScript
+CLI build last. This order matters because Vite clears `dist/`. Run `npm run
+build` after any later UI build to restore the Node CLI.
+
+The real smoke script proves:
+
+- the default root responds without a Vite client route;
+- `serve --dev` exposes the Vite client route;
+- SIGINT and SIGTERM stop each supervised process group;
+- an occupied port fails without an alternate listener or fallback;
+- a controlled private-runtime exit status propagates through the CLI.
+
+## Server options
+
+Both modes accept flags:
 
 ```bash
-npm run build:ui
+desk serve --host 127.0.0.1 --port 5173
+desk serve --dev --host 127.0.0.1 --port 5173
 ```
 
-Standalone build:
+Precedence is flags, then `DESK_HOST` / `DESK_PORT`, then
+`127.0.0.1:5173`.
+
+## Container contract
+
+The Docker image uses Node 22.23.1 in both build and runtime stages, builds the
+full application at `/opt/desk`, and exposes the same CLI:
 
 ```bash
-npm run build:standalone
+docker build -t desk:cli .
+docker run --rm desk:cli help
+docker run --rm -p 127.0.0.1:5173:5173 desk:cli
+docker run --rm -p 127.0.0.1:5174:5174 \
+  desk:cli serve --dev --host 0.0.0.0 --port 5174
 ```
 
-The standalone build runs the UI build, creates asset tarballs, and compiles `desk-server`.
+The container binds `0.0.0.0` because port publication is controlled by Docker.
+Publish it only on a trusted host interface. Desk has no built-in authentication.
 
-## Choosing a runtime
+## Host integrations
 
-Use `desk serve` when:
+The installer owns core build/runtime requirements. These integrations remain
+optional and use the host user's credentials:
 
-- you are working from a clone
-- you want normal Node/Vite development behavior
-- you need source-level debugging
+- `codex`, `claude`, and `opencode` for agents
+- `gh` for GitHub and Projects
+- `rg` for fast search
+- GPU telemetry commands
 
-Use the standalone binary when:
-
-- you want a single executable server artifact
-- you do not want Vite or the UI source tree at runtime
-- you are deploying Desk as a local operator tool on a machine that already has tmux and the agent CLIs
-
-Keep Desk bound to localhost. If you work on a remote development box, use the
-SSH forwarding model in [Run Desk securely](/guide-deploy-securely).
-
-## Next steps
-
-- Follow [Deploy and secure Desk](/guide-deploy-securely) for a deployment
-  checklist.
-- Read [Architecture](/concepts-architecture) to understand what source and
-  standalone runtimes share.
-- Use [Troubleshooting and FAQ](/troubleshooting) for startup and local
-  connection issues.
+Read [Run Desk securely](/guide-deploy-securely) before remote access and
+[Troubleshooting](/troubleshooting) for installer or runtime failures.

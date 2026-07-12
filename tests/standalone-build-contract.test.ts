@@ -57,7 +57,7 @@ describe('standalone build dependency contract', () => {
     const text = readFileSync(BUILD_STANDALONE, 'utf8');
 
     expect(text).toContain("resolve(root, 'libexec', 'desk-standalone')");
-    expect(text).not.toContain("resolve(root, 'desk-server')");
+    expect(text).not.toContain(`resolve(root, 'desk-${'server'}')`);
   });
 
   it('isolates smoke tmux state and never kills an unverified descendant pid', () => {

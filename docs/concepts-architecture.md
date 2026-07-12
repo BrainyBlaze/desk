@@ -43,9 +43,10 @@ windows, but the agent process is not owned by the browser.
 
 ### Server
 
-The server exposes the UI assets and the local API. In source mode, `desk serve`
-starts Vite. In standalone mode, the binary serves the embedded UI bundle and
-the same backend routes without Vite.
+The server exposes the UI assets and local API. Plain `desk serve` launches the
+release-private compiled Bun runtime, which serves the embedded UI without Vite.
+`desk serve --dev` explicitly starts Vite and mounts the same backend routes as
+server middleware. The CLI does not fall back between these runtime boundaries.
 
 The server also coordinates:
 

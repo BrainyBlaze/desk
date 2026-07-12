@@ -88,33 +88,34 @@ once, and let them coordinate — without becoming the message bus yourself.
 
 ## Quickstart
 
-Install the prebuilt binary (Linux x64/arm64, macOS Apple Silicon). It's
-self-contained — UI + LSP servers embedded, Bun-native terminals — so the only
-runtime dependency is **tmux**:
+On macOS or Linux x64/arm64, start with a working `curl` and run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-desk-server           # web UI + API on http://127.0.0.1:5173
+desk serve            # private Bun server on http://127.0.0.1:5173
 ```
 
-`install.sh` downloads the latest release binary, verifies its checksum when a
-matching release checksum and a SHA-256 tool are available, and installs it as
-**`desk-server`** in `/usr/local/bin` (or `~/.local/bin`). The standalone command
-only serves the UI and API; the multi-command **`desk`** CLI comes from a source
-checkout. Pin a release with `DESK_VERSION=vX.Y.Z`, or download a binary from the
-[releases page](https://github.com/BrainyBlaze/desk/releases).
+The installer provisions missing host requirements, downloads checksum-verified
+Desk source plus pinned Node 22.23.1 and Bun 1.3.14 toolchains, builds an immutable
+release, and installs the complete `desk` CLI in the first safe directory already
+on `PATH`. It supports macOS and glibc Linux; WSL follows the Linux path. Native
+Windows and musl Linux are not currently supported release targets.
+
+`desk serve` always launches the private Bun runtime. Use `desk serve --dev` when
+you explicitly want Vite. A missing or broken runtime fails; Desk never falls back
+to the other mode.
 
 <details>
 <summary>Build from source (for development)</summary>
 
-You need **Node.js 20+**, **npm**, **tmux**, and a C/C++ toolchain (for
-`node-pty` — `build-essential` / Xcode CLT):
+Match CI with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**, tmux 3.2+, and a
+C/C++ toolchain:
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git
 cd desk
-npm ci && npm run build && npm link   # global `desk` CLI
-desk serve            # web server + UI on http://127.0.0.1:5173 (Vite dev)
+npm ci && npm run build:distribution && npm link
+desk serve --dev      # Vite development server on http://127.0.0.1:5173
 ```
 </details>
 
@@ -248,7 +249,8 @@ an unread lamp on the toolbar until you touch the session.
 The global `desk` command (or `npm run dev -- <command>` from a clone):
 
 ```bash
-desk serve [--port N] [--host H]  # web server + UI (default 127.0.0.1:5173)
+desk serve [--port N] [--host H]        # private Bun runtime
+desk serve --dev [--port N] [--host H]  # Vite development runtime
 desk up [--dry-run]               # start every missing session
 desk status                       # show which sessions exist
 desk attach <name|tmux|resume>    # attach a terminal to a session
@@ -294,22 +296,22 @@ send prompts into your agent sessions, run the host-wide kill switch, and operat
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run check     # typecheck
-npm test          # vitest unit suite (1,500+ tests over the pure layers)
-npm run serve     # dev server + UI on http://127.0.0.1:5173
+npm test          # Vitest suite
+npm run build:distribution
+npm run smoke:serve-modes
+desk serve --dev  # Vite development server + UI
 ```
 
 The unit suite covers the pure layers (parsers, protocol, models, engines with
 injected I/O); UI flows are validated with headless Playwright against an
 isolated instance (a temporary `HOME` directory running `vite --port 5190`).
 
-A note on the runtime: `desk serve` runs the UI through the **Vite dev
-server**, with the entire Desk API mounted as a Vite server-middleware plugin
-(`src/server/vitePlugin.ts`). For a single-user localhost tool this *is* the
-supported runtime, not a temporary dev convenience — which is why `vite` is a
-runtime dependency, not a dev one. `npm run build:ui` produces a static bundle
-as a build check (CI runs it); `desk serve` does not serve that bundle.
+`desk serve --dev` runs the UI through Vite with the Desk API mounted as server
+middleware. Plain `desk serve` launches `libexec/desk-standalone`, whose embedded
+UI and API do not load Vite. `npm run build:distribution` builds the private Bun
+runtime first and the Node CLI last because Vite clears `dist/` during its build.
 
 The sci-fi/HUD design system lives in `src/web/arwes/`:
 

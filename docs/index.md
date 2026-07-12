@@ -111,19 +111,19 @@ before designing a larger fleet.
 
 ## First decision
 
-Choose how you want to run Desk:
+Install the complete CLI, then choose a server mode:
 
 <Tabs>
-  <Tab title="Standalone binary">
-    The default: `install.sh` drops a self-contained `desk-server` binary (no Vite,
-    embedded UI). Start with [Getting started](/getting-started), then read
+  <Tab title="Default Bun mode">
+    `desk serve` launches the release-private compiled runtime and embedded UI.
+    Start with [Getting started](/getting-started), then read
     [Distribution and deployment](/distribution-deployment) and
     [Deploy and secure Desk](/guide-deploy-securely).
   </Tab>
 
-  <Tab title="Source checkout">
-    Use this when you are developing Desk or want the multi-command `desk` CLI
-    from a clone. See [Getting started](/getting-started).
+  <Tab title="Vite development mode">
+    `desk serve --dev` explicitly starts Vite from the installed source-backed
+    release or a checkout. It never falls back to Bun.
   </Tab>
 </Tabs>
 

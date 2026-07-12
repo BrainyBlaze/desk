@@ -8,6 +8,23 @@ This page summarizes the repository changelog. The source of truth is
 
 ## Unreleased
 
+## 0.3.0 — source-backed CLI distribution
+
+- The curl installer now installs the complete `desk` CLI on supported macOS
+  and glibc Linux x64/arm64 hosts, including WSL.
+- Plain `desk serve` launches the private compiled Bun runtime. `desk serve
+  --dev` explicitly launches Vite; both modes fail without fallback.
+- Releases publish source, install-manifest, and checksum assets instead of a
+  separate public server executable.
+- The installer provisions and rechecks required host packages, owns pinned Node
+  22.23.1/npm 10.9.8 and Bun 1.3.14 toolchains, validates archives before safe
+  extraction, and builds in an isolated staging instance.
+- Install, upgrade, explicit downgrade, same-version repair, rollback, two-
+  instance retention, launcher ownership, PATH ordering, and uninstall are
+  lock-protected and fail closed.
+- The Docker image now uses the full CLI, defaults to `desk serve`, and retains
+  the opt-in Vite mode.
+
 ### Channels reliability and operations
 
 - Pane capture now waits for process `close` instead of `exit`, preventing

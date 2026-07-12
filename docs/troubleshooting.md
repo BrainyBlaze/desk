@@ -9,45 +9,68 @@ symptom, then run the checks in order.
 
 ## Server and UI
 
-### `desk` unexpectedly starts the server or reports port 5173 in use
+### The installer reports a shadowing `desk` command
 
-Versions of `install.sh` introduced around v0.2.0 may have placed the standalone
-server at `~/.local/bin/desk` or `/usr/local/bin/desk`, shadowing the full CLI.
-The current installer names that server `desk-server`; `desk` belongs to the
-source checkout's multi-command CLI.
-
-Find every command candidate before changing anything:
+Desk scans `PATH` in command-resolution order and refuses to install behind an
+unidentified executable. Inspect every candidate:
 
 ```bash
 type -a desk
 command -v desk
 ```
 
-Inspect the resolved file or symlink. Do not blindly move or remove it: an npm
-link or checkout-provided `desk` is the full CLI and should stay named `desk`.
-After confirming that an old regular file is the standalone server, preserve it
-under the new name and refresh the shell lookup cache, for example:
+An npm link or checkout-provided command may already be the full CLI. Remove or
+move only files whose ownership you have verified, then refresh shell lookup:
 
 ```bash
-mv -i ~/.local/bin/desk ~/.local/bin/desk-server
 hash -r
 ```
 
-Use the corresponding `/usr/local/bin` paths (and appropriate permissions) if
-that is where the old installer wrote the binary. If `desk-server` already
-exists, keep it and move the old file to a backup name instead of overwriting
-the current install.
+If you set `DESK_BIN_DIR`, it must be an absolute canonical directory already on
+`PATH`, with no earlier conflicting command.
 
-### `desk serve` cannot find Vite
+### `desk serve` reports that the private runtime is missing
+
+Plain `desk serve` requires `libexec/desk-standalone` in the active immutable
+release. Rerun the installer to create and activate a fresh instance:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+```
+
+Desk does not switch to Vite when this artifact is absent.
+
+### `desk serve --dev` cannot find Vite
 
 Cause: dependencies are missing in the Desk checkout.
 
 Fix:
 
 ```bash
-npm install
-npm run build
-desk serve
+npm ci
+npm run build:distribution
+desk serve --dev
+```
+
+The development command does not switch to the private Bun runtime when Vite is
+missing.
+
+### Startup reports `EMFILE: too many open files`
+
+This is an operating-system watcher limit, not a reason to change server modes.
+Close unnecessary watcher-heavy processes and inspect the current limits. On
+Linux, increase the user or inotify limits through your system configuration,
+then restart the shell and `desk serve --dev`. The default Bun mode does not run
+Vite's source watcher.
+
+### Port 5173 is already in use
+
+Desk fails closed on the requested port; it does not select another port. Stop
+the existing listener or choose an explicit port:
+
+```bash
+desk serve --port 5174
+desk serve --dev --port 5174
 ```
 
 ### Browser still shows old docs or UI
