@@ -11,10 +11,10 @@ symptom, then run the checks in order.
 
 ### `desk` unexpectedly starts the server or reports port 5173 in use
 
-Installers from before the command split may have placed the standalone server
-at `~/.local/bin/desk` or `/usr/local/bin/desk`, shadowing the full CLI. The
-current installer names that server `desk-server`; `desk` belongs to the source
-checkout's multi-command CLI.
+Versions of `install.sh` introduced around v0.2.0 may have placed the standalone
+server at `~/.local/bin/desk` or `/usr/local/bin/desk`, shadowing the full CLI.
+The current installer names that server `desk-server`; `desk` belongs to the
+source checkout's multi-command CLI.
 
 Find every command candidate before changing anything:
 
