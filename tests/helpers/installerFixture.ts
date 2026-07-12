@@ -164,6 +164,7 @@ exit 92
     const sourceParent = join(this.root, 'source');
     const sourceRoot = join(sourceParent, 'desk-v0.3.0');
     mkdirSync(sourceRoot, { recursive: true });
+    chmodSync(sourceRoot, 0o775);
     writeFileSync(join(sourceRoot, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
     writeFileSync(join(sourceRoot, 'package-lock.json'), '{}\n');
     symlinkSync('package.json', join(sourceRoot, 'package-link.json'));
