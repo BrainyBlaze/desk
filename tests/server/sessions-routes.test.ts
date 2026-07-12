@@ -1,6 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionSpec, TmuxPlanAction } from '../../src/core/types.js';
-import { runManagedPlan } from '../../src/server/routes/sessionsRoutes.js';
+import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
+import { createSessionsRoutes, runManagedPlan } from '../../src/server/routes/sessionsRoutes.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const session: SessionSpec = {
   groupId: 'main',
@@ -26,5 +33,40 @@ describe('sessions route managed startup', () => {
 
     expect(result).toEqual({ exitCode: 1, error: 'tmux executable not found' });
     expect(cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe('sessions route validation', () => {
+  it('surfaces an invalid session payload as a typed 400 response', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const req = Object.assign(new PassThrough(), {
+      method: 'POST',
+      url: '/api/add',
+      headers: { 'content-type': 'application/json' }
+    }) as unknown as IncomingMessage;
+    req.end(JSON.stringify({ groupId: 'main', session: null }));
+    const chunks: string[] = [];
+    const res = {
+      statusCode: 0,
+      setHeader: () => undefined,
+      end: (payload?: unknown) => {
+        if (payload !== undefined) {
+          chunks.push(String(payload));
+        }
+      }
+    } as unknown as ServerResponse;
+    const route = createSessionsRoutes({
+      managedAgentLsp: {} as never,
+      nativeAgentLaunch: (spec) => spec,
+      agentSurfaceBroker: { disposeSession: vi.fn() }
+    });
+
+    await createDeskApiMiddleware([route])(req, res, vi.fn());
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(chunks.join(''))).toEqual({
+      error: 'session body is required',
+      code: 'invalid-input'
+    });
   });
 });

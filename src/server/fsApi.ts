@@ -19,6 +19,7 @@ import { searchContent, searchFiles } from './fsSearch.js';
 import { readManifestFile, resolveManifestPath, updateManifestFile, withManifestFileLock } from '../core/config.js';
 import type { DeskNotesSettings } from '../core/types.js';
 import type { LspFileOperationCoordinator, LspFileOperationKind } from './lsp/lspFileOperationCoordinator.js';
+import { ApiValidationError } from './apiValidation.js';
 
 export interface FsRequestOptions {
   fileOperationCoordinator?: LspFileOperationCoordinator;
@@ -191,7 +192,7 @@ export async function handleFsRequest(
       const path = resolveFsPath(body.path, root, [resolveManifestPath()]);
       const content = body.content;
       if (typeof content !== 'string') {
-        throw new Error('content must be a string');
+        throw new ApiValidationError('content must be a string');
       }
       const expected = typeof body.mtimeMs === 'number' ? body.mtimeMs : undefined;
       const result =
@@ -305,7 +306,7 @@ export async function handleFsRequest(
     if (url.pathname === '/api/fs/delete') {
       const path = resolveFsPath(body.path, root);
       if (path === resolve(root)) {
-        throw new Error('refusing to delete the explorer root');
+        throw new ApiValidationError('refusing to delete the explorer root');
       }
       const kind = lspKindFromPath(path);
       const deletedPath = realpathSync(path);
@@ -320,7 +321,7 @@ export async function handleFsRequest(
     if (url.pathname === '/api/fs/delete-preview') {
       const path = resolveFsPath(body.path, root);
       if (path === resolve(root)) {
-        throw new Error('refusing to delete the explorer root');
+        throw new ApiValidationError('refusing to delete the explorer root');
       }
       const kind = lspKindFromPath(path);
       const deletedPath = realpathSync(path);
@@ -406,7 +407,7 @@ export function rawContentType(path: string): string | null {
 
 function requireRoot(value: string | null): string {
   if (!value || value.trim() === '') {
-    throw new Error('root query/body parameter is required');
+    throw new ApiValidationError('root query/body parameter is required');
   }
   return value;
 }

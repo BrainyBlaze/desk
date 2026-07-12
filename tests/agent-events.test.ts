@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ApiValidationError } from '../src/server/apiValidation.js';
 import { normalizeAgentEventForApi, parseAgentEventV2 } from '../src/server/agentEvents.js';
 
 describe('parseAgentEventV2', () => {
@@ -44,6 +45,7 @@ describe('parseAgentEventV2', () => {
   });
 
   it('rejects unversioned legacy-looking payloads instead of guessing', () => {
+    expect(() => parseAgentEventV2({ session: 'tmux-a', kind: 'turn-complete' })).toThrow(ApiValidationError);
     expect(() => parseAgentEventV2({ session: 'tmux-a', kind: 'turn-complete' })).toThrow(/schemaVersion/);
   });
 

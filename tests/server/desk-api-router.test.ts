@@ -3,7 +3,8 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FileLockBusyError } from '../../src/shared/fileLock.js';
 import { ManifestMutationError } from '../../src/core/config.js';
-import { readRequiredString } from '../../src/server/apiValidation.js';
+import { ManifestValidationError } from '../../src/core/manifest.js';
+import { ApiConflictError, ApiNotFoundError, readRequiredString } from '../../src/server/apiValidation.js';
 import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
 import { readJsonBody } from '../../src/server/httpUtil.js';
 import type { DeskRoute } from '../../src/server/plugin.js';
@@ -134,6 +135,38 @@ describe('createDeskApiMiddleware', () => {
     expect(res.body).not.toContain('/home/user');
   });
 
+  it('preserves typed API conflicts', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw new ApiConflictError('target already exists');
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/conflict'), res, vi.fn());
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'target already exists',
+      code: 'conflict'
+    });
+  });
+
+  it('preserves typed not-found failures', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw new ApiNotFoundError('source does not exist');
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/missing'), res, vi.fn());
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'source does not exist',
+      code: 'not-found'
+    });
+  });
+
   it('preserves safe manifest mutation conflicts without exposing arbitrary errors', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const res = response();
@@ -148,6 +181,39 @@ describe('createDeskApiMiddleware', () => {
       error: 'group alpha already exists',
       code: 'manifest-conflict'
     });
+  });
+
+  it('surfaces manifest validation failures without treating them as server faults', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw new ManifestValidationError('project alpha requires cwd');
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/desk'), res, vi.fn());
+
+    expect(res.statusCode).toBe(422);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'project alpha requires cwd',
+      code: 'manifest-invalid'
+    });
+  });
+
+  it('maps known filesystem errno failures to safe actionable responses', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw Object.assign(new Error("ENOENT: no such file or directory, open '/home/user/secret'"), { code: 'ENOENT' });
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/fs/read'), res, vi.fn());
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'File or directory not found',
+      code: 'not-found'
+    });
+    expect(res.body).not.toContain('/home/user');
   });
 
   it('logs and returns JSON 500 when a route throws', async () => {

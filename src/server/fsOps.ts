@@ -13,6 +13,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { ApiConflictError, ApiNotFoundError, ApiValidationError } from './apiValidation.js';
 
 export interface FsEntry {
   name: string;
@@ -141,7 +142,7 @@ export function writeFileAtomicCreate(path: string, content: string | Buffer): F
 
 export function createEntry(path: string, kind: 'file' | 'dir'): void {
   if (existsSync(path)) {
-    throw new Error(`already exists: ${path}`);
+    throw new ApiConflictError(`already exists: ${path}`);
   }
   if (kind === 'dir') {
     mkdirSync(path, { recursive: true });
@@ -154,15 +155,15 @@ export function createEntry(path: string, kind: 'file' | 'dir'): void {
 /** Copy a file or directory (recursive); refuses clobber and self-nesting. */
 export function copyEntry(from: string, to: string): void {
   if (!existsSync(from)) {
-    throw new Error(`does not exist: ${from}`);
+    throw new ApiNotFoundError(`does not exist: ${from}`);
   }
   if (existsSync(to)) {
-    throw new Error(`target already exists: ${to}`);
+    throw new ApiConflictError(`target already exists: ${to}`);
   }
   const fromResolved = resolve(from);
   const toResolved = resolve(to);
   if (toResolved === fromResolved || toResolved.startsWith(fromResolved + sep)) {
-    throw new Error('cannot copy a directory into itself');
+    throw new ApiValidationError('cannot copy a directory into itself');
   }
   mkdirSync(dirname(to), { recursive: true });
   cpSync(from, to, { recursive: true });
@@ -170,15 +171,15 @@ export function copyEntry(from: string, to: string): void {
 
 export function renameEntry(from: string, to: string): void {
   if (!existsSync(from)) {
-    throw new Error(`does not exist: ${from}`);
+    throw new ApiNotFoundError(`does not exist: ${from}`);
   }
   if (existsSync(to)) {
-    throw new Error(`target already exists: ${to}`);
+    throw new ApiConflictError(`target already exists: ${to}`);
   }
   const fromResolved = resolve(from);
   const toResolved = resolve(to);
   if (toResolved === fromResolved || toResolved.startsWith(fromResolved + sep)) {
-    throw new Error('cannot move a directory into itself');
+    throw new ApiValidationError('cannot move a directory into itself');
   }
   mkdirSync(dirname(to), { recursive: true });
   renameSync(from, to);

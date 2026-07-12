@@ -1,3 +1,5 @@
+import { ApiValidationError } from './apiValidation.js';
+
 export const AGENT_EVENT_SCHEMA_VERSION = 2;
 
 export type AgentEventKindV2 =
@@ -51,7 +53,7 @@ export interface NormalizedAgentEvent {
 
 function readString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`agent event requires ${field}`);
+    throw new ApiValidationError(`agent event requires ${field}`);
   }
   return value.trim();
 }
@@ -62,21 +64,21 @@ function readOptionalString(value: unknown): string | undefined {
 
 function assertFullTmuxSession(session: string): void {
   if (/^[a-f0-9]{8}$/i.test(session)) {
-    throw new Error('agent event session must be the full tmux session name, not a suffix');
+    throw new ApiValidationError('agent event session must be the full tmux session name, not a suffix');
   }
 }
 
 export function parseAgentEventV2(input: unknown, now = new Date()): AgentEventV2 {
   if (!input || typeof input !== 'object') {
-    throw new Error('agent event must be an object');
+    throw new ApiValidationError('agent event must be an object');
   }
   const record = input as Record<string, unknown>;
   if (record.schemaVersion !== AGENT_EVENT_SCHEMA_VERSION) {
-    throw new Error('agent event requires schemaVersion 2');
+    throw new ApiValidationError('agent event requires schemaVersion 2');
   }
   const kind = readString(record.kind, 'kind');
   if (!AGENT_EVENT_KINDS.has(kind as AgentEventKindV2)) {
-    throw new Error(`unsupported agent event kind: ${kind}`);
+    throw new ApiValidationError(`unsupported agent event kind: ${kind}`);
   }
   const session = readString(record.session, 'session');
   assertFullTmuxSession(session);
@@ -107,7 +109,7 @@ export function normalizeAgentEventForApi(input: unknown, now = new Date()): Nor
     };
   }
   if (!input || typeof input !== 'object') {
-    throw new Error('agent event must be an object');
+    throw new ApiValidationError('agent event must be an object');
   }
   const record = input as Record<string, unknown>;
   const legacyKind = readOptionalString(record.kind);

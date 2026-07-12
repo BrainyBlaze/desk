@@ -44,7 +44,7 @@ import type {
   SessionSpec,
   TmuxPlanAction
 } from '../../core/types.js';
-import { readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
+import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
 import { shouldRespawnAfterEdit } from '../editRespawn.js';
@@ -89,7 +89,7 @@ function scheduleAgentResumeCapture(session: SessionSpec): void {
 
 function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
   if (!value || typeof value !== 'object') {
-    throw new Error('session body is required');
+    throw new ApiValidationError('session body is required');
   }
   const record = value as Record<string, unknown>;
   const command = readOptionalString(record.command);
@@ -103,7 +103,7 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
 
   if (command) {
     if (record.uiMode === 'native') {
-      throw new Error('session.uiMode native is not supported for custom-command sessions');
+      throw new ApiValidationError('session.uiMode native is not supported for custom-command sessions');
     }
     session.command = command;
     return session;
@@ -115,10 +115,10 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
   const uiMode = readOptionalString(record.uiMode);
   if (uiMode !== undefined) {
     if (uiMode !== 'terminal' && uiMode !== 'native') {
-      throw new Error('session.uiMode must be terminal or native');
+      throw new ApiValidationError('session.uiMode must be terminal or native');
     }
     if (uiMode === 'native' && !sessionSupportsNativeUiMode({ agent: session.agent })) {
-      throw new Error(`session.uiMode native is not supported for agent ${session.agent}`);
+      throw new ApiValidationError(`session.uiMode native is not supported for agent ${session.agent}`);
     }
     session.uiMode = uiMode;
   }
@@ -236,7 +236,7 @@ function readLayoutBody(value: unknown): DeskGroupLayout | undefined {
     return undefined;
   }
   if (!['1x1', '2x2', '3x3', '4x4', 'custom', 'linear'].includes(kind)) {
-    throw new Error('layout.kind must be 1x1, 2x2, 3x3, 4x4, custom, or linear');
+    throw new ApiValidationError('layout.kind must be 1x1, 2x2, 3x3, 4x4, custom, or linear');
   }
   return {
     kind: kind as DeskLayoutKind,

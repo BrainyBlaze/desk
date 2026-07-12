@@ -1,7 +1,8 @@
 import type { Connect } from 'vite';
 import { ManifestMutationError } from '../core/config.js';
+import { ManifestValidationError } from '../core/manifest.js';
 import { FileLockBusyError } from '../shared/fileLock.js';
-import { ApiValidationError } from './apiValidation.js';
+import { DeskApiError } from './apiValidation.js';
 import { HttpBodyError, sendJson } from './httpUtil.js';
 import type { DeskRoute } from './plugin.js';
 
@@ -40,9 +41,9 @@ function mapDeskApiError(error: unknown): DeskApiErrorResponse {
       body: { error: error.message, code: error.code }
     };
   }
-  if (error instanceof ApiValidationError) {
+  if (error instanceof DeskApiError) {
     return {
-      statusCode: 400,
+      statusCode: error.statusCode,
       body: { error: error.message, code: error.code }
     };
   }
@@ -58,8 +59,41 @@ function mapDeskApiError(error: unknown): DeskApiErrorResponse {
       body: { error: error.message, code: error.code }
     };
   }
+  if (error instanceof ManifestValidationError) {
+    return {
+      statusCode: 422,
+      body: { error: error.message, code: error.code }
+    };
+  }
+  const systemError = mapNodeSystemError(error);
+  if (systemError) {
+    return systemError;
+  }
   return {
     statusCode: 500,
     body: { error: 'Internal server error' }
   };
+}
+
+function mapNodeSystemError(error: unknown): DeskApiErrorResponse | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') {
+    return { statusCode: 404, body: { error: 'File or directory not found', code: 'not-found' } };
+  }
+  if (code === 'EEXIST') {
+    return { statusCode: 409, body: { error: 'File or directory already exists', code: 'conflict' } };
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return { statusCode: 403, body: { error: 'Permission denied', code: 'permission-denied' } };
+  }
+  if (code === 'ENOTDIR' || code === 'EISDIR' || code === 'EINVAL') {
+    return { statusCode: 400, body: { error: 'Invalid file or directory operation', code: 'invalid-input' } };
+  }
+  if (code === 'ENOSPC') {
+    return { statusCode: 507, body: { error: 'Storage is full', code: 'storage-full' } };
+  }
+  return undefined;
 }

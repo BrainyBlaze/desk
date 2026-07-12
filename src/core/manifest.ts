@@ -15,16 +15,25 @@ import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './ope
 const DEFAULT_NAMESPACE = 'agentdesk';
 const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
 
+export class ManifestValidationError extends Error {
+  readonly code = 'manifest-invalid';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManifestValidationError';
+  }
+}
+
 export function parseDeskManifest(source: string): DeskManifest {
   const parsed = YAML.parse(source) as unknown;
 
   if (!isRecord(parsed)) {
-    throw new Error('desk manifest must be an object');
+    throw new ManifestValidationError('desk manifest must be an object');
   }
 
   for (const key of Object.keys(parsed)) {
     if (!MANIFEST_TOP_LEVEL_KEYS.has(key)) {
-      throw new Error(`desk manifest has unknown top-level key "${key}"`);
+      throw new ManifestValidationError(`desk manifest has unknown top-level key "${key}"`);
     }
   }
 
@@ -50,13 +59,13 @@ export function parseDeskManifest(source: string): DeskManifest {
 
   for (const project of manifest.projects ?? []) {
     if (!project || typeof project.id !== 'string' || project.id.trim() === '') {
-      throw new Error('each project requires an id');
+      throw new ManifestValidationError('each project requires an id');
     }
     if (typeof project.cwd !== 'string' || project.cwd.trim() === '') {
-      throw new Error(`project ${project.id} requires cwd`);
+      throw new ManifestValidationError(`project ${project.id} requires cwd`);
     }
     if (!Array.isArray(project.groups)) {
-      throw new Error(`project ${project.id} requires a groups array`);
+      throw new ManifestValidationError(`project ${project.id} requires a groups array`);
     }
     for (const group of project.groups) {
       validateGroup(group);
@@ -77,7 +86,7 @@ function requireManifestListOrAbsent(value: unknown, key: string): unknown[] | u
     return undefined;
   }
   if (!Array.isArray(value)) {
-    throw new Error(`desk manifest: "${key}" must be a list`);
+    throw new ManifestValidationError(`desk manifest: "${key}" must be a list`);
   }
   return value;
 }
@@ -155,28 +164,28 @@ export function expandHome(path: string, homeDir: string): string {
 
 function validateGroup(group: DeskGroup): void {
   if (!group || typeof group.id !== 'string' || group.id.trim() === '') {
-    throw new Error('each group requires an id');
+    throw new ManifestValidationError('each group requires an id');
   }
   if (!Array.isArray(group.sessions)) {
-    throw new Error(`group ${group.id} requires a sessions array`);
+    throw new ManifestValidationError(`group ${group.id} requires a sessions array`);
   }
 }
 
 function validateSession(groupId: string, session: DeskSession, inheritedCwd?: string): void {
   if (!session || typeof session.name !== 'string' || session.name.trim() === '') {
-    throw new Error(`group ${groupId} has a session without a name`);
+    throw new ManifestValidationError(`group ${groupId} has a session without a name`);
   }
   validateSessionUiMode(session);
   if (typeof session.command === 'string' && session.command.trim() !== '') {
     return;
   }
   if ((!inheritedCwd || inheritedCwd.trim() === '') && (typeof session.cwd !== 'string' || session.cwd.trim() === '')) {
-    throw new Error(`session ${session.name} requires cwd`);
+    throw new ManifestValidationError(`session ${session.name} requires cwd`);
   }
   if (isSupportedAgent(session.agent)) {
     return;
   }
-  throw new Error(`session ${session.name} requires a supported agent or command`);
+  throw new ManifestValidationError(`session ${session.name} requires a supported agent or command`);
 }
 
 function validateSessionUiMode(session: DeskSession): void {
@@ -184,10 +193,12 @@ function validateSessionUiMode(session: DeskSession): void {
     return;
   }
   if (session.uiMode !== 'native') {
-    throw new Error(`session ${session.name} has an unknown uiMode; expected terminal or native`);
+    throw new ManifestValidationError(`session ${session.name} has an unknown uiMode; expected terminal or native`);
   }
   if (!sessionSupportsNativeUiMode(session)) {
-    throw new Error(`session ${session.name} cannot use native uiMode; only codex/claude/opencode agent sessions support it`);
+    throw new ManifestValidationError(
+      `session ${session.name} cannot use native uiMode; only codex/claude/opencode agent sessions support it`
+    );
   }
 }
 
@@ -347,7 +358,7 @@ export function buildAgentCommand(
   if (session.agent === 'opencode') {
     return buildOpencodeCommand(session, cwd, homeDir, tmuxSession);
   }
-  throw new Error(`session ${session.name} requires an explicit command`);
+  throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }
 
 function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string, tmuxSession: string): string {

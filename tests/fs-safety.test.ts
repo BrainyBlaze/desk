@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ApiValidationError } from '../src/server/apiValidation';
 import { resolveFsPath } from '../src/server/fsSafety';
 
 describe('resolveFsPath', () => {
@@ -17,6 +18,7 @@ describe('resolveFsPath', () => {
   });
 
   it('rejects .. escapes', () => {
+    expect(() => resolveFsPath('/workspace/projects/../.ssh/id_rsa', root)).toThrow(ApiValidationError);
     expect(() => resolveFsPath('/workspace/projects/../.ssh/id_rsa', root)).toThrow(/escapes/);
   });
 

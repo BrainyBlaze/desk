@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest';
+import { buildSessionSpecs, ManifestValidationError, parseDeskManifest } from '../src/core/manifest';
 
 describe('desk manifest ui mode', () => {
   it('defaults SDK-backed agent sessions to native ui mode when none is declared', () => {
@@ -514,6 +514,7 @@ projects:
 
 describe('desk manifest malformed top-level keys (finding N12)', () => {
   it('rejects unknown top-level keys instead of silently dropping a misspelled groups key', () => {
+    expect(() => parseDeskManifest('gropus: []')).toThrow(ManifestValidationError);
     expect(() => parseDeskManifest('gropus: []')).toThrow(/unknown top-level key "gropus"/);
   });
 

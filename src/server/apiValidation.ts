@@ -1,9 +1,32 @@
-export class ApiValidationError extends Error {
-  readonly code = 'invalid-input';
-
-  constructor(message: string) {
+export class DeskApiError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+    readonly code: string
+  ) {
     super(message);
+    this.name = 'DeskApiError';
+  }
+}
+
+export class ApiValidationError extends DeskApiError {
+  constructor(message: string) {
+    super(message, 400, 'invalid-input');
     this.name = 'ApiValidationError';
+  }
+}
+
+export class ApiConflictError extends DeskApiError {
+  constructor(message: string) {
+    super(message, 409, 'conflict');
+    this.name = 'ApiConflictError';
+  }
+}
+
+export class ApiNotFoundError extends DeskApiError {
+  constructor(message: string) {
+    super(message, 404, 'not-found');
+    this.name = 'ApiNotFoundError';
   }
 }
 
