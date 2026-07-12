@@ -179,8 +179,10 @@ are required by `desk serve`.
 The advertised one-liner necessarily assumes a working `curl` with usable TLS
 trust because that command downloads the installer itself. That is the sole
 bootstrap prerequisite and is stated explicitly in the quickstart. Once the
-script is running, it provisions and re-probes every other required capability
-before it downloads the Desk release or a Desk-owned toolchain.
+script is running, it provisions and re-probes the bootstrap host capabilities
+(CA trust, archive extraction, and SHA-256) before downloading the Desk release
+metadata. Release-declared Node and Bun assets are downloaded, verified,
+promoted, and probed only after that metadata is resolved.
 
 The installer first detects `uname` OS and architecture. Supported values are:
 
@@ -259,7 +261,8 @@ The installer performs the following flow:
 
 1. Detect and validate OS, architecture, libc where relevant, and a supported
    dependency provider.
-2. Acquire an installation lock scoped to the canonical `DESK_HOME`.
+2. Acquire an installation lock at the canonical sibling path
+   `${DESK_HOME}.install-lock`, before creating or modifying `DESK_HOME`.
 3. Provision and re-probe CA trust, archive extraction, and checksum capability.
 4. Provision and re-probe the remaining host packages.
 5. Resolve the requested release tag. `DESK_VERSION` must match the canonical
@@ -301,13 +304,16 @@ The existing active release is untouched until all staging and smoke checks
 succeed. A failure cleans only owned temporary paths and preserves the old
 `current` link and launcher target. The installer never reuses a staging name.
 
-The lock is acquired with an atomic directory creation under `DESK_HOME` and
-records PID, host, start time, and installer version. A live owner makes a second
-installer fail immediately. A lock is stale only when it belongs to the same host,
-its process is absent, and its age exceeds ten minutes; otherwise
-manual inspection is required. Signal/exit traps release only a lock whose
-ownership token matches the current installer. Package-manager-native locks are
-still honored separately.
+The lock is acquired by atomically creating the canonical sibling directory
+`${DESK_HOME}.install-lock`; it is never nested inside the install root. It
+records PID, host, start time, installer version, and a random ownership token. A
+live owner makes a second installer fail immediately. A lock is stale only when
+it belongs to the same host, its process is absent, and its age exceeds ten
+minutes; otherwise manual inspection is required. Signal/exit traps release only
+a lock whose ownership token matches the current installer. During uninstall,
+the sibling lock remains held until the install root has been fully removed; the
+lock is the final path removed, so another installer cannot enter the deletion
+window. Package-manager-native locks are still honored separately.
 
 The build script still uses Bun compile mode, but writes only
 `libexec/desk-standalone`. Its comments and output consistently describe a
@@ -562,6 +568,8 @@ path, or unrelated internal artifact.
   refusal to uninstall unidentified paths.
 - Run concurrent same-version and different-version installers and prove the
   lock permits only one owner, including stale-lock recovery cases.
+- Race uninstall against a new install and prove the sibling lock excludes the
+  new installer until the old install root is completely removed.
 - Exercise earlier and later PATH collisions, unsafe PATH entries, invalid
   `DESK_BIN_DIR` values, and the literal
   `curl ... | bash && desk serve` executable-resolution flow.
