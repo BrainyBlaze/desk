@@ -511,3 +511,21 @@ projects:
     expect(command).toContain("--resume 'a$(id)b'");
   });
 });
+
+describe('desk manifest malformed top-level keys (finding N12)', () => {
+  it('throws when groups is present but not a list (does not silently empty the config)', () => {
+    // An indentation slip that turns `groups:` into a scalar used to be coerced
+    // to [] — dropping every project/session with no diagnostic, then persisted
+    // as empty on the next write. It must fail loud instead.
+    expect(() => parseDeskManifest('groups: oops')).toThrow(/"groups" must be a list/);
+  });
+
+  it('throws when projects is present but not a list', () => {
+    expect(() => parseDeskManifest('projects: nope')).toThrow(/"projects" must be a list/);
+  });
+
+  it('still treats an absent key as an empty config (no false positive)', () => {
+    expect(() => parseDeskManifest('settings: {}')).not.toThrow();
+    expect(parseDeskManifest('settings: {}').groups).toEqual([]);
+  });
+});

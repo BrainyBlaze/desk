@@ -25,8 +25,13 @@ export function parseDeskManifest(source: string): DeskManifest {
     // UI settings live in the manifest so they survive reboots and browsers;
     // every write path spreads the manifest, so parse must carry them through.
     settings: isRecord(parsed.settings) ? (parsed.settings as DeskManifest['settings']) : undefined,
-    groups: Array.isArray(parsed.groups) ? parsed.groups : [],
-    projects: Array.isArray(parsed.projects) ? parsed.projects : undefined
+    // Present-but-not-a-list is a mistake (e.g. an indentation slip turning
+    // `groups:` into a scalar), NOT an empty config. Silently coercing it to []
+    // dropped every project/session with zero diagnostics, and the next write
+    // spread the empty manifest back to disk — permanent data loss. Throw
+    // instead; an ABSENT key still means "none".
+    groups: (requireManifestListOrAbsent(parsed.groups, 'groups') ?? []) as DeskManifest['groups'],
+    projects: requireManifestListOrAbsent(parsed.projects, 'projects') as DeskManifest['projects']
   } as unknown as DeskManifest;
 
   for (const group of manifest.groups) {
@@ -55,6 +60,19 @@ export function parseDeskManifest(source: string): DeskManifest {
   }
 
   return manifest;
+}
+
+/** A manifest top-level list (`groups`/`projects`) may be absent (→ undefined,
+ *  meaning "none") but if PRESENT must be a list. A present scalar/map is a
+ *  hand-edit mistake and throws rather than silently dropping the data. */
+function requireManifestListOrAbsent(value: unknown, key: string): unknown[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`desk manifest: "${key}" must be a list`);
+  }
+  return value;
 }
 
 export function buildSessionSpecs(

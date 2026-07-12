@@ -104,7 +104,10 @@ function main(argv: string[]): number {
       return runHooksCommand(args.target, args.options);
     }
 
-    const desk = loadDesk({ manifestPath: args.manifestPath });
+    // `config` and `init` must work even when the manifest is unparseable — they
+    // are exactly the commands a user needs to FIND and REPLACE a broken file,
+    // so they must run before loadDesk (which parses the manifest and would
+    // otherwise die on the very corruption the user is trying to fix).
     const manifestPath = resolveManifestPath(args.manifestPath);
 
     if (args.command === 'config') {
@@ -132,6 +135,8 @@ function main(argv: string[]): number {
       console.log(`created ${manifestPath}`);
       return 0;
     }
+
+    const desk = loadDesk({ manifestPath: args.manifestPath });
 
     if (args.command === 'add') {
       const session = readSessionOptions(args.options);
