@@ -177,8 +177,14 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         const next = args.shift() as string;
         if (next === '--thread') {
           thread = args.shift();
+          if (thread === undefined || thread.startsWith('--')) {
+            throw new Error('--thread requires a value');
+          }
         } else if (next === '--as') {
           as = args.shift();
+          if (as === undefined || as.startsWith('--')) {
+            throw new Error('--as requires a value');
+          }
         } else {
           bodyParts.push(next);
         }
