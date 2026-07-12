@@ -796,31 +796,40 @@ export function ChannelsSubsystem({
   // Scroll-down (and the live poll): fetch messages after the newest loaded one
   // and APPEND them. Used both to page forward through a deep unread backlog and
   // to pick up live messages while the window already includes the newest.
-  const loadNewer = useCallback(async (channel: string): Promise<void> => {
+  /** Append newer messages. Returns false when it could NOT advance — the server
+   *  returned nothing new for our `after` cursor. That happens both when we are
+   *  genuinely up to date AND when our newest loaded message was DELETED
+   *  externally (a stale cursor), so the caller reconciles a persistent mismatch
+   *  with a full window refetch instead of freezing on it. */
+  const loadNewer = useCallback(async (channel: string): Promise<boolean> => {
     const loaded = detailRef.current;
     if (!loaded || loaded.name !== channel || loadingMoreRef.current) {
-      return;
+      return false;
     }
     const newest = loaded.messages[loaded.messages.length - 1]?.id;
     if (!newest) {
-      return;
+      return false;
     }
     loadingMoreRef.current = true;
     try {
       const page = await channelsMessages(channel, { after: newest });
-      setDetail((current) => {
-        if (!current || current.name !== channel) {
-          return current;
-        }
-        const known = new Set(current.messages.map((message) => message.id));
-        const fresh = page.messages.filter((message) => !known.has(message.id));
-        if (fresh.length === 0 && page.hasNewer === current.hasNewer) {
-          return current;
-        }
-        return { ...current, messages: [...current.messages, ...fresh], hasNewer: page.hasNewer };
-      });
+      const known = new Set(loaded.messages.map((message) => message.id));
+      const fresh = page.messages.filter((message) => !known.has(message.id));
+      const progressed = fresh.length > 0 || page.hasNewer !== loaded.hasNewer;
+      if (progressed) {
+        setDetail((current) => {
+          if (!current || current.name !== channel) {
+            return current;
+          }
+          const knownNow = new Set(current.messages.map((message) => message.id));
+          const freshNow = page.messages.filter((message) => !knownNow.has(message.id));
+          return { ...current, messages: [...current.messages, ...freshNow], hasNewer: page.hasNewer };
+        });
+      }
+      return progressed;
     } catch (err) {
       report(err);
+      return false;
     } finally {
       loadingMoreRef.current = false;
     }
@@ -943,7 +952,18 @@ export function ChannelsSubsystem({
           setRestoreScrollChannel(null);
           void refreshDetail(selectedSummary.name, { initialWindow: true, summary: selectedSummary });
         } else if (!loaded.hasNewer && newestLoaded !== summaryLast) {
-          void loadNewer(selectedSummary.name);
+          const target = selectedSummary.name;
+          void loadNewer(target).then((progressed) => {
+            // If loadNewer could not advance yet the summary still shows a
+            // different last message, our newest cursor is stale (the newest
+            // loaded message was deleted externally) — the feed would otherwise
+            // freeze on this mismatch every tick. Refetch the window to recover.
+            // We are at the tail here (!hasNewer), so this does not disturb a
+            // scrolled-up reader.
+            if (!progressed && activeRef.current && selectedRef.current === target && detailRef.current?.name === target) {
+              void refreshDetail(target);
+            }
+          });
           if (threadRef.current) {
             void refreshThread(selectedSummary.name, threadRef.current);
           }
@@ -2296,7 +2316,7 @@ export function ChannelsSubsystem({
                       hasOlder={!filtering && detail.hasOlder}
                       hasNewer={!filtering && detail.hasNewer}
                       onLoadOlder={!filtering ? loadOlder : undefined}
-                      onLoadNewer={!filtering ? () => loadNewer(detail.name) : undefined}
+                      onLoadNewer={!filtering ? () => void loadNewer(detail.name) : undefined}
                       onJumpLatest={!filtering && detail.hasNewer ? () => jumpToLatest(detail.name) : undefined}
                       onReadProgress={active && !filtering ? (id) => markChannelRead(detail.name, id) : undefined}
                       onOpenThread={openThread}
