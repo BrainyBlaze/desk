@@ -605,7 +605,7 @@ if kind=="tar":
             name=normalized(member.name)
             if member.isdev(): raise ValueError("special archive entry rejected")
             if not (member.isdir() or member.isfile() or member.issym() or member.islnk()): raise ValueError("unsupported archive entry")
-            mode=safe_mode(member.mode, member.isdir())
+            mode=0o777 if (member.issym() or member.islnk()) else safe_mode(member.mode, member.isdir())
             link=None
             if member.issym(): link=safe_link(name, member.linkname, True)
             if member.islnk(): link=safe_link(name, member.linkname, False)

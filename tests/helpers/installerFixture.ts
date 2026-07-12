@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -165,6 +166,7 @@ exit 92
     mkdirSync(sourceRoot, { recursive: true });
     writeFileSync(join(sourceRoot, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
     writeFileSync(join(sourceRoot, 'package-lock.json'), '{}\n');
+    symlinkSync('package.json', join(sourceRoot, 'package-link.json'));
     const sourceAsset = 'desk-v0.3.0-source.tar.gz';
     const sourcePath = join(this.releaseDir, sourceAsset);
     runChecked('tar', ['-czf', sourcePath, '-C', sourceParent, 'desk-v0.3.0'], this.root);
