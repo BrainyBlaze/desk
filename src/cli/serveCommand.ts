@@ -125,7 +125,7 @@ export function createServeLaunch(
       args: [viteEntry, '--host', options.host, '--port', String(options.port), '--strictPort'],
       cwd: root,
       env: parentEnv,
-      label: `desk serving (dev) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
+      label: `desk starting (dev) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
     };
   }
 
@@ -142,7 +142,7 @@ export function createServeLaunch(
       DESK_HOST: options.host,
       DESK_PORT: String(options.port)
     },
-    label: `desk serving (standalone) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
+    label: `desk starting (standalone) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
   };
 }
 

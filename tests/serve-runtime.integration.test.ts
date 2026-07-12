@@ -367,6 +367,8 @@ describe('serve runtime supervision', () => {
       await waitUntil(async () => !(await portIsOpen(port)), `port ${port} to close`);
       expect(processIsAlive(runtimePid)).toBe(false);
       expect(await portIsOpen(port)).toBe(false);
+      await waitUntil(() => !processGroupIsAlive(cliPid), `CLI process group ${cliPid} to exit`);
+      expect(processGroupIsAlive(cliPid)).toBe(false);
     }
   );
 
@@ -379,6 +381,8 @@ describe('serve runtime supervision', () => {
       expect(outcome).toEqual({ code: 1, signal: null });
       expect(`${cli.stdout}\n${cli.stderr}`).toContain(`Port ${bound.port} is already in use`);
       expect(`${cli.stdout}\n${cli.stderr}`).not.toContain('trying another one');
+      expect(cli.stdout).toContain(`desk starting (dev) on http://127.0.0.1:${bound.port}`);
+      expect(cli.stdout).not.toContain('desk serving');
       expect(cli.stdout).not.toContain('Local:');
       expect(await portIsOpen(bound.port)).toBe(true);
     } finally {
