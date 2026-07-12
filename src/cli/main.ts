@@ -85,6 +85,34 @@ interface ParsedArgs {
   options: Map<string, string>;
 }
 
+const COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
+  ['help', new Set()],
+  ['--help', new Set()],
+  ['-h', new Set()],
+  ['serve', new Set(['--host', '--port'])],
+  ['hooks', new Set(['--home'])],
+  ['config', new Set(['--file', '-f'])],
+  ['init', new Set(['--file', '-f', '--force'])],
+  [
+    'add',
+    new Set([
+      '--file',
+      '-f',
+      '--group',
+      '--group-label',
+      '--name',
+      '--cwd',
+      '--command',
+      '--agent',
+      '--resume'
+    ])
+  ],
+  ['status', new Set(['--file', '-f'])],
+  ['up', new Set(['--file', '-f', '--dry-run'])],
+  ['attach', new Set(['--file', '-f'])],
+  ['capture', new Set(['--file', '-f', '--lines'])]
+]);
+
 export function main(argv: string[]): number {
   try {
     const args = parseArgs(argv);
@@ -216,6 +244,9 @@ function parseArgs(argv: string[]): ParsedArgs {
 
   while (args.length > 0) {
     const next = args.shift();
+    if (next?.startsWith('-')) {
+      assertOptionAllowed(command, next);
+    }
     if (next === '--file' || next === '-f') {
       manifestPath = requireValue(next, args.shift());
     } else if (next === '--dry-run') {
@@ -234,6 +265,13 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return { command, manifestPath, dryRun, force, target, lines, options };
+}
+
+function assertOptionAllowed(command: string, option: string): void {
+  const allowed = COMMAND_OPTIONS.get(command);
+  if (allowed && !allowed.has(option)) {
+    throw new Error(`unknown option ${option} for desk ${command}`);
+  }
 }
 
 function requireValue(flag: string, value: string | undefined): string {
