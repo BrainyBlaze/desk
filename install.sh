@@ -376,8 +376,12 @@ validate_release_version() {
   "$PYTHON_BIN" - "$1" <<'PY'
 import re, sys
 value=sys.argv[1]
-pattern=r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
-if re.fullmatch(pattern, value) is None:
+pattern=r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+match=re.fullmatch(pattern, value)
+if match is None:
+    raise SystemExit(1)
+prerelease=match.group(1)
+if prerelease is not None and any(part.isdigit() and len(part) > 1 and part.startswith("0") for part in prerelease.split(".")):
     raise SystemExit(1)
 PY
 }
@@ -407,18 +411,27 @@ PY
 semver_compare() {
   "$PYTHON_BIN" - "$1" "$2" <<'PY'
 import re, sys
-def key(value):
+def parse(value):
     m=re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", value)
     if not m: raise SystemExit(2)
     base=tuple(map(int,m.group(1,2,3)))
     pre=m.group(4)
-    return base, pre
-a, b=key(sys.argv[1]), key(sys.argv[2])
-if a[0] != b[0]: print(-1 if a[0] < b[0] else 1)
-elif a[1] == b[1]: print(0)
-elif a[1] is None: print(1)
-elif b[1] is None: print(-1)
-else: print(-1 if a[1] < b[1] else 1)
+    return base, None if pre is None else pre.split(".")
+def compare_identifiers(left, right):
+    for a, b in zip(left, right):
+        if a == b: continue
+        a_numeric, b_numeric = a.isdigit(), b.isdigit()
+        if a_numeric and b_numeric: return -1 if int(a) < int(b) else 1
+        if a_numeric != b_numeric: return -1 if a_numeric else 1
+        return -1 if a < b else 1
+    return (len(left) > len(right)) - (len(left) < len(right))
+a, b=parse(sys.argv[1]), parse(sys.argv[2])
+if a[0] != b[0]: result=-1 if a[0] < b[0] else 1
+elif a[1] == b[1]: result=0
+elif a[1] is None: result=1
+elif b[1] is None: result=-1
+else: result=compare_identifiers(a[1], b[1])
+print(result)
 PY
 }
 

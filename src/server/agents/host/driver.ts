@@ -169,7 +169,7 @@ export interface AgentDriver {
   /**
    * Clean shutdown — close the agent connection, free resources, ensure no further
    * events are emitted via any subscribed handler. Called once on tmux-session kill
- * / mode-switch / Desk server shutdown. Should not return until the driver has
+   * / mode-switch / Desk server shutdown. Should not return until the driver has
    * released its agent resources or given up trying.
    */
   shutdown(): Promise<void>;

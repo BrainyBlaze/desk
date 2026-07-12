@@ -7,6 +7,7 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   writeFileSync
 } from 'node:fs';
 import { hostname } from 'node:os';
@@ -98,6 +99,29 @@ describe('source-backed installer contract', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/canonical.*release tag/i);
     expect(existsSync(`${value.deskHome}.install-lock`)).toBe(false);
+  });
+
+  it('compares numeric prerelease identifiers numerically before refusing a silent downgrade', () => {
+    const value = fixture();
+    const installed = value.run();
+    expect(installed.status, installed.stderr).toBe(0);
+
+    const release = realpathSync(join(value.deskHome, 'current'));
+    const metadataPath = join(release, '.desk-release');
+    const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+    writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, version: 'v0.3.0-rc.10' }, null, 2)}\n`);
+
+    const curl = join(value.binDir, 'curl');
+    writeFileSync(
+      curl,
+      '#!/usr/bin/env bash\nset -euo pipefail\ndestination=""\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then destination="$2"; shift 2; else shift; fi\ndone\n[ -n "$destination" ]\nprintf \'{"tag_name":"v0.3.0-rc.2"}\\n\' > "$destination"\n'
+    );
+    chmodSync(curl, 0o755);
+
+    const result = value.run({ env: { DESK_VERSION: '', DESK_RELEASE_BASE_URL: '' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/older than installed v0\.3\.0-rc\.10.*silent downgrade/i);
   });
 
   it('rejects a live sibling lock before release staging', () => {

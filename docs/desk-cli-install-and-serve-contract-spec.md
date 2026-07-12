@@ -1,17 +1,17 @@
 # Desk CLI installation and serve contract
 
-**Status:** Approved future design; implementation pending
+**Status:** Implemented in Desk 0.3.0
 
 **Date:** 2026-07-12
 
-**Supersedes after implementation:** `docs/standalone-command-contract-spec.md`
+**Supersedes:** `docs/standalone-command-contract-spec.md`
 
 ## Summary
 
-Desk will expose one user-facing command: `desk`. The curl installer will install
+Desk exposes one user-facing command: `desk`. The curl installer installs
 the complete source-backed CLI on supported macOS and Linux hosts, including WSL,
-and will provision every missing required dependency. Native Windows is not
-supported by the proposed change.
+and provisions every missing required dependency. Native Windows is not
+supported.
 
 The serve contract is explicit:
 
@@ -155,7 +155,7 @@ ${XDG_DATA_HOME:-$HOME/.local/share}/desk/
 
 `DESK_HOME` may override the data prefix. `DESK_BIN_DIR` may override the
 launcher directory. These are the supported install-location overrides; the
-installer will not maintain old server-specific variables or layouts.
+installer does not maintain old server-specific variables or layouts.
 
 The installer maintains pinned Desk-owned Node/npm and Bun toolchains under the
 data prefix. It reuses an already verified matching toolchain and downloads it
