@@ -1,6 +1,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { shellQuote } from '../shared/shell.js';
 import { writeTextFileAtomic } from '../shared/atomicFile.js';
+import { withFileLockSync } from '../shared/fileLock.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -262,6 +263,18 @@ function writeTextIfChanged(path: string, content: string): void {
 }
 
 function mergeHookConfig(path: string, desired: { hooks: Record<string, HookGroup[]> }): 'merged' | 'skipped-malformed' {
+  // Lock the read-modify-write on this shared user config: `desk hooks install`
+  // can race Claude Code (or a second install) writing ~/.claude/settings.json.
+  // The atomic write prevents a torn file, not a lost update. Lock a separate
+  // `.lock` path (see resumeCaptureState / the manifest).
+  mkdirSync(dirname(path), { recursive: true });
+  return withFileLockSync(`${path}.lock`, () => mergeHookConfigLocked(path, desired));
+}
+
+function mergeHookConfigLocked(
+  path: string,
+  desired: { hooks: Record<string, HookGroup[]> }
+): 'merged' | 'skipped-malformed' {
   const read = readJsonObjectClassified(path);
   if (read.kind === 'malformed') {
     // The file exists but does not parse to a JSON object. Merging here would
