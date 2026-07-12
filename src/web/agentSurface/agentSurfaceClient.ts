@@ -50,10 +50,17 @@ const RECONNECT_INITIAL_BACKOFF_MS = 250;
 const RECONNECT_MAX_BACKOFF_MS = 30_000;
 
 /** Resolve the WS base URL lazily so importing this module in a non-DOM context (tests)
- *  does not crash on `location` being undefined. terminalBrokerClient uses the same trick. */
-function defaultBaseUrl(): string {
+ *  does not crash on `location` being undefined. terminalBrokerClient uses the same trick.
+ *  Exported for tests. */
+export function defaultBaseUrl(): string {
   if (typeof location !== 'undefined') {
-    return `ws://${location.host}`;
+    // Match the page scheme: a secure page (https, e.g. desk behind a tailscale
+    // or reverse-proxy TLS front) must use wss, or the browser rejects the ws://
+    // connection as mixed content and `new WebSocket()` throws — leaving every
+    // native surface permanently "reconnecting". terminalBrokerClient does the
+    // same; this was the one client that hardcoded ws://.
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${location.host}`;
   }
   return 'ws://127.0.0.1:5173';
 }
@@ -169,7 +176,17 @@ export class AgentSurfaceClient {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.connecting = true;
-    const socket = this.makeSocket(`${this.baseUrl}/ws/agent-ui`);
+    let socket: AgentSurfaceSocket;
+    try {
+      socket = this.makeSocket(`${this.baseUrl}/ws/agent-ui`);
+    } catch {
+      // `new WebSocket()` can throw synchronously (a bad/mixed-content URL). Do
+      // not leak `connecting = true` — that would wedge every future
+      // ensureConnection() on the early-return and dead the Retry button.
+      this.connecting = false;
+      this.scheduleReconnect();
+      return;
+    }
     this.socket = socket;
     // Capture socket locally; every handler checks `this.socket !== socket` so a stale
     // socket that fires open/message/close AFTER forceReconnect or closeSocket replaced
