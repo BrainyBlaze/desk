@@ -358,10 +358,11 @@ export function App(): JSX.Element {
   const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
   const [unreadEvents, setUnreadEvents] = useState(0);
   // The 2s pulse loop (telemetry + attention/events + snapshot liveness) owns
-  // systemSnapshot/systemError/telemetryHistory/pulseCacheRef; it writes the
+  // systemSnapshot/systemError/telemetryHistory; it writes the
   // attention/events/snapshot state below through these setters so the coupling
-  // is preserved exactly. App's own callbacks reset the returned pulseCacheRef.
-  const { systemSnapshot, systemError, telemetryHistoryRef, pulseCacheRef } = usePulse({
+  // is preserved exactly. App invalidates in-flight attention payloads before
+  // applying its own optimistic attention/event mutations.
+  const { systemSnapshot, systemError, telemetryHistoryRef, invalidateAttentionPulse } = usePulse({
     setSnapshot,
     setAttention,
     setAgentEvents,
@@ -1685,6 +1686,7 @@ export function App(): JSX.Element {
   }
 
   function openAgentEvent(event: AgentEvent): void {
+    invalidateAttentionPulse();
     setAgentEvents((current) => current.map((e) => (e.id === event.id ? { ...e, read: true } : e)));
     setUnreadEvents((count) => Math.max(0, count - (event.read ? 0 : 1)));
     fireAndForget(markEventsRead({ ids: [event.id] }), 'mark event read');
@@ -1725,7 +1727,7 @@ export function App(): JSX.Element {
   }
 
   function markAllEventsRead(): void {
-    pulseCacheRef.current = { attention: '', events: '' };
+    invalidateAttentionPulse();
     setAgentEvents((current) => current.map((e) => ({ ...e, read: true })));
     setUnreadEvents(0);
     // Acknowledging every event acknowledges every sidebar lamp with it
@@ -1750,7 +1752,7 @@ export function App(): JSX.Element {
   }
 
   function clearAgentEvents(): void {
-    pulseCacheRef.current = { attention: '', events: '' };
+    invalidateAttentionPulse();
     setAgentEvents([]);
     setUnreadEvents(0);
     setAttention({});
@@ -1759,7 +1761,7 @@ export function App(): JSX.Element {
 
   function touchSession(tmuxSession: string): void {
     recordAgentRecent(tmuxSession);
-    pulseCacheRef.current = { attention: '', events: '' };
+    invalidateAttentionPulse();
     setAttention((current) => {
       if (!current[tmuxSession]) {
         return current;
