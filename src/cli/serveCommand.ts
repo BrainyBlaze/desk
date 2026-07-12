@@ -158,6 +158,21 @@ function signalExitCode(signal: NodeJS.Signals | undefined): number {
   return 1;
 }
 
+function signalRuntimeGroup(child: ChildProcess, signal: ForwardedSignal): boolean {
+  if (child.pid === undefined) {
+    return false;
+  }
+  try {
+    process.kill(-child.pid, signal);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export function runServeLaunch(launch: ServeLaunch): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let child: ChildProcess | undefined;
@@ -191,7 +206,11 @@ export function runServeLaunch(launch: ServeLaunch): Promise<number> {
         pendingSignal = signal;
         return;
       }
-      pendingSignal = child.kill(signal) ? undefined : signal;
+      try {
+        pendingSignal = signalRuntimeGroup(child, signal) ? undefined : signal;
+      } catch (error) {
+        rejectOnce(error);
+      }
     };
     function handleSigint(): void {
       forwardSignal('SIGINT');
@@ -206,6 +225,7 @@ export function runServeLaunch(launch: ServeLaunch): Promise<number> {
     try {
       child = spawn(launch.command, launch.args, {
         cwd: launch.cwd,
+        detached: true,
         env: launch.env,
         stdio: 'inherit'
       });
@@ -221,6 +241,12 @@ export function runServeLaunch(launch: ServeLaunch): Promise<number> {
     });
     child.once('error', rejectOnce);
     child.once('close', (code, signal) => {
+      try {
+        signalRuntimeGroup(child!, 'SIGTERM');
+      } catch (error) {
+        rejectOnce(error);
+        return;
+      }
       resolveOnce(code ?? signalExitCode(signal ?? forwardedSignal));
     });
   });

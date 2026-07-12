@@ -30,10 +30,12 @@
     "build:ui": "vite build",
     "build:standalone:assets": "vite build && node scripts/make-assets.mjs",
     "build:standalone": "npm run build:standalone:assets && bun run scripts/build-standalone.ts",
+    "build:distribution": "npm run build:standalone && npm run build",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dev": "tsx src/cli/main.ts",
     "generate:codex-bindings": "node scripts/generate-codex-bindings.mjs",
+    "smoke:serve-modes": "node scripts/smoke-serve-modes.mjs",
     "serve": "vite --host 127.0.0.1",
     "ui": "vite --host 127.0.0.1"
   },
