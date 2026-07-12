@@ -77,6 +77,12 @@ export class TerminalBrokerClient {
       this.sendFrame({ type: 'subscribe', session, surfaceId, visible });
     }
     // When the socket opens later, resubscribeAll replays this with current state.
+    // Replay the CURRENT connection state to this surface now: onConnectionChange
+    // otherwise only fires on future transitions, so a cell that mounts while the
+    // bridge is already down (reconnect exhausted, or mid-outage) would render as
+    // alive and silently swallow keystrokes. A late subscriber must learn it's
+    // disconnected immediately and show the Reconnect overlay.
+    surface.handlers.onConnectionChange?.(this.connected);
   }
 
   unsubscribe(surfaceId: string): void {

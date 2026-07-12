@@ -182,6 +182,30 @@ describe('TerminalBrokerClient', () => {
     expect(out).toEqual(['ok']);
   });
 
+  it('replays the current connection state to a late subscriber (down → overlay, not silent input loss)', () => {
+    const { client, sockets } = makeClient();
+    const conn: boolean[] = [];
+    // Subscribe while socket 0 is still CONNECTING (connected === false).
+    client.subscribe('s1', 'sess', true, {
+      onOutput: () => {},
+      onSnapshot: () => {},
+      onConnectionChange: (up) => conn.push(up)
+    });
+    // The late subscriber must immediately learn it is disconnected — otherwise
+    // the cell renders alive and silently swallows keystrokes.
+    expect(conn[0]).toBe(false);
+    sockets[0].open();
+    expect(conn.at(-1)).toBe(true);
+    // A new surface subscribing while connected reports true right away.
+    const conn2: boolean[] = [];
+    client.subscribe('s2', 'sess', true, {
+      onOutput: () => {},
+      onSnapshot: () => {},
+      onConnectionChange: (up) => conn2.push(up)
+    });
+    expect(conn2).toEqual([true]);
+  });
+
   it('tears down the socket when the last surface unsubscribes', () => {
     const { client, sockets } = makeClient();
     client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
