@@ -124,6 +124,7 @@ import {
 } from './channelsModel.js';
 import type { AddableAgentRuntimeState, ChannelSidebarSectionId } from './channelsModel.js';
 import { createDetailRefreshGate } from './detailRefreshGate.js';
+import { channelSwitchCursorSeed } from './channelCursorSeed.js';
 import { Composer } from './Composer.js';
 import { EngineConsole } from './EngineConsole.js';
 import { CommandPalette, type PaletteCommand } from './CommandPalette.js';
@@ -1151,7 +1152,11 @@ export function ChannelsSubsystem({
   // latest. Cached switches restore the saved viewport only when nothing new
   // arrived while away.
 
-  function selectChannel(name: string, summary?: ChannelSummary, options: { restoreScroll?: boolean } = {}): void {
+  function selectChannel(
+    name: string,
+    summary?: ChannelSummary,
+    options: { restoreScroll?: boolean; seedCursor?: boolean } = {}
+  ): void {
     if (!shouldSwitchChannelForNavigation(selectedRef.current, name)) {
       return;
     }
@@ -1164,6 +1169,13 @@ export function ChannelsSubsystem({
     setThreadMessages([]);
     setQuery('');
     setAllMessages(null);
+    // Reseed the keyboard cursor onto the window this switch lands on so the
+    // first j/k advances from the current view instead of carrying the previous
+    // channel's cursor (absent from the new window → jump to the oldest row).
+    // navigateToMessage sets its own explicit target and passes seedCursor:false.
+    const seedCursor = options.seedCursor !== false;
+    const savedAnchor = scrollAnchorByChannelRef.current.get(name)?.messageId ?? null;
+    const readAnchor = seenMapRef.current[name]?.id ?? null;
     localStorage.setItem(CHANNEL_STORAGE_KEY, name);
     // Load memoization: if we have a channel window and no unread messages
     // arrived while it was hidden, restore it instantly with its saved viewport.
@@ -1180,15 +1192,30 @@ export function ChannelsSubsystem({
         // posted to channel B — a draft could land in the wrong channel, and a
         // failed reanchor fetch left the mismatch on screen indefinitely.
         setDetail(cached);
+        // Reanchor re-fetches a window centred on unread, so the old saved
+        // viewport anchor may be off-window — seed the read anchor.
+        if (seedCursor) {
+          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false));
+        }
         void refreshDetail(name, { initialWindow: true, summary });
       } else {
         setVisitAnchorId(null);
         setRestoreScrollChannel(restoreScrollChannelForSelection(name, options));
         setDetail(cached);
+        // Plain restore lands on the remembered viewport — its anchor is in the
+        // cached window.
+        if (seedCursor) {
+          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, true));
+        }
       }
     } else {
       setRestoreScrollChannel(null);
       setDetail(null);
+      // Fresh visit: the window loads centred on the read/unread boundary, so
+      // the read anchor (not a stale saved viewport) is the in-window seed.
+      if (seedCursor) {
+        setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false));
+      }
       void refreshDetail(name, { initialWindow: true, summary });
     }
   }
@@ -1206,7 +1233,10 @@ export function ChannelsSubsystem({
     }
     setNavTarget({ channel, messageId, thread });
     if (selectedRef.current !== channel) {
-      selectChannel(channel, undefined, { restoreScroll: false });
+      // When navigating to an explicit message we set cursorId above; let the
+      // switch keep that target (seedCursor:false). Without a target, let the
+      // switch seed the cursor so the new channel doesn't inherit a stale one.
+      selectChannel(channel, undefined, { restoreScroll: false, seedCursor: !messageId });
     }
     // selectChannel is component-scope stable (see registerNavigator effect).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1259,14 +1289,19 @@ export function ChannelsSubsystem({
   }, [navTarget, detail, threadParent, threadMessages, loadAroundMessage]);
 
   function openThread(parentId: string): void {
-    if (!selected) {
+    // Use the LIVE selected channel, not the `selected` state: openThread is
+    // invoked from the once-registered keydown listener, whose closure captures
+    // a stale `selected`. refreshThread guards on selectedRef.current === channel,
+    // so passing the stale state made the guard fail and the thread never loaded.
+    const channel = selectedRef.current;
+    if (!channel) {
       return;
     }
     bleeps.open?.play();
     setThreadParent(parentId);
     threadRef.current = parentId;
     setThreadMessages([]);
-    void refreshThread(selected, parentId);
+    void refreshThread(channel, parentId);
   }
 
   /* ---------- actions ---------- */
