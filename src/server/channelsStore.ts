@@ -1015,7 +1015,10 @@ export class ChannelsWatcher {
   constructor(
     private readonly home: string,
     private readonly onMessage: (incoming: IncomingChannelMessage) => void,
-    private readonly sweepIntervalMs = 30_000
+    private readonly sweepIntervalMs = 30_000,
+    private readonly onWatcherError: (error: Error) => void = (error) => {
+      console.error(`channels watcher degraded: ${error.message}`);
+    }
   ) {}
 
   private sweepTimer: NodeJS.Timeout | undefined;
@@ -1057,7 +1060,9 @@ export class ChannelsWatcher {
     // depth 1: home/<channel>/<file>. _members and _files changes are filtered
     // out by the conversation-file test below.
     this.watcher = watch(this.home, { depth: 1, ignoreInitial: true });
-    this.watcher.on('error', () => undefined);
+    this.watcher.on('error', (error) => {
+      this.onWatcherError(error instanceof Error ? error : new Error(String(error)));
+    });
     this.watcher.on('all', (_event, eventPath) => {
       const fileName = basename(eventPath);
       if (!CONVERSATION_FILE.test(fileName)) {

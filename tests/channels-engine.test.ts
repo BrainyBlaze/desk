@@ -2017,6 +2017,19 @@ describe('channels store', () => {
     expect(incoming).toEqual([fresh.message.id]); // seen-set dedupes the second scan
   });
 
+  it('surfaces chokidar watcher errors instead of dropping them blind', () => {
+    createChannel(home, 'ops', 'goal');
+    const errors: Error[] = [];
+    const watcher = new ChannelsWatcher(home, () => undefined, 30_000, (error) => errors.push(error));
+    watcher.start();
+    const internal = watcher as unknown as { watcher?: { emit(event: string, error: Error): void } };
+
+    internal.watcher?.emit('error', new Error('watch backend failed'));
+
+    expect(errors.map((error) => error.message)).toEqual(['watch backend failed']);
+    watcher.stop();
+  });
+
   it('watcher leaves a message retryable when dispatch throws', async () => {
     createChannel(home, 'ops', 'goal');
     await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
