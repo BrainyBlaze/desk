@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionSpec, TmuxPlanAction } from '../../src/core/types.js';
 import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
-import { createSessionsRoutes, runManagedPlan } from '../../src/server/routes/sessionsRoutes.js';
+import { createSessionsRoutes, readDeskSessionBody, runManagedPlan } from '../../src/server/routes/sessionsRoutes.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -37,6 +37,27 @@ describe('sessions route managed startup', () => {
 });
 
 describe('sessions route validation', () => {
+  it('preserves agent metadata for custom-command sessions', () => {
+    expect(
+      readDeskSessionBody(
+        {
+          name: 'custom-agent',
+          command: 'claude-wrapper',
+          agent: 'claude',
+          resume: 'sess-edited',
+          bypassPermissions: true
+        },
+        { cwdRequired: false }
+      )
+    ).toEqual({
+      name: 'custom-agent',
+      command: 'claude-wrapper',
+      agent: 'claude',
+      resume: 'sess-edited',
+      bypassPermissions: true
+    });
+  });
+
   it('surfaces an invalid session payload as a typed 400 response', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const req = Object.assign(new PassThrough(), {

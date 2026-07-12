@@ -87,7 +87,7 @@ function scheduleAgentResumeCapture(session: SessionSpec): void {
   scheduleOpencodeResumeCapture(session);
 }
 
-function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
+export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
   if (!value || typeof value !== 'object') {
     throw new ApiValidationError('session body is required');
   }
@@ -101,6 +101,18 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
     session.cwd = cwd;
   }
 
+  const agent = readOptionalString(record.agent);
+  if (agent) {
+    session.agent = agent;
+  }
+  const resume = readOptionalString(record.resume);
+  if (resume) {
+    session.resume = resume;
+  }
+  if (record.bypassPermissions !== undefined) {
+    session.bypassPermissions = Boolean(record.bypassPermissions);
+  }
+
   if (command) {
     if (record.uiMode === 'native') {
       throw new ApiValidationError('session.uiMode native is not supported for custom-command sessions');
@@ -109,8 +121,7 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
     return session;
   }
 
-  session.agent = readOptionalString(record.agent) ?? 'codex';
-  session.resume = readOptionalString(record.resume);
+  session.agent ??= 'codex';
   session.bypassPermissions = Boolean(record.bypassPermissions);
   const uiMode = readOptionalString(record.uiMode);
   if (uiMode !== undefined) {

@@ -30,24 +30,28 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
 } {
   const cwd = form.cwd.trim() || undefined;
   const command = form.command.trim();
-  if (command) {
-    return {
-      name: form.name,
-      cwd,
-      command
-    };
-  }
   const resume = form.resume.trim();
   // Only an emptied field that previously SHOWED a value is a deliberate clear;
   // an empty field that loaded empty may simply predate async resume capture.
   const clearResume = resume === '' && form.initialResume.trim() !== '';
-  return {
-    name: form.name,
-    cwd,
+  const agentFields = {
     agent: form.agent,
     resume: resume || undefined,
     ...(clearResume ? { clearResume: true } : {}),
-    bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined,
+    bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined
+  };
+  if (command) {
+    return {
+      name: form.name,
+      cwd,
+      ...agentFields,
+      command
+    };
+  }
+  return {
+    name: form.name,
+    cwd,
+    ...agentFields,
     // Emit the concrete choice for native-capable agents: native is the
     // resolved default now, so an omitted terminal would flip to native.
     ...(supportsNativeUi(form.agent, false) ? { uiMode: form.uiMode } : {}),
