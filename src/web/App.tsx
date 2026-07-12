@@ -571,9 +571,6 @@ export function App(): JSX.Element {
     localStorage.setItem('desk.notifOpen', String(notifOpen));
   }, [notifOpen]);
 
-  useEffect(() => {
-    localStorage.setItem('desk.notifWidth', String(notifWidth));
-  }, [notifWidth]);
   const bleepsSettings = useMemo(() => createDeskBleepsSettings(muted || !interacted), [muted, interacted]);
   const settingsLoadedRef = useRef(false);
 
@@ -2084,6 +2081,7 @@ export function App(): JSX.Element {
   });
   const drawerHandlers = useStableCallbacks({
     onResize: setNotifWidth,
+    onResizeEnd: (width: number) => localStorage.setItem('desk.notifWidth', String(width)),
     onClose: () => setNotifOpen(false),
     onOpenEvent: openAgentEvent,
     onMarkAllRead: markAllEventsRead,
@@ -3253,6 +3251,7 @@ function NotificationDrawerImpl({
   events,
   snapshot,
   onResize,
+  onResizeEnd,
   onClose,
   onOpenEvent,
   onMarkAllRead,
@@ -3263,13 +3262,23 @@ function NotificationDrawerImpl({
   events: AgentEvent[];
   snapshot: DeskSnapshot | null;
   onResize: (width: number) => void;
+  onResizeEnd: (width: number) => void;
   onClose: () => void;
   onOpenEvent: (event: AgentEvent) => void;
   onMarkAllRead: () => void;
   onClearAll: () => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
-  const dragRef = useRef<{ startX: number; startWidth: number } | undefined>(undefined);
+  const dragRef = useRef<{ startX: number; startWidth: number; currentWidth: number } | undefined>(undefined);
+
+  const finishResize = (): void => {
+    const drag = dragRef.current;
+    if (!drag) {
+      return;
+    }
+    dragRef.current = undefined;
+    onResizeEnd(drag.currentWidth);
+  };
 
   const sessionLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -3314,18 +3323,19 @@ function NotificationDrawerImpl({
           onPointerDown={(event) => {
             event.preventDefault();
             (event.target as HTMLElement).setPointerCapture(event.pointerId);
-            dragRef.current = { startX: event.clientX, startWidth: width };
+            dragRef.current = { startX: event.clientX, startWidth: width, currentWidth: width };
           }}
           onPointerMove={(event) => {
             if (!dragRef.current) {
               return;
             }
             const next = dragRef.current.startWidth + (dragRef.current.startX - event.clientX);
-            onResize(Math.min(560, Math.max(260, Math.round(next))));
+            const nextWidth = Math.min(560, Math.max(260, Math.round(next)));
+            dragRef.current.currentWidth = nextWidth;
+            onResize(nextWidth);
           }}
-          onPointerUp={() => {
-            dragRef.current = undefined;
-          }}
+          onPointerUp={finishResize}
+          onPointerCancel={finishResize}
         />
         <div className="notifHeader">
           <div className="railTitle">
