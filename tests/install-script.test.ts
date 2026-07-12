@@ -145,22 +145,22 @@ describe('source-backed installer contract', () => {
     const value = fixture();
     const log = join(value.root, 'package-manager.log');
     const tmux = join(value.binDir, 'tmux');
-    const apt = join(value.binDir, 'apt-get');
+    const packageManager = join(value.binDir, process.platform === 'darwin' ? 'brew' : 'apt-get');
     const sudo = join(value.binDir, 'sudo');
     writeFileSync(tmux, '#!/usr/bin/env bash\nprintf "tmux 2.9\\n"\n');
     writeFileSync(
-      apt,
-      '#!/usr/bin/env bash\n[ -d "${DESK_HOME}.install-lock" ] || exit 95\nprintf "%s\\n" "$*" >> "$PACKAGE_LOG"\nexit 73\n'
+      packageManager,
+      '#!/usr/bin/env bash\n[ "${1:-}" = "shellenv" ] && exit 0\n[ -d "${DESK_HOME}.install-lock" ] || exit 95\nprintf "%s\\n" "$*" >> "$PACKAGE_LOG"\nexit 73\n'
     );
     writeFileSync(sudo, '#!/usr/bin/env bash\nexec "$@"\n');
     chmodSync(tmux, 0o755);
-    chmodSync(apt, 0o755);
+    chmodSync(packageManager, 0o755);
     chmodSync(sudo, 0o755);
 
     const result = value.run({ env: { PACKAGE_LOG: log } });
 
     expect(result.status).toBe(73);
-    expect(readFileSync(log, 'utf8')).toContain('update');
+    expect(readFileSync(log, 'utf8')).toMatch(/update|install/);
     expect(existsSync(`${value.deskHome}.install-lock`)).toBe(false);
   });
 });
