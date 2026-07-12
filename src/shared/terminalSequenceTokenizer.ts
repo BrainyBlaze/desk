@@ -87,6 +87,15 @@ export class TerminalSequenceTokenizer {
   private text = '';
   private seq = '';
 
+  /** True when an incomplete escape sequence is buffered from a previous push().
+   *  A caller's fast-path "no marker byte in this chunk, skip it" guard is only
+   *  SAFE when this is false — otherwise skipping a plain chunk that sits between
+   *  a sequence's intro and its terminator drops those bytes and corrupts the
+   *  eventual token. When this is true, push() the chunk unconditionally. */
+  hasPending(): boolean {
+    return this.state !== 'ground' || this.seq.length > 0;
+  }
+
   /** Feed a chunk; returns every COMPLETE token. An incomplete trailing sequence
    *  (or text) is buffered and continues on the next push(). */
   push(chunk: string): TerminalToken[] {

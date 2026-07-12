@@ -97,6 +97,21 @@ describe('TerminalSequenceTokenizer — chunk-boundary invariance (D-1/D-2)', ()
     expect(tokens.map((t) => t.raw).join('')).toBe(input);
   });
 
+  it('hasPending() reports a buffered partial so a caller fast-path guard stays safe', () => {
+    const tok = new TerminalSequenceTokenizer();
+    expect(tok.hasPending()).toBe(false);
+    // Intro of an OSC 9 with no terminator yet — a partial is now buffered.
+    tok.push(`${ESC}]9;approval `);
+    expect(tok.hasPending()).toBe(true);
+    // A plain middle chunk MUST still be pushed (guarding it out would drop it).
+    tok.push('is needed ');
+    expect(tok.hasPending()).toBe(true);
+    const done = tok.push('now' + BEL);
+    expect(tok.hasPending()).toBe(false);
+    const osc = done.find((t) => t.kind === 'osc');
+    expect(osc).toMatchObject({ command: 9, payload: 'approval is needed now', terminated: true });
+  });
+
   it('coalesced push of many small chunks stays lossless and correct', () => {
     const input = `title${ESC}]0;x${BEL}${ESC}[?1002h${ESC}P q${ST}end`;
     const tok = new TerminalSequenceTokenizer();
