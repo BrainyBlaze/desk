@@ -17,7 +17,7 @@ import type { SessionSpec, TmuxPlanAction } from './types.js';
  * `status ?? 0` as success. Returned message tells the user tmux is missing
  * instead of failing silently or with a cryptic TypeError.
  */
-function tmuxSpawnError(result: { error?: Error }): string | undefined {
+export function tmuxSpawnError(result: { error?: Error }): string | undefined {
   if (!result.error) {
     return undefined;
   }
@@ -83,20 +83,37 @@ export function loadDeskCached(options: LoadDeskOptions = {}): LoadedDesk {
 }
 
 export function listTmuxSessions(): Set<string> {
+  const result = queryTmuxSessions();
+  return result.ok ? result.sessions : new Set();
+}
+
+type TmuxSessionQuery = { ok: true; sessions: Set<string> } | { ok: false; error: string };
+
+function queryTmuxSessions(): TmuxSessionQuery {
   const result = spawnSync('tmux', ['list-sessions', '-F', '#S'], {
     encoding: 'utf8'
   });
 
+  const spawnError = tmuxSpawnError(result);
+  if (spawnError) {
+    return { ok: false, error: spawnError };
+  }
+  if (result.status === null) {
+    return { ok: false, error: 'tmux could not run' };
+  }
   if (result.status !== 0) {
-    return new Set();
+    return { ok: true, sessions: new Set() };
   }
 
-  return new Set(
-    result.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-  );
+  return {
+    ok: true,
+    sessions: new Set(
+      result.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+    )
+  };
 }
 
 let tmuxSessionsCache: { at: number; sessions: Set<string> } | null = null;
@@ -383,7 +400,11 @@ export function findSession(sessions: SessionSpec[], query: string): SessionSpec
 }
 
 export function printStatus(sessions: SessionSpec[]): void {
-  const existing = listTmuxSessions();
+  const result = queryTmuxSessions();
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  const existing = result.sessions;
   for (const session of sessions) {
     const state = existing.has(session.tmuxSession) ? 'running' : 'missing';
     console.log(`${state.padEnd(8)} ${session.groupId.padEnd(8)} ${session.name.padEnd(18)} ${session.tmuxSession}`);

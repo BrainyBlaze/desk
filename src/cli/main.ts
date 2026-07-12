@@ -13,8 +13,17 @@ import {
 } from '../core/config.js';
 import { installAgentHooks } from '../core/agentHooks.js';
 import { createAttachArgv } from '../core/tmux.js';
-import { captureSession, findSession, loadDesk, planDeskUp, printStatus, runPlan } from '../core/runner.js';
+import {
+  captureSession,
+  findSession,
+  loadDesk,
+  planDeskUp,
+  printStatus,
+  runPlan,
+  tmuxSpawnError
+} from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
+import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
 import type { DeskSession } from '../core/types.js';
@@ -196,7 +205,11 @@ export function main(argv: string[]): number {
       const result = spawnSync('tmux', createAttachArgv(session.tmuxSession), {
         stdio: 'inherit'
       });
-      return result.status ?? 0;
+      const spawnError = tmuxSpawnError(result);
+      if (spawnError) {
+        throw new Error(spawnError);
+      }
+      return result.status ?? 1;
     }
 
     if (args.command === 'capture') {
@@ -245,18 +258,21 @@ function parseArgs(argv: string[]): ParsedArgs {
   while (args.length > 0) {
     const next = args.shift();
     if (next?.startsWith('-')) {
-      assertOptionAllowed(command, next);
+      const allowedOptions = COMMAND_OPTIONS.get(command);
+      if (allowedOptions) {
+        assertAllowedOption(`desk ${command}`, next, allowedOptions);
+      }
     }
     if (next === '--file' || next === '-f') {
-      manifestPath = requireValue(next, args.shift());
+      manifestPath = requireOptionValue(next, args.shift());
     } else if (next === '--dry-run') {
       dryRun = true;
     } else if (next === '--force') {
       force = true;
     } else if (next === '--lines') {
-      lines = Number.parseInt(requireValue(next, args.shift()), 10);
+      lines = Number.parseInt(requireOptionValue(next, args.shift()), 10);
     } else if (next?.startsWith('--')) {
-      options.set(next.slice(2), requireValue(next, args.shift()));
+      options.set(next.slice(2), requireOptionValue(next, args.shift()));
     } else if (next && !target) {
       target = next;
     } else if (next) {
@@ -265,20 +281,6 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return { command, manifestPath, dryRun, force, target, lines, options };
-}
-
-function assertOptionAllowed(command: string, option: string): void {
-  const allowed = COMMAND_OPTIONS.get(command);
-  if (allowed && !allowed.has(option)) {
-    throw new Error(`unknown option ${option} for desk ${command}`);
-  }
-}
-
-function requireValue(flag: string, value: string | undefined): string {
-  if (!value) {
-    throw new Error(`${flag} requires a value`);
-  }
-  return value;
 }
 
 function readSessionOptions(options: Map<string, string>): DeskSession {

@@ -58,6 +58,48 @@ describe('desk channels CLI', () => {
     expect(output.join('\n')).not.toContain('parent message');
   });
 
+  it.each([
+    ['list', ['list', '--unknown']],
+    ['read', ['read', 'ops', '--unknown']]
+  ])('rejects an unknown option for channels %s', async (command, args) => {
+    createChannel(resolveChannelsHome(), 'ops', 'test channel');
+
+    const code = await runChannelsCli(args);
+
+    expect(code).toBe(1);
+    expect(errors.join('\n')).toContain(`unknown option --unknown for desk channels ${command}`);
+  });
+
+  it('rejects an unknown option for channels post without posting it as message text', async () => {
+    const home = resolveChannelsHome();
+    createChannel(home, 'ops', 'test channel');
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('server offline');
+    }));
+
+    const code = await runChannelsCli(['post', 'ops', '--unknown']);
+
+    expect(code).toBe(1);
+    expect(errors.join('\n')).toContain('unknown option --unknown for desk channels post');
+    expect(readChannelDetail(home, 'ops').messages).toEqual([]);
+  });
+
+  it.each([
+    ['--message', ['read', 'ops', '--message', '--unknown']],
+    ['--thread', ['post', 'ops', '--thread', '-x', 'message']],
+    ['--as', ['post', 'ops', '--as', '-x', 'message']]
+  ])('does not consume another option as the value of %s', async (option, args) => {
+    createChannel(resolveChannelsHome(), 'ops', 'test channel');
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('server offline');
+    }));
+
+    const code = await runChannelsCli(args);
+
+    expect(code).toBe(1);
+    expect(errors.join('\n')).toContain(`${option} requires a value`);
+  });
+
   it('rejects a non-member --as override when posting through the offline fallback', async () => {
     const home = resolveChannelsHome();
     createChannel(home, 'ops', 'test channel');

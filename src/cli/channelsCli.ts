@@ -10,6 +10,7 @@ import {
   resolveChannelsHome
 } from '../server/channelsStore.js';
 import { parseConversation, type ChannelMessage } from '../server/channelsProtocol.js';
+import { assertAllowedOption, requireOptionValue } from './args.js';
 
 /**
  * `desk channels …` — the protocol CLI agents use from inside their sessions.
@@ -34,6 +35,15 @@ const HELP = `desk channels — slack-like messaging between desk agents
                                                          Post a message
 
 Mention members with @name, everyone with @channel, the operator with @human.`;
+
+const CHANNEL_COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
+  ['help', new Set()],
+  ['--help', new Set()],
+  ['-h', new Set()],
+  ['list', new Set()],
+  ['read', new Set(['--message'])],
+  ['post', new Set(['--thread', '--as'])]
+]);
 
 function apiBase(): string {
   return (process.env.DESK_API ?? 'http://127.0.0.1:5173').replace(/\/$/, '');
@@ -115,6 +125,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
 
   try {
     if (command === 'help' || command === '--help' || command === '-h') {
+      assertNoArguments(command, args);
       console.log(HELP);
       return 0;
     }
@@ -122,6 +133,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
     const home = resolveChannelsHome();
 
     if (command === 'list') {
+      assertNoArguments(command, args);
       for (const channel of listChannels(home)) {
         const agents = channel.members.filter((member) => member.type !== 'human').length;
         console.log(`#${channel.name}\t${channel.messageCount} messages, ${agents} agents\t${channel.goal}`);
@@ -131,7 +143,10 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
 
     if (command === 'read') {
       const channel = args.shift();
-      if (!channel) {
+      if (channel?.startsWith('-')) {
+        assertChannelOption(command, channel);
+      }
+      if (!channel || channel.startsWith('-')) {
         throw new Error('usage: desk channels read <channel> [<parent-msg-id>|--message <msg-id>]');
       }
       let parent: string | undefined;
@@ -139,12 +154,12 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
       let expectsMessageId = false;
       while (args.length > 0) {
         const next = args.shift() as string;
+        if (next.startsWith('-')) {
+          assertChannelOption(command, next);
+        }
         if (next === '--message') {
           expectsMessageId = true;
-          messageId = args.shift();
-          if (!messageId) {
-            throw new Error('usage: desk channels read <channel> --message <msg-id>');
-          }
+          messageId = requireOptionValue(next, args.shift());
         } else if (!parent) {
           parent = next;
         } else {
@@ -170,27 +185,30 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
 
     if (command === 'post') {
       const channel = args.shift();
+      if (channel?.startsWith('-')) {
+        assertChannelOption(command, channel);
+      }
+      if (!channel || channel.startsWith('-')) {
+        throw new Error('usage: desk channels post <channel> [--thread <id>] [--as <member>] "<body>"');
+      }
       let thread: string | undefined;
       let as: string | undefined;
       const bodyParts: string[] = [];
       while (args.length > 0) {
         const next = args.shift() as string;
+        if (next.startsWith('-')) {
+          assertChannelOption(command, next);
+        }
         if (next === '--thread') {
-          thread = args.shift();
-          if (thread === undefined || thread.startsWith('--')) {
-            throw new Error('--thread requires a value');
-          }
+          thread = requireOptionValue(next, args.shift());
         } else if (next === '--as') {
-          as = args.shift();
-          if (as === undefined || as.startsWith('--')) {
-            throw new Error('--as requires a value');
-          }
+          as = requireOptionValue(next, args.shift());
         } else {
           bodyParts.push(next);
         }
       }
       const body = bodyParts.join(' ').trim();
-      if (!channel || body.length === 0) {
+      if (body.length === 0) {
         throw new Error('usage: desk channels post <channel> [--thread <id>] [--as <member>] "<body>"');
       }
 
@@ -229,6 +247,24 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
   }
+}
+
+function assertChannelOption(command: string, option: string): void {
+  const allowedOptions = CHANNEL_COMMAND_OPTIONS.get(command);
+  if (allowedOptions) {
+    assertAllowedOption(`desk channels ${command}`, option, allowedOptions);
+  }
+}
+
+function assertNoArguments(command: string, args: string[]): void {
+  const unexpected = args.shift();
+  if (!unexpected) {
+    return;
+  }
+  if (unexpected.startsWith('-')) {
+    assertChannelOption(command, unexpected);
+  }
+  throw new Error(`unexpected argument ${unexpected} for desk channels ${command}`);
 }
 
 function resolveAuthorOffline(home: string, channel: string, tmux: string): string {
