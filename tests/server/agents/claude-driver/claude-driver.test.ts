@@ -15,7 +15,10 @@ import {
  */
 class FakeQuery implements AsyncIterable<ClaudeSdkMessage> {
   private queue: ClaudeSdkMessage[] = [];
-  private waiters: Array<(value: IteratorResult<ClaudeSdkMessage>) => void> = [];
+  private waiters: Array<{
+    resolve: (value: IteratorResult<ClaudeSdkMessage>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
   private done = false;
   interrupts = 0;
   setModelCalls: Array<string | undefined> = [];
@@ -27,7 +30,7 @@ class FakeQuery implements AsyncIterable<ClaudeSdkMessage> {
   push(message: ClaudeSdkMessage): void {
     const waiter = this.waiters.shift();
     if (waiter) {
-      waiter({ done: false, value: message });
+      waiter.resolve({ done: false, value: message });
       return;
     }
     this.queue.push(message);
@@ -36,7 +39,14 @@ class FakeQuery implements AsyncIterable<ClaudeSdkMessage> {
   finish(): void {
     this.done = true;
     for (const waiter of this.waiters.splice(0)) {
-      waiter({ done: true, value: undefined as never });
+      waiter.resolve({ done: true, value: undefined as never });
+    }
+  }
+
+  fail(error: unknown): void {
+    this.done = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.reject(error);
     }
   }
 
@@ -53,7 +63,7 @@ class FakeQuery implements AsyncIterable<ClaudeSdkMessage> {
         if (this.done) {
           return Promise.resolve({ done: true, value: undefined as never });
         }
-        return new Promise((resolve) => this.waiters.push(resolve));
+          return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
       }
     };
   }
@@ -390,6 +400,14 @@ describe('claudeDriver interrupt and shutdown', () => {
     await drain();
     const error = h.events.find((event) => event.kind === 'agent-error');
     expect(error).toMatchObject({ kind: 'agent-error', fatal: false });
+    expect(h.events[h.events.length - 1]).toMatchObject({ kind: 'status', state: 'exited' });
+  });
+
+  it('surfaces a rejected SDK stream and exits the live session', async () => {
+    const h = await startedHarness();
+    h.query.fail(new Error('sdk stream failed'));
+    await drain();
+    expect(h.events).toContainEqual({ kind: 'agent-error', message: 'sdk stream failed', fatal: true });
     expect(h.events[h.events.length - 1]).toMatchObject({ kind: 'status', state: 'exited' });
   });
 

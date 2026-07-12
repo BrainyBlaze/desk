@@ -478,6 +478,7 @@ export class AgentSurfaceBroker {
     note?: string
   ): void {
     const session = this.requireSession(sessionName);
+    this.requireSubscription(client, sessionName, surfaceId);
     if (!session.host) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
@@ -494,6 +495,7 @@ export class AgentSurfaceBroker {
 
   private browserInterrupt(client: BrowserClient, sessionName: string, surfaceId: string): void {
     const session = this.requireSession(sessionName);
+    this.requireSubscription(client, sessionName, surfaceId);
     if (!session.host) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
@@ -503,6 +505,14 @@ export class AgentSurfaceBroker {
   }
 
   // ── Internal helpers ──
+
+  private requireSubscription(client: BrowserClient, sessionName: string, surfaceId: string): SurfaceSubscription {
+    const subscription = client.subscriptions.get(subscriptionKey(sessionName, surfaceId));
+    if (!subscription) {
+      throw brokerError('not-native-session', `not subscribed to ${sessionName}`, false);
+    }
+    return subscription;
+  }
 
   private acquireSession(name: string): AgentSurfaceSession {
     let session = this.sessions.get(name);

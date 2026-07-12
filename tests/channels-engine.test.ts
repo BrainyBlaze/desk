@@ -2181,6 +2181,39 @@ describe('engine drain race safety', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  it('does not reclaim a watchdog drain while the physical paste is in flight', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-watchdog-'));
+    const sent: string[] = [];
+    let resolvePush: (() => void) | null = null;
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        await new Promise<boolean>((resolve) => {
+          resolvePush = () => resolve(true);
+        });
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => '❯ '
+    });
+    const members = [member('alpha', 'tmux-a')];
+    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-watchdog', 'human', '@alpha go') }, members);
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    engine.handleAgentSignal('tmux-a', 'bell');
+    await flush();
+    expect(sent).toHaveLength(1);
+    resolvePush?.();
+    await flush();
+    expect(sent).toHaveLength(1);
+    engine.dispose();
+    rmSync(home, { recursive: true, force: true });
+  });
+
   it('does not apply a stale prompt-gate decision after the queue head changes', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-gate-race-'));
     const sent: string[] = [];

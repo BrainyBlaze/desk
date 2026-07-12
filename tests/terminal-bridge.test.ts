@@ -10,6 +10,7 @@ import {
   stripTerminalMouseModeControls
 } from '../src/server/terminalBridge';
 import type { SessionSpec } from '../src/core/types';
+import { TerminalSequenceTokenizer } from '../src/shared/terminalSequenceTokenizer';
 
 const session: SessionSpec = {
   groupId: 'research',
@@ -48,6 +49,12 @@ describe('terminal bridge', () => {
     expect(stripTerminalMouseModeControls('a\x1b[4 qb')).toBe('a\x1b[3 qb');
     expect(stripTerminalMouseModeControls('a\x1b[6 qb')).toBe('a\x1b[5 qb');
     expect(stripTerminalMouseModeControls('a\x1b[1 qb')).toBe('a\x1b[1 qb');
+  });
+
+  it('strips DECSET controls split across PTY chunks', () => {
+    const tokenizer = new TerminalSequenceTokenizer();
+    expect(stripTerminalMouseModeControls('a\x1b[?100', tokenizer)).toBe('a');
+    expect(stripTerminalMouseModeControls('0hb', tokenizer)).toBe('b');
   });
 
   it('fast-path returns plain output unchanged (no mouse-mode or cursor-style escapes)', () => {

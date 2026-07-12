@@ -283,6 +283,40 @@ describe('AgentSurfaceBroker — visibility-gated forwarding', () => {
 });
 
 describe('AgentSurfaceBroker — surface → host command routing', () => {
+  it('rejects permission responses and interrupts from an unsubscribed surface', async () => {
+    const harness = await startBroker();
+    const host = await harness.connectHost();
+    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
+
+    const browser = await harness.connectBrowser();
+    await browser.waitFor((f) => (f as { type?: string }).type === 'ready');
+    browser.send({ type: 'respond-permission', session: 's1', surfaceId: 'unsubscribed', requestId: 'perm-1', optionId: 'allow' });
+    browser.send({ type: 'interrupt', session: 's1', surfaceId: 'unsubscribed' });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 500;
+      const poll = (): void => {
+        const errors = browser.received.filter((f) => (f as { type?: string }).type === 'error');
+        if (errors.length >= 2) {
+          resolve();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new Error('timed out waiting for subscription errors'));
+          return;
+        }
+        setTimeout(poll, 10);
+      };
+      poll();
+    });
+    const errors = browser.received.filter((f) => (f as { type?: string }).type === 'error');
+    expect(errors).toHaveLength(2);
+    expect(host.received.filter((f) => ['respond-permission', 'interrupt'].includes((f as { type?: string }).type ?? ''))).toHaveLength(0);
+    browser.close();
+    host.close();
+    harness.close();
+  });
+
   it('subscribe + send forwards an inject command to the host with a fresh requestId', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();

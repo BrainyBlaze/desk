@@ -207,6 +207,7 @@ export function createClaudeDriver(options: ClaudeDriverOptions): AgentDriver {
     } catch (error) {
       if (!isShutdown) {
         emit({ kind: 'agent-error', message: error instanceof Error ? error.message : String(error), fatal: true });
+        status('exited');
       }
     }
   }

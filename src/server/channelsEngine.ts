@@ -241,6 +241,7 @@ export function defaultPidStarttimeReader(pid: number): number | null {
  */
 export const TMUX_SPAWN_TIMEOUT_MS = 4000;
 const DEFAULT_ENGINE_PROBE_TTL_MS = 750;
+const DELIVERY_SEND_TIMEOUT_MS = 30_000;
 const DIAGNOSTIC_PROBE_TIMEOUT_GRACE_MS = 250;
 
 export interface SpawnSettledResult {
@@ -555,6 +556,8 @@ interface MemberRuntime {
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
   draining: boolean;
+  /** true while the physical tmux paste is in flight; never reclaim this drain */
+  deliveryInFlight: boolean;
   /**
    * Single-flight generation. Every drain/forceDeliver attempt captures
    * `++drainGeneration`; after each await it re-checks the runtime value and
@@ -926,7 +929,7 @@ export class ChannelsEngine {
   private runtime(tmuxSession: string): MemberRuntime {
     let entry = this.members.get(tmuxSession);
     if (!entry) {
-      entry = { tmuxSession, busy: false, awaitingApproval: false, queue: [], draining: false, drainGeneration: 0, unobservableRetries: 0 };
+      entry = { tmuxSession, busy: false, awaitingApproval: false, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0, unobservableRetries: 0 };
       this.members.set(tmuxSession, entry);
     }
     return entry;
@@ -1512,7 +1515,7 @@ export class ChannelsEngine {
       // the queue is never stranded. Falling through bumps drainGeneration below,
       // which makes the wedged coroutine bail at its next await instead of
       // double-delivering (single-flight).
-      if (Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs) {
+      if (runtime.deliveryInFlight || Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs) {
         this.recordHold(runtime, 'busy', countHoldCycle);
         return;
       }
@@ -1634,7 +1637,29 @@ export class ChannelsEngine {
     const preSnap = needsLegacyVerify
       ? deliverySnapshot ?? await this.probe.probe(runtime.tmuxSession, { source: 'verify', forceFresh: true })
       : undefined;
-    const delivered = await this.sendText(runtime.tmuxSession, payload);
+    runtime.deliveryInFlight = true;
+    let delivered: boolean;
+    let deliveryTimedOut = false;
+    try {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        delivered = await Promise.race([
+          this.sendText(runtime.tmuxSession, payload),
+          new Promise<boolean>((resolve) => {
+            timeout = setTimeout(() => {
+              deliveryTimedOut = true;
+              resolve(false);
+            }, DELIVERY_SEND_TIMEOUT_MS);
+          })
+        ]);
+      } finally {
+        if (timeout !== undefined) {
+          clearTimeout(timeout);
+        }
+      }
+    } finally {
+      runtime.deliveryInFlight = false;
+    }
     if (!delivered) {
       runtime.busy = false;
       this.clearPendingAck(runtime);
@@ -1646,6 +1671,12 @@ export class ChannelsEngine {
       // idempotently on the next delivery attempt.
       runtime.submitState = undefined;
       runtime.submitStateSeqs = undefined;
+      if (deliveryTimedOut) {
+        // The transport may still settle after the timeout. Do not retry: a
+        // late tmux paste plus a retry would duplicate the prompt.
+        runtime.queue = runtime.queue.filter((item) => item.seq !== next.seq);
+        this.persistQueue(runtime);
+      }
       this.recordHold(runtime, 'send-failed', countHoldCycle);
       // Allow a future re-dispatch of this id if the queue entry is ever lost.
       return false; // session vanished mid-push — the pump retries

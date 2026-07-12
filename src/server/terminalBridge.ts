@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from '../core/terminalSizing.js';
 import type { SessionSpec } from '../core/types.js';
+import { TerminalSequenceTokenizer, type TerminalToken } from '../shared/terminalSequenceTokenizer.js';
 
 export interface TerminalAttachCommand {
   file: string;
@@ -245,36 +246,36 @@ export function scrollTmuxPane(
   return { ok: true };
 }
 
-export function stripTerminalMouseModeControls(data: string): string {
-  // Hot path: runs on every broadcast chunk. The mouse-mode (`\x1b[?…h/l`) and
-  // cursor-style (`… q`) escapes appear on TUI startup/attach, essentially never in
-  // streaming output, so an indexOf pre-check returns the chunk untouched (no regex,
-  // no allocation) in the common case. When a marker is present the regex runs
-  // exactly as before.
-  if (data.indexOf('\x1b[?') === -1 && data.indexOf(' q') === -1) {
+export function stripTerminalMouseModeControls(
+  data: string,
+  tokenizer: TerminalSequenceTokenizer = new TerminalSequenceTokenizer()
+): string {
+  if (!tokenizer.hasPending() && data.indexOf('\x1b[') === -1) {
     return data;
   }
-  return data
-    .replace(/\x1b\[\?([0-9;]+)([hl])/g, (sequence, params: string, mode: string) => {
-      const values = params.split(';');
-      const remaining = values.filter(
-        (param) =>
-          !mousePrivateModes.has(param) &&
-          param !== cursorBlinkPrivateMode &&
-          !(mode === 'l' && param === cursorVisiblePrivateMode)
-      );
-      if (remaining.length === 0) {
-        return '';
+  return tokenizer
+    .push(data)
+    .map((token: TerminalToken) => {
+      if (token.kind !== 'csi') {
+        return token.raw;
       }
-      if (remaining.length === values.length) {
-        return sequence as string;
+      if (token.prefix === '?' && (token.final === 'h' || token.final === 'l')) {
+        const values = token.params.split(';');
+        const remaining = values.filter(
+          (param) =>
+            !mousePrivateModes.has(param) &&
+            param !== cursorBlinkPrivateMode &&
+            !(token.final === 'l' && param === cursorVisiblePrivateMode)
+        );
+        return remaining.length === 0 ? '' : remaining.length === values.length ? token.raw : `\x1b[?${remaining.join(';')}${token.final}`;
       }
-      return `\x1b[?${remaining.join(';')}${mode}`;
+      if (token.final === 'q') {
+        const replacement = steadyCursorStyles.get(token.params.trim());
+        return replacement ? `\x1b[${replacement} q` : token.raw;
+      }
+      return token.raw;
     })
-    .replace(/\x1b\[([0-9]*) q/g, (sequence, style: string) => {
-      const replacement = steadyCursorStyles.get(style);
-      return replacement ? `\x1b[${replacement} q` : (sequence as string);
-    });
+    .join('');
 }
 
 export function exitTmuxCopyMode(tmuxSession: string): { ok: boolean } {
