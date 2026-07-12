@@ -651,7 +651,7 @@ PY
 }
 
 write_toolchain_manifest() {
-  "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+  "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" <<'PY'
 import json, os, sys
 path,kind,version,target,libc,asset,digest=sys.argv[1:]
 data={"schemaVersion":1,"managedBy":"desk-installer","kind":kind,"version":version,"target":target,"libc":libc,"asset":asset,"sha256":digest}
