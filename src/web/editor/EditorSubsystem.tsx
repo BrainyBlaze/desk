@@ -845,7 +845,12 @@ export function EditorSubsystem({
       void fsSearchFiles(root, query)
         .then((page) => {
           if (!stale) {
-            setPaletteResults(page.matches.map((match) => match.path));
+            // fsSearchFiles returns ROOT-RELATIVE paths (rg runs with cwd=root).
+            // openFile resolves a relative path against the server cwd and
+            // rejects it as "escapes the explorer root", so quick-open used to
+            // fail for any root != server cwd (and mint a broken relative-keyed
+            // tab when they matched). Resolve to absolute here, as SearchPanel does.
+            setPaletteResults(page.matches.map((match) => (root.endsWith('/') ? `${root}${match.path}` : `${root}/${match.path}`)));
             setPaletteIndex(0);
           }
         })
