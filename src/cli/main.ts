@@ -186,12 +186,17 @@ function runHooksCommand(target: string | undefined, options: Map<string, string
     throw new Error('hooks requires subcommand: install');
   }
   const installed = installAgentHooks({ homeDir: options.get('home') });
+  const skipped = new Set(installed.skipped);
+  const report = (path: string): void => {
+    // Report honestly: a path whose existing JSON was malformed was NOT merged.
+    console.log(skipped.has(path) ? `SKIPPED ${path} (invalid JSON; a .bak was written — fix it and re-run)` : `merged ${path}`);
+  };
   console.log(`installed ${installed.shimPath}`);
-  console.log(`merged ${installed.codexHooksPath}`);
-  console.log(`merged ${installed.claudeSettingsPath}`);
+  report(installed.codexHooksPath);
+  report(installed.claudeSettingsPath);
   console.log(`installed ${installed.opencodePluginPath}`);
   console.log('codex note: non-managed command hooks may require trust before they fire');
-  return 0;
+  return skipped.size > 0 ? 1 : 0;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {

@@ -1,6 +1,6 @@
-import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { shellQuote } from '../shared/shell.js';
-import { readJsonFileOr, writeTextFileAtomic } from '../shared/atomicFile.js';
+import { writeTextFileAtomic } from '../shared/atomicFile.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +50,9 @@ export interface InstalledAgentHooks {
   codexHooksPath: string;
   claudeSettingsPath: string;
   opencodePluginPath: string;
+  /** Config paths that were NOT written because their existing content was
+   *  malformed JSON (a .bak was made). The caller must report these honestly. */
+  skipped: string[];
 }
 
 const OPENCODE_PLUGIN_SOURCE_PATH = fileURLToPath(new URL('./opencode/desk-attention.js', import.meta.url));
@@ -121,11 +124,16 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   const opencodePluginPath = join(homeDir, '.config', 'opencode', 'plugin', 'desk-attention.js');
 
   writeExecutable(shimPath, buildDeskAgentEventShim());
-  mergeHookConfig(codexHooksPath, buildCodexHooksConfig(shimPath));
-  mergeHookConfig(claudeSettingsPath, buildClaudeHooksSettings(shimPath));
+  const skipped: string[] = [];
+  if (mergeHookConfig(codexHooksPath, buildCodexHooksConfig(shimPath)) === 'skipped-malformed') {
+    skipped.push(codexHooksPath);
+  }
+  if (mergeHookConfig(claudeSettingsPath, buildClaudeHooksSettings(shimPath)) === 'skipped-malformed') {
+    skipped.push(claudeSettingsPath);
+  }
   writeTextIfChanged(opencodePluginPath, readFileSync(OPENCODE_PLUGIN_SOURCE_PATH, 'utf8'));
 
-  return { shimPath, codexHooksPath, claudeSettingsPath, opencodePluginPath };
+  return { shimPath, codexHooksPath, claudeSettingsPath, opencodePluginPath, skipped };
 }
 
 export function buildDeskAgentEventShim(): string {
@@ -253,8 +261,26 @@ function writeTextIfChanged(path: string, content: string): void {
   }
 }
 
-function mergeHookConfig(path: string, desired: { hooks: Record<string, HookGroup[]> }): void {
-  const current = readJsonObject(path);
+function mergeHookConfig(path: string, desired: { hooks: Record<string, HookGroup[]> }): 'merged' | 'skipped-malformed' {
+  const read = readJsonObjectClassified(path);
+  if (read.kind === 'malformed') {
+    // The file exists but does not parse to a JSON object. Merging here would
+    // read it as {} and write hooks-only content over it, silently destroying
+    // the user's permissions/env/model settings. Back it up and skip instead;
+    // the user fixes the JSON and re-runs. (Degrade-to-{} is safe for a READ,
+    // never for a full-file overwrite.)
+    const backup = `${path}.bak`;
+    try {
+      copyFileSync(path, backup);
+    } catch {
+      // best effort — even without a backup, refusing to overwrite is the goal
+    }
+    console.error(
+      `desk: ${path} is not valid JSON — skipped to avoid overwriting it (backed up to ${backup}). Fix the JSON and re-run.`
+    );
+    return 'skipped-malformed';
+  }
+  const current = read.kind === 'object' ? read.value : {};
   const currentHooks = isRecord(current.hooks) ? current.hooks : {};
   const mergedHooks: Record<string, unknown> = { ...currentHooks };
 
@@ -263,6 +289,7 @@ function mergeHookConfig(path: string, desired: { hooks: Record<string, HookGrou
   }
 
   writeJsonIfChanged(path, { ...current, hooks: mergedHooks });
+  return 'merged';
 }
 
 function mergeHookGroups(existing: unknown, desiredGroups: HookGroup[]): Array<Record<string, unknown>> {
@@ -296,10 +323,30 @@ function isSameHook(existing: unknown, desired: HookHandler): boolean {
   return isRecord(existing) && existing.type === desired.type && existing.command === desired.command;
 }
 
-function readJsonObject(path: string): Record<string, unknown> {
-  // Atomic + parse-guarded: a crash mid-write can't truncate the user's config, and
-  // a hand-edited malformed JSON degrades to {} instead of throwing and aborting.
-  return readJsonFileOr<Record<string, unknown>>(path, {});
+type JsonObjectRead =
+  | { kind: 'missing' }
+  | { kind: 'object'; value: Record<string, unknown> }
+  | { kind: 'malformed' };
+
+/** Read a JSON object, distinguishing a missing file (safe to create fresh)
+ *  from one that exists but does not parse to an object (must NOT be
+ *  overwritten). Unlike readJsonFileOr, which collapses both to the fallback. */
+function readJsonObjectClassified(path: string): JsonObjectRead {
+  if (!existsSync(path)) {
+    return { kind: 'missing' };
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return { kind: 'malformed' };
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isRecord(parsed) ? { kind: 'object', value: parsed } : { kind: 'malformed' };
+  } catch {
+    return { kind: 'malformed' };
+  }
 }
 
 function writeJsonIfChanged(path: string, value: Record<string, unknown>): void {
