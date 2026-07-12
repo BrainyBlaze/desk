@@ -1117,6 +1117,13 @@ export function ChannelsSubsystem({
       const shouldReanchor = summary ? channelShouldReanchorCachedDetail(summary, seenMapRef.current[name]) : false;
       if (shouldReanchor) {
         setRestoreScrollChannel(null);
+        // Show the newly-selected channel's cached window immediately, THEN
+        // reanchor to unread. Without this, detail stayed on the previous
+        // channel while `selected` was already the new one: the header, feed,
+        // composer placeholder and any draft rendered channel A, but handleSend
+        // posted to channel B — a draft could land in the wrong channel, and a
+        // failed reanchor fetch left the mismatch on screen indefinitely.
+        setDetail(cached);
         void refreshDetail(name, { initialWindow: true, summary });
       } else {
         setVisitAnchorId(null);
