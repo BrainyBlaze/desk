@@ -56,18 +56,44 @@ export function currentTmuxSession(): string {
   return result.status === 0 ? result.stdout.trim() : '';
 }
 
+/** The desk server could not be reached at all — the request never left, so a
+ *  local file-append fallback is safe (it can't duplicate a server-side post). */
+class ServerUnreachableError extends Error {}
+
 async function apiPost(path: string, payload: unknown): Promise<Record<string, unknown>> {
-  const response = await fetch(`${apiBase()}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(5000)
-  });
-  const body = (await response.json()) as Record<string, unknown>;
-  if (!response.ok) {
-    throw new Error(typeof body.error === 'string' ? body.error : `request failed ${response.status}`);
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5000)
+    });
+  } catch (err) {
+    // A TIMEOUT means the request WAS sent — the server may have processed it —
+    // so falling back to a local append would duplicate the message. Only a
+    // genuine connection failure (server not running) is safe to fall back on.
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new Error('desk server did not respond within 5s; the message may or may not have posted — check the channel before retrying');
+    }
+    throw new ServerUnreachableError('desk server unreachable');
   }
-  return body;
+  // Text-first parse: a reachable-but-misbehaving server (a proxy 502 HTML page,
+  // an empty body) must surface its real status, not a SyntaxError misread as
+  // "unreachable".
+  const text = await response.text();
+  let body: Record<string, unknown> | undefined;
+  if (text) {
+    try {
+      body = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      body = undefined;
+    }
+  }
+  if (!response.ok) {
+    throw new Error(body && typeof body.error === 'string' ? body.error : `request failed ${response.status}`);
+  }
+  return body ?? {};
 }
 
 function printMessages(messages: ChannelMessage[]): void {
@@ -174,8 +200,12 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         console.log(String(result.id ?? 'posted'));
         return 0;
       } catch (error) {
-        if (error instanceof Error && /not a member|cannot be empty|invalid|not found/.test(error.message)) {
-          throw error; // protocol error — do not retry as a blind file append
+        // Only a genuine connection failure is safe to fall back on. A protocol
+        // error (server rejected), a timeout (may have posted), or a non-JSON
+        // response must NOT trigger a blind local append — that duplicated the
+        // message. The old regex on the error text misclassified all three.
+        if (!(error instanceof ServerUnreachableError)) {
+          throw error;
         }
         // Server unreachable: append directly; the watcher dispatches later.
         const author = as ?? resolveAuthorOffline(home, channel, tmux);

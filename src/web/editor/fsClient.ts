@@ -33,10 +33,26 @@ export interface FsChangeEvent {
 }
 
 async function readJson<T>(request: Promise<Response>): Promise<T> {
+  // Read text FIRST, then parse — never `response.json()` before the status
+  // check. A non-JSON error body (a proxy 502 HTML page, the Vite SPA index
+  // served on an unknown route, an empty 500) otherwise threw a cryptic
+  // "Unexpected token '<'" and discarded the real HTTP status. 409 stays a
+  // valid result (a write conflict carries a JSON body), not an error.
   const response = await request;
-  const payload = (await response.json()) as T & { error?: string };
+  const text = await response.text();
+  let payload: (T & { error?: string }) | undefined;
+  if (text) {
+    try {
+      payload = JSON.parse(text) as T & { error?: string };
+    } catch {
+      payload = undefined;
+    }
+  }
   if (!response.ok && response.status !== 409) {
-    throw new Error(payload.error ?? `request failed (${response.status})`);
+    throw new Error(payload?.error ?? `request failed (${response.status})`);
+  }
+  if (payload === undefined) {
+    throw new Error(`request failed (${response.status}): unexpected non-JSON response`);
   }
   return payload;
 }
