@@ -31,6 +31,29 @@ describe('createDetailRefreshGate', () => {
     expect(gate.isCurrent('desk', newer)).toBe(true);
   });
 
+  it('ending an OLDER request cannot free the slot held by a newer pending one (token ownership)', () => {
+    // Codex's exact repro of the end(token) ownership bug.
+    const gate = createDetailRefreshGate();
+    const reconcile1 = gate.begin('desk', true) as number; // reconcile, in flight
+    const explicit2 = gate.begin('desk', false) as number; // explicit reload, also in flight
+    expect(explicit2).not.toBeNull();
+    gate.end('desk', reconcile1); // the OLDER reconcile settles first
+    // explicit2 is still pending, so a fresh reconcile must STILL be blocked.
+    expect(gate.begin('desk', true)).toBeNull();
+    // Only once the newer explicit reload ends is a reconcile allowed again.
+    gate.end('desk', explicit2);
+    expect(gate.begin('desk', true)).not.toBeNull();
+  });
+
+  it('ending the stale older request leaves the newer request the current owner', () => {
+    const gate = createDetailRefreshGate();
+    const older = gate.begin('desk', false) as number;
+    const newer = gate.begin('desk', false) as number;
+    gate.end('desk', older); // stale older resolves and ends
+    expect(gate.isCurrent('desk', newer)).toBe(true); // newer still owns the apply
+    expect(gate.isCurrent('desk', older)).toBe(false);
+  });
+
   it('lets an explicit reload run even while a reconcile is in flight, and it wins', () => {
     const gate = createDetailRefreshGate();
     const reconcile = gate.begin('desk', true) as number; // poll reconcile, in flight

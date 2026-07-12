@@ -39,23 +39,39 @@ export interface DetailRefreshGate {
 
 export function createDetailRefreshGate(): DetailRefreshGate {
   const latestToken = new Map<string, number>();
-  const inFlight = new Set<string>();
+  // The SET of tokens currently in flight per key — not a single bit. end() must
+  // remove only its own token, so that ending an older request (e.g. a settled
+  // reconcile) can never free the slot held by a newer request still pending
+  // (e.g. an explicit reload). A key is "in flight" iff its set is non-empty.
+  const inFlight = new Map<string, Set<number>>();
 
   return {
     begin(key, dedupe) {
-      if (dedupe && inFlight.has(key)) {
+      const active = inFlight.get(key);
+      if (dedupe && active && active.size > 0) {
         return null;
       }
       const token = (latestToken.get(key) ?? 0) + 1;
       latestToken.set(key, token);
-      inFlight.add(key);
+      if (active) {
+        active.add(token);
+      } else {
+        inFlight.set(key, new Set([token]));
+      }
       return token;
     },
     isCurrent(key, token) {
       return latestToken.get(key) === token;
     },
-    end(key) {
-      inFlight.delete(key);
+    end(key, token) {
+      const active = inFlight.get(key);
+      if (!active) {
+        return;
+      }
+      active.delete(token); // remove ONLY the ending token — never a newer one
+      if (active.size === 0) {
+        inFlight.delete(key);
+      }
     }
   };
 }
