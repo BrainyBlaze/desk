@@ -47,7 +47,7 @@ import {
   readStoredSidebarWidth
 } from '../sidebarPanel.js';
 import { usePersistedCollapse } from '../usePersistedCollapse.js';
-import { saveSettings } from '../api.js';
+import { markEventsRead, saveSettings } from '../api.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from '../arwes/motion.js';
 import type { DeskSnapshot, DeskSessionView } from '../types.js';
@@ -1088,12 +1088,8 @@ export function ChannelsSubsystem({
     if (!active) {
       return;
     }
-    void fetch('/api/attention-read', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kinds: ['channel'] })
-    }).catch(() => undefined);
-  }, [active, detail]);
+    void markEventsRead({ kinds: ['channel'] }).catch(report);
+  }, [active, detail, report]);
 
   // Advance a channel's read pointer as the feed reports scroll progress.
   // Forward-only: a poll re-render, an upward scroll, or a stale report can
