@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +28,7 @@ export function parseServeOptions(
   argv: readonly string[],
   env: ServeEnvironment = process.env
 ): ServeOptions {
-  let mode: ServeMode = 'vite';
+  let mode: ServeMode = 'standalone';
   let hostFlag: string | undefined;
   let portFlag: string | undefined;
   const seen = new Set<string>();
@@ -36,12 +37,12 @@ export function parseServeOptions(
   while (cursor < argv.length) {
     const argument = argv[cursor];
 
-    if (argument === '--standalone') {
+    if (argument === '--dev') {
       if (seen.has(argument)) {
         throw new Error(`${argument} may be specified only once`);
       }
       seen.add(argument);
-      mode = 'standalone';
+      mode = 'vite';
       cursor += 1;
       continue;
     }
@@ -143,4 +144,84 @@ export function createServeLaunch(
     },
     label: `desk serving (standalone) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
   };
+}
+
+type ForwardedSignal = 'SIGINT' | 'SIGTERM';
+
+function signalExitCode(signal: NodeJS.Signals | undefined): number {
+  if (signal === 'SIGINT') {
+    return 130;
+  }
+  if (signal === 'SIGTERM') {
+    return 143;
+  }
+  return 1;
+}
+
+export function runServeLaunch(launch: ServeLaunch): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    let child: ChildProcess | undefined;
+    let settled = false;
+    let pendingSignal: ForwardedSignal | undefined;
+    let forwardedSignal: ForwardedSignal | undefined;
+
+    const removeSignalHandlers = () => {
+      process.off('SIGINT', handleSigint);
+      process.off('SIGTERM', handleSigterm);
+    };
+    const resolveOnce = (status: number) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      removeSignalHandlers();
+      resolve(status);
+    };
+    const rejectOnce = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      removeSignalHandlers();
+      reject(error);
+    };
+    const forwardSignal = (signal: ForwardedSignal) => {
+      forwardedSignal = signal;
+      if (child?.pid === undefined) {
+        pendingSignal = signal;
+        return;
+      }
+      pendingSignal = child.kill(signal) ? undefined : signal;
+    };
+    function handleSigint(): void {
+      forwardSignal('SIGINT');
+    }
+    function handleSigterm(): void {
+      forwardSignal('SIGTERM');
+    }
+
+    process.on('SIGINT', handleSigint);
+    process.on('SIGTERM', handleSigterm);
+
+    try {
+      child = spawn(launch.command, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        stdio: 'inherit'
+      });
+    } catch (error) {
+      rejectOnce(error);
+      return;
+    }
+
+    child.once('spawn', () => {
+      if (pendingSignal !== undefined) {
+        forwardSignal(pendingSignal);
+      }
+    });
+    child.once('error', rejectOnce);
+    child.once('close', (code, signal) => {
+      resolveOnce(code ?? signalExitCode(signal ?? forwardedSignal));
+    });
+  });
 }

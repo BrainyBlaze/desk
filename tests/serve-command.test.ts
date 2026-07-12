@@ -7,6 +7,7 @@ import {
   createServeLaunch,
   findPackageRoot,
   parseServeOptions,
+  runServeLaunch,
   type ServeOptions
 } from '../src/cli/serveCommand.js';
 
@@ -58,25 +59,25 @@ afterEach(() => {
 });
 
 describe('parseServeOptions', () => {
-  it('defaults to Vite on the loopback host and port 5173', () => {
+  it('defaults to standalone on the loopback host and port 5173', () => {
     expect(parseServeOptions([], {})).toEqual({
-      mode: 'vite',
+      mode: 'standalone',
       host: '127.0.0.1',
       port: 5173
     });
   });
 
-  it('treats --standalone as a boolean flag', () => {
-    expect(parseServeOptions(['--standalone', '--port', '6000'], {})).toEqual({
-      mode: 'standalone',
+  it('treats --dev as a boolean flag that selects Vite', () => {
+    expect(parseServeOptions(['--dev', '--port', '6000'], {})).toEqual({
+      mode: 'vite',
       host: '127.0.0.1',
       port: 6000
     });
   });
 
   it('accepts serve flags in any order', () => {
-    expect(parseServeOptions(['--port', '6000', '--host', '0.0.0.0', '--standalone'], {})).toEqual({
-      mode: 'standalone',
+    expect(parseServeOptions(['--port', '6000', '--host', '0.0.0.0', '--dev'], {})).toEqual({
+      mode: 'vite',
       host: '0.0.0.0',
       port: 6000
     });
@@ -84,7 +85,7 @@ describe('parseServeOptions', () => {
 
   it('uses environment defaults when flags are absent', () => {
     expect(parseServeOptions([], { DESK_HOST: '0.0.0.0', DESK_PORT: '7000' })).toEqual({
-      mode: 'vite',
+      mode: 'standalone',
       host: '0.0.0.0',
       port: 7000
     });
@@ -96,7 +97,7 @@ describe('parseServeOptions', () => {
         DESK_HOST: '0.0.0.0',
         DESK_PORT: '7000'
       })
-    ).toEqual({ mode: 'vite', host: 'localhost', port: 6000 });
+    ).toEqual({ mode: 'standalone', host: 'localhost', port: 6000 });
   });
 
   it.each([
@@ -116,7 +117,7 @@ describe('parseServeOptions', () => {
   });
 
   it.each([
-    [['--standalone', '--standalone'], '--standalone may be specified only once'],
+    [['--dev', '--dev'], '--dev may be specified only once'],
     [['--host', 'one', '--host', 'two'], '--host may be specified only once'],
     [['--port', '5173', '--port', '5174'], '--port may be specified only once']
   ] as const)('rejects duplicate flags in %j', (argv, message) => {
@@ -131,8 +132,12 @@ describe('parseServeOptions', () => {
     expect(() => parseServeOptions(['--unknown'], {})).toThrow('unknown option --unknown');
   });
 
+  it('rejects the retired --standalone flag', () => {
+    expect(() => parseServeOptions(['--standalone'], {})).toThrow('unknown option --standalone');
+  });
+
   it('rejects unexpected positional arguments', () => {
-    expect(() => parseServeOptions(['--standalone', 'true'], {})).toThrow('unexpected argument true');
+    expect(() => parseServeOptions(['--dev', 'true'], {})).toThrow('unexpected argument true');
   });
 });
 
@@ -209,8 +214,28 @@ describe('serve launch planning', () => {
 
     const message = thrownMessage(() => createServeLaunch(root, standaloneOptions, '/runtime/node'));
 
-    expect(message).toMatch(/standalone.*reinstall/i);
-    expect(message).not.toMatch(/vite/i);
+    expect(message).toBe(`Standalone runtime is missing at ${standaloneEntry}; reinstall desk`);
     expectOnlyArtifactLookup(standaloneEntry);
+  });
+});
+
+describe('serve launch supervision', () => {
+  it('rejects spawn errors without leaking signal listeners', async () => {
+    const sigintListeners = process.listenerCount('SIGINT');
+    const sigtermListeners = process.listenerCount('SIGTERM');
+    const missingRuntime = join(tmpdir(), `desk-missing-runtime-${process.pid}-${Date.now()}`);
+
+    await expect(
+      runServeLaunch({
+        command: missingRuntime,
+        args: [],
+        cwd: tmpdir(),
+        env: process.env,
+        label: 'missing runtime'
+      })
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    expect(process.listenerCount('SIGINT')).toBe(sigintListeners);
+    expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners);
   });
 });

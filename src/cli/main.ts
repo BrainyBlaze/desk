@@ -1,8 +1,5 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   addSessionToManifest,
   createEmptyManifest,
@@ -15,6 +12,7 @@ import { installAgentHooks } from '../core/agentHooks.js';
 import { createAttachArgv } from '../core/tmux.js';
 import { captureSession, findSession, loadDesk, planDeskUp, printStatus, runPlan } from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
+import { createServeLaunch, findPackageRoot, parseServeOptions, runServeLaunch } from './serveCommand.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import type { DeskSession } from '../core/types.js';
 
@@ -22,7 +20,10 @@ const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat fo
 
 Usage: desk <command> [options]
 
-  serve [--port 5173] [--host 127.0.0.1]    Start the Vite dev server + UI.
+  desk serve [--host HOST] [--port PORT]
+      Start the private standalone runtime.
+  desk serve --dev [--host HOST] [--port PORT]
+      Start the Vite dev server + UI.
   up [--dry-run]                            Start every missing session
   status                                    Show which sessions exist
   init                                      Create an empty user config
@@ -35,44 +36,9 @@ Usage: desk <command> [options]
   config                                    Print the active config path
   help                                      Show this help
 
+Serve host/port precedence: flags > DESK_HOST/DESK_PORT > 127.0.0.1/5173.
+
 Quick start: desk serve   then open the printed URL.`;
-
-/** Locate the installed package root (holds package.json + vite.config + node_modules). */
-function findPackageRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (let depth = 0; depth < 8; depth += 1) {
-    // The package root holds package.json plus EITHER the dev config (a source
-    // checkout) OR the built CLI (a prebuilt artifact ships dist/ + node_modules
-    // but no vite.config.ts/src).
-    if (
-      existsSync(join(dir, 'package.json')) &&
-      (existsSync(join(dir, 'vite.config.ts')) || existsSync(join(dir, 'dist', 'cli', 'main.js')))
-    ) {
-      return dir;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      break;
-    }
-    dir = parent;
-  }
-  throw new Error('cannot locate the desk package root (reinstall desk)');
-}
-
-function serve(options: Map<string, string>): number {
-  const root = findPackageRoot();
-  const host = options.get('host') ?? '127.0.0.1';
-  const port = options.get('port') ?? '5173';
-
-  // The Vite dev server (serves the client source with HMR).
-  const viteBin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
-  if (!existsSync(viteBin)) {
-    throw new Error(`vite is not installed in ${root}; run "npm install" there first`);
-  }
-  console.log(`desk serving (dev) on http://${host}:${port}  (Ctrl-C to stop)`);
-  const result = spawnSync(viteBin, ['--host', host, '--port', port], { cwd: root, stdio: 'inherit' });
-  return result.status ?? 0;
-}
 
 interface ParsedArgs {
   command: string;
@@ -83,8 +49,15 @@ interface ParsedArgs {
   options: Map<string, string>;
 }
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   try {
+    if ((argv[0] ?? 'help') === 'serve') {
+      const options = parseServeOptions(argv.slice(1));
+      const launch = createServeLaunch(findPackageRoot(import.meta.url), options);
+      console.log(launch.label);
+      return await runServeLaunch(launch);
+    }
+
     const args = parseArgs(argv);
 
     // Commands that do not need an existing manifest are handled first so a
@@ -92,10 +65,6 @@ function main(argv: string[]): number {
     if (args.command === 'help' || args.command === '--help' || args.command === '-h') {
       console.log(HELP);
       return 0;
-    }
-
-    if (args.command === 'serve') {
-      return serve(args.options);
     }
 
     if (args.command === 'hooks') {
@@ -194,6 +163,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       dryRun = true;
     } else if (next === '--lines') {
       lines = Number.parseInt(requireValue(next, args.shift()), 10);
+    } else if (next === '--standalone') {
+      throw new Error('unknown option --standalone');
     } else if (next?.startsWith('--')) {
       options.set(next.slice(2), requireValue(next, args.shift()));
     } else if (next && !target) {
@@ -239,7 +210,15 @@ function requireOption(options: Map<string, string>, name: string): string {
 }
 
 const cliArgs = process.argv.slice(2);
-if (cliArgs[0] === 'channels') {
+const rejectedTopLevelOption = cliArgs.includes('--standalone')
+  ? '--standalone'
+  : cliArgs[0] !== 'serve' && cliArgs.includes('--dev')
+    ? '--dev'
+    : undefined;
+if (rejectedTopLevelOption !== undefined) {
+  console.error(`unknown option ${rejectedTopLevelOption}`);
+  process.exitCode = 1;
+} else if (cliArgs[0] === 'channels') {
   process.exitCode = await runChannelsCli(cliArgs.slice(1));
 } else if (cliArgs[0] === 'agent-host') {
   // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
@@ -251,5 +230,5 @@ if (cliArgs[0] === 'channels') {
     process.exitCode = 1;
   }
 } else {
-  process.exitCode = main(cliArgs);
+  process.exitCode = await main(cliArgs);
 }
