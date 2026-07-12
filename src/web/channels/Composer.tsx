@@ -14,6 +14,7 @@ import {
   handleComposerFileDragOver,
   handleComposerFileDrop,
   handleComposerFilePaste,
+  restoreComposerTextAfterFailedSend,
   runComposerFileUpload,
   startComposerResize
 } from '../composerInput.js';
@@ -154,15 +155,25 @@ export function Composer({
     if (body.length === 0 || sending || disabled) {
       return;
     }
+    const submittedDraftKey = draftKeyRef.current;
+    let sent = false;
     setSending(true);
+    setText('');
+    setMention(null);
     try {
-      const ok = await onSend(body);
-      if (ok) {
-        setText('');
-        setMention(null);
+      sent = await onSend(body);
+      if (sent) {
         bleeps.deploy?.play();
       }
     } finally {
+      if (!sent) {
+        if (draftKeyRef.current === submittedDraftKey) {
+          setText((current) => restoreComposerTextAfterFailedSend(body, current));
+        } else if (submittedDraftKey) {
+          const current = localStorage.getItem(submittedDraftKey) ?? '';
+          localStorage.setItem(submittedDraftKey, restoreComposerTextAfterFailedSend(body, current));
+        }
+      }
       setSending(false);
       areaRef.current?.focus();
     }
@@ -238,7 +249,7 @@ export function Composer({
         style={manualHeight ? { height: `${manualHeight}px` } : undefined}
         placeholder={placeholder}
         value={text}
-        disabled={disabled || sending}
+        disabled={disabled}
         onChange={(event) => {
           setText(event.target.value);
           refreshMention(event.target.value, event.target.selectionStart ?? event.target.value.length);
@@ -251,6 +262,9 @@ export function Composer({
           handleComposerFilePaste(event, uploadFiles);
         }}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
           if (mention && mentionOptions.length > 0) {
             if (event.key === 'ArrowDown') {
               event.preventDefault();
@@ -272,7 +286,7 @@ export function Composer({
               return;
             }
           }
-          if (composerPlainEnterShouldSend(event.key, event.shiftKey)) {
+          if (composerPlainEnterShouldSend(event.key, event.shiftKey, event.nativeEvent.isComposing)) {
             event.preventDefault();
             void send();
           }

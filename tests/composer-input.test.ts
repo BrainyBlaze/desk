@@ -10,6 +10,7 @@ import {
   handleComposerFileDragOver,
   handleComposerFileDrop,
   handleComposerFilePaste,
+  restoreComposerTextAfterFailedSend,
   runComposerFileUpload,
   startComposerResize
 } from '../src/web/composerInput';
@@ -40,6 +41,12 @@ describe('composer input shared helpers', () => {
     expect(composerPlainEnterShouldSend('Enter', false)).toBe(true);
     expect(composerPlainEnterShouldSend('Enter', true)).toBe(false);
     expect(composerPlainEnterShouldSend('NumpadEnter', false)).toBe(false);
+    expect(composerPlainEnterShouldSend('Enter', false, true)).toBe(false);
+  });
+
+  it('restores a failed submitted message without overwriting text typed while it was pending', () => {
+    expect(restoreComposerTextAfterFailedSend('submitted', '')).toBe('submitted');
+    expect(restoreComposerTextAfterFailedSend('submitted', 'new draft')).toBe('submitted\nnew draft');
   });
 
   it('maps resize arrow keys to clamped height deltas', () => {
