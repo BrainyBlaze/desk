@@ -185,7 +185,8 @@ LOCK
 }
 
 cleanup_on_exit() {
-  local status=$? active=""
+  set -- "$?"
+  local status="$1" active=""
   trap - EXIT
   if [ -n "$STAGED_RELEASE" ] && [ -e "$STAGED_RELEASE" ]; then
     rm -rf -- "$STAGED_RELEASE"
@@ -324,7 +325,7 @@ ensure_macos_tooling() {
 
 install_missing_packages() {
   local packages=()
-  [ "${#MISSING_CAPABILITIES[@]}" -gt 0 ] || return 0
+  [ -n "${MISSING_CAPABILITIES[*]-}" ] || return 0
   detect_package_manager
   [ -n "$PACKAGE_MANAGER" ] || die "missing required host capabilities and no supported package manager was found: ${MISSING_CAPABILITIES[*]}"
   info "Provisioning required host capabilities (${MISSING_CAPABILITIES[*]}) with $PACKAGE_MANAGER…"
@@ -361,7 +362,7 @@ install_missing_packages() {
 
 verify_host_capabilities() {
   probe_host_capabilities
-  [ "${#MISSING_CAPABILITIES[@]}" -eq 0 ] || die "host provisioning finished but capabilities remain unsatisfied: ${MISSING_CAPABILITIES[*]}"
+  [ -z "${MISSING_CAPABILITIES[*]-}" ] || die "host provisioning finished but capabilities remain unsatisfied: ${MISSING_CAPABILITIES[*]}"
 }
 
 sha256_file() {
@@ -1066,7 +1067,7 @@ PY
 report_optional_integrations() {
   local command missing=()
   for command in codex claude opencode gh nvidia-smi; do have "$command" || missing+=("$command"); done
-  [ "${#missing[@]}" -eq 0 ] || info "Optional integrations not installed (Desk still works): ${missing[*]}"
+  [ -z "${missing[*]-}" ] || info "Optional integrations not installed (Desk still works): ${missing[*]}"
 }
 
 validate_uninstall_tree() {
