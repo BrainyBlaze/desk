@@ -686,9 +686,16 @@ export function GitSubsystem({
           const fingerprint = JSON.stringify(next);
           const changed = fingerprint !== statusFingerprintRef.current;
           statusFingerprintRef.current = fingerprint;
+          // Live worktree/staged diffs can change even when the porcelain status
+          // fingerprint does NOT — further edits to an already-modified file keep
+          // the letter 'M'. So refresh open diff tabs every tick; otherwise an
+          // open diff went permanently stale as the file kept changing. loadLog
+          // and loadBranches only change with the status, so keep them gated.
+          const tasks: Array<Promise<unknown>> = [refreshLiveDiffs()];
           if (changed || options.log) {
-            await Promise.all([loadLog(true), refreshLiveDiffs(), loadBranches()]);
+            tasks.push(loadLog(true), loadBranches());
           }
+          await Promise.all(tasks);
         }
       } catch (err) {
         report(err);
