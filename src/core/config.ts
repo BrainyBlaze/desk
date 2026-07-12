@@ -7,6 +7,15 @@ import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
 import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
 import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, SessionSpec } from './types.js';
 
+export class ManifestMutationError extends Error {
+  readonly code = 'manifest-conflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManifestMutationError';
+  }
+}
+
 export interface ResolveDefaultManifestPathOptions {
   homeDir?: string;
   configHome?: string;
@@ -195,7 +204,7 @@ export function addSessionToManifest(manifest: DeskManifest, options: AddSession
   }
 
   if (group.sessions.some((session) => session.name === options.session.name)) {
-    throw new Error(`session ${options.session.name} already exists in group ${options.groupId}`);
+    throw new ManifestMutationError(`session ${options.session.name} already exists in group ${options.groupId}`);
   }
 
   group.sessions.push(options.session);
@@ -209,7 +218,7 @@ export function addGroupToManifest(manifest: DeskManifest, options: AddGroupOpti
   }));
 
   if (groups.some((group) => group.id === options.groupId)) {
-    throw new Error(`group ${options.groupId} already exists`);
+    throw new ManifestMutationError(`group ${options.groupId} already exists`);
   }
 
   const group: DeskGroup = {
@@ -228,7 +237,7 @@ export function addGroupToManifest(manifest: DeskManifest, options: AddGroupOpti
 export function addProjectToManifest(manifest: DeskManifest, options: AddProjectOptions): DeskManifest {
   const projects = cloneProjects(manifest);
   if (projects.some((project) => project.id === options.projectId)) {
-    throw new Error(`project ${options.projectId} already exists`);
+    throw new ManifestMutationError(`project ${options.projectId} already exists`);
   }
   projects.push({
     id: options.projectId,
@@ -243,10 +252,10 @@ export function addGroupToProjectManifest(manifest: DeskManifest, options: AddPr
   const projects = cloneProjects(manifest);
   const project = projects.find((candidate) => candidate.id === options.projectId);
   if (!project) {
-    throw new Error(`project ${options.projectId} does not exist`);
+    throw new ManifestMutationError(`project ${options.projectId} does not exist`);
   }
   if (project.groups.some((group) => group.id === options.groupId)) {
-    throw new Error(`group ${options.groupId} already exists in project ${options.projectId}`);
+    throw new ManifestMutationError(`group ${options.groupId} already exists in project ${options.projectId}`);
   }
   project.groups.push({
     id: options.groupId,
@@ -261,14 +270,14 @@ export function addSessionToProjectManifest(manifest: DeskManifest, options: Add
   const projects = cloneProjects(manifest);
   const project = projects.find((candidate) => candidate.id === options.projectId);
   if (!project) {
-    throw new Error(`project ${options.projectId} does not exist`);
+    throw new ManifestMutationError(`project ${options.projectId} does not exist`);
   }
   const group = project.groups.find((candidate) => candidate.id === options.groupId);
   if (!group) {
-    throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
+    throw new ManifestMutationError(`group ${options.groupId} does not exist in project ${options.projectId}`);
   }
   if (group.sessions.some((session) => session.name === options.session.name)) {
-    throw new Error(`session ${options.session.name} already exists in group ${options.groupId}`);
+    throw new ManifestMutationError(`session ${options.session.name} already exists in group ${options.groupId}`);
   }
   group.sessions.push(options.session);
   return { ...manifest, projects };
@@ -296,7 +305,7 @@ export function editProjectInManifest(manifest: DeskManifest, options: EditProje
     });
   }
   if (!updated) {
-    throw new Error(`project ${options.projectId} does not exist`);
+    throw new ManifestMutationError(`project ${options.projectId} does not exist`);
   }
   return { ...manifest, groups, projects: manifest.projects };
 }
@@ -308,7 +317,7 @@ export function deleteProjectFromManifest(manifest: DeskManifest, options: Delet
   }
 
   if (!options.cwd) {
-    throw new Error(`project ${options.projectId} does not exist`);
+    throw new ManifestMutationError(`project ${options.projectId} does not exist`);
   }
   let removedSessions = 0;
   const groups = cloneGroups(manifest)
@@ -400,10 +409,10 @@ export function moveSessionInManifest(manifest: DeskManifest, options: MoveProje
   if (targetProject) {
     const targetGroup = targetProject.groups.find((group) => group.id === options.targetGroupId);
     if (!targetGroup) {
-      throw new Error(`group ${options.targetGroupId} does not exist in project ${options.targetProjectId}`);
+      throw new ManifestMutationError(`group ${options.targetGroupId} does not exist in project ${options.targetProjectId}`);
     }
     if (targetGroup.sessions.some((candidate) => candidate.name === session.name)) {
-      throw new Error(`session ${session.name} already exists in group ${options.targetGroupId}`);
+      throw new ManifestMutationError(`session ${session.name} already exists in group ${options.targetGroupId}`);
     }
     targetGroup.sessions.push(session);
     return { ...manifest, groups, projects };
@@ -411,10 +420,10 @@ export function moveSessionInManifest(manifest: DeskManifest, options: MoveProje
 
   const targetGroup = groups.find((group) => group.id === options.targetGroupId);
   if (!targetGroup) {
-    throw new Error(`group ${options.targetGroupId} does not exist`);
+    throw new ManifestMutationError(`group ${options.targetGroupId} does not exist`);
   }
   if (targetGroup.sessions.some((candidate) => candidate.name === session.name)) {
-    throw new Error(`session ${session.name} already exists in group ${options.targetGroupId}`);
+    throw new ManifestMutationError(`session ${session.name} already exists in group ${options.targetGroupId}`);
   }
   targetGroup.sessions.push(session);
   return { ...manifest, groups, projects: manifest.projects };
@@ -524,7 +533,7 @@ function updateTargetGroup(
   if (project) {
     const group = project.groups.find((candidate) => candidate.id === options.groupId);
     if (!group) {
-      throw new Error(`group ${options.groupId} does not exist in project ${options.projectId}`);
+      throw new ManifestMutationError(`group ${options.groupId} does not exist in project ${options.projectId}`);
     }
     update(group);
     return { ...manifest, projects };
@@ -533,7 +542,7 @@ function updateTargetGroup(
   const groups = cloneGroups(manifest);
   const group = groups.find((candidate) => candidate.id === options.groupId);
   if (!group) {
-    throw new Error(`group ${options.groupId} does not exist`);
+    throw new ManifestMutationError(`group ${options.groupId} does not exist`);
   }
   update(group);
   return { ...manifest, groups, projects: manifest.projects };
@@ -566,7 +575,7 @@ function replaceSession(
     return merged;
   });
   if (!replaced) {
-    throw new Error(`session ${currentName} does not exist`);
+    throw new ManifestMutationError(`session ${currentName} does not exist`);
   }
   return next;
 }
@@ -577,7 +586,7 @@ function removeSession(projects: NonNullable<DeskManifest['projects']>, groups: 
     ? sourceProject.groups.find((group) => group.id === options.sourceGroupId)
     : groups.find((group) => group.id === options.sourceGroupId);
   if (!sourceGroup) {
-    throw new Error(`group ${options.sourceGroupId} does not exist`);
+    throw new ManifestMutationError(`group ${options.sourceGroupId} does not exist`);
   }
   const index = sourceGroup.sessions.findIndex(
     (session) =>
@@ -585,7 +594,7 @@ function removeSession(projects: NonNullable<DeskManifest['projects']>, groups: 
       (Boolean(sourceProject) || !options.sourceProjectCwd || !session.cwd || cwdMatches(session.cwd, options.sourceProjectCwd))
   );
   if (index < 0) {
-    throw new Error(`session ${options.sourceSessionName} does not exist`);
+    throw new ManifestMutationError(`session ${options.sourceSessionName} does not exist`);
   }
   const [session] = sourceGroup.sessions.splice(index, 1);
   return session!;

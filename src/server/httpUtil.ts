@@ -4,9 +4,15 @@ export interface ReadJsonBodyOptions {
   maxBytes?: number;
 }
 
-export interface HttpBodyError extends Error {
-  code: 'body-too-large' | 'invalid-json' | 'body-read-failed';
-  statusCode: number;
+export class HttpBodyError extends Error {
+  constructor(
+    message: string,
+    readonly code: 'body-too-large' | 'invalid-json' | 'body-read-failed',
+    readonly statusCode: 400 | 413
+  ) {
+    super(message);
+    this.name = 'HttpBodyError';
+  }
 }
 
 const DEFAULT_JSON_BODY_MAX_BYTES = 1_048_576;
@@ -101,9 +107,6 @@ function bodyTooLargeError(): HttpBodyError {
   return bodyError('Request body too large', 'body-too-large', 413);
 }
 
-function bodyError(message: string, code: HttpBodyError['code'], statusCode: number): HttpBodyError {
-  const error = new Error(message) as HttpBodyError;
-  error.code = code;
-  error.statusCode = statusCode;
-  return error;
+function bodyError(message: string, code: HttpBodyError['code'], statusCode: HttpBodyError['statusCode']): HttpBodyError {
+  return new HttpBodyError(message, code, statusCode);
 }

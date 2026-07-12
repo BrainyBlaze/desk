@@ -1,10 +1,25 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { describe, expect, it, vi } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { FileLockBusyError } from '../../src/shared/fileLock.js';
+import { ManifestMutationError } from '../../src/core/config.js';
+import { readRequiredString } from '../../src/server/apiValidation.js';
 import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
+import { readJsonBody } from '../../src/server/httpUtil.js';
 import type { DeskRoute } from '../../src/server/plugin.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function request(url: string): IncomingMessage {
   return { method: 'GET', url } as IncomingMessage;
+}
+
+function bodyRequest(url: string, body: string, headers: Record<string, string> = {}): IncomingMessage {
+  const req = Object.assign(new PassThrough(), { method: 'POST', url, headers }) as unknown as IncomingMessage;
+  req.end(body);
+  return req;
 }
 
 function response(): ServerResponse & { body?: string } {
@@ -62,6 +77,77 @@ describe('createDeskApiMiddleware', () => {
 
     expect(res.statusCode).toBe(404);
     expect(JSON.parse(res.body ?? '')).toEqual({ error: 'unknown API route /api/missing' });
+  });
+
+  it('preserves the status, code, and safe message from HttpBodyError', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async (req) => {
+      await readJsonBody(req, { maxBytes: 8 });
+      return true;
+    };
+
+    await createDeskApiMiddleware([route])(
+      bodyRequest('/api/body', 'ignored', { 'content-length': '9' }),
+      res,
+      vi.fn()
+    );
+
+    expect(res.statusCode).toBe(413);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'Request body too large',
+      code: 'body-too-large'
+    });
+  });
+
+  it('returns a safe 400 for typed API validation errors', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      readRequiredString(undefined, 'session');
+      return true;
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/validate'), res, vi.fn());
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'session must be a non-empty string',
+      code: 'invalid-input'
+    });
+  });
+
+  it('returns a safe retryable conflict for a busy file lock', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw new FileLockBusyError('/home/user/.config/desk/desk.yml', 10_000);
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/save'), res, vi.fn());
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'Desk data is busy; retry the request',
+      code: 'FILE_LOCK_BUSY'
+    });
+    expect(res.body).not.toContain('/home/user');
+  });
+
+  it('preserves safe manifest mutation conflicts without exposing arbitrary errors', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw new ManifestMutationError('group alpha already exists');
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/add-group'), res, vi.fn());
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body ?? '')).toEqual({
+      error: 'group alpha already exists',
+      code: 'manifest-conflict'
+    });
   });
 
   it('logs and returns JSON 500 when a route throws', async () => {
