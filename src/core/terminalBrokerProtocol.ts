@@ -12,6 +12,10 @@ export type TerminalBrokerClientFrame =
 
 export type TerminalBrokerServerFrame =
   | { type: 'ready'; version: 1 }
+  // Server liveness beacon (every 15s). The client tracks the time of the last
+  // frame of ANY type; a half-open TCP delivers none, so the client can detect a
+  // dead-but-OPEN socket and reconnect. Carries the server clock for diagnostics.
+  | { type: 'heartbeat'; at: number }
   | { type: 'snapshot'; session: string; surfaceId: string; data: string }
   | { type: 'output'; session: string; data: string }
   | { type: 'error'; session?: string; message: string }

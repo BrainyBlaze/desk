@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TerminalBrokerClient, type BrokerSocket } from '../src/web/terminalBrokerClient.js';
 import type { TerminalBrokerServerFrame } from '../src/core/terminalBrokerProtocol.js';
 
@@ -204,6 +204,39 @@ describe('TerminalBrokerClient', () => {
       onConnectionChange: (up) => conn2.push(up)
     });
     expect(conn2).toEqual([true]);
+  });
+
+  it('reconnects after the heartbeat timeout with no frames (half-open socket)', () => {
+    vi.useFakeTimers();
+    try {
+      const { client, sockets } = makeClient();
+      client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
+      sockets[0].open(); // connected; half-open watchdog armed
+      expect(sockets).toHaveLength(1);
+      // A half-open TCP delivers no frames; the socket still reports OPEN. Advance
+      // past the 30s timeout (the watchdog checks every 15s).
+      vi.advanceTimersByTime(31_000);
+      expect(sockets.length).toBeGreaterThan(1); // watchdog forceReconnected
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a heartbeat frame keeps the socket alive (no spurious reconnect)', () => {
+    vi.useFakeTimers();
+    try {
+      const { client, sockets } = makeClient();
+      client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
+      sockets[0].open();
+      // A beacon every 15s keeps lastFrameAt fresh across a full minute.
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 15_000) {
+        vi.advanceTimersByTime(15_000);
+        sockets[0].emit({ type: 'heartbeat', at: Date.now() });
+      }
+      expect(sockets).toHaveLength(1); // never reconnected
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('tears down the socket when the last surface unsubscribes', () => {
