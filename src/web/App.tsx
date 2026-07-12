@@ -87,9 +87,11 @@ import {
   upDesk,
   type AgentEvent,
   type DeskAutosaveMode,
-  type DeskFetchedUiSettings
+  type DeskFetchedUiSettings,
+  type DeskUiSettings
 } from './api.js';
 import { fireAndForget, toErrorMessage } from './asyncSafe.js';
+import { reconcileInitialSetting } from './initialSettingsReconcile.js';
 import { TerminalSurface } from './TerminalSurface.js';
 import { StatusBar } from './StatusBar.js';
 import { publishStatus, type StatusSegment } from './statusSegments.js';
@@ -412,6 +414,35 @@ export function App(): JSX.Element {
   const [lspDetectionState, setLspDetectionState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [lspSaving, setLspSaving] = useState(false);
   const [lspSaveError, setLspSaveError] = useState(false);
+  const initialSettingsEditRevisionsRef = useRef({
+    theme: 0,
+    muted: 0,
+    autosaveMode: 0,
+    autosaveDelayMs: 0,
+    lsp: 0
+  });
+  const currentInitialSettingsRef = useRef({ themeName, muted, autosaveMode, autosaveDelayMs });
+  currentInitialSettingsRef.current = { themeName, muted, autosaveMode, autosaveDelayMs };
+  const handleThemeNameChange = useCallback((next: DeskThemeName) => {
+    initialSettingsEditRevisionsRef.current.theme += 1;
+    currentInitialSettingsRef.current.themeName = next;
+    setThemeName(next);
+  }, []);
+  const handleMutedChange = useCallback((next: boolean) => {
+    initialSettingsEditRevisionsRef.current.muted += 1;
+    currentInitialSettingsRef.current.muted = next;
+    setMuted(next);
+  }, []);
+  const handleAutosaveModeChange = useCallback((next: DeskAutosaveMode) => {
+    initialSettingsEditRevisionsRef.current.autosaveMode += 1;
+    currentInitialSettingsRef.current.autosaveMode = next;
+    setAutosaveMode(next);
+  }, []);
+  const handleAutosaveDelayChange = useCallback((next: number) => {
+    initialSettingsEditRevisionsRef.current.autosaveDelayMs += 1;
+    currentInitialSettingsRef.current.autosaveDelayMs = next;
+    setAutosaveDelayMs(next);
+  }, []);
   // Boot/restore editor root is not published to the editor-root signal (see editorRoot.ts); capture
   // the persisted one so detection runs for the initially-restored workspace, then track live changes.
   const [bootEditorRoot, setBootEditorRoot] = useState<string | null>(null);
@@ -475,6 +506,7 @@ export function App(): JSX.Element {
   }, []);
   const handleLspEnabledChange = useCallback(
     (next: boolean) => {
+      initialSettingsEditRevisionsRef.current.lsp += 1;
       setLspSaving(true);
       setLspSaveError(false);
       // Carry the current denylist through the master-toggle save so it is preserved server-side.
@@ -496,6 +528,7 @@ export function App(): JSX.Element {
   // server response. Disabling adds the id; enabling removes it. enabled stays as-is.
   const handleLspLanguageToggle = useCallback(
     (languageId: string, nextEnabled: boolean) => {
+      initialSettingsEditRevisionsRef.current.lsp += 1;
       const current = new Set(lspDisabledLanguages);
       if (nextEnabled) {
         current.delete(languageId);
@@ -546,27 +579,52 @@ export function App(): JSX.Element {
   useEffect(() => {
     // desk.yml settings are the source of truth (localStorage is just an
     // instant-boot cache to avoid a theme flash before this fetch lands).
+    const revisionsAtRequest = { ...initialSettingsEditRevisionsRef.current };
     void fetchSettings()
       .then((settings) => {
-        if (typeof settings.theme === 'string') {
-          setThemeName(readStoredTheme(settings.theme));
+        const revisions = initialSettingsEditRevisionsRef.current;
+        const current = currentInitialSettingsRef.current;
+        const themeSetting = reconcileInitialSetting(
+          typeof settings.theme === 'string' ? readStoredTheme(settings.theme) : undefined,
+          current.themeName,
+          revisions.theme !== revisionsAtRequest.theme
+        );
+        const mutedSetting = reconcileInitialSetting(
+          typeof settings.muted === 'boolean' ? settings.muted : undefined,
+          current.muted,
+          revisions.muted !== revisionsAtRequest.muted
+        );
+        const autosaveModeSetting = reconcileInitialSetting(
+          settings.editor?.autosave,
+          current.autosaveMode,
+          revisions.autosaveMode !== revisionsAtRequest.autosaveMode
+        );
+        const autosaveDelaySetting = reconcileInitialSetting(
+          typeof settings.editor?.autosaveDelayMs === 'number' ? settings.editor.autosaveDelayMs : undefined,
+          current.autosaveDelayMs,
+          revisions.autosaveDelayMs !== revisionsAtRequest.autosaveDelayMs
+        );
+        if (themeSetting.adoptServer) {
+          setThemeName(themeSetting.value);
         }
-        if (typeof settings.muted === 'boolean') {
-          setMuted(settings.muted);
+        if (mutedSetting.adoptServer) {
+          setMuted(mutedSetting.value);
         }
-        if (settings.editor?.autosave) {
-          setAutosaveMode(settings.editor.autosave);
+        if (autosaveModeSetting.adoptServer) {
+          setAutosaveMode(autosaveModeSetting.value);
         }
-        if (typeof settings.editor?.autosaveDelayMs === 'number') {
-          setAutosaveDelayMs(settings.editor.autosaveDelayMs);
+        if (autosaveDelaySetting.adoptServer) {
+          setAutosaveDelayMs(autosaveDelaySetting.value);
         }
         // Auto-detect model: take ONLY the persisted master enabled flag + per-language denylist
         // here; the active languages come from runtime detection (below), never from persisted
         // settings.lsp.languages.
-        setLspEnabled(settings.lsp?.enabled === true);
-        setLspDisabledLanguages(
-          Array.isArray(settings.lsp?.disabledLanguages) ? settings.lsp.disabledLanguages : []
-        );
+        if (revisions.lsp === revisionsAtRequest.lsp) {
+          setLspEnabled(settings.lsp?.enabled === true);
+          setLspDisabledLanguages(
+            Array.isArray(settings.lsp?.disabledLanguages) ? settings.lsp.disabledLanguages : []
+          );
+        }
         setBootEditorRoot(typeof settings.editor?.root === 'string' ? settings.editor.root : null);
         if (settings.sidebars && typeof settings.sidebars === 'object') {
           setSidebarWidths(settings.sidebars);
@@ -596,16 +654,59 @@ export function App(): JSX.Element {
           }
         }
         settingsLoadedRef.current = true;
+        const catchup: DeskUiSettings = {};
+        if (themeSetting.persistCurrent) {
+          catchup.theme = themeSetting.value;
+        }
+        if (mutedSetting.persistCurrent) {
+          catchup.muted = mutedSetting.value;
+        }
+        const editorCatchup: NonNullable<DeskUiSettings['editor']> = {};
+        if (autosaveModeSetting.persistCurrent) {
+          editorCatchup.autosave = autosaveModeSetting.value;
+        }
+        if (autosaveDelaySetting.persistCurrent) {
+          editorCatchup.autosaveDelayMs = autosaveDelaySetting.value;
+        }
+        if (Object.keys(editorCatchup).length > 0) {
+          catchup.editor = editorCatchup;
+        }
         if (settings.theme === undefined) {
           // First run with no stored settings: adopt this browser's choice.
-          fireAndForget(saveSettings({ theme: themeName, muted }), 'save initial settings');
+          catchup.theme = themeSetting.value;
+          catchup.muted = mutedSetting.value;
+        }
+        if (Object.keys(catchup).length > 0) {
+          fireAndForget(saveSettings(catchup), 'reconcile initial settings');
         }
       })
       .catch((error) => {
         // The fetch failed, so there is no loaded server state to clobber —
         // release the persistence gate so later user changes still save (partial
         // saves merge server-side), and surface the failure instead of dropping it.
+        const revisions = initialSettingsEditRevisionsRef.current;
+        const current = currentInitialSettingsRef.current;
+        const catchup: DeskUiSettings = {};
+        if (revisions.theme !== revisionsAtRequest.theme) {
+          catchup.theme = current.themeName;
+        }
+        if (revisions.muted !== revisionsAtRequest.muted) {
+          catchup.muted = current.muted;
+        }
+        const editorCatchup: NonNullable<DeskUiSettings['editor']> = {};
+        if (revisions.autosaveMode !== revisionsAtRequest.autosaveMode) {
+          editorCatchup.autosave = current.autosaveMode;
+        }
+        if (revisions.autosaveDelayMs !== revisionsAtRequest.autosaveDelayMs) {
+          editorCatchup.autosaveDelayMs = current.autosaveDelayMs;
+        }
+        if (Object.keys(editorCatchup).length > 0) {
+          catchup.editor = editorCatchup;
+        }
         settingsLoadedRef.current = true;
+        if (Object.keys(catchup).length > 0) {
+          fireAndForget(saveSettings(catchup), 'recover settings edits after initial load failure');
+        }
         console.warn(`[desk] initial settings load failed: ${toErrorMessage(error)}`);
       });
     setBooted(true);
@@ -773,7 +874,7 @@ export function App(): JSX.Element {
         icon: <VolumeX size={11} />,
         text: 'muted',
         hint: 'Sounds are muted — click to unmute',
-        onClick: () => setMuted(false)
+        onClick: () => handleMutedChange(false)
       });
     }
     segments.push({
@@ -1951,7 +2052,7 @@ export function App(): JSX.Element {
     }
   });
   const headerHandlers = useStableCallbacks({
-    onToggleMuted: () => setMuted((value) => !value),
+    onToggleMuted: () => handleMutedChange(!muted),
     onToggleNotifications: () => setNotifOpen((value) => !value),
     onOpenSettings: () => setModal('settings'),
     onKillAll: () => setModal('killAll'),
@@ -2414,13 +2515,13 @@ export function App(): JSX.Element {
             body: (
               <SettingsView
                 themeName={themeName}
-                onThemeChange={setThemeName}
+                onThemeChange={handleThemeNameChange}
                 autosaveMode={autosaveMode}
                 autosaveDelayMs={autosaveDelayMs}
-                onAutosaveModeChange={setAutosaveMode}
-                onAutosaveDelayChange={setAutosaveDelayMs}
+                onAutosaveModeChange={handleAutosaveModeChange}
+                onAutosaveDelayChange={handleAutosaveDelayChange}
                 muted={muted}
-                onMutedChange={setMuted}
+                onMutedChange={handleMutedChange}
                 lspEnabled={lspEnabled}
                 lspDetectedLanguages={detectedLanguages}
                 lspDisabledLanguages={lspDisabledLanguages}
