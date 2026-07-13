@@ -23,6 +23,7 @@ npm-debug.log*
 
 # Local agent scratch
 .claude/
+/.worktrees/
 
 # Bun standalone build artifacts
 src/server/assets/*.tar.gz
