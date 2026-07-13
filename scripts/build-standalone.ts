@@ -11,7 +11,7 @@
 //                   kept as a guard in case anything else pulls node-pty in.
 //
 // Run after `vite build` + `node scripts/make-assets.mjs`.
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { BunPlugin } from 'bun';
 
@@ -80,9 +80,11 @@ export async function buildStandalone({
   }
 }
 
-// Run as a script (`bun run scripts/build-standalone.ts`) → compile desk's own
-// plugin-free binary. When imported, only the `buildStandalone` export runs.
+// Run as a script (`bun run scripts/build-standalone.ts`) → compile desk's private
+// plugin-free runtime. When imported, only the `buildStandalone` export runs.
 if (import.meta.main) {
-  await buildStandalone({ outfile: resolve(root, 'desk-server') });
-  console.log('build-standalone: wrote desk-server');
+  const outfile = resolve(root, 'libexec', 'desk-standalone');
+  mkdirSync(dirname(outfile), { recursive: true });
+  await buildStandalone({ outfile });
+  console.log('build-standalone: wrote libexec/desk-standalone');
 }

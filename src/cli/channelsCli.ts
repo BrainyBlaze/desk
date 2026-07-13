@@ -96,6 +96,10 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
     const home = resolveChannelsHome();
 
     if (command === 'list') {
+      if (args.length > 0) {
+        const argument = args[0]!;
+        throw new Error(argument.startsWith('--') ? `unknown option ${argument}` : `unexpected argument ${argument}`);
+      }
       for (const channel of listChannels(home)) {
         const agents = channel.members.filter((member) => member.type !== 'human').length;
         console.log(`#${channel.name}\t${channel.messageCount} messages, ${agents} agents\t${channel.goal}`);
@@ -119,6 +123,8 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
           if (!messageId) {
             throw new Error('usage: desk channels read <channel> --message <msg-id>');
           }
+        } else if (next.startsWith('--')) {
+          throw new Error(`unknown option ${next}`);
         } else if (!parent) {
           parent = next;
         } else {
@@ -153,6 +159,8 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
           thread = args.shift();
         } else if (next === '--as') {
           as = args.shift();
+        } else if (next.startsWith('--')) {
+          throw new Error(`unknown option ${next}`);
         } else {
           bodyParts.push(next);
         }

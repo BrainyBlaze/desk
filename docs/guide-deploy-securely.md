@@ -18,30 +18,30 @@ control, and keep it bound to localhost.
 ## Choose a runtime
 
 <Tabs>
-  <Tab title="Standalone binary">
-    The default: install the binary (it lands as `desk-server`) and run it —
-    `DESK_HOST` / `DESK_PORT` set the bind address:
+  <Tab title="Default Bun mode">
+    Install the complete CLI and run its private compiled runtime:
 
     ```bash
     curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-    DESK_HOST=127.0.0.1 DESK_PORT=5173 desk-server
+    desk serve --host 127.0.0.1 --port 5173
     ```
 
     This serves the embedded UI and backend without Vite.
   </Tab>
 
-  <Tab title="Source runtime">
-    Use `desk serve` when you work from a checkout:
+  <Tab title="Vite development mode">
+    Opt into Vite when you are developing Desk:
 
     ```bash
-    desk serve --host 127.0.0.1 --port 5173
+    desk serve --dev --host 127.0.0.1 --port 5173
     ```
 
     This starts Vite and the Desk API from the source tree.
   </Tab>
 </Tabs>
 
-Both bind to `127.0.0.1:5173` by default. Keep that default.
+Both bind to `127.0.0.1:5173` by default and fail rather than switching modes.
+Keep the localhost default.
 
 ## Working on a remote development box
 
@@ -68,13 +68,6 @@ to your own machine, not network exposure.
 
 Managed agents report lifecycle and attention events through Desk-owned hooks:
 
-<Note>
-The hook installer is part of the source checkout's full `desk` CLI, not the
-standalone `desk-server` binary. If you installed only `desk-server`, follow
-[Build from source](/getting-started#build-from-source) before running these
-commands, or continue using the standalone UI without the CLI hook installer.
-</Note>
-
 ```bash
 desk hooks install
 ```
@@ -89,16 +82,12 @@ desk hooks install --home /home/other-user
 
 ## Verify your setup
 
-If the full source-checkout CLI is installed, check:
+The curl and source installation paths provide the same CLI. Check:
 
 ```bash
 desk status
 desk capture <session-name> --lines 50
 ```
-
-If you installed only `desk-server`, perform the checks below in the UI; the
-standalone installer does not provide the `desk status` or `desk capture`
-commands.
 
 In the UI, verify:
 
@@ -115,8 +104,7 @@ In the UI, verify:
 - Run Desk as the user that owns the intended repositories and tmux sessions.
 - Reach a remote box over SSH forwarding, not by exposing the port.
 - Keep agent CLI credentials in their normal tool-managed locations.
-- When the source CLI is installed, use `desk up --dry-run` before starting a
-  large manifest.
+- Use `desk up --dry-run` before starting a large manifest.
 - Use the emergency kill switch only when you intend to stop all matching
   agent processes on the host.
 - Back up `~/.config/desk/desk.yml` before large manifest edits.

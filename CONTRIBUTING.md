@@ -7,10 +7,14 @@ Thanks for working on Desk. This guide covers how to set up, change, and ship co
 ```bash
 nvm use 22          # Desk's CI runs Node v22.23.1 — match it locally
 npm ci
-npm run build       # build:ui then the CLI (see the build note below)
+bun --version       # must be 1.3.14; bundled npm must be 10.9.8
+npm run build:distribution
 ```
 
-- **Node version matters.** CI pins **Node v22.23.1**. A newer local Node can pass tests that fail on CI (module-resolution and worker-thread behavior differ across majors). Always `nvm use 22` before you verify. (Rule **R11.2**.)
+- **Toolchain versions matter.** CI pins **Node v22.23.1**, its bundled **npm
+  10.9.8**, and **Bun 1.3.14**. Match all three before verification. A newer local
+  runtime can hide CI-only loader, worker, or compiled-runtime defects. (Rule
+  **R11.2**.)
 - **After `npm run build:ui`, run `npm run build`.** `vite emptyOutDir` wipes `dist/`, including the linked CLI. (Rule **R11.3**.)
 
 ## The verification gate
@@ -20,9 +24,23 @@ Every change must pass, locally, on Node 22, before you push:
 ```bash
 npm run check       # tsc --noEmit
 npx vitest run      # the full suite
+npm run build:distribution
+npm run smoke:serve-modes
+npm run build       # restore the CLI after any UI build
 ```
 
 Never push-and-see. Reproduce any CI failure in CI's exact environment first, fix it, confirm green locally, then push. (Rule **R11.2**.)
+
+Tagged releases publish a versioned source archive, `desk-install-manifest.json`,
+and `SHA256SUMS`. Generate the same contract locally from a clean committed tree:
+
+```bash
+npm run release:assets -- --version v0.3.0 --out-dir /tmp/desk-release
+(cd /tmp/desk-release && sha256sum -c SHA256SUMS)
+```
+
+The curl installer builds that source with its own verified toolchains. It does
+not consume or publish a separate public server artifact.
 
 ## The one rule to internalize first
 
@@ -58,7 +76,7 @@ Full text, rationale, and enforcement for each is in [docs/engineering-rules.md]
 ## Where things live
 
 - `src/core` — kernel (manifest, config, agent hooks); never imports `web`/`server`.
-- `src/server` — dev/standalone server, channels engine, LSP bridge, agent drivers.
+- `src/server` — Vite/private Bun server, channels engine, LSP bridge, agent drivers.
 - `src/web` — React UI (agent surface, editor, channels, git, projects).
 - `src/shared` — pure, dependency-free utilities shared across layers.
 - `docs/` — long-form docs, including `engineering-rules.md`.

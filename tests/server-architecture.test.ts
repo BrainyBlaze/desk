@@ -5,6 +5,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const SERVER_ROOT = fileURLToPath(new URL('../src/server/', import.meta.url));
+const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function sourceFiles(root: string): string[] {
   const files: string[] = [];
@@ -120,5 +121,24 @@ describe('server architecture boundaries', () => {
       .map((file) => relative(SERVER_ROOT, file));
 
     expect(optionOwners).toEqual(['tmuxOptions.ts']);
+  });
+
+  it('builds and releases only the full CLI with its private runtime', () => {
+    const ci = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
+    const release = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
+    const installer = readFileSync(join(ROOT, '.github/workflows/installer.yml'), 'utf8');
+    const retired = ['desk', 'server'].join('-');
+
+    expect(ci).toContain('node-version: 22.23.1');
+    expect(ci).toContain('bun-version: 1.3.14');
+    expect(ci).toContain('npm run build:distribution');
+    expect(ci).toContain('npm run smoke:serve-modes');
+    expect(release).toContain('npm run release:assets');
+    expect(release).toContain('desk-install-manifest.json');
+    expect(release).toContain('-source.tar.gz');
+    expect(release).not.toContain(retired);
+    expect(installer).toMatch(/ubuntu|fedora|archlinux|opensuse|alpine/);
+    expect(installer).toContain('macos-15');
+    expect(installer).toContain('macos-15-intel');
   });
 });

@@ -7,12 +7,15 @@ Desk is an operator console for running agents. The operations surfaces show hos
 
 ## Server lifecycle
 
-There are two supported runtime shapes:
+The one CLI exposes two explicit runtime shapes:
 
-- `desk serve`: source-checkout runtime with the Desk API mounted into Vite server middleware
-- standalone binary: no Vite runtime, embedded UI assets, same Desk API mounted on a plain HTTP server
+- `desk serve`: private Bun runtime with embedded UI assets and no Vite
+- `desk serve --dev`: Node/Vite runtime with the Desk API mounted as middleware
 
-Both bind to `127.0.0.1:5173` by default. See [Distribution and deployment](/distribution-deployment) for runtime and release details.
+Both bind to `127.0.0.1:5173` by default, supervise their child process group,
+and fail without switching modes. Send Ctrl-C to the CLI process for clean
+shutdown. See [Distribution and deployment](/distribution-deployment) for runtime
+and release details.
 
 ## System monitor
 

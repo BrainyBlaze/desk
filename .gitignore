@@ -26,7 +26,7 @@ npm-debug.log*
 
 # Bun standalone build artifacts
 src/server/assets/*.tar.gz
-/desk-server
+/libexec/desk-standalone
 /probe-server
 /probe-*.mjs
 
