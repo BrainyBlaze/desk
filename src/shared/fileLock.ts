@@ -1,10 +1,6 @@
 import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
-import type { LockOptions } from 'proper-lockfile';
-
-const require = createRequire(import.meta.url);
-const { lock, lockSync } = require('proper-lockfile') as typeof import('proper-lockfile');
+import { lock, lockSync, type LockOptions } from 'proper-lockfile';
 
 const DEFAULT_RETRY_MS = 25;
 const DEFAULT_TIMEOUT_MS = 10_000;

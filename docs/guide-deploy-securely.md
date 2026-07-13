@@ -19,12 +19,12 @@ control, and keep it bound to localhost.
 
 <Tabs>
   <Tab title="Standalone binary">
-    The default: install the binary (it lands as `desk`) and run it —
+    The default: install the binary (it lands as `desk-server`) and run it —
     `DESK_HOST` / `DESK_PORT` set the bind address:
 
     ```bash
     curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
-    DESK_HOST=127.0.0.1 DESK_PORT=5173 desk
+    DESK_HOST=127.0.0.1 DESK_PORT=5173 desk-server
     ```
 
     This serves the embedded UI and backend without Vite.
@@ -68,6 +68,13 @@ to your own machine, not network exposure.
 
 Managed agents report lifecycle and attention events through Desk-owned hooks:
 
+<Note>
+The hook installer is part of the source checkout's full `desk` CLI, not the
+standalone `desk-server` binary. If you installed only `desk-server`, follow
+[Build from source](/getting-started#build-from-source) before running these
+commands, or continue using the standalone UI without the CLI hook installer.
+</Note>
+
 ```bash
 desk hooks install
 ```
@@ -77,17 +84,21 @@ under the current home directory. Use `--home` when preparing another user's
 home directory:
 
 ```bash
-desk hooks install --home /home/dev
+desk hooks install --home /home/other-user
 ```
 
 ## Verify your setup
 
-After starting the server, check:
+If the full source-checkout CLI is installed, check:
 
 ```bash
 desk status
 desk capture <session-name> --lines 50
 ```
+
+If you installed only `desk-server`, perform the checks below in the UI; the
+standalone installer does not provide the `desk status` or `desk capture`
+commands.
 
 In the UI, verify:
 
@@ -104,7 +115,8 @@ In the UI, verify:
 - Run Desk as the user that owns the intended repositories and tmux sessions.
 - Reach a remote box over SSH forwarding, not by exposing the port.
 - Keep agent CLI credentials in their normal tool-managed locations.
-- Use `desk up --dry-run` before starting a large manifest.
+- When the source CLI is installed, use `desk up --dry-run` before starting a
+  large manifest.
 - Use the emergency kill switch only when you intend to stop all matching
   agent processes on the host.
 - Back up `~/.config/desk/desk.yml` before large manifest edits.

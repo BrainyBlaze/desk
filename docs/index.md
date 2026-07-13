@@ -115,7 +115,7 @@ Choose how you want to run Desk:
 
 <Tabs>
   <Tab title="Standalone binary">
-    The default: `install.sh` drops a self-contained `desk` binary (no Vite,
+    The default: `install.sh` drops a self-contained `desk-server` binary (no Vite,
     embedded UI). Start with [Getting started](/getting-started), then read
     [Distribution and deployment](/distribution-deployment) and
     [Deploy and secure Desk](/guide-deploy-securely).

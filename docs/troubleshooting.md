@@ -9,6 +9,35 @@ symptom, then run the checks in order.
 
 ## Server and UI
 
+### `desk` unexpectedly starts the server or reports port 5173 in use
+
+Versions of `install.sh` introduced around v0.2.0 may have placed the standalone
+server at `~/.local/bin/desk` or `/usr/local/bin/desk`, shadowing the full CLI.
+The current installer names that server `desk-server`; `desk` belongs to the
+source checkout's multi-command CLI.
+
+Find every command candidate before changing anything:
+
+```bash
+type -a desk
+command -v desk
+```
+
+Inspect the resolved file or symlink. Do not blindly move or remove it: an npm
+link or checkout-provided `desk` is the full CLI and should stay named `desk`.
+After confirming that an old regular file is the standalone server, preserve it
+under the new name and refresh the shell lookup cache, for example:
+
+```bash
+mv -i ~/.local/bin/desk ~/.local/bin/desk-server
+hash -r
+```
+
+Use the corresponding `/usr/local/bin` paths (and appropriate permissions) if
+that is where the old installer wrote the binary. If `desk-server` already
+exists, keep it and move the old file to a backup name instead of overwriting
+the current install.
+
 ### `desk serve` cannot find Vite
 
 Cause: dependencies are missing in the Desk checkout.
