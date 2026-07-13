@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ApiConflictError, ApiNotFoundError, ApiValidationError } from '../src/server/apiValidation';
 import {
   copyEntry,
   createEntry,
@@ -137,11 +138,17 @@ describe('copyEntry', () => {
   it('refuses to clobber an existing target', () => {
     writeFileSync(join(root, 'a.txt'), 'x');
     writeFileSync(join(root, 'b.txt'), 'y');
+    expect(() => copyEntry(join(root, 'a.txt'), join(root, 'b.txt'))).toThrow(ApiConflictError);
     expect(() => copyEntry(join(root, 'a.txt'), join(root, 'b.txt'))).toThrow(/already exists/);
+  });
+
+  it('reports a missing source as not found', () => {
+    expect(() => copyEntry(join(root, 'missing.txt'), join(root, 'b.txt'))).toThrow(ApiNotFoundError);
   });
 
   it('refuses to copy a directory into its own descendant', () => {
     mkdirSync(join(root, 'dir/sub'), { recursive: true });
+    expect(() => copyEntry(join(root, 'dir'), join(root, 'dir/sub/clone'))).toThrow(ApiValidationError);
     expect(() => copyEntry(join(root, 'dir'), join(root, 'dir/sub/clone'))).toThrow(/into itself/);
   });
 });

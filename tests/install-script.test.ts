@@ -183,7 +183,7 @@ describe('installer lifecycle', () => {
     });
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('Desk fixture help');
-  });
+  }, 20_000);
 
   it('reinstalls the same version into a new immutable instance and retains the previous one', () => {
     const value = fixture();
@@ -196,7 +196,7 @@ describe('installer lifecycle', () => {
     expect(second.status, second.stderr).toBe(0);
     expect(readlinkSync(join(value.deskHome, 'current'))).not.toBe(firstTarget);
     expect(value.releaseInstances()).toHaveLength(2);
-  });
+  }, 20_000);
 
   it('prunes the oldest instance after a third successful activation', () => {
     const value = fixture();

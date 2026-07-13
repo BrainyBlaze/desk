@@ -46,8 +46,12 @@ export function filesFromClipboardItems(items: ArrayLike<ClipboardFileItem> | It
     .filter((file): file is File => file !== null);
 }
 
-export function composerPlainEnterShouldSend(key: string, shiftKey: boolean): boolean {
-  return key === 'Enter' && !shiftKey;
+export function composerPlainEnterShouldSend(key: string, shiftKey: boolean, isComposing = false): boolean {
+  return key === 'Enter' && !shiftKey && !isComposing;
+}
+
+export function restoreComposerTextAfterFailedSend(submitted: string, current: string): string {
+  return current.length === 0 ? submitted : `${submitted}\n${current}`;
 }
 
 export function composerResizeKeyDelta(key: string, step: number): number | null {

@@ -457,10 +457,7 @@ export class AgentSurfaceBroker {
 
   private browserSend(client: BrowserClient, sessionName: string, surfaceId: string, text: string): void {
     const session = this.requireSession(sessionName);
-    const sub = client.subscriptions.get(subscriptionKey(sessionName, surfaceId));
-    if (!sub) {
-      throw brokerError('not-native-session', `not subscribed to ${sessionName}`, false);
-    }
+    this.requireVisibleSubscription(client, sessionName, surfaceId);
     if (!session.host) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
@@ -478,6 +475,7 @@ export class AgentSurfaceBroker {
     note?: string
   ): void {
     const session = this.requireSession(sessionName);
+    this.requireVisibleSubscription(client, sessionName, surfaceId);
     if (!session.host) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
@@ -494,6 +492,7 @@ export class AgentSurfaceBroker {
 
   private browserInterrupt(client: BrowserClient, sessionName: string, surfaceId: string): void {
     const session = this.requireSession(sessionName);
+    this.requireVisibleSubscription(client, sessionName, surfaceId);
     if (!session.host) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
@@ -503,6 +502,22 @@ export class AgentSurfaceBroker {
   }
 
   // ── Internal helpers ──
+
+  private requireSubscription(client: BrowserClient, sessionName: string, surfaceId: string): SurfaceSubscription {
+    const subscription = client.subscriptions.get(subscriptionKey(sessionName, surfaceId));
+    if (!subscription) {
+      throw brokerError('not-native-session', `not subscribed to ${sessionName}`, false);
+    }
+    return subscription;
+  }
+
+  private requireVisibleSubscription(client: BrowserClient, sessionName: string, surfaceId: string): SurfaceSubscription {
+    const subscription = this.requireSubscription(client, sessionName, surfaceId);
+    if (!subscription.visible) {
+      throw brokerError('not-native-session', `surface ${surfaceId} is not visible for ${sessionName}`, false);
+    }
+    return subscription;
+  }
 
   private acquireSession(name: string): AgentSurfaceSession {
     let session = this.sessions.get(name);

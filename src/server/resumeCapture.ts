@@ -5,12 +5,11 @@ import { resolveManifestPath, updateManifestFile } from '../core/config.js';
 import { buildSessionSpecs } from '../core/manifest.js';
 import {
   findPendingResumeCapture,
-  readPendingResumeCaptures,
   removePendingResumeCapture,
   type PendingResumeCapture,
   type ResumeCaptureStateOptions,
+  updatePendingResumeCaptures,
   upsertPendingResumeCapture,
-  writePendingResumeCaptures
 } from '../core/resumeCaptureState.js';
 import type { DeskAgent, DeskManifest, SessionSpec } from '../core/types.js';
 import { listOpencodeSessions, pickOpencodeCaptureResumeSession } from './opencodeSession.js';
@@ -475,17 +474,19 @@ export function restorePendingResumeCaptures(
   options: { intervalMs?: number; statePath?: string } = {}
 ): void {
   const stateOptions = pendingStateOptions(options);
-  const keep: PendingResumeCapture[] = [];
-  for (const pending of readPendingResumeCaptures(stateOptions)) {
+  const keep = updatePendingResumeCaptures((captures) =>
+    captures.filter((pending) => {
+      const spec = sessions.find((candidate) => candidate.tmuxSession === pending.tmuxSession);
+      return Boolean(spec && !spec.resume && spec.agent === pending.agent && spec.cwd === pending.cwd);
+    }), stateOptions);
+  for (const pending of keep) {
     const spec = sessions.find((candidate) => candidate.tmuxSession === pending.tmuxSession);
-    if (!spec || spec.resume || spec.agent !== pending.agent || spec.cwd !== pending.cwd) {
+    if (!spec) {
       continue;
     }
     pendingCaptures.set(pending.tmuxSession, pending);
-    keep.push(pending);
     if (pending.agent === 'opencode') {
       pollOpencodeResumeCapture(spec, pending, options.intervalMs ?? 2_000, stateOptions);
     }
   }
-  writePendingResumeCaptures(keep, stateOptions);
 }

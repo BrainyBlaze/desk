@@ -177,6 +177,29 @@ describe('LspSessionController (unit)', () => {
     expect(connectSession).toHaveBeenCalledTimes(2);
   });
 
+  it('reports unexpected session loss but not an intentional close', async () => {
+    const { controller, sessions } = makeUnitController();
+    const losses: Array<{ workspaceRoot: string; languageId: string; exit: LspExit }> = [];
+    const unsubscribe = controller.onSessionLost((event) => losses.push(event));
+
+    const first = controller.ensureSession({ workspaceRoot: '/w', languageId: 'typescript', languageSelector: SELECTOR });
+    sessions[0]!.fireReady(CAPS);
+    await first;
+    sessions[0]!.die({ code: 1, signal: null });
+
+    expect(losses).toEqual([
+      { workspaceRoot: '/w', languageId: 'typescript', exit: { code: 1, signal: null } }
+    ]);
+
+    const second = controller.ensureSession({ workspaceRoot: '/w', languageId: 'typescript', languageSelector: SELECTOR });
+    sessions[1]!.fireReady(CAPS);
+    await second;
+    controller.closeSession({ workspaceRoot: '/w', languageId: 'typescript' });
+    expect(losses).toHaveLength(1);
+
+    unsubscribe();
+  });
+
   it('closeSession disposes the registration and closes the session', async () => {
     const { controller, sessions, connectSession, register } = makeUnitController();
     const first = controller.ensureSession({ workspaceRoot: '/w', languageId: 'typescript', languageSelector: SELECTOR });

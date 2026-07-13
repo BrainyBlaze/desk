@@ -24,16 +24,17 @@ interface UsePulseResult {
     net: number[];
     disk: number[];
   }>;
-  /** Last server payloads (serialized) for the pulse diff-and-bail. Optimistic
-   *  local mutations clear these so the next pulse re-syncs unconditionally. */
-  pulseCacheRef: MutableRefObject<{ attention: string; events: string }>;
+  /** Invalidates attention/events responses already in flight and forces the
+   *  next current pulse to reconcile against the server payload. */
+  invalidateAttentionPulse: () => void;
 }
 
 /**
  * Owns the 2s pulse loop: fetches system telemetry + attention/events and folds
  * live tmux run-states into the snapshot. Attention/events/snapshot state stays
  * owned by App; this hook receives their setters so the coupling is preserved
- * exactly (the pulse writes them, App's own callbacks reset pulseCacheRef).
+ * exactly (the pulse writes them, App invalidates stale responses after its
+ * own optimistic mutations).
  */
 export function usePulse({
   setSnapshot,
@@ -55,6 +56,10 @@ export function usePulse({
   // Last server payloads (serialized) for the pulse diff-and-bail. Optimistic
   // local mutations clear these so the next pulse re-syncs unconditionally.
   const pulseCacheRef = useRef({ attention: '', events: '' });
+  // Each request captures this generation before fetchPulse(). Optimistic
+  // local mutations advance it so older attention/event payloads cannot undo
+  // the local state after their await resolves.
+  const attentionGenerationRef = useRef(0);
   // Tracks whether the previous pulse failed, so a success transition can wake
   // any terminal cells stranded on the manual Reconnect overlay (self-healing).
   const pulseFailingRef = useRef(false);
@@ -62,6 +67,7 @@ export function usePulse({
   useEffect(() => {
     let alive = true;
     async function pulseTick(): Promise<void> {
+      const attentionGeneration = attentionGenerationRef.current;
       try {
         const pulse = await fetchPulse();
         if (!alive) {
@@ -85,17 +91,19 @@ export function usePulse({
         // Diff-and-bail: attention/events keep their object identity when the
         // payload didn't change, so the memoized sidebar/multiplexer trees
         // skip reconciliation entirely on a calm tick.
-        const attentionJson = JSON.stringify(pulse.attention.sessions);
-        if (attentionJson !== pulseCacheRef.current.attention) {
-          pulseCacheRef.current.attention = attentionJson;
-          setAttention(pulse.attention.sessions);
+        if (attentionGeneration === attentionGenerationRef.current) {
+          const attentionJson = JSON.stringify(pulse.attention.sessions);
+          if (attentionJson !== pulseCacheRef.current.attention) {
+            pulseCacheRef.current.attention = attentionJson;
+            setAttention(pulse.attention.sessions);
+          }
+          const eventsJson = JSON.stringify(pulse.attention.events);
+          if (eventsJson !== pulseCacheRef.current.events) {
+            pulseCacheRef.current.events = eventsJson;
+            setAgentEvents(pulse.attention.events ?? []);
+          }
+          setUnreadEvents(pulse.attention.unread ?? 0);
         }
-        const eventsJson = JSON.stringify(pulse.attention.events);
-        if (eventsJson !== pulseCacheRef.current.events) {
-          pulseCacheRef.current.events = eventsJson;
-          setAgentEvents(pulse.attention.events ?? []);
-        }
-        setUnreadEvents(pulse.attention.unread ?? 0);
         // Liveness self-heal: fold the live tmux set into the snapshot.
         // patchViewLiveness preserves identity of untouched sessions so
         // terminal sockets never churn on a state-only patch.
@@ -143,5 +151,10 @@ export function usePulse({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { systemSnapshot, systemError, telemetryHistoryRef, pulseCacheRef };
+  function invalidateAttentionPulse(): void {
+    attentionGenerationRef.current += 1;
+    pulseCacheRef.current = { attention: '', events: '' };
+  }
+
+  return { systemSnapshot, systemError, telemetryHistoryRef, invalidateAttentionPulse };
 }

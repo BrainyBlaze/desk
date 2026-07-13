@@ -1989,6 +1989,41 @@ describe('channels store', () => {
     expect(listChannels(home)[0]).toMatchObject({ name: 'ops', messageCount: 1 });
   });
 
+  it('changes the channel content revision for root-message add, edit, and delete', async () => {
+    createChannel(home, 'ops', 'goal');
+
+    const initialSummary = listChannels(home)[0];
+    const initialDetail = readChannelDetail(home, 'ops');
+    expect(initialSummary.contentRevision).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(initialDetail.contentRevision).toBe(initialSummary.contentRevision);
+
+    const first = await appendMessage(home, 'ops', { author: 'human', body: 'first' });
+    const afterAppend = listChannels(home)[0].contentRevision;
+    expect(afterAppend).not.toBe(initialSummary.contentRevision);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterAppend);
+
+    const rootFile = join(home, 'ops', 'root.md');
+    const watcher = new ChannelsWatcher(home, () => undefined);
+    watcher.prewarm();
+    writeFileSync(rootFile, readFileSync(rootFile, 'utf8').replace('first', 'other'));
+    watcher.scanFile('ops', 'root.md');
+    const afterExternalEdit = listChannels(home)[0].contentRevision;
+    expect(afterExternalEdit).not.toBe(afterAppend);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterExternalEdit);
+    watcher.stop();
+
+    await editMessage(home, 'ops', 'root.md', first.message.id, 'edited');
+    const afterEdit = listChannels(home)[0].contentRevision;
+    expect(afterEdit).not.toBe(afterExternalEdit);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterEdit);
+
+    await deleteMessage(home, 'ops', 'root.md', first.message.id);
+    const afterDelete = listChannels(home)[0].contentRevision;
+    expect(afterDelete).not.toBe(afterEdit);
+    expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterDelete);
+    expect(listChannels(home)[0].contentRevision).toBe(afterDelete);
+  });
+
   it('creates thread files and back-links the parent message', async () => {
     createChannel(home, 'ops', 'goal');
     const parent = await appendMessage(home, 'ops', { author: 'human', body: 'root question' });
@@ -2015,6 +2050,19 @@ describe('channels store', () => {
     watcher.scanFile('ops', 'root.md');
     watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([fresh.message.id]); // seen-set dedupes the second scan
+  });
+
+  it('surfaces chokidar watcher errors instead of dropping them blind', () => {
+    createChannel(home, 'ops', 'goal');
+    const errors: Error[] = [];
+    const watcher = new ChannelsWatcher(home, () => undefined, 30_000, (error) => errors.push(error));
+    watcher.start();
+    const internal = watcher as unknown as { watcher?: { emit(event: string, error: Error): void } };
+
+    internal.watcher?.emit('error', new Error('watch backend failed'));
+
+    expect(errors.map((error) => error.message)).toEqual(['watch backend failed']);
+    watcher.stop();
   });
 
   it('watcher leaves a message retryable when dispatch throws', async () => {
@@ -2179,6 +2227,195 @@ describe('engine drain race safety', () => {
     await flush();
     expect(sent).toHaveLength(1);
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it('does not reclaim a watchdog drain while the physical paste is in flight', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-watchdog-'));
+    const sent: string[] = [];
+    let resolvePush: (() => void) | null = null;
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        await new Promise<boolean>((resolve) => {
+          resolvePush = () => resolve(true);
+        });
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => '❯ '
+    });
+    const members = [member('alpha', 'tmux-a')];
+    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-watchdog', 'human', '@alpha go') }, members);
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    engine.handleAgentSignal('tmux-a', 'bell');
+    await flush();
+    expect(sent).toHaveLength(1);
+    resolvePush?.();
+    await flush();
+    expect(sent).toHaveLength(1);
+    engine.dispose();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('does not force-deliver while the physical paste is in flight past the watchdog', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-watchdog-'));
+    const sent: string[] = [];
+    let resolvePush: (() => void) | undefined;
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        if (sent.length === 1) {
+          await new Promise<void>((resolve) => {
+            resolvePush = resolve;
+          });
+        }
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => '❯ '
+    });
+    const members = [member('alpha', 'tmux-a')];
+    try {
+      engine.handleMessage(
+        { channel: 'ops', file: 'root.md', message: message('msg-force-watchdog', 'human', '@alpha go') },
+        members
+      );
+      await waitFor(() => sent.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(await engine.forceDeliver('tmux-a')).toBe(false);
+      expect(sent).toHaveLength(1);
+    } finally {
+      resolvePush?.();
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('invalidates a stale gated drain before force-delivering another queued item', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-generation-'));
+    const sent: string[] = [];
+    let captureCalls = 0;
+    let resolveFirstCapture: ((pane: string) => void) | undefined;
+    let markFirstCaptureStarted: (() => void) | undefined;
+    const firstCaptureStarted = new Promise<void>((resolve) => {
+      markFirstCaptureStarted = resolve;
+    });
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 60_000,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => {
+        captureCalls += 1;
+        if (captureCalls === 1) {
+          markFirstCaptureStarted?.();
+          return new Promise<string>((resolve) => {
+            resolveFirstCapture = resolve;
+          });
+        }
+        return '❯ ';
+      }
+    });
+    try {
+      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-force-first');
+      await firstCaptureStarted;
+      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-force-second');
+      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
+      expect(targetSeq).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(true);
+      expect(sent).toEqual(['second prompt']);
+
+      resolveFirstCapture?.('❯ ');
+      await flush();
+      expect(sent).toEqual(['second prompt']);
+    } finally {
+      resolveFirstCapture?.('❯ ');
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a newer forced paste single-flight when a stale gated drain settles', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-stale-finally-'));
+    const sent: string[] = [];
+    let captureCalls = 0;
+    let resolveFirstCapture: ((pane: string) => void) | undefined;
+    let markFirstCaptureStarted: (() => void) | undefined;
+    let resolveForcedPaste: (() => void) | undefined;
+    const firstCaptureStarted = new Promise<void>((resolve) => {
+      markFirstCaptureStarted = resolve;
+    });
+    const engine = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 60_000,
+      drainWatchdogMs: 10,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        if (sent.length === 1) {
+          await new Promise<void>((resolve) => {
+            resolveForcedPaste = resolve;
+          });
+        }
+        return true;
+      },
+      sessionRunning: () => true,
+      sessionCreatedAt: async () => 1,
+      capturePane: async () => {
+        captureCalls += 1;
+        if (captureCalls === 1) {
+          markFirstCaptureStarted?.();
+          return new Promise<string>((resolve) => {
+            resolveFirstCapture = resolve;
+          });
+        }
+        return '❯ ';
+      }
+    });
+    try {
+      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-stale-first');
+      await firstCaptureStarted;
+      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-stale-second');
+      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
+      expect(targetSeq).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const forced = engine.forceDeliver('tmux-a', targetSeq);
+      await waitFor(() => sent.length === 1);
+      resolveFirstCapture?.('❯ ');
+      await flush();
+
+      expect(await engine.forceDeliver('tmux-a')).toBe(false);
+      expect(sent).toEqual(['second prompt']);
+      resolveForcedPaste?.();
+      expect(await forced).toBe(true);
+    } finally {
+      resolveFirstCapture?.('❯ ');
+      resolveForcedPaste?.();
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('does not apply a stale prompt-gate decision after the queue head changes', async () => {

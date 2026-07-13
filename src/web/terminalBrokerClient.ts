@@ -50,6 +50,11 @@ interface Surface {
 
 const OPEN = 1;
 const RECONNECT_MAX = 5;
+// If no frame of any type arrives within this window the socket is treated as
+// dead. The server beacons every 15s, so 30s = two missed beacons. This is the
+// only way to detect a half-open TCP (sleep/NAT timeout) whose readyState the
+// browser still reports as OPEN — sendInput would otherwise succeed into the void.
+const HEARTBEAT_TIMEOUT_MS = 30_000;
 
 export class TerminalBrokerClient {
   private socket: BrokerSocket | undefined;
@@ -60,6 +65,8 @@ export class TerminalBrokerClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private connecting = false;
   private selfHealArmed = false;
+  private lastFrameAt = 0;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly makeSocket: BrokerSocketFactory = defaultFactory, private readonly url?: string) {}
 
@@ -77,6 +84,12 @@ export class TerminalBrokerClient {
       this.sendFrame({ type: 'subscribe', session, surfaceId, visible });
     }
     // When the socket opens later, resubscribeAll replays this with current state.
+    // Replay the CURRENT connection state to this surface now: onConnectionChange
+    // otherwise only fires on future transitions, so a cell that mounts while the
+    // bridge is already down (reconnect exhausted, or mid-outage) would render as
+    // alive and silently swallow keystrokes. A late subscriber must learn it's
+    // disconnected immediately and show the Reconnect overlay.
+    surface.handlers.onConnectionChange?.(this.connected);
   }
 
   unsubscribe(surfaceId: string): void {
@@ -151,6 +164,7 @@ export class TerminalBrokerClient {
       this.reconnectTimer = undefined;
     }
     this.reconnectAttempts = 0;
+    this.stopHeartbeat();
     if (this.socket) {
       try {
         this.socket.close();
@@ -160,6 +174,14 @@ export class TerminalBrokerClient {
       this.socket = undefined;
     }
     this.connected = false;
+    // Clear `connecting` too. If forceReconnect fires while a socket is still
+    // mid-CONNECTING (wake-from-sleep triggers online + visibilitychange + pulse
+    // in sequence, and SYN retries can hold the socket in CONNECTING for
+    // seconds), we just orphaned that socket above — its close handler bails on
+    // the `this.socket !== socket` guard and never resets the flag, so leaving
+    // it true wedges every future ensureConnection() on the early-return and the
+    // Reconnect button becomes a permanent no-op. Mirrors agentSurfaceClient.
+    this.connecting = false;
     if (this.surfaces.size > 0) {
       this.ensureConnection();
     }
@@ -209,6 +231,7 @@ export class TerminalBrokerClient {
       this.connecting = false;
       this.connected = true;
       this.reconnectAttempts = 0;
+      this.startHeartbeat(socket);
       this.resubscribeAll();
       this.notifyConnection(true);
     });
@@ -222,6 +245,7 @@ export class TerminalBrokerClient {
       if (this.socket !== socket) {
         return;
       }
+      this.stopHeartbeat();
       this.socket = undefined;
       this.connecting = false;
       this.connected = false;
@@ -231,6 +255,26 @@ export class TerminalBrokerClient {
     socket.addEventListener('error', () => {
       // 'close' follows and drives reconnect; nothing extra to do here.
     });
+  }
+
+  /** Start the half-open watchdog for `socket`: if no frame of any type arrives
+   *  within HEARTBEAT_TIMEOUT_MS the socket is dead (a half-open TCP still reports
+   *  OPEN), so reconnect. Checked at half the timeout so detection lands < ~1.5x. */
+  private startHeartbeat(socket: BrokerSocket): void {
+    this.lastFrameAt = Date.now();
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.socket === socket && this.connected && Date.now() - this.lastFrameAt >= HEARTBEAT_TIMEOUT_MS) {
+        this.forceReconnect();
+      }
+    }, HEARTBEAT_TIMEOUT_MS / 2);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
   }
 
   private scheduleReconnect(): void {
@@ -258,6 +302,8 @@ export class TerminalBrokerClient {
   }
 
   private handleServerData(raw: unknown): void {
+    // Any received frame proves the socket is live — reset the half-open watchdog.
+    this.lastFrameAt = Date.now();
     let frame: TerminalBrokerServerFrame;
     try {
       frame = JSON.parse(typeof raw === 'string' ? raw : String(raw)) as TerminalBrokerServerFrame;
@@ -267,6 +313,9 @@ export class TerminalBrokerClient {
     switch (frame.type) {
       case 'ready':
         return;
+      case 'heartbeat':
+        return; // liveness only; lastFrameAt already bumped above
+
       case 'output': {
         const ids = this.bySession.get(frame.session);
         if (!ids) {
@@ -323,6 +372,7 @@ export class TerminalBrokerClient {
   }
 
   private teardown(): void {
+    this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;

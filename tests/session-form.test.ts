@@ -43,7 +43,32 @@ describe('session form payload', () => {
     ).toEqual({
       name: 'agent',
       cwd: '/tmp/override',
+      agent: 'bash',
       command: 'bash'
+    });
+  });
+
+  it('keeps visible agent and resume edits with an explicit command', () => {
+    expect(
+      buildSessionPayload({
+        projectId: 'alpha',
+        groupId: 'main',
+        name: 'custom-agent',
+        cwd: '/tmp/override',
+        agent: 'claude',
+        resume: 'sess-edited',
+        initialResume: 'sess-original',
+        bypassPermissions: true,
+        command: 'claude-wrapper',
+        uiMode: 'terminal'
+      })
+    ).toEqual({
+      name: 'custom-agent',
+      cwd: '/tmp/override',
+      agent: 'claude',
+      resume: 'sess-edited',
+      bypassPermissions: true,
+      command: 'claude-wrapper'
     });
   });
 
@@ -127,6 +152,8 @@ describe('session form payload', () => {
     ).toEqual({
       name: 'custom',
       cwd: '/tmp/override',
+      agent: 'claude',
+      bypassPermissions: false,
       command: 'htop'
     });
   });

@@ -94,7 +94,11 @@ export function BoardView({
                         animated={['flicker', ['y', 8, 0]]}
                         draggable
                         title={item.content?.title}
-                        onDragStart={() => setDragging(item)}
+                        onDragStart={(event: DragEvent) => {
+                          event.dataTransfer.setData('text/plain', item.id);
+                          event.dataTransfer.effectAllowed = 'move';
+                          setDragging(item);
+                        }}
                         onDragEnd={() => {
                           setDragging(null);
                           setDropColumn(null);

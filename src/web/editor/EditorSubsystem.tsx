@@ -57,7 +57,9 @@ import { SearchPanel } from './SearchPanel.js';
 import { EditorTabs, type TabMeta } from './EditorTabs.js';
 import { MonacoHost, type RevealTarget } from './MonacoHost.js';
 import { closeTab, fileNameOf, moveTab, openTab } from './editorState.js';
-import { initMonaco, languageForPath, monaco } from './monacoSetup.js';
+import { createSaveQueue } from './saveQueue.js';
+import { initMonaco, monaco } from './monacoSetup.js';
+import { acquireSharedTextModel } from './sharedTextModels.js';
 import type { EditorLspBinding } from './lsp/editorLspBinding.js';
 import { perfMarkFirst, perfMarkOpen } from './lsp/perfTelemetry.js';
 import { isMarkdownFile, rawFileUrl, viewerKindFor, type ViewerKind } from './fileKinds.js';
@@ -73,6 +75,8 @@ interface OpenFile {
   /** current absolute path — updated in place when an untitled note is renamed */
   path: string;
   model: monaco.editor.ITextModel | null;
+  modelChangeSubscription: monaco.IDisposable | null;
+  releaseModel: (() => void) | null;
   savedVersionId: number;
   mtimeMs: number;
   dirty: boolean;
@@ -86,6 +90,14 @@ interface OpenFile {
   renderMarkdown: boolean;
   /** bumped on disk changes so viewers re-fetch the raw bytes */
   rawRevision: number;
+}
+
+function releaseOpenFileModel(file: OpenFile): void {
+  file.modelChangeSubscription?.dispose();
+  file.modelChangeSubscription = null;
+  file.releaseModel?.();
+  file.releaseModel = null;
+  file.model = null;
 }
 
 interface ExistingTextModelForLsp {
@@ -327,10 +339,10 @@ export function EditorSubsystem({
   // Autosave config mirror so timers and listeners always read fresh values.
   const autosaveRef = useRef(effectiveAutosave);
   autosaveRef.current = effectiveAutosave;
-  // Per-file idle timers (after-delay mode) and an in-flight write guard so a
-  // slow disk can never produce overlapping writes for the same path.
+  // Per-file idle timers (after-delay mode) and a coalescing queue so a slow
+  // disk never overlaps writes or drops a save requested during one.
   const autosaveTimersRef = useRef(new Map<string, number>());
-  const savingPathsRef = useRef(new Set<string>());
+  const saveQueueRef = useRef(createSaveQueue());
   // Notes variant: assigned below (declaration order), invoked from writeFile.
   const renameNoteRef = useRef<(path: string, content: string) => void>(() => undefined);
 
@@ -363,7 +375,7 @@ export function EditorSubsystem({
   useEffect(() => {
     return () => {
       for (const file of filesRef.current.values()) {
-        file.model?.dispose();
+        releaseOpenFileModel(file);
       }
       filesRef.current.clear();
       if (persistTimerRef.current !== null) {
@@ -845,7 +857,12 @@ export function EditorSubsystem({
       void fsSearchFiles(root, query)
         .then((page) => {
           if (!stale) {
-            setPaletteResults(page.matches.map((match) => match.path));
+            // fsSearchFiles returns ROOT-RELATIVE paths (rg runs with cwd=root).
+            // openFile resolves a relative path against the server cwd and
+            // rejects it as "escapes the explorer root", so quick-open used to
+            // fail for any root != server cwd (and mint a broken relative-keyed
+            // tab when they matched). Resolve to absolute here, as SearchPanel does.
+            setPaletteResults(page.matches.map((match) => (root.endsWith('/') ? `${root}${match.path}` : `${root}/${match.path}`)));
             setPaletteIndex(0);
           }
         })
@@ -1072,43 +1089,46 @@ export function EditorSubsystem({
       if (!root) {
         return;
       }
-      const file = filesRef.current.get(path);
-      if (!file?.model || savingPathsRef.current.has(path)) {
-        return;
-      }
-      savingPathsRef.current.add(path);
-      try {
-        // Snapshot content and version together: keystrokes typed while the
-        // write is in flight must stay dirty (they are not on disk).
-        const contentAtSave = file.model.getValue();
-        const versionAtSave = file.model.getAlternativeVersionId();
-        const result = await fsWrite(root, path, contentAtSave, overwrite ? undefined : file.mtimeMs);
-        // The tab may have closed (or the root switched) while writing.
-        if (filesRef.current.get(path) !== file || !file.model) {
+      const generation = rootGenRef.current;
+      await saveQueueRef.current.run(path, overwrite, async (queuedOverwrite) => {
+        if (rootGenRef.current !== generation) {
           return;
         }
-        if (result.ok) {
-          file.mtimeMs = result.mtimeMs;
-          file.savedVersionId = versionAtSave;
-          file.dirty = file.model.getAlternativeVersionId() !== versionAtSave;
-          file.conflict = false;
-          file.deleted = false;
-          if (isNotes && isUntitledNote(fileNameOf(file.path)) && contentAtSave.trim() !== '') {
-            // First save with real content: adopt a content-derived filename.
-            renameNoteRef.current(file.path, contentAtSave);
-          }
-          // Disk changed: tree badges and the gutter both need a re-read.
-          scheduleGitRefresh();
-          setGutterTick((tick) => tick + 1);
-        } else {
-          file.conflict = true;
+        const file = filesRef.current.get(path);
+        if (!file?.model) {
+          return;
         }
-        bump();
-      } catch (err) {
-        onError(err instanceof Error ? err.message : String(err));
-      } finally {
-        savingPathsRef.current.delete(path);
-      }
+        try {
+          // Snapshot content and version together: keystrokes typed while the
+          // write is in flight must stay dirty (they are not on disk).
+          const contentAtSave = file.model.getValue();
+          const versionAtSave = file.model.getAlternativeVersionId();
+          const result = await fsWrite(root, path, contentAtSave, queuedOverwrite ? undefined : file.mtimeMs);
+          // The tab may have closed (or the root switched) while writing.
+          if (filesRef.current.get(path) !== file || !file.model) {
+            return;
+          }
+          if (result.ok) {
+            file.mtimeMs = result.mtimeMs;
+            file.savedVersionId = versionAtSave;
+            file.dirty = file.model.getAlternativeVersionId() !== versionAtSave;
+            file.conflict = false;
+            file.deleted = false;
+            if (isNotes && isUntitledNote(fileNameOf(file.path)) && contentAtSave.trim() !== '') {
+              // First save with real content: adopt a content-derived filename.
+              renameNoteRef.current(file.path, contentAtSave);
+            }
+            // Disk changed: tree badges and the gutter both need a re-read.
+            scheduleGitRefresh();
+            setGutterTick((tick) => tick + 1);
+          } else {
+            file.conflict = true;
+          }
+          bump();
+        } catch (err) {
+          onError(err instanceof Error ? err.message : String(err));
+        }
+      });
     },
     [root, bump, onError, isNotes, scheduleGitRefresh]
   );
@@ -1211,6 +1231,8 @@ export function EditorSubsystem({
           files.set(path, {
             path,
             model: null,
+            modelChangeSubscription: null,
+            releaseModel: null,
             savedVersionId: 0,
             mtimeMs: 0,
             dirty: false,
@@ -1233,20 +1255,16 @@ export function EditorSubsystem({
           }
           if (result.ok) {
             initMonaco();
-            const uri = monaco.Uri.file(path);
-            // A model for this Uri may survive a previous open (createModel
-            // throws on duplicates) — reuse it with fresh content.
-            const existing = monaco.editor.getModel(uri);
-            if (existing) {
-              existing.setValue(result.content);
-            }
-            const model = existing ?? monaco.editor.createModel(result.content, languageForPath(path), uri);
+            const lease = acquireSharedTextModel(path, result.content);
+            const model = lease.model;
             const file: OpenFile = {
               path,
               model,
-              savedVersionId: model.getAlternativeVersionId(),
+              modelChangeSubscription: null,
+              releaseModel: lease.release,
+              savedVersionId: lease.diskMatches ? model.getAlternativeVersionId() : -1,
               mtimeMs: result.mtimeMs,
-              dirty: false,
+              dirty: !lease.diskMatches,
               conflict: false,
               deleted: false,
               readonlyReason: null,
@@ -1255,7 +1273,7 @@ export function EditorSubsystem({
               renderMarkdown: false,
               rawRevision: 0
             };
-            model.onDidChangeContent((event) => {
+            file.modelChangeSubscription = model.onDidChangeContent((event) => {
               const dirty = model.getAlternativeVersionId() !== file.savedVersionId;
               if (dirty !== file.dirty) {
                 file.dirty = dirty;
@@ -1284,6 +1302,8 @@ export function EditorSubsystem({
             files.set(path, {
               path,
               model: null,
+              modelChangeSubscription: null,
+              releaseModel: null,
               savedVersionId: 0,
               mtimeMs: 0,
               dirty: false,
@@ -1400,11 +1420,13 @@ export function EditorSubsystem({
         return;
       }
       cancelAutosave(path);
-      // Capture uri/languageId before disposing the model (dispose loses both).
+      // Capture uri/languageId before releasing the model (the final lease disposes it).
       if (file?.model) {
         lspBindingRef.current?.closeModel({ uri: file.model.uri.toString(), languageId: file.model.getLanguageId() });
       }
-      file?.model?.dispose();
+      if (file) {
+        releaseOpenFileModel(file);
+      }
       filesRef.current.delete(path);
       watcherRef.current?.unwatch(path);
       const next = closeTab(tabsRef.current, activeTabRef.current, path);
@@ -1968,6 +1990,16 @@ export function EditorSubsystem({
         return;
       }
       const resolved = check.resolved ?? path;
+      // Switching root disposes every open model and clears the tab list. Confirm
+      // first if any buffer is unsaved — otherwise switching root silently threw
+      // away in-progress edits (only per-tab close had a dirty guard).
+      const dirtyPaths = [...filesRef.current.entries()].filter(([, file]) => file.dirty).map(([openPath]) => openPath);
+      if (dirtyPaths.length > 0) {
+        const summary = dirtyPaths.length === 1 ? dirtyPaths[0] : `${dirtyPaths.length} files`;
+        if (!window.confirm(`Discard unsaved changes in ${summary} and switch workspace root?`)) {
+          return;
+        }
+      }
       // Invalidate in-flight opens/restores from the previous root and stop
       // suppressing persistence so the new root is written out.
       rootGenRef.current += 1;
@@ -1981,7 +2013,7 @@ export function EditorSubsystem({
       }
       autosaveTimersRef.current.clear();
       for (const [openPath, file] of filesRef.current) {
-        file.model?.dispose();
+        releaseOpenFileModel(file);
         watcherRef.current?.unwatch(openPath);
       }
       filesRef.current.clear();

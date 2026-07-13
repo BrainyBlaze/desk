@@ -10,6 +10,7 @@ import {
   resolveChannelsHome
 } from '../server/channelsStore.js';
 import { parseConversation, type ChannelMessage } from '../server/channelsProtocol.js';
+import { assertAllowedOption, requireOptionValue } from './args.js';
 
 /**
  * `desk channels …` — the protocol CLI agents use from inside their sessions.
@@ -35,6 +36,15 @@ const HELP = `desk channels — slack-like messaging between desk agents
 
 Mention members with @name, everyone with @channel, the operator with @human.`;
 
+const CHANNEL_COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
+  ['help', new Set()],
+  ['--help', new Set()],
+  ['-h', new Set()],
+  ['list', new Set()],
+  ['read', new Set(['--message'])],
+  ['post', new Set(['--thread', '--as'])]
+]);
+
 function apiBase(): string {
   return (process.env.DESK_API ?? 'http://127.0.0.1:5173').replace(/\/$/, '');
 }
@@ -56,18 +66,44 @@ export function currentTmuxSession(): string {
   return result.status === 0 ? result.stdout.trim() : '';
 }
 
+/** The desk server could not be reached at all — the request never left, so a
+ *  local file-append fallback is safe (it can't duplicate a server-side post). */
+class ServerUnreachableError extends Error {}
+
 async function apiPost(path: string, payload: unknown): Promise<Record<string, unknown>> {
-  const response = await fetch(`${apiBase()}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(5000)
-  });
-  const body = (await response.json()) as Record<string, unknown>;
-  if (!response.ok) {
-    throw new Error(typeof body.error === 'string' ? body.error : `request failed ${response.status}`);
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5000)
+    });
+  } catch (err) {
+    // A TIMEOUT means the request WAS sent — the server may have processed it —
+    // so falling back to a local append would duplicate the message. Only a
+    // genuine connection failure (server not running) is safe to fall back on.
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new Error('desk server did not respond within 5s; the message may or may not have posted — check the channel before retrying');
+    }
+    throw new ServerUnreachableError('desk server unreachable');
   }
-  return body;
+  // Text-first parse: a reachable-but-misbehaving server (a proxy 502 HTML page,
+  // an empty body) must surface its real status, not a SyntaxError misread as
+  // "unreachable".
+  const text = await response.text();
+  let body: Record<string, unknown> | undefined;
+  if (text) {
+    try {
+      body = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      body = undefined;
+    }
+  }
+  if (!response.ok) {
+    throw new Error(body && typeof body.error === 'string' ? body.error : `request failed ${response.status}`);
+  }
+  return body ?? {};
 }
 
 function printMessages(messages: ChannelMessage[]): void {
@@ -89,6 +125,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
 
   try {
     if (command === 'help' || command === '--help' || command === '-h') {
+      assertNoArguments(command, args);
       console.log(HELP);
       return 0;
     }
@@ -96,10 +133,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
     const home = resolveChannelsHome();
 
     if (command === 'list') {
-      if (args.length > 0) {
-        const argument = args[0]!;
-        throw new Error(argument.startsWith('--') ? `unknown option ${argument}` : `unexpected argument ${argument}`);
-      }
+      assertNoArguments(command, args);
       for (const channel of listChannels(home)) {
         const agents = channel.members.filter((member) => member.type !== 'human').length;
         console.log(`#${channel.name}\t${channel.messageCount} messages, ${agents} agents\t${channel.goal}`);
@@ -109,7 +143,10 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
 
     if (command === 'read') {
       const channel = args.shift();
-      if (!channel) {
+      if (channel?.startsWith('-')) {
+        assertChannelOption(command, channel);
+      }
+      if (!channel || channel.startsWith('-')) {
         throw new Error('usage: desk channels read <channel> [<parent-msg-id>|--message <msg-id>]');
       }
       let parent: string | undefined;
@@ -117,14 +154,12 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
       let expectsMessageId = false;
       while (args.length > 0) {
         const next = args.shift() as string;
+        if (next.startsWith('-')) {
+          assertChannelOption(command, next);
+        }
         if (next === '--message') {
           expectsMessageId = true;
-          messageId = args.shift();
-          if (!messageId) {
-            throw new Error('usage: desk channels read <channel> --message <msg-id>');
-          }
-        } else if (next.startsWith('--')) {
-          throw new Error(`unknown option ${next}`);
+          messageId = requireOptionValue(next, args.shift());
         } else if (!parent) {
           parent = next;
         } else {
@@ -150,23 +185,30 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
 
     if (command === 'post') {
       const channel = args.shift();
+      if (channel?.startsWith('-')) {
+        assertChannelOption(command, channel);
+      }
+      if (!channel || channel.startsWith('-')) {
+        throw new Error('usage: desk channels post <channel> [--thread <id>] [--as <member>] "<body>"');
+      }
       let thread: string | undefined;
       let as: string | undefined;
       const bodyParts: string[] = [];
       while (args.length > 0) {
         const next = args.shift() as string;
+        if (next.startsWith('-')) {
+          assertChannelOption(command, next);
+        }
         if (next === '--thread') {
-          thread = args.shift();
+          thread = requireOptionValue(next, args.shift());
         } else if (next === '--as') {
-          as = args.shift();
-        } else if (next.startsWith('--')) {
-          throw new Error(`unknown option ${next}`);
+          as = requireOptionValue(next, args.shift());
         } else {
           bodyParts.push(next);
         }
       }
       const body = bodyParts.join(' ').trim();
-      if (!channel || body.length === 0) {
+      if (body.length === 0) {
         throw new Error('usage: desk channels post <channel> [--thread <id>] [--as <member>] "<body>"');
       }
 
@@ -182,8 +224,12 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         console.log(String(result.id ?? 'posted'));
         return 0;
       } catch (error) {
-        if (error instanceof Error && /not a member|cannot be empty|invalid|not found/.test(error.message)) {
-          throw error; // protocol error — do not retry as a blind file append
+        // Only a genuine connection failure is safe to fall back on. A protocol
+        // error (server rejected), a timeout (may have posted), or a non-JSON
+        // response must NOT trigger a blind local append — that duplicated the
+        // message. The old regex on the error text misclassified all three.
+        if (!(error instanceof ServerUnreachableError)) {
+          throw error;
         }
         // Server unreachable: append directly; the watcher dispatches later.
         const author = as ?? resolveAuthorOffline(home, channel, tmux);
@@ -201,6 +247,24 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
   }
+}
+
+function assertChannelOption(command: string, option: string): void {
+  const allowedOptions = CHANNEL_COMMAND_OPTIONS.get(command);
+  if (allowedOptions) {
+    assertAllowedOption(`desk channels ${command}`, option, allowedOptions);
+  }
+}
+
+function assertNoArguments(command: string, args: string[]): void {
+  const unexpected = args.shift();
+  if (!unexpected) {
+    return;
+  }
+  if (unexpected.startsWith('-')) {
+    assertChannelOption(command, unexpected);
+  }
+  throw new Error(`unexpected argument ${unexpected} for desk channels ${command}`);
 }
 
 function resolveAuthorOffline(home: string, channel: string, tmux: string): string {

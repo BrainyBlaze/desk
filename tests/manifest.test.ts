@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest';
+import { buildSessionSpecs, ManifestValidationError, parseDeskManifest } from '../src/core/manifest';
 
 describe('desk manifest ui mode', () => {
   it('defaults SDK-backed agent sessions to native ui mode when none is declared', () => {
@@ -509,5 +509,28 @@ projects:
     expect(command).not.toContain('resume id: a$(id)b');
     // The --resume argument stays quoted too.
     expect(command).toContain("--resume 'a$(id)b'");
+  });
+});
+
+describe('desk manifest malformed top-level keys (finding N12)', () => {
+  it('rejects unknown top-level keys instead of silently dropping a misspelled groups key', () => {
+    expect(() => parseDeskManifest('gropus: []')).toThrow(ManifestValidationError);
+    expect(() => parseDeskManifest('gropus: []')).toThrow(/unknown top-level key "gropus"/);
+  });
+
+  it('throws when groups is present but not a list (does not silently empty the config)', () => {
+    // An indentation slip that turns `groups:` into a scalar used to be coerced
+    // to [] — dropping every project/session with no diagnostic, then persisted
+    // as empty on the next write. It must fail loud instead.
+    expect(() => parseDeskManifest('groups: oops')).toThrow(/"groups" must be a list/);
+  });
+
+  it('throws when projects is present but not a list', () => {
+    expect(() => parseDeskManifest('projects: nope')).toThrow(/"projects" must be a list/);
+  });
+
+  it('still treats an absent key as an empty config (no false positive)', () => {
+    expect(() => parseDeskManifest('settings: {}')).not.toThrow();
+    expect(parseDeskManifest('settings: {}').groups).toEqual([]);
   });
 });

@@ -19,6 +19,7 @@ import { fileNameOf } from '../editor/editorState.js';
 import type { GitCommitDetail, GitCommitFile, GitLogCommit } from './gitClient.js';
 import { computeGraph, laneColorIndex, type GraphRow } from './gitGraph.js';
 import { commitFileBadge, dirOf, shortTimeAgo } from './gitStatusMeta.js';
+import { useClampedMenu } from '../menuPosition.js';
 
 const LANE_W = 10;
 const ROW_H = 30;
@@ -65,6 +66,7 @@ export function HistoryPanel({
 }: HistoryPanelProps): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [menu, setMenu] = useState<CommitMenuState | null>(null);
+  const menuRef = useClampedMenu(menu);
   const graph = useMemo(() => computeGraph(commits), [commits]);
   const railLanes = Math.min(MAX_LANES, Math.max(1, ...graph.map((row) => row.laneCount)));
 
@@ -189,7 +191,7 @@ export function HistoryPanel({
         </div>
       ) : null}
       {menu ? (
-        <div className="treeContextMenu" style={{ left: menu.x, top: menu.y, clipPath: CLIP_OCTAGON_TINY }}>
+        <div ref={menuRef} className="treeContextMenu" style={{ left: menu.x, top: menu.y, clipPath: CLIP_OCTAGON_TINY }}>
           <Animator combine manager="stagger" duration={{ stagger: 0.015 }}>
             {menuItem(<History size={12} />, 'Checkout commit', false, () => onCheckout(menu.commit.sha))}
             {menuItem(<GitBranchPlus size={12} />, 'Create branch here…', false, () => onCreateBranch(menu.commit.sha))}

@@ -164,7 +164,7 @@ export async function clearAllEvents(): Promise<void> {
   );
 }
 
-export async function markEventsRead(payload: { ids?: string[]; all?: boolean }): Promise<void> {
+export async function markEventsRead(payload: { ids?: string[]; all?: boolean; kinds?: AgentEventKind[] }): Promise<void> {
   await readJson(
     fetch('/api/attention-read', {
       method: 'POST',

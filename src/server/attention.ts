@@ -1,5 +1,6 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
+import { TerminalSequenceTokenizer, type TerminalToken } from '../shared/terminalSequenceTokenizer.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -178,30 +179,28 @@ export class AttentionTracker {
  * a bare BEL is a generic notification. BELs that merely terminate other OSC
  * sequences (e.g. OSC 0 title updates) do not count.
  */
-export function extractTerminalNotifications(chunk: string): Array<{ kind: AgentEventKind; message?: string }> {
-  // Hot path: this runs on every PTY output chunk of every attached session. Plain
-  // output has neither a BEL nor an OSC-9 intro, so an indexOf pre-check skips the
-  // full-chunk regex .replace below (33x faster per chunk on plain output, and no
-  // per-chunk allocation). A notification is only possible if one of those bytes is
-  // present; everything past this guard is unchanged.
-  if (chunk.indexOf('\x07') === -1 && chunk.indexOf('\x1b]9') === -1) {
+export function extractTerminalNotifications(
+  chunk: string,
+  tokenizer: TerminalSequenceTokenizer = new TerminalSequenceTokenizer()
+): Array<{ kind: AgentEventKind; message?: string }> {
+  // Hot path: plain output has no control bytes, so avoid token allocation.
+  if (!tokenizer.hasPending() && chunk.indexOf('\x07') === -1 && chunk.indexOf('\x1b]9') === -1) {
     return [];
   }
   const found: Array<{ kind: AgentEventKind; message?: string }> = [];
-  const oscNine = /\x1b\]9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
-  let match: RegExpExecArray | null;
-  while ((match = oscNine.exec(chunk)) !== null) {
-    const message = match[1]?.trim();
-    const kind: AgentEventKind = /approv|permission/i.test(message ?? '')
-      ? 'approval-requested'
-      : /\b(needs input|input requested|question(?:\.asked)?|answer required)\b/i.test(message ?? '')
-        ? 'input-requested'
-        : 'turn-complete';
-    found.push({ kind, message: message || undefined });
-  }
-  const withoutOsc = chunk.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-  if (withoutOsc.includes('\x07')) {
-    found.push({ kind: 'bell' });
+  const tokens: TerminalToken[] = tokenizer.push(chunk);
+  for (const token of tokens) {
+    if (token.kind === 'execute' && token.code === 7) {
+      found.push({ kind: 'bell' });
+    } else if (token.kind === 'osc' && token.command === 9 && token.terminated) {
+      const message = token.payload.trim();
+      const kind: AgentEventKind = /approv|permission/i.test(message)
+        ? 'approval-requested'
+        : /\b(needs input|input requested|question(?:\.asked)?|answer required)\b/i.test(message)
+          ? 'input-requested'
+          : 'turn-complete';
+      found.push({ kind, message: message || undefined });
+    }
   }
   return found;
 }

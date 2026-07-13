@@ -131,6 +131,25 @@ export function ExplorerTree({
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const editCommittedRef = useRef(false);
+  // The directory paths THIS tree watches (root + expanded dirs). The FsWatchSocket
+  // is shared and NOT ref-counted, so unwatchAll() would also drop the per-file
+  // watches openFile registered for disk-change detection — meaning toggling the
+  // sidebar to Search (which unmounts this tree) silently killed conflict/reload
+  // detection for every open file. Track our own paths and unwatch only those.
+  const ownWatchedRef = useRef<Set<string>>(new Set());
+  const watchDir = useCallback(
+    (path: string): void => {
+      ownWatchedRef.current.add(path);
+      watcher.watch(path);
+    },
+    [watcher]
+  );
+  const unwatchOwnDirs = useCallback((): void => {
+    for (const path of ownWatchedRef.current) {
+      watcher.unwatch(path);
+    }
+    ownWatchedRef.current.clear();
+  }, [watcher]);
 
   const loadDir = useCallback(
     async (path: string): Promise<void> => {
@@ -155,13 +174,13 @@ export function ExplorerTree({
     setPendingEdit(null);
     setConfirmDelete(null);
     setDropTarget(null);
-    watcher.unwatchAll();
-    watcher.watch(root);
+    unwatchOwnDirs();
+    watchDir(root);
     void loadDir(root);
     return () => {
-      watcher.unwatchAll();
+      unwatchOwnDirs();
     };
-  }, [root, watcher, loadDir]);
+  }, [root, watchDir, unwatchOwnDirs, loadDir]);
 
   useEffect(() => {
     return watcher.onEvent((event) => {
@@ -200,10 +219,10 @@ export function ExplorerTree({
   const expandDir = useCallback(
     (path: string): void => {
       setExpanded((current) => new Set(current).add(path));
-      watcher.watch(path);
+      watchDir(path);
       void loadDir(path);
     },
-    [watcher, loadDir]
+    [watchDir, loadDir]
   );
 
   const collapseDir = useCallback(
@@ -213,6 +232,7 @@ export function ExplorerTree({
         next.delete(path);
         return next;
       });
+      ownWatchedRef.current.delete(path);
       watcher.unwatch(path);
     },
     [watcher]
@@ -281,7 +301,7 @@ export function ExplorerTree({
       dir = `${dir}/${segment}`;
       if (!expandedRef.current.has(dir)) {
         setExpanded((current) => new Set(current).add(dir));
-        watcher.watch(dir);
+        watchDir(dir);
       }
       if (!childrenByDirRef.current.has(dir)) {
         // Sequential: each level's listing must exist before the next renders.
@@ -753,8 +773,14 @@ export function ExplorerTree({
               ? menuItem(<Trash2 size={12} />, selectedPaths.size > 1 ? `Delete ${selectedPaths.size} files` : 'Delete', true, () => {
                   setMenu(null);
                   if (selectedPaths.size > 1) {
-                    setConfirmDelete(null);
                     const pathsToDelete = Array.from(selectedPaths);
+                    // Confirm the bulk delete — single-file delete shows a danger
+                    // modal, but multi-select used to delete immediately with no
+                    // prompt and no undo.
+                    if (!window.confirm(`Delete ${pathsToDelete.length} selected items? This cannot be undone.`)) {
+                      return;
+                    }
+                    setConfirmDelete(null);
                     const performDeleteMultiple = async (): Promise<void> => {
                       try {
                         for (const path of pathsToDelete) {

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { terminalBroker } from './terminalBrokerClient.js';
+import { terminalSessionKey } from './terminalSessionKey.js';
+import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -318,6 +320,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         shellRef.current.dataset.terminalScrollback = 'false';
       }
       updateScrollRail();
+      // Entering scrollback moved focus to the overlay div; leaving it (Escape,
+      // or wheeling past the bottom) left focus on <body>, so the next keystroke
+      // was silently dropped. Return focus to the live terminal.
+      terminalRef.current?.focus();
     };
     exitScrollbackRef.current = exitScrollback;
 
@@ -378,17 +384,30 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }
 
       if ((event.ctrlKey || event.metaKey) && key === 'c') {
-        const selection = getSelectedText(terminal);
+        // Copy ONLY when the terminal itself has a selection. getSelectedText
+        // falls back to window.getSelection(), so a stray DOM selection anywhere
+        // else (a channel message, the sidebar) used to hijack Ctrl+C and copy
+        // that text instead of sending SIGINT to interrupt the running process.
+        const selection = terminal.getSelection();
         if (selection) {
           event.preventDefault();
-          copyText(selection);
+          void copyTextWithFallback(selection);
           return false;
         }
+        // No terminal selection: fall through so Ctrl+C reaches the shell.
       }
 
       if ((event.ctrlKey || event.metaKey) && key === 'v') {
+        // On a plain-HTTP LAN/mobile deployment the async clipboard API is
+        // absent (non-secure context). Intercepting Ctrl+V there produced a
+        // silent no-op AND suppressed the browser's native paste event that
+        // xterm handles on its own — so paste was impossible. When readText is
+        // unavailable, do NOT preventDefault: let the native paste flow to xterm.
+        if (!navigator.clipboard?.readText) {
+          return true;
+        }
         event.preventDefault();
-        void navigator.clipboard?.readText().then((text) => {
+        void navigator.clipboard.readText().then((text) => {
           if (text) {
             setInputActive(true);
             resetLiveScroll();
@@ -399,7 +418,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }
 
       if (event.ctrlKey && event.altKey && key === 'c') {
-        void navigator.clipboard?.writeText(serializeAddon.serialize());
+        // Route through copyText so a plain-HTTP (non-secure) context still
+        // copies via the execCommand fallback instead of silently no-oping when
+        // the async clipboard is absent.
+        void copyTextWithFallback(serializeAddon.serialize());
         return false;
       }
 
@@ -570,18 +592,26 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       event.clipboardData?.setData('text/plain', selection);
     };
     const handleContextMenu = (event: MouseEvent): void => {
+      const selection = terminal.getSelection();
+      const canRead = Boolean(navigator.clipboard?.readText);
+      // Only swallow the native menu when we can offer something better: a
+      // selection to copy, or async-clipboard paste. On plain HTTP with no
+      // selection, let the browser's native menu (and its Paste item) through
+      // rather than preventDefaulting into a dead no-op.
+      if (!shouldSuppressContextMenu(Boolean(selection), canRead)) {
+        return;
+      }
       event.preventDefault();
-      const selection = getSelectedText(terminal);
       if (selection) {
         const openMenu = selectionMenuRef.current;
         if (openMenu) {
           openMenu(selection, event.clientX, event.clientY);
         } else {
-          copyText(selection);
+          void copyTextWithFallback(selection);
         }
         return;
       }
-      void navigator.clipboard?.readText().then((text) => {
+      void navigator.clipboard!.readText().then((text) => {
         if (text) {
           setInputActive(true);
           resetLiveScroll();
@@ -882,7 +912,21 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       onDataDisposable.dispose();
       terminalBroker.unsubscribe(surfaceId);
     };
-  }, [session, revision]);
+    // Keyed on the STABLE session identity (tmux target, state, name, cwd), not
+    // the session object: a mutation elsewhere ships a fresh snapshot whose
+    // session objects have new identities but identical content, and re-running
+    // this effect then would clear/resubscribe/reflash every mounted terminal
+    // (the reported "flaky rendering"). terminalSessionKey captures exactly the
+    // fields this effect body reads, so it re-runs iff one of them changes.
+    //
+    // `revision` is NOT a global mutation counter — it is this session's entry in
+    // the per-session terminalRevisions map (AgentMultiplexer passes
+    // terminalRevisions[tmuxSession]), bumped ONLY by restartExistingSession and
+    // confirmUiModeSwitch for THAT session (App.tsx). Those genuinely replace the
+    // tmux target/mode, so re-attaching this one terminal is required and correct;
+    // an unrelated boot/layout/reorder never changes it. Keep it in the deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalSessionKey(session), revision]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -998,7 +1042,9 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
               const viewer = viewerRef.current;
               if (viewer?.hasSelection()) {
                 event.preventDefault();
-                void navigator.clipboard?.writeText(viewer.getSelection()).catch(() => undefined);
+                // copyText falls back to execCommand on plain HTTP; a bare
+                // navigator.clipboard?.writeText would copy nothing there.
+                void copyTextWithFallback(viewer.getSelection());
               }
             }
           }}
@@ -1060,30 +1106,4 @@ function detectAcceleratedWebgl2(): boolean {
 
 function getSelectedText(terminal: Terminal): string {
   return terminal.getSelection() || window.getSelection()?.toString() || '';
-}
-
-function copyText(text: string): void {
-  if (!text) {
-    return;
-  }
-
-  if (navigator.clipboard?.writeText) {
-    void navigator.clipboard.writeText(text).catch(() => fallbackCopyText(text));
-    return;
-  }
-
-  fallbackCopyText(text);
-}
-
-function fallbackCopyText(text: string): void {
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', 'true');
-  textarea.style.position = 'fixed';
-  textarea.style.left = '-9999px';
-  textarea.style.top = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand('copy');
-  textarea.remove();
 }

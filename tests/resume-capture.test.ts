@@ -1,13 +1,16 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyResumeToManifest,
   findOpencodeResume,
   isValidResumeId,
   isValidResumeIdForAgent,
-  parseRolloutMeta
+  parseRolloutMeta,
+  restorePendingResumeCaptures
 } from '../src/server/resumeCapture.js';
 import {
   readPendingResumeCaptures,
@@ -29,6 +32,32 @@ projects:
 `;
 
 const originalEnv = { ...process.env };
+const RESUME_CAPTURE_STATE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/core/resumeCaptureState.ts')).href;
+const FILE_LOCK_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/shared/fileLock.ts')).href;
+
+const DELAYED_UPSERT_WORKER_SOURCE = `
+import { existsSync, writeFileSync } from 'node:fs';
+import { withFileLockSync } from '${FILE_LOCK_SOURCE}';
+import { readPendingResumeCaptures, writePendingResumeCaptures } from '${RESUME_CAPTURE_STATE_SOURCE}';
+
+const statePath = process.argv[2];
+const readyPath = process.argv[3];
+const releasePath = process.argv[4];
+const capture = JSON.parse(process.argv[5]);
+const waitState = new Int32Array(new SharedArrayBuffer(4));
+
+withFileLockSync(statePath + '.lock', () => {
+  writeFileSync(readyPath, 'ready');
+  const deadline = Date.now() + 2_000;
+  while (!existsSync(releasePath) && Date.now() < deadline) {
+    Atomics.wait(waitState, 0, 0, 5);
+  }
+  const captures = readPendingResumeCaptures({ path: statePath })
+    .filter((entry) => entry.tmuxSession !== capture.tmuxSession);
+  captures.push(capture);
+  writePendingResumeCaptures(captures, { path: statePath });
+});
+`;
 
 afterEach(() => {
   process.env = { ...originalEnv };
@@ -187,4 +216,139 @@ describe('pending resume capture state', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('does not let startup cleanup lose a concurrent desk-up capture', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-resume-capture-startup-race-'));
+    const statePath = join(root, 'captures.json');
+    const readyPath = join(root, 'upsert-ready');
+    const releasePath = join(root, 'release-upsert');
+    const workerPath = join(root, 'delayed-upsert.mjs');
+    const specs = buildSessionSpecs(
+      parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ${root}
+    groups:
+      - id: main
+        sessions:
+          - { name: existing, agent: opencode, uiMode: terminal }
+          - { name: concurrent, agent: opencode, uiMode: terminal }
+`),
+      { homeDir: root }
+    );
+    const existingSpec = specs.find((spec) => spec.name === 'existing')!;
+    const concurrentSpec = specs.find((spec) => spec.name === 'concurrent')!;
+    const existingCapture = {
+      tmuxSession: existingSpec.tmuxSession,
+      agent: 'opencode' as const,
+      cwd: existingSpec.cwd,
+      sinceMs: 1_000,
+      deadlineMs: 0
+    };
+    const concurrentCapture = {
+      tmuxSession: concurrentSpec.tmuxSession,
+      agent: 'opencode' as const,
+      cwd: concurrentSpec.cwd,
+      sinceMs: 2_000,
+      deadlineMs: 0
+    };
+    upsertPendingResumeCapture(existingCapture, { path: statePath });
+    writeFileSync(workerPath, DELAYED_UPSERT_WORKER_SOURCE);
+
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx', workerPath, statePath, readyPath, releasePath, JSON.stringify(concurrentCapture)],
+      { stdio: ['ignore', 'ignore', 'pipe'] }
+    );
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const childExit = new Promise<number | null>((resolveExit, reject) => {
+      child.once('error', reject);
+      child.once('exit', resolveExit);
+    });
+    let releaser: ReturnType<typeof spawn> | undefined;
+    let releaserExit: Promise<number | null> | undefined;
+
+    try {
+      await waitFor(() => existsSync(readyPath));
+      releaser = spawn(
+        process.execPath,
+        [
+          '-e',
+          "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'release'), 75)",
+          releasePath
+        ],
+        { stdio: 'ignore' }
+      );
+      releaserExit = new Promise<number | null>((resolveExit, reject) => {
+        releaser!.once('error', reject);
+        releaser!.once('exit', resolveExit);
+      });
+      let interleaved = false;
+      const interleavedSpecs = new Proxy(specs, {
+        get(target, property, receiver) {
+          if (property !== 'find') {
+            return Reflect.get(target, property, receiver);
+          }
+          return (predicate: Parameters<typeof target.find>[0]) => {
+            if (!interleaved) {
+              interleaved = true;
+              writeFileSync(releasePath, 'release');
+              waitForSync(() =>
+                readPendingResumeCaptures({ path: statePath }).some(
+                  (capture) => capture.tmuxSession === concurrentCapture.tmuxSession
+                )
+              );
+            }
+            return target.find(predicate);
+          };
+        }
+      });
+
+      restorePendingResumeCaptures(interleavedSpecs, { statePath });
+
+      expect(await releaserExit).toBe(0);
+      expect(await childExit, stderr).toBe(0);
+      expect(interleaved).toBe(true);
+      expect(
+        readPendingResumeCaptures({ path: statePath })
+          .map((capture) => capture.tmuxSession)
+          .sort()
+      ).toEqual([existingCapture.tmuxSession, concurrentCapture.tmuxSession].sort());
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill();
+      }
+      if (releaser && releaser.exitCode === null && releaser.signalCode === null) {
+        releaser.kill();
+      }
+      await childExit.catch(() => undefined);
+      await releaserExit?.catch(() => undefined);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error('timed out waiting for condition');
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  }
+}
+
+function waitForSync(predicate: () => boolean, timeoutMs = 5_000): void {
+  const deadline = Date.now() + timeoutMs;
+  const waitState = new Int32Array(new SharedArrayBuffer(4));
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error('timed out waiting for condition');
+    }
+    Atomics.wait(waitState, 0, 0, 5);
+  }
+}

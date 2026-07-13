@@ -1,7 +1,8 @@
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeTextFileAtomic } from '../shared/atomicFile.js';
 
 /**
  * Desk-owned OpenCode config dir.
@@ -98,6 +99,9 @@ function writeIfChanged(path: string, content: string): void {
     current = undefined;
   }
   if (current !== content) {
-    writeFileSync(path, content);
+    // Atomic temp+rename, like the agentHooks writer this mirrors: a crash
+    // mid-write must not leave a truncated opencode.json / desk-attention.js
+    // that boots opencode without the attention plugin (silent notification loss).
+    writeTextFileAtomic(path, content);
   }
 }

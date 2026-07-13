@@ -98,6 +98,15 @@ export function ItemDrawer({
       });
   }, [item, revision, reloadNonce, onError]);
 
+  // Reset the comment draft when the ACTIVE ITEM changes (not on a background
+  // revision/reload). The drawer stays mounted across item switches, so without
+  // this a comment typed for item A would post to item B. Field editors get the
+  // same isolation via their per-item React key below.
+  const itemId = item?.id;
+  useEffect(() => {
+    setComment('');
+  }, [itemId]);
+
   const isDraft = item?.type === 'DRAFT_ISSUE';
   const isClosed = item?.content?.state === 'CLOSED' || item?.content?.state === 'MERGED';
   const repoItem = Boolean(item?.content?.repository);
@@ -156,7 +165,10 @@ export function ItemDrawer({
                 {fields
                   .filter((field) => FIELD_EDITABLE.has(field.dataType))
                   .map((field) => (
-                    <label key={field.id} className="projDrawerField">
+                    // Key by item AND field: switching items must remount the
+                    // editor so its seeded draft can't carry item A's value onto
+                    // item B (a cross-item write to the GitHub project).
+                    <label key={`${item.id}:${field.id}`} className="projDrawerField">
                       <span>{field.name}</span>
                       <FieldEditor
                         field={field}

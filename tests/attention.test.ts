@@ -7,6 +7,7 @@ import {
   isLikelyUserInput,
   parseBellFlagsOutput
 } from '../src/server/attention.js';
+import { TerminalSequenceTokenizer } from '../src/shared/terminalSequenceTokenizer.js';
 
 describe('parseBellFlagsOutput', () => {
   it('parses session/flag/activity rows, ignoring blanks', () => {
@@ -39,6 +40,21 @@ describe('extractTerminalNotifications', () => {
   it('reports bare BEL as a generic bell, ignoring OSC-terminating BELs', () => {
     expect(extractTerminalNotifications('done\x07')).toEqual([{ kind: 'bell' }]);
     expect(extractTerminalNotifications('\x1b]0;title\x07')).toEqual([]);
+  });
+
+  it('keeps OSC 9 state across PTY chunk boundaries', () => {
+    const tokenizer = new TerminalSequenceTokenizer();
+    expect(extractTerminalNotifications('\x1b]9;turn', tokenizer)).toEqual([]);
+    expect(extractTerminalNotifications(' complete\x07', tokenizer)).toEqual([
+      { kind: 'turn-complete', message: 'turn complete' }
+    ]);
+  });
+
+  it('does not drop plain middle chunks while an OSC is buffered', () => {
+    const tokenizer = new TerminalSequenceTokenizer();
+    expect(extractTerminalNotifications('\x1b]9;turn', tokenizer)).toEqual([]);
+    expect(extractTerminalNotifications(' complete', tokenizer)).toEqual([]);
+    expect(extractTerminalNotifications('\x07', tokenizer)).toEqual([{ kind: 'turn-complete', message: 'turn complete' }]);
   });
 
   it('fast-path returns empty for plain output with no BEL or OSC-9 marker', () => {

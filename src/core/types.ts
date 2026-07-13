@@ -1,5 +1,15 @@
 export type DeskAgent = 'codex' | 'claude' | 'bash' | 'opencode' | string;
 
+/** The agents desk knows how to launch. `DeskAgent` widens to `string` for
+ *  forward-compat at the type level, so this is the runtime source of truth —
+ *  used by manifest validation and the CLI add-boundary so a typo can't be
+ *  written to the config (which would brick every later command on load). */
+export const SUPPORTED_AGENTS = ['codex', 'claude', 'bash', 'opencode'] as const;
+
+export function isSupportedAgent(value: string | undefined): boolean {
+  return typeof value === 'string' && (SUPPORTED_AGENTS as readonly string[]).includes(value);
+}
+
 /** UI surface for a session's cell. Absent on the manifest record = 'terminal'. */
 export type DeskSessionUiMode = 'terminal' | 'native';
 

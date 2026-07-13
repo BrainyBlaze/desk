@@ -16,6 +16,7 @@ import {
 import { ensureTmuxGlobalOptions, markTmuxGlobalOptionsStale } from './tmuxOptions.js';
 import { TerminalOutputRing } from './terminalOutputRing.js';
 import { attentionTracker, extractTerminalNotifications, notifyAgentSignal, notifyRaise } from './attention.js';
+import { TerminalSequenceTokenizer } from '../shared/terminalSequenceTokenizer.js';
 
 export interface BrokerPty {
   onData(handler: (chunk: string) => void): void;
@@ -74,6 +75,8 @@ interface BrokerTerminal {
   pty: BrokerPty;
   ring: TerminalOutputRing;
   clients: Map<BrokerTransport, Map<string, { visible: boolean }>>;
+  attentionTokenizer: TerminalSequenceTokenizer;
+  mouseModeTokenizer: TerminalSequenceTokenizer;
   idleSince?: number;
 }
 
@@ -82,6 +85,7 @@ const DEFAULT_BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_IDLE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_MAX_WARM_PTYS = 40;
 const DEFAULT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const HEARTBEAT_MS = 15_000;
 
 export class TerminalBroker {
   private readonly loadSessions: () => SessionSpec[];
@@ -114,6 +118,13 @@ export class TerminalBroker {
   addClient(transport: BrokerTransport): void {
     this.clients.set(transport, { transport, subscriptions: new Map() });
     this.sendFrame(transport, { type: 'ready', version: 1 });
+  }
+
+  heartbeat(): void {
+    const frame: TerminalBrokerServerFrame = { type: 'heartbeat', at: Date.now() };
+    for (const transport of this.clients.keys()) {
+      this.sendFrame(transport, frame);
+    }
   }
 
   removeClient(transport: BrokerTransport): void {
@@ -309,7 +320,9 @@ export class TerminalBroker {
       session,
       pty,
       ring: new TerminalOutputRing(this.ringBytes),
-      clients: new Map()
+      clients: new Map(),
+      attentionTokenizer: new TerminalSequenceTokenizer(),
+      mouseModeTokenizer: new TerminalSequenceTokenizer()
     };
     this.terminals.set(session.tmuxSession, terminal);
     pty.onData((chunk) => this.handlePtyData(terminal, chunk));
@@ -318,7 +331,7 @@ export class TerminalBroker {
   }
 
   private handlePtyData(terminal: BrokerTerminal, chunk: string): void {
-    const notifications = extractTerminalNotifications(chunk);
+    const notifications = extractTerminalNotifications(chunk, terminal.attentionTokenizer);
     if (notifications.length > 0) {
       attentionTracker.raise(terminal.session.tmuxSession);
       notifyRaise(terminal.session.tmuxSession);
@@ -327,7 +340,7 @@ export class TerminalBroker {
         notifyAgentSignal(terminal.session.tmuxSession, notification.kind);
       }
     }
-    const payload = stripTerminalMouseModeControls(chunk);
+    const payload = stripTerminalMouseModeControls(chunk, terminal.mouseModeTokenizer);
     terminal.ring.append(payload);
     for (const [transport, surfaces] of terminal.clients) {
       if (![...surfaces.values()].some((subscription) => subscription.visible)) {
@@ -418,7 +431,9 @@ export function installTerminalBroker(
   const maxPayload = positiveInteger(options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES, 'terminal broker maxPayloadBytes');
   const wss = new WebSocketServer({ noServer: true, maxPayload });
   const sweepTimer = setInterval(() => broker.sweepIdle(), 30_000);
+  const heartbeatTimer = setInterval(() => broker.heartbeat(), HEARTBEAT_MS);
   sweepTimer.unref?.();
+  heartbeatTimer.unref?.();
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     if (socket.destroyed) {
       return; // already rejected by the central upgrade guard
@@ -451,6 +466,7 @@ export function installTerminalBroker(
   });
   return () => {
     clearInterval(sweepTimer);
+    clearInterval(heartbeatTimer);
     broker.dispose();
     wss.close();
   };

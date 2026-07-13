@@ -4,6 +4,7 @@ import {
   addGroupToManifest,
   addProjectToManifest,
   addSessionToManifest,
+  deleteProjectFromManifest,
   deleteSessionFromManifest,
   editGroupInManifest,
   editProjectInManifest,
@@ -418,19 +419,15 @@ projects: []
 });
 
 describe('manifest write robustness', () => {
-  it('readManifestFile treats a blank file as empty instead of throwing', async () => {
-    const { readManifestFile, writeManifestFile } = await import('../src/core/config.js');
+  it('readManifestFile rejects a present blank file instead of treating corruption as an empty desk', async () => {
+    const { readManifestFile } = await import('../src/core/config.js');
     const { mkdtempSync, writeFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const { tmpdir } = await import('node:os');
     const dir = mkdtempSync(join(tmpdir(), 'desk-cfg-'));
     const path = join(dir, 'desk.yml');
     writeFileSync(path, '   \n  ');
-    expect(() => readManifestFile(path)).not.toThrow();
-    expect(readManifestFile(path).groups).toEqual([]);
-    // and a real write produces a non-empty, re-readable manifest
-    writeManifestFile(path, { settings: { theme: 'x' }, groups: [], projects: [] });
-    expect(readManifestFile(path).settings).toEqual({ theme: 'x' });
+    expect(() => readManifestFile(path)).toThrow(/manifest is empty/);
   });
 
   it('writeManifestFile refuses to persist an empty payload', async () => {
@@ -443,5 +440,36 @@ describe('manifest write robustness', () => {
     // guard by checking a manifest that stringifies to content still works and
     // the guard exists for the empty-serialization edge.
     expect(() => writeManifestFile(path, { groups: [], projects: [] })).not.toThrow();
+  });
+});
+
+describe('deleteProjectFromManifest (legacy cwd) — finding N14', () => {
+  it('removes only the emptied group and preserves an unrelated empty group', () => {
+    // Legacy (groups-based) manifest: group `a` has the session being deleted,
+    // group `b` is an unrelated empty group the user just created.
+    const manifest = {
+      groups: [
+        { id: 'a', label: 'A', sessions: [{ name: 's', cwd: '/proj/a', command: 'bash' }] },
+        { id: 'b', label: 'B', sessions: [] }
+      ],
+      projects: undefined
+    } as unknown as Parameters<typeof deleteProjectFromManifest>[0];
+
+    const result = deleteProjectFromManifest(manifest, { projectId: 'unmatched', cwd: '/proj/a' });
+
+    // `a` emptied by the delete → removed; `b` was already empty and unrelated →
+    // must survive (the old `.filter(sessions.length > 0)` deleted it too).
+    expect(result.groups.map((group) => group.id)).toEqual(['b']);
+  });
+
+  it('throws when no legacy session matches the requested cwd', () => {
+    const manifest = {
+      groups: [{ id: 'a', sessions: [{ name: 's', cwd: '/proj/a', command: 'bash' }] }],
+      projects: undefined
+    } as unknown as Parameters<typeof deleteProjectFromManifest>[0];
+
+    expect(() => deleteProjectFromManifest(manifest, { projectId: 'missing', cwd: '/proj/other' })).toThrow(
+      /project missing does not exist/
+    );
   });
 });

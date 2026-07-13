@@ -716,6 +716,9 @@ export function NativeAgentSurface({
               handleComposerFilePaste(event, uploadNativeFiles);
             }}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) {
+                return;
+              }
               if (slashPaletteVisible) {
                 if (e.key === 'ArrowDown') {
                   e.preventDefault();
@@ -745,7 +748,7 @@ export function NativeAgentSurface({
                   return;
                 }
               }
-              if (composerPlainEnterShouldSend(e.key, e.shiftKey)) {
+              if (composerPlainEnterShouldSend(e.key, e.shiftKey, e.nativeEvent.isComposing)) {
                 e.preventDefault();
                 if (canSend) {
                   handleSend();

@@ -47,7 +47,7 @@ import {
   readStoredSidebarWidth
 } from '../sidebarPanel.js';
 import { usePersistedCollapse } from '../usePersistedCollapse.js';
-import { saveSettings } from '../api.js';
+import { markEventsRead, saveSettings } from '../api.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from '../arwes/motion.js';
 import type { DeskSnapshot, DeskSessionView } from '../types.js';
@@ -123,6 +123,8 @@ import {
   shouldSwitchChannelForNavigation
 } from './channelsModel.js';
 import type { AddableAgentRuntimeState, ChannelSidebarSectionId } from './channelsModel.js';
+import { createDetailRefreshGate } from './detailRefreshGate.js';
+import { channelSwitchCursorSeed } from './channelCursorSeed.js';
 import { Composer } from './Composer.js';
 import { EngineConsole } from './EngineConsole.js';
 import { CommandPalette, type PaletteCommand } from './CommandPalette.js';
@@ -348,6 +350,15 @@ export function ChannelsSubsystem({
     }
     const onKey = (event: KeyboardEvent): void => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) {
+          return; // don't hijack Cmd-K while the user is typing in a field
+        }
+        // An App-level modal (e.g. Settings) owns the keyboard; navState.blocked
+        // only sees Channels-owned overlays, so check the DOM for any .deskModal.
+        if (document.querySelector('.deskModal')) {
+          return; // don't open the palette over an open modal
+        }
         event.preventDefault();
         setPaletteOpen((prev) => !prev);
       }
@@ -408,8 +419,14 @@ export function ChannelsSubsystem({
         return; // leave Cmd-K and friends alone
       }
       const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) {
         return; // typing, not navigating
+      }
+      // An App-level modal (e.g. Settings) owns the keyboard; navState.blocked
+      // only tracks Channels-owned overlays, so j/k/s/t could otherwise mutate
+      // the hidden feed from a non-input control inside that modal.
+      if (document.querySelector('.deskModal')) {
+        return;
       }
       const state = navStateRef.current;
       if (state.blocked) {
@@ -733,7 +750,18 @@ export function ChannelsSubsystem({
   // message with context around it. Cached channel switches use this path only
   // when unread messages arrived while away; no-new switches restore the
   // memoized window and viewport.
+  const detailGateRef = useRef(createDetailRefreshGate());
   const refreshDetail = useCallback(async (channel: string, options: { initialWindow?: boolean; summary?: ChannelSummary } = {}): Promise<void> => {
+    // Reconcile refetches (the live poll's revision-diff + stale-cursor recovery
+    // — options.initialWindow falsey) are single-flight per channel: skip when
+    // one is already running so a slow refetch is not relaunched every tick. An
+    // explicit reload (initialWindow — channel switch / reanchor / jump) always
+    // runs. Either way the token sequences the apply, so a slow older response
+    // can never overwrite a newer mutation.
+    const token = detailGateRef.current.begin(channel, !options.initialWindow);
+    if (token === null) {
+      return;
+    }
     try {
       const summary = options.summary ?? channelsRef.current.find((entry) => entry.name === channel);
       const since = options.initialWindow && summary ? channelInitialLoadSince(summary, seenMapRef.current[channel]) : null;
@@ -742,7 +770,10 @@ export function ChannelsSubsystem({
         setRestoreScrollChannel(null);
       }
       const next = await channelsDetail(channel, since);
-      if (selectedRef.current === channel) {
+      // Apply only if still selected AND this is still the latest refresh for the
+      // channel — a newer refresh bumps the token and wins, so a stale response
+      // is dropped instead of overwriting fresher content.
+      if (selectedRef.current === channel && detailGateRef.current.isCurrent(channel, token)) {
         setDetail(next);
         if (threadRef.current) {
           const stillExists = next.messages.some((message) => message.id === threadRef.current);
@@ -754,6 +785,8 @@ export function ChannelsSubsystem({
       }
     } catch (err) {
       report(err);
+    } finally {
+      detailGateRef.current.end(channel, token);
     }
   }, [beginVisit, report]);
 
@@ -796,31 +829,49 @@ export function ChannelsSubsystem({
   // Scroll-down (and the live poll): fetch messages after the newest loaded one
   // and APPEND them. Used both to page forward through a deep unread backlog and
   // to pick up live messages while the window already includes the newest.
-  const loadNewer = useCallback(async (channel: string): Promise<void> => {
+  /**
+   * Append newer messages. Returns a DISCRIMINATED outcome so the caller only
+   * force-refetches on a genuinely stale cursor, never on a transient skip:
+   *  - 'appended'  fetched newer messages (or hasNewer changed).
+   *  - 'stale'     the server returned nothing for our `after` cursor. In the
+   *                poll's mismatch context (summary shows a newer last) this means
+   *                our newest loaded message was deleted externally — recover with
+   *                a window refetch.
+   *  - 'skipped'   nothing to do (no detail / wrong channel / a load already in
+   *                flight). Must NOT trigger a refetch — an overlapping full
+   *                refetch on the next tick was the bug in the first cut.
+   *  - 'error'     the fetch failed; leave the window as-is.
+   */
+  const loadNewer = useCallback(async (channel: string): Promise<'appended' | 'stale' | 'skipped' | 'error'> => {
     const loaded = detailRef.current;
     if (!loaded || loaded.name !== channel || loadingMoreRef.current) {
-      return;
+      return 'skipped';
     }
     const newest = loaded.messages[loaded.messages.length - 1]?.id;
     if (!newest) {
-      return;
+      return 'skipped';
     }
     loadingMoreRef.current = true;
     try {
       const page = await channelsMessages(channel, { after: newest });
-      setDetail((current) => {
-        if (!current || current.name !== channel) {
-          return current;
-        }
-        const known = new Set(current.messages.map((message) => message.id));
-        const fresh = page.messages.filter((message) => !known.has(message.id));
-        if (fresh.length === 0 && page.hasNewer === current.hasNewer) {
-          return current;
-        }
-        return { ...current, messages: [...current.messages, ...fresh], hasNewer: page.hasNewer };
-      });
+      const known = new Set(loaded.messages.map((message) => message.id));
+      const fresh = page.messages.filter((message) => !known.has(message.id));
+      const progressed = fresh.length > 0 || page.hasNewer !== loaded.hasNewer;
+      if (progressed) {
+        setDetail((current) => {
+          if (!current || current.name !== channel) {
+            return current;
+          }
+          const knownNow = new Set(current.messages.map((message) => message.id));
+          const freshNow = page.messages.filter((message) => !knownNow.has(message.id));
+          return { ...current, messages: [...current.messages, ...freshNow], hasNewer: page.hasNewer };
+        });
+        return 'appended';
+      }
+      return 'stale';
     } catch (err) {
       report(err);
+      return 'error';
     } finally {
       loadingMoreRef.current = false;
     }
@@ -943,10 +994,35 @@ export function ChannelsSubsystem({
           setRestoreScrollChannel(null);
           void refreshDetail(selectedSummary.name, { initialWindow: true, summary: selectedSummary });
         } else if (!loaded.hasNewer && newestLoaded !== summaryLast) {
-          void loadNewer(selectedSummary.name);
+          const target = selectedSummary.name;
+          void loadNewer(target).then((outcome) => {
+            // Recover ONLY on a genuinely stale cursor (fetched, nothing came
+            // back, yet the summary shows a newer last = our newest was deleted
+            // externally) — the feed would otherwise freeze on this mismatch
+            // every tick. A 'skipped' (a load already in flight) or 'error' must
+            // NOT refetch, or a slow load would spawn overlapping full refetches.
+            // We are at the tail here (!hasNewer), so the refetch does not
+            // disturb a scrolled-up reader.
+            if (outcome === 'stale' && activeRef.current && selectedRef.current === target && detailRef.current?.name === target) {
+              void refreshDetail(target);
+            }
+          });
           if (threadRef.current) {
             void refreshThread(selectedSummary.name, threadRef.current);
           }
+        } else if (!loaded.hasNewer && selectedSummary.contentRevision !== loaded.contentRevision) {
+          // The tail signature (count / last-id / preview) is UNCHANGED yet the
+          // server's content-addressed revision moved: a message was edited in
+          // place, or one was deleted from mid-history. Neither shifts the tail,
+          // so the loadNewer path above is blind to it and the feed would show
+          // stale content until the next hard reload. A partial append also
+          // leaves the loaded revision deliberately stale (loadNewer fetches
+          // only after-cursor messages and cannot safely adopt the whole-root
+          // revision), so this same branch performs the reconciling full reload
+          // one tick later. We are at the tail (!hasNewer), so refreshDetail
+          // lands the reader on the newest with no scroll yank; a scrolled-up
+          // reader (hasNewer) is left undisturbed and reconciles on return.
+          void refreshDetail(selectedSummary.name);
         }
         // Member join/leave only touches metadata, never the message window.
         if (loaded.members.length !== selectedSummary.members.length) {
@@ -1028,12 +1104,8 @@ export function ChannelsSubsystem({
     if (!active) {
       return;
     }
-    void fetch('/api/attention-read', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kinds: ['channel'] })
-    }).catch(() => undefined);
-  }, [active, detail]);
+    void markEventsRead({ kinds: ['channel'] }).catch(report);
+  }, [active, detail, report]);
 
   // Advance a channel's read pointer as the feed reports scroll progress.
   // Forward-only: a poll re-render, an upward scroll, or a stale report can
@@ -1095,7 +1167,11 @@ export function ChannelsSubsystem({
   // latest. Cached switches restore the saved viewport only when nothing new
   // arrived while away.
 
-  function selectChannel(name: string, summary?: ChannelSummary, options: { restoreScroll?: boolean } = {}): void {
+  function selectChannel(
+    name: string,
+    summary?: ChannelSummary,
+    options: { restoreScroll?: boolean; seedCursor?: boolean } = {}
+  ): void {
     if (!shouldSwitchChannelForNavigation(selectedRef.current, name)) {
       return;
     }
@@ -1108,6 +1184,17 @@ export function ChannelsSubsystem({
     setThreadMessages([]);
     setQuery('');
     setAllMessages(null);
+    // Reseed the keyboard cursor onto the window this switch lands on so the
+    // first j/k advances from the current view instead of carrying the previous
+    // channel's cursor (absent from the new window → jump to the oldest row).
+    // navigateToMessage sets its own explicit target and passes seedCursor:false.
+    const seedCursor = options.seedCursor !== false;
+    const savedAnchor = scrollAnchorByChannelRef.current.get(name)?.messageId ?? null;
+    const readAnchor = seenMapRef.current[name]?.id ?? null;
+    // Newest in-window fallback for a never-visited channel (no saved/read
+    // anchor): a fresh/reanchor window loads at the tail, so the summary's newest
+    // message is in it (cached restore uses its own last row below instead).
+    const newestFromSummary = (summary ?? channelsRef.current.find((entry) => entry.name === name))?.lastMessage?.id ?? null;
     localStorage.setItem(CHANNEL_STORAGE_KEY, name);
     // Load memoization: if we have a channel window and no unread messages
     // arrived while it was hidden, restore it instantly with its saved viewport.
@@ -1117,15 +1204,40 @@ export function ChannelsSubsystem({
       const shouldReanchor = summary ? channelShouldReanchorCachedDetail(summary, seenMapRef.current[name]) : false;
       if (shouldReanchor) {
         setRestoreScrollChannel(null);
+        // Show the newly-selected channel's cached window immediately, THEN
+        // reanchor to unread. Without this, detail stayed on the previous
+        // channel while `selected` was already the new one: the header, feed,
+        // composer placeholder and any draft rendered channel A, but handleSend
+        // posted to channel B — a draft could land in the wrong channel, and a
+        // failed reanchor fetch left the mismatch on screen indefinitely.
+        setDetail(cached);
+        // Reanchor re-fetches a window centred on unread, so the old saved
+        // viewport anchor may be off-window — seed the read anchor, or the
+        // newest message (also in the re-fetched tail) when there is no read.
+        if (seedCursor) {
+          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false, newestFromSummary));
+        }
         void refreshDetail(name, { initialWindow: true, summary });
       } else {
         setVisitAnchorId(null);
         setRestoreScrollChannel(restoreScrollChannelForSelection(name, options));
         setDetail(cached);
+        // Plain restore lands on the remembered viewport — its anchor is in the
+        // cached window; if there is no saved/read anchor, the cached window's
+        // last row is the in-window newest.
+        if (seedCursor) {
+          setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, true, cached.messages.at(-1)?.id ?? null));
+        }
       }
     } else {
       setRestoreScrollChannel(null);
       setDetail(null);
+      // Fresh visit: the window loads centred on the read/unread boundary (or
+      // at the tail when never read), so seed the read anchor, falling back to
+      // the newest message which the tail-loaded window contains.
+      if (seedCursor) {
+        setCursorId(channelSwitchCursorSeed(savedAnchor, readAnchor, false, newestFromSummary));
+      }
       void refreshDetail(name, { initialWindow: true, summary });
     }
   }
@@ -1143,7 +1255,10 @@ export function ChannelsSubsystem({
     }
     setNavTarget({ channel, messageId, thread });
     if (selectedRef.current !== channel) {
-      selectChannel(channel, undefined, { restoreScroll: false });
+      // When navigating to an explicit message we set cursorId above; let the
+      // switch keep that target (seedCursor:false). Without a target, let the
+      // switch seed the cursor so the new channel doesn't inherit a stale one.
+      selectChannel(channel, undefined, { restoreScroll: false, seedCursor: !messageId });
     }
     // selectChannel is component-scope stable (see registerNavigator effect).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1196,14 +1311,19 @@ export function ChannelsSubsystem({
   }, [navTarget, detail, threadParent, threadMessages, loadAroundMessage]);
 
   function openThread(parentId: string): void {
-    if (!selected) {
+    // Use the LIVE selected channel, not the `selected` state: openThread is
+    // invoked from the once-registered keydown listener, whose closure captures
+    // a stale `selected`. refreshThread guards on selectedRef.current === channel,
+    // so passing the stale state made the guard fail and the thread never loaded.
+    const channel = selectedRef.current;
+    if (!channel) {
       return;
     }
     bleeps.open?.play();
     setThreadParent(parentId);
     threadRef.current = parentId;
     setThreadMessages([]);
-    void refreshThread(selected, parentId);
+    void refreshThread(channel, parentId);
   }
 
   /* ---------- actions ---------- */
@@ -2289,7 +2409,7 @@ export function ChannelsSubsystem({
                       hasOlder={!filtering && detail.hasOlder}
                       hasNewer={!filtering && detail.hasNewer}
                       onLoadOlder={!filtering ? loadOlder : undefined}
-                      onLoadNewer={!filtering ? () => loadNewer(detail.name) : undefined}
+                      onLoadNewer={!filtering ? () => void loadNewer(detail.name) : undefined}
                       onJumpLatest={!filtering && detail.hasNewer ? () => jumpToLatest(detail.name) : undefined}
                       onReadProgress={active && !filtering ? (id) => markChannelRead(detail.name, id) : undefined}
                       onOpenThread={openThread}

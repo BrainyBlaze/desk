@@ -100,12 +100,19 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
 
+  // True when the last poll/refresh failed: the cached `diag` is now stale, so
+  // the live pills (pump live / N queued) must render as unknown rather than
+  // keep asserting minutes-old values next to the error banner.
+  const [stale, setStale] = useState(false);
+
   const refresh = useCallback(async () => {
     try {
       setDiag(await channelsEngineDiagnostics());
       setError(null);
+      setStale(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setStale(true);
     }
   }, []);
 
@@ -144,17 +151,20 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   const sessions = (diag?.sessions ?? []).slice().sort((a, b) => b.queued - a.queued);
+  // A stale snapshot (last poll failed) must not drive the live pills — render
+  // them as unknown so they never assert minutes-old health beside the error.
+  const live = stale ? null : diag;
 
   return (
     <ActionModal open={open} title="Engine console" icon={<Gauge size={13} />} onClose={onClose} wide>
       <div className="chanEngineDrawer chanEngineDrawerModal">
         <div className="chanEngineHead">
           <div className="chanEngineHealth">
-            <span className={`chanEnginePill ${!diag ? 'muted' : diag.pumpAlive ? 'ok' : 'warn'}`}>
-              {!diag ? 'pump —' : diag.pumpAlive ? 'pump live' : 'pump down'}
+            <span className={`chanEnginePill ${!live ? 'muted' : live.pumpAlive ? 'ok' : 'warn'}`}>
+              {!live ? 'pump —' : live.pumpAlive ? 'pump live' : 'pump down'}
             </span>
-            {diag?.passive ? <span className="chanEnginePill warn">passive</span> : null}
-            <span className="chanEnginePill muted">{diag ? `${diag.totalQueued} queued` : '— queued'}</span>
+            {live?.passive ? <span className="chanEnginePill warn">passive</span> : null}
+            <span className="chanEnginePill muted">{live ? `${live.totalQueued} queued` : '— queued'}</span>
           </div>
         </div>
 

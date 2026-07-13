@@ -10,6 +10,7 @@ import {
   resetChannelsRuntime
 } from '../src/server/channelsApi.js';
 import { listPausedSessions } from '../src/server/channelsPaused.js';
+import { appendMessage, createChannel, editMessage } from '../src/server/channelsStore.js';
 
 interface ApiResult {
   handled: boolean;
@@ -90,6 +91,23 @@ describe('channels storage API endpoints', () => {
 
     const removed = await callChannelsApi('POST', '/api/channels/views', { action: 'remove', name: 'triage' });
     expect(removed.body.items).toEqual([]);
+  });
+
+  it('exposes the same content revision from state summaries and channel details', async () => {
+    createChannel(home, 'ops', 'goal');
+    const first = await appendMessage(home, 'ops', { author: 'human', body: 'first' });
+
+    const state = await callChannelsApi('GET', '/api/channels/state');
+    const detail = await callChannelsApi('GET', '/api/channels/channel?name=ops');
+    const revision = state.body.channels[0].contentRevision;
+    expect(revision).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(detail.body.contentRevision).toBe(revision);
+
+    await editMessage(home, 'ops', 'root.md', first.message.id, 'changed');
+    const changedState = await callChannelsApi('GET', '/api/channels/state');
+    const changedDetail = await callChannelsApi('GET', '/api/channels/channel?name=ops');
+    expect(changedState.body.channels[0].contentRevision).not.toBe(revision);
+    expect(changedDetail.body.contentRevision).toBe(changedState.body.channels[0].contentRevision);
   });
 
   it('persists pause/resume actions through both the paused endpoint and engine action endpoint', async () => {

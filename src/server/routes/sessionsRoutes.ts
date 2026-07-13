@@ -44,7 +44,7 @@ import type {
   SessionSpec,
   TmuxPlanAction
 } from '../../core/types.js';
-import { readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
+import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
 import { shouldRespawnAfterEdit } from '../editRespawn.js';
@@ -87,9 +87,9 @@ function scheduleAgentResumeCapture(session: SessionSpec): void {
   scheduleOpencodeResumeCapture(session);
 }
 
-function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
+export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
   if (!value || typeof value !== 'object') {
-    throw new Error('session body is required');
+    throw new ApiValidationError('session body is required');
   }
   const record = value as Record<string, unknown>;
   const command = readOptionalString(record.command);
@@ -101,24 +101,35 @@ function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } 
     session.cwd = cwd;
   }
 
+  const agent = readOptionalString(record.agent);
+  if (agent) {
+    session.agent = agent;
+  }
+  const resume = readOptionalString(record.resume);
+  if (resume) {
+    session.resume = resume;
+  }
+  if (record.bypassPermissions !== undefined) {
+    session.bypassPermissions = Boolean(record.bypassPermissions);
+  }
+
   if (command) {
     if (record.uiMode === 'native') {
-      throw new Error('session.uiMode native is not supported for custom-command sessions');
+      throw new ApiValidationError('session.uiMode native is not supported for custom-command sessions');
     }
     session.command = command;
     return session;
   }
 
-  session.agent = readOptionalString(record.agent) ?? 'codex';
-  session.resume = readOptionalString(record.resume);
+  session.agent ??= 'codex';
   session.bypassPermissions = Boolean(record.bypassPermissions);
   const uiMode = readOptionalString(record.uiMode);
   if (uiMode !== undefined) {
     if (uiMode !== 'terminal' && uiMode !== 'native') {
-      throw new Error('session.uiMode must be terminal or native');
+      throw new ApiValidationError('session.uiMode must be terminal or native');
     }
     if (uiMode === 'native' && !sessionSupportsNativeUiMode({ agent: session.agent })) {
-      throw new Error(`session.uiMode native is not supported for agent ${session.agent}`);
+      throw new ApiValidationError(`session.uiMode native is not supported for agent ${session.agent}`);
     }
     session.uiMode = uiMode;
   }
@@ -236,7 +247,7 @@ function readLayoutBody(value: unknown): DeskGroupLayout | undefined {
     return undefined;
   }
   if (!['1x1', '2x2', '3x3', '4x4', 'custom', 'linear'].includes(kind)) {
-    throw new Error('layout.kind must be 1x1, 2x2, 3x3, 4x4, custom, or linear');
+    throw new ApiValidationError('layout.kind must be 1x1, 2x2, 3x3, 4x4, custom, or linear');
   }
   return {
     kind: kind as DeskLayoutKind,
@@ -274,24 +285,30 @@ function readLayoutSizesBody(value: unknown): DeskLayoutSizes | undefined {
   return sizes;
 }
 
-function runManagedPlan(
+export interface ManagedPlanResult {
+  exitCode: number;
+  error?: string;
+}
+
+export function runManagedPlan(
   plan: TmuxPlanAction[],
   settings: DeskSettings | undefined,
   managedAgentLsp: ManagedAgentLsp,
-  nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec
-): number {
+  nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec,
+  start: typeof startSession = startSession
+): ManagedPlanResult {
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = startSession(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
+    const started = start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
-      return 1;
+      return { exitCode: 1, error: started.error ?? `tmux start failed for ${action.session.tmuxSession}` };
     }
   }
-  return 0;
+  return { exitCode: 0 };
 }
 
 export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute {
@@ -303,7 +320,10 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const desk = loadDesk({});
       const plan = planDeskUp(desk.sessions);
       const settings = readManifestFile(resolveManifestPath()).settings;
-      const exitCode = dryRun ? runPlan(plan, true) : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
+      const result = dryRun
+        ? { exitCode: runPlan(plan, true) }
+        : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
+      const { exitCode } = result;
       if (!dryRun && exitCode === 0) {
         for (const action of plan) {
           if (action.type === 'start') {
@@ -313,6 +333,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       }
       sendJson(res, exitCode === 0 ? 200 : 500, {
         exitCode,
+        ...('error' in result && result.error ? { error: result.error } : {}),
         actions: plan.map((action) => ({
           type: action.type,
           session: action.session.name,

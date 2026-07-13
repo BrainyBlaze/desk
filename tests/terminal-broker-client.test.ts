@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TerminalBrokerClient, type BrokerSocket } from '../src/web/terminalBrokerClient.js';
 import type { TerminalBrokerServerFrame } from '../src/core/terminalBrokerProtocol.js';
 
 class FakeSocket implements BrokerSocket {
   readyState = 0; // CONNECTING
   sent: string[] = [];
+  /** When true, close() defers the 'close' event (models a real browser
+   * WebSocket, whose close is async — the event fires a task later, after the
+   * caller may have replaced this.socket). Flush with fireDeferredClose(). */
+  deferredClose = false;
+  private pendingClose = false;
   private handlers: Record<string, ((e: any) => void)[]> = {};
   addEventListener(type: string, handler: (e: any) => void): void {
     (this.handlers[type] ??= []).push(handler);
@@ -13,6 +18,17 @@ class FakeSocket implements BrokerSocket {
     this.sent.push(data);
   }
   close(): void {
+    if (this.deferredClose) {
+      this.readyState = 2; // CLOSING
+      this.pendingClose = true;
+      return;
+    }
+    this.fire('close', {});
+  }
+  fireDeferredClose(): void {
+    if (!this.pendingClose) return;
+    this.pendingClose = false;
+    this.readyState = 3; // CLOSED
     this.fire('close', {});
   }
   open(): void {
@@ -138,6 +154,89 @@ describe('TerminalBrokerClient', () => {
     // pendingResize was cleared after the first send, so a clean reconnect with
     // no NEW resize must not duplicate it; the subscribe carries current state.
     expect(latest.parsedSent().some((f) => f.type === 'subscribe' && f.surfaceId === 's1')).toBe(true);
+  });
+
+  it('does not wedge when Reconnect fires while the socket is still CONNECTING (wake-from-sleep)', () => {
+    const { client, sockets } = makeClient();
+    client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
+    expect(sockets).toHaveLength(1);
+    // Socket 0 is CONNECTING (never opened) — the wake-from-sleep window where SYN
+    // retries hold it open for seconds. Model the real browser: close() is async.
+    sockets[0].deferredClose = true;
+    // online + visibilitychange + pulse recovery all call forceReconnect here.
+    client.forceReconnect();
+    // A NEW connection attempt MUST be made. Before the fix, `connecting` stayed
+    // true (the orphaned socket's async close bails on the stale-socket guard and
+    // never resets it), so ensureConnection early-returned — permanently wedged,
+    // and the Reconnect button became a no-op.
+    expect(sockets).toHaveLength(2);
+    // The orphaned socket's async close now arrives; it must not corrupt the new one.
+    sockets[0].fireDeferredClose();
+    sockets[1].open();
+    const sub = sockets[1].parsedSent().find((f) => f.type === 'subscribe' && f.surfaceId === 's1');
+    expect(sub).toBeTruthy();
+    // Genuinely reconnected: live output flows again.
+    const out: string[] = [];
+    client.subscribe('s1', 'sess', true, { onOutput: (d) => out.push(d), onSnapshot: () => {} });
+    sockets[1].emit({ type: 'output', session: 'sess', data: 'ok' });
+    expect(out).toEqual(['ok']);
+  });
+
+  it('replays the current connection state to a late subscriber (down → overlay, not silent input loss)', () => {
+    const { client, sockets } = makeClient();
+    const conn: boolean[] = [];
+    // Subscribe while socket 0 is still CONNECTING (connected === false).
+    client.subscribe('s1', 'sess', true, {
+      onOutput: () => {},
+      onSnapshot: () => {},
+      onConnectionChange: (up) => conn.push(up)
+    });
+    // The late subscriber must immediately learn it is disconnected — otherwise
+    // the cell renders alive and silently swallows keystrokes.
+    expect(conn[0]).toBe(false);
+    sockets[0].open();
+    expect(conn.at(-1)).toBe(true);
+    // A new surface subscribing while connected reports true right away.
+    const conn2: boolean[] = [];
+    client.subscribe('s2', 'sess', true, {
+      onOutput: () => {},
+      onSnapshot: () => {},
+      onConnectionChange: (up) => conn2.push(up)
+    });
+    expect(conn2).toEqual([true]);
+  });
+
+  it('reconnects after the heartbeat timeout with no frames (half-open socket)', () => {
+    vi.useFakeTimers();
+    try {
+      const { client, sockets } = makeClient();
+      client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
+      sockets[0].open(); // connected; half-open watchdog armed
+      expect(sockets).toHaveLength(1);
+      // A half-open TCP delivers no frames; the socket still reports OPEN. Advance
+      // past the 30s timeout (the watchdog checks every 15s).
+      vi.advanceTimersByTime(31_000);
+      expect(sockets.length).toBeGreaterThan(1); // watchdog forceReconnected
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a heartbeat frame keeps the socket alive (no spurious reconnect)', () => {
+    vi.useFakeTimers();
+    try {
+      const { client, sockets } = makeClient();
+      client.subscribe('s1', 'sess', true, { onOutput: () => {}, onSnapshot: () => {} });
+      sockets[0].open();
+      // A beacon every 15s keeps lastFrameAt fresh across a full minute.
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 15_000) {
+        vi.advanceTimersByTime(15_000);
+        sockets[0].emit({ type: 'heartbeat', at: Date.now() });
+      }
+      expect(sockets).toHaveLength(1); // never reconnected
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('tears down the socket when the last surface unsubscribes', () => {

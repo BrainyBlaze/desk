@@ -85,6 +85,24 @@ function createBroker(
 }
 
 describe('TerminalBroker', () => {
+  it('broadcasts a timestamped heartbeat to every connected client', () => {
+    const { broker } = createBroker();
+    const first = new FakeTransport();
+    const second = new FakeTransport();
+    broker.addClient(first);
+    broker.addClient(second);
+    const before = Date.now();
+
+    broker.heartbeat();
+
+    for (const client of [first, second]) {
+      const heartbeat = client.sent.find((frame: any) => frame.type === 'heartbeat') as
+        | { type: 'heartbeat'; at: number }
+        | undefined;
+      expect(heartbeat?.at).toBeGreaterThanOrEqual(before);
+    }
+  });
+
   it('builds self-contained capture snapshots and falls back to the output ring', () => {
     expect(
       createTerminalBrokerSnapshot(
@@ -148,7 +166,9 @@ describe('TerminalBroker', () => {
       broker.addClient(client);
       broker.handleFrame(client, { type: 'subscribe', session: 'agentdesk-a', surfaceId: 'cell-a', visible: true });
 
-      ptys.get('agentdesk-a')?.emit('\x1b]9;permission prompt\x07ready');
+      ptys.get('agentdesk-a')?.emit('\x1b]9;permission ');
+      expect(signals).toEqual([]);
+      ptys.get('agentdesk-a')?.emit('prompt\x07ready');
 
       expect(signals).toEqual([{ session: 'agentdesk-a', kind: 'approval-requested' }]);
       expect(attentionTracker.snapshot()).toHaveProperty('agentdesk-a');
@@ -158,7 +178,8 @@ describe('TerminalBroker', () => {
         message: 'permission prompt',
         read: false
       });
-      expect(client.sent).toContainEqual({ type: 'output', session: 'agentdesk-a', data: '\x1b]9;permission prompt\x07ready' });
+      expect(client.sent).toContainEqual({ type: 'output', session: 'agentdesk-a', data: '\x1b]9;permission ' });
+      expect(client.sent).toContainEqual({ type: 'output', session: 'agentdesk-a', data: 'prompt\x07ready' });
     } finally {
       unsubscribe();
       attentionTracker.clearEvents();
