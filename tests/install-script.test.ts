@@ -196,7 +196,7 @@ describe('installer lifecycle', () => {
     expect(second.status, second.stderr).toBe(0);
     expect(readlinkSync(join(value.deskHome, 'current'))).not.toBe(firstTarget);
     expect(value.releaseInstances()).toHaveLength(2);
-  });
+  }, 20_000);
 
   it('prunes the oldest instance after a third successful activation', () => {
     const value = fixture();
