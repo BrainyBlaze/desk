@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 /**
  * Durable adapter-host auth (spec: docs/native-ui-mode-spec.md §4).
  *
- * Tokens must be verifiable after a desk-server restart, so they derive from a
+ * Tokens must be verifiable after a Desk server restart, so they derive from a
  * persistent secret instead of in-memory state: token = HMAC-SHA256(secret,
  * tmuxSession + agent). Stable per session by design — the loopback socket
  * gates session identity, not replay, and the hello pid distinguishes spawns.

@@ -1,184 +1,177 @@
 ---
 title: "Getting started"
-description: "Install Desk, start the local server, and launch your first durable agent session."
+description: "Install the complete Desk CLI, choose a server mode, and launch your first durable agent session."
 ---
 
-This guide takes you from an empty machine to a running Desk workspace with one
-managed agent session, using the prebuilt `desk-server` binary.
-
-<Info>
-Prefer a source checkout — it installs the multi-command `desk` CLI
-(`desk serve`, `desk up`, `desk init`, …). Jump to [Build from
-source](#build-from-source). The prebuilt `desk-server` command only starts the
-server; drive the rest from the UI.
-</Info>
+The curl installer builds a versioned Desk release and makes the complete `desk`
+CLI immediately available on your existing `PATH`.
 
 ## Requirements
 
-The binary is self-contained — UI and language servers embedded, Bun-native
-terminals — so the runtime needs only:
+You need a working `curl` with TLS trust to download the installer. Supported
+release targets are:
 
-- tmux
-- curl (to run the installer)
+- macOS x64 and arm64
+- glibc Linux x64 and arm64, including WSL
 
-Optional tools unlock additional features:
+Native Windows is unsupported. Alpine and other musl systems can provision host
+packages, but installation stops before activation because Desk does not yet
+publish a compatible Node toolchain.
 
-- `codex`, `claude`, or `opencode` for managed agent sessions
-- `gh` for GitHub repository, pull request, and Projects features
-- `rg` for fast file search in the editor
-- `nvidia-smi` or `intel_gpu_top` for GPU telemetry
+The installer detects, installs, and rechecks the required host layer: CA
+certificates, archive and checksum tools, tmux 3.2+, Git 2.30+, Python 3.6+, make,
+and a working C++ compiler. It maintains its own checksum-verified Node 22.23.1,
+npm 10.9.8, and Bun 1.3.14 under the Desk install root. It does not replace your
+global runtimes.
 
-## Five-minute setup
+Agent CLIs (`codex`, `claude`, and `opencode`), `gh`, and GPU telemetry commands
+are optional. Install only the integrations you intend to use.
+
+## Install and start Desk
 
 <Steps>
-  <Step title="Install Desk">
+  <Step title="Install the CLI">
     ```bash
     curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+    command -v desk
+    desk help
     ```
 
-    The installer downloads the release binary for your platform, verifies its
-    checksum when a matching release checksum and a SHA-256 tool are available,
-    and installs it as `desk-server` (in `/usr/local/bin` or `~/.local/bin`).
-
-    <Check>
-    `command -v desk-server` prints the install path.
-    </Check>
+    The installer refuses a launcher directory outside `PATH` and refuses to
+    overwrite an unidentified `desk` command. A successful install therefore
+    makes `curl ... | bash && desk serve` valid in the invoking shell.
   </Step>
 
-  <Step title="Authenticate external tools">
-    Sign in through each tool's own CLI:
-
+  <Step title="Start the default server">
     ```bash
-    codex
-    claude
-    opencode
-    gh auth login
-    gh auth refresh -s project
+    desk serve
     ```
 
-    Use only the tools you plan to launch. Desk degrades subsystem-by-subsystem
-    when optional tools are absent.
-  </Step>
+    Plain `serve` launches the private Bun runtime and embedded UI. It binds to
+    `127.0.0.1:5173` by default.
 
-  <Step title="Start the server">
     ```bash
-    desk-server
+    desk serve --host 127.0.0.1 --port 5173
     ```
-
-    `desk-server` starts the standalone server and prints the local URL. By
-    default it binds to `127.0.0.1:5173`; override with `DESK_HOST` /
-    `DESK_PORT`.
 
     <Check>
-    Open `http://127.0.0.1:5173` and confirm the Desk UI loads.
+    Open `http://127.0.0.1:5173` and confirm that the Desk UI loads.
     </Check>
   </Step>
 
   <Step title="Create your first session">
-    In the UI, open **Add session** from the agents sidebar and choose:
-
-    - session name: `first-codex`
-    - agent: `codex`, `claude`, `opencode`, or `bash`
-    - working directory: the repository you want the agent to use
-    - permission bypass: enabled for a YOLO-style managed agent, disabled when
-      you want tool prompts
-
-    Desk writes the session to `~/.config/desk/desk.yml`, creates a
-    deterministic tmux session, and attaches the cell — Codex, Claude, and
-    OpenCode open as a native chat surface, bash and custom commands as a
-    browser terminal.
-
-    <Check>
-    The cell should show the agent's chat composer (or the shell TUI for
-    bash), and `tmux ls` should list a matching session.
-    </Check>
+    In the UI, open **Add session** and choose a session name, agent or command,
+    and repository directory. Desk writes the session to
+    `~/.config/desk/desk.yml` and owns its tmux lifetime.
   </Step>
 </Steps>
 
-## Build from source
+## Choose the Vite development mode
 
-A source checkout gives you the full **`desk` CLI** — `desk serve`, `desk up`,
-`desk init`, `desk config`, `desk status`, and more — plus the Vite dev runtime.
-You need **Node.js 20+**, **npm**, **tmux**, and a C/C++ toolchain for `node-pty`
-(`build-essential` / Xcode CLT):
+Use Vite only when you are developing Desk or need source-level UI behavior:
 
 ```bash
-git clone https://github.com/BrainyBlaze/desk.git
-cd desk
-npm ci && npm run build && npm link
-desk serve            # Vite runtime + UI on http://127.0.0.1:5173
+desk serve --dev
 ```
 
-`desk serve` runs the same backend as the binary, through a Vite server. See
-[Distribution and deployment](/distribution-deployment) for how the two runtimes
-differ, and [Run Desk securely](/guide-deploy-securely) before exposing either.
+The modes are explicit and fail closed. Plain `desk serve` never falls back to
+Vite, and `desk serve --dev` never falls back to Bun. Host and port precedence is:
+flags, then `DESK_HOST` / `DESK_PORT`, then `127.0.0.1:5173`.
 
-Want a specific prebuilt build instead of the installer? Download an artifact
-(`desk-server-linux-x64`, `desk-server-linux-arm64`, `desk-server-darwin-arm64`)
-from a [release](https://github.com/BrainyBlaze/desk/releases), `chmod +x`, and
-run it directly:
+## Authenticate optional integrations
+
+Sign in through each tool's own CLI:
 
 ```bash
-DESK_HOST=127.0.0.1 DESK_PORT=5173 ./desk-server-linux-x64
+codex
+claude
+opencode
+gh auth login
+gh auth refresh -s project
 ```
 
-## Bring a configured fleet up
+Missing optional tools disable only their related subsystem.
 
-When `desk.yml` contains multiple sessions, use **Up** in the UI. From a source
-checkout you can also drive it from the CLI:
+## Operate a configured fleet
 
 ```bash
 desk up --dry-run
 desk up
-desk status
-```
-
-`desk up` starts missing configured sessions without replacing running tmux
-sessions. Use [Create an agent fleet](/guide-create-agent-fleet) to build a
-larger manifest intentionally.
-
-## Useful CLI commands (source checkout)
-
-The multi-command `desk` CLI ships with a source checkout (`npm link`):
-
-```bash
-desk help
-desk config
-desk up --dry-run
 desk status
 desk attach <name|tmux-session|resume-id>
 desk capture <name|tmux-session|resume-id> --lines 200
 desk hooks install
 ```
 
-`desk add` writes a manifest session from the CLI. For managed agent sessions
-it requires a real `--resume` id today. Use the Add Session modal or edit
-`desk.yml` when you want Desk to start fresh and harvest the id later.
+`desk up` starts missing configured sessions without replacing running tmux
+sessions.
+
+## Upgrade, reinstall, or downgrade
+
+Rerun the installer to resolve and install the latest release:
 
 ```bash
-desk add --group main --name api-codex --cwd ~/projects/product --agent codex --resume 00000000-0000-0000-0000-000000000000
-desk add --group main --name dev-server --cwd ~/projects/product --command "npm run dev"
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
 ```
+
+Pin a version for an explicit install or downgrade:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
+  | DESK_VERSION=v0.3.0 bash
+```
+
+A same-version run creates and verifies a new immutable instance instead of
+modifying the active one. After activation, Desk retains the current and previous
+instances for rollback.
+
+## Uninstall the managed application
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
+  | bash -s -- --uninstall
+```
+
+Uninstall verifies Desk ownership before removing the launcher, releases,
+toolchains, and install metadata. It preserves `~/.config/desk`, projects, tmux
+sessions, credentials, and optional host tools. To remove configuration too,
+inspect it first and then delete it explicitly:
+
+```bash
+rm -rf ~/.config/desk
+```
+
+## Build from source
+
+Contributors should use the same pins as CI: Node 22.23.1, npm 10.9.8, and Bun
+1.3.14.
+
+```bash
+git clone https://github.com/BrainyBlaze/desk.git
+cd desk
+npm ci
+npm run build:distribution
+npm link
+desk serve --dev
+```
+
+See [Distribution and deployment](/distribution-deployment) for the versioned
+layout and release assets, and [Run Desk securely](/guide-deploy-securely) before
+changing the bind address.
 
 ## Next steps
 
 <Columns cols={2}>
   <Card title="Model a fleet" icon="layout-grid" href="/guide-create-agent-fleet">
-    Configure projects, groups, sessions, layouts, permissions, and startup
-    behavior.
+    Configure projects, groups, sessions, layouts, permissions, and startup.
   </Card>
-
   <Card title="Use channels" icon="messages-square" href="/guide-channels-collaboration">
-    Add agents to rooms, mention them, read replies, and inspect delivery
-    diagnostics.
+    Add agents to rooms, mention them, and inspect delivery diagnostics.
   </Card>
-
   <Card title="Understand configuration" icon="file-cog" href="/configuration">
-    Learn the full `desk.yml` manifest schema.
+    Learn the `desk.yml` manifest schema.
   </Card>
-
   <Card title="Troubleshoot setup" icon="wrench" href="/troubleshooting">
-    Fix missing tmux sessions, absent agent CLIs, GitHub auth, LSP, and channel
-    delivery issues.
+    Diagnose installer, PATH, server, and session failures.
   </Card>
 </Columns>

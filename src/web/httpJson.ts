@@ -1,4 +1,4 @@
-// Shared browser->desk-server JSON response reader.
+// Shared browser-to-Desk server JSON response reader.
 //
 // Reads the body as text FIRST, then parses defensively, and only then branches
 // on response.ok. This avoids the historical bug where `await response.json()`

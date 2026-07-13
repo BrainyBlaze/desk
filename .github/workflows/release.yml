@@ -1,20 +1,17 @@
 name: release
 
-# Build the standalone Bun binary for each platform and publish it to a GitHub
-# Release. Triggered by pushing a package version tag; the tag must match
-# package.json "version". `workflow_dispatch` builds the matrix without releasing
-# (artifacts only) so the build can be exercised on demand.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-  # Smoke-build the matrix on PRs that touch the build inputs (no release — the
-  # release job is gated to tags). Keeps the release build from breaking unnoticed.
   pull_request:
     paths:
-      - 'src/**'
+      - 'install.sh'
+      - 'scripts/create-release-assets.mjs'
+      - 'scripts/distribution/**'
       - 'scripts/build-standalone.ts'
-      - 'scripts/make-assets.mjs'
+      - 'scripts/smoke-serve-modes.mjs'
+      - 'src/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/release.yml'
@@ -23,81 +20,72 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, target: linux-x64 }
-          - { os: ubuntu-24.04-arm, target: linux-arm64 }
-          - { os: macos-14, target: darwin-arm64 }
+  assets-and-install:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22.23.1
           cache: npm
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      # node-pty builds its native addon from source on Linux (python3 + a
-      # toolchain are preinstalled on the runners); macOS uses shipped prebuilds.
+      - run: sudo apt-get update && sudo apt-get install -y ca-certificates curl tar gzip coreutils tmux git python3 make g++
       - run: npm ci
-
-      # vite build (UI) -> make-assets (tar UI + LSP) -> bun build --compile.
-      # The UI bundle can overflow node's ~2 GB default heap.
-      - name: Build standalone binary
-        run: npm run build:standalone
-        env:
-          NODE_OPTIONS: --max-old-space-size=4096
-
-      - name: Stage artifact
+      - name: Resolve and verify release version
+        id: version
+        shell: bash
         run: |
-          mkdir -p out
-          mv desk-server "out/desk-server-${{ matrix.target }}"
-
+          package_version="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$GITHUB_REF_NAME" != "$package_version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json $package_version"
+            exit 1
+          fi
+          echo "value=$package_version" >> "$GITHUB_OUTPUT"
+      - name: Generate source-backed release assets
+        run: npm run release:assets -- --version "${{ steps.version.outputs.value }}" --out-dir "$RUNNER_TEMP/release-assets"
+      - name: Verify release checksums
+        run: (cd "$RUNNER_TEMP/release-assets" && sha256sum -c SHA256SUMS)
+      - name: Install and smoke the published contract
+        shell: bash
+        run: |
+          root=$(mktemp -d "$RUNNER_TEMP/desk-release-install.XXXXXX")
+          trap 'rm -rf "$root"' EXIT
+          mkdir -p "$root/bin" "$root/home" "$root/user-home" "$root/outside"
+          export HOME="$root/user-home"
+          export PATH="$root/bin:$PATH"
+          export DESK_HOME="$root/home"
+          export DESK_BIN_DIR="$root/bin"
+          export DESK_VERSION="${{ steps.version.outputs.value }}"
+          export DESK_RELEASE_BASE_URL="file://$RUNNER_TEMP/release-assets"
+          bash install.sh
+          (cd "$root/outside" && "$root/bin/desk" help)
+          node scripts/smoke-serve-modes.mjs --desk "$root/bin/desk" --cwd "$root/outside"
+          bash install.sh --uninstall
+          test ! -e "$root/bin/desk"
+          test ! -e "$root/home"
       - uses: actions/upload-artifact@v4
         with:
-          name: desk-server-${{ matrix.target }}
-          path: out/desk-server-${{ matrix.target }}
+          name: desk-release-assets
+          path: |
+            ${{ runner.temp }}/release-assets/desk-${{ steps.version.outputs.value }}-source.tar.gz
+            ${{ runner.temp }}/release-assets/desk-install-manifest.json
+            ${{ runner.temp }}/release-assets/SHA256SUMS
           if-no-files-found: error
 
-  release:
-    name: publish release
-    needs: build
+  publish:
+    needs: assets-and-install
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Verify tag matches package.json version
-        run: |
-          pkg="v$(node -p "require('./package.json').version")"
-          echo "package.json=$pkg  tag=$GITHUB_REF_NAME"
-          if [ "$pkg" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match package.json $pkg"
-            exit 1
-          fi
-
       - uses: actions/download-artifact@v4
         with:
-          path: dist-bins
-          merge-multiple: true
-
-      - name: Checksums
-        run: |
-          cd dist-bins
-          ls -la
-          sha256sum desk-server-* > SHA256SUMS
-          cat SHA256SUMS
-
+          name: desk-release-assets
+          path: release-assets
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -105,5 +93,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist-bins/desk-server-*
-            dist-bins/SHA256SUMS
+            release-assets/desk-${{ needs.assets-and-install.outputs.version }}-source.tar.gz
+            release-assets/desk-install-manifest.json
+            release-assets/SHA256SUMS

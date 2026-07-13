@@ -2,10 +2,14 @@
 
 ## Unreleased
 
-- **Standalone command contract.** The release installer now installs the
-  server-only binary as `desk-server`, preserving `desk` for the full source
-  CLI. Unsupported standalone arguments fail before server startup, and the
-  installer warns without modifying an existing legacy `desk` executable.
+- **Source-backed full CLI distribution.** The curl installer now provisions
+  required macOS/Linux host capabilities, verifies release and toolchain
+  checksums, builds an immutable source release with pinned Node 22.23.1/npm
+  10.9.8 and Bun 1.3.14, and atomically installs the complete `desk` CLI. Plain
+  `desk serve` runs the private Bun component; `desk serve --dev` opts into Vite,
+  with no fallback. Releases publish source, install-manifest, and checksum
+  assets. Upgrade, explicit downgrade, same-version repair, retention, rollback,
+  PATH ownership, and uninstall are lock-protected and fail closed.
 - **Terminal transport cleanup.** Removed the retired direct `/ws/terminal`
   bridge; the multiplexed `/ws/terminal-broker` is now the only terminal
   WebSocket. Global tmux mouse and OSC-passthrough policy is applied through one

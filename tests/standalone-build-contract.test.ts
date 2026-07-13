@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 const FILE_LOCK = fileURLToPath(new URL('../src/shared/fileLock.ts', import.meta.url));
 const STANDALONE_ENTRY = fileURLToPath(new URL('../src/server/standalone-entry.ts', import.meta.url));
+const BUILD_STANDALONE = fileURLToPath(new URL('../scripts/build-standalone.ts', import.meta.url));
+const SMOKE_SERVE_MODES = fileURLToPath(new URL('../scripts/smoke-serve-modes.mjs', import.meta.url));
 
 describe('standalone build dependency contract', () => {
   it('loads proper-lockfile through a static runtime import', () => {
@@ -32,7 +34,7 @@ describe('standalone build dependency contract', () => {
     expect(text).not.toContain("require('proper-lockfile')");
   });
 
-  it('keeps server runtime imports behind standalone argument validation', () => {
+  it('dynamically loads the private runtime and starts it immediately', () => {
     const text = readFileSync(STANDALONE_ENTRY, 'utf8');
     const source = ts.createSourceFile(STANDALONE_ENTRY, text, ts.ScriptTarget.Latest, true);
     const staticImports = source.statements.flatMap((statement) =>
@@ -45,5 +47,26 @@ describe('standalone build dependency contract', () => {
     expect(staticImports).not.toContain('./embeddedPlugins.js');
     expect(text).toContain("import('./standalone.js')");
     expect(text).toContain("import('./embeddedPlugins.js')");
+    expect(text).toContain('await startStandalone({ plugins: embeddedPlugins });');
+    expect(text).not.toContain('standaloneCommand');
+    expect(text).not.toContain('runStandaloneCommand');
+    expect(text).not.toContain('process.argv');
+  });
+
+  it('emits the compiled runtime only at the private libexec path', () => {
+    const text = readFileSync(BUILD_STANDALONE, 'utf8');
+
+    expect(text).toContain("resolve(root, 'libexec', 'desk-standalone')");
+    expect(text).not.toContain(`resolve(root, 'desk-${'server'}')`);
+  });
+
+  it('isolates smoke tmux state and never kills an unverified descendant pid', () => {
+    const text = readFileSync(SMOKE_SERVE_MODES, 'utf8');
+
+    expect(text).toContain('TMUX_TMPDIR');
+    expect(text).toContain('HOME: smokeHome');
+    expect(text).toContain('delete childEnvironment.TMUX');
+    expect(text).toContain('delete childEnvironment.DESK_PLUGINS');
+    expect(text).not.toContain("process.kill(pid, 'SIGKILL')");
   });
 });

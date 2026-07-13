@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import {
   addSessionToManifest,
   createEmptyManifest,
@@ -23,6 +22,7 @@ import {
   tmuxSpawnError
 } from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
+import { createServeLaunch, findPackageRoot, parseServeOptions, runServeLaunch } from './serveCommand.js';
 import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
@@ -32,7 +32,10 @@ const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat fo
 
 Usage: desk <command> [options]
 
-  serve [--port 5173] [--host 127.0.0.1]    Start the Vite dev server + UI.
+  desk serve [--host HOST] [--port PORT]
+      Start the private standalone runtime.
+  desk serve --dev [--host HOST] [--port PORT]
+      Start the Vite dev server + UI.
   up [--dry-run]                            Start every missing session
   status                                    Show which sessions exist
   init                                      Create an empty user config
@@ -45,44 +48,9 @@ Usage: desk <command> [options]
   config                                    Print the active config path
   help                                      Show this help
 
+Serve host/port precedence: flags > DESK_HOST/DESK_PORT > 127.0.0.1/5173.
+
 Quick start: desk serve   then open the printed URL.`;
-
-/** Locate the installed package root (holds package.json + vite.config + node_modules). */
-function findPackageRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (let depth = 0; depth < 8; depth += 1) {
-    // The package root holds package.json plus EITHER the dev config (a source
-    // checkout) OR the built CLI (a prebuilt artifact ships dist/ + node_modules
-    // but no vite.config.ts/src).
-    if (
-      existsSync(join(dir, 'package.json')) &&
-      (existsSync(join(dir, 'vite.config.ts')) || existsSync(join(dir, 'dist', 'cli', 'main.js')))
-    ) {
-      return dir;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      break;
-    }
-    dir = parent;
-  }
-  throw new Error('cannot locate the desk package root (reinstall desk)');
-}
-
-function serve(options: Map<string, string>): number {
-  const root = findPackageRoot();
-  const host = options.get('host') ?? '127.0.0.1';
-  const port = options.get('port') ?? '5173';
-
-  // The Vite dev server (serves the client source with HMR).
-  const viteBin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
-  if (!existsSync(viteBin)) {
-    throw new Error(`vite is not installed in ${root}; run "npm install" there first`);
-  }
-  console.log(`desk serving (dev) on http://${host}:${port}  (Ctrl-C to stop)`);
-  const result = spawnSync(viteBin, ['--host', host, '--port', port], { cwd: root, stdio: 'inherit' });
-  return result.status ?? 0;
-}
 
 interface ParsedArgs {
   command: string;
@@ -122,6 +90,22 @@ const COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
   ['capture', new Set(['--file', '-f', '--lines'])]
 ]);
 
+async function runCli(argv: string[]): Promise<number> {
+  if ((argv[0] ?? 'help') !== 'serve') {
+    return main(argv);
+  }
+
+  try {
+    const options = parseServeOptions(argv.slice(1));
+    const launch = createServeLaunch(findPackageRoot(import.meta.url), options);
+    console.log(launch.label);
+    return await runServeLaunch(launch);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 export function main(argv: string[]): number {
   try {
     const args = parseArgs(argv);
@@ -131,10 +115,6 @@ export function main(argv: string[]): number {
     if (args.command === 'help' || args.command === '--help' || args.command === '-h') {
       console.log(HELP);
       return 0;
-    }
-
-    if (args.command === 'serve') {
-      return serve(args.options);
     }
 
     if (args.command === 'hooks') {
@@ -254,6 +234,12 @@ function parseArgs(argv: string[]): ParsedArgs {
   let target: string | undefined;
   let lines = 200;
   const options = new Map<string, string>();
+  const valueOptions =
+    command === 'add'
+      ? new Set(['group', 'group-label', 'name', 'cwd', 'command', 'agent', 'resume'])
+      : command === 'hooks'
+        ? new Set(['home'])
+        : new Set<string>();
 
   while (args.length > 0) {
     const next = args.shift();
@@ -272,7 +258,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     } else if (next === '--lines') {
       lines = Number.parseInt(requireOptionValue(next, args.shift()), 10);
     } else if (next?.startsWith('--')) {
-      options.set(next.slice(2), requireOptionValue(next, args.shift()));
+      const name = next.slice(2);
+      if (!valueOptions.has(name)) {
+        throw new Error(`unknown option ${next}`);
+      }
+      options.set(name, requireOptionValue(next, args.shift()));
     } else if (next && !target) {
       target = next;
     } else if (next) {
@@ -326,15 +316,21 @@ if (isCliEntry) {
   if (cliArgs[0] === 'channels') {
     process.exitCode = await runChannelsCli(cliArgs.slice(1));
   } else if (cliArgs[0] === 'agent-host') {
-    // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
-    // fatal error, or signal — top-level await is the natural exit gate.
-    try {
-      await runAgentHostFromEnv();
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
+    const argument = cliArgs[1];
+    if (argument !== undefined) {
+      console.error(argument.startsWith('--') ? `unknown option ${argument}` : `unexpected argument ${argument}`);
       process.exitCode = 1;
+    } else {
+      // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
+      // fatal error, or signal — top-level await is the natural exit gate.
+      try {
+        await runAgentHostFromEnv();
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
+      }
     }
   } else {
-    process.exitCode = main(cliArgs);
+    process.exitCode = await runCli(cliArgs);
   }
 }

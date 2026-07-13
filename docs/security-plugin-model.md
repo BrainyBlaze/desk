@@ -99,7 +99,9 @@ export default {
 };
 ```
 
-The typed helper `defineDeskPlugin` exists in Desk's source tree at `src/server/plugin.ts` for embedders who build from source, but the published package exposes only the CLI binaries.
+The typed helper `defineDeskPlugin` exists at `src/server/plugin.ts`. Source-backed
+installs retain the application source and locked dependencies, so local
+embedders can build against the same release tree.
 
 ## Runtime plugins
 
@@ -126,7 +128,6 @@ stock Desk server safe to expose publicly.
 It covers:
 
 - terminal broker sockets
-- legacy terminal sockets
 - filesystem watch sockets
 - LSP sockets
 
@@ -134,9 +135,12 @@ All plugin guards must allow the request. If any guard rejects, Desk closes the 
 
 ## Embedded plugins
 
-The standalone build has a build-time seam for embedding plugins directly into a downstream binary. Desk's own binary embeds no plugins.
+The private Bun build has a build-time seam for embedding plugins directly into a
+downstream runtime. Desk's own runtime embeds no plugins.
 
-Runtime `DESK_PLUGINS` still works in standalone mode. The standalone server loads runtime plugins first, then appends any embedded plugins supplied by the build.
+Runtime `DESK_PLUGINS` works with both `desk serve` and `desk serve --dev`. The
+private Bun runtime loads runtime plugins first, then appends any embedded
+plugins supplied by the build.
 
 ## Error surfaces
 

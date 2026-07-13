@@ -1,101 +1,80 @@
 # syntax=docker/dockerfile:1
-#
-# Desk — STANDALONE (Bun single-binary) image. Based on ./Dockerfile.
-#
-# The runtime ships NO Node.js. `npm run build:standalone` compiles one
-# self-contained `desk-server` binary that embeds the Bun runtime, the Vite UI
-# bundle, node-pty's pty.node, and the TypeScript/Python language servers. The
-# runtime stage therefore carries only the EXTERNAL programs desk shells out to —
-# tmux, git, gh, ripgrep, and the agent CLIs (Codex, Claude Code).
-#
-# Build:  docker build -t desk:standalone .
-# Run:    docker run --rm -p 5173:5173 desk:standalone   # http://127.0.0.1:5173
 
-##################################
-# Stage 1 — build + compile binary
-##################################
-FROM node:22-bookworm-slim AS builder
+FROM node:22.23.1-bookworm-slim AS builder
 
-# node-pty native addon (python3 + toolchain) + ca-certificates for the bun
-# installer's HTTPS download (the slim base ships none).
+ARG TARGETARCH
+ARG BUN_VERSION=1.3.14
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 make g++ curl unzip ca-certificates \
+      ca-certificates curl unzip python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Bun provides `bun build --compile`.
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) asset=bun-linux-x64-baseline.zip; sha=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7 ;; \
+      arm64) asset=bun-linux-aarch64.zip; sha=a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b ;; \
+      *) printf 'unsupported Docker architecture: %s\n' "$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' \
+      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${asset}" \
+      -o /tmp/bun.zip; \
+    printf '%s  %s\n' "$sha" /tmp/bun.zip | sha256sum -c -; \
+    unzip -q /tmp/bun.zip -d /tmp/bun; \
+    install -m 0755 "/tmp/bun/${asset%.zip}/bun" /usr/local/bin/bun; \
+    bun --version | grep -Fx "$BUN_VERSION"; \
+    rm -rf /tmp/bun /tmp/bun.zip
 
-WORKDIR /app
+WORKDIR /opt/desk
 COPY package.json package-lock.json ./
 RUN npm ci
-
 COPY . .
+RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build:distribution \
+    && test -x dist/cli/main.js \
+    && test -x libexec/desk-standalone
 
-# build:standalone = vite build (UI) → make-assets (tar UI+LSP) → bun --compile.
-# The UI build can overflow node's ~2 GB default heap.
-RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build:standalone \
-    && test -s desk-server
+FROM node:22.23.1-bookworm-slim AS runtime
 
-##################################
-# Stage 2 — runtime image (NO node)
-##################################
-FROM debian:bookworm-slim AS runtime
-
-# Exact client versions (2026-06-13):
-#   Claude Code  latest = 2.1.177  ·  stable = 2.1.153
-#   Codex CLI    latest stable = 0.139.0
 ARG CLAUDE_VERSION=2.1.177
 ARG CODEX_VERSION=0.139.0
 
-# IS_SANDBOX=1: this image runs desk as root; Claude Code refuses
-# `--dangerously-skip-permissions` (a session's bypassPermissions) as root unless
-# the env marks a sandbox — without it bypass-permission claude sessions die on
-# launch. A desk container is a dedicated, isolated environment.
 ENV DEBIAN_FRONTEND=noninteractive \
     IS_SANDBOX=1 \
     PATH="/root/.local/bin:${PATH}" \
-    DESK_HOST=0.0.0.0 \
-    DESK_PORT=5173 \
     TERM=xterm-256color
 
-# Runtime system tooling (same roles as the Node image):
-#   tmux — durable runtime that owns every agent session; git/gh — git+Projects;
-#   ripgrep — fs/content search; procps — `ps` for the kill switch;
-#   tar — extracts the embedded UI/LSP tarballs on first use;
-#   gawk — codex installer needs interval-regex (mawk lacks it).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git tmux ripgrep procps less gawk tar \
+      ca-certificates curl gnupg git tmux ripgrep procps less gawk tar \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Codex CLI (native Rust binary, pinned) --------------------------------
-# CODEX_NON_INTERACTIVE only here, scoped to the install script (no TTY during
-# build) — NOT a persistent ENV: codex runs as an interactive TUI in desk sessions.
-RUN CODEX_NON_INTERACTIVE=1 CODEX_RELEASE="${CODEX_VERSION}" sh -c "$(curl -fsSL https://chatgpt.com/codex/install.sh)" \
+RUN CODEX_NON_INTERACTIVE=1 CODEX_RELEASE="${CODEX_VERSION}" \
+      sh -c "$(curl -fsSL https://chatgpt.com/codex/install.sh)" \
     && ln -sf /root/.local/bin/codex /usr/local/bin/codex \
     && codex --version
 
-# --- Claude Code (native binary, pinned) -----------------------------------
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
     && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
     && claude --version
 
-# Just the self-contained binary: UI + LSP servers are embedded; terminals use
-# Bun's native PTY (Bun.Terminal), so there's no node-pty native to ship.
-COPY --from=builder /app/desk-server /usr/local/bin/desk-server
+COPY --from=builder /opt/desk /opt/desk
+RUN ln -s /opt/desk/dist/cli/main.js /usr/local/bin/desk \
+    && desk help >/dev/null \
+    && test -x /opt/desk/libexec/desk-standalone
 
+WORKDIR /workspace
 EXPOSE 5173
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:5173/ >/dev/null || exit 1
+  CMD curl -fsS http://127.0.0.1:5173/ >/dev/null || exit 1
 
-# SECURITY: Desk has NO authentication and grants full fs/terminal/git access to
-# anyone who reaches the port. Only expose it behind a trusted tunnel/proxy.
-CMD ["desk-server"]
+# SECURITY: Desk has no authentication and grants filesystem, terminal, and Git
+# access. Bind it only to a trusted interface, tunnel, or authenticated proxy.
+ENTRYPOINT ["desk"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "5173"]
