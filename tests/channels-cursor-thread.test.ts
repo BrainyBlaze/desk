@@ -75,3 +75,13 @@ describe('ChannelsSubsystem cursor/thread wiring', () => {
     expect(editableGuards.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('MessageList cursor focus ownership', () => {
+  const source = readFileSync(new URL('../src/web/channels/MessageList.tsx', import.meta.url), 'utf8');
+
+  it('does not steal focus from a select while applying a deferred cursor move', () => {
+    expect(source).toMatch(
+      /active\.tagName === 'INPUT' \|\|\s+active\.tagName === 'TEXTAREA' \|\|\s+active\.tagName === 'SELECT' \|\|\s+active\.isContentEditable/
+    );
+  });
+});

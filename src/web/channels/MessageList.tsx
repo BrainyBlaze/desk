@@ -748,10 +748,15 @@ export function MessageList({
       if (!node) {
         return;
       }
-      // Never pull focus out of an input — the operator may be typing in the
-      // composer while agents chat.
+      // Never pull focus out of a form control while agents chat.
       const active = document.activeElement as HTMLElement | null;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+      if (
+        active &&
+        (active.tagName === 'INPUT' ||
+          active.tagName === 'TEXTAREA' ||
+          active.tagName === 'SELECT' ||
+          active.isContentEditable)
+      ) {
         return;
       }
       const escaped =

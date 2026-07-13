@@ -51,4 +51,12 @@ describe('shouldSuppressContextMenu', () => {
     expect(terminalSource.match(/void copyTextWithFallback\(/g)).toHaveLength(4);
     expect(terminalSource).not.toContain('function fallbackCopyText');
   });
+
+  it('scopes the terminal context menu to the terminal selection', () => {
+    const terminalSource = readFileSync(new URL('../src/web/TerminalSurface.tsx', import.meta.url), 'utf8');
+
+    expect(terminalSource).toMatch(
+      /const handleContextMenu = \(event: MouseEvent\): void => \{\s+const selection = terminal\.getSelection\(\);/
+    );
+  });
 });

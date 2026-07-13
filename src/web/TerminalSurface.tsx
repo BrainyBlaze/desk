@@ -592,7 +592,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       event.clipboardData?.setData('text/plain', selection);
     };
     const handleContextMenu = (event: MouseEvent): void => {
-      const selection = getSelectedText(terminal);
+      const selection = terminal.getSelection();
       const canRead = Boolean(navigator.clipboard?.readText);
       // Only swallow the native menu when we can offer something better: a
       // selection to copy, or async-clipboard paste. On plain HTTP with no
