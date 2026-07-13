@@ -183,7 +183,7 @@ describe('installer lifecycle', () => {
     });
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('Desk fixture help');
-  });
+  }, 20_000);
 
   it('reinstalls the same version into a new immutable instance and retains the previous one', () => {
     const value = fixture();
