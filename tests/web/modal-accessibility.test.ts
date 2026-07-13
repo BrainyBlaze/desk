@@ -7,11 +7,24 @@ describe('shared Modal keyboard ownership', () => {
     const source = readFileSync(new URL('../../src/web/arwes/primitives.tsx', import.meta.url), 'utf8');
 
     expect(source).toContain("from './modalFocus.js'");
-    expect(source).toMatch(/ref=\{modalRef\}[\s\S]*tabIndex=\{-1\}/);
+    expect(source).toMatch(/ref=\{setModalElement\}[\s\S]*tabIndex=\{-1\}/);
     expect(source).toMatch(/event\.key === 'Tab'/);
     expect(source).toContain('event.stopImmediatePropagation()');
     expect(source).toMatch(/isTopLayer\(modal,[\s\S]*document\.querySelectorAll/);
     expect(source).toMatch(/previousFocus[\s\S]*\.focus\(\)/);
+  });
+
+  it('moves focus when the animated dialog actually mounts', () => {
+    const source = readFileSync(new URL('../../src/web/arwes/primitives.tsx', import.meta.url), 'utf8');
+
+    expect(source).toMatch(/const setModalElement = useCallback\([\s\S]*requestAnimationFrame[\s\S]*\}, \[\]\);/);
+    expect(source).toMatch(
+      /const focusWhenVisible = \(\): void => \{[\s\S]*getComputedStyle\(initial\)\.visibility === 'hidden'[\s\S]*requestAnimationFrame\(focusWhenVisible\)/
+    );
+    expect(source).toContain('ref={setModalElement}');
+    expect(source).toMatch(
+      /useEffect\(\(\) => \(\) => \{[\s\S]*previousFocusRef\.current[\s\S]*previousFocus\.focus\(\);[\s\S]*\}, \[\]\);/
+    );
   });
 
   it('wraps Tab only at the dialog boundaries', () => {

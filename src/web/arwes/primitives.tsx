@@ -526,6 +526,37 @@ export function Modal({
   const previousFocusRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement ? document.activeElement : null
   );
+  const focusFrameRef = useRef<number | null>(null);
+  const setModalElement = useCallback((modal: HTMLElement | null): void => {
+    if (focusFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusFrameRef.current);
+      focusFrameRef.current = null;
+    }
+    modalRef.current = modal;
+    if (!modal) {
+      return;
+    }
+    const focusDeadline = window.performance.now() + 1_000;
+    const focusWhenVisible = (): void => {
+      focusFrameRef.current = null;
+      const layers = Array.from(document.querySelectorAll<HTMLElement>('.deskModal'));
+      if (!modal.isConnected || !isTopLayer(modal, layers)) {
+        return;
+      }
+      const body = modal.querySelector<HTMLElement>('.modalBody');
+      const initial = modal.querySelector<HTMLElement>('[autofocus]') ?? getModalFocusableElements(body ?? modal)[0] ?? modal;
+      // Arwes keeps nested controls visibility:hidden through their enter
+      // animation; focus() silently no-ops until that transition completes.
+      if (window.getComputedStyle(initial).visibility === 'hidden') {
+        if (window.performance.now() < focusDeadline) {
+          focusFrameRef.current = window.requestAnimationFrame(focusWhenVisible);
+        }
+        return;
+      }
+      initial.focus();
+    };
+    focusFrameRef.current = window.requestAnimationFrame(focusWhenVisible);
+  }, []);
   useEffect(() => {
     setActive(true);
   }, []);
@@ -544,26 +575,15 @@ export function Modal({
   const requestCloseRef = useRef(requestClose);
   requestCloseRef.current = requestClose;
   useEffect(() => () => closerRef.current?.dispose(), []);
-  useEffect(() => {
-    const modal = modalRef.current;
-    if (!modal) {
-      return;
+  useEffect(() => () => {
+    if (focusFrameRef.current !== null) {
+      window.cancelAnimationFrame(focusFrameRef.current);
+      focusFrameRef.current = null;
     }
-    const focusFrame = window.requestAnimationFrame(() => {
-      if (!isTopLayer(modal, Array.from(document.querySelectorAll<HTMLElement>('.deskModal')))) {
-        return;
-      }
-      const body = modal.querySelector<HTMLElement>('.modalBody');
-      const initial = modal.querySelector<HTMLElement>('[autofocus]') ?? getModalFocusableElements(body ?? modal)[0] ?? modal;
-      initial.focus();
-    });
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      const previousFocus = previousFocusRef.current;
-      if (previousFocus?.isConnected) {
-        previousFocus.focus();
-      }
-    };
+    const previousFocus = previousFocusRef.current;
+    if (previousFocus?.isConnected) {
+      previousFocus.focus();
+    }
   }, []);
   useEffect(() => {
     // The last painted dialog owns keyboard containment. Older modal listeners
@@ -601,7 +621,7 @@ export function Modal({
       <BleepsOnAnimator<DeskBleepName> transitions={{ entering: enterBleep, exiting: 'close' }} />
       <Animated className={`modalScrim ${tone === 'danger' ? 'danger' : ''}`} animated={['fade']}>
         <section
-          ref={modalRef}
+          ref={setModalElement}
           className={`deskModal ${tone === 'danger' ? 'danger' : ''} ${wide ? 'wide' : ''}`}
           role="dialog"
           aria-modal="true"
