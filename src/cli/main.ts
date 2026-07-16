@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { copyFileSync, existsSync, realpathSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   addSessionToManifest,
   createEmptyManifest,
@@ -309,8 +309,20 @@ function requireOption(options: Map<string, string>, name: string): string {
 
 // Only dispatch when run AS the CLI entry point, not when imported (tests import
 // `main` directly and drive it in-process — importing must have no side effects).
-const isCliEntry =
-  typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href;
+// Compare via realpathSync so `npm link`'s bin symlink (~/.node/bin/desk →
+// dist/cli/main.js) still counts as "run as CLI" — a naive URL equality would
+// mismatch because import.meta.url follows the symlink to the real file while
+// argv[1] keeps the symlink path, silently skipping the whole dispatch block.
+const isCliEntry = ((): boolean => {
+  if (typeof process.argv[1] !== 'string') {
+    return false;
+  }
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+})();
 if (isCliEntry) {
   const cliArgs = process.argv.slice(2);
   if (cliArgs[0] === 'channels') {
