@@ -3938,6 +3938,10 @@ select {
 .chanFeaturedClose { margin-left: auto; background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
 .chanFeaturedError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
 .chanFeaturedEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
+.chanFeaturedFilters { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--desk-border-dim); }
+.chanFeaturedFilter { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--desk-text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.chanFeaturedFilter select { background: rgba(20, 20, 30, 0.6); color: var(--desk-text); border: 1px solid var(--desk-border-dim); border-radius: 3px; padding: 3px 6px; font-size: 12px; font-family: inherit; cursor: pointer; text-transform: none; letter-spacing: 0; }
+.chanFeaturedFilter select:hover { border-color: var(--desk-accent); }
 .chanFeaturedList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
 .chanFeaturedItem { display: flex; align-items: stretch; gap: 4px; }
 .chanFeaturedItem.missing { opacity: 0.6; }
