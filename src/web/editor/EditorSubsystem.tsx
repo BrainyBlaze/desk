@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Animated, Animator, useBleeps } from '@arwes/react';
-import { AlertTriangle, ChevronDown, CircleAlert, ClipboardCopy, FileCode, FilePlus, Folder, FolderPlus, FolderTree, GitBranch, GitCompareArrows, History, Home, ListTree, RefreshCw, RotateCcw, Save, Search, StickyNote } from 'lucide-react';
+import { AlertTriangle, ChevronDown, CircleAlert, ClipboardCopy, FileCode, FilePlus, Folder, FolderPlus, FolderTree, GitBranch, GitCompareArrows, History, Home, ListTree, RefreshCw, RotateCcw, Save, Search, StickyNote, Upload } from 'lucide-react';
 import { formatSaveState, publishStatus, relativeToRootPath, type StatusSegment } from '../statusSegments.js';
 import { lspStatusSegment } from './lsp/statusSegment.js';
 import { getLspStatus, lspStatusKey, subscribeLspStatus } from './lsp/lspStatusStore.js';
@@ -270,6 +270,7 @@ export function EditorSubsystem({
     createFile: () => undefined,
     createDir: () => undefined,
     refresh: () => undefined,
+    uploadFiles: () => undefined,
     revealPath: async () => undefined
   });
   const registerTreeActions = useCallback((actions: ExplorerTreeActions) => {
@@ -2118,6 +2119,14 @@ export function EditorSubsystem({
                 disabled={sidebarMode !== 'tree' || !root}
                 onClick={() => treeActionsRef.current.createDir()}
               />
+              {isNotes ? null : (
+                <IconButton
+                  icon={<Upload size={12} />}
+                  label="Upload files"
+                  disabled={sidebarMode !== 'tree' || !root}
+                  onClick={() => treeActionsRef.current.uploadFiles()}
+                />
+              )}
               <IconButton
                 icon={<RefreshCw size={12} />}
                 label="Refresh"

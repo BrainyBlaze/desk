@@ -42,6 +42,7 @@ export interface ExplorerTreeActions {
   createFile: () => void;
   createDir: () => void;
   refresh: () => void;
+  uploadFiles: () => void;
   /** expand ancestors, scroll the row into view, flash it; expandTarget also
       expands the target itself (used to navigate INTO a linked directory) */
   revealPath: (path: string, expandTarget?: boolean) => Promise<void>;
@@ -322,12 +323,17 @@ export function ExplorerTree({
     createFile: () => undefined,
     createDir: () => undefined,
     refresh: () => undefined,
+    uploadFiles: () => undefined,
     revealPath: async () => undefined
   });
   actionsRef.current = {
     createFile: () => startCreate('create-file', root),
     createDir: () => startCreate('create-dir', root),
     refresh: () => void loadDir(root),
+    uploadFiles: () => {
+      setUploadDir(root);
+      fileInputRef.current?.click();
+    },
     revealPath
   };
   useEffect(() => {
@@ -335,6 +341,7 @@ export function ExplorerTree({
       createFile: () => actionsRef.current.createFile(),
       createDir: () => actionsRef.current.createDir(),
       refresh: () => actionsRef.current.refresh(),
+      uploadFiles: () => actionsRef.current.uploadFiles(),
       revealPath: (path, expandTarget) => actionsRef.current.revealPath(path, expandTarget)
     });
   }, [registerActions]);

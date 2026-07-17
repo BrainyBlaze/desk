@@ -405,13 +405,40 @@ export function buildTurnPrompt(options: {
   home: string;
   role?: string;
   functions?: string;
+  supervisor?: boolean;
+  supervisorMaxIdleMinutes?: number;
 }): string {
   const threadArg = options.file.startsWith('thread-') ? ` --thread ${options.file.slice('thread-'.length, -3)}` : '';
   const lines = [
     `[#${options.channel}] New message from @${options.author} (${options.message.id}) — you are @${options.member}.`,
     ''
   ];
-  if (options.role || options.functions) {
+  if (options.supervisor) {
+    const idle = options.supervisorMaxIdleMinutes && options.supervisorMaxIdleMinutes > 0 ? options.supervisorMaxIdleMinutes : 3;
+    lines.push(
+      `You are the SUPERVISOR of #${options.channel}. You receive every message in the channel (not only mentions).`,
+      `Your job: keep an up-to-date summary of the channel — where we started, current state, decisions, patterns, and what each agent is doing.`,
+      `Stuck detection: desk tracks each worker's busy state. If an agent WORKED, went IDLE, and then stayed silent past ${idle} minute(s) without posting an update, desk will ping you with the specific @name(s) — nudge those agents directly, not @channel.`,
+      ``,
+      `EVERY message you receive, do this in order:`,
+      `1. Update your running SUMMARY (a few paragraphs — where we started, current state, latest decisions, patterns, who is doing what). Keep it as ONE sentinel message that you EDIT in place, not a new post each time.`,
+      `2. If this message needs a supervisor reply (someone is stuck, a decision is missing, the group drifted), reply in the channel by @name.`,
+      `3. If nothing needs a supervisor reply, do NOT post — silent updates to the sentinel summary are fine.`,
+      ``,
+      `Sentinel summary command:`,
+      `  first time: desk channels post ${options.channel} --as ${options.member} "**Summary (sentinel):** ..." — remember the returned message id.`,
+      `  every time after: desk channels edit ${options.channel} --message <sentinel-id> --as ${options.member} "**Summary (sentinel):** ..." — same id, updated body.`,
+      ``,
+      `The ${idle}-minute stuck-detection window is controlled from the desk UI (member role modal → Supervisor → Max idle). If it needs adjusting, ask @human to change it there — you do not set it yourself.`
+    );
+    if (options.role) {
+      lines.push(`Additional role: ${options.role}`);
+    }
+    if (options.functions) {
+      lines.push(`Additional functions: ${options.functions}`);
+    }
+    lines.push('');
+  } else if (options.role || options.functions) {
     if (options.role) {
       lines.push(`Your role in this channel: ${options.role}`);
     }
@@ -435,6 +462,49 @@ export function buildTurnPrompt(options: {
       `If it requires nothing from you, post one brief line saying so and why — unless this message is itself a pure acknowledgment/status (then do not reply; never acknowledge acknowledgments). ` +
       `Human guidelines posted in the channel override this cadence.`
   );
+  return lines.join('\n');
+}
+
+/**
+ * Idle-timer check-in prompt for a supervisor: fired by the engine when the
+ * channel has been silent longer than the supervisor's max-idle window. Asks
+ * the supervisor to ping the channel and find out what's stuck, then refresh
+ * their running summary.
+ */
+export function buildSupervisorCheckInPrompt(options: {
+  channel: string;
+  member: string;
+  /** Agents that were working, went idle, and stayed silent past the max-idle
+   *  window without posting anything. Names are prefixed with @ in the prompt. */
+  stuckAgents: Array<{ name: string; stoppedForMinutes: number }>;
+  role?: string;
+  functions?: string;
+}): string {
+  const stuckLines = options.stuckAgents.map(
+    (agent) => `  - @${agent.name} — stopped ${agent.stoppedForMinutes} minute(s) ago without posting an update`
+  );
+  const stuckHandles = options.stuckAgents.map((agent) => `@${agent.name}`).join(', ');
+  const lines = [
+    `[#${options.channel}] Supervisor check-in — you are @${options.member}.`,
+    '',
+    `The following agent(s) in #${options.channel} were working, went idle, and then stayed silent — they need a nudge:`,
+    ...stuckLines,
+    ``,
+    `Do this now:`,
+    `1. Ping ${stuckHandles} in #${options.channel} by @name and ask a specific question: "what did you finish, what's blocking you?" Do NOT spam @channel with a generic prompt — target the stuck agent(s).`,
+    `2. When their reply lands, EDIT your sentinel summary in place (same message id you have been maintaining) so it reflects the new state — do NOT post a fresh summary each time.`,
+    `3. If a stuck agent needs concrete next steps to unblock, propose them in that same reply.`,
+    ``,
+    `Reply with:    desk channels post ${options.channel} --as ${options.member} "@${options.stuckAgents[0]?.name ?? 'agent'} <your targeted question>"`,
+    `Edit sentinel: desk channels edit ${options.channel} --message <sentinel-id> --as ${options.member} "**Summary (sentinel):** ..."`,
+    `Read full conversation: desk channels read ${options.channel}`
+  ];
+  if (options.role) {
+    lines.push('', `Additional role: ${options.role}`);
+  }
+  if (options.functions) {
+    lines.push(`Additional functions: ${options.functions}`);
+  }
   return lines.join('\n');
 }
 
@@ -612,6 +682,22 @@ interface DeliveryEventContext {
 export class ChannelsEngine {
   private readonly members = new Map<string, MemberRuntime>();
   private readonly activity: ChannelActivityEvent[] = [];
+  /** Per-channel per-worker activity tracking for supervisor stuck-detection.
+   *  For each channel and each non-supervisor member we remember when they were
+   *  last handed a prompt from THIS channel (lastPromptAt) and when they last
+   *  posted to THIS channel (lastPostAt). A worker is "stuck" when
+   *  lastPromptAt > lastPostAt AND they've been silent past the threshold —
+   *  i.e. this channel gave them work and they haven't reported back. Work
+   *  they picked up outside the channel is intentionally invisible here: roles
+   *  live per-channel, so supervision does too. `lastCheckInAt` is the spam
+   *  guard — one check-in per open work window per channel. */
+  private readonly channelWorkerActivity = new Map<
+    string,
+    {
+      workers: Map<string, { lastPromptAt: number; lastPostAt: number }>;
+      lastCheckInAt: number;
+    }
+  >();
   private activitySeq = 0;
   private queueSeq = 0;
   private disposed = false;
@@ -825,8 +911,101 @@ export class ChannelsEngine {
           void this.reconcileBusy(runtime);
         }
       }
+      this.checkSupervisorIdle();
     }, intervalMs);
     this.pumpTimer.unref?.();
+  }
+
+  /** Every pump tick: for each channel with a supervisor member, look for
+   *  workers who have an OPEN CHANNEL TASK (this channel handed them a prompt
+   *  more recently than they posted back) and have been silent past the
+   *  threshold. Only "channel work" is supervised — work an agent picked up
+   *  outside this channel is invisible here (roles live per-channel, so
+   *  supervision does too). If there is at least one stuck worker, ping the
+   *  supervisor with names so it can nudge by @name instead of @channel. */
+  private checkSupervisorIdle(): void {
+    const now = Date.now();
+    for (const [channel, entry] of this.channelWorkerActivity.entries()) {
+      if (entry.workers.size === 0) {
+        continue; // no channel prompts and no channel posts recorded yet
+      }
+      let members: ChannelMember[];
+      try {
+        members = listChannelMembers(this.options.home, channel);
+      } catch (error) {
+        // R1: never drop a failure blind. A channel disappearing mid-pump
+        // (destroy race) is expected; a broken manifest is not. Log both
+        // once per skip so it's visible in the ops console.
+        console.warn(
+          `[desk-channels] supervisor idle-check skipped #${channel}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        continue;
+      }
+      const supervisors = members.filter(
+        (member) => member.supervisor === true && member.tmuxSession && member.type !== 'human'
+      );
+      if (supervisors.length === 0) {
+        continue;
+      }
+      // Threshold = shortest max-idle among the channel's supervisors.
+      const thresholdMinutes = Math.min(
+        ...supervisors.map((sup) => (sup.supervisorMaxIdleMinutes && sup.supervisorMaxIdleMinutes > 0 ? sup.supervisorMaxIdleMinutes : 3))
+      );
+      const thresholdMs = thresholdMinutes * 60_000;
+      const stuck: Array<{ name: string; stoppedForMinutes: number }> = [];
+      for (const member of members) {
+        if (member.type === 'human') continue;
+        if (member.supervisor === true) continue;
+        if (!member.tmuxSession) continue;
+        const workerState = entry.workers.get(member.name);
+        if (!workerState) continue;
+        // Task in play = last prompt from this channel is newer than the
+        // worker's last post to this channel. If they already reported, no task.
+        if (workerState.lastPromptAt <= workerState.lastPostAt) continue;
+        // Give them time before nudging: measure silence since the last prompt.
+        const silentForMs = now - workerState.lastPromptAt;
+        if (silentForMs < thresholdMs) continue;
+        // Currently busy → they're actively responding to the prompt. Not stuck.
+        const runtime = this.members.get(member.tmuxSession);
+        if (runtime?.busy === true) continue;
+        stuck.push({ name: member.name, stoppedForMinutes: Math.round(silentForMs / 60_000) });
+      }
+      if (stuck.length === 0) {
+        continue;
+      }
+      // Spam guard: one check-in per open work window. Reset when a new prompt
+      // lands (recordWorkerPrompt zeros this) or a worker posts (recordWorkerPost).
+      if (entry.lastCheckInAt > 0) {
+        continue;
+      }
+      let anyFired = false;
+      for (const supervisor of supervisors) {
+        const prompt = buildSupervisorCheckInPrompt({
+          channel,
+          member: supervisor.name,
+          stuckAgents: stuck,
+          role: supervisor.role,
+          functions: supervisor.functions
+        });
+        this.enqueue(supervisor.tmuxSession!, {
+          channel,
+          messageId: `supervisor-check-in-${channel}-${now}`,
+          author: 'system',
+          prompt,
+          target: supervisor.name,
+          preview: `stuck: ${stuck.map((s) => s.name).join(', ')}`,
+          kind: 'prompt',
+          file: `_supervisor/${channel}.md`,
+          member: supervisor.name
+        });
+        anyFired = true;
+      }
+      if (anyFired) {
+        entry.lastCheckInAt = now;
+      }
+    }
   }
 
   /**
@@ -1292,6 +1471,14 @@ export class ChannelsEngine {
     this.pushActivity({ kind: 'message', channel, file, messageId: message.id, author: message.author, preview });
 
     const members = membersOverride ?? listChannelMembers(this.options.home, channel);
+    // The author just posted to this channel — record it so stuck-detection
+    // knows they reported back on any in-flight prompt from this channel.
+    const authorMember = members.find((member) => member.name === message.author);
+    const authorIsSupervisor = authorMember?.supervisor === true;
+    if (authorMember && !authorIsSupervisor && authorMember.type !== 'human') {
+      this.recordWorkerPost(channel, authorMember.name);
+    }
+
     const pingsHuman = message.author !== 'human' && mentionsHuman(message.body);
     if (pingsHuman) {
       this.pushActivity({ kind: 'human-mention', channel, file, messageId: message.id, author: message.author, preview });
@@ -1305,6 +1492,14 @@ export class ChannelsEngine {
       if (!target.tmuxSession || target.tmuxSession === authorSession) {
         continue;
       }
+      // Record that THIS channel handed target a prompt (only for non-supervisor
+      // workers, and only when the AUTHOR is not a supervisor). Supervisor
+      // messages don't count as "assigned work" — the supervisor decides on
+      // its own when to re-nudge, so we don't want its own check-in question
+      // to open a fresh check-in window for the same worker forever.
+      if (target.supervisor !== true && target.type !== 'human' && !authorIsSupervisor) {
+        this.recordWorkerPrompt(channel, target.name);
+      }
       const prompt = buildTurnPrompt({
         channel,
         file,
@@ -1313,7 +1508,9 @@ export class ChannelsEngine {
         message,
         home: this.options.home,
         role: target.role,
-        functions: target.functions
+        functions: target.functions,
+        supervisor: target.supervisor,
+        supervisorMaxIdleMinutes: target.supervisorMaxIdleMinutes
       });
       this.enqueue(target.tmuxSession, {
         channel,
@@ -1327,6 +1524,38 @@ export class ChannelsEngine {
         member: target.name
       });
     }
+  }
+
+  private ensureChannelActivity(channel: string): {
+    workers: Map<string, { lastPromptAt: number; lastPostAt: number }>;
+    lastCheckInAt: number;
+  } {
+    let entry = this.channelWorkerActivity.get(channel);
+    if (!entry) {
+      entry = { workers: new Map(), lastCheckInAt: 0 };
+      this.channelWorkerActivity.set(channel, entry);
+    }
+    return entry;
+  }
+
+  private recordWorkerPrompt(channel: string, member: string): void {
+    const entry = this.ensureChannelActivity(channel);
+    const now = Date.now();
+    const prior = entry.workers.get(member) ?? { lastPromptAt: 0, lastPostAt: 0 };
+    entry.workers.set(member, { lastPromptAt: now, lastPostAt: prior.lastPostAt });
+    // A new task landed → the previous check-in window closes; the next window
+    // can fire fresh once the new prompt goes unanswered for `threshold` minutes.
+    entry.lastCheckInAt = 0;
+  }
+
+  private recordWorkerPost(channel: string, member: string): void {
+    const entry = this.ensureChannelActivity(channel);
+    const now = Date.now();
+    const prior = entry.workers.get(member) ?? { lastPromptAt: 0, lastPostAt: 0 };
+    entry.workers.set(member, { lastPromptAt: prior.lastPromptAt, lastPostAt: now });
+    // Someone reported back → the check-in guard resets so the next open work
+    // window can fire its own check-in later if the worker stops again.
+    entry.lastCheckInAt = 0;
   }
 
   private threadParentAuthor(channel: string, parentId: string): string | undefined {

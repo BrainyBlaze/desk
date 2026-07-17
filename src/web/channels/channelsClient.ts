@@ -334,6 +334,17 @@ export async function channelsMemberRoleClear(channel: string, member: string): 
   await post('/api/channels/member-role', { channel, member, role: undefined, functions: undefined });
 }
 
+/** Toggle supervisor mode on a channel member; when enabled the agent receives
+ *  ALL messages and is pinged after `supervisorMaxIdleMinutes` of silence. */
+export async function channelsMemberSupervisor(
+  channel: string,
+  member: string,
+  supervisor: boolean,
+  supervisorMaxIdleMinutes?: number
+): Promise<void> {
+  await post('/api/channels/member-supervisor', { channel, member, supervisor, supervisorMaxIdleMinutes });
+}
+
 export async function channelsQueueClear(tmuxSession: string): Promise<void> {
   await post('/api/channels/queue-clear', { tmuxSession });
 }
