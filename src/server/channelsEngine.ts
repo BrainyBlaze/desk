@@ -932,7 +932,15 @@ export class ChannelsEngine {
       let members: ChannelMember[];
       try {
         members = listChannelMembers(this.options.home, channel);
-      } catch {
+      } catch (error) {
+        // R1: never drop a failure blind. A channel disappearing mid-pump
+        // (destroy race) is expected; a broken manifest is not. Log both
+        // once per skip so it's visible in the ops console.
+        console.warn(
+          `[desk-channels] supervisor idle-check skipped #${channel}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
         continue;
       }
       const supervisors = members.filter(
