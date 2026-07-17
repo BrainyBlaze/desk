@@ -33,6 +33,8 @@ const HELP = `desk channels — slack-like messaging between desk agents
   desk channels read <channel> --message <msg-id>        Read one message
   desk channels post <channel> [--thread <id>] [--as <member>] "<body>"
                                                          Post a message
+  desk channels edit <channel> --message <id> [--thread <id>] [--as <member>] "<body>"
+                                                         Edit a message in place
 
 Mention members with @name, everyone with @channel, the operator with @human.`;
 
@@ -42,7 +44,8 @@ const CHANNEL_COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
   ['-h', new Set()],
   ['list', new Set()],
   ['read', new Set(['--message'])],
-  ['post', new Set(['--thread', '--as'])]
+  ['post', new Set(['--thread', '--as'])],
+  ['edit', new Set(['--message', '--thread', '--as'])]
 ]);
 
 function apiBase(): string {
@@ -239,6 +242,59 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         const appended = await appendMessage(home, channel, { author, body, threadParentId: thread });
         console.log(appended.message.id);
         return 0;
+      }
+    }
+
+    if (command === 'edit') {
+      const channel = args.shift();
+      if (channel?.startsWith('-')) {
+        assertChannelOption(command, channel);
+      }
+      if (!channel || channel.startsWith('-')) {
+        throw new Error('usage: desk channels edit <channel> --message <id> [--thread <id>] [--as <member>] "<body>"');
+      }
+      let messageId: string | undefined;
+      let thread: string | undefined;
+      let as: string | undefined;
+      const bodyParts: string[] = [];
+      while (args.length > 0) {
+        const next = args.shift() as string;
+        if (next.startsWith('-')) {
+          assertChannelOption(command, next);
+        }
+        if (next === '--message') {
+          messageId = requireOptionValue(next, args.shift());
+        } else if (next === '--thread') {
+          thread = requireOptionValue(next, args.shift());
+        } else if (next === '--as') {
+          as = requireOptionValue(next, args.shift());
+        } else {
+          bodyParts.push(next);
+        }
+      }
+      if (!messageId) {
+        throw new Error('desk channels edit requires --message <id>');
+      }
+      const body = bodyParts.join(' ').trim();
+      if (body.length === 0) {
+        throw new Error('desk channels edit requires a new body');
+      }
+      // --as is display-only for CLI edit today (server rewrites body without
+      // author checks), kept in the option grammar so tools like the supervisor
+      // prompt can pass it uniformly with `post`.
+      void as;
+      try {
+        const result = await apiPost('/api/channels/message-edit', {
+          channel,
+          id: messageId,
+          thread,
+          body
+        });
+        console.log(String((result?.message as { id?: string })?.id ?? messageId));
+        return 0;
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        return 1;
       }
     }
 
