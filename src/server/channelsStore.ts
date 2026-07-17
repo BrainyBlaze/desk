@@ -479,7 +479,54 @@ export function updateMemberRole(
       joined: member.joined,
       tmuxSession: member.tmuxSession,
       role,
-      functions
+      functions,
+      supervisor: member.supervisor,
+      supervisorMaxIdleMinutes: member.supervisorMaxIdleMinutes
+    })
+  );
+  invalidateChannelSummary(home, channel);
+  return updated;
+}
+
+/** Toggle supervisor on/off and set the max-idle timer (minutes). Preserves
+ *  role/functions. Called from POST /api/channels/member-supervisor. */
+export function updateMemberSupervisor(
+  home: string,
+  channel: string,
+  name: string,
+  supervisor: boolean,
+  supervisorMaxIdleMinutes?: number
+): ChannelMember | undefined {
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) {
+    throw new Error(`invalid member name: ${name}`);
+  }
+  const members = listChannelMembers(home, channel);
+  const member = members.find((m) => m.name === name);
+  if (!member) {
+    return undefined;
+  }
+  const timer = supervisor
+    ? supervisorMaxIdleMinutes && supervisorMaxIdleMinutes > 0
+      ? supervisorMaxIdleMinutes
+      : 3
+    : undefined;
+  const updated: ChannelMember = {
+    ...member,
+    supervisor: supervisor || undefined,
+    supervisorMaxIdleMinutes: timer
+  };
+  const manifestPath = join(channelDir(home, channel), '_members', `${name}.md`);
+  writeFileAtomic(
+    manifestPath,
+    formatMemberManifest({
+      name: member.name,
+      type: member.type,
+      joined: member.joined,
+      tmuxSession: member.tmuxSession,
+      role: member.role,
+      functions: member.functions,
+      supervisor: supervisor || undefined,
+      supervisorMaxIdleMinutes: timer
     })
   );
   invalidateChannelSummary(home, channel);

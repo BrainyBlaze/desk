@@ -32,7 +32,8 @@ import {
   resolveChannelsHome,
   saveChannelFile,
   searchChannelMessages,
-  updateMemberRole
+  updateMemberRole,
+  updateMemberSupervisor
 } from './channelsStore.js';
 import { addFeatured, listFeaturedItems, removeFeatured } from './channelsFeatured.js';
 import {
@@ -892,6 +893,22 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         return true;
       }
       sendJson(res, 200, { ok: true, role: found.role, functions: found.functions });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/member-supervisor') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const member = requireString(body.member, 'member');
+      const supervisor = Boolean(body.supervisor);
+      const rawMinutes = Number(body.supervisorMaxIdleMinutes);
+      const supervisorMaxIdleMinutes = Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : undefined;
+      const updated = updateMemberSupervisor(home, channel, member, supervisor, supervisorMaxIdleMinutes);
+      if (!updated) {
+        sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, member: updated });
       return true;
     }
 

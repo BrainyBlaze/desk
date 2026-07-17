@@ -67,6 +67,7 @@ import {
   channelsMemberRemove,
   channelsMemberRole,
   channelsMemberRoleClear,
+  channelsMemberSupervisor,
   channelsMessageDelete,
   channelsMessageEdit,
   channelsMessages,
@@ -138,6 +139,12 @@ import { DigestView } from './DigestView.js';
 import { MessageList, type MessageMenuTarget, type MessageRef, type MessageScrollAnchor } from './MessageList.js';
 
 const CHANNEL_STORAGE_KEY = 'desk.channelsChannel';
+/** Default role/functions preloaded when the Supervisor checkbox is turned on and
+ *  the user's fields are empty. Toggling the checkbox off clears fields that
+ *  still hold exactly these defaults — a hand-edited value is preserved. */
+const SUPERVISOR_DEFAULT_ROLE = 'supervisor';
+const SUPERVISOR_DEFAULT_FUNCTIONS =
+  'maintain a running summary of the channel (where we started, current state, decisions, patterns); ping stuck agents by @name; run a check-in with @channel when everyone goes silent past the max-idle window';
 const SEEN_STORAGE_KEY = 'desk.channelsSeen';
 const STATE_POLL_MS = 2500;
 /** background cadence: keep unread badges + sounds alive while another subsystem is open */
@@ -254,8 +261,20 @@ export function ChannelsSubsystem({
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
   const [channelsHelpOpen, setChannelsHelpOpen] = useState(false);
-  const [memberRoleModal, setMemberRoleModal] = useState<{ member: string; channel: string; currentRole?: string; currentFunctions?: string } | null>(null);
-  const [memberRoleForm, setMemberRoleForm] = useState({ role: '', functions: '' });
+  const [memberRoleModal, setMemberRoleModal] = useState<{
+    member: string;
+    channel: string;
+    currentRole?: string;
+    currentFunctions?: string;
+    currentSupervisor?: boolean;
+    currentMaxIdleMinutes?: number;
+  } | null>(null);
+  const [memberRoleForm, setMemberRoleForm] = useState({
+    role: '',
+    functions: '',
+    supervisor: false,
+    maxIdleMinutes: 3
+  });
   // the active saved-view filter applied to the feed (null = none).
   const [activeView, setActiveView] = useState<{ name: string; filter: ViewFilter } | null>(null);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
@@ -1425,7 +1444,12 @@ export function ChannelsSubsystem({
     const { member, channel } = memberRoleModal;
     const role = memberRoleForm.role.trim() || undefined;
     const functions = memberRoleForm.functions.trim() || undefined;
-    void channelsMemberRole(channel, member, role, functions)
+    const supervisor = memberRoleForm.supervisor;
+    const maxIdleMinutes = memberRoleForm.maxIdleMinutes > 0 ? memberRoleForm.maxIdleMinutes : 3;
+    void Promise.all([
+      channelsMemberRole(channel, member, role, functions),
+      channelsMemberSupervisor(channel, member, supervisor, supervisor ? maxIdleMinutes : undefined)
+    ])
       .then(async () => {
         setMemberRoleModal(null);
         onInfo(`@${member} role updated`);
@@ -1607,6 +1631,24 @@ export function ChannelsSubsystem({
     }
     return map;
   }, [snapshot]);
+
+  /** channel name → project label (via any member's tmuxSession → session.spec.projectLabel).
+   *  Used by FeaturedView to offer a project filter for saved messages. */
+  const channelProjects = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const channel of channels) {
+      for (const member of channel.members) {
+        if (!member.tmuxSession) continue;
+        const entry = sessionIndex.get(member.tmuxSession);
+        const label = entry?.view.spec.projectLabel || entry?.view.spec.projectId;
+        if (label) {
+          map[channel.name] = label;
+          break;
+        }
+      }
+    }
+    return map;
+  }, [channels, sessionIndex]);
 
   const deliveryIndex = useMemo(() => {
     const map = new Map<string, LifecycleState>();
@@ -2216,8 +2258,20 @@ export function ChannelsSubsystem({
                                     icon={<Briefcase size={11} />}
                                     label={`Add role for @${member.name}`}
                                     onClick={() => {
-                                      setMemberRoleForm({ role: member.role ?? '', functions: member.functions ?? '' });
-                                      setMemberRoleModal({ member: member.name, channel: detail.name, currentRole: member.role, currentFunctions: member.functions });
+                                      setMemberRoleForm({
+                                        role: member.role ?? '',
+                                        functions: member.functions ?? '',
+                                        supervisor: Boolean(member.supervisor),
+                                        maxIdleMinutes: member.supervisorMaxIdleMinutes ?? 3
+                                      });
+                                      setMemberRoleModal({
+                                        member: member.name,
+                                        channel: detail.name,
+                                        currentRole: member.role,
+                                        currentFunctions: member.functions,
+                                        currentSupervisor: member.supervisor,
+                                        currentMaxIdleMinutes: member.supervisorMaxIdleMinutes
+                                      });
                                     }}
                                   />
                                   <IconButton icon={<X size={11} />} label={`Remove @${member.name}`} onClick={() => handleRemoveMember(member.name)} />
@@ -2608,6 +2662,7 @@ export function ChannelsSubsystem({
         onNavigate={(channel, messageId, thread) => {
           navigateToMessage(channel, messageId, thread);
         }}
+        channelProjects={channelProjects}
       />
       <SearchView
         open={searchOpen}
@@ -2972,13 +3027,73 @@ export function ChannelsSubsystem({
                 }}
               />
             </div>
+            <div style={{ marginBottom: '12px', paddingTop: '10px', borderTop: '1px solid var(--desk-line)' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={memberRoleForm.supervisor}
+                  onChange={(e) => {
+                    const enable = e.target.checked;
+                    setMemberRoleForm((prev) => {
+                      if (enable) {
+                        // fill empty fields with supervisor defaults; a hand-typed
+                        // value stays untouched so we never overwrite user input.
+                        return {
+                          ...prev,
+                          supervisor: true,
+                          role: prev.role.trim() === '' ? SUPERVISOR_DEFAULT_ROLE : prev.role,
+                          functions: prev.functions.trim() === '' ? SUPERVISOR_DEFAULT_FUNCTIONS : prev.functions
+                        };
+                      }
+                      // toggling off: clear a field ONLY if it still holds the
+                      // exact default we injected — otherwise keep the edit.
+                      return {
+                        ...prev,
+                        supervisor: false,
+                        role: prev.role === SUPERVISOR_DEFAULT_ROLE ? '' : prev.role,
+                        functions: prev.functions === SUPERVISOR_DEFAULT_FUNCTIONS ? '' : prev.functions
+                      };
+                    });
+                  }}
+                />
+                <span style={{ fontSize: '12px', color: 'var(--desk-text)' }}>Supervisor</span>
+              </label>
+              <div style={{ marginLeft: '24px', marginTop: '4px', fontSize: '11px', color: 'var(--desk-text-dim)', lineHeight: 1.4 }}>
+                Receives ALL messages (not only mentions), maintains a channel summary of what's happening, and pings @channel when everyone goes silent.
+              </div>
+              {memberRoleForm.supervisor ? (
+                <div style={{ marginLeft: '24px', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <label style={{ fontSize: '11px', color: 'var(--desk-text-dim)' }}>Max idle</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={memberRoleForm.maxIdleMinutes}
+                    onChange={(e) =>
+                      setMemberRoleForm({ ...memberRoleForm, maxIdleMinutes: Math.max(1, Number(e.target.value) || 3) })
+                    }
+                    style={{
+                      width: '60px',
+                      padding: '4px 6px',
+                      backgroundColor: 'var(--desk-bg)',
+                      color: 'var(--desk-text)',
+                      border: '1px solid var(--desk-line)',
+                      borderRadius: '2px',
+                      fontSize: '12px',
+                      fontFamily: 'monospace'
+                    }}
+                  />
+                  <span style={{ fontSize: '11px', color: 'var(--desk-text-dim)' }}>minutes before check-in</span>
+                </div>
+              ) : null}
+            </div>
             <div className="confirmActions">
               <Cmd
                 icon={<X size={12} />}
                 label="Cancel"
                 onClick={() => {
                   setMemberRoleModal(null);
-                  setMemberRoleForm({ role: '', functions: '' });
+                  setMemberRoleForm({ role: '', functions: '', supervisor: false, maxIdleMinutes: 3 });
                 }}
               />
               {memberRoleModal?.currentRole ? (

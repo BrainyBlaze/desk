@@ -103,6 +103,55 @@ describe('mentions', () => {
   });
 });
 
+describe('resolveTargets with supervisor members', () => {
+  const supervisor = (name: string): ChannelMember => ({ ...member(name), supervisor: true, supervisorMaxIdleMinutes: 3 });
+
+  it('a supervisor is added to a @name delivery that would otherwise skip them', () => {
+    // human pings only @agent-b; base delivery is [agent-b]. supe must be merged.
+    const members = [member('agent-a'), member('agent-b'), supervisor('supe'), member('human', 'human')];
+    const names = resolveTargets('human', 'ping @agent-b', members).map((m) => m.name);
+    expect(names).toEqual(['agent-b', 'supe']);
+  });
+
+  it('a supervisor gets a message that mentions only unknown handles', () => {
+    // Mentions-only-humans/unknowns normally deliver to nobody; supe must still receive it.
+    const members = [member('agent-a'), supervisor('supe'), member('human', 'human')];
+    expect(resolveTargets('human', 'ping @not-a-member', members).map((m) => m.name)).toEqual(['supe']);
+  });
+
+  it('a supervisor is not double-added on @channel or empty-mentions broadcasts', () => {
+    const members = [member('agent-a'), supervisor('supe'), member('human', 'human')];
+    // @channel path returns `agents` verbatim (already includes supe): must not duplicate.
+    expect(resolveTargets('human', 'hey @channel', members).map((m) => m.name)).toEqual(['agent-a', 'supe']);
+    // no-mentions broadcast: same rule.
+    expect(resolveTargets('human', 'plain message', members).map((m) => m.name)).toEqual(['agent-a', 'supe']);
+  });
+
+  it('a supervisor never receives their own message', () => {
+    const members = [member('agent-a'), supervisor('supe'), member('human', 'human')];
+    // supe posts; the author is excluded from `agents`, so supervisors[] is empty, no self-delivery.
+    expect(resolveTargets('supe', 'silence check @not-here', members).map((m) => m.name)).toEqual([]);
+    expect(resolveTargets('supe', 'plain message', members).map((m) => m.name)).toEqual(['agent-a']);
+  });
+
+  it('in a thread, a supervisor is still added even though @channel does not broadcast', () => {
+    // Thread target set = parent author (+ named mentions). supe is not the parent author and
+    // not mentioned, but must still receive the message.
+    const members = [member('agent-a'), member('agent-b'), supervisor('supe'), member('human', 'human')];
+    const names = resolveTargets('human', 'thread reply', members, {
+      isThread: true,
+      threadAuthor: 'agent-a'
+    }).map((m) => m.name);
+    expect(names).toEqual(['agent-a', 'supe']);
+  });
+
+  it('a supervisor member with supervisor=false or undefined does NOT bypass mention filtering', () => {
+    const notSup: ChannelMember = { ...member('supe'), supervisor: false };
+    const members = [member('agent-a'), notSup, member('human', 'human')];
+    expect(resolveTargets('human', 'ping @agent-a', members).map((m) => m.name)).toEqual(['agent-a']);
+  });
+});
+
 describe('member manifests', () => {
   it('round-trips manifests with the desk tmux extension', () => {
     const manifest = formatMemberManifest({
@@ -123,6 +172,45 @@ describe('member manifests', () => {
 
   it('rejects manifests without frontmatter', () => {
     expect(parseMemberManifest('# nope')).toBeUndefined();
+  });
+
+  it('round-trips supervisor + max-idle-minutes losslessly', () => {
+    const manifest = formatMemberManifest({
+      name: 'supe',
+      type: 'claude-code',
+      joined: '2026-06-11 12:00:00',
+      tmuxSession: 'agentdesk-x-main-supe-1',
+      supervisor: true,
+      supervisorMaxIdleMinutes: 5
+    });
+    expect(manifest).toContain('supervisor: true');
+    expect(manifest).toContain('supervisorMaxIdleMinutes: 5');
+    const parsed = parseMemberManifest(manifest);
+    expect(parsed).toMatchObject({
+      name: 'supe',
+      supervisor: true,
+      supervisorMaxIdleMinutes: 5
+    });
+  });
+
+  it('omits supervisor keys when the flag is off (undefined vs false must not leak)', () => {
+    const manifest = formatMemberManifest({
+      name: 'plain',
+      type: 'claude-code',
+      joined: '2026-06-11 12:00:00'
+    });
+    expect(manifest).not.toContain('supervisor');
+    expect(manifest).not.toContain('supervisorMaxIdleMinutes');
+    const parsed = parseMemberManifest(manifest);
+    expect(parsed?.supervisor).toBeUndefined();
+    expect(parsed?.supervisorMaxIdleMinutes).toBeUndefined();
+  });
+
+  it('coerces supervisorMaxIdleMinutes: 0 and negatives to undefined on parse', () => {
+    const bad = ['---', 'name: bad', 'type: claude-code', 'status: active', 'joined: t', 'supervisor: true', 'supervisorMaxIdleMinutes: 0', '---'].join('\n');
+    const parsed = parseMemberManifest(bad);
+    expect(parsed?.supervisor).toBe(true);
+    expect(parsed?.supervisorMaxIdleMinutes).toBeUndefined();
   });
 });
 

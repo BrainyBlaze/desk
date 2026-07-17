@@ -74,6 +74,12 @@ export interface ChannelMember {
   role?: string;
   /** agent functions/responsibilities in this channel */
   functions?: string;
+  /** desk extension: supervisor sees ALL messages (not only mentions),
+   *  maintains a channel summary, and pings @channel when idle. */
+  supervisor?: boolean;
+  /** minutes of channel silence before the supervisor is asked to check in
+   *  (only meaningful when supervisor=true; defaults to 3 when omitted) */
+  supervisorMaxIdleMinutes?: number;
 }
 
 /**
@@ -426,8 +432,24 @@ export interface ResolveTargetOptions {
  */
 export function resolveTargets(author: string, body: string, members: ChannelMember[], options: ResolveTargetOptions = {}): ChannelMember[] {
   const agents = members.filter((member) => member.type !== 'human' && member.name !== author);
+  const supervisors = agents.filter((member) => member.supervisor === true);
   const mentions = new Set(extractMentions(body).map((mention) => mention.toLowerCase()));
   const agentNames = new Set(members.filter((member) => member.type !== 'human').map((member) => member.name.toLowerCase()));
+
+  const mergeSupervisors = (result: ChannelMember[]): ChannelMember[] => {
+    if (supervisors.length === 0) {
+      return result;
+    }
+    const seen = new Set(result.map((member) => member.name.toLowerCase()));
+    const merged = [...result];
+    for (const supervisor of supervisors) {
+      if (!seen.has(supervisor.name.toLowerCase())) {
+        merged.push(supervisor);
+      }
+    }
+    return merged;
+  };
+
   if (options.isThread) {
     const targetNames = new Set<string>();
     if (options.threadAuthor) {
@@ -438,17 +460,17 @@ export function resolveTargets(author: string, body: string, members: ChannelMem
         targetNames.add(mention);
       }
     }
-    return agents.filter((member) => targetNames.has(member.name.toLowerCase()));
+    return mergeSupervisors(agents.filter((member) => targetNames.has(member.name.toLowerCase())));
   }
   if (mentions.has('channel')) {
     return agents;
   }
   const mentionsKnownAgent = [...mentions].some((mention) => agentNames.has(mention));
   if (mentionsKnownAgent) {
-    return agents.filter((member) => mentions.has(member.name.toLowerCase()));
+    return mergeSupervisors(agents.filter((member) => mentions.has(member.name.toLowerCase())));
   }
   if (mentions.size > 0) {
-    return [];
+    return mergeSupervisors([]);
   }
   return agents;
 }
@@ -479,6 +501,10 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
   if (!fields.name) {
     return undefined;
   }
+  const supervisorRaw = fields.supervisor?.toLowerCase();
+  const supervisor = supervisorRaw === 'true' || supervisorRaw === 'yes' || supervisorRaw === '1' ? true : undefined;
+  const idleMinutesRaw = Number.parseInt(fields.supervisorMaxIdleMinutes ?? '', 10);
+  const supervisorMaxIdleMinutes = Number.isFinite(idleMinutesRaw) && idleMinutesRaw > 0 ? idleMinutesRaw : undefined;
   return {
     name: fields.name,
     type: fields.type ?? 'human',
@@ -486,7 +512,9 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
     joined: fields.joined ?? '',
     tmuxSession: fields.tmux || undefined,
     role: fields.role || undefined,
-    functions: fields.functions || undefined
+    functions: fields.functions || undefined,
+    supervisor,
+    supervisorMaxIdleMinutes
   };
 }
 
@@ -498,6 +526,8 @@ export interface MemberManifestOptions {
   agentLabel?: string;
   role?: string;
   functions?: string;
+  supervisor?: boolean;
+  supervisorMaxIdleMinutes?: number;
 }
 
 export function formatMemberManifest(options: MemberManifestOptions): string {
@@ -516,6 +546,12 @@ export function formatMemberManifest(options: MemberManifestOptions): string {
   }
   if (options.functions) {
     lines.push(`functions: ${options.functions}`);
+  }
+  if (options.supervisor) {
+    lines.push(`supervisor: true`);
+  }
+  if (options.supervisorMaxIdleMinutes && options.supervisorMaxIdleMinutes > 0) {
+    lines.push(`supervisorMaxIdleMinutes: ${options.supervisorMaxIdleMinutes}`);
   }
   lines.push('---', '', `# @${options.name}`, '', '## Identity', '', `- **Agent**: ${options.name}`, `- **Type**: ${options.type}`);
   if (options.agentLabel) {
