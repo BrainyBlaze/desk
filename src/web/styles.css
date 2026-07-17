@@ -1758,7 +1758,7 @@ select:focus {
 .railActions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
 }
 
 /* Row actions reveal on hover/keyboard focus (vs-code style): forty rows of
@@ -1859,38 +1859,36 @@ select:focus {
 .cellTabs {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 3px;
+  gap: 6px;
   min-width: 0;
   overflow: auto hidden;
-  padding: 4px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--desk-line);
+  cursor: grab;
 }
 
-.cellLabel {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  min-width: 18px;
-  height: 18px;
-  border: 1px solid var(--desk-chrome-line-soft);
-  color: var(--desk-text-dim);
-  font-size: 10px;
+.cellTabs:active {
+  cursor: grabbing;
 }
 
 .cellTab {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  max-width: 190px;
-  height: 18px;
-  gap: 4px;
-  border: 1px solid var(--desk-chrome-line-soft);
-  border-radius: 2px;
-  background: var(--desk-surface);
+  max-width: 220px;
+  height: 22px;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  transition: color 0.12s ease;
+}
+
+.cellTab:hover {
   color: var(--desk-text);
-  cursor: grab;
-  font-size: 10px;
 }
 
 .cellTab span:last-child {
@@ -1902,8 +1900,11 @@ select:focus {
 
 .cellTab.selected,
 .cellTab.globalSelected {
-  border-color: var(--desk-accent);
   color: var(--desk-accent);
+}
+
+.cellTabs .cellRemove {
+  margin-left: auto;
 }
 
 .cellRemove {

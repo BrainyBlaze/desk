@@ -386,20 +386,28 @@ function TerminalCellImpl({
         onDrop={() => onDropSession(group, cell)}
       >
         <CellChrome focused={Boolean(cell.activeSession && cell.activeSession.spec.tmuxSession === selectedTmux)}>
-          <div className="cellTabs">
-            <span className="cellLabel">{cell.label}</span>
+          <div
+            className="cellTabs"
+            draggable={Boolean(cell.activeSession)}
+            onDragStart={(event: DragEvent<HTMLDivElement>) => {
+              if (!cell.activeSession) return;
+              event.dataTransfer.effectAllowed = 'move';
+              // Drag image = just the active tab pill (name + status), not the whole header.
+              const activeTab = event.currentTarget.querySelector('.cellTab.selected') as HTMLElement | null;
+              if (activeTab) {
+                const rect = activeTab.getBoundingClientRect();
+                event.dataTransfer.setDragImage(activeTab, event.clientX - rect.left, event.clientY - rect.top);
+              }
+              onDragSession(cell.activeSession.spec.tmuxSession);
+            }}
+            onDragEnd={() => onDragSession(null)}
+          >
             {cell.sessions.map((session) => (
               <button
                 key={session.spec.tmuxSession}
                 className={`cellTab ${session.spec.tmuxSession === cell.activeSession?.spec.tmuxSession ? 'selected' : ''} ${
                   session.spec.tmuxSession === selectedTmux ? 'globalSelected' : ''
                 }`}
-                draggable
-                onDragStart={(event: DragEvent<HTMLButtonElement>) => {
-                  event.dataTransfer.effectAllowed = 'move';
-                  onDragSession(session.spec.tmuxSession);
-                }}
-                onDragEnd={() => onDragSession(null)}
                 onMouseEnter={() => bleeps.hover?.play()}
                 onClick={() => {
                   bleeps.click?.play();
@@ -415,7 +423,10 @@ function TerminalCellImpl({
               className="cellRemove"
               type="button"
               aria-label="Remove layout cell"
-              onClick={() => onRemoveCell(group, cell)}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRemoveCell(group, cell);
+              }}
               disabled={group.layout.cellCount <= 1}
               title="Remove layout cell"
             >
