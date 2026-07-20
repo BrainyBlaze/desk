@@ -37,6 +37,7 @@ import {
   MAGIC,
   MAX_PAYLOAD,
   PROTO_VERSION,
+  RESERVED_FLAG_MASK,
   RecordType,
   crc32
 } from '../src/shared/atchWire/frames.js';
@@ -124,6 +125,16 @@ describe('atch v3 wire — header', () => {
     expect(() => decodeFrame(strict)).toThrow(/BAD_FLAGS/);
     const lax = new ByteWriter().bytes(MAGIC).u16(PROTO_VERSION).u16(FrameType.HEARTBEAT).u32(1 << 20).u32(0).u32(0).u64(0n).u64(0n).take();
     expect(decodeFrame(lax)).not.toBeNull();
+  });
+  it('treats COMPRESSED (bit4) as a reserved-must-be-0 bit (doc §1.1)', () => {
+    // COMPRESSED alone under STRICT → BAD_FLAGS (matches the atch C 0xfffffff0 mask).
+    const strict = new ByteWriter().bytes(MAGIC).u16(PROTO_VERSION).u16(FrameType.HEARTBEAT).u32(Flag.COMPRESSED | Flag.STRICT).u32(0).u32(0).u64(0n).u64(0n).take();
+    expect(() => decodeFrame(strict)).toThrow(/BAD_FLAGS/);
+    // Without STRICT, reserved bits are tolerated (doc §1.1: "under STRICT").
+    const lax = new ByteWriter().bytes(MAGIC).u16(PROTO_VERSION).u16(FrameType.HEARTBEAT).u32(Flag.COMPRESSED).u32(0).u32(0).u64(0n).u64(0n).take();
+    expect(decodeFrame(lax)).not.toBeNull();
+    // RESERVED_FLAG_MASK is the C-matching 0xfffffff0.
+    expect(RESERVED_FLAG_MASK >>> 0).toBe(0xfffffff0);
   });
 });
 
@@ -246,10 +257,27 @@ describe('golden vectors', () => {
     valid.push({ name: 'RECORD', type: FrameType.RECORD, generation: 7, sequence: '3', body: { $note: 'OUTPUT record, see decodeRecord' }, frameHex: hex(encodeFrame(hdr(FrameType.RECORD, { aux: 900n, payload: recPayload }))) });
     valid.push({ name: 'CHECKPOINT_DATA', type: FrameType.CHECKPOINT_DATA, generation: 7, sequence: '3', body: { $note: 'present=1, see decodeCheckpointData' }, frameHex: hex(encodeFrame(hdr(FrameType.CHECKPOINT_DATA, { payload: encodeCheckpointData(CKPT_DATA) }))) });
     valid.push({ name: 'JOURNAL_DATA', type: FrameType.JOURNAL_DATA, generation: 7, sequence: '3', body: { $note: '2 records, see decodeJournalData' }, frameHex: hex(encodeFrame(hdr(FrameType.JOURNAL_DATA, { payload: encodeJournalData(JOURNAL) }))) });
+    const rawHeader = (type: FrameType, flags: number, payloadLen: number): Uint8Array =>
+      new ByteWriter().bytes(MAGIC).u16(PROTO_VERSION).u16(type).u32(flags).u32(payloadLen).u32(0).u64(0n).u64(0n).take();
     const invalid = [
       { name: 'bad_magic', hex: hex(flip(encodeFrame(hdr(FrameType.HEARTBEAT)), 0)), expectCode: ErrorCode.BAD_MAGIC },
-      { name: 'bad_version', hex: hex(setByte(encodeFrame(hdr(FrameType.HEARTBEAT)), 4, 9)), expectCode: ErrorCode.BAD_VERSION }
+      { name: 'bad_version', hex: hex(setByte(encodeFrame(hdr(FrameType.HEARTBEAT)), 4, 9)), expectCode: ErrorCode.BAD_VERSION },
+      // reserved-flag ±STRICT (doc §4.7): COMPRESSED (bit4) is reserved-must-be-0.
+      { name: 'reserved_flag_strict', hex: hex(rawHeader(FrameType.HEARTBEAT, Flag.COMPRESSED | Flag.STRICT, 0)), expectCode: ErrorCode.BAD_FLAGS },
+      // payload_length beyond the per-frame cap → PAYLOAD_TOO_LARGE before allocation.
+      { name: 'payload_too_large', hex: hex(rawHeader(FrameType.HEARTBEAT, 0, MAX_PAYLOAD + 1)), expectCode: ErrorCode.PAYLOAD_TOO_LARGE }
     ];
+    // each invalid vector must decode to exactly its expected error code.
+    for (const v of invalid) {
+      const bytes = Uint8Array.from(Buffer.from(v.hex, 'hex'));
+      let code: ErrorCode | undefined;
+      try {
+        decodeFrame(bytes, true);
+      } catch (e) {
+        code = e instanceof WireError ? e.code : undefined;
+      }
+      expect(code, v.name).toBe(v.expectCode);
+    }
     writeFileSync(join(dir, 'vectors.json'), JSON.stringify({ contract: 'atch-wire-v3', proto_version: PROTO_VERSION, header_len: HEADER_LEN, valid, invalid }, null, 2) + '\n');
     expect(valid.length).toBeGreaterThanOrEqual(29);
   });

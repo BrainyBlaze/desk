@@ -69,15 +69,22 @@ export const Flag = {
   ROLE_OBSERVER: 1 << 1,
   MORE: 1 << 2,
   STRICT: 1 << 3,
-  COMPRESSED: 1 << 4 // reserved, must be 0
+  /** bit4: reserved for future compression, MUST be 0 (doc §1.1). Named for
+   *  documentation only — it is a RESERVED bit, so setting it under STRICT is a
+   *  BAD_FLAGS error (it is intentionally NOT excluded from RESERVED_FLAG_MASK). */
+  COMPRESSED: 1 << 4
 } as const;
-/** Bits that MUST be zero (reserved). Nonzero under STRICT → BAD_FLAGS. */
+/**
+ * Bits that MUST be zero (reserved). Nonzero under STRICT → BAD_FLAGS (doc §1.1).
+ * COMPRESSED (bit4) is "reserved, must be 0", so it is INCLUDED here (i.e. only
+ * the four live flags below are permitted); this matches the atch C decoder's
+ * 0xfffffff0 mask. Mask value = 0xfffffff0.
+ */
 export const RESERVED_FLAG_MASK = ~(
   Flag.ROLE_CONTROLLER |
   Flag.ROLE_OBSERVER |
   Flag.MORE |
-  Flag.STRICT |
-  Flag.COMPRESSED
+  Flag.STRICT
 ) >>> 0;
 
 /** Capability bits (u32, HELLO negotiation). */
