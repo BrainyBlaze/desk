@@ -16,7 +16,19 @@ import {
   WireError,
   type RawFrame
 } from '../src/shared/atchWire/codec.js';
-import { decodeBody, decodeRecord, encodeBody, encodeRecord, type Body } from '../src/shared/atchWire/messages.js';
+import {
+  decodeBody,
+  decodeCheckpointData,
+  decodeJournalData,
+  decodeRecord,
+  encodeBody,
+  encodeCheckpointData,
+  encodeJournalData,
+  encodeRecord,
+  type Body,
+  type CheckpointData,
+  type JournalData
+} from '../src/shared/atchWire/messages.js';
 import {
   ErrorCode,
   Flag,
@@ -54,6 +66,18 @@ const SAMPLE: Partial<Record<FrameType, Body>> = {
   },
   [FrameType.ERROR]: { code: ErrorCode.LEASE_DENIED, detail: 'lease held by conn 4' },
   [FrameType.HEARTBEAT]: {},
+  [FrameType.DETACH]: {},
+  [FrameType.LEASE_CLAIM]: { role: 1, forced: 0 },
+  [FrameType.LEASE_RELEASE]: {},
+  [FrameType.EVENT_STREAM]: { event_type: 1, generation: 7, event_seq: 5n, ts_ms: 1721520000000n, body: 'pid=4321' },
+  [FrameType.SIGNAL_ACK]: { opId: b16(0x44), result: 0, child_status: 0 },
+  [FrameType.STATE_UPDATE_ACK]: { state_record_seq: 100n, result: 0, committed_state_record_seq: 100n },
+  [FrameType.CHECKPOINT_ACK]: { checkpoint_set_id: 88n, snapshot_kind: 0, stored: 1, at_offset: 900n, at_record_seq: 40n },
+  [FrameType.JOURNAL_READ]: { from_record_seq: 40n, max_records: 256, max_bytes: 65536 },
+  [FrameType.CHECKPOINT_PUT]: {
+    checkpoint_set_id: 88n, generation: 7, output_offset: 900n, record_seq: 40n, geometry_rev: 3, rows: 40, cols: 120,
+    snapshot_kind: 1, format_version: 1, xterm_version: '6.0.0', patch_version: 'bb1', checksum: b32(0x66), snapshot: new TextEncoder().encode('\x1b[H\x1b[2J restored screen')
+  },
   [FrameType.OUTPUT_ACK]: { ack_offset: 65535n, ack_record_seq: 300n },
   [FrameType.INPUT]: { flags: 0, surface_id: 2, bytes: new Uint8Array([0x1b, 0x5b, 0x41]) },
   [FrameType.COMMAND]: { txnId: b16(0x11), step: 0, step_key: b16(0x22), generation: 7, payload_digest: b32(0x33), payload: new TextEncoder().encode('hello world\r') },
@@ -131,6 +155,42 @@ describe('atch v3 wire — RECORD envelope', () => {
   });
 });
 
+const CKPT_DATA: CheckpointData = {
+  checkpoint_set_id: 88n,
+  present: 1,
+  snapshot_kind: 1,
+  put: { generation: 7, output_offset: 900n, record_seq: 40n, geometry_rev: 3, rows: 40, cols: 120, snapshot_kind: 1, format_version: 1, xterm_version: '6.0.0', patch_version: 'bb1', checksum: b32(0x66), snapshot: new TextEncoder().encode('screen') }
+};
+const JOURNAL: JournalData = {
+  from_record_seq: 40n,
+  eof: 1,
+  records: [
+    { record_type: RecordType.OUTPUT, record_seq: 40n, generation: 7, output_offset: 900n, body: new TextEncoder().encode('$ ') },
+    { record_type: RecordType.RESIZE, record_seq: 41n, generation: 7, output_offset: 902n, body: new ByteWriter().u16(50).u16(200).u32(4).take() }
+  ]
+};
+
+describe('atch v3 wire — variable-shape frames', () => {
+  it('CHECKPOINT_DATA present round-trips', () => {
+    const enc = encodeCheckpointData(CKPT_DATA);
+    const dec = decodeCheckpointData(enc);
+    expect(dec.checkpoint_set_id).toBe(88n);
+    expect(dec.present).toBe(1);
+    expect(new TextDecoder().decode(dec.put!.snapshot as Uint8Array)).toBe('screen');
+  });
+  it('CHECKPOINT_DATA absent (present=0) round-trips', () => {
+    const enc = encodeCheckpointData({ checkpoint_set_id: 1n, present: 0, snapshot_kind: 0 });
+    expect(decodeCheckpointData(enc)).toEqual({ checkpoint_set_id: 1n, present: 0, snapshot_kind: 0 });
+  });
+  it('JOURNAL_DATA record array round-trips', () => {
+    const enc = encodeJournalData(JOURNAL);
+    const dec = decodeJournalData(enc);
+    expect(dec.records).toHaveLength(2);
+    expect(dec.records[0].record_seq).toBe(40n);
+    expect(dec.records[1].record_type).toBe(RecordType.RESIZE);
+  });
+});
+
 describe('atch v3 wire — MORE reassembly', () => {
   it('reassembles a 2-fragment blob message', () => {
     const p1 = Uint8Array.of(1, 2, 3);
@@ -181,12 +241,17 @@ describe('golden vectors', () => {
       const frame = encodeFrame(hdr(type, { payload: encodeBody(type, body) }));
       return { name: FrameType[type], type, generation: 7, sequence: '3', body: jsonBody(body), frameHex: hex(frame) };
     });
+    // variable-shape frames (dedicated codecs) — full contract coverage
+    const recPayload = encodeRecord({ record_type: RecordType.OUTPUT, record_seq: 40n, generation: 7, output_offset: 900n, body: new TextEncoder().encode('$ ') });
+    valid.push({ name: 'RECORD', type: FrameType.RECORD, generation: 7, sequence: '3', body: { $note: 'OUTPUT record, see decodeRecord' }, frameHex: hex(encodeFrame(hdr(FrameType.RECORD, { aux: 900n, payload: recPayload }))) });
+    valid.push({ name: 'CHECKPOINT_DATA', type: FrameType.CHECKPOINT_DATA, generation: 7, sequence: '3', body: { $note: 'present=1, see decodeCheckpointData' }, frameHex: hex(encodeFrame(hdr(FrameType.CHECKPOINT_DATA, { payload: encodeCheckpointData(CKPT_DATA) }))) });
+    valid.push({ name: 'JOURNAL_DATA', type: FrameType.JOURNAL_DATA, generation: 7, sequence: '3', body: { $note: '2 records, see decodeJournalData' }, frameHex: hex(encodeFrame(hdr(FrameType.JOURNAL_DATA, { payload: encodeJournalData(JOURNAL) }))) });
     const invalid = [
       { name: 'bad_magic', hex: hex(flip(encodeFrame(hdr(FrameType.HEARTBEAT)), 0)), expectCode: ErrorCode.BAD_MAGIC },
       { name: 'bad_version', hex: hex(setByte(encodeFrame(hdr(FrameType.HEARTBEAT)), 4, 9)), expectCode: ErrorCode.BAD_VERSION }
     ];
     writeFileSync(join(dir, 'vectors.json'), JSON.stringify({ contract: 'atch-wire-v3', proto_version: PROTO_VERSION, header_len: HEADER_LEN, valid, invalid }, null, 2) + '\n');
-    expect(valid.length).toBeGreaterThanOrEqual(18);
+    expect(valid.length).toBeGreaterThanOrEqual(29);
   });
 });
 

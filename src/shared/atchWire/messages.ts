@@ -102,6 +102,21 @@ export const FRAME_SCHEMA: Partial<Record<FrameType, Field[]>> = {
     f('accepted_format_versions', 'u32'),
     f('accepted_patch_versions', 'str16')
   ],
+  [FrameType.CHECKPOINT_PUT]: [
+    f('checkpoint_set_id', 'u64'),
+    f('generation', 'u32'),
+    f('output_offset', 'u64'),
+    f('record_seq', 'u64'),
+    f('geometry_rev', 'u32'),
+    f('rows', 'u16'),
+    f('cols', 'u16'),
+    f('snapshot_kind', 'u8'),
+    f('format_version', 'u32'),
+    f('xterm_version', 'str16'),
+    f('patch_version', 'str16'),
+    f('checksum', 'b32'),
+    f('snapshot', 'blob32')
+  ],
   [FrameType.TERMINAL_REPLY]: [
     f('query_id', 'u64'),
     f('generation', 'u32'),
@@ -207,3 +222,69 @@ export function decodeRecord(payload: Uint8Array): RecordEnvelope {
 
 // re-export crc32 via a thin wrapper so this module owns the record crc domain.
 import { crc32 as crc32Of } from './frames.js';
+
+// ---- CHECKPOINT_DATA (conditional body) --------------------------------------
+export interface CheckpointData {
+  checkpoint_set_id: bigint;
+  present: number;
+  snapshot_kind: number;
+  /** present==1 → the CHECKPOINT_PUT body from `generation` onward. */
+  put?: Body;
+}
+
+export function encodeCheckpointData(d: CheckpointData): Uint8Array {
+  const w = new ByteWriter().u64(d.checkpoint_set_id).u8(d.present).u8(d.snapshot_kind);
+  if (d.present) {
+    if (!d.put) throw new WireError(ErrorCode.INTERNAL, 'CHECKPOINT_DATA present=1 without body');
+    // The put body per §3.23 is the CHECKPOINT_PUT layout from `generation` on:
+    // encode a full CHECKPOINT_PUT body and drop its leading checkpoint_set_id (u64).
+    const full = encodeBody(FrameType.CHECKPOINT_PUT, { checkpoint_set_id: d.checkpoint_set_id, ...d.put });
+    w.bytes(full.subarray(8));
+  }
+  return w.take();
+}
+
+export function decodeCheckpointData(payload: Uint8Array): CheckpointData {
+  const r = new ByteReader(payload);
+  const checkpoint_set_id = r.u64();
+  const present = r.u8();
+  const snapshot_kind = r.u8();
+  if (!present) {
+    r.end();
+    return { checkpoint_set_id, present, snapshot_kind };
+  }
+  // Reconstruct a CHECKPOINT_PUT body by prefixing the set_id, then schema-decode.
+  const withId = new ByteWriter().u64(checkpoint_set_id).bytes(r.rest()).take();
+  const put = decodeBody(FrameType.CHECKPOINT_PUT, withId);
+  return { checkpoint_set_id, present, snapshot_kind, put };
+}
+
+// ---- JOURNAL_DATA (record array) ---------------------------------------------
+export interface JournalData {
+  from_record_seq: bigint;
+  eof: number;
+  records: RecordEnvelope[];
+}
+
+export function encodeJournalData(d: JournalData): Uint8Array {
+  const w = new ByteWriter().u64(d.from_record_seq).u8(d.eof).u32(d.records.length);
+  for (const rec of d.records) {
+    const encoded = encodeRecord(rec);
+    w.u32(encoded.length).bytes(encoded);
+  }
+  return w.take();
+}
+
+export function decodeJournalData(payload: Uint8Array): JournalData {
+  const r = new ByteReader(payload);
+  const from_record_seq = r.u64();
+  const eof = r.u8();
+  const count = r.u32();
+  const records: RecordEnvelope[] = [];
+  for (let i = 0; i < count; i++) {
+    const recLen = r.u32();
+    records.push(decodeRecord(r.fixed(recLen)));
+  }
+  r.end();
+  return { from_record_seq, eof, records };
+}
