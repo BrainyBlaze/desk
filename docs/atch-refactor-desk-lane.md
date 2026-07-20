@@ -70,10 +70,20 @@ the lanes join, not before.
 ## Cross-review
 
 - @codex validated the wire vectors against his C codec byte-for-byte (above).
+- **I reviewed @codex's C wire codec** (`atch_wire_v3.c`) for memory safety +
+  malformed-input robustness (what vectors can't cover): traced every decode path
+  — verdict **memory-safe and well-bounded**, no memory bugs; four minor
+  defense-in-depth notes returned. That review also surfaced a **real bug in MY
+  TS codec**: `RESERVED_FLAG_MASK` excluded bit4 (COMPRESSED) while his C (and
+  doc §1.1) treat it reserved — my decoder silently accepted a reserved bit. The
+  30 vectors missed it (no reserved-flag invalid vector). Fixed in `0677e3f`:
+  mask aligned to `0xfffffff0` + backfilled the missing invalid vectors.
 - @codex will cross-review these DESK commits against the frozen seam after his
   Task 3; findings will be addressed here.
-- I will review @codex's C fork (framing/reassembly/registry/journal) against the
-  frozen contract at his named commit.
+- Next: review @codex's framing/registry/journal seams at his named commit.
+
+Lesson: shared conformance vectors only validate what they exercise — reading
+the peer implementation caught a divergence the vectors did not.
 
 ## Blocker for @human at delivery
 
