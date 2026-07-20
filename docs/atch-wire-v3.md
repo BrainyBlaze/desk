@@ -18,6 +18,8 @@ All integers little-endian. All offsets are byte offsets from the field's start.
 |`MAX_CELLS`|`2000000`|rows×cols ceiling; reject before worker alloc|
 |`MAX_STR16`|`65535`|str16 byte length ceiling|
 |`MAX_CHECKPOINT`|`4194304` (4 MiB)|snapshot blob cap|
+|`MAX_TERMINAL_REPLY`|`256`|TERMINAL_REPLY bytes cap|
+|`MORE_TIMEOUT_MS`|`5000`|MORE reassembly timeout|
 |`LEASE_TTL_MS`|`15000`|controller lease TTL (heartbeat)|
 |`HEARTBEAT_MS`|`5000`|keepalive cadence|
 |`CRC32`|IEEE 802.3, poly `0xEDB88320` reflected, init `0xFFFFFFFF`, final-XOR `0xFFFFFFFF`|journal records|
@@ -44,7 +46,10 @@ All integers little-endian. All offsets are byte offsets from the field's start.
 ### 1.3 MORE reassembly [resolves 8A#1/8C#6]
 A logical message spanning MORE frames = the CONTIGUOUS run of same-`type` frames with `MORE` set, terminated by the first same-type frame with `MORE` clear. Fragments carry increasing `sequence`; reassembly aborts (ERROR(TRUNCATED), drop partial) on: a `sequence` gap, a `type` change mid-run, total > `MAX_MSG`, or a per-message timeout `MORE_TIMEOUT=5000ms`. Only the PAYLOAD is fragmented; each fragment has its own header.
 
-## 2. Frame types (u16) — FROZEN, 29 types [resolves 8E#1/8G#? count]
+### 1.4 Capability bits (u32, HELLO negotiation) [consensus w/ @codex 2026-07-20]
+`bit0 RECORD` · `bit1 COMMAND` · `bit2 CHECKPOINT` · `bit3 SIGNAL` · `bit4 STATE_UPDATE` · `bit5 REDRAW` · bits 6-31 reserved (must be 0). Negotiated cap = intersection of both HELLOs; a REQUIRED cap the peer lacks → ERROR(CAP_UNSUPPORTED). A frame whose feature bit is not in the negotiated set → ERROR(CAP_UNSUPPORTED).
+
+## 2. Frame types (u16) — FROZEN, 30 types [resolves 8E#1/8G#count; +TERMINAL_REPLY per @codex review]
 `dir`: M=master→client, C=client→master, B=both.
 | type | name | dir | §payload |
 |----|----|----|----|
@@ -74,6 +79,7 @@ A logical message spanning MORE frames = the CONTIGUOUS run of same-`type` frame
 |67|JOURNAL_DATA|M|§3.21 (streams RECORD envelopes)|
 |68|CHECKPOINT_GET|C|§3.22|
 |69|CHECKPOINT_DATA|M|§3.23|
+|70|TERMINAL_REPLY|C|§3.27 — a fenceable, grammar-bound terminal-query reply [resolves 8I#6/8F, per @codex review]|
 |80|GAP|M|§3.24 (2-D bounds + reason + exactness axes) [resolves 8B/8J]|
 |82|FENCE|M|§3.25 (replay→live boundary, 2-D)|
 |83|REDRAW|C|§3.26 (explicit method; NOT retired) [resolves 8E#1]|
@@ -92,7 +98,7 @@ Unknown type + valid header ⇒ skip `payload_length`, log once (STRICT ⇒ ERRO
 - **3.10 RESIZE** `lease_epoch u32` · `surface_id u32` · `generation u32` · `rows u16` · `cols u16`. Only the lease owner; stale `lease_epoch`/`generation` REJECTED not replayed [resolves 8G#5]. Geometry clamped to MIN/MAX + MAX_CELLS.
 - **3.11 LEASE_CLAIM** `role u8` · `forced u8`. Allowed from an attached connection requesting the controller role BEFORE it owns the lease (attached-claimant) [resolves 8D#2].
 - **3.12 LEASE_GRANT** `granted u8` · `owner_conn u32` · `lease_epoch u32`(increments each grant) · `ack_offset u64` · `ack_record_seq u64` [resolves 8D#2]. Controller catches up to `ack_*` before driving.
-- **3.13 EVENT_STREAM** `event_type u8`(§5 enum) · `seq u64` · `ts_ms u64` · `body str16` — out-of-band signal; the same events are also durable journal EVENT records.
+- **3.13 EVENT_STREAM** `event_type u8`(§5 enum) · `generation u32` · `event_seq u64` · `ts_ms u64` · `body str16`. Event IDENTITY = `(sessionId, generation, event_seq)`; this is a FAST-PATH mirror of the durable journal EVENT record (§4/§5) — the receiver DEDUPES by identity so an event delivered both via EVENT_STREAM and via journal replay is applied EXACTLY once [consensus w/ @codex: retain both + dedupe].
 - **3.14 SIGNAL_REQUEST** `opId bytes[16]` · `signal u8`(1 TERM/2 KILL/3 INT/4 HUP) · `escalate_ms u32`(0=none; TERM→escalate_ms→KILL) [resolves 8E#1]. Idempotent by opId.
 - **3.15 SIGNAL_ACK** `opId bytes[16]` · `result u8`(0 delivered/1 no-child/2 denied) · `child_status i32`(if reaped).
 - **3.16 STATE_UPDATE** `state_record_seq u64` · `worker_incarnation bytes[16]` · `current_state_exact u8` · `restart_recoverable u8` · `main_exact u8` · `alt_exact u8` · `active_buffer u8` [resolves 8I#3]. Accept only GREATER `state_record_seq`; equal-seq identical=idempotent, mismatch→STATE_UPDATE_ACK(key_conflict); lower rejected.
@@ -105,7 +111,8 @@ Unknown type + valid header ⇒ skip `payload_length`, log once (STRICT ⇒ ERRO
 - **3.23 CHECKPOINT_DATA** `checkpoint_set_id id64` · `present u8` · `snapshot_kind u8` · (if present) the CHECKPOINT_PUT body (from `generation` onward).
 - **3.24 GAP** `from_offset u64` · `from_record_seq u64` · `to_offset u64` · `to_record_seq u64` · `reason u8`(1 truncated/2 backpressure-overflow/3 sink-failure/4 recovery-lost/5 generation-changed) · `current_state_exact u8` · `restart_recoverable u8` · `main_exact u8` · `alt_exact u8` · `active_buffer u8`. Bounds are `[from_exclusive, to_inclusive]` in BOTH dims.
 - **3.25 FENCE** `at_offset u64` · `at_record_seq u64` · `phase u8`(0 replay-end→live). Client applies up to `(at_*)` then switches to live RECORD frames.
-- **3.26 REDRAW** `method u8`(0 none/1 ctrl_l/2 winch) · `rows u16` · `cols u16`. Controller-only; asks the master to trigger an app repaint (mirrors the fork's `-r`).
+- **3.26 REDRAW** `method u8`(0 none/1 ctrl_l/2 winch) · `rows u16` · `cols u16`. Controller-only; asks the master to trigger an app repaint (mirrors the fork's `-r`). RETAINED (consensus).
+- **3.27 TERMINAL_REPLY** `query_id u64`(stable id allocated at query interception; UNIQUE per outstanding query — offset alone is insufficient, 7C#2/8I#6) · `generation u32` · `lease_epoch u32` · `source u8`(0 worker/1 lease-surface) · `query_class u8`(1 DA1/2 DA2/3 DSR/4 CPR/5 DECRQM/6 XTVERSION/7 pixel-geom/8 color/9 focus) · `reply blob32`(bounded ≤ `MAX_TERMINAL_REPLY=256`). EXACT-ONCE grammar binding: the master records the outstanding query `{query_id, expected responder(source), query_class, generation, lease_epoch, allowed grammar per class, max len}`; accepts EXACTLY ONE matching reply, consumes it atomically, and REJECTS unsolicited / duplicate / cross-class / wrong-responder / stale-generation-or-epoch / oversized bytes (→ ERROR(KEY_CONFLICT) or silent drop per class). Prevents the reply path becoming arbitrary PTY injection.
 
 ## 4. Typed RECORD envelope (shared by live RECORD frames + journal + JOURNAL_DATA) [resolves 8C#3/8J]
 One layout for a record whether streamed live (frame type 16) or replayed (inside JOURNAL_DATA / on disk):
@@ -132,4 +139,4 @@ Replay = apply by `record_seq` order (offset is a secondary index; RESIZE/EVENT/
 Each vector = `{name, hex_bytes, expect: parsed|error(code)}`. REQUIRED coverage: every frame type at min+boundary field values; MORE reassembly (2-fragment, N-fragment, gap-abort, type-change-abort, timeout); invalid (bad magic, bad version, payload_length=MAX+1, truncated header, truncated payload, unknown type ±STRICT, bad sequence, reserved-flag ±STRICT, role-disallowed, generation mismatch, geometry > MAX_CELLS, str16 len>MAX, blob32 needing MORE); RECORD envelope crc pass/fail; checkpoint-set select present/absent/format-mismatch; every u64 at 0, 1, 2^53-1, 2^53, 2^64-1 (BigInt/decimal-string boundary) [resolves 8C#7]. The atch C encoder/decoder and the Desk TS codec both pass byte-for-byte; a vector mismatch fails CI in both lanes.
 
 ---
-STATUS: v3-frozen-draft (2026-07-20). @codex reviews/challenges; on consensus this is the Phase-A interlock. Open sub-decisions flagged for review: (a) EVENT_STREAM vs journal EVENT duplication policy; (b) whether REDRAW stays or the daemon drives repaint via RESIZE only; (c) exact capability bit map (to be co-assigned). Everything else is byte-frozen.
+STATUS: **v3 FROZEN** (2026-07-20, consensus @claude-1 + @codex). The three prior sub-decisions are RESOLVED: (a) EVENT_STREAM + durable journal EVENT records BOTH retained, deduped by `(sessionId,generation,event_seq)` (§3.13); (b) REDRAW type 83 RETAINED with explicit method/geometry (§3.26); (c) capability bits assigned (§1.4). TERMINAL_REPLY added as type 70 (§3.27). Golden vectors materialized under `tests/fixtures/atch-wire/` and generated by the reference TS codec (`src/shared/atchWire/`). Contract changes now require a cross-reviewed version bump.
