@@ -15,7 +15,7 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 
 All of it is pure `src/shared` logic with persistence/IO expressed as **ports**,
 so the correctness rules are unit-testable without a live binary, sockets, or a
-browser. **182 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
+browser. **191 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
 
 | Spec | Module | What it is | Commit |
 |---|---|---|---|
@@ -27,6 +27,7 @@ browser. **182 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
 | §8.2 (C4) | `src/shared/recovery/` | Two independent trust axes (`current_state_exact` vs `restart_recoverable`) + per-buffer provenance + hidden-state re-establishment oracle. | `8e97255` |
 | §3.2/§3.3 | `src/shared/runtime/` | Daemon pure cores — worker supervisor (fail-closed cap, bounded backoff, sharding, visible-first restore), PID+start-time instance lock, versioned RPC, emulator port. | `0ba6ee3` |
 | §7.1 | `src/shared/runtime/sessionRuntime.ts` | **SessionRuntime** — composes all five layers; an integration test drives REAL wire records + REAL browser frames through it end-to-end. | `3c785ee` |
+| §6.9/§3.6 | `src/shared/runtime/nativeLifecycle.ts` | Daemon-owned native agent-host FSM (starting→ready→working/idle→exited/crashed) + control-plane `native-fsm` projection + bounded-backoff restart. Establishes the **atch-terminal-only vs daemon-native ownership boundary** as code (C14). | `1913607` |
 | §10 | `src/shared/migration/` | tmuxSession→sessionId grammar/minting, submitState **repair map (never import legacy as `done`)**, resumable phase FSM. | `5c7c71f` |
 
 ## The shared interlock is validated both directions
@@ -84,6 +85,17 @@ the lanes join, not before.
 
 Lesson: shared conformance vectors only validate what they exercise — reading
 the peer implementation caught a divergence the vectors did not.
+
+### Native-ownership consensus (§6.9 / C14)
+
+@codex's atch Task4 (terminal launch/process integration) broke 39 legacy tests.
+Grounding it in the spec resolved ownership: **atch is terminal-PTY-only (§5.2
+C14 "native is not atch's"); native session lifecycle is daemon-owned (§6.9,
+§3.6).** @codex confirmed and is holding his green terminal-only gate (dropping
+the corrective changes) while the daemon owns native lifecycle. I delivered that
+boundary as executable code (`nativeLifecycle.ts`, `1913607`) so both lanes agree
+on ownership. The live daemon glue that runs real host processes lands at
+lane-join.
 
 ## Blocker for @human at delivery
 
