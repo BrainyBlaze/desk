@@ -5,4 +5,5 @@ export * from './workerSupervisor.js';
 export * from './instanceLock.js';
 export * from './rpcEnvelope.js';
 export * from './emulatorPort.js';
+export * from './nativeLifecycle.js';
 export * from './sessionRuntime.js';
