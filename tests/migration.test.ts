@@ -10,7 +10,9 @@ import {
   checkGlobalUniqueness,
   importsAsDone,
   isValidSessionId,
+  migrateDurabilityQueue,
   migrateManifestSessions,
+  migratePausedStore,
   mintSessionId,
   negotiateClientSchema,
   planDrain,
@@ -18,6 +20,8 @@ import {
   resumeMigration,
   validateManifestMigration,
   type LegacyDurabilityExt,
+  type LegacyPausedEntry,
+  type LegacyQueueItem,
   type LegacySessionEntry
 } from '../src/shared/migration/index.js';
 
@@ -204,5 +208,77 @@ describe('migration — manifest transform (tmuxSession → sessionId)', () => {
     const first = migrateManifestSessions(entries).entries.map((e) => e.sessionId);
     const second = migrateManifestSessions(entries).entries.map((e) => e.sessionId);
     expect(second).toEqual(first);
+  });
+});
+
+// ---- channelsPaused store transform (§10) -----------------------------------
+describe('migration — channelsPaused re-key', () => {
+  const map = new Map<string, string>([
+    ['tmux-a', 'claude'],
+    ['tmux-b', 'server']
+  ]);
+
+  it('re-keys paused entries by the map, preserving pausedAt + reason', () => {
+    const items: LegacyPausedEntry[] = [
+      { tmuxSession: 'tmux-a', pausedAt: '2026-07-21T00:00:00.000Z', reason: 'sensitive work' },
+      { tmuxSession: 'tmux-b', pausedAt: '2026-07-21T01:00:00.000Z' }
+    ];
+    const out = migratePausedStore(items, map);
+    expect(out.items).toEqual([
+      { sessionId: 'claude', pausedAt: '2026-07-21T00:00:00.000Z', reason: 'sensitive work' },
+      { sessionId: 'server', pausedAt: '2026-07-21T01:00:00.000Z' }
+    ]);
+    expect(out.dropped).toEqual([]);
+  });
+
+  it('reports (never silently drops) a pause on a session gone from the manifest', () => {
+    const items: LegacyPausedEntry[] = [{ tmuxSession: 'tmux-ghost', pausedAt: '2026-07-21T00:00:00.000Z' }];
+    const out = migratePausedStore(items, map);
+    expect(out.items).toEqual([]);
+    expect(out.dropped).toEqual(items);
+  });
+});
+
+// ---- durability/queue store transform (§10) ---------------------------------
+describe('migration — durability queue re-key + submit repair', () => {
+  const map = new Map<string, string>([['tmux-a', 'claude']]);
+
+  it('an incomplete drain imports each item re-keyed + repaired, never as done', () => {
+    const items: LegacyQueueItem[] = [
+      { tmuxSession: 'tmux-a', seq: 1, ext: 'json' },
+      { tmuxSession: 'tmux-a', seq: 2, ext: 'delivering' },
+      { tmuxSession: 'tmux-a', seq: 3, ext: 'delivered' }
+    ];
+    const out = migrateDurabilityQueue(items, map, /*drainComplete*/ false);
+    expect(out.skippedByDrain).toBe(false);
+    expect(out.items.map((i) => [i.sessionId, i.seq, i.outcome.phase])).toEqual([
+      ['claude', 1, 'queued'],
+      ['claude', 2, 'queued'], // claimed-before-send → re-derive queued
+      ['claude', 3, 'semantic-unknown'] // .delivered held, never done
+    ]);
+    for (const i of out.items) {
+      expect(i.outcome.freshTxn).toBe(true);
+      expect(importsAsDone(i.outcome)).toBe(false);
+    }
+  });
+
+  it('a proven .delivered lifts to submit-confirmed (still not done)', () => {
+    const items: LegacyQueueItem[] = [{ tmuxSession: 'tmux-a', seq: 5, ext: 'delivered', provenConfirmed: true }];
+    const out = migrateDurabilityQueue(items, map, false);
+    expect(out.items[0].outcome.phase).toBe('submit-confirmed');
+    expect(importsAsDone(out.items[0].outcome)).toBe(false);
+  });
+
+  it('a fully-drained queue imports nothing', () => {
+    const items: LegacyQueueItem[] = [{ tmuxSession: 'tmux-a', seq: 1, ext: 'json' }];
+    const out = migrateDurabilityQueue(items, map, /*drainComplete*/ true);
+    expect(out).toEqual({ items: [], dropped: [], skippedByDrain: true });
+  });
+
+  it('reports items for a session gone from the manifest', () => {
+    const items: LegacyQueueItem[] = [{ tmuxSession: 'tmux-ghost', seq: 1, ext: 'delivering' }];
+    const out = migrateDurabilityQueue(items, map, false);
+    expect(out.items).toEqual([]);
+    expect(out.dropped).toEqual(items);
   });
 });

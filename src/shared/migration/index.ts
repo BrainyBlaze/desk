@@ -6,3 +6,5 @@ export * from './sessionId.js';
 export * from './submitStateRepair.js';
 export * from './migrationPhases.js';
 export * from './manifestTransform.js';
+export * from './channelsPausedTransform.js';
+export * from './durabilityTransform.js';
