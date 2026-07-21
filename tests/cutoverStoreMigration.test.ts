@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migratePausedStoreFile } from '../src/server/cutoverStoreMigration.js';
+import { migrateManifestToCanary, migratePausedStoreFile } from '../src/server/cutoverStoreMigration.js';
+import { readManifestFile, writeManifestFile } from '../src/core/config.js';
+import type { DeskManifest } from '../src/core/types.js';
 
 describe('cutover store migration — paused store (§10)', () => {
   let src: string;
@@ -70,5 +72,46 @@ describe('cutover store migration — paused store (§10)', () => {
     mkdirSync(join(src, '_engine'), { recursive: true });
     writeFileSync(join(src, '_engine', 'paused.json'), JSON.stringify({ items: 'not-an-array' }));
     expect(() => migratePausedStoreFile(src, dst, map)).toThrow(/fail-closed/);
+  });
+});
+
+describe('cutover store migration — canary manifest write (§10)', () => {
+  let src: string;
+  let dst: string;
+  beforeEach(() => {
+    src = mkdtempSync(join(tmpdir(), 'desk-cutover-msrc-'));
+    dst = mkdtempSync(join(tmpdir(), 'desk-cutover-mdst-'));
+  });
+  afterEach(() => {
+    rmSync(src, { recursive: true, force: true });
+    rmSync(dst, { recursive: true, force: true });
+  });
+
+  it('persists a sessionId-bearing manifest to the canary root, leaving the source read-only', () => {
+    const srcPath = join(src, 'desk.yml');
+    const dstPath = join(dst, 'canary-desk.yml');
+    const legacy: DeskManifest = {
+      groups: [
+        {
+          id: 'g1',
+          sessions: [
+            { name: 'Claude', tmuxSession: 'tmux-a', cwd: '/w', agent: 'claude' },
+            { name: 'Server', tmuxSession: 'tmux-b', cwd: '/w', command: 'bash' }
+          ]
+        }
+      ]
+    };
+    writeManifestFile(srcPath, legacy);
+
+    const report = migrateManifestToCanary(srcPath, dstPath);
+    expect(report.sessions).toBe(2);
+
+    // Target carries the minted ids; the round-trip is verified inside the executor.
+    const target = readManifestFile(dstPath);
+    expect(target.groups[0].sessions.map((s) => s.sessionId)).toEqual(['claude', 'server']);
+
+    // Source manifest is untouched (no sessionId written back).
+    const source = readManifestFile(srcPath);
+    expect(source.groups[0].sessions[0].sessionId).toBeUndefined();
   });
 });

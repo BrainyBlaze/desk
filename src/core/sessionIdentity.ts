@@ -13,7 +13,7 @@ import type { DeskGroup, DeskManifest, DeskProject, DeskSession } from './types.
 import { migrateManifestSessions, type LegacySessionEntry, type ManifestMigration } from '../shared/migration/index.js';
 
 /** Canonical session traversal: top-level groups in order, then projects in order. */
-function collectSessions(manifest: DeskManifest): DeskSession[] {
+export function collectSessions(manifest: DeskManifest): DeskSession[] {
   const out: DeskSession[] = [];
   for (const group of manifest.groups) {
     out.push(...group.sessions);

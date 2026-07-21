@@ -12,6 +12,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
+import { readManifestFile, writeManifestFile } from '../core/config.js';
+import { applyMigratedSessionIds, buildManifestMigration, collectSessions } from '../core/sessionIdentity.js';
 import { migratePausedStore, type LegacyPausedEntry, type MigratedPausedEntry } from '../shared/migration/index.js';
 
 /** Version 2 = the sessionId-keyed paused store (version 1 was tmuxSession-keyed). */
@@ -37,6 +39,35 @@ export function migratePausedStoreFile(sourceRoot: string, targetRoot: string, t
   mkdirSync(targetDir, { recursive: true });
   writeFileAtomic(join(targetDir, 'paused.json'), `${JSON.stringify({ version: PAUSED_STORE_VERSION, items: result.items }, null, 2)}\n`);
   return { migrated: result.items, dropped: result.dropped };
+}
+
+export interface ManifestMigrationReport {
+  sessions: number;
+  targetPath: string;
+}
+
+/**
+ * Persist the sessionId-bearing manifest into the isolated canary root (§10
+ * Phase 2). Reads the source manifest READ-ONLY, mints + applies sessionIds, and
+ * writes the migrated manifest atomically to targetPath (the existing manifest
+ * writer). Fail-closed: after writing, it re-reads and verifies every session's
+ * sessionId survived the YAML round-trip — a dropped field aborts rather than
+ * persisting a manifest that silently lost identities. sessionId is the eventual
+ * durable identity source, so future loads/edits preserve the assigned ids.
+ */
+export function migrateManifestToCanary(sourceManifestPath: string, targetManifestPath: string): ManifestMigrationReport {
+  const manifest = readManifestFile(sourceManifestPath); // read-only
+  const migration = buildManifestMigration(manifest);
+  const migrated = applyMigratedSessionIds(manifest, migration);
+  writeManifestFile(targetManifestPath, migrated); // atomic (temp + rename)
+
+  // Fail-closed round-trip: the assigned ids must survive serialize→parse.
+  const readBack = collectSessions(readManifestFile(targetManifestPath)).map((s) => s.sessionId);
+  const expected = migration.entries.map((e) => e.sessionId);
+  if (readBack.length !== expected.length || readBack.some((id, i) => id !== expected[i])) {
+    throw new Error(`cutover: manifest YAML round-trip dropped or altered sessionIds at ${targetManifestPath} — refusing (fail-closed)`);
+  }
+  return { sessions: expected.length, targetPath: targetManifestPath };
 }
 
 /** Read the legacy (version-1, tmuxSession-keyed) paused store as transform entries. */
