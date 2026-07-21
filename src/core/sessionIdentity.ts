@@ -48,8 +48,15 @@ export function buildManifestMigration(manifest: DeskManifest): ManifestMigratio
  * so migration.entries[i] lines up with the i-th session. Non-mutating.
  */
 export function applyMigratedSessionIds(manifest: DeskManifest, migration: ManifestMigration): DeskManifest {
+  // Fail closed: a cardinality mismatch means the migration was not built from
+  // THIS manifest, so applying it would silently write sessionId: undefined onto
+  // the tail sessions. Refuse to partially apply a cutover identity transform.
+  const count = collectSessions(manifest).length;
+  if (migration.entries.length !== count) {
+    throw new Error(`§10 apply: migration has ${migration.entries.length} entries but the manifest has ${count} sessions; refusing to partially apply`);
+  }
   let i = 0;
-  const withId = (session: DeskSession): DeskSession => ({ ...session, sessionId: migration.entries[i++]?.sessionId });
+  const withId = (session: DeskSession): DeskSession => ({ ...session, sessionId: migration.entries[i++].sessionId });
   const mapGroup = (group: DeskGroup): DeskGroup => ({ ...group, sessions: group.sessions.map(withId) });
   const mapProject = (project: DeskProject): DeskProject => ({ ...project, groups: project.groups.map(mapGroup) });
   return {

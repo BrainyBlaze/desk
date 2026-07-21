@@ -74,4 +74,14 @@ describe('sessionIdentity — manifest glue (§10)', () => {
     // Non-mutating: the original manifest is untouched.
     expect(original.groups[0].sessions[0].sessionId).toBeUndefined();
   });
+
+  it('fails closed on a migration whose cardinality does not match the manifest', () => {
+    const original = manifest(); // 4 sessions
+    const full = buildManifestMigration(original);
+    const short = { ...full, entries: full.entries.slice(0, 2) };
+    const extra = { ...full, entries: [...full.entries, { name: 'X', sessionId: 'x-extra' }] };
+    // A short OR extra migration must throw, never silently write undefined ids.
+    expect(() => applyMigratedSessionIds(original, short)).toThrow(/refusing to partially apply/);
+    expect(() => applyMigratedSessionIds(original, extra)).toThrow(/refusing to partially apply/);
+  });
 });
