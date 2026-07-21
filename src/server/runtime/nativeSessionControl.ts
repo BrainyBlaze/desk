@@ -97,6 +97,32 @@ export function staleNativeIdentityAfterEdit(
   return oldId !== newId ? oldId : undefined;
 }
 
+/**
+ * Fail-closed guard for an identity-changing native edit: retire the pre-edit
+ * identity BEFORE the manifest rename commits. Returns `ok: false` (the caller
+ * MUST abort the edit, leaving the manifest untouched and provisioning nothing)
+ * when the retire fails — so a rename can never orphan the old atch master nor
+ * desync the manifest against a still-running master. A no-op (ok) when the flag
+ * is off or the identity is unchanged. (R2.1 fail-closed lifecycle safety.)
+ */
+export async function retireStaleIdentityForEdit(
+  oldSpec: SessionSpec | undefined,
+  newSpec: SessionSpec | undefined
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!nativeSessionsEnabled()) {
+    return { ok: true };
+  }
+  const stale = staleNativeIdentityAfterEdit(oldSpec, newSpec);
+  if (stale === undefined) {
+    return { ok: true };
+  }
+  const retired = await retireNativeSession(stale);
+  if (retired.ok) {
+    return { ok: true };
+  }
+  return { ok: false, error: `could not retire old identity ${stale}: ${retired.error}` };
+}
+
 /** Start a session: daemon-provisioned under the flag, else legacy tmux. */
 export function startSessionNativeAware(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string } {
   return nativeSessionsEnabled() ? provisionNativeSession(spec) : startSession(spec);

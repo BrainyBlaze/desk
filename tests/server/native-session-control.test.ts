@@ -7,6 +7,7 @@ import {
   nativeSessionsEnabled,
   provisionNativeSession,
   restartSessionNativeAware,
+  retireStaleIdentityForEdit,
   staleNativeIdentityAfterEdit,
   startSessionNativeAware
 } from '../../src/server/runtime/nativeSessionControl.js';
@@ -207,5 +208,46 @@ describe('staleNativeIdentityAfterEdit', () => {
   it('returns undefined when either spec is missing', () => {
     expect(staleNativeIdentityAfterEdit(undefined, baseSpec)).toBeUndefined();
     expect(staleNativeIdentityAfterEdit(baseSpec, undefined)).toBeUndefined();
+  });
+});
+
+describe('retireStaleIdentityForEdit (fail-closed guard)', () => {
+  const oldSpec = { ...baseSpec, sessionId: 'shell' };
+  const renamed = { ...baseSpec, sessionId: 'renamed' };
+
+  it('is a no-op (ok) when the flag is off', async () => {
+    setEnv('DESK_ATCH_NATIVE', undefined);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await retireStaleIdentityForEdit(oldSpec, renamed)).toEqual({ ok: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op (ok) when the identity is unchanged', async () => {
+    setEnv('DESK_ATCH_NATIVE', '1');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await retireStaleIdentityForEdit(oldSpec, { ...baseSpec, sessionId: 'shell', model: 'x' })).toEqual({ ok: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('retires the OLD identity and reports ok when the daemon accepts it', async () => {
+    setEnv('DESK_ATCH_NATIVE', '1');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await retireStaleIdentityForEdit(oldSpec, renamed)).toEqual({ ok: true });
+    expect(fetchMock.mock.calls[0][0]).toContain('/control/retire');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('shell');
+  });
+
+  it('reports NOT-ok when the retire fails, so the caller aborts the edit (fail closed)', async () => {
+    setEnv('DESK_ATCH_NATIVE', '1');
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await retireStaleIdentityForEdit(oldSpec, renamed);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('could not retire old identity shell');
+    }
   });
 });

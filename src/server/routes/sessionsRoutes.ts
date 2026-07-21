@@ -37,7 +37,7 @@ import {
   nativeSessionsEnabled,
   restartSessionNativeAware,
   retireNativeSession,
-  staleNativeIdentityAfterEdit,
+  retireStaleIdentityForEdit,
   startSessionNativeAware
 } from '../runtime/nativeSessionControl.js';
 import type {
@@ -584,17 +584,17 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           session
         });
         const newSpec = findSpec(buildSessionSpecs(next, { homeDir: homedir() }), session.name);
-        writeManifestFile(manifestPath, next);
-        // A native edit that changes the session's identity (e.g. a rename, since
-        // sessionId is minted from the name) must retire the master under its OLD
-        // identity or it orphans — nothing references it again.
-        const staleIdentity = nativeSessionsEnabled() ? staleNativeIdentityAfterEdit(oldSpec, newSpec) : undefined;
-        if (staleIdentity !== undefined) {
-          const retired = await retireNativeSession(staleIdentity);
-          if (!retired.ok) {
-            console.error(`native session edit: could not retire old identity ${staleIdentity}: ${retired.error}`);
-          }
+        // Fail closed (R2.1): a native edit that changes the session's identity
+        // (e.g. a rename, since sessionId is minted from the name) must retire the
+        // master under its OLD identity, BEFORE the manifest rename commits. If it
+        // can't be retired (e.g. daemon down), abort — neither orphan the old atch
+        // master nor desync the manifest against a still-running master. The user
+        // retries once the daemon is reachable.
+        const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
+        if (!staleGuard.ok) {
+          return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };
         }
+        writeManifestFile(manifestPath, next);
         if (
           shouldRespawnAfterEdit(oldSpec, newSpec, (target) =>
             (nativeSessionsEnabled() ? runningSessionSet() : listTmuxSessions()).has(target)
