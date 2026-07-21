@@ -37,6 +37,8 @@ describe('migration — sessionId grammar', () => {
     expect(isValidSessionId('Web-1')).toBe(false); // no uppercase
     expect(isValidSessionId('web_1')).toBe(false); // no underscore
     expect(isValidSessionId('-web')).toBe(false);
+    expect(isValidSessionId(true)).toBe(false); // regex coercion must not admit non-strings
+    expect(isValidSessionId(null)).toBe(false);
   });
 
   it('assertMintable rejects grammar and collision', () => {
@@ -169,6 +171,35 @@ describe('migration — manifest transform (tmuxSession → sessionId)', () => {
     expect(m.entries.map((e) => e.sessionId)).toEqual(['claude', 'claude-2', 'claude-3']);
     expect(m.tmuxToSessionId.get('tmux-b')).toBe('claude-2');
     expect(m.tmuxToSessionId.size).toBe(3);
+  });
+
+  it('preserves persisted sessionIds and reserves them before minting missing ids', () => {
+    const entries: LegacySessionEntry[] = [
+      { name: 'Stable' },
+      { name: 'Renamed Session', sessionId: 'stable', tmuxSession: 'tmux-existing' }
+    ];
+    const m = ok(migrateManifestSessions(entries), entries);
+    expect(m.entries.map((entry) => entry.sessionId)).toEqual(['stable-2', 'stable']);
+    expect(m.tmuxToSessionId.get('tmux-existing')).toBe('stable');
+  });
+
+  it('validates persisted sessionIds fail-closed', () => {
+    const invalid: LegacySessionEntry[] = [{ name: 'One', sessionId: 'Invalid ID' }];
+    expect(validateManifestMigration(invalid, migrateManifestSessions(invalid))).toEqual({
+      ok: false,
+      reason: 'sessionid-grammar',
+      value: 'Invalid ID'
+    });
+
+    const duplicate: LegacySessionEntry[] = [
+      { name: 'One', sessionId: 'same-id' },
+      { name: 'Two', sessionId: 'same-id' }
+    ];
+    expect(validateManifestMigration(duplicate, migrateManifestSessions(duplicate))).toEqual({
+      ok: false,
+      reason: 'sessionid-collision',
+      value: 'same-id'
+    });
   });
 
   it('a never-started session (no tmuxSession) still gets a sessionId but no map entry', () => {

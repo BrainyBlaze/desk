@@ -585,11 +585,11 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         });
         const newSpec = findSpec(buildSessionSpecs(next, { homeDir: homedir() }), session.name);
         // Fail closed (R2.1): a native edit that changes the session's identity
-        // (e.g. a rename, since sessionId is minted from the name) must retire the
-        // master under its OLD identity, BEFORE the manifest rename commits. If it
-        // can't be retired (e.g. daemon down), abort — neither orphan the old atch
-        // master nor desync the manifest against a still-running master. The user
-        // retries once the daemon is reachable.
+        // (possible for a legacy entry without a persisted sessionId) must retire
+        // the master under its OLD identity, BEFORE the manifest edit commits. If
+        // it can't be retired (e.g. daemon down), abort — neither orphan the old
+        // atch master nor desync the manifest against a still-running master. The
+        // user retries once the daemon is reachable.
         const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
         if (!staleGuard.ok) {
           return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };

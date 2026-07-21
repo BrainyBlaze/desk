@@ -253,6 +253,45 @@ groups:
     ]);
   });
 
+  it('fails closed on invalid or duplicate persisted sessionIds', () => {
+    const invalid = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: unsafe
+        cwd: /workspace
+        command: bash
+        sessionId: bad/id
+`);
+    expect(() => buildSessionSpecs(invalid, { homeDir: '/workspace' })).toThrow(/sessionId "bad\/id" violates the identity grammar/);
+
+    const nonString = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: unsafe-type
+        cwd: /workspace
+        command: bash
+        sessionId: true
+`);
+    expect(() => buildSessionSpecs(nonString, { homeDir: '/workspace' })).toThrow(/sessionId "true" violates the identity grammar/);
+
+    const duplicate = parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: one
+        cwd: /workspace
+        command: bash
+        sessionId: same-id
+      - name: two
+        cwd: /workspace
+        command: bash
+        sessionId: same-id
+`);
+    expect(() => buildSessionSpecs(duplicate, { homeDir: '/workspace' })).toThrow(/duplicate sessionId "same-id"/);
+  });
+
   it('requires session cwd and either a command or a supported agent', () => {
     expect(() =>
       parseDeskManifest(`

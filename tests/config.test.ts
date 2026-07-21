@@ -3,6 +3,7 @@ import {
   addGroupToProjectManifest,
   addGroupToManifest,
   addProjectToManifest,
+  addSessionToProjectManifest,
   addSessionToManifest,
   deleteProjectFromManifest,
   deleteSessionFromManifest,
@@ -48,12 +49,46 @@ describe('desk config', () => {
               name: 'sample-agent',
               cwd: '~/projects/sample',
               agent: 'codex',
-              resume: '00000000-0000-7000-8000-000000000000'
+              resume: '00000000-0000-7000-8000-000000000000',
+              sessionId: 'sample-agent'
             }
           ]
         }
       ]
     });
+  });
+
+  it('pins a sessionId when adding root and project sessions', () => {
+    const root = addSessionToManifest(
+      {
+        groups: [
+          {
+            id: 'existing',
+            sessions: [{ name: 'Existing', command: 'bash', sessionId: 'new-agent' }]
+          }
+        ]
+      },
+      {
+        groupId: 'research',
+        session: { name: 'New Agent', cwd: '~/projects/sample', agent: 'codex', sessionId: 'new-agent' }
+      }
+    );
+    expect(root.groups[1].sessions[0].sessionId).toBe('new-agent-2');
+
+    const project = addProjectToManifest(createEmptyManifest(), {
+      projectId: 'alpha',
+      cwd: '~/projects/alpha'
+    });
+    const grouped = addGroupToProjectManifest(project, {
+      projectId: 'alpha',
+      groupId: 'main'
+    });
+    const withSession = addSessionToProjectManifest(grouped, {
+      projectId: 'alpha',
+      groupId: 'main',
+      session: { name: 'Project Agent', agent: 'codex', sessionId: 'bad/id' }
+    });
+    expect(withSession.projects?.[0].groups[0].sessions[0].sessionId).toBe('project-agent');
   });
 
   it('round-trips session uiMode through serialize/parse', () => {
@@ -101,6 +136,35 @@ describe('desk config', () => {
     expect(session.uiMode).toBe('native');
     expect(session.tmuxSession).toBe('agentdesk-research-chat-agent-pinned00');
     expect(session.bypassPermissions).toBe(true);
+  });
+
+  it('preserves the durable sessionId across a rename edit', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: research
+    label: Research
+    sessions:
+      - name: chat-agent
+        cwd: ~/projects/sample
+        agent: claude
+        sessionId: chat-agent-stable
+`);
+
+    const edited = editSessionInManifest(manifest, {
+      groupId: 'research',
+      currentName: 'chat-agent',
+      session: {
+        name: 'renamed-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        sessionId: 'replacement-must-not-win'
+      }
+    });
+
+    expect(edited.groups[0].sessions[0]).toMatchObject({
+      name: 'renamed-agent',
+      sessionId: 'chat-agent-stable'
+    });
   });
 
   it('preserves a captured resume id when an edit payload omits it without an explicit clear', () => {

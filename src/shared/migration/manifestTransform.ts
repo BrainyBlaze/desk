@@ -1,7 +1,8 @@
 // Manifest session-identity transform (spec §10, phase 3 transform + phase 4
 // validate). Re-keys a session manifest from the legacy tmux identity to the
-// atch-native sessionId, minting a grammar-valid, globally-unique sessionId per
-// session and emitting the canonical tmuxSession→sessionId map that every other
+// atch-native sessionId, preserving an existing durable identity or minting a
+// grammar-valid, globally-unique sessionId for a legacy session, and emitting
+// the canonical tmuxSession→sessionId map that every other
 // §10 store transform (channelsPaused, resume state, AgentSurface) re-keys
 // against.
 //
@@ -11,20 +12,22 @@
 // the gated cutover glue and lives in the product layer, not here.
 //
 // Deterministic in entry order, so a resumed `transform` phase re-run over the
-// restored legacy backup mints byte-identical ids — no pre-assigned-id state to
-// carry across a resume (§10 resumable phase FSM).
+// restored backup preserves or mints byte-identical ids (§10 resumable phase
+// FSM).
 
 import { checkGlobalUniqueness, isValidSessionId, mintSessionId } from './sessionId.js';
 
-/** A legacy session as the transform needs it — name (mint source) + optional tmux identity. */
+/** A session as the transform needs it: name, optional durable id, and optional tmux identity. */
 export interface LegacySessionEntry {
   /** Human name; the mint source for the sessionId. */
   name: string;
+  /** Durable identity to preserve; absent on a legacy manifest entry. */
+  sessionId?: string;
   /** Legacy tmux identity; when present it becomes a re-key map entry. */
   tmuxSession?: string;
 }
 
-/** A migrated session: its minted sessionId plus the tmux identity it came from (if any). */
+/** A migrated session: its durable sessionId plus the tmux identity it came from (if any). */
 export interface MigratedSessionEntry {
   name: string;
   sessionId: string;
@@ -45,19 +48,28 @@ export type ManifestValidation =
   | { ok: false; reason: 'duplicate-tmux-session'; value: string };
 
 /**
- * Phase 3 — transform. Mint a sessionId for every entry (from its name, deduped
- * globally so name collisions get a numeric suffix), preserving the tmux
- * identity → sessionId map. Always succeeds; correctness is asserted separately
- * by validateManifestMigration so the phase FSM's validate step is an explicit,
- * fail-closed gate before commit.
+ * Phase 3 — transform. Preserve each existing sessionId and mint only missing
+ * ids (from the name, deduped globally so name collisions get a numeric suffix),
+ * preserving the tmux identity → sessionId map. Existing ids are reserved before
+ * minting so traversal order cannot steal a durable identity. Always succeeds;
+ * correctness is asserted separately by validateManifestMigration so the phase
+ * FSM's validate step is an explicit, fail-closed gate before commit.
  */
 export function migrateManifestSessions(entries: readonly LegacySessionEntry[]): ManifestMigration {
   const taken = new Set<string>();
+  for (const entry of entries) {
+    if (entry.sessionId !== undefined) {
+      taken.add(entry.sessionId);
+    }
+  }
+
   const migrated: MigratedSessionEntry[] = [];
   const tmuxToSessionId = new Map<string, string>();
   for (const entry of entries) {
-    const sessionId = mintSessionId(entry.name, taken);
-    taken.add(sessionId);
+    const sessionId = entry.sessionId ?? mintSessionId(entry.name, taken);
+    if (entry.sessionId === undefined) {
+      taken.add(sessionId);
+    }
     const out: MigratedSessionEntry = { name: entry.name, sessionId };
     if (entry.tmuxSession !== undefined) {
       out.tmuxSession = entry.tmuxSession;

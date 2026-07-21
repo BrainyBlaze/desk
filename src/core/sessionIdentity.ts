@@ -1,8 +1,8 @@
 // Product-side glue for the §10 manifest transform (cutover Phase 2, Step 1).
 // Bridges the product's DeskManifest to the pure, layering-clean migration
 // transform in src/shared/migration: flatten the manifest's sessions to the
-// transform's structural entries, run the mint, and (round-trip) apply the
-// minted sessionIds back onto a new manifest.
+// transform's structural entries, preserve or mint identities, and
+// (round-trip) apply the sessionIds back onto a new manifest.
 //
 // Pure and non-mutating — returns new objects, never touches the live store.
 // The store read/write that consumes this is the gated Phase 2/3 work; this only
@@ -30,6 +30,9 @@ export function collectSessions(manifest: DeskManifest): DeskSession[] {
 export function deskManifestToEntries(manifest: DeskManifest): LegacySessionEntry[] {
   return collectSessions(manifest).map((session) => {
     const entry: LegacySessionEntry = { name: session.name };
+    if (session.sessionId !== undefined) {
+      entry.sessionId = session.sessionId;
+    }
     if (session.tmuxSession !== undefined) {
       entry.tmuxSession = session.tmuxSession;
     }
@@ -37,7 +40,7 @@ export function deskManifestToEntries(manifest: DeskManifest): LegacySessionEntr
   });
 }
 
-/** Run the §10 manifest mint over the product manifest, yielding ids + the tmux→sessionId map. */
+/** Preserve or mint §10 identities, yielding ids + the tmux→sessionId map. */
 export function buildManifestMigration(manifest: DeskManifest): ManifestMigration {
   return migrateManifestSessions(deskManifestToEntries(manifest));
 }

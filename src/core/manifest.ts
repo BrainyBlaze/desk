@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { validateManifestMigration } from '../shared/migration/index.js';
 import { shellQuote } from '../shared/shell.js';
 import { isSupportedAgent } from './types.js';
 import type {
@@ -11,7 +12,7 @@ import type {
   SessionSpec
 } from './types.js';
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
-import { buildManifestMigration } from './sessionIdentity.js';
+import { buildManifestMigration, deskManifestToEntries } from './sessionIdentity.js';
 
 const DEFAULT_NAMESPACE = 'agentdesk';
 const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
@@ -150,14 +151,23 @@ export function buildSessionSpecs(
     )
   );
 
-  // Attach the atch-native durable sessionId (§10), minted from the manifest in
-  // the same canonical traversal order (root groups, then projects) that
-  // buildManifestMigration uses — so entry[i] lines up with spec[i]. Fail closed
-  // on a cardinality mismatch rather than leave a spec without an identity.
+  // Attach the atch-native durable sessionId (§10), preserved or minted in the
+  // same canonical traversal order (root groups, then projects) that
+  // buildManifestMigration uses — so entry[i] lines up with spec[i].
   const specs = [...rootSpecs, ...projectSpecs];
   const migration = buildManifestMigration(manifest);
+  const validation = validateManifestMigration(deskManifestToEntries(manifest), migration);
+  if (!validation.ok) {
+    if (validation.reason === 'sessionid-grammar') {
+      throw new ManifestValidationError(`sessionId "${validation.value}" violates the identity grammar`);
+    }
+    if (validation.reason === 'sessionid-collision') {
+      throw new ManifestValidationError(`duplicate sessionId "${validation.value}"`);
+    }
+    throw new ManifestValidationError(`duplicate tmuxSession "${validation.value}"`);
+  }
   if (migration.entries.length !== specs.length) {
-    throw new ManifestValidationError(`sessionId mint produced ${migration.entries.length} ids for ${specs.length} sessions`);
+    throw new ManifestValidationError(`sessionId transform produced ${migration.entries.length} ids for ${specs.length} sessions`);
   }
   return specs.map((spec, i) => ({ ...spec, sessionId: migration.entries[i].sessionId }));
 }

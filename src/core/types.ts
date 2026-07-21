@@ -116,9 +116,10 @@ export interface DeskSession {
   command?: string;
   tmuxSession?: string;
   /**
-   * atch-native durable session identity (§10). Minted from the session name via
-   * the migration transform. Optional during the transitional cutover; it becomes
-   * the sole identity (and tmuxSession is dropped) at the Phase 5 legacy deletion.
+   * atch-native durable session identity (§10). Preserved once assigned; legacy
+   * entries without one receive a name-derived id from the migration transform.
+   * Optional during the transitional cutover; it becomes the sole identity (and
+   * tmuxSession is dropped) at the Phase 5 legacy deletion.
    */
   sessionId?: string;
   order?: number;

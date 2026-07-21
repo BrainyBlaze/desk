@@ -52,6 +52,44 @@ describe('sessionIdentity — manifest glue (§10)', () => {
     expect(m.tmuxToSessionId.size).toBe(3);
   });
 
+  it('preserves persisted sessionIds across rename and traversal reorder', () => {
+    const original: DeskManifest = {
+      groups: [
+        {
+          id: 'g1',
+          sessions: [
+            { name: 'Claude', sessionId: 'claude-stable', tmuxSession: 'tmux-claude' },
+            { name: 'Server', sessionId: 'server-stable', tmuxSession: 'tmux-server' }
+          ]
+        }
+      ]
+    };
+    const edited: DeskManifest = {
+      groups: [
+        {
+          id: 'g1',
+          sessions: [
+            { name: 'Server Renamed', sessionId: 'server-stable', tmuxSession: 'tmux-server' },
+            { name: 'Claude Renamed', sessionId: 'claude-stable', tmuxSession: 'tmux-claude' }
+          ]
+        }
+      ]
+    };
+
+    expect(deskManifestToEntries(edited)).toEqual([
+      { name: 'Server Renamed', sessionId: 'server-stable', tmuxSession: 'tmux-server' },
+      { name: 'Claude Renamed', sessionId: 'claude-stable', tmuxSession: 'tmux-claude' }
+    ]);
+
+    const migration = buildManifestMigration(edited);
+    expect(migration.entries.map((entry) => entry.sessionId)).toEqual(['server-stable', 'claude-stable']);
+    expect(migration.tmuxToSessionId).toEqual(buildManifestMigration(original).tmuxToSessionId);
+    expect(migration.tmuxToSessionId).toEqual(new Map([
+      ['tmux-server', 'server-stable'],
+      ['tmux-claude', 'claude-stable']
+    ]));
+  });
+
   it('applies sessionIds back in the same order, aligned with the map, without mutating the input', () => {
     const original = manifest();
     const m = buildManifestMigration(original);

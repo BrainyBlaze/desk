@@ -5,8 +5,8 @@
 
 export const SESSION_ID_RE = /^[a-z][a-z0-9-]{2,63}$/;
 
-export function isValidSessionId(id: string): boolean {
-  return SESSION_ID_RE.test(id);
+export function isValidSessionId(id: unknown): id is string {
+  return typeof id === 'string' && SESSION_ID_RE.test(id);
 }
 
 /** Assert grammar + uniqueness at create; a collision is a hard reject (§10). */
