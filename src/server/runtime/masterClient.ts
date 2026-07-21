@@ -37,6 +37,11 @@ export class MasterClient {
   private readonly ra = new FrameReassembler();
   private readonly h: MasterClientHandlers;
   private seq = 0n;
+  /** Session generation, learned from ATTACH_ACK. Post-attach frames (INPUT/
+   *  RESIZE/COMMAND) MUST carry it — the master fences frames whose generation
+   *  != its own (spawn-assigned) generation. 0 until ATTACH_ACK (HELLO/ATTACH
+   *  are pre-attach and generation-agnostic). */
+  private generation = 0;
   private readonly incarnation = randomBytes(16);
 
   constructor(private readonly sockPath: string, handlers: MasterClientHandlers = {}) {
@@ -98,7 +103,7 @@ export class MasterClient {
   // ---- internals ------------------------------------------------------------
   private sendBody(type: FrameType, body: Body): void {
     const payload = encodeBody(type, body);
-    this.send({ type, flags: 0, generation: 0, sequence: this.seq++, aux: 0n, payload });
+    this.send({ type, flags: 0, generation: this.generation, sequence: this.seq++, aux: 0n, payload });
   }
 
   private onData(chunk: Buffer): void {
@@ -122,9 +127,13 @@ export class MasterClient {
           if (e instanceof WireError) this.h.onProtocolError?.(e);
         }
         return;
-      case FrameType.ATTACH_ACK:
-        this.h.onAttachAck?.(decodeBody(FrameType.ATTACH_ACK, f.payload));
+      case FrameType.ATTACH_ACK: {
+        const ack = decodeBody(FrameType.ATTACH_ACK, f.payload);
+        // Adopt the session generation so post-attach frames pass the master's fence.
+        this.generation = (ack as { generation: number }).generation;
+        this.h.onAttachAck?.(ack);
         return;
+      }
       case FrameType.ERROR: {
         const body = decodeBody(FrameType.ERROR, f.payload) as { code: number; detail: string };
         this.h.onError?.(body.code, body.detail);

@@ -18,6 +18,13 @@ export interface SpawnMasterOptions {
   env?: NodeJS.ProcessEnv;
   readyTimeoutMs?: number;
   pollMs?: number;
+  /**
+   * The launcher forks a DETACHED master and exits (e.g. `atch start`), so a
+   * clean exit of the spawned process is expected and the socket appearing is
+   * the sole readiness signal. When true, spawnMaster does not reject on the
+   * launcher's exit; it polls the socket until timeout.
+   */
+  detached?: boolean;
 }
 
 /**
@@ -49,6 +56,11 @@ export async function spawnMaster(opts: SpawnMasterOptions): Promise<{ child: Ch
       else resolve();
     }
     function onExit(code: number | null): void {
+      // Detached launcher: a clean exit is expected; keep polling for the socket.
+      if (opts.detached) {
+        if (existsSync(opts.sockPath)) finish();
+        return;
+      }
       finish(new Error(`atch exited before its socket appeared (code ${code})`));
     }
     function check(): void {
