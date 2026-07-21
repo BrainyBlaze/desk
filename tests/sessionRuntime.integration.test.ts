@@ -180,3 +180,51 @@ describe('SessionRuntime — control plane + delivery (typed hook)', () => {
     expect(a.event.eventId).toBe(b.event.eventId); // same eventId, counted once
   });
 });
+
+describe('SessionRuntime — control-plane input injection + tail (channels delivery)', () => {
+  it('injectInput sends an INPUT frame under the reserved surface id 0, byte-exact', () => {
+    const h = makeHarness();
+    h.rt.injectInput(new TextEncoder().encode('hello channel'));
+    expect(h.masterOut).toHaveLength(1);
+    expect(h.masterOut[0].type).toBe(FrameType.INPUT);
+    const body = decodeBody(FrameType.INPUT, h.masterOut[0].payload) as { surface_id: number; bytes: Uint8Array };
+    expect(body.surface_id).toBe(0);
+    expect(new TextDecoder().decode(body.bytes)).toBe('hello channel');
+  });
+
+  it('paste input stays unwrapped when the app never enabled bracketed paste', () => {
+    const h = makeHarness();
+    h.rt.injectInput(new TextEncoder().encode('line1\nline2'), true);
+    const body = decodeBody(FrameType.INPUT, h.masterOut[0].payload) as { bytes: Uint8Array };
+    expect(new TextDecoder().decode(body.bytes)).toBe('line1\nline2');
+  });
+
+  it('paste input is bracketed-paste-wrapped when the app enabled the mode', () => {
+    class PasteEmulator extends FakeEmulator {
+      bracketedPaste(): boolean {
+        return true;
+      }
+    }
+    const emu = new PasteEmulator();
+    const masterOut: RawFrame[] = [];
+    const rt = new SessionRuntime({
+      sessionId: 's1',
+      generation: 1,
+      emulator: emu,
+      intakeStore: new InMemoryIntakeStore(),
+      cmdCache: new InMemoryCmdCache(),
+      now: () => 1,
+      sendBrowser: () => {},
+      sendMaster: (frame) => masterOut.push(frame)
+    });
+    rt.injectInput(new TextEncoder().encode('line1\nline2'), true);
+    const body = decodeBody(FrameType.INPUT, masterOut[0].payload) as { bytes: Uint8Array };
+    expect(new TextDecoder().decode(body.bytes)).toBe('\x1b[200~line1\nline2\x1b[201~');
+  });
+
+  it('tailText exposes the emulator tail (the capture-pane equivalent)', () => {
+    const h = makeHarness();
+    h.emu.write(new TextEncoder().encode('screen-tail'));
+    expect(h.rt.tailText(5)).toEqual(['screen-tail']);
+  });
+});

@@ -175,6 +175,37 @@ export class SessionRuntime {
   }
 
   /**
+   * Control-plane input injection (channels delivery, not a browser surface):
+   * an INPUT frame under the reserved surface id 0 — browser channelIds are
+   * allocated from 1, so 0 can never collide with a subscriber. With `paste`,
+   * mirrors tmux `paste-buffer -p`: wrap in bracketed-paste codes ONLY when the
+   * app enabled the mode (DECSET 2004), so multi-line text does not submit per
+   * newline in a TUI, while a plain shell never sees stray escape codes.
+   */
+  injectInput(bytes: Uint8Array, paste = false): void {
+    let data = bytes;
+    if (paste && this.d.emulator.bracketedPaste?.() === true) {
+      const open = new TextEncoder().encode('\x1b[200~');
+      const close = new TextEncoder().encode('\x1b[201~');
+      data = new Uint8Array(open.length + bytes.length + close.length);
+      data.set(open, 0);
+      data.set(bytes, open.length);
+      data.set(close, open.length + bytes.length);
+    }
+    const payload = encodeBody(FrameType.INPUT, { flags: 0, surface_id: 0, bytes: data });
+    this.d.sendMaster({ type: FrameType.INPUT, flags: 0, generation: this.d.generation, sequence: 0n, aux: 0n, payload });
+  }
+
+  /**
+   * The last `rows` on-screen lines as plain text (the capture-pane equivalent
+   * for channels submit-verify): the authoritative emulator's tail, never
+   * escape sequences.
+   */
+  tailText(rows: number): string[] {
+    return this.d.emulator.readTailText(rows);
+  }
+
+  /**
    * Browser-initiated resize (§7.5): resize the authoritative emulator and tell
    * the master to resize the PTY. Lease enforcement (only the owning surface may
    * resize) is the §7.5 refinement layered above; here the frame carries the

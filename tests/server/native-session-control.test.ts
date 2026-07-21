@@ -3,6 +3,7 @@ import type { SessionSpec } from '../../src/core/types.js';
 import * as runner from '../../src/core/runner.js';
 import {
   atchCommandFor,
+  createNativeChannelsTransport,
   daemonHttpBase,
   nativeSessionsEnabled,
   provisionNativeSession,
@@ -183,6 +184,82 @@ describe('restartSessionNativeAware', () => {
     expect(result).toEqual({ ok: true });
     expect(restartSpy).toHaveBeenCalledWith(baseSpec);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('createNativeChannelsTransport', () => {
+  function stubDesk(): void {
+    vi.spyOn(runner, 'loadDeskCached').mockReturnValue({
+      sessions: [{ ...baseSpec, tmuxSession: 'agentdesk-g-shell-abc', sessionId: 'shell' }]
+    } as never);
+  }
+
+  it('sendText pastes via the daemon (paste flag on) then sends a delayed CR', async () => {
+    stubDesk();
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+      return Promise.resolve({ ok: true, status: 200, text: async () => '{"ok":true}' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const waits: number[] = [];
+    const transport = createNativeChannelsTransport({ enterDelayMs: 700, wait: async (ms) => void waits.push(ms) });
+
+    const sent = await transport.sendText('agentdesk-g-shell-abc', 'msg body');
+
+    expect(sent).toBe(true);
+    expect(bodies).toEqual([
+      { sessionId: 'shell', text: 'msg body', paste: true },
+      { sessionId: 'shell', text: '\r' }
+    ]);
+    expect(waits).toEqual([700]);
+  });
+
+  it('sendText reports false (no Enter) when the paste fails', async () => {
+    stubDesk();
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createNativeChannelsTransport({ wait: async () => {} });
+    expect(await transport.sendText('agentdesk-g-shell-abc', 'msg')).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('capturePane joins the daemon tail lines and returns null when unobservable', async () => {
+    stubDesk();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, lines: ['a', 'b'] }) })
+      .mockResolvedValueOnce({ ok: false, status: 404, text: async () => '{"ok":false,"error":"no such session"}' });
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createNativeChannelsTransport();
+    expect(await transport.capturePane('agentdesk-g-shell-abc')).toBe('a\nb');
+    expect(await transport.capturePane('agentdesk-g-shell-abc')).toBeNull();
+  });
+
+  it('sendEnter sends a bare CR keyed by sessionId', async () => {
+    stubDesk();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createNativeChannelsTransport();
+    expect(await transport.sendEnter('agentdesk-g-shell-abc')).toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ sessionId: 'shell', text: '\r' });
+  });
+
+  it('sessionRunning reads the flag-aware running set', () => {
+    const runningSpy = vi.spyOn(runner, 'runningSessionSet').mockReturnValue(new Set(['agentdesk-g-shell-abc']));
+    const transport = createNativeChannelsTransport();
+    expect(transport.sessionRunning('agentdesk-g-shell-abc')).toBe(true);
+    expect(transport.sessionRunning('agentdesk-g-ghost-def')).toBe(false);
+    expect(runningSpy).toHaveBeenCalled();
+  });
+
+  it('falls back to the tmuxSession as the daemon key for an unknown session', async () => {
+    vi.spyOn(runner, 'loadDeskCached').mockReturnValue({ sessions: [] } as never);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createNativeChannelsTransport();
+    await transport.sendEnter('agentdesk-g-orphan-xyz');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('agentdesk-g-orphan-xyz');
   });
 });
 

@@ -167,6 +167,16 @@ export class SessionManager {
     return this.core.ingestHook(sessionId, hook);
   }
 
+  /** Control-plane input injection (channels delivery). False if the session is unknown. */
+  injectInput(sessionId: string, bytes: Uint8Array, paste = false): boolean {
+    return this.core.injectInput(sessionId, bytes, paste);
+  }
+
+  /** The session's on-screen tail as plain text (capture-pane equivalent), or undefined. */
+  tailText(sessionId: string, rows: number): string[] | undefined {
+    return this.core.tailText(sessionId, rows);
+  }
+
   state(sessionId: string): { state: ControlState; source: Source; generation: number } | undefined {
     return this.core.state(sessionId);
   }

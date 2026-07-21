@@ -60,6 +60,10 @@ export class XtermEmulator implements EmulatorPort {
     return { row: buf.cursorY, col: buf.cursorX };
   }
 
+  bracketedPaste(): boolean {
+    return this.term.modes.bracketedPasteMode;
+  }
+
   onEvent(cb: (event: EmulatorEvent) => void): () => void {
     this.listeners.push(cb);
     return () => {

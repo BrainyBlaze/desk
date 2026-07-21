@@ -51,6 +51,10 @@ export interface TerminalDaemon {
   provision(sessionId: string, spec: TerminalDaemonSessionSpec): Promise<EnsureResult>;
   /** Retire a session (KILL contract runs via the SessionManager cleanup). */
   retire(sessionId: string): void;
+  /** Control-plane input injection (channels delivery). False if unknown. */
+  input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
+  /** The session's on-screen tail as plain text, or undefined if unknown. */
+  tail(sessionId: string, rows: number): string[] | undefined;
   /** Tear down the WS bridge + its timers. */
   dispose(): void;
 }
@@ -83,6 +87,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     },
     retire(sessionId) {
       router.sessions.retire(sessionId);
+    },
+    input(sessionId, bytes, paste = false) {
+      return router.sessions.injectInput(sessionId, bytes, paste);
+    },
+    tail(sessionId, rows) {
+      return router.sessions.tailText(sessionId, rows);
     },
     dispose() {
       disposeBridge();
@@ -126,7 +136,7 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
 export function createDaemonControlHandler(
-  daemon: Pick<TerminalDaemon, 'provision' | 'retire'>
+  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail'>
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
@@ -161,6 +171,42 @@ export function createDaemonControlHandler(
           }
           daemon.retire(body.sessionId);
           sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/input') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          if (typeof body.text !== 'string' || body.text.length === 0) {
+            sendJson(res, 400, { ok: false, error: 'text must be a non-empty string' });
+            return;
+          }
+          const accepted = daemon.input(body.sessionId, new TextEncoder().encode(body.text), body.paste === true);
+          if (!accepted) {
+            // An unknown session is a concrete failure the channels engine must
+            // see (it reverts the delivery), never a silent ok.
+            sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/tail') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          const rows = Number(body.rows);
+          const bounded = Number.isFinite(rows) && rows > 0 ? Math.min(Math.floor(rows), 1000) : 200;
+          const lines = daemon.tail(body.sessionId, bounded);
+          if (lines === undefined) {
+            sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
+            return;
+          }
+          sendJson(res, 200, { ok: true, lines });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/control/health') {

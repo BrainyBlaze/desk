@@ -4,6 +4,7 @@ import { extname } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
 import { addAgentSignalListener, attentionTracker } from './attention.js';
 import { loadDesk, loadDeskCached } from '../core/runner.js';
+import { createNativeChannelsTransport, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
 import { buildOnboardingPrompt, ChannelsEngine, sendTextToTmux } from './channelsEngine.js';
 import {
   claimDelivering,
@@ -102,8 +103,14 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   }
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
   let engine!: ChannelsEngine;
+  // Under DESK_ATCH_NATIVE, terminal-session delivery rides the daemon control
+  // plane instead of tmux (paste/has-session/capture-pane/send-keys would all
+  // silently fail against an atch master). The uiMode=native broker path is
+  // unchanged either way.
+  const nativeTransport = nativeSessionsEnabled() ? createNativeChannelsTransport() : undefined;
   const sendChannelDelivery = createChannelDeliverySender({
     agentSurfaceBroker: options.agentSurfaceBroker,
+    ...(nativeTransport ? { terminalSender: nativeTransport.sendText } : {}),
     onNonRetryableNativeFailure: (tmuxSession, error) => {
       pauseEngineSession(home, engine, tmuxSession, `native channel delivery failed (${error.code}): ${error.message}`);
     }
@@ -179,7 +186,14 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
         uiMode: spec.uiMode
       };
     },
-    nativeSessionState: (tmuxSession) => options.agentSurfaceBroker?.nativeDeliveryState(tmuxSession) ?? 'offline'
+    nativeSessionState: (tmuxSession) => options.agentSurfaceBroker?.nativeDeliveryState(tmuxSession) ?? 'offline',
+    ...(nativeTransport
+      ? {
+          sessionRunning: nativeTransport.sessionRunning,
+          capturePane: nativeTransport.capturePane,
+          sendEnter: nativeTransport.sendEnter
+        }
+      : {})
   });
   const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
   watcher.start();

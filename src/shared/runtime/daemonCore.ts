@@ -141,6 +141,19 @@ export class DaemonCore {
     this.sessions.get(sessionId)?.runtime.onBrowserInput(channelId, binary, bytes);
   }
 
+  /** Control-plane input injection (channels delivery). False if the session is unknown. */
+  injectInput(sessionId: string, bytes: Uint8Array, paste = false): boolean {
+    const e = this.sessions.get(sessionId);
+    if (e === undefined) return false;
+    e.runtime.injectInput(bytes, paste);
+    return true;
+  }
+
+  /** The session's on-screen tail as plain text, or undefined if unknown. */
+  tailText(sessionId: string, rows: number): string[] | undefined {
+    return this.sessions.get(sessionId)?.runtime.tailText(rows);
+  }
+
   /** Route INPUT by channelId alone (the router validated ownership). No-op if stale. */
   onBrowserInputByChannel(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
     const sessionId = this.channelToSession.get(channelId);

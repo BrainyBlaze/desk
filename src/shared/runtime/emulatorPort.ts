@@ -42,6 +42,12 @@ export interface EmulatorPort {
   serialize(): string;
   /** Current cursor position (for CPR/DSR worker replies, §7.7). */
   cursor(): { row: number; col: number };
+  /**
+   * Whether the app enabled bracketed-paste mode (DECSET 2004). Optional so
+   * test fakes stay minimal; absent reads as false. Channels delivery uses it
+   * to mirror tmux `paste-buffer -p` (wrap pasted text only when asked for).
+   */
+  bracketedPaste?(): boolean;
   /** Subscribe to semantic parser events (§6.6). Returns an unsubscribe fn. */
   onEvent(cb: (event: EmulatorEvent) => void): () => void;
   /** Tear down the emulator (session ended / worker recycle). */

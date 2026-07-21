@@ -5,11 +5,18 @@ import { createDaemonControlHandler, isSafeDaemonSessionId } from '../../src/ser
 
 interface Captured {
   status: number;
-  body: { ok?: boolean; error?: string } | undefined;
+  body: { ok?: boolean; error?: string; lines?: string[] } | undefined;
+}
+
+interface DaemonMock {
+  provision: ReturnType<typeof vi.fn>;
+  retire: ReturnType<typeof vi.fn>;
+  input: ReturnType<typeof vi.fn>;
+  tail: ReturnType<typeof vi.fn>;
 }
 
 function invoke(
-  daemon: { provision: ReturnType<typeof vi.fn>; retire: ReturnType<typeof vi.fn> },
+  daemon: DaemonMock,
   method: string,
   url: string,
   body?: unknown,
@@ -41,10 +48,12 @@ function invoke(
   });
 }
 
-function daemonMock(provisionResult: unknown = { ok: true, generation: 1, created: true }) {
+function daemonMock(provisionResult: unknown = { ok: true, generation: 1, created: true }): DaemonMock {
   return {
     provision: vi.fn().mockResolvedValue(provisionResult),
-    retire: vi.fn()
+    retire: vi.fn(),
+    input: vi.fn().mockReturnValue(true),
+    tail: vi.fn().mockReturnValue(['line-a', 'line-b'])
   };
 }
 
@@ -93,7 +102,7 @@ describe('daemon control handler', () => {
   });
 
   it('reports a thrown provision error as HTTP 500', async () => {
-    const daemon = { provision: vi.fn().mockRejectedValue(new Error('spawn failed')), retire: vi.fn() };
+    const daemon = { ...daemonMock(), provision: vi.fn().mockRejectedValue(new Error('spawn failed')) };
     const result = await invoke(daemon, 'POST', '/control/provision', { sessionId: 'sess-a', command: ['bash'] });
     expect(result.status).toBe(500);
     expect(result.body?.error).toContain('spawn failed');
@@ -123,6 +132,47 @@ describe('daemon control handler', () => {
     });
     expect(result.status).toBe(413);
     expect(daemon.provision).not.toHaveBeenCalled();
+  });
+
+  it('injects input for a known session, threading the paste flag', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/input', { sessionId: 'sess-a', text: 'hi\n', paste: true });
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    const [sessionId, bytes, paste] = daemon.input.mock.calls[0];
+    expect(sessionId).toBe('sess-a');
+    expect(new TextDecoder().decode(bytes)).toBe('hi\n');
+    expect(paste).toBe(true);
+  });
+
+  it('404s input for an unknown session (a concrete failure, not a silent ok)', async () => {
+    const daemon = { ...daemonMock(), input: vi.fn().mockReturnValue(false) };
+    const result = await invoke(daemon, 'POST', '/control/input', { sessionId: 'ghost', text: 'hi' });
+    expect(result.status).toBe(404);
+    expect(result.body?.ok).toBe(false);
+  });
+
+  it('400s empty input text without touching the daemon', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/input', { sessionId: 'sess-a', text: '' });
+    expect(result.status).toBe(400);
+    expect(daemon.input).not.toHaveBeenCalled();
+  });
+
+  it('returns the tail lines for a known session, clamping rows', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a', rows: 5000 });
+    expect(result.status).toBe(200);
+    expect(result.body?.lines).toEqual(['line-a', 'line-b']);
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 1000);
+  });
+
+  it('defaults tail rows when absent and 404s an unknown session', async () => {
+    const daemon = daemonMock();
+    await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a' });
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 200);
+    const unknown = { ...daemonMock(), tail: vi.fn().mockReturnValue(undefined) };
+    const result = await invoke(unknown, 'POST', '/control/tail', { sessionId: 'ghost' });
+    expect(result.status).toBe(404);
   });
 });
 
