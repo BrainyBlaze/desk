@@ -12,18 +12,22 @@ function invoke(
   daemon: { provision: ReturnType<typeof vi.fn>; retire: ReturnType<typeof vi.fn> },
   method: string,
   url: string,
-  body?: unknown
+  body?: unknown,
+  headers?: Record<string, string>
 ): Promise<Captured> {
   const handler = createDaemonControlHandler(daemon);
   const req = new PassThrough() as unknown as IncomingMessage & PassThrough;
   req.method = method;
   req.url = url;
+  req.headers = headers ?? {};
   return new Promise<Captured>((resolve) => {
     let status = 0;
     const res = {
-      writeHead(code: number) {
-        status = code;
-        return res;
+      set statusCode(value: number) {
+        status = value;
+      },
+      setHeader() {
+        /* sendJson sets content-type; irrelevant to these assertions */
       },
       end(payload?: string) {
         resolve({ status, body: payload ? (JSON.parse(payload) as Captured['body']) : undefined });
@@ -110,6 +114,15 @@ describe('daemon control handler', () => {
   it('404s an unknown control path', async () => {
     const result = await invoke(daemonMock(), 'POST', '/control/bogus', {});
     expect(result.status).toBe(404);
+  });
+
+  it('maps an over-cap body to a typed 413 without spawning', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/provision', '{}', {
+      'content-length': String(128 * 1024)
+    });
+    expect(result.status).toBe(413);
+    expect(daemon.provision).not.toHaveBeenCalled();
   });
 });
 

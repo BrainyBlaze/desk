@@ -19,6 +19,7 @@ import { TerminalWsRouter } from './terminalWsRouter.js';
 import { XtermEmulatorFactory } from './xtermEmulator.js';
 import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
+import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { EnsureResult } from '../../shared/runtime/daemonCore.js';
 
 interface UpgradeServer {
@@ -99,30 +100,30 @@ export function isSafeDaemonSessionId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{1,80}$/.test(value);
 }
 
-function readRequestBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (chunk: string) => {
-      body += chunk;
-      if (body.length > 1_000_000) reject(new Error('control body too large'));
-    });
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
-  });
+/** Control payloads are tiny (a session id + a short command array). */
+const CONTROL_BODY_MAX_BYTES = 64 * 1024;
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string');
 }
 
-function respondJson(res: ServerResponse, status: number, payload: unknown): void {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
-  res.end(body);
+/** Clamp a client-supplied geometry so it can neither zero nor blow up the grid allocation (R4.3). */
+function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
+  const geometry = (value ?? {}) as { rows?: unknown; cols?: unknown };
+  const rows = Number(geometry.rows);
+  const cols = Number(geometry.cols);
+  return {
+    rows: Number.isFinite(rows) && rows > 0 ? Math.min(Math.floor(rows), 1000) : 24,
+    cols: Number.isFinite(cols) && cols > 0 ? Math.min(Math.floor(cols), 1000) : 80
+  };
 }
 
 /**
  * The daemon's HTTP control plane: the web server posts here to provision/retire
  * a session's atch master on demand (the spawn/boot/restart cutover path). It is
  * an ordinary `request` listener; the binary terminal transport rides the
- * separate `upgrade` event, so the two never collide.
+ * separate `upgrade` event, so the two never collide. Bodies read through the
+ * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
 export function createDaemonControlHandler(
   daemon: Pick<TerminalDaemon, 'provision' | 'retire'>
@@ -132,48 +133,47 @@ export function createDaemonControlHandler(
       try {
         const url = new URL(req.url ?? '/', 'http://daemon.local');
         if (req.method === 'POST' && url.pathname === '/control/provision') {
-          const body = JSON.parse((await readRequestBody(req)) || '{}') as {
-            sessionId?: unknown;
-            command?: unknown;
-            geometry?: { rows?: number; cols?: number };
-          };
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
           if (!isSafeDaemonSessionId(body.sessionId)) {
-            respondJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
             return;
           }
-          if (!Array.isArray(body.command) || body.command.length === 0 || !body.command.every((c) => typeof c === 'string')) {
-            respondJson(res, 400, { ok: false, error: 'command must be a non-empty string[]' });
+          if (!isStringArray(body.command)) {
+            sendJson(res, 400, { ok: false, error: 'command must be a non-empty string[]' });
             return;
           }
-          const geometry = {
-            rows: Number(body.geometry?.rows) > 0 ? Math.floor(Number(body.geometry?.rows)) : 24,
-            cols: Number(body.geometry?.cols) > 0 ? Math.floor(Number(body.geometry?.cols)) : 80
-          };
-          const ens = await daemon.provision(body.sessionId, { command: body.command as string[], geometry });
+          const ens = await daemon.provision(body.sessionId, {
+            command: body.command,
+            geometry: readProvisionGeometry(body.geometry)
+          });
           if (ens.ok) {
-            respondJson(res, 200, { ok: true });
+            sendJson(res, 200, { ok: true });
           } else {
-            respondJson(res, 503, { ok: false, error: `atch provision refused: ${ens.reason}` });
+            sendJson(res, 503, { ok: false, error: `atch provision refused: ${ens.reason}` });
           }
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/retire') {
-          const body = JSON.parse((await readRequestBody(req)) || '{}') as { sessionId?: unknown };
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
           if (!isSafeDaemonSessionId(body.sessionId)) {
-            respondJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
             return;
           }
           daemon.retire(body.sessionId);
-          respondJson(res, 200, { ok: true });
+          sendJson(res, 200, { ok: true });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/control/health') {
-          respondJson(res, 200, { ok: true });
+          sendJson(res, 200, { ok: true });
           return;
         }
-        respondJson(res, 404, { ok: false, error: 'not found' });
+        sendJson(res, 404, { ok: false, error: 'not found' });
       } catch (error) {
-        respondJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        if (error instanceof HttpBodyError) {
+          sendJson(res, error.statusCode, { ok: false, error: error.message });
+          return;
+        }
+        sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
       }
     })();
   };

@@ -10,6 +10,7 @@
 
 import { restartSession, startSession } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
+import { shellQuote } from '../../shared/shell.js';
 
 export function nativeSessionsEnabled(): boolean {
   return process.env.DESK_ATCH_NATIVE === '1';
@@ -21,19 +22,16 @@ export function daemonHttpBase(): string {
   return raw.replace(/^ws(s?):\/\//, 'http$1://');
 }
 
-/** Single-quote a value for safe interpolation into an `sh -c` script. */
-function shSingleQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * The atch child command for a session: run the session's command in its cwd,
  * exactly as `tmux new-session -c cwd command` would. A command-less session
  * falls back to the login shell. Matches the proven canary form `sh -c bash`.
+ * The cwd is escaped through the single audited quoter (R6.1); the command is
+ * the session's own shell command, run as-is exactly as the tmux path does.
  */
 export function atchCommandFor(spec: SessionSpec): string[] {
   const command = (spec.command ?? '').trim();
-  const cd = spec.cwd ? `cd ${shSingleQuote(spec.cwd)} || exit 1\n` : '';
+  const cd = spec.cwd ? `cd ${shellQuote(spec.cwd)} || exit 1\n` : '';
   const run = command.length > 0 ? command : '"${SHELL:-bash}"';
   return ['sh', '-c', `${cd}${run}`];
 }
@@ -76,6 +74,27 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
 /** Retire a session's atch master via the daemon (KILL contract). */
 export function retireNativeSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
   return daemonControl('/control/retire', { sessionId });
+}
+
+/**
+ * The native identity a session edit leaves behind, or undefined if unchanged.
+ *
+ * A session's atch master is keyed by `sessionId ?? tmuxSession`, and sessionId
+ * is minted from the session name — so a rename changes the identity while the
+ * running master keeps the old one. The edit path retires the returned id so the
+ * old master does not orphan (nothing references it again). Returns undefined
+ * when nothing changed or either spec is missing.
+ */
+export function staleNativeIdentityAfterEdit(
+  oldSpec: SessionSpec | undefined,
+  newSpec: SessionSpec | undefined
+): string | undefined {
+  if (!oldSpec || !newSpec) {
+    return undefined;
+  }
+  const oldId = oldSpec.sessionId ?? oldSpec.tmuxSession;
+  const newId = newSpec.sessionId ?? newSpec.tmuxSession;
+  return oldId !== newId ? oldId : undefined;
 }
 
 /** Start a session: daemon-provisioned under the flag, else legacy tmux. */

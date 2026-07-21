@@ -30,12 +30,14 @@ import {
   listTmuxSessions,
   loadDesk,
   planDeskUp,
+  runningSessionSet,
   runPlan
 } from '../../core/runner.js';
 import {
   nativeSessionsEnabled,
   restartSessionNativeAware,
   retireNativeSession,
+  staleNativeIdentityAfterEdit,
   startSessionNativeAware
 } from '../runtime/nativeSessionControl.js';
 import type {
@@ -583,7 +585,22 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         });
         const newSpec = findSpec(buildSessionSpecs(next, { homeDir: homedir() }), session.name);
         writeManifestFile(manifestPath, next);
-        if (shouldRespawnAfterEdit(oldSpec, newSpec, (target) => listTmuxSessions().has(target)) && newSpec) {
+        // A native edit that changes the session's identity (e.g. a rename, since
+        // sessionId is minted from the name) must retire the master under its OLD
+        // identity or it orphans — nothing references it again.
+        const staleIdentity = nativeSessionsEnabled() ? staleNativeIdentityAfterEdit(oldSpec, newSpec) : undefined;
+        if (staleIdentity !== undefined) {
+          const retired = await retireNativeSession(staleIdentity);
+          if (!retired.ok) {
+            console.error(`native session edit: could not retire old identity ${staleIdentity}: ${retired.error}`);
+          }
+        }
+        if (
+          shouldRespawnAfterEdit(oldSpec, newSpec, (target) =>
+            (nativeSessionsEnabled() ? runningSessionSet() : listTmuxSessions()).has(target)
+          ) &&
+          newSpec
+        ) {
           managedAgentLsp.cleanup(newSpec.tmuxSession);
           const launch = managedAgentLsp.prepare(newSpec, next.settings);
           const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
