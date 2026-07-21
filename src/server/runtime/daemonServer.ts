@@ -147,7 +147,8 @@ export class DaemonServer {
         return { ok: true, result: { pong: true, version: RPC_VERSION } };
       case 'ensure': {
         const r = this.core.ensure(String(p.sessionId), { rows: Number(p.rows) || 24, cols: Number(p.cols) || 80 });
-        return r.ok ? { ok: true, result: r } : { ok: false, errorCode: 'cap-exceeded', errorMessage: 'MAX_LIVE_WORKERS reached' };
+        // The RPC envelope carries ok/error; the result holds only the useful fields.
+        return r.ok ? { ok: true, result: { generation: r.generation, created: r.created } } : { ok: false, errorCode: 'cap-exceeded', errorMessage: 'MAX_LIVE_WORKERS reached' };
       }
       case 'retire':
         this.core.retire(String(p.sessionId));
