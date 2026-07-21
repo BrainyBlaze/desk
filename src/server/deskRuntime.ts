@@ -21,6 +21,7 @@ import { forceKillActiveStdioVirtualSessionChildren } from './lsp/stdioVirtualSe
 import type { DeskPlugin } from './plugin.js';
 import { startSystemSampling, stopSystemSampling } from './systemSampler.js';
 import { installTerminalBroker } from './terminalBroker.js';
+import { installTerminalDaemonProxy } from './terminalDaemonProxy.js';
 import { repairTinyTmuxWindows } from './terminalBridge.js';
 import { ensureTmuxGlobalOptions } from './tmuxOptions.js';
 
@@ -64,6 +65,18 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
       disposers.add(() => httpServer.off('upgrade', onUpgrade));
     }
 
+    // atch-native, behind a default-OFF cutover flag: the web server PROXIES
+    // /ws/terminal to the separate daemon process (byte-forwarding, no
+    // @xterm/headless in the web server, so serve startup timing is unaffected).
+    // Flag off ⇒ the live tmux path is untouched. Provisioning + the tmux/string
+    // removal are the gated canary/cutover steps.
+    if (process.env.DESK_ATCH_NATIVE === '1') {
+      disposers.add(
+        installTerminalDaemonProxy(httpServer, {
+          daemonBaseUrl: process.env.DESK_DAEMON_URL ?? 'ws://127.0.0.1:5178'
+        })
+      );
+    }
     disposers.add(installTerminalBroker(httpServer, services.terminalBroker));
     disposers.add(installAgentSurfaceBroker(httpServer, services.agentSurfaceBroker));
     disposers.add(installFsWatchBridge(httpServer));
