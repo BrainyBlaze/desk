@@ -31,9 +31,9 @@ import {
   loadDesk,
   planDeskUp,
   restartSession,
-  runPlan,
-  startSession
+  runPlan
 } from '../../core/runner.js';
+import { restartSessionNativeAware, startSessionNativeAware } from '../runtime/nativeSessionControl.js';
 import type {
   DeskGroupLayout,
   DeskLayoutKind,
@@ -290,22 +290,22 @@ export interface ManagedPlanResult {
   error?: string;
 }
 
-export function runManagedPlan(
+export async function runManagedPlan(
   plan: TmuxPlanAction[],
   settings: DeskSettings | undefined,
   managedAgentLsp: ManagedAgentLsp,
   nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec,
-  start: typeof startSession = startSession
-): ManagedPlanResult {
+  start: (session: SessionSpec) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }> = startSessionNativeAware
+): Promise<ManagedPlanResult> {
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
+    const started = await start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
-      return { exitCode: 1, error: started.error ?? `tmux start failed for ${action.session.tmuxSession}` };
+      return { exitCode: 1, error: started.error ?? `start failed for ${action.session.tmuxSession}` };
     }
   }
   return { exitCode: 0 };
@@ -322,7 +322,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const settings = readManifestFile(resolveManifestPath()).settings;
       const result = dryRun
         ? { exitCode: runPlan(plan, true) }
-        : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
+        : await runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
       const { exitCode } = result;
       if (!dryRun && exitCode === 0) {
         for (const action of plan) {
@@ -350,7 +350,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const session = readDeskSessionBody(body.session);
       let nextSession: SessionSpec | undefined;
       let addError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const next = addSessionToManifest(manifest, {
           groupId,
           groupLabel: readOptionalString(body.groupLabel),
@@ -363,7 +363,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         const launch = managedAgentLsp.prepare(nextSession, next.settings);
-        const started = startSession(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
+        const started = await startSessionNativeAware(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
         if (!started.ok) {
           launch?.cleanup();
           addError = started.error;
@@ -431,7 +431,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const groupId = readRequiredString(body.groupId, 'groupId');
       let nextSession: SessionSpec | undefined;
       let addError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const next = addSessionToProjectManifest(manifest, { projectId, groupId, session });
         nextSession = findSessionForStart(next, { groupId, sessionName: session.name, projectId });
         const cwdValidation = validateSessionCwd(nextSession);
@@ -440,7 +440,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         const launch = managedAgentLsp.prepare(nextSession, next.settings);
-        const started = startSession(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
+        const started = await startSessionNativeAware(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
         if (!started.ok) {
           launch?.cleanup();
           addError = started.error;
@@ -568,7 +568,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         if (shouldRespawnAfterEdit(oldSpec, newSpec, (target) => listTmuxSessions().has(target)) && newSpec) {
           managedAgentLsp.cleanup(newSpec.tmuxSession);
           const launch = managedAgentLsp.prepare(newSpec, next.settings);
-          const restarted = restartSession(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
+          const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
           if (!restarted.ok) {
             launch?.cleanup();
             return { updated: next, respawnError: `session edit saved but respawn failed: ${restarted.error}` };
@@ -634,7 +634,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       }
       managedAgentLsp.cleanup(session.tmuxSession);
       const launch = managedAgentLsp.prepare(session, readManifestFile(resolveManifestPath()).settings);
-      const restarted = restartSession(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
+      const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
       if (!restarted.ok) {
         launch?.cleanup();
         sendJson(res, 500, { error: restarted.error });

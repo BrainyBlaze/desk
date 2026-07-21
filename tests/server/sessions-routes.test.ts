@@ -20,10 +20,10 @@ const session: SessionSpec = {
 };
 
 describe('sessions route managed startup', () => {
-  it('preserves the actionable startSession failure reason for the API response', () => {
+  it('preserves the actionable startSession failure reason for the API response', async () => {
     const cleanup = vi.fn();
     const plan: TmuxPlanAction[] = [{ type: 'start', session, argv: [] }];
-    const result = runManagedPlan(
+    const result = await runManagedPlan(
       plan,
       undefined,
       { prepare: () => ({ session, cleanup }) } as never,
