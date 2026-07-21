@@ -38,6 +38,16 @@ canary session through the sessionId schema + binary path; validate browser/WS,
 input/output, resize, reconnect, snapshot, retire, and store durability. Then
 publish the ACTUAL PID/port/socket/config/process footprint + evidence.
 
+The atomic consumer switch in this phase re-keys EVERY tmuxSession-keyed live
+consumer to sessionId together, never piecemeal: the channels engine (queue /
+paused via the seeded stores), the terminal path (surface / broker / router),
+resume-capture, AND the in-memory **AttentionTracker** — its
+raise / clear / pushEvent / lastClearedAt / notifyRaise API plus the
+terminal-output attention classifier that calls `raise` (`attention.ts`). The
+attention component is explicitly in cutover scope (flagged by @human); it holds
+no FS store (in-memory only), so it is a wiring re-key verified in the Item 2
+review and the canary footprint gate — NOT an optional UI follow-up.
+
 **Phase 4 — GATE.** Canary green + footprint/evidence reviewed by @codex and
 @human → request authorization for the default flip + legacy deletion.
 
