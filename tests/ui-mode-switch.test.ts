@@ -213,4 +213,53 @@ describe('performUiModeSwitch', () => {
     expect(restartCalls).toBe(1);
     expect(result).toMatchObject({ ok: false, status: 500, error: 'tmux exploded' });
   });
+
+  it('awaits an async (native daemon) restart before reporting success', async () => {
+    const order: string[] = [];
+    const validated = validateUiModeSwitch(manifest(), {
+      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      uiMode: 'native',
+      homeDir: HOME
+    });
+    if (!validated.ok || validated.noop) {
+      throw new Error('expected an actionable switch');
+    }
+
+    const result = await performUiModeSwitch(
+      { manifest: manifest(), validated, homeDir: HOME },
+      {
+        write: () => undefined,
+        restart: async () => {
+          order.push('restart-start');
+          await Promise.resolve();
+          order.push('restart-resolved');
+          return { ok: true };
+        },
+        scheduleCapture: () => order.push('capture')
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    // capture runs only after the async restart fully resolved
+    expect(order).toEqual(['restart-start', 'restart-resolved', 'capture']);
+  });
+
+  it('propagates an async restart failure as a typed 500', async () => {
+    const validated = validateUiModeSwitch(manifest(), {
+      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      uiMode: 'native',
+      homeDir: HOME
+    });
+    if (!validated.ok || validated.noop) {
+      throw new Error('expected an actionable switch');
+    }
+    const result = await performUiModeSwitch(
+      { manifest: manifest(), validated, homeDir: HOME },
+      {
+        write: () => undefined,
+        restart: () => Promise.resolve({ ok: false, error: 'daemon unreachable' })
+      }
+    );
+    expect(result).toMatchObject({ ok: false, status: 500, error: 'daemon unreachable' });
+  });
 });

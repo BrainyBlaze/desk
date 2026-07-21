@@ -30,10 +30,14 @@ import {
   listTmuxSessions,
   loadDesk,
   planDeskUp,
-  restartSession,
   runPlan
 } from '../../core/runner.js';
-import { restartSessionNativeAware, startSessionNativeAware } from '../runtime/nativeSessionControl.js';
+import {
+  nativeSessionsEnabled,
+  restartSessionNativeAware,
+  retireNativeSession,
+  startSessionNativeAware
+} from '../runtime/nativeSessionControl.js';
 import type {
   DeskGroupLayout,
   DeskLayoutKind,
@@ -226,7 +230,21 @@ function cwdMatchesResolved(left: string, right: string): boolean {
   return left.replace(/\/+$/, '') === right.replace(/\/+$/, '');
 }
 
-function killSessionTargets(targets: Array<SessionSpec | string>): { ok: boolean; error?: string } {
+export async function killSessionTargets(targets: Array<SessionSpec | string>): Promise<{ ok: boolean; error?: string }> {
+  if (nativeSessionsEnabled()) {
+    // Under the flag a session's atch master is keyed by sessionId; retire it via
+    // the daemon (never tmux) so a delete leaves no orphan master. A bare-string
+    // target (a raw tmuxSession) retires best-effort; retire is idempotent, so a
+    // session the daemon does not know is a harmless no-op.
+    const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId ?? target.tmuxSession)))];
+    for (const sessionId of ids) {
+      const retired = await retireNativeSession(sessionId);
+      if (!retired.ok) {
+        return retired;
+      }
+    }
+    return { ok: true };
+  }
   const tmuxSessions = targets.map((target) => (typeof target === 'string' ? target : target.tmuxSession));
   for (const tmuxSession of [...new Set(tmuxSessions)]) {
     const killed = killSession(tmuxSession);
@@ -478,9 +496,9 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const projectId = readRequiredString(body.projectId, 'projectId');
       const cwd = readOptionalString(body.cwd);
       let deleteError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const targets = collectProjectDeleteSessions(manifest, { projectId, cwd });
-        const killed = killSessionTargets(targets);
+        const killed = await killSessionTargets(targets);
         if (!killed.ok) {
           deleteError = killed.error;
           return null;
@@ -522,9 +540,9 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const groupId = readRequiredString(body.groupId, 'groupId');
       const projectCwd = readOptionalString(body.projectCwd);
       let deleteError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const targets = collectGroupDeleteSessions(manifest, { projectId, groupId, projectCwd });
-        const killed = killSessionTargets(targets);
+        const killed = await killSessionTargets(targets);
         if (!killed.ok) {
           deleteError = killed.error;
           return null;
@@ -594,17 +612,22 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const projectCwd = readOptionalString(body.projectCwd);
       const tmuxSession = readOptionalString(body.tmuxSession);
       let deleteError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
-        const targets = collectSessionDeleteTargets(manifest, {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
+        const specTargets = collectSessionDeleteTargets(manifest, {
           projectId,
           groupId,
           sessionName,
           projectCwd
-        }).map((candidate) => candidate.tmuxSession);
+        });
+        const targets = specTargets.map((candidate) => candidate.tmuxSession);
+        // Retire by SessionSpec so the native path keys on sessionId; a caller-
+        // supplied tmuxSession not among the specs is retired best-effort.
+        const killTargets: Array<SessionSpec | string> = [...specTargets];
         if (tmuxSession && !targets.includes(tmuxSession)) {
           targets.push(tmuxSession);
+          killTargets.push(tmuxSession);
         }
-        const killed = killSessionTargets(targets);
+        const killed = await killSessionTargets(killTargets);
         if (!killed.ok) {
           deleteError = killed.error;
           return null;
@@ -685,7 +708,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
                 launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
                 return nativeAgentLaunch(launch?.session ?? spec, launch?.envFilePath);
               },
-              restart: (spec) => restartSession(spec),
+              restart: (spec) => restartSessionNativeAware(spec),
               scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
             }
           );

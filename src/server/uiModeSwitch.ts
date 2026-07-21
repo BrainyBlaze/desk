@@ -85,7 +85,7 @@ export interface PerformUiModeSwitchInput {
 
 export interface PerformUiModeSwitchDeps {
   write: (next: DeskManifest) => void;
-  restart: (spec: SessionSpec) => { ok: boolean; error?: string };
+  restart: (spec: SessionSpec) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
   /** Optional launch rewrite hook (LSP/MCP wiring); receives the post-edit spec. */
   prepare?: (spec: SessionSpec) => SessionSpec;
   scheduleCapture?: (spec: SessionSpec) => void;
@@ -116,7 +116,7 @@ export async function performUiModeSwitch(
     return { ok: false, status: 500, error: `session ${validated.spec.tmuxSession} disappeared during ui-mode switch` };
   }
   const launchSpec = deps.prepare ? deps.prepare(nextSpec) : nextSpec;
-  const restarted = deps.restart(launchSpec);
+  const restarted = await deps.restart(launchSpec);
   if (!restarted.ok) {
     return { ok: false, status: 500, error: restarted.error ?? 'session restart failed' };
   }
