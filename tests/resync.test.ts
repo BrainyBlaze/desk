@@ -90,4 +90,29 @@ describe('resync — stale vs advanced generation/revision (§7.4)', () => {
     expect(r.onSnapshot(snap(10n, 2, 1))).toBe('discard'); // older generation snapshot
     expect(r.expectedOffset).toBe(50n); // baseline unchanged
   });
+
+  it('a stale snapshot arriving DURING resync does not regress the baseline (@codex review)', () => {
+    const r = new SubscriptionResync();
+    r.onSnapshot(snap(100n, 2, 1)); // baseline gen2 rev1 @100
+    r.onOutput(out(200n, 5, 2, 1)); // gap: expected 100, got 200 → dirty
+    expect(r.phase).toBe('dirty');
+    r.requestedSnapshot();
+    expect(r.phase).toBe('resyncing');
+    // an out-of-order STALE snapshot (older generation) arrives during resync:
+    expect(r.onSnapshot(snap(50n, 1, 0))).toBe('discard');
+    expect(r.expectedOffset).toBe(100n); // baseline NOT regressed
+    expect(r.phase).toBe('resyncing'); // still awaiting the fresh snapshot
+    // the genuine current-or-newer fresh snapshot re-baselines and resumes:
+    expect(r.onSnapshot(snap(210n, 2, 1))).toBe('apply');
+    expect(r.phase).toBe('live');
+    expect(r.expectedOffset).toBe(210n);
+  });
+
+  it('a stale-revision snapshot during dirty is also discarded', () => {
+    const r = new SubscriptionResync();
+    r.onSnapshot(snap(0n, 2, 5)); // baseline gen2 rev5
+    r.onGap(); // → dirty
+    expect(r.onSnapshot(snap(0n, 2, 3))).toBe('discard'); // rev3 < rev5
+    expect(r.phase).toBe('dirty');
+  });
 });

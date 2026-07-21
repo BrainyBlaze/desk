@@ -33,6 +33,8 @@ export class SubscriptionResync {
   private revision = 0;
   /** Next contiguous output offset expected while live. */
   private expected = 0n;
+  /** Whether a baseline snapshot has ever been applied (gates the stale guard). */
+  private hasBaseline = false;
 
   get phase(): ResyncState {
     return this.state;
@@ -44,16 +46,20 @@ export class SubscriptionResync {
   /**
    * A SNAPSHOT establishes (or re-establishes) the baseline at its generation /
    * revision / offset. A snapshot for an OLDER generation/revision than the
-   * current baseline is stale and discarded; otherwise it makes us `live`.
+   * established baseline is stale and discarded in ANY non-initial state
+   * (live, dirty, or resyncing) — an out-of-order stale snapshot arriving during
+   * resync must NOT regress the newer remembered baseline. Only a current-or-
+   * newer snapshot re-baselines us to `live`.
    */
   onSnapshot(m: FrameMeta): FrameAction {
-    if (this.state === 'live' && (m.generation < this.generation || (m.generation === this.generation && m.revision < this.revision))) {
-      return 'discard'; // stale snapshot behind our current baseline
+    if (this.hasBaseline && (m.generation < this.generation || (m.generation === this.generation && m.revision < this.revision))) {
+      return 'discard'; // stale snapshot behind our established baseline
     }
     this.generation = m.generation;
     this.revision = m.revision;
     this.expected = m.offset;
     this.state = 'live';
+    this.hasBaseline = true;
     return 'apply';
   }
 
