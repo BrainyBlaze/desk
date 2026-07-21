@@ -2,3 +2,4 @@
 // Pure src/shared; the daemon persists RecoveryState in the registry and
 // surfaces it in ATTACH_ACK + GAP.
 export * from './recoveryState.js';
+export * from './checkpointSelect.js';
