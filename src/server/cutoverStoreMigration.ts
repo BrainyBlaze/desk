@@ -501,3 +501,43 @@ export function markSeedCommitted(root: string): void {
   mkdirSync(migrationDir(root), { recursive: true });
   writeFileAtomic(committedMarkerPath(root), `${JSON.stringify({ version: SEED_JOURNAL_VERSION })}\n`);
 }
+
+export interface SeedDeliveryPlan {
+  /** sessionId → prompts to (re)enqueue for delivery (repaired phase queued). */
+  enqueue: Map<string, QueuedPrompt[]>;
+  /** sessionId → seqs held as semantic-unknown — surfaced, NEVER auto-delivered. */
+  held: Map<string, number[]>;
+  /** sessionId → seqs recorded as already submit-confirmed — not re-delivered. */
+  confirmed: Map<string, number[]>;
+}
+
+/**
+ * Partition a validated seed journal into per-session delivery dispositions the
+ * channels engine applies on first start: queued items re-enqueue (at-most-once
+ * via the fresh keys), semantic-unknown are held (fail-closed, surfaced but never
+ * auto-delivered), and submit-confirmed are recorded as already delivered so they
+ * are deduped, not re-sent. Pure — the engine-wiring step consumes this.
+ */
+export function partitionSeedForDelivery(seed: { items: SeedJournalItem[] }): SeedDeliveryPlan {
+  const enqueue = new Map<string, QueuedPrompt[]>();
+  const held = new Map<string, number[]>();
+  const confirmed = new Map<string, number[]>();
+  const push = <T>(m: Map<string, T[]>, key: string, value: T): void => {
+    const list = m.get(key);
+    if (list === undefined) {
+      m.set(key, [value]);
+    } else {
+      list.push(value);
+    }
+  };
+  for (const item of seed.items) {
+    if (item.phase === 'queued') {
+      push(enqueue, item.sessionId, item.body);
+    } else if (item.phase === 'semantic-unknown') {
+      push(held, item.sessionId, item.seq);
+    } else {
+      push(confirmed, item.sessionId, item.seq); // submit-confirmed
+    }
+  }
+  return { enqueue, held, confirmed };
+}

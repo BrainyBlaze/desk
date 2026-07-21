@@ -12,6 +12,7 @@ import {
   markSeedCommitted,
   migrateManifestToCanary,
   migratePausedStoreFile,
+  partitionSeedForDelivery,
   planDurabilityMigration,
   readSeedJournalForConsumption,
   runCanaryMigration,
@@ -301,6 +302,17 @@ describe('cutover store migration — durability plan (§10 Option B)', () => {
     writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
     writeFileSync(join(dst, '_engine', 'migration', 'bodies', 'claude', '0000000001.json'), JSON.stringify({ notPrompt: 1 }));
     expect(() => readSeedJournalForConsumption(dst)).toThrow(/malformed body/);
+  });
+
+  it('partitions the seed for delivery: queued re-enqueue, semantic-unknown held', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'q' }));
+    writeItem('tmux-a', 2, 'delivered', JSON.stringify({ prompt: 'h' }));
+    writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
+    const seed = readSeedJournalForConsumption(dst);
+    const plan = partitionSeedForDelivery(seed ?? { items: [] });
+    expect(plan.enqueue.get('claude')?.map((b) => (b as { prompt: string }).prompt)).toEqual(['q']);
+    expect(plan.held.get('claude')).toEqual([2]);
+    expect(plan.confirmed.size).toBe(0);
   });
 });
 
