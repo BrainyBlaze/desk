@@ -230,3 +230,71 @@ export function planDurabilityMigration(
 
   return { items, dropped: migration.dropped, unreadable, skippedByDrain: migration.skippedByDrain };
 }
+
+/** Version 1 of the one-shot durability seed journal (sessionId-keyed delivery seed). */
+const SEED_JOURNAL_VERSION = 1;
+const padSeq = (seq: number): string => String(seq).padStart(10, '0');
+
+export interface DurabilitySeedOptions {
+  /** Proceed even though some queue bodies were unreadable (default: fail closed). */
+  acknowledgeUnreadable?: boolean;
+  /** Proceed even though some queue sessions are unmapped and will be dropped (default: fail closed). */
+  acknowledgeDropped?: boolean;
+}
+
+export interface DurabilitySeedReport {
+  written: number;
+  droppedAck: number;
+  /** The engine already consumed a prior seed (committed marker present) → left untouched. */
+  alreadyCommitted: boolean;
+}
+
+/**
+ * Write the Option B durability seed journal into the canary root: an atomic,
+ * versioned, one-shot seed keyed by (sessionId, seq) holding each item's repaired
+ * delivery phase + reissue decision, with raw bodies re-keyed to a SEPARATE
+ * sessionId-keyed location. The channels engine seeds from this once on first
+ * start and writes the committed marker; this writer is idempotent — a present
+ * committed marker means the engine already consumed the seed, so it is left
+ * untouched, and an un-committed rewrite is byte-stable (items sorted by
+ * sessionId then seq).
+ *
+ * Fail-closed by default: any unreadable body, or any unmapped-session drop,
+ * aborts unless the caller explicitly acknowledges it — a successful journal must
+ * never silently omit live queue state.
+ */
+export function writeDurabilitySeedJournal(plan: DurabilityMigrationPlan, targetRoot: string, options: DurabilitySeedOptions = {}): DurabilitySeedReport {
+  const journalDir = join(targetRoot, '_engine', 'migration');
+  const committedMarker = join(journalDir, 'seed-journal.committed');
+  if (existsSync(committedMarker)) {
+    return { written: 0, droppedAck: 0, alreadyCommitted: true }; // engine already seeded — respect it
+  }
+  if (plan.unreadable.length > 0 && options.acknowledgeUnreadable !== true) {
+    throw new Error(`cutover: ${plan.unreadable.length} unreadable queue bodies — refusing a partial seed journal (fail-closed); pass acknowledgeUnreadable to proceed`);
+  }
+  if (plan.dropped.length > 0 && options.acknowledgeDropped !== true) {
+    throw new Error(`cutover: ${plan.dropped.length} unmapped queue sessions would be dropped — pass acknowledgeDropped to proceed`);
+  }
+
+  // Deterministic order → byte-stable journal across idempotent retries.
+  const items = [...plan.items].sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : a.seq - b.seq));
+
+  // Raw bodies re-keyed to a SEPARATE sessionId-keyed location.
+  for (const item of items) {
+    const bodyDir = join(journalDir, 'bodies', item.sessionId);
+    mkdirSync(bodyDir, { recursive: true });
+    writeFileAtomic(join(bodyDir, `${padSeq(item.seq)}.json`), JSON.stringify(item.body));
+  }
+
+  // The journal holds the repaired phase/reissue (never the body, never a legacy ext).
+  const journal = {
+    version: SEED_JOURNAL_VERSION,
+    committed: false,
+    items: items.map((item) => ({ sessionId: item.sessionId, seq: item.seq, phase: item.outcome.phase, reissue: item.outcome.reissue })),
+    dropped: plan.dropped,
+    unreadable: plan.unreadable
+  };
+  mkdirSync(journalDir, { recursive: true });
+  writeFileAtomic(join(journalDir, 'seed-journal.json'), `${JSON.stringify(journal, null, 2)}\n`);
+  return { written: items.length, droppedAck: plan.dropped.length, alreadyCommitted: false };
+}

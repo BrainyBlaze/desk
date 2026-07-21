@@ -4,10 +4,10 @@
 // input fails closed.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrateManifestToCanary, migratePausedStoreFile, planDurabilityMigration } from '../src/server/cutoverStoreMigration.js';
+import { migrateManifestToCanary, migratePausedStoreFile, planDurabilityMigration, writeDurabilitySeedJournal } from '../src/server/cutoverStoreMigration.js';
 import { readManifestFile, writeManifestFile } from '../src/core/config.js';
 import type { DeskManifest } from '../src/core/types.js';
 
@@ -118,12 +118,15 @@ describe('cutover store migration — canary manifest write (§10)', () => {
 
 describe('cutover store migration — durability plan (§10 Option B)', () => {
   let src: string;
+  let dst: string;
   const map = new Map<string, string>([['tmux-a', 'claude']]);
   beforeEach(() => {
     src = mkdtempSync(join(tmpdir(), 'desk-cutover-dur-'));
+    dst = mkdtempSync(join(tmpdir(), 'desk-cutover-durdst-'));
   });
   afterEach(() => {
     rmSync(src, { recursive: true, force: true });
+    rmSync(dst, { recursive: true, force: true });
   });
 
   const writeItem = (tmux: string, seq: number, ext: string, content: string): void => {
@@ -157,5 +160,63 @@ describe('cutover store migration — durability plan (§10 Option B)', () => {
     const plan = planDurabilityMigration(src, map, true);
     expect(plan.skippedByDrain).toBe(true);
     expect(plan.items).toEqual([]);
+  });
+
+  const journalPath = (): string => join(dst, '_engine', 'migration', 'seed-journal.json');
+  const readJournal = (): any => JSON.parse(readFileSync(journalPath(), 'utf8'));
+
+  it('writes an atomic sessionId+seq journal with re-keyed bodies, committed=false', () => {
+    writeItem('tmux-a', 2, 'json', JSON.stringify({ prompt: 'a2' }));
+    writeItem('tmux-a', 1, 'delivered', JSON.stringify({ prompt: 'a1' }));
+    const plan = planDurabilityMigration(src, map, false);
+    const report = writeDurabilitySeedJournal(plan, dst);
+    expect(report).toEqual({ written: 2, droppedAck: 0, alreadyCommitted: false });
+    const journal = readJournal();
+    expect(journal.version).toBe(1);
+    expect(journal.committed).toBe(false);
+    // Deterministic order: sessionId then seq.
+    expect(journal.items).toEqual([
+      { sessionId: 'claude', seq: 1, phase: 'semantic-unknown', reissue: false },
+      { sessionId: 'claude', seq: 2, phase: 'queued', reissue: false }
+    ]);
+    // Raw bodies re-keyed to a separate sessionId-keyed location.
+    expect(JSON.parse(readFileSync(join(dst, '_engine', 'migration', 'bodies', 'claude', '0000000001.json'), 'utf8'))).toEqual({ prompt: 'a1' });
+  });
+
+  it('is byte-stable across idempotent rewrites (deterministic ordering)', () => {
+    writeItem('tmux-a', 3, 'json', JSON.stringify({ prompt: 'c' }));
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a' }));
+    const plan = planDurabilityMigration(src, map, false);
+    writeDurabilitySeedJournal(plan, dst);
+    const first = readFileSync(journalPath(), 'utf8');
+    writeDurabilitySeedJournal(plan, dst);
+    expect(readFileSync(journalPath(), 'utf8')).toBe(first);
+  });
+
+  it('respects a committed marker (idempotent: leaves a consumed seed untouched)', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a' }));
+    const plan = planDurabilityMigration(src, map, false);
+    mkdirSync(join(dst, '_engine', 'migration'), { recursive: true });
+    writeFileSync(join(dst, '_engine', 'migration', 'seed-journal.committed'), 'done');
+    const report = writeDurabilitySeedJournal(plan, dst);
+    expect(report.alreadyCommitted).toBe(true);
+    expect(existsSync(journalPath())).toBe(false); // untouched — engine already seeded
+  });
+
+  it('fails closed on unreadable bodies unless explicitly acknowledged', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a' }));
+    writeItem('tmux-a', 2, 'json', 'corrupt'); // unreadable
+    const plan = planDurabilityMigration(src, map, false);
+    expect(() => writeDurabilitySeedJournal(plan, dst)).toThrow(/unreadable/);
+    const report = writeDurabilitySeedJournal(plan, dst, { acknowledgeUnreadable: true });
+    expect(report.written).toBe(1);
+  });
+
+  it('fails closed on unmapped-session drops unless explicitly acknowledged', () => {
+    writeItem('tmux-ghost', 1, 'json', JSON.stringify({ prompt: 'g' }));
+    const plan = planDurabilityMigration(src, map, false);
+    expect(() => writeDurabilitySeedJournal(plan, dst)).toThrow(/dropped/);
+    const report = writeDurabilitySeedJournal(plan, dst, { acknowledgeDropped: true });
+    expect(report).toMatchObject({ written: 0, droppedAck: 1 });
   });
 });
