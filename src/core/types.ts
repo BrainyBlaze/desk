@@ -115,6 +115,12 @@ export interface DeskSession {
   bypassPermissions?: boolean;
   command?: string;
   tmuxSession?: string;
+  /**
+   * atch-native durable session identity (§10). Minted from the session name via
+   * the migration transform. Optional during the transitional cutover; it becomes
+   * the sole identity (and tmuxSession is dropped) at the Phase 5 legacy deletion.
+   */
+  sessionId?: string;
   order?: number;
   uiMode?: DeskSessionUiMode;
   /** Runtime model override (provider/model string, driver-interpreted). NOT part of session identity. */
@@ -138,6 +144,8 @@ export interface SessionSpec {
   bypassPermissions?: boolean;
   customCommand?: boolean;
   tmuxSession: string;
+  /** atch-native durable session identity (§10); optional during the transitional cutover. */
+  sessionId?: string;
   command: string;
   uiMode: DeskSessionUiMode;
   model?: string;
