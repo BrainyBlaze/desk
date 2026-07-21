@@ -230,6 +230,7 @@ groups:
         groupOrder: undefined,
         order: undefined,
         tmuxSession: 'agentdesk-group-1-alpha-00000000',
+        sessionId: 'alpha',
         command: "cd '/workspace/projects/alpha' && exec desk agent-host",
         uiMode: 'native'
       },
@@ -245,6 +246,7 @@ groups:
         groupOrder: undefined,
         order: undefined,
         tmuxSession: 'agentdesk-group-1-project-mu-00000000',
+        sessionId: 'project-mu',
         command: "cd '/workspace/projects/project-μ' && exec desk agent-host",
         uiMode: 'native'
       }

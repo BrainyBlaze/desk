@@ -11,6 +11,7 @@ import type {
   SessionSpec
 } from './types.js';
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
+import { buildManifestMigration } from './sessionIdentity.js';
 
 const DEFAULT_NAMESPACE = 'agentdesk';
 const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
@@ -149,7 +150,16 @@ export function buildSessionSpecs(
     )
   );
 
-  return [...rootSpecs, ...projectSpecs];
+  // Attach the atch-native durable sessionId (§10), minted from the manifest in
+  // the same canonical traversal order (root groups, then projects) that
+  // buildManifestMigration uses — so entry[i] lines up with spec[i]. Fail closed
+  // on a cardinality mismatch rather than leave a spec without an identity.
+  const specs = [...rootSpecs, ...projectSpecs];
+  const migration = buildManifestMigration(manifest);
+  if (migration.entries.length !== specs.length) {
+    throw new ManifestValidationError(`sessionId mint produced ${migration.entries.length} ids for ${specs.length} sessions`);
+  }
+  return specs.map((spec, i) => ({ ...spec, sessionId: migration.entries[i].sessionId }));
 }
 
 export function expandHome(path: string, homeDir: string): string {
