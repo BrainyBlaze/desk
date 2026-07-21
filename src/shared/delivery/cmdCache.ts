@@ -137,6 +137,17 @@ export class InMemoryCmdCache {
     this.partitions.delete(this.key(sessionId, generation));
   }
 
+  /** Enumerate all live records with their (session, generation) — for durable-log compaction. */
+  *entries(): IterableIterator<{ sessionId: string; generation: number; record: CmdRecord }> {
+    const SEP = String.fromCharCode(0); // must match key()'s \u0000 separator
+    for (const [pk, p] of this.partitions) {
+      const sp = pk.lastIndexOf(SEP);
+      const sessionId = pk.slice(0, sp);
+      const generation = Number(pk.slice(sp + 1));
+      for (const record of p.values()) yield { sessionId, generation, record };
+    }
+  }
+
   /**
    * Enforce the horizon: evict records older than `horizonMs`, then trim each
    * partition to `maxEntries` (oldest by ts first). Returns the eviction count.
