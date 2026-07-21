@@ -252,6 +252,16 @@ describe('golden vectors', () => {
       const frame = encodeFrame(hdr(type, { payload: encodeBody(type, body) }));
       return { name: FrameType[type], type, generation: 7, sequence: '3', body: jsonBody(body), frameHex: hex(frame) };
     });
+    const oneByteCr: Body = { flags: 0, surface_id: 2, bytes: Uint8Array.of(0x0d) };
+    const inputIndex = valid.findIndex((vector) => vector.type === FrameType.INPUT);
+    valid.splice(inputIndex + 1, 0, {
+      name: 'INPUT_ONE_BYTE_CR',
+      type: FrameType.INPUT,
+      generation: 7,
+      sequence: '4',
+      body: jsonBody(oneByteCr),
+      frameHex: hex(encodeFrame(hdr(FrameType.INPUT, { sequence: 4n, payload: encodeBody(FrameType.INPUT, oneByteCr) })))
+    });
     // variable-shape frames (dedicated codecs) — full contract coverage
     const recPayload = encodeRecord({ record_type: RecordType.OUTPUT, record_seq: 40n, generation: 7, output_offset: 900n, body: new TextEncoder().encode('$ ') });
     valid.push({ name: 'RECORD', type: FrameType.RECORD, generation: 7, sequence: '3', body: { $note: 'OUTPUT record, see decodeRecord' }, frameHex: hex(encodeFrame(hdr(FrameType.RECORD, { aux: 900n, payload: recPayload }))) });
@@ -278,6 +288,7 @@ describe('golden vectors', () => {
       }
       expect(code, v.name).toBe(v.expectCode);
     }
+    expect(valid.some((vector) => vector.name === 'INPUT_ONE_BYTE_CR')).toBe(true);
     writeFileSync(join(dir, 'vectors.json'), JSON.stringify({ contract: 'atch-wire-v3', proto_version: PROTO_VERSION, header_len: HEADER_LEN, valid, invalid }, null, 2) + '\n');
     expect(valid.length).toBeGreaterThanOrEqual(29);
   });
