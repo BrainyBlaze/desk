@@ -15,12 +15,16 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 
 All of it is pure `src/shared` logic with persistence/IO expressed as **ports**,
 so the correctness rules are unit-testable without a live binary, sockets, or a
-browser. **191 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
+browser. **220 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
 
 | Spec | Module | What it is | Commit |
 |---|---|---|---|
 | §4 wire | `src/shared/atchWire/` | Frozen v3 wire codec — 36-byte header, 30 frame types, MORE reassembly, typed RECORD envelope, 2 variable-shape frames (CHECKPOINT_DATA present-discriminator, JOURNAL_DATA record-array). Complete **30/30 golden vectors** + 2 invalid. | `32ce420`, `47fe138` |
 | §6 (C16) | `src/shared/controlPlane/` | Source-tagged lifecycle (`unknown`-extended), precedence + **staleness-drop** resolution, **generation fence**, **exactly-once** intake (invocationId dedup + atomic sourceSeq) and consumer (cursor + receipt outbox). | `0c7e8e3` |
+| §4.8.1 (H8) | `src/shared/controlPlane/generationLedger.ts` | Durable **tombstone generation ledger** backing the fence — generation survives delete+recreate (never reset/reissued), so a reused sessionId can't admit a stale hook. | `8c4f59c` |
+| §7.4 | `src/shared/browserProtocol/resync.ts` | Loss-aware per-subscription resync FSM — contiguity-gated live, gap→dirty→resnapshot, stale-vs-advanced generation/revision discard. | `b2fca49` |
+| §8.1 (C3) | `src/shared/recovery/checkpointSelect.ts` | The **R-xterm-patch recovery ladder** — exact pinned-patch checkpoint → full replay → fail-closed degrade; kind-1 display never used for authoritative recovery. | `3a4fe18` |
+| §4.9 | `src/shared/journal/journalReplay.ts` | `record_seq` **total-order replay projector** (recovery + history); per-type projection, EVENT dedup, TRUNCATION gap vs undeclared-loss discontinuity. | `4bf5388` |
 | §6.10 (H1) | `src/shared/delivery/` | Transport-vs-semantic phase FSM (accepted ≠ delivered), marked/unmarked confirm, CMD_CACHE PREPARED/WRITTEN/ACKED with a fail-closed retry horizon. | `63ca2b0` |
 | §7.4/§7.7 | `src/shared/browserProtocol/` | Loss-aware binary WS framing (14 frames, channelId multiplex, generation+revision) + reply-suppression responder matrix / CSI-OSC query classifier (set-vs-query, no over-suppression). | `33940cf` |
 | §7.5/§7.9 | `src/shared/lease/` | Controller/resize lease — epoch-fenced handoff, forced-takeover demotion, TTL auto-release, catch-up ack-offset. | `eea031d` |
