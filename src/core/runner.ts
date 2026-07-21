@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { shellQuote } from '../shared/shell.js';
-import { statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, statSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
 import { createCaptureArgv, createKillSessionArgv, createStartSessionArgv } from './tmux.js';
@@ -133,6 +134,27 @@ export function listTmuxSessionsCached(now = Date.now()): Set<string> {
   const sessions = listTmuxSessions();
   tmuxSessionsCache = { at: now, sessions };
   return sessions;
+}
+
+/**
+ * The running-session set the live UI/pulse uses. Under DESK_ATCH_NATIVE a
+ * session is running iff its atch master socket exists (keyed by sessionId under
+ * the socket root); otherwise the tmux session list. Returns tmuxSessions during
+ * the transitional cutover (the view model still keys by tmuxSession).
+ */
+export function runningSessionSet(): Set<string> {
+  if (process.env.DESK_ATCH_NATIVE !== '1') {
+    return listTmuxSessionsCached();
+  }
+  const socketRoot = process.env.DESK_ATCH_SOCKET_ROOT ?? join(tmpdir(), 'desk-atch');
+  const running = new Set<string>();
+  for (const session of loadDeskCached().sessions) {
+    const sessionId = session.sessionId ?? session.tmuxSession;
+    if (existsSync(join(socketRoot, `${sessionId}.sock`))) {
+      running.add(session.tmuxSession);
+    }
+  }
+  return running;
 }
 
 export function invalidateTmuxSessionsCache(): void {

@@ -1,4 +1,4 @@
-import { listTmuxSessionsCached, loadDesk } from '../../core/runner.js';
+import { listTmuxSessionsCached, loadDesk, runningSessionSet } from '../../core/runner.js';
 import { normalizeAgentEventForApi } from '../agentEvents.js';
 import { attentionTracker, notifyAgentSignal, type AgentEventKind } from '../attention.js';
 import { initChannelsRuntime } from '../channelsApi.js';
@@ -32,7 +32,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
     }
 
     if (req.method === 'GET' && url.pathname === '/api/pulse') {
-      const running = listTmuxSessionsCached();
+      const running = runningSessionSet();
       managedAgentLsp.reconcile(running);
       attentionTracker.dropDead(running);
       sendJson(res, 200, {
