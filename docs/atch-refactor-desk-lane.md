@@ -15,7 +15,9 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 
 All of it is pure `src/shared` logic with persistence/IO expressed as **ports**,
 so the correctness rules are unit-testable without a live binary, sockets, or a
-browser. **220 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
+browser. **237 lane tests, `tsc --noEmit` 0 errors, node v22.23.1.** The full
+project suite is green with these added: **2585 passed, 0 failures**, `npm run
+check` clean.
 
 | Spec | Module | What it is | Commit |
 |---|---|---|---|
@@ -31,6 +33,8 @@ browser. **220 tests, `tsc --noEmit` 0 errors, node v22.23.1.**
 | §8.2 (C4) | `src/shared/recovery/` | Two independent trust axes (`current_state_exact` vs `restart_recoverable`) + per-buffer provenance + hidden-state re-establishment oracle. | `8e97255` |
 | §3.2/§3.3 | `src/shared/runtime/` | Daemon pure cores — worker supervisor (fail-closed cap, bounded backoff, sharding, visible-first restore), PID+start-time instance lock, versioned RPC, emulator port. | `0ba6ee3` |
 | §7.1 | `src/shared/runtime/sessionRuntime.ts` | **SessionRuntime** — composes all five layers; an integration test drives REAL wire records + REAL browser frames through it end-to-end. | `3c785ee` |
+| §3.2/§3.6 | `src/shared/runtime/daemonCore.ts` | **DaemonCore** — the multi-session registry composing the generation ledger + fail-closed cap + per-session runtimes + lease into a callable daemon (socket/process I/O is the thin outer shell). The fence holds across delete+recreate at the daemon level. | `39db2f3` |
+| §7.8/§7.6/§15 | `tests/byteIntegrity.gate.test.ts` | Shipping gate: OUTPUT byte-integrity across EVERY split boundary + one-byte-at-a-time (binary end-to-end), and the 256-value two-channel INPUT gate. | `d1f96ec` |
 | §6.9/§3.6 | `src/shared/runtime/nativeLifecycle.ts` | Daemon-owned native agent-host FSM (starting→ready→working/idle→exited/crashed) + control-plane `native-fsm` projection + bounded-backoff restart. Establishes the **atch-terminal-only vs daemon-native ownership boundary** as code (C14). | `1913607` |
 | §10 | `src/shared/migration/` | tmuxSession→sessionId grammar/minting, submitState **repair map (never import legacy as `done`)**, resumable phase FSM. | `5c7c71f` |
 
