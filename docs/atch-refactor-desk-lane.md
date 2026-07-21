@@ -13,11 +13,14 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 
 ## Status headline (honest)
 
-**The real lane-join is PROVEN** — the daemon spawns a real atch session
-(`atch start`, `ATCH_GENERATION` injected from the durable ledger), attaches over
-the v3 socket, and a real terminal **round-trips multi-line input→output** through
-the real binary, with the generation fence, v3 handshake, spawn contract, and
-detached lifecycle all live (4-case smoke, stable over repeated runs, opt-in via
+**The full stack is PROVEN live with all real components** — real atch C master →
+TS daemon → **real @xterm/headless screen authority** → browser frames. The daemon
+spawns a real atch session (`atch start`, `ATCH_GENERATION` injected from the
+durable ledger), attaches over the v3 socket, a real terminal **round-trips
+multi-line input→output** through the real binary, the **real headless emulator
+renders it**, and a new surface's SNAPSHOT (SerializeAddon) carries the rendered
+screen — with the generation fence, v3 handshake, spawn contract, and detached
+lifecycle all live (5-case smoke, stable over repeated runs, opt-in via
 `RUN_REAL_JOIN=1`). Both the C master and the TS daemon are green together.
 
 **The tmux replacement is NOT shipped.** The protocol + daemon + master link are
@@ -92,22 +95,22 @@ each an explicit gate, none done:
    the real-atch join is proven. What remains behind the seams: the worker child
    processes, native host supervision + rendezvous, and the HTTP hook-intake
    endpoint.
-2. **Real `@xterm/headless` emulator adapter** — the `EmulatorPort`
-   implementation. `@xterm/headless` is a new runtime dep (§3.3, H10) not yet
-   installed; adding it is a packaging step (lockfile, `npm ci`, ~500-pkg tree).
-   The port + fake keep everything else testable meanwhile.
+2. **Real `@xterm/headless` emulator adapter** — DONE (`xtermEmulator.ts`,
+   `c149d02`): `@xterm/headless ^6.0.0` added, the `EmulatorPort` renders real
+   output, feeds the classifier, serializes restorable snapshots, and is proven
+   as the live screen authority in the full-stack join (`07fba5a`).
 3. **FS-store transforms** — the §10 per-store transforms (manifest,
    channelsPaused, resume state, LSP wiring, AgentSurface re-mint) that the
-   repair map + phase FSM here drive.
+   repair map + phase FSM here drive. OPEN — touches the running product's stores.
 4. **Frontend integration** — the `terminalBrokerClient` binary rewrite, the
    xterm reply-suppression addon (registerCsiHandler wiring), and the
-   TerminalSurface two-input-channel wiring.
+   TerminalSurface two-input-channel wiring. OPEN — needs the browser.
 5. **The live tmux→atch cutover** — replacing the terminalBroker /
-   channelsEngine seams in the running product.
+   channelsEngine seams in the running product. OPEN — the product still uses tmux.
 
-Items 1, 4, and 5 fundamentally require @codex's real atch binary (the master to
-talk to) and a live browser/server environment to validate — i.e. they land when
-the lanes join, not before.
+Items 3–5 modify the running Desk product and need a live browser/server env; they
+are the "productionize into the product" phase and are NOT done. The protocol,
+daemon, master link, and screen authority are proven; the product cutover is not.
 
 ## Cross-review
 
