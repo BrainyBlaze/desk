@@ -15,9 +15,11 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 
 All of it is pure `src/shared` logic with persistence/IO expressed as **ports**,
 so the correctness rules are unit-testable without a live binary, sockets, or a
-browser. **237 lane tests, `tsc --noEmit` 0 errors, node v22.23.1.** The full
-project suite is green with these added: **2585 passed, 0 failures**, `npm run
-check` clean.
+browser. **~247 lane tests, `tsc --noEmit` 0 errors, node v22.23.1.** The full
+project suite is green with these added: **2604 passed, 0 failures**, `npm run
+check` clean. The daemon is a **runnable process** (`daemonServer.ts`) with a
+**durable, restart-surviving** fence store (`fileGenerationLedger.ts`) — not just
+logic.
 
 | Spec | Module | What it is | Commit |
 |---|---|---|---|
@@ -35,6 +37,7 @@ check` clean.
 | §7.1 | `src/shared/runtime/sessionRuntime.ts` | **SessionRuntime** — composes all five layers; an integration test drives REAL wire records + REAL browser frames through it end-to-end. | `3c785ee` |
 | §3.2/§3.6 | `src/shared/runtime/daemonCore.ts` | **DaemonCore** — the multi-session registry composing the generation ledger + fail-closed cap + per-session runtimes + lease into a callable daemon. The fence holds across delete+recreate at the daemon level. | `39db2f3` |
 | §3.2/§3.7 | `src/server/runtime/daemonServer.ts` | **DaemonServer — the RUNNABLE daemon**: a real single-instance unix-socket server (PID+start-time lock, stale-lock repair, 0700/0600) framing versioned RPC (ping/ensure/retire/list/state/stop) into DaemonCore. Node stdlib only; runs + tested over a real socket today. | `4d51718` |
+| §4.8.1 | `src/server/runtime/fileGenerationLedger.ts` | **Durable fsync'd** append-only generation ledger — the fence survives a daemon RESTART (torn-tail safe, monotonic guard). Demonstrates the durable-adapter pattern the intake/consumer/CMD_CACHE stores follow. | `83b88c3` |
 | §7.8/§7.6/§15 | `tests/byteIntegrity.gate.test.ts` | Shipping gate: OUTPUT byte-integrity across EVERY split boundary + one-byte-at-a-time (binary end-to-end), and the 256-value two-channel INPUT gate. | `d1f96ec` |
 | §6.9/§3.6 | `src/shared/runtime/nativeLifecycle.ts` | Daemon-owned native agent-host FSM (starting→ready→working/idle→exited/crashed) + control-plane `native-fsm` projection + bounded-backoff restart. Establishes the **atch-terminal-only vs daemon-native ownership boundary** as code (C14). | `1913607` |
 | §10 | `src/shared/migration/` | tmuxSession→sessionId grammar/minting, submitState **repair map (never import legacy as `done`)**, resumable phase FSM. | `5c7c71f` |
