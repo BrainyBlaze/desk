@@ -33,7 +33,8 @@ check` clean.
 | §8.2 (C4) | `src/shared/recovery/` | Two independent trust axes (`current_state_exact` vs `restart_recoverable`) + per-buffer provenance + hidden-state re-establishment oracle. | `8e97255` |
 | §3.2/§3.3 | `src/shared/runtime/` | Daemon pure cores — worker supervisor (fail-closed cap, bounded backoff, sharding, visible-first restore), PID+start-time instance lock, versioned RPC, emulator port. | `0ba6ee3` |
 | §7.1 | `src/shared/runtime/sessionRuntime.ts` | **SessionRuntime** — composes all five layers; an integration test drives REAL wire records + REAL browser frames through it end-to-end. | `3c785ee` |
-| §3.2/§3.6 | `src/shared/runtime/daemonCore.ts` | **DaemonCore** — the multi-session registry composing the generation ledger + fail-closed cap + per-session runtimes + lease into a callable daemon (socket/process I/O is the thin outer shell). The fence holds across delete+recreate at the daemon level. | `39db2f3` |
+| §3.2/§3.6 | `src/shared/runtime/daemonCore.ts` | **DaemonCore** — the multi-session registry composing the generation ledger + fail-closed cap + per-session runtimes + lease into a callable daemon. The fence holds across delete+recreate at the daemon level. | `39db2f3` |
+| §3.2/§3.7 | `src/server/runtime/daemonServer.ts` | **DaemonServer — the RUNNABLE daemon**: a real single-instance unix-socket server (PID+start-time lock, stale-lock repair, 0700/0600) framing versioned RPC (ping/ensure/retire/list/state/stop) into DaemonCore. Node stdlib only; runs + tested over a real socket today. | `4d51718` |
 | §7.8/§7.6/§15 | `tests/byteIntegrity.gate.test.ts` | Shipping gate: OUTPUT byte-integrity across EVERY split boundary + one-byte-at-a-time (binary end-to-end), and the 256-value two-channel INPUT gate. | `d1f96ec` |
 | §6.9/§3.6 | `src/shared/runtime/nativeLifecycle.ts` | Daemon-owned native agent-host FSM (starting→ready→working/idle→exited/crashed) + control-plane `native-fsm` projection + bounded-backoff restart. Establishes the **atch-terminal-only vs daemon-native ownership boundary** as code (C14). | `1913607` |
 | §10 | `src/shared/migration/` | tmuxSession→sessionId grammar/minting, submitState **repair map (never import legacy as `done`)**, resumable phase FSM. | `5c7c71f` |
@@ -56,9 +57,12 @@ So the seam is conformant on both sides before the lanes join.
 The remaining work is process/IO wiring and the live cutover. It is deliberately
 NOT in this branch because it depends on things outside an autonomous TS build:
 
-1. **Daemon process glue** — the unix-socket server, RPC dispatch, worker child
-   processes, native host supervision + rendezvous, and the HTTP hook-intake.
-   Composes the pure cores above; needs a running host to verify.
+1. **Daemon process glue** — the unix-socket server + RPC dispatch + single-
+   instance lock are BUILT and runnable (`daemonServer.ts`, tested over a real
+   socket). What remains behind that shell: the atch-master socket link (needs
+   the real binary), the worker child processes, native host supervision +
+   rendezvous, HTTP hook-intake, and the fsync'd persistence adapters for the
+   ledger / intake / CMD_CACHE / journal.
 2. **Real `@xterm/headless` emulator adapter** — the `EmulatorPort`
    implementation. `@xterm/headless` is a new runtime dep (§3.3, H10) not yet
    installed; adding it is a packaging step (lockfile, `npm ci`, ~500-pkg tree).
