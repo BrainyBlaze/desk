@@ -89,6 +89,32 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   };
 }
 
+export interface ProvisionRequest {
+  sessionId: string;
+  spec: TerminalDaemonSessionSpec;
+}
+
+/**
+ * Provision atch masters for a set of sessions (the daemon process's startup
+ * loop). Sequential so a burst of spawns does not thundering-herd the host; each
+ * failure is isolated and reported, never aborting the rest.
+ */
+export async function provisionSessions(
+  daemon: Pick<TerminalDaemon, 'provision'>,
+  requests: readonly ProvisionRequest[]
+): Promise<{ sessionId: string; ok: boolean; error?: string }[]> {
+  const results: { sessionId: string; ok: boolean; error?: string }[] = [];
+  for (const { sessionId, spec } of requests) {
+    try {
+      const ens = await daemon.provision(sessionId, spec);
+      results.push({ sessionId, ok: ens.ok });
+    } catch (error) {
+      results.push({ sessionId, ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
+}
+
 export interface TerminalDaemonServer {
   daemon: TerminalDaemon;
   server: Server;

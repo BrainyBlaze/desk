@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { createTerminalDaemon, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
+import { createTerminalDaemon, provisionSessions, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
@@ -68,5 +68,29 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
     } finally {
       await d.close();
     }
+  });
+
+  it('provisions sessions sequentially, isolating and reporting failures', async () => {
+    const calls: string[] = [];
+    const fakeDaemon = {
+      provision: async (sessionId: string) => {
+        calls.push(sessionId);
+        if (sessionId === 'boom') {
+          throw new Error('spawn failed');
+        }
+        return { ok: true as const, generation: 1, created: true };
+      }
+    };
+    const results = await provisionSessions(fakeDaemon, [
+      { sessionId: 'a', spec: { command: ['cat'], geometry: { rows: 24, cols: 80 } } },
+      { sessionId: 'boom', spec: { command: ['cat'], geometry: { rows: 24, cols: 80 } } },
+      { sessionId: 'b', spec: { command: ['cat'], geometry: { rows: 24, cols: 80 } } }
+    ]);
+    expect(calls).toEqual(['a', 'boom', 'b']); // sequential, boom did not abort the rest
+    expect(results).toEqual([
+      { sessionId: 'a', ok: true },
+      { sessionId: 'boom', ok: false, error: 'spawn failed' },
+      { sessionId: 'b', ok: true }
+    ]);
   });
 });
