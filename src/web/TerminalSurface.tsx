@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
-import { terminalBroker } from './terminalBrokerClient.js';
+import { binaryTerminalBroker } from './binaryTerminalBrokerClient.js';
+import { ReplySuppressionAddon } from './replySuppressionAddon.js';
+import { BpError } from '../shared/browserProtocol/index.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
@@ -165,6 +167,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     terminal.loadAddon(serializeAddon);
     terminal.loadAddon(unicode11Addon);
     terminal.loadAddon(webLinksAddon);
+    // Suppress the browser terminal's built-in DA/DSR/CPR/DECRQM/geometry/focus/
+    // color-query auto-replies (§7.7): exactly one responder answers each query
+    // over the wire, never a stray browser reply racing the worker/lease owner.
+    terminal.loadAddon(new ReplySuppressionAddon());
     terminal.unicode.activeVersion = '11';
 
     // Budgeted WebGL with event-driven recovery: acquire when visible and
@@ -493,7 +499,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
           applicationScrollProfileForAgent(activeSession?.spec.agent)
         );
         if (input) {
-          terminalBroker.sendInput(surfaceIdRef.current, input);
+          binaryTerminalBroker.sendInput(surfaceIdRef.current, input);
         }
         return;
       }
@@ -775,7 +781,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       resizeTimerRef.current = window.setTimeout(() => {
         // Resize travels as a broker frame through the server's min-size-guarded
         // resize path. Only a visible surface may resize.
-        terminalBroker.sendResize(surfaceIdRef.current, cols, rows);
+        binaryTerminalBroker.sendResize(surfaceIdRef.current, cols, rows);
       }, 80);
     };
 
@@ -853,7 +859,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
           return; // never pin a degenerate size
         }
         lastResizeRef.current = key;
-        terminalBroker.sendResize(surfaceId, cols, rows);
+        binaryTerminalBroker.sendResize(surfaceId, cols, rows);
         void repaintTerminal({ session: tmuxTarget }).catch(() => undefined);
       }, 450);
     };
@@ -863,9 +869,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     // at least one surface is visible; a hidden surface receives nothing, so a
     // warm-but-hidden keep-alive cell costs no parse/render. On reveal the broker
     // sends a self-contained snapshot, which we apply after a reset.
-    terminalBroker.subscribe(surfaceId, tmuxTarget, cellVisibleRef.current, {
-      onOutput: (data) => {
-        terminal.write(data);
+    binaryTerminalBroker.subscribe(surfaceId, tmuxTarget, terminal.rows, terminal.cols, cellVisibleRef.current, {
+      onOutput: (bytes) => {
+        // Raw output bytes, written binary end-to-end (no premature string decode).
+        terminal.write(bytes);
       },
       onSnapshot: (data) => {
         terminal.reset();
@@ -875,11 +882,12 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // settled cell size differs from what the window currently has.
         stabilize();
       },
-      onExit: () => {
-        terminal.writeln('\r\n\x1b[33m[session exited]\x1b[0m');
+      onExit: (code, signal) => {
+        const how = signal ? `signal ${signal}` : `code ${code}`;
+        terminal.writeln(`\r\n\x1b[33m[session exited ${how}]\x1b[0m`);
       },
-      onError: (message) => {
-        terminal.writeln(`\r\n\x1b[31m${message}\x1b[0m`);
+      onError: (code) => {
+        terminal.writeln(`\r\n\x1b[31m${describeBpError(code)}\x1b[0m`);
       },
       onConnectionChange: (up) => {
         if (disposed) {
@@ -893,13 +901,18 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     });
     // Let the mount effect's reveal/hide detection drive broker visibility, and
     // route the manual Reconnect button to the shared connection.
-    brokerVisibilityRef.current = (visible) => terminalBroker.setVisibility(surfaceId, visible);
-    reconnectRef.current = () => terminalBroker.forceReconnect();
+    brokerVisibilityRef.current = (visible) => binaryTerminalBroker.setVisibility(surfaceId, visible);
+    reconnectRef.current = () => binaryTerminalBroker.forceReconnect();
 
-    // Keystrokes flow back through the broker; the server only accepts input
-    // from a visible, subscribed surface.
+    // Two-input (§7.6): onData carries UTF-8 keystrokes, onBinary carries raw
+    // bytes (e.g. a paste or a mouse/paste sequence xterm emits binary). Both
+    // flow back through the broker; the server accepts input only from a
+    // visible, subscribed surface.
     const onDataDisposable = terminal.onData((data) => {
-      terminalBroker.sendInput(surfaceId, data);
+      binaryTerminalBroker.sendInput(surfaceId, data);
+    });
+    const onBinaryDisposable = terminal.onBinary((data) => {
+      binaryTerminalBroker.sendBinary(surfaceId, latin1ToBytes(data));
     });
 
     return () => {
@@ -910,7 +923,8 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       window.clearTimeout(resizeTimerRef.current);
       window.clearTimeout(stabilizeTimer);
       onDataDisposable.dispose();
-      terminalBroker.unsubscribe(surfaceId);
+      onBinaryDisposable.dispose();
+      binaryTerminalBroker.unsubscribe(surfaceId);
     };
     // Keyed on the STABLE session identity (tmux target, state, name, cwd), not
     // the session object: a mutation elsewhere ships a fresh snapshot whose
@@ -1106,4 +1120,33 @@ function detectAcceleratedWebgl2(): boolean {
 
 function getSelectedText(terminal: Terminal): string {
   return terminal.getSelection() || window.getSelection()?.toString() || '';
+}
+
+/**
+ * xterm's onBinary emits a string whose code units are raw byte values (0–255),
+ * so decode it latin1-style rather than UTF-8 encoding it (which would corrupt
+ * bytes ≥ 0x80). This is the raw-bytes half of the §7.6 two-input path.
+ */
+function latin1ToBytes(data: string): Uint8Array {
+  const bytes = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    bytes[i] = data.charCodeAt(i) & 0xff;
+  }
+  return bytes;
+}
+
+/** Human-readable text for a browser-protocol error code (§7.4 ERROR frame). */
+function describeBpError(code: number): string {
+  switch (code) {
+    case BpError.BAD_CHANNEL:
+      return 'terminal channel is no longer valid';
+    case BpError.STALE_GENERATION:
+      return 'session was recreated; reattaching';
+    case BpError.STALE_LEASE:
+      return 'another surface holds the input lease';
+    case BpError.PAYLOAD_TOO_LARGE:
+      return 'terminal frame too large';
+    default:
+      return `terminal error ${code}`;
+  }
 }
