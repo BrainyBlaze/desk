@@ -156,6 +156,30 @@ export class DaemonCore {
     this.channelToSession.delete(channelId);
   }
 
+  /** Route a browser RESIZE by channelId (the router validated ownership). */
+  onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
+    const sessionId = this.channelToSession.get(channelId);
+    if (sessionId === undefined) return false;
+    this.sessions.get(sessionId)?.runtime.onBrowserResize(channelId, rows, cols);
+    return true;
+  }
+
+  /** Route a browser VISIBILITY by channelId. */
+  onBrowserVisibilityByChannel(channelId: number, visible: boolean): boolean {
+    const sessionId = this.channelToSession.get(channelId);
+    if (sessionId === undefined) return false;
+    this.sessions.get(sessionId)?.runtime.onBrowserVisibility(channelId, visible);
+    return true;
+  }
+
+  /** Route a browser QUERY_REPLY by channelId (§7.7 — currently fail-closed drop). */
+  onBrowserQueryReplyByChannel(channelId: number, queryOffset: bigint, leaseEpoch: number, bytes: Uint8Array): boolean {
+    const sessionId = this.channelToSession.get(channelId);
+    if (sessionId === undefined) return false;
+    this.sessions.get(sessionId)?.runtime.onBrowserQueryReply(channelId, queryOffset, leaseEpoch, bytes);
+    return true;
+  }
+
   ingestHook(sessionId: string, hook: HookInput): ReturnType<SessionRuntime['ingestHook']> | undefined {
     return this.sessions.get(sessionId)?.runtime.ingestHook(hook);
   }

@@ -97,11 +97,29 @@ export class TerminalWsRouter {
         if (this.owns(ws, frame.channelId)) this.dropChannel(ws, frame.channelId);
         return;
       }
+      case BpFrameType.RESIZE: {
+        if (this.ownOrReject(ws, frame.channelId)) this.manager.onBrowserResizeByChannel(frame.channelId, frame.rows, frame.cols);
+        return;
+      }
+      case BpFrameType.VISIBILITY: {
+        if (this.ownOrReject(ws, frame.channelId)) this.manager.onBrowserVisibilityByChannel(frame.channelId, frame.visible);
+        return;
+      }
+      case BpFrameType.QUERY_REPLY: {
+        if (this.ownOrReject(ws, frame.channelId)) this.manager.onBrowserQueryReplyByChannel(frame.channelId, frame.queryOffset, frame.leaseEpoch, frame.bytes);
+        return;
+      }
       default:
-        // VISIBILITY / RESIZE / QUERY_REPLY route by ownership the same way; wired
-        // as the runtime grows those paths. Unowned frames are ignored.
+        // server→client frame types (or unknown) — a client must not send these.
         return;
     }
+  }
+
+  /** Ownership gate for a channel-scoped frame: true if owned, else reject + false. */
+  private ownOrReject(ws: WsConn, channelId: number): boolean {
+    if (this.owns(ws, channelId)) return true;
+    ws.send(encodeBpFrame({ type: BpFrameType.ERROR, channelId, code: BpError.BAD_CHANNEL }));
+    return false;
   }
 
   /** Clean up all of a WS's channels when it closes (§7.4 lifecycle). */

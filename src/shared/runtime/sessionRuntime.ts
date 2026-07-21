@@ -174,6 +174,39 @@ export class SessionRuntime {
     this.d.sendMaster({ type: FrameType.INPUT, flags: 0, generation: this.d.generation, sequence: 0n, aux: 0n, payload });
   }
 
+  /**
+   * Browser-initiated resize (§7.5): resize the authoritative emulator and tell
+   * the master to resize the PTY. Lease enforcement (only the owning surface may
+   * resize) is the §7.5 refinement layered above; here the frame carries the
+   * session generation so the master's fence accepts it.
+   */
+  onBrowserResize(channelId: number, rows: number, cols: number): void {
+    const sub = this.subscribers.get(channelId);
+    if (sub !== undefined) {
+      sub.rows = rows;
+      sub.cols = cols;
+    }
+    this.d.emulator.resize(rows, cols);
+    const payload = encodeBody(FrameType.RESIZE, { lease_epoch: 0, surface_id: channelId, generation: this.d.generation, rows, cols });
+    this.d.sendMaster({ type: FrameType.RESIZE, flags: 0, generation: this.d.generation, sequence: 0n, aux: 0n, payload });
+  }
+
+  /** Browser surface visibility (§3.3/§7.4) — drives worker residency + lease candidacy. */
+  onBrowserVisibility(channelId: number, visible: boolean): void {
+    const sub = this.subscribers.get(channelId);
+    if (sub !== undefined) sub.visible = visible;
+  }
+
+  /**
+   * A surface's reply to a query_request (§7.7, pixel/color/focus). The full
+   * TERMINAL_REPLY routing lands with the query_request path; until the daemon
+   * issues query_requests, an inbound QUERY_REPLY is uncorrelated and dropped
+   * FAIL-CLOSED (never injected as input, never a fabricated reply).
+   */
+  onBrowserQueryReply(_channelId: number, _queryOffset: bigint, _leaseEpoch: number, _bytes: Uint8Array): void {
+    // no outstanding query_request to correlate → drop (§7.7 fail-closed).
+  }
+
   // ---- control plane + delivery (§6/§6.10) ----------------------------------
   /**
    * Ingest a typed hook / native command-result: fence + stamp via the control

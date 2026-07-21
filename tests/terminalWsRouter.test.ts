@@ -9,9 +9,16 @@ import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type Em
 import { TerminalWsRouter, type WsConn } from '../src/server/runtime/terminalWsRouter.js';
 import { BpError, BpFrameType, decodeBpFrame, encodeBpFrame, type BpFrame } from '../src/shared/browserProtocol/index.js';
 
+const createdEmus: FakeEmu[] = [];
 class FakeEmu implements EmulatorPort {
+  resizes: { rows: number; cols: number }[] = [];
+  constructor() {
+    createdEmus.push(this);
+  }
   write(): void {}
-  resize(): void {}
+  resize(rows: number, cols: number): void {
+    this.resizes.push({ rows, cols });
+  }
   readTailText(): string[] {
     return [];
   }
@@ -42,10 +49,14 @@ class FakeWs implements WsConn {
 
 const subscribe = (sessionId: string, surfaceId = 'main') => encodeBpFrame({ type: BpFrameType.SUBSCRIBE, sessionId, surfaceId, rows: 40, cols: 120 });
 const input = (channelId: number, text: string) => encodeBpFrame({ type: BpFrameType.INPUT, channelId, binary: false, bytes: new TextEncoder().encode(text) });
+const resize = (channelId: number, rows: number, cols: number) => encodeBpFrame({ type: BpFrameType.RESIZE, channelId, rows, cols });
+const visibility = (channelId: number, visible: boolean) => encodeBpFrame({ type: BpFrameType.VISIBILITY, channelId, visible });
+const queryReply = (channelId: number) => encodeBpFrame({ type: BpFrameType.QUERY_REPLY, channelId, queryOffset: 0n, leaseEpoch: 0, bytes: Uint8Array.of(0x1b) });
 
 describe('terminal WS router (§7.4)', () => {
   let router: TerminalWsRouter;
   beforeEach(() => {
+    createdEmus.length = 0; // emulators are created at ensure(): [0]=s1, [1]=s2
     router = new TerminalWsRouter({
       ledger: new GenerationLedger(new InMemoryGenerationLedger()),
       supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
@@ -108,5 +119,44 @@ describe('terminal WS router (§7.4)', () => {
     const ws = new FakeWs();
     router.onWsFrame(ws, subscribe('ghost'));
     expect(ws.errors()).toContain(BpError.BAD_CHANNEL);
+  });
+
+  it('RESIZE from the owner reaches the session emulator', () => {
+    const ws = new FakeWs();
+    router.onWsFrame(ws, subscribe('s1')); // channel 1
+    const emu = createdEmus[0]; // s1's emulator (created first in beforeEach)
+    router.onWsFrame(ws, resize(1, 24, 80));
+    expect(emu.resizes).toContainEqual({ rows: 24, cols: 80 });
+    expect(ws.errors()).toHaveLength(0); // owner → routed, no rejection
+  });
+
+  it('RESIZE on a channel the WS does not own is rejected (§7.4)', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, subscribe('s1')); // a owns channel 1
+    const emu = createdEmus[0]; // s1's emulator
+    router.onWsFrame(b, resize(1, 24, 80)); // b is not the owner
+    expect(b.errors()).toContain(BpError.BAD_CHANNEL);
+    expect(emu.resizes).not.toContainEqual({ rows: 24, cols: 80 }); // never routed
+  });
+
+  it('VISIBILITY from the owner is accepted; from a non-owner is rejected', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, subscribe('s1')); // a owns channel 1
+    router.onWsFrame(a, visibility(1, false));
+    expect(a.errors()).toHaveLength(0); // owner → accepted
+    router.onWsFrame(b, visibility(1, false)); // non-owner
+    expect(b.errors()).toContain(BpError.BAD_CHANNEL);
+  });
+
+  it('QUERY_REPLY from the owner is dropped fail-closed (no error, no crash); a non-owner is rejected', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, subscribe('s1')); // a owns channel 1
+    router.onWsFrame(a, queryReply(1)); // uncorrelated → §7.7 fail-closed drop
+    expect(a.errors()).toHaveLength(0); // dropped silently, not an error
+    router.onWsFrame(b, queryReply(1)); // non-owner
+    expect(b.errors()).toContain(BpError.BAD_CHANNEL);
   });
 });

@@ -143,6 +143,21 @@ export class SessionManager {
     this.core.unsubscribeChannel(channelId);
   }
 
+  /** Route a browser RESIZE by channelId (ownership validated by the router). */
+  onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
+    return this.core.onBrowserResizeByChannel(channelId, rows, cols);
+  }
+
+  /** Route a browser VISIBILITY by channelId. */
+  onBrowserVisibilityByChannel(channelId: number, visible: boolean): boolean {
+    return this.core.onBrowserVisibilityByChannel(channelId, visible);
+  }
+
+  /** Route a browser QUERY_REPLY by channelId (§7.7). */
+  onBrowserQueryReplyByChannel(channelId: number, queryOffset: bigint, leaseEpoch: number, bytes: Uint8Array): boolean {
+    return this.core.onBrowserQueryReplyByChannel(channelId, queryOffset, leaseEpoch, bytes);
+  }
+
   /** The session that owns a channelId, or undefined if unknown/stale. */
   sessionOfChannel(channelId: number): string | undefined {
     return this.core.sessionOfChannel(channelId);
