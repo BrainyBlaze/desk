@@ -13,6 +13,7 @@ interface DaemonMock {
   retire: ReturnType<typeof vi.fn>;
   input: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
+  attentionEventsSince: ReturnType<typeof vi.fn>;
 }
 
 function invoke(
@@ -53,7 +54,8 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     provision: vi.fn().mockResolvedValue(provisionResult),
     retire: vi.fn(),
     input: vi.fn().mockReturnValue(true),
-    tail: vi.fn().mockReturnValue(['line-a', 'line-b'])
+    tail: vi.fn().mockReturnValue(['line-a', 'line-b']),
+    attentionEventsSince: vi.fn().mockReturnValue({ events: [{ seq: 3, sessionId: 'shell', kind: 'bell' }], lastSeq: 3 })
   };
 }
 
@@ -173,6 +175,19 @@ describe('daemon control handler', () => {
     const unknown = { ...daemonMock(), tail: vi.fn().mockReturnValue(undefined) };
     const result = await invoke(unknown, 'POST', '/control/tail', { sessionId: 'ghost' });
     expect(result.status).toBe(404);
+  });
+
+  it('drains attention events since a cursor, defaulting a bad cursor to 0', async () => {
+    const daemon = daemonMock();
+    const result = (await invoke(daemon, 'POST', '/control/attention', { since: 2 })) as Captured & {
+      body?: { events?: unknown[]; lastSeq?: number };
+    };
+    expect(result.status).toBe(200);
+    expect(daemon.attentionEventsSince).toHaveBeenCalledWith(2);
+    expect(result.body?.events).toEqual([{ seq: 3, sessionId: 'shell', kind: 'bell' }]);
+    expect(result.body?.lastSeq).toBe(3);
+    await invoke(daemon, 'POST', '/control/attention', { since: 'garbage' });
+    expect(daemon.attentionEventsSince).toHaveBeenLastCalledWith(0);
   });
 });
 

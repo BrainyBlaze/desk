@@ -45,6 +45,15 @@ export interface TerminalDaemonSessionSpec {
   geometry: { rows: number; cols: number };
 }
 
+/** A buffered attention event (bell/OSC9) from a session's emulator. */
+export interface DaemonAttentionEvent {
+  seq: number;
+  sessionId: string;
+  kind: 'bell' | 'osc9';
+  /** OSC9 notification body, when present. */
+  data?: string;
+}
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
   /** Spawn + attach the atch master for a session (CREATE contract). */
@@ -55,18 +64,42 @@ export interface TerminalDaemon {
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
   /** The session's on-screen tail as plain text, or undefined if unknown. */
   tail(sessionId: string, rows: number): string[] | undefined;
+  /**
+   * Buffered bell/OSC9 events with seq > since (the web's attention poller
+   * drains these — the atch-native replacement for tmux bell flags). A `since`
+   * ahead of the head is a stale cursor from a previous daemon incarnation and
+   * reads as 0 (deliver everything buffered) rather than silently nothing.
+   */
+  attentionEventsSince(since: number): { events: DaemonAttentionEvent[]; lastSeq: number };
   /** Tear down the WS bridge + its timers. */
   dispose(): void;
 }
 
+/** Bounded attention ring — plenty for a 2s poll cadence; oldest events drop first. */
+const ATTENTION_RING_MAX = 512;
+
 /** Assemble the durable terminal daemon + mount its binary WS bridge (additive). */
 export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDaemon {
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
+  const attentionRing: DaemonAttentionEvent[] = [];
+  let attentionSeq = 0;
   const router = new TerminalWsRouter({
     ledger,
     supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
-    now: Date.now
+    now: Date.now,
+    onSemanticEvent: (sessionId, event) => {
+      attentionSeq += 1;
+      attentionRing.push({
+        seq: attentionSeq,
+        sessionId,
+        kind: event.kind === 'bell' ? 'bell' : 'osc9',
+        ...(typeof event.data === 'string' && event.data.length > 0 ? { data: event.data.slice(0, 300) } : {})
+      });
+      if (attentionRing.length > ATTENTION_RING_MAX) {
+        attentionRing.splice(0, attentionRing.length - ATTENTION_RING_MAX);
+      }
+    }
   });
   const disposeBridge = installTerminalWsBridge(options.httpServer, router, options.wsPath !== undefined ? { path: options.wsPath } : {});
 
@@ -93,6 +126,10 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     },
     tail(sessionId, rows) {
       return router.sessions.tailText(sessionId, rows);
+    },
+    attentionEventsSince(since) {
+      const cursor = since > attentionSeq ? 0 : since; // stale cursor from a prior daemon incarnation
+      return { events: attentionRing.filter((event) => event.seq > cursor), lastSeq: attentionSeq };
     },
     dispose() {
       disposeBridge();
@@ -136,7 +173,7 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
 export function createDaemonControlHandler(
-  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail'>
+  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail' | 'attentionEventsSince'>
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
@@ -207,6 +244,13 @@ export function createDaemonControlHandler(
             return;
           }
           sendJson(res, 200, { ok: true, lines });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/attention') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          const since = Number(body.since);
+          const drained = daemon.attentionEventsSince(Number.isFinite(since) && since >= 0 ? Math.floor(since) : 0);
+          sendJson(res, 200, { ok: true, ...drained });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/control/health') {

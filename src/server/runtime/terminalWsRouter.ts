@@ -26,6 +26,8 @@ export interface TerminalWsRouterDeps {
   supervisor: WorkerSupervisor;
   emulatorFactory: EmulatorFactory;
   now: () => number;
+  /** Attention-relevant emulator events (bell/OSC9) — see DaemonCoreDeps. */
+  onSemanticEvent?: (sessionId: string, event: import('../../shared/runtime/emulatorPort.js').EmulatorEvent) => void;
 }
 
 export class TerminalWsRouter {
@@ -41,7 +43,8 @@ export class TerminalWsRouter {
       supervisor: deps.supervisor,
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
-      sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame)
+      sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame),
+      ...(deps.onSemanticEvent !== undefined ? { onSemanticEvent: deps.onSemanticEvent } : {})
     });
   }
 

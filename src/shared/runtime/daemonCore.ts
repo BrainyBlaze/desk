@@ -12,7 +12,7 @@ import { type BpFrame } from '../browserProtocol/index.js';
 import { type RawFrame } from '../atchWire/codec.js';
 import { type RecordEnvelope } from '../atchWire/messages.js';
 import { WorkerSupervisor } from './workerSupervisor.js';
-import { type EmulatorFactory } from './emulatorPort.js';
+import { type EmulatorEvent, type EmulatorFactory } from './emulatorPort.js';
 import { SessionRuntime, type HookInput } from './sessionRuntime.js';
 import { createLeaseState, claim, release, type ClaimResult, type LeaseState } from '../lease/index.js';
 import { decideStop } from './instanceLock.js';
@@ -26,6 +26,12 @@ export interface DaemonCoreDeps {
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
   /** Send a frame to a session's atch master. */
   sendMaster: (sessionId: string, frame: RawFrame) => void;
+  /**
+   * Attention-relevant semantic events from the authoritative emulator (§6.6):
+   * bell + OSC9, the atch-native replacement for the tmux bell-flag poller.
+   * Optional — a daemon without an attention consumer just drops them.
+   */
+  onSemanticEvent?: (sessionId: string, event: EmulatorEvent) => void;
 }
 
 interface SessionEntry {
@@ -68,6 +74,17 @@ export class DaemonCore {
 
     const generation = this.d.ledger.allocate(sessionId); // durable, fsync-before-spawn
     const emulator = this.d.emulatorFactory.create(geometry);
+    // BEL/OSC9 → attention (the tmux bell-flag poller's native replacement).
+    // Filtered here so consumers only ever see attention-relevant kinds; the
+    // subscription dies with the emulator on retire.
+    if (this.d.onSemanticEvent !== undefined) {
+      const forward = this.d.onSemanticEvent;
+      emulator.onEvent((event) => {
+        if (event.kind === 'bell' || (event.kind === 'osc' && event.code === 9)) {
+          forward(sessionId, event);
+        }
+      });
+    }
     const runtime = new SessionRuntime({
       sessionId,
       generation,

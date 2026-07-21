@@ -27,6 +27,8 @@ export interface SessionManagerDeps {
   now: () => number;
   /** Deliver a browser frame to a session's surface (the web-server WS wires this). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
+  /** Attention-relevant emulator events (bell/OSC9) — see DaemonCoreDeps. */
+  onSemanticEvent?: (sessionId: string, event: import('../../shared/runtime/emulatorPort.js').EmulatorEvent) => void;
 }
 
 export class SessionManager {
@@ -43,7 +45,8 @@ export class SessionManager {
       now: deps.now,
       sendBrowser: deps.sendBrowser,
       // sendMaster routes to the session's attached master client, if any.
-      sendMaster: (sessionId, frame) => this.masters.get(sessionId)?.send(frame)
+      sendMaster: (sessionId, frame) => this.masters.get(sessionId)?.send(frame),
+      ...(deps.onSemanticEvent !== undefined ? { onSemanticEvent: deps.onSemanticEvent } : {})
     });
   }
 

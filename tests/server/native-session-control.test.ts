@@ -5,12 +5,14 @@ import {
   atchCommandFor,
   createNativeChannelsTransport,
   daemonHttpBase,
+  drainNativeAttentionEvents,
   nativeSessionsEnabled,
   provisionNativeSession,
   restartSessionNativeAware,
   retireStaleIdentityForEdit,
   staleNativeIdentityAfterEdit,
-  startSessionNativeAware
+  startSessionNativeAware,
+  tmuxSessionForNativeId
 } from '../../src/server/runtime/nativeSessionControl.js';
 
 const baseSpec: SessionSpec = {
@@ -260,6 +262,72 @@ describe('createNativeChannelsTransport', () => {
     const transport = createNativeChannelsTransport();
     await transport.sendEnter('agentdesk-g-orphan-xyz');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('agentdesk-g-orphan-xyz');
+  });
+
+  it('sessionCreatedAt reads the socket stat in epoch seconds and null when absent', async () => {
+    stubDesk();
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = mkdtempSync(join(tmpdir(), 'desk-sock-root-'));
+    const savedRoot = process.env.DESK_ATCH_SOCKET_ROOT;
+    try {
+      process.env.DESK_ATCH_SOCKET_ROOT = root;
+      writeFileSync(join(root, 'shell.sock'), '');
+      const transport = createNativeChannelsTransport();
+      const created = await transport.sessionCreatedAt('agentdesk-g-shell-abc');
+      expect(created).not.toBeNull();
+      expect(Math.abs((created ?? 0) - Math.floor(Date.now() / 1000))).toBeLessThan(60);
+      expect(await transport.sessionCreatedAt('agentdesk-g-ghost-999')).toBeNull();
+    } finally {
+      if (savedRoot === undefined) delete process.env.DESK_ATCH_SOCKET_ROOT;
+      else process.env.DESK_ATCH_SOCKET_ROOT = savedRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('tmuxSessionForNativeId', () => {
+  it('maps a daemon sessionId back to the consumer-facing tmuxSession', () => {
+    vi.spyOn(runner, 'loadDeskCached').mockReturnValue({
+      sessions: [{ ...baseSpec, tmuxSession: 'agentdesk-g-shell-abc', sessionId: 'shell' }]
+    } as never);
+    expect(tmuxSessionForNativeId('shell')).toBe('agentdesk-g-shell-abc');
+    expect(tmuxSessionForNativeId('unknown-id')).toBe('unknown-id');
+  });
+});
+
+describe('drainNativeAttentionEvents', () => {
+  it('returns validated events + the advanced cursor', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true,
+          events: [
+            { seq: 4, sessionId: 'shell', kind: 'bell' },
+            { seq: 5, sessionId: 'shell', kind: 'osc9', data: 'Turn done' },
+            { seq: 6, sessionId: 42, kind: 'bell' }, // invalid → dropped
+            { seq: 7, sessionId: 'shell', kind: 'title' } // invalid kind → dropped
+          ],
+          lastSeq: 7
+        })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const drained = await drainNativeAttentionEvents(3);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ since: 3 });
+    expect(drained.events).toEqual([
+      { seq: 4, sessionId: 'shell', kind: 'bell' },
+      { seq: 5, sessionId: 'shell', kind: 'osc9', data: 'Turn done' }
+    ]);
+    expect(drained.lastSeq).toBe(7);
+  });
+
+  it('fails soft to an empty drain with the cursor unmoved when the daemon is unreachable', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await drainNativeAttentionEvents(9)).toEqual({ events: [], lastSeq: 9 });
   });
 });
 

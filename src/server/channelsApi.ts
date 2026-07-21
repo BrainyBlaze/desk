@@ -191,7 +191,8 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       ? {
           sessionRunning: nativeTransport.sessionRunning,
           capturePane: nativeTransport.capturePane,
-          sendEnter: nativeTransport.sendEnter
+          sendEnter: nativeTransport.sendEnter,
+          sessionCreatedAt: nativeTransport.sessionCreatedAt
         }
       : {})
   });

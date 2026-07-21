@@ -8,6 +8,9 @@
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
 
+import { statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadDeskCached, restartSession, runningSessionSet, startSession } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { shellQuote } from '../../shared/shell.js';
@@ -164,6 +167,43 @@ function nativeIdForTmuxSession(tmuxSession: string): string {
   return spec?.sessionId ?? tmuxSession;
 }
 
+/** The inverse: the tmuxSession consumers key on, for a daemon-reported sessionId. */
+export function tmuxSessionForNativeId(sessionId: string): string {
+  const spec = loadDeskCached({}).sessions.find((candidate) => (candidate.sessionId ?? candidate.tmuxSession) === sessionId);
+  return spec?.tmuxSession ?? sessionId;
+}
+
+export interface NativeAttentionEvent {
+  seq: number;
+  sessionId: string;
+  kind: 'bell' | 'osc9';
+  data?: string;
+}
+
+/**
+ * Drain buffered bell/OSC9 events from the daemon (the atch-native replacement
+ * for the tmux bell-flag poll). Fails soft to an empty drain with the cursor
+ * unmoved — the next poll retries; attention is a lossy-by-design surface and
+ * the daemon buffers a bounded ring.
+ */
+export async function drainNativeAttentionEvents(
+  since: number
+): Promise<{ events: NativeAttentionEvent[]; lastSeq: number }> {
+  const result = await daemonControl('/control/attention', { since });
+  if (!result.ok) {
+    return { events: [], lastSeq: since };
+  }
+  const events = Array.isArray(result.body?.events) ? (result.body.events as NativeAttentionEvent[]) : [];
+  const lastSeq = typeof result.body?.lastSeq === 'number' ? result.body.lastSeq : since;
+  return {
+    events: events.filter(
+      (event) =>
+        typeof event?.sessionId === 'string' && (event.kind === 'bell' || event.kind === 'osc9') && typeof event.seq === 'number'
+    ),
+    lastSeq
+  };
+}
+
 /**
  * The channels-delivery transport for atch-native terminal sessions: the four
  * engine deps that default to tmux (paste/has-session/capture-pane/send-keys),
@@ -181,6 +221,11 @@ export interface NativeChannelsTransport {
   capturePane: (tmuxSession: string) => Promise<string | null>;
   /** Bare Enter (the submit-verification retry). */
   sendEnter: (tmuxSession: string) => Promise<boolean>;
+  /**
+   * Session start time in epoch SECONDS (tmux #{session_created} parity),
+   * from the atch socket's stat; null when unobservable.
+   */
+  sessionCreatedAt: (tmuxSession: string) => Promise<number | null>;
 }
 
 export function createNativeChannelsTransport(
@@ -211,6 +256,18 @@ export function createNativeChannelsTransport(
     },
     async sendEnter(tmuxSession) {
       return (await daemonControl('/control/input', { sessionId: nativeIdForTmuxSession(tmuxSession), text: '\r' })).ok;
+    },
+    async sessionCreatedAt(tmuxSession) {
+      const socketRoot = process.env.DESK_ATCH_SOCKET_ROOT ?? join(tmpdir(), 'desk-atch');
+      try {
+        const stat = statSync(join(socketRoot, `${nativeIdForTmuxSession(tmuxSession)}.sock`));
+        // Some filesystems report no birthtime (0); the socket is created at
+        // session start and never rewritten, so ctime is a faithful fallback.
+        const ms = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs;
+        return Math.floor(ms / 1000);
+      } catch {
+        return null; // unobservable — same degraded read as a dead tmux session
+      }
     }
   };
 }

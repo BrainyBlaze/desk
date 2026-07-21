@@ -145,3 +145,56 @@ describe('DaemonCore — lease + stop (§7.9/§11.4)', () => {
     expect(core.canStop(false)).toEqual({ action: 'stop' });
   });
 });
+
+describe('DaemonCore — semantic attention events (bell/OSC9 → onSemanticEvent)', () => {
+  class EmittingEmu extends FakeEmu {
+    cb: ((e: EmulatorEvent) => void) | undefined;
+    onEvent(cb: (e: EmulatorEvent) => void): () => void {
+      this.cb = cb;
+      return () => {
+        this.cb = undefined;
+      };
+    }
+  }
+
+  it('forwards bell + OSC9 (with data) and filters every other event kind', () => {
+    const emu = new EmittingEmu();
+    const seen: { sessionId: string; event: EmulatorEvent }[] = [];
+    const core = new DaemonCore({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+      emulatorFactory: { create: () => emu },
+      now: () => 1000,
+      sendBrowser: () => {},
+      sendMaster: () => {},
+      onSemanticEvent: (sessionId, event) => seen.push({ sessionId, event })
+    });
+    expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
+    expect(emu.cb).toBeDefined();
+
+    emu.cb?.({ kind: 'bell' });
+    emu.cb?.({ kind: 'osc', code: 9, data: 'Turn complete' });
+    emu.cb?.({ kind: 'osc', code: 0, data: 'a title write' }); // filtered
+    emu.cb?.({ kind: 'title', data: 'ignored' }); // filtered
+    emu.cb?.({ kind: 'link', data: 'ignored' }); // filtered
+
+    expect(seen).toEqual([
+      { sessionId: 's1', event: { kind: 'bell' } },
+      { sessionId: 's1', event: { kind: 'osc', code: 9, data: 'Turn complete' } }
+    ]);
+  });
+
+  it('does not subscribe at all when no consumer is wired', () => {
+    const emu = new EmittingEmu();
+    const core = new DaemonCore({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+      emulatorFactory: { create: () => emu },
+      now: () => 1000,
+      sendBrowser: () => {},
+      sendMaster: () => {}
+    });
+    expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
+    expect(emu.cb).toBeUndefined();
+  });
+});

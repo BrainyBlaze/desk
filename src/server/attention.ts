@@ -1,6 +1,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { TerminalSequenceTokenizer, type TerminalToken } from '../shared/terminalSequenceTokenizer.js';
+import { drainNativeAttentionEvents, nativeSessionsEnabled, tmuxSessionForNativeId } from './runtime/nativeSessionControl.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -336,6 +337,27 @@ export function notifyAgentSignal(tmuxSession: string, kind: AgentEventKind): vo
 let pollTimer: NodeJS.Timeout | undefined;
 let previousFlags = new Map<string, number>();
 let pollInFlight = false;
+/** Drain cursor into the daemon's attention ring (atch-native path). */
+let nativeAttentionCursor = 0;
+
+/**
+ * Drain the daemon's buffered bell/OSC9 events and raise attention for each —
+ * the atch-native replacement for tmux bell flags. Events are keyed by
+ * sessionId at the daemon; consumers key by tmuxSession during the
+ * transitional cutover, so each event maps back at this boundary.
+ */
+async function drainNativeAttention(): Promise<void> {
+  const { events, lastSeq } = await drainNativeAttentionEvents(nativeAttentionCursor);
+  for (const event of events) {
+    const session = tmuxSessionForNativeId(event.sessionId);
+    if (attentionTracker.raise(session)) {
+      attentionTracker.pushEvent(session, 'bell', event.data);
+    }
+    notifyRaise(session);
+    notifyAgentSignal(session, 'bell');
+  }
+  nativeAttentionCursor = lastSeq;
+}
 
 /** Starts the background bell-flag poller (idempotent). */
 export function startAttentionPolling(intervalMs = 2000): void {
@@ -357,6 +379,11 @@ export function startAttentionPolling(intervalMs = 2000): void {
         notifyAgentSignal(session, 'bell');
       }
       previousFlags = new Map([...flags].map(([name, value]) => [name, value.bellFlag]));
+      if (nativeSessionsEnabled()) {
+        // Native sessions never appear in tmux flags; their bells ride the
+        // daemon's emulator-event ring. Both paths run during the transition.
+        await drainNativeAttention();
+      }
     } finally {
       pollInFlight = false;
     }
@@ -371,4 +398,5 @@ export function stopAttentionPolling(): void {
     pollTimer = undefined;
   }
   previousFlags = new Map();
+  nativeAttentionCursor = 0;
 }
