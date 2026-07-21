@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { createTerminalDaemon } from '../src/server/runtime/terminalDaemon.js';
+import { createTerminalDaemon, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
@@ -51,5 +51,22 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
 
     daemon.dispose();
     expect(server.listeners).toHaveLength(0); // bridge unmounted
+  });
+
+  it('starts the daemon in its OWN http server (separate-process entry) and closes cleanly', async () => {
+    const d = await startTerminalDaemonServer({
+      homeRoot: home,
+      atchBinPath: '/bin/false',
+      atchSocketRoot: home,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      expect(d.port).toBeGreaterThan(0); // OS-assigned port bound
+      const ens = d.daemon.router.sessions.ensure('sess-1', { rows: 24, cols: 80 });
+      expect(ens.ok).toBe(true);
+    } finally {
+      await d.close();
+    }
   });
 });

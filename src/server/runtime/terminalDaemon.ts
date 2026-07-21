@@ -10,7 +10,7 @@
 // the product's terminal transport (and provisioning real sessions) is the
 // gated, flag-guarded cutover; this is the composable piece that step wires.
 
-import type { IncomingMessage } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { join } from 'node:path';
 import { GenerationLedger } from '../../shared/controlPlane/index.js';
@@ -85,6 +85,40 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     },
     dispose() {
       disposeBridge();
+    }
+  };
+}
+
+export interface TerminalDaemonServer {
+  daemon: TerminalDaemon;
+  server: Server;
+  /** The bound port (0 in options → an OS-assigned port). */
+  port: number;
+  close(): Promise<void>;
+}
+
+/**
+ * Start the terminal daemon in its OWN http server (the separate-process entry).
+ * This is the whole point of the three-tier split: the @xterm/headless emulator
+ * and the master links live in the daemon process, NEVER in the web-server
+ * process (embedding them there regressed serve startup timing). The web server
+ * connects out to this via daemonClient / a WS proxy.
+ */
+export async function startTerminalDaemonServer(
+  options: Omit<TerminalDaemonOptions, 'httpServer'> & { host?: string; port: number }
+): Promise<TerminalDaemonServer> {
+  const server = createServer();
+  const daemon = createTerminalDaemon({ ...options, httpServer: server });
+  await new Promise<void>((resolve) => server.listen(options.port, options.host ?? '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : options.port;
+  return {
+    daemon,
+    server,
+    port,
+    close() {
+      daemon.dispose();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
     }
   };
 }
