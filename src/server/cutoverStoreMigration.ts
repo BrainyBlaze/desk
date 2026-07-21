@@ -327,6 +327,39 @@ export interface CanaryMigrationResult {
   error?: string;
 }
 
+/** Fail closed unless the dir is absent or empty — a fresh canary run must not merge onto stale state. */
+function requireEmptyDir(dir: string, label: string): void {
+  if (existsSync(dir) && readdirSync(dir).length > 0) {
+    throw new Error(`cutover: ${label} root must be empty or absent for a fresh canary run (${dir} is non-empty)`);
+  }
+}
+
+/** Validate the COMPLETE written canary output before commit (not just manifest identity). */
+function validateCanaryOutput(options: CanaryMigrationOptions): void {
+  for (const session of collectSessions(readManifestFile(options.targetManifestPath))) {
+    if (session.sessionId === undefined || session.sessionId === '') {
+      throw new Error(`cutover: canary manifest session ${session.name} is missing a sessionId`);
+    }
+  }
+  const pausedPath = join(options.targetRoot, '_engine', 'paused.json');
+  if (existsSync(pausedPath)) {
+    const paused = JSON.parse(readFileSync(pausedPath, 'utf8')) as { version?: number };
+    if (paused.version !== PAUSED_STORE_VERSION) {
+      throw new Error(`cutover: canary paused store is not version ${PAUSED_STORE_VERSION}`);
+    }
+  }
+  const journalPath = join(options.targetRoot, '_engine', 'migration', 'seed-journal.json');
+  if (existsSync(journalPath)) {
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { version?: number; committed?: boolean };
+    if (journal.version !== SEED_JOURNAL_VERSION) {
+      throw new Error(`cutover: canary seed journal is not version ${SEED_JOURNAL_VERSION}`);
+    }
+    if (journal.committed !== false) {
+      throw new Error('cutover: canary seed journal is already committed before the commit phase');
+    }
+  }
+}
+
 /** Immutable backup of the source stores + manifest (rollback safety; source stays read-only). */
 function backupSource(options: CanaryMigrationOptions): void {
   mkdirSync(options.backupRoot, { recursive: true });
@@ -353,6 +386,8 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
   let phase: MigrationPhase = 'backup';
   const partial: Pick<CanaryMigrationResult, 'manifest' | 'paused' | 'durability'> = {};
   try {
+    requireEmptyDir(options.backupRoot, 'backup');
+    requireEmptyDir(options.targetRoot, 'target');
     backupSource(options);
     phase = advance(phase); // → transform
 
@@ -372,6 +407,7 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
     if (!check.ok) {
       throw new Error(`cutover: canary validation failed (${check.reason}: ${check.value})`);
     }
+    validateCanaryOutput(options);
     phase = advance(phase); // → commit
 
     mkdirSync(join(options.targetRoot, '_engine', 'migration'), { recursive: true });

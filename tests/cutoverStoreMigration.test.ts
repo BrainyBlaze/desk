@@ -275,5 +275,15 @@ describe('cutover store migration — canary orchestrator (§10)', () => {
     expect(existsSync(join(backup, 'desk.yml'))).toBe(true);
     expect(existsSync(join(target, '_engine', 'migration', 'migration.done'))).toBe(false);
   });
+
+  it('fails closed on a non-empty target root (never merges onto stale state)', () => {
+    seed();
+    mkdirSync(join(target, 'stale'), { recursive: true });
+    writeFileSync(join(target, 'stale', 'x'), 'old');
+    const result = runCanaryMigration(opts());
+    expect(result.phase).toBe('aborted');
+    expect(result.failedPhase).toBe('backup');
+    expect(result.error).toMatch(/must be empty/);
+  });
 });
 
