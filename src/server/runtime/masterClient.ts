@@ -18,6 +18,8 @@ export interface MasterClientHandlers {
   onClose?: () => void;
   /** A decode/protocol failure on the incoming stream. */
   onProtocolError?: (err: WireError) => void;
+  /** Raw incoming bytes, before reassembly — for diagnostics/tracing. */
+  onRaw?: (chunk: Uint8Array) => void;
 }
 
 export interface AttachOptions {
@@ -83,9 +85,11 @@ export class MasterClient {
     this.sendBody(FrameType.INPUT, { flags: binary ? 1 : 0, surface_id: surfaceId, bytes });
   }
 
-  /** Resize the master's PTY (only the lease owner should call this, §7.5). */
-  sendResize(rows: number, cols: number, leaseEpoch: number, surfaceId: number, generation: number): void {
-    this.sendBody(FrameType.RESIZE, { lease_epoch: leaseEpoch, surface_id: surfaceId, generation, rows, cols });
+  /** Resize the master's PTY (only the lease owner should call this, §7.5). The
+   *  RESIZE body's generation field is fenced by the master too, so it carries
+   *  the adopted session generation. */
+  sendResize(rows: number, cols: number, leaseEpoch: number, surfaceId: number): void {
+    this.sendBody(FrameType.RESIZE, { lease_epoch: leaseEpoch, surface_id: surfaceId, generation: this.generation, rows, cols });
   }
 
   /** Send an already-built raw frame (e.g. a COMMAND from the delivery engine). */
@@ -107,9 +111,11 @@ export class MasterClient {
   }
 
   private onData(chunk: Buffer): void {
+    const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    this.h.onRaw?.(bytes);
     let frames: RawFrame[];
     try {
-      frames = this.ra.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      frames = this.ra.push(bytes);
     } catch (e) {
       if (e instanceof WireError) this.h.onProtocolError?.(e);
       this.close();

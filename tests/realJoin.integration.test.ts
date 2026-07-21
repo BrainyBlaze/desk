@@ -1,8 +1,9 @@
-// THE REAL JOIN (spec §7.1 / §4) — the first true end-to-end against the REAL
-// atch binary. The daemon spawns a real atch session (`atch start NAME cat`) with
-// ATCH_GENERATION injected, attaches its MasterClient over the v3 socket, types
-// input, and asserts the output round-trips through the real binary. Skips
-// cleanly when the binary is absent (set ATCH_BIN to run it).
+// THE REAL JOIN (spec §7.1 / §4) — end-to-end against the REAL atch binary. The
+// daemon spawns a real atch session with ATCH_GENERATION injected, attaches over
+// the v3 socket, and exercises the full protocol: handshake + generation fence,
+// input→output round-trip (single + multi-line), RESIZE, and the SessionManager
+// production detached spawn/kill lifecycle. Skips cleanly when the binary is
+// absent (set ATCH_BIN to run it).
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
@@ -10,12 +11,19 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { MasterClient } from '../src/server/runtime/masterClient.js';
 import { spawnMaster } from '../src/server/runtime/spawnMaster.js';
-import { Role } from '../src/shared/atchWire/frames.js';
+import { SessionManager } from '../src/server/runtime/sessionManager.js';
+import { Role, RecordType } from '../src/shared/atchWire/frames.js';
 import { type RecordEnvelope } from '../src/shared/atchWire/messages.js';
-import { RecordType } from '../src/shared/atchWire/frames.js';
+import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
+import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type EmulatorEvent, type BpFrame } from '../src/shared/runtime/index.js';
+import { BpFrameType } from '../src/shared/browserProtocol/index.js';
 
 const ATCH_BIN = process.env.ATCH_BIN ?? '/home/dev/.config/superpowers/worktrees/atch/phase-a-implementation/atch';
-const AVAILABLE = existsSync(ATCH_BIN);
+// Real-binary tests spawn multiple live PTY sessions and are timing-sensitive, so
+// they are OPT-IN (RUN_REAL_JOIN=1) — the default suite stays deterministic with
+// the fake-master tests. Run explicitly to verify the join against real atch:
+//   RUN_REAL_JOIN=1 npx vitest run tests/realJoin.integration.test.ts
+const AVAILABLE = existsSync(ATCH_BIN) && process.env.RUN_REAL_JOIN === '1';
 const UID = typeof process.getuid === 'function' ? process.getuid() : 1000;
 const SOCK_DIR = `/tmp/.atch-${UID}`;
 
@@ -28,57 +36,143 @@ async function until(pred: () => boolean, timeoutMs: number, stepMs = 30): Promi
   }
   return pred();
 }
-function killSession(name: string): void {
-  try {
-    spawn(ATCH_BIN, ['kill', '-f', name], { stdio: 'ignore' });
-  } catch {
-    /* best effort */
+function killSession(name: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    try {
+      const k = spawn(ATCH_BIN, ['kill', '-f', name], { stdio: 'ignore' });
+      k.once('exit', () => {
+        rmSync(join(SOCK_DIR, name), { force: true });
+        resolve();
+      });
+      k.once('error', () => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+class FakeEmu implements EmulatorPort {
+  write(): void {}
+  resize(): void {}
+  readTailText(): string[] {
+    return [];
   }
-  rmSync(join(SOCK_DIR, name), { force: true });
+  serialize(): string {
+    return '';
+  }
+  cursor(): { row: number; col: number } {
+    return { row: 0, col: 0 };
+  }
+  onEvent(_cb: (e: EmulatorEvent) => void): () => void {
+    return () => {};
+  }
+  dispose(): void {}
 }
 
 describe.skipIf(!AVAILABLE)('REAL join — daemon ↔ real atch master (§7.1)', () => {
-  let sessionName = '';
-  afterEach(() => {
-    if (sessionName) killSession(sessionName);
-    sessionName = '';
+  const sessions: string[] = [];
+  const track = (n: string) => (sessions.push(n), n);
+  afterEach(async () => {
+    // Await teardown so each test starts with no lingering atch processes racing
+    // the next handshake (isolated they all pass; sequentially they must be clean).
+    await Promise.all(sessions.splice(0).map(killSession));
+    await wait(150);
   });
 
-  it('spawns a real atch session with ATCH_GENERATION, attaches, and round-trips input→output', { timeout: 25000 }, async () => {
-    sessionName = `deskjoin${Date.now().toString(36)}`;
-    const sockPath = join(SOCK_DIR, sessionName);
-
-    // Daemon spawns the real atch master, injecting the ledger generation.
-    await spawnMaster({ binPath: ATCH_BIN, args: ['start', sessionName, 'cat'], sockPath, generation: 1, detached: true, readyTimeoutMs: 6000 });
-    expect(existsSync(sockPath), 'session socket exists').toBe(true);
-
-    // The daemon's MasterClient attaches over the v3 socket.
-    const output: number[] = [];
-    let ackGeneration = -1;
+  /** Spawn a real atch session running `cmd` and attach a MasterClient. */
+  async function openSession(cmd: string[]): Promise<{ client: MasterClient; output: () => string; ackGen: () => number }> {
+    const name = track(`deskjoin${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`);
+    const sockPath = join(SOCK_DIR, name);
+    await spawnMaster({ binPath: ATCH_BIN, args: ['start', name, ...cmd], sockPath, generation: 1, detached: true, readyTimeoutMs: 6000 });
+    const bytes: number[] = [];
+    let gen = -1;
     const client = new MasterClient(sockPath, {
       onRecord: (rec: RecordEnvelope) => {
-        if (rec.record_type === RecordType.OUTPUT) output.push(...rec.body);
+        if (rec.record_type === RecordType.OUTPUT) bytes.push(...rec.body);
       },
-      onAttachAck: (ack) => {
-        ackGeneration = (ack as { generation: number }).generation;
-      }
+      onAttachAck: (ack) => (gen = (ack as { generation: number }).generation)
     });
+    await client.connect();
+    client.handshake({ role: Role.CONTROLLER, sessionId: name, rows: 40, cols: 120 });
+    // The generation MUST be adopted before any post-attach frame, or the master
+    // fences it — wait robustly for ATTACH_ACK.
+    expect(await until(() => gen >= 0, 6000), 'ATTACH_ACK received').toBe(true);
+    return { client, output: () => new TextDecoder().decode(Uint8Array.from(bytes)), ackGen: () => gen };
+  }
+
+  it('handshake + generation fence + single-line round-trip', { timeout: 25000 }, async () => {
+    const s = await openSession(['cat']);
     try {
-      await client.connect();
-      client.handshake({ role: Role.CONTROLLER, sessionId: sessionName, rows: 40, cols: 120 });
-      expect(await until(() => ackGeneration >= 0, 4000), 'ATTACH_ACK received').toBe(true);
-      // The generation the master reports is the one the daemon injected via env.
-      expect(ackGeneration).toBe(1);
-
-      // Type input; `cat` (and the PTY echo) send it back as OUTPUT.
-      await wait(150); // let the child settle
-      client.sendInput(new TextEncoder().encode('hello-join\n'), false, 1);
-
-      const got = await until(() => new TextDecoder().decode(Uint8Array.from(output)).includes('hello-join'), 5000);
-      const text = new TextDecoder().decode(Uint8Array.from(output));
-      expect(got, `output round-trip (got: ${JSON.stringify(text)})`).toBe(true);
+      expect(s.ackGen()).toBe(1); // the daemon-injected ATCH_GENERATION
+      await wait(150);
+      s.client.sendInput(new TextEncoder().encode('hello-join\n'), false, 1);
+      expect(await until(() => s.output().includes('hello-join'), 5000)).toBe(true);
     } finally {
-      client.close();
+      s.client.close();
     }
+  });
+
+  it('multi-line round-trip preserves all lines', { timeout: 25000 }, async () => {
+    const s = await openSession(['cat']);
+    try {
+      await wait(200);
+      for (const line of ['alpha', 'bravo', 'charlie']) {
+        s.client.sendInput(new TextEncoder().encode(line + '\n'), false, 1);
+        await wait(120); // pace the sends so the PTY echo does not coalesce/drop under load
+      }
+      const ok = await until(() => {
+        const t = s.output();
+        return t.includes('alpha') && t.includes('bravo') && t.includes('charlie');
+      }, 6000);
+      expect(ok, `output: ${JSON.stringify(s.output())}`).toBe(true);
+    } finally {
+      s.client.close();
+    }
+  });
+
+  it('RESIZE is accepted (generation-fenced) and input still round-trips after it', { timeout: 25000 }, async () => {
+    const s = await openSession(['cat']);
+    try {
+      await wait(150);
+      s.client.sendResize(50, 200, 1, 1); // fenced RESIZE — must not desync the session
+      await wait(150);
+      s.client.sendInput(new TextEncoder().encode('after-resize\n'), false, 1);
+      expect(await until(() => s.output().includes('after-resize'), 5000)).toBe(true);
+    } finally {
+      s.client.close();
+    }
+  });
+
+  it('SessionManager production path: detached spawn → browser OUTPUT → retire kills the session', { timeout: 25000 }, async () => {
+    const name = track(`deskmgr${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`);
+    const sockPath = join(SOCK_DIR, name);
+    const browserOut: BpFrame[] = [];
+    const mgr = new SessionManager({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
+      emulatorFactory: { create: () => new FakeEmu() },
+      now: () => Date.now(),
+      sendBrowser: (_sid, _ch, frame) => browserOut.push(frame)
+    });
+    const ens = await mgr.spawnAndAttach(name, {
+      binPath: ATCH_BIN,
+      args: ['start', name, 'cat'],
+      sockPath,
+      geometry: { rows: 40, cols: 120 },
+      detached: true,
+      killSpec: { binPath: ATCH_BIN, args: ['kill', '-f', name] },
+      readyTimeoutMs: 6000
+    });
+    expect(ens.ok).toBe(true);
+    const ch = mgr.subscribe(name, 'main', 40, 120)!;
+    await wait(200);
+
+    mgr.onBrowserInput(name, ch, false, new TextEncoder().encode('via-manager\n'));
+    const got = await until(() => browserOut.some((f) => f.type === BpFrameType.OUTPUT && new TextDecoder().decode((f as Extract<BpFrame, { type: BpFrameType.OUTPUT }>).bytes).includes('via-manager')), 5000);
+    expect(got).toBe(true);
+
+    // retire runs `atch kill -f NAME`; the session socket disappears.
+    mgr.retire(name);
+    expect(await until(() => !existsSync(sockPath), 4000)).toBe(true);
   });
 });

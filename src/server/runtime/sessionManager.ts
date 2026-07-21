@@ -18,7 +18,7 @@ import { type BpFrame } from '../../shared/browserProtocol/index.js';
 import { MasterClient } from './masterClient.js';
 import { spawnMaster } from './spawnMaster.js';
 import { Role } from '../../shared/atchWire/frames.js';
-import { type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 export interface SessionManagerDeps {
   ledger: GenerationLedger;
@@ -32,7 +32,8 @@ export interface SessionManagerDeps {
 export class SessionManager {
   private readonly core: DaemonCore;
   private readonly masters = new Map<string, MasterClient>();
-  private readonly children = new Map<string, ChildProcess>();
+  /** Per-session teardown: kill the tracked child, or run the atch-kill command for a detached master. */
+  private readonly cleanups = new Map<string, () => void>();
 
   constructor(deps: SessionManagerDeps) {
     this.core = new DaemonCore({
@@ -76,13 +77,48 @@ export class SessionManager {
    */
   async spawnAndAttach(
     sessionId: string,
-    opts: { binPath: string; args: string[]; sockPath: string; geometry: { rows: number; cols: number }; readyTimeoutMs?: number }
+    opts: {
+      binPath: string;
+      args: string[];
+      sockPath: string;
+      geometry: { rows: number; cols: number };
+      readyTimeoutMs?: number;
+      /** The launcher forks a detached master and exits (e.g. `atch start`). */
+      detached?: boolean;
+      /** For a detached master, the command to stop the session on retire (e.g. `atch kill -f NAME`). */
+      killSpec?: { binPath: string; args: string[] };
+    }
   ): Promise<EnsureResult> {
     const ens = this.ensure(sessionId, opts.geometry);
     if (!ens.ok) return ens;
-    const { child } = await spawnMaster({ binPath: opts.binPath, args: opts.args, sockPath: opts.sockPath, generation: ens.generation, readyTimeoutMs: opts.readyTimeoutMs });
-    this.children.set(sessionId, child);
-    child.once('exit', () => this.retire(sessionId));
+    const { child } = await spawnMaster({
+      binPath: opts.binPath,
+      args: opts.args,
+      sockPath: opts.sockPath,
+      generation: ens.generation,
+      readyTimeoutMs: opts.readyTimeoutMs,
+      detached: opts.detached
+    });
+    if (opts.detached) {
+      // A detached master: the launcher exits normally (do NOT retire on that);
+      // teardown is the kill command, if provided.
+      const ks = opts.killSpec;
+      this.cleanups.set(sessionId, () => {
+        if (ks !== undefined) {
+          try {
+            spawn(ks.binPath, ks.args, { stdio: 'ignore' });
+          } catch {
+            /* best effort */
+          }
+        }
+      });
+    } else {
+      // A tracked foreground child: retire when it exits, kill it on retire.
+      this.cleanups.set(sessionId, () => {
+        if (child.exitCode === null) child.kill();
+      });
+      child.once('exit', () => this.retire(sessionId));
+    }
     await this.attachMaster(sessionId, opts.sockPath, opts.geometry);
     return ens;
   }
@@ -112,9 +148,9 @@ export class SessionManager {
   retire(sessionId: string): void {
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
-    const child = this.children.get(sessionId);
-    if (child !== undefined && child.exitCode === null) child.kill();
-    this.children.delete(sessionId);
+    const cleanup = this.cleanups.get(sessionId);
+    if (cleanup !== undefined) cleanup();
+    this.cleanups.delete(sessionId);
     this.core.retire(sessionId);
   }
 
