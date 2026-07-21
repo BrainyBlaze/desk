@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrateManifestToCanary, migratePausedStoreFile, planDurabilityMigration, writeDurabilitySeedJournal } from '../src/server/cutoverStoreMigration.js';
+import { migrateManifestToCanary, migratePausedStoreFile, planDurabilityMigration, runCanaryMigration, writeDurabilitySeedJournal } from '../src/server/cutoverStoreMigration.js';
 import { readManifestFile, writeManifestFile } from '../src/core/config.js';
 import type { DeskManifest } from '../src/core/types.js';
 
@@ -220,3 +220,60 @@ describe('cutover store migration — durability plan (§10 Option B)', () => {
     expect(report).toMatchObject({ written: 0, droppedAck: 1 });
   });
 });
+
+describe('cutover store migration — canary orchestrator (§10)', () => {
+  let src: string;
+  let target: string;
+  let backup: string;
+  beforeEach(() => {
+    src = mkdtempSync(join(tmpdir(), 'desk-canary-src-'));
+    target = mkdtempSync(join(tmpdir(), 'desk-canary-tgt-'));
+    backup = mkdtempSync(join(tmpdir(), 'desk-canary-bak-'));
+  });
+  afterEach(() => {
+    for (const d of [src, target, backup]) rmSync(d, { recursive: true, force: true });
+  });
+
+  const seed = (ghost = false): void => {
+    const manifest: DeskManifest = { groups: [{ id: 'g1', sessions: [{ name: 'Claude', cwd: '/w', agent: 'claude', tmuxSession: 'tmux-a' }] }] };
+    writeManifestFile(join(src, 'desk.yml'), manifest);
+    mkdirSync(join(src, '_engine'), { recursive: true });
+    writeFileSync(join(src, '_engine', 'paused.json'), JSON.stringify({ version: 1, items: [{ tmuxSession: 'tmux-a', pausedAt: '2026-07-21T00:00:00.000Z' }] }));
+    const q = join(src, '_engine', 'queue', ghost ? 'tmux-ghost' : 'tmux-a');
+    mkdirSync(q, { recursive: true });
+    writeFileSync(join(q, '0000000001.json'), JSON.stringify({ prompt: 'hi' }));
+  };
+  const opts = () => ({
+    sourceRoot: src,
+    sourceManifestPath: join(src, 'desk.yml'),
+    targetRoot: target,
+    targetManifestPath: join(target, 'desk.yml'),
+    backupRoot: backup
+  });
+
+  it('runs backup then transform then validate then commit to the canary, source read-only', () => {
+    seed();
+    const result = runCanaryMigration(opts());
+    expect(result.phase).toBe('done');
+    expect(result.rollback).toBe('none');
+    expect(result.manifest?.sessions).toBe(1);
+    expect(readManifestFile(join(target, 'desk.yml')).groups[0].sessions[0].sessionId).toBe('claude');
+    expect(JSON.parse(readFileSync(join(target, '_engine', 'paused.json'), 'utf8')).items[0].sessionId).toBe('claude');
+    expect(JSON.parse(readFileSync(join(target, '_engine', 'migration', 'seed-journal.json'), 'utf8')).items[0].sessionId).toBe('claude');
+    expect(existsSync(join(target, '_engine', 'migration', 'migration.done'))).toBe(true);
+    expect(existsSync(join(backup, 'desk.yml'))).toBe(true);
+    expect(existsSync(join(backup, '_engine', 'paused.json'))).toBe(true);
+    expect(readManifestFile(join(src, 'desk.yml')).groups[0].sessions[0].sessionId).toBeUndefined();
+  });
+
+  it('aborts at transform with restore-backup when an unmapped drop is not acknowledged', () => {
+    seed(true);
+    const result = runCanaryMigration(opts());
+    expect(result.phase).toBe('aborted');
+    expect(result.failedPhase).toBe('transform');
+    expect(result.rollback).toBe('restore-backup');
+    expect(existsSync(join(backup, 'desk.yml'))).toBe(true);
+    expect(existsSync(join(target, '_engine', 'migration', 'migration.done'))).toBe(false);
+  });
+});
+

@@ -8,12 +8,13 @@
 // isolated data root. Pointing target at the live root is possible but is the
 // gated Phase 5 commit, never done here.
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
 import { readManifestFile, writeManifestFile } from '../core/config.js';
-import { applyMigratedSessionIds, buildManifestMigration, collectSessions } from '../core/sessionIdentity.js';
+import { applyMigratedSessionIds, buildManifestMigration, collectSessions, deskManifestToEntries } from '../core/sessionIdentity.js';
+import { advanceMigration, validateManifestMigration, type MigrationPhase, type Rollback } from '../shared/migration/index.js';
 import {
   EXT_CONSUMED,
   EXT_DELIVERED,
@@ -297,4 +298,88 @@ export function writeDurabilitySeedJournal(plan: DurabilityMigrationPlan, target
   mkdirSync(journalDir, { recursive: true });
   writeFileAtomic(join(journalDir, 'seed-journal.json'), `${JSON.stringify(journal, null, 2)}\n`);
   return { written: items.length, droppedAck: plan.dropped.length, alreadyCommitted: false };
+}
+
+// ---- canary migration orchestrator (Phase 2 driver over the phase FSM) ------
+
+export interface CanaryMigrationOptions {
+  /** Live data root — read ONLY, never mutated. */
+  sourceRoot: string;
+  sourceManifestPath: string;
+  /** Isolated canary data root — all writes land here. */
+  targetRoot: string;
+  targetManifestPath: string;
+  /** Immutable backup destination (rollback safety). */
+  backupRoot: string;
+  acknowledgeDropped?: boolean;
+  acknowledgeUnreadable?: boolean;
+}
+
+export interface CanaryMigrationResult {
+  /** 'done' on success, 'aborted' on failure. */
+  phase: MigrationPhase;
+  /** The rollback the FSM says would restore consistency on an abort. */
+  rollback: Rollback;
+  manifest?: ManifestMigrationReport;
+  paused?: PausedMigrationReport;
+  durability?: DurabilitySeedReport;
+  failedPhase?: MigrationPhase;
+  error?: string;
+}
+
+/** Immutable backup of the source stores + manifest (rollback safety; source stays read-only). */
+function backupSource(options: CanaryMigrationOptions): void {
+  mkdirSync(options.backupRoot, { recursive: true });
+  const srcEngine = join(options.sourceRoot, '_engine');
+  if (existsSync(srcEngine)) {
+    cpSync(srcEngine, join(options.backupRoot, '_engine'), { recursive: true });
+  }
+  if (existsSync(options.sourceManifestPath)) {
+    cpSync(options.sourceManifestPath, join(options.backupRoot, 'desk.yml'));
+  }
+}
+
+/**
+ * Drive the §10 store migration to an isolated canary root over the journaled
+ * phase FSM: backup → transform → validate → commit. The source is read ONLY and
+ * never mutated; the immutable backup is taken first; each executor fails closed.
+ * A failure aborts and reports the rollback the FSM says would restore
+ * consistency (restore-backup once a backup exists). Quiesce and boot are the
+ * live canary-run wrapper's job (gated) — this pure driver does no live mutation
+ * and no boot.
+ */
+export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigrationResult {
+  const advance = (p: MigrationPhase): MigrationPhase => advanceMigration(p, 'ok').next;
+  let phase: MigrationPhase = 'backup';
+  const partial: Pick<CanaryMigrationResult, 'manifest' | 'paused' | 'durability'> = {};
+  try {
+    backupSource(options);
+    phase = advance(phase); // → transform
+
+    const map = buildManifestMigration(readManifestFile(options.sourceManifestPath)).tmuxToSessionId;
+    partial.manifest = migrateManifestToCanary(options.sourceManifestPath, options.targetManifestPath);
+    partial.paused = migratePausedStoreFile(options.sourceRoot, options.targetRoot, map);
+    const plan = planDurabilityMigration(options.sourceRoot, map);
+    partial.durability = writeDurabilitySeedJournal(plan, options.targetRoot, {
+      acknowledgeDropped: options.acknowledgeDropped,
+      acknowledgeUnreadable: options.acknowledgeUnreadable
+    });
+    phase = advance(phase); // → validate
+
+    // Validate before commit: reverify the identity mint is collision-free.
+    const source = readManifestFile(options.sourceManifestPath);
+    const check = validateManifestMigration(deskManifestToEntries(source), buildManifestMigration(source));
+    if (!check.ok) {
+      throw new Error(`cutover: canary validation failed (${check.reason}: ${check.value})`);
+    }
+    phase = advance(phase); // → commit
+
+    mkdirSync(join(options.targetRoot, '_engine', 'migration'), { recursive: true });
+    writeFileAtomic(join(options.targetRoot, '_engine', 'migration', 'migration.done'), `${JSON.stringify({ version: 1, sessions: partial.manifest.sessions }, null, 2)}\n`);
+    phase = advance(phase); // → done
+    return { phase: 'done', rollback: 'none', ...partial };
+  } catch (error) {
+    const { next, rollback } = advanceMigration(phase, 'fail');
+    return { phase: next, rollback, failedPhase: phase, error: (error as Error).message, ...partial };
+  }
 }
