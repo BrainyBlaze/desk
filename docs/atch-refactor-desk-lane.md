@@ -15,11 +15,18 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 
 All of it is pure `src/shared` logic with persistence/IO expressed as **ports**,
 so the correctness rules are unit-testable without a live binary, sockets, or a
-browser. **~247 lane tests, `tsc --noEmit` 0 errors, node v22.23.1.** The full
-project suite is green with these added: **2604 passed, 0 failures**, `npm run
-check` clean. The daemon is a **runnable process** (`daemonServer.ts`) with a
-**durable, restart-surviving** fence store (`fileGenerationLedger.ts`) — not just
-logic.
+browser. `tsc --noEmit` 0 errors, node v22.23.1; full project suite **2628
+passed, 0 failures**, `npm run check` clean.
+
+**The daemon side is COMPLETE end-to-end** (tested against fakes + real sockets;
+the real atch binary and `@xterm/headless` emulator drop in behind clean seams):
+a runnable unix-socket RPC daemon (`daemonServer.ts` + `daemonClient.ts`), a
+multi-session registry (`daemonCore.ts`), the atch-master v3 link
+(`masterClient.ts`), the full session pipe (`sessionManager.ts` — ensure → attach
+master → master OUTPUT to browser, browser INPUT to master), and durable
+fsync'd/restart-surviving stores for the fence, exactly-once intake + consumer,
+and CMD_CACHE (`fileGenerationLedger` / `fileIntakeStore` / `fileConsumerStore` /
+`fileCmdCache`). A byte-level handshake trace fixture is the C-adapter oracle.
 
 | Spec | Module | What it is | Commit |
 |---|---|---|---|
@@ -60,12 +67,12 @@ So the seam is conformant on both sides before the lanes join.
 The remaining work is process/IO wiring and the live cutover. It is deliberately
 NOT in this branch because it depends on things outside an autonomous TS build:
 
-1. **Daemon process glue** — the unix-socket server + RPC dispatch + single-
-   instance lock are BUILT and runnable (`daemonServer.ts`, tested over a real
-   socket). What remains behind that shell: the atch-master socket link (needs
-   the real binary), the worker child processes, native host supervision +
-   rendezvous, HTTP hook-intake, and the fsync'd persistence adapters for the
-   ledger / intake / CMD_CACHE / journal.
+1. **Daemon process glue** — BUILT and runnable end-to-end: the unix-socket RPC
+   server+client, registry, master v3 link, session pipe, and all fsync'd
+   persistence adapters are done and tested. What remains behind the seams: the
+   real atch-master link (needs @codex's C v3 adapter — the gate, my reviews +
+   handshake trace unblocked it), the worker child processes, native host
+   supervision + rendezvous, and the HTTP hook-intake endpoint.
 2. **Real `@xterm/headless` emulator adapter** — the `EmulatorPort`
    implementation. `@xterm/headless` is a new runtime dep (§3.3, H10) not yet
    installed; adding it is a packaging step (lockfile, `npm ci`, ~500-pkg tree).
