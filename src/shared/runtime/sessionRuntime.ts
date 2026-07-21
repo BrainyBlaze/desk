@@ -141,8 +141,11 @@ export class SessionRuntime {
    * Subscribe a surface: assign a channelId, ACK it, and emit the baseline
    * SNAPSHOT at the current output offset (§7.4). Returns the channelId.
    */
-  subscribe(surfaceId: string, rows: number, cols: number): number {
-    const channelId = this.nextChannelId++;
+  subscribe(surfaceId: string, rows: number, cols: number, assignedChannelId?: number): number {
+    // The daemon allocates a GLOBALLY-unique channelId (so frames that carry only
+    // channelId route unambiguously); fall back to a local counter when called
+    // directly (e.g. unit tests).
+    const channelId = assignedChannelId ?? this.nextChannelId++;
     this.subscribers.set(channelId, { surfaceId, rows, cols, visible: true });
     this.d.sendBrowser(channelId, {
       type: BpFrameType.SUBSCRIBE_ACK,

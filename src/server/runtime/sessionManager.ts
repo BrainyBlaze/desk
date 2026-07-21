@@ -133,6 +133,21 @@ export class SessionManager {
     this.core.onBrowserInput(sessionId, channelId, binary, bytes);
   }
 
+  /** Route INPUT by channelId alone (the router validated WS ownership, §7.4). */
+  onBrowserInputByChannel(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    return this.core.onBrowserInputByChannel(channelId, binary, bytes);
+  }
+
+  /** Unsubscribe a channel (surface + channel→session mapping). */
+  unsubscribeChannel(channelId: number): void {
+    this.core.unsubscribeChannel(channelId);
+  }
+
+  /** The session that owns a channelId, or undefined if unknown/stale. */
+  sessionOfChannel(channelId: number): string | undefined {
+    return this.core.sessionOfChannel(channelId);
+  }
+
   ingestHook(sessionId: string, hook: HookInput): IntakeResult | undefined {
     return this.core.ingestHook(sessionId, hook);
   }

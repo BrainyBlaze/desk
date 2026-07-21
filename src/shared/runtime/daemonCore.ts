@@ -44,6 +44,10 @@ export class DaemonCore {
   /** One shared intake store (keyed by sessionId internally, §6.5 single allocator). */
   private readonly intakeStore = new InMemoryIntakeStore();
   private readonly cmdCache = new InMemoryCmdCache();
+  /** Global monotonic channelId allocator (§7.4) — never reused across sessions. */
+  private nextChannelId = 1;
+  /** channelId → owning sessionId, for channelId-only INPUT routing. */
+  private readonly channelToSession = new Map<number, string>();
 
   constructor(deps: DaemonCoreDeps) {
     this.d = deps;
@@ -86,6 +90,7 @@ export class DaemonCore {
   retire(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.d.supervisor.release(sessionId);
+    for (const [ch, sid] of this.channelToSession) if (sid === sessionId) this.channelToSession.delete(ch);
   }
 
   /** Whether an explicit daemon stop may proceed (§11.4: refuse while sessions live unless forced). */
@@ -111,12 +116,44 @@ export class DaemonCore {
     this.sessions.get(sessionId)?.runtime.onMasterRecord(rec);
   }
 
+  /**
+   * Subscribe a surface, allocating a GLOBALLY-monotonic channelId (§7.4) so the
+   * browser protocol's channelId-only frames route unambiguously even when one
+   * WS subscribes to multiple sessions. The channelId→sessionId map lets INPUT
+   * route by channelId alone; the WS-owner scoping is the router's job (§7.4 —
+   * INPUT is accepted only from the connection that owns the channel).
+   */
   subscribe(sessionId: string, surfaceId: string, rows: number, cols: number): number | undefined {
-    return this.sessions.get(sessionId)?.runtime.subscribe(surfaceId, rows, cols);
+    const e = this.sessions.get(sessionId);
+    if (e === undefined) return undefined;
+    const channelId = this.nextChannelId++;
+    e.runtime.subscribe(surfaceId, rows, cols, channelId);
+    this.channelToSession.set(channelId, sessionId);
+    return channelId;
+  }
+
+  /** The session that owns a channelId, or undefined if unknown/stale. */
+  sessionOfChannel(channelId: number): string | undefined {
+    return this.channelToSession.get(channelId);
   }
 
   onBrowserInput(sessionId: string, channelId: number, binary: boolean, bytes: Uint8Array): void {
     this.sessions.get(sessionId)?.runtime.onBrowserInput(channelId, binary, bytes);
+  }
+
+  /** Route INPUT by channelId alone (the router validated ownership). No-op if stale. */
+  onBrowserInputByChannel(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    const sessionId = this.channelToSession.get(channelId);
+    if (sessionId === undefined) return false;
+    this.sessions.get(sessionId)?.runtime.onBrowserInput(channelId, binary, bytes);
+    return true;
+  }
+
+  /** Unsubscribe a channel (drops the surface + the channel→session mapping). */
+  unsubscribeChannel(channelId: number): void {
+    const sessionId = this.channelToSession.get(channelId);
+    if (sessionId !== undefined) this.sessions.get(sessionId)?.runtime.unsubscribe(channelId);
+    this.channelToSession.delete(channelId);
   }
 
   ingestHook(sessionId: string, hook: HookInput): ReturnType<SessionRuntime['ingestHook']> | undefined {
