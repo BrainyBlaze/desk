@@ -8,13 +8,32 @@
 // isolated data root. Pointing target at the live root is possible but is the
 // gated Phase 5 commit, never done here.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
 import { readManifestFile, writeManifestFile } from '../core/config.js';
 import { applyMigratedSessionIds, buildManifestMigration, collectSessions } from '../core/sessionIdentity.js';
-import { migratePausedStore, type LegacyPausedEntry, type MigratedPausedEntry } from '../shared/migration/index.js';
+import {
+  EXT_CONSUMED,
+  EXT_DELIVERED,
+  EXT_DELIVERING,
+  EXT_QUEUED,
+  EXT_STUCK_PASTE,
+  EXT_STUCK_SUBMIT,
+  EXT_STUCK_UNOBSERVABLE,
+  classifyQueueFile,
+  readQueueItem
+} from './channelsDurability.js';
+import type { QueuedPrompt } from './channelsProtocol.js';
+import {
+  migrateDurabilityQueue,
+  migratePausedStore,
+  type LegacyPausedEntry,
+  type LegacyQueueItem,
+  type MigratedPausedEntry,
+  type RepairOutcome
+} from '../shared/migration/index.js';
 
 /** Version 2 = the sessionId-keyed paused store (version 1 was tmuxSession-keyed). */
 const PAUSED_STORE_VERSION = 2;
@@ -90,4 +109,124 @@ function readLegacyPaused(path: string): LegacyPausedEntry[] {
     }
     return entry;
   });
+}
+
+// ---- durability queue migration (Option B: plan → seed journal) -------------
+
+/** A migrated queue item paired with its repaired delivery decision and raw body. */
+export interface DurabilityPlanItem {
+  sessionId: string;
+  seq: number;
+  outcome: RepairOutcome;
+  body: QueuedPrompt;
+}
+
+export interface DurabilityMigrationPlan {
+  /** Ready-to-seed items: re-keyed to sessionId, submit-repaired, body preserved. */
+  items: DurabilityPlanItem[];
+  /** Items whose tmuxSession has no sessionId — reported, not silently lost. */
+  dropped: LegacyQueueItem[];
+  /** Items whose body was unreadable/corrupt — surfaced, never quietly dropped. */
+  unreadable: { tmuxSession: string; seq: number; ext: string }[];
+  /** True when a fully-drained queue imports nothing (§10 round-7A). */
+  skippedByDrain: boolean;
+}
+
+/** Map a durable queue-file extension to a §10 LegacyDurabilityExt (or null to skip). */
+function toLegacyDurabilityExt(fileExt: string): LegacyQueueItem['ext'] | null {
+  switch (fileExt) {
+    case EXT_QUEUED:
+      return 'json';
+    case EXT_DELIVERING:
+      return 'delivering';
+    case EXT_DELIVERED:
+      return 'delivered';
+    case EXT_STUCK_PASTE:
+      return 'stuck-paste';
+    case EXT_STUCK_SUBMIT:
+      return 'stuck-submit';
+    case EXT_STUCK_UNOBSERVABLE:
+      return 'stuck-unobservable';
+    case EXT_CONSUMED:
+      // Transient restore-atomicity tombstone → a replay candidate → re-deliver as queued.
+      return 'json';
+    default:
+      return null;
+  }
+}
+
+interface RawQueueItem {
+  tmuxSession: string;
+  seq: number;
+  ext: LegacyQueueItem['ext'];
+  fileExt: string;
+  body: QueuedPrompt | null;
+}
+
+const bodyKey = (tmuxSession: string, seq: number): string => `${tmuxSession}\u0000${seq}`;
+
+/** Enumerate the legacy per-session queue dirs under sourceRoot (read-only). */
+function readLegacyDurabilityQueue(sourceRoot: string): RawQueueItem[] {
+  const queueRoot = join(sourceRoot, '_engine', 'queue');
+  if (!existsSync(queueRoot)) {
+    return [];
+  }
+  const out: RawQueueItem[] = [];
+  for (const tmuxSession of readdirSync(queueRoot)) {
+    const dir = join(queueRoot, tmuxSession);
+    if (!statSync(dir).isDirectory()) {
+      continue;
+    }
+    for (const filename of readdirSync(dir)) {
+      const fileExt = classifyQueueFile(filename);
+      if (fileExt === null) {
+        continue; // not a queue-item file
+      }
+      const ext = toLegacyDurabilityExt(fileExt);
+      if (ext === null) {
+        continue;
+      }
+      const seq = Number.parseInt(filename.slice(0, 10), 10);
+      if (!Number.isInteger(seq)) {
+        continue;
+      }
+      out.push({ tmuxSession, seq, ext, fileExt, body: readQueueItem(dir, filename) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Plan the durability-queue migration (Option B, read-only): re-key each item to
+ * sessionId via the manifest map, repair its legacy state through the §10
+ * transform (nothing imports as done; .delivered held semantic-unknown), and
+ * pair each with its raw body so the seed-journal writer can persist both the
+ * repaired phase and the re-keyed body. Unmapped sessions and unreadable bodies
+ * are reported, never silently dropped.
+ */
+export function planDurabilityMigration(
+  sourceRoot: string,
+  tmuxToSessionId: ReadonlyMap<string, string>,
+  drainComplete = false
+): DurabilityMigrationPlan {
+  const raw = readLegacyDurabilityQueue(sourceRoot);
+  const unreadable = raw.filter((r) => r.body === null).map((r) => ({ tmuxSession: r.tmuxSession, seq: r.seq, ext: r.fileExt }));
+  const readable = raw.filter((r): r is RawQueueItem & { body: QueuedPrompt } => r.body !== null);
+
+  const legacyItems: LegacyQueueItem[] = readable.map((r) => ({ tmuxSession: r.tmuxSession, seq: r.seq, ext: r.ext }));
+  const migration = migrateDurabilityQueue(legacyItems, tmuxToSessionId, drainComplete);
+
+  // Pair each migrated item back to its body via the (injective) inverse map.
+  const inverse = new Map<string, string>([...tmuxToSessionId].map(([tmux, sid]) => [sid, tmux]));
+  const bodies = new Map<string, QueuedPrompt>(readable.map((r) => [bodyKey(r.tmuxSession, r.seq), r.body]));
+  const items: DurabilityPlanItem[] = migration.items.map((m) => {
+    const tmux = inverse.get(m.sessionId);
+    const body = tmux !== undefined ? bodies.get(bodyKey(tmux, m.seq)) : undefined;
+    if (body === undefined) {
+      throw new Error(`cutover: durability body missing for ${m.sessionId} seq ${m.seq} (fail-closed)`);
+    }
+    return { sessionId: m.sessionId, seq: m.seq, outcome: m.outcome, body };
+  });
+
+  return { items, dropped: migration.dropped, unreadable, skippedByDrain: migration.skippedByDrain };
 }

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrateManifestToCanary, migratePausedStoreFile } from '../src/server/cutoverStoreMigration.js';
+import { migrateManifestToCanary, migratePausedStoreFile, planDurabilityMigration } from '../src/server/cutoverStoreMigration.js';
 import { readManifestFile, writeManifestFile } from '../src/core/config.js';
 import type { DeskManifest } from '../src/core/types.js';
 
@@ -113,5 +113,49 @@ describe('cutover store migration — canary manifest write (§10)', () => {
     // Source manifest is untouched (no sessionId written back).
     const source = readManifestFile(srcPath);
     expect(source.groups[0].sessions[0].sessionId).toBeUndefined();
+  });
+});
+
+describe('cutover store migration — durability plan (§10 Option B)', () => {
+  let src: string;
+  const map = new Map<string, string>([['tmux-a', 'claude']]);
+  beforeEach(() => {
+    src = mkdtempSync(join(tmpdir(), 'desk-cutover-dur-'));
+  });
+  afterEach(() => {
+    rmSync(src, { recursive: true, force: true });
+  });
+
+  const writeItem = (tmux: string, seq: number, ext: string, content: string): void => {
+    const dir = join(src, '_engine', 'queue', tmux);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${String(seq).padStart(10, '0')}.${ext}`), content);
+  };
+
+  it('re-keys + repairs each item and preserves its body, reporting drops and unreadable', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a1' }));
+    writeItem('tmux-a', 2, 'delivered', JSON.stringify({ prompt: 'a2' }));
+    writeItem('tmux-a', 3, 'delivering', JSON.stringify({ prompt: 'a3' }));
+    writeItem('tmux-a', 4, 'json', 'not-json'); // unreadable body
+    writeItem('tmux-ghost', 1, 'json', JSON.stringify({ prompt: 'g' })); // unmapped session
+
+    const plan = planDurabilityMigration(src, map, false);
+    const bySeq = new Map(plan.items.map((i) => [i.seq, i]));
+    expect(bySeq.get(1)?.sessionId).toBe('claude');
+    expect(bySeq.get(1)?.outcome.phase).toBe('queued');
+    expect(bySeq.get(1)?.body).toEqual({ prompt: 'a1' });
+    expect(bySeq.get(2)?.outcome.phase).toBe('semantic-unknown'); // .delivered held, never done
+    expect(bySeq.get(3)?.outcome.phase).toBe('queued');
+    expect(bySeq.get(3)?.outcome.reissue).toBe(true); // delivering → re-deliver
+    expect(plan.dropped).toEqual([{ tmuxSession: 'tmux-ghost', seq: 1, ext: 'json' }]);
+    expect(plan.unreadable).toEqual([{ tmuxSession: 'tmux-a', seq: 4, ext: 'json' }]);
+    expect(plan.skippedByDrain).toBe(false);
+  });
+
+  it('a fully-drained queue plans nothing', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a1' }));
+    const plan = planDurabilityMigration(src, map, true);
+    expect(plan.skippedByDrain).toBe(true);
+    expect(plan.items).toEqual([]);
   });
 });
