@@ -81,6 +81,14 @@ describe('handshake conformance trace (§4)', () => {
     // client → master
     const hello = bodyClient(FrameType.HELLO, 0n, { client_version: 3, peer_role: Role.CONTROLLER, capabilities: CAPS, incarnation: INCARNATION });
     const attach = bodyClient(FrameType.ATTACH, 1n, { role: Role.CONTROLLER, prev_generation: 0, last_seen_offset: 0n, last_seen_record_seq: 0n, desired_rows: 40, desired_cols: 120, sessionId: 'web-1' });
+    // INPUT is FrameType 18 (NOT 5); payload = flags u8 + surface_id u32 + bytes
+    // blob32 — the PTY keystrokes are the `bytes` field, NOT the whole payload.
+    const inputBody: Body = { flags: 0, surface_id: 7, bytes: new TextEncoder().encode('ls\r') };
+    const input = bodyClient(FrameType.INPUT, 2n, inputBody);
+    // RESIZE is FrameType 21 (NOT 83); payload = lease_epoch u32 + surface_id u32
+    // + generation u32 + rows u16 + cols u16 = 16 bytes (NOT 5).
+    const resizeBody: Body = { lease_epoch: 1, surface_id: 7, generation: 1, rows: 50, cols: 200 };
+    const resize = bodyClient(FrameType.RESIZE, 3n, resizeBody);
     // master → client
     const attachAck: RawFrame = { type: FrameType.ATTACH_ACK, flags: 0, generation: 1, sequence: 0n, aux: 0n, payload: encodeBody(FrameType.ATTACH_ACK, ATTACH_ACK_BODY) };
     const recordBody = new TextEncoder().encode('hi');
@@ -89,6 +97,8 @@ describe('handshake conformance trace (§4)', () => {
     const flow = [
       trace('HELLO', 'client->master', hello, { client_version: 3, peer_role: Role.CONTROLLER, capabilities: CAPS, incarnation: INCARNATION }),
       trace('ATTACH', 'client->master', attach, { role: Role.CONTROLLER, prev_generation: 0, last_seen_offset: 0n, last_seen_record_seq: 0n, desired_rows: 40, desired_cols: 120, sessionId: 'web-1' }),
+      trace('INPUT', 'client->master', input, inputBody),
+      trace('RESIZE', 'client->master', resize, resizeBody),
       trace('ATTACH_ACK', 'master->client', attachAck, ATTACH_ACK_BODY),
       trace('RECORD(OUTPUT)', 'master->client', record, { record_type: RecordType.OUTPUT, record_seq: 1n, generation: 1, output_offset: 0n, body: recordBody })
     ];
@@ -99,7 +109,7 @@ describe('handshake conformance trace (§4)', () => {
       join(dir, 'handshake-trace.json'),
       JSON.stringify({ contract: 'atch-wire-v3', note: 'controller attach flow; incarnation is client-chosen (any 16 bytes); RECORD inner = record_type u8, record_seq u64, generation u32, output_offset u64, body_len u32, body, crc32 u32', flow }, null, 2) + '\n'
     );
-    expect(flow).toHaveLength(4);
+    expect(flow).toHaveLength(6);
     // sanity: every frame re-decodes to its declared type.
     for (const f of flow) expect((f.header as { typeName: string }).typeName).toBeTruthy();
   });
