@@ -10,12 +10,15 @@ import {
   checkGlobalUniqueness,
   importsAsDone,
   isValidSessionId,
+  migrateManifestSessions,
   mintSessionId,
   negotiateClientSchema,
   planDrain,
   repairLegacySubmit,
   resumeMigration,
-  type LegacyDurabilityExt
+  validateManifestMigration,
+  type LegacyDurabilityExt,
+  type LegacySessionEntry
 } from '../src/shared/migration/index.js';
 
 // ---- sessionId grammar + minting (§10) --------------------------------------
@@ -129,5 +132,77 @@ describe('migration — resumable phase FSM', () => {
     expect(negotiateClientSchema(5, 5)).toBe('ok');
     expect(negotiateClientSchema(4, 5)).toBe('migrate-on-read');
     expect(negotiateClientSchema(2, 5)).toBe('clear-and-rederive');
+  });
+});
+
+// ---- manifest session-identity transform (§10 phase 3 + 4) ------------------
+describe('migration — manifest transform (tmuxSession → sessionId)', () => {
+  const ok = (m: ReturnType<typeof migrateManifestSessions>, entries: LegacySessionEntry[]) => {
+    const v = validateManifestMigration(entries, m);
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    return m;
+  };
+
+  it('mints a grammar-valid sessionId per session and preserves the tmux map', () => {
+    const entries: LegacySessionEntry[] = [
+      { name: 'Claude Agent', tmuxSession: 'desk-claude-7f3a' },
+      { name: 'Server', tmuxSession: 'desk-server-11b2' }
+    ];
+    const m = ok(migrateManifestSessions(entries), entries);
+    expect(m.entries.map((e) => e.sessionId)).toEqual(['claude-agent', 'server']);
+    for (const e of m.entries) expect(isValidSessionId(e.sessionId)).toBe(true);
+    expect(m.tmuxToSessionId.get('desk-claude-7f3a')).toBe('claude-agent');
+    expect(m.tmuxToSessionId.get('desk-server-11b2')).toBe('server');
+  });
+
+  it('dedupes colliding names with a numeric suffix, keeping each tmux mapping distinct', () => {
+    const entries: LegacySessionEntry[] = [
+      { name: 'Claude', tmuxSession: 'tmux-a' },
+      { name: 'Claude', tmuxSession: 'tmux-b' },
+      { name: 'Claude', tmuxSession: 'tmux-c' }
+    ];
+    const m = ok(migrateManifestSessions(entries), entries);
+    expect(m.entries.map((e) => e.sessionId)).toEqual(['claude', 'claude-2', 'claude-3']);
+    expect(m.tmuxToSessionId.get('tmux-b')).toBe('claude-2');
+    expect(m.tmuxToSessionId.size).toBe(3);
+  });
+
+  it('a never-started session (no tmuxSession) still gets a sessionId but no map entry', () => {
+    const entries: LegacySessionEntry[] = [{ name: 'Fresh Session' }];
+    const m = ok(migrateManifestSessions(entries), entries);
+    expect(m.entries[0]).toMatchObject({ sessionId: 'fresh-session' });
+    expect(m.entries[0].tmuxSession).toBeUndefined();
+    expect(m.tmuxToSessionId.size).toBe(0);
+  });
+
+  it('slugs weird names (emoji / leading digit / symbols) to the grammar', () => {
+    const entries: LegacySessionEntry[] = [
+      { name: '  🚀 Deploy!! ' },
+      { name: '2nd Window' },
+      { name: '' }
+    ];
+    const m = migrateManifestSessions(entries);
+    expect(validateManifestMigration(entries, m).ok).toBe(true);
+    for (const e of m.entries) expect(isValidSessionId(e.sessionId)).toBe(true);
+  });
+
+  it('validate is fail-closed on a duplicate legacy tmuxSession (map must be injective)', () => {
+    const entries: LegacySessionEntry[] = [
+      { name: 'One', tmuxSession: 'dup' },
+      { name: 'Two', tmuxSession: 'dup' }
+    ];
+    const m = migrateManifestSessions(entries);
+    const v = validateManifestMigration(entries, m);
+    expect(v).toEqual({ ok: false, reason: 'duplicate-tmux-session', value: 'dup' });
+  });
+
+  it('is deterministic in entry order (a resumed transform re-mints identically)', () => {
+    const entries: LegacySessionEntry[] = [
+      { name: 'Alpha', tmuxSession: 'a' },
+      { name: 'Alpha', tmuxSession: 'b' }
+    ];
+    const first = migrateManifestSessions(entries).entries.map((e) => e.sessionId);
+    const second = migrateManifestSessions(entries).entries.map((e) => e.sessionId);
+    expect(second).toEqual(first);
   });
 });
