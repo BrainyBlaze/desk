@@ -4,3 +4,4 @@
 export * from './frames.js';
 export * from './codec.js';
 export * from './querySuppression.js';
+export * from './resync.js';
