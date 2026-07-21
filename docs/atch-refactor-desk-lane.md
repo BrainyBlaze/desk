@@ -11,12 +11,29 @@ legacy fallbacks. Three tiers: **atch v3 master** (per-session C process) |
 **desk-runtime daemon + xterm-worker** (HTTP-independent screen/query authority) |
 **web server** (client).
 
+## Status headline (honest)
+
+**The real lane-join is PROVEN** — the daemon spawns a real atch session
+(`atch start`, `ATCH_GENERATION` injected from the durable ledger), attaches over
+the v3 socket, and a real terminal **round-trips multi-line input→output** through
+the real binary, with the generation fence, v3 handshake, spawn contract, and
+detached lifecycle all live (4-case smoke, stable over repeated runs, opt-in via
+`RUN_REAL_JOIN=1`). Both the C master and the TS daemon are green together.
+
+**The tmux replacement is NOT shipped.** The protocol + daemon + master link are
+proven, but the running product still uses tmux. Shipping the replacement
+requires the explicit remaining gates in "Integration boundary" below — the real
+`@xterm/headless` worker, the frontend rewrite, the §10 FS-store transforms, and
+the live cutover — none of which are done. Do not describe tmux as replaced until
+those gates are closed.
+
 ## What this branch delivers — built, tested, reviewable
 
-All of it is pure `src/shared` logic with persistence/IO expressed as **ports**,
-so the correctness rules are unit-testable without a live binary, sockets, or a
-browser. `tsc --noEmit` 0 errors, node v22.23.1; full project suite **2628
-passed, 0 failures**, `npm run check` clean.
+All pure logic is `src/shared` with persistence/IO expressed as **ports**, so the
+correctness rules are unit-testable; the server-side runtime wires real sockets,
+processes, and the atch binary. `tsc --noEmit` 0 errors, node v22.23.1; full
+project suite **2630 passed, 0 failures** (real-binary tests opt-in), `npm run
+check` clean.
 
 **The daemon side is COMPLETE end-to-end** (tested against fakes + real sockets;
 the real atch binary and `@xterm/headless` emulator drop in behind clean seams):
@@ -48,6 +65,8 @@ and CMD_CACHE (`fileGenerationLedger` / `fileIntakeStore` / `fileConsumerStore` 
 | §7.8/§7.6/§15 | `tests/byteIntegrity.gate.test.ts` | Shipping gate: OUTPUT byte-integrity across EVERY split boundary + one-byte-at-a-time (binary end-to-end), and the 256-value two-channel INPUT gate. | `d1f96ec` |
 | §6.9/§3.6 | `src/shared/runtime/nativeLifecycle.ts` | Daemon-owned native agent-host FSM (starting→ready→working/idle→exited/crashed) + control-plane `native-fsm` projection + bounded-backoff restart. Establishes the **atch-terminal-only vs daemon-native ownership boundary** as code (C14). | `1913607` |
 | §10 | `src/shared/migration/` | tmuxSession→sessionId grammar/minting, submitState **repair map (never import legacy as `done`)**, resumable phase FSM. | `5c7c71f` |
+| §7.1/§4 | `src/server/runtime/masterClient.ts` + `spawnMaster.ts` + `sessionManager.ts` | The **atch-master v3 link + spawn**: MasterClient (handshake, generation-stamped post-attach frames, RECORD intake), spawnMaster (`ATCH_GENERATION` inject, detached mode), SessionManager (detached spawn/kill lifecycle). | `a529c91`, `bffc660`, `cc63634` |
+| §7.1/§4 | `tests/realJoin.integration.test.ts` | **The proven real join** (opt-in `RUN_REAL_JOIN=1`): real atch spawn + v3 attach + multi-line round-trip + RESIZE + production detached spawn/kill, all against the real binary. | `a529c91`, `cc63634` |
 
 ## The shared interlock is validated both directions
 
@@ -62,17 +81,17 @@ build against. As of this writing:
 
 So the seam is conformant on both sides before the lanes join.
 
-## Integration boundary — what remains, and why it is gated
+## Integration boundary — the explicit remaining gates to ship the replacement
 
-The remaining work is process/IO wiring and the live cutover. It is deliberately
-NOT in this branch because it depends on things outside an autonomous TS build:
+The protocol, daemon, and master link are **proven live** (see the status
+headline). What remains before tmux is actually replaced in the running product —
+each an explicit gate, none done:
 
-1. **Daemon process glue** — BUILT and runnable end-to-end: the unix-socket RPC
-   server+client, registry, master v3 link, session pipe, and all fsync'd
-   persistence adapters are done and tested. What remains behind the seams: the
-   real atch-master link (needs @codex's C v3 adapter — the gate, my reviews +
-   handshake trace unblocked it), the worker child processes, native host
-   supervision + rendezvous, and the HTTP hook-intake endpoint.
+1. **Daemon process glue** — the unix-socket RPC server+client, registry, master
+   v3 link, session pipe, spawn, and fsync'd persistence adapters are DONE and
+   the real-atch join is proven. What remains behind the seams: the worker child
+   processes, native host supervision + rendezvous, and the HTTP hook-intake
+   endpoint.
 2. **Real `@xterm/headless` emulator adapter** — the `EmulatorPort`
    implementation. `@xterm/headless` is a new runtime dep (§3.3, H10) not yet
    installed; adding it is a packaging step (lockfile, `npm ci`, ~500-pkg tree).
