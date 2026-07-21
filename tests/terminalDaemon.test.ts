@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { createTerminalDaemon, provisionSessions, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
+import { createTerminalDaemon, provisionSessions, runTerminalDaemon, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
@@ -92,5 +92,22 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
       { sessionId: 'boom', ok: false, error: 'spawn failed' },
       { sessionId: 'b', ok: true }
     ]);
+  });
+
+  it('runTerminalDaemon starts the server and returns provisioning results (no sessions ⇒ empty)', async () => {
+    const running = await runTerminalDaemon({
+      homeRoot: home,
+      atchBinPath: '/bin/false',
+      atchSocketRoot: home,
+      host: '127.0.0.1',
+      port: 0,
+      sessions: []
+    });
+    try {
+      expect(running.port).toBeGreaterThan(0);
+      expect(running.provisioned).toEqual([]);
+    } finally {
+      await running.close();
+    }
   });
 });

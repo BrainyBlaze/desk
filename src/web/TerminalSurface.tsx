@@ -826,6 +826,9 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     terminal.writeln('');
 
     const tmuxTarget = session.spec.tmuxSession;
+    // The daemon keys sessions by the atch-native sessionId; subscribe by it when
+    // present (transitional fallback to tmuxSession until Phase 5 drops the latter).
+    const daemonSessionId = session.spec.sessionId ?? tmuxTarget;
     const surfaceId = surfaceIdRef.current;
     let disposed = false;
     let stabilizeTimer: number | undefined;
@@ -869,7 +872,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     // at least one surface is visible; a hidden surface receives nothing, so a
     // warm-but-hidden keep-alive cell costs no parse/render. On reveal the broker
     // sends a self-contained snapshot, which we apply after a reset.
-    binaryTerminalBroker.subscribe(surfaceId, tmuxTarget, terminal.rows, terminal.cols, cellVisibleRef.current, {
+    binaryTerminalBroker.subscribe(surfaceId, daemonSessionId, terminal.rows, terminal.cols, cellVisibleRef.current, {
       onOutput: (bytes) => {
         // Raw output bytes, written binary end-to-end (no premature string decode).
         terminal.write(bytes);

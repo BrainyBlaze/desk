@@ -115,6 +115,31 @@ export async function provisionSessions(
   return results;
 }
 
+export interface RunTerminalDaemonOptions extends Omit<TerminalDaemonOptions, 'httpServer'> {
+  host?: string;
+  port: number;
+  sessions: readonly ProvisionRequest[];
+}
+
+export interface RunningTerminalDaemon {
+  server: import('node:http').Server;
+  port: number;
+  provisioned: { sessionId: string; ok: boolean; error?: string }[];
+  close(): Promise<void>;
+}
+
+/**
+ * The daemon-process main: start the standalone terminal daemon server, then
+ * provision the atch master for each running session. Returns a handle with the
+ * bound port and per-session provisioning results; a process entry adds the
+ * signal handling around it.
+ */
+export async function runTerminalDaemon(options: RunTerminalDaemonOptions): Promise<RunningTerminalDaemon> {
+  const server = await startTerminalDaemonServer(options);
+  const provisioned = await provisionSessions(server.daemon, options.sessions);
+  return { server: server.server, port: server.port, provisioned, close: server.close };
+}
+
 export interface TerminalDaemonServer {
   daemon: TerminalDaemon;
   server: Server;
