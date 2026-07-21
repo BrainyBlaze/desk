@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
 import { readManifestFile, writeManifestFile } from '../core/config.js';
 import { applyMigratedSessionIds, buildManifestMigration, collectSessions, deskManifestToEntries } from '../core/sessionIdentity.js';
-import { advanceMigration, validateManifestMigration, type MigrationPhase, type Rollback } from '../shared/migration/index.js';
+import { advanceMigration, isValidSessionId, validateManifestMigration, type MigrationPhase, type Rollback } from '../shared/migration/index.js';
 import {
   EXT_CONSUMED,
   EXT_DELIVERED,
@@ -447,28 +447,51 @@ export function isSeedCommitted(root: string): boolean {
  * on a partial/corrupt seed. Reading does NOT set the marker; the engine writes
  * it via markSeedCommitted only after every item is seeded.
  */
+/** The only phases the durability repair produces (§10); anything else is corrupt. */
+const KNOWN_SEED_PHASES = new Set(['queued', 'semantic-unknown', 'submit-confirmed']);
+
 export function readSeedJournalForConsumption(root: string): { items: SeedJournalItem[] } | null {
   const journalPath = join(migrationDir(root), 'seed-journal.json');
   if (!existsSync(journalPath)) {
     return null;
   }
-  const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { version?: number; items?: unknown };
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { version?: number; committed?: unknown; items?: unknown };
   if (journal.version !== SEED_JOURNAL_VERSION) {
     throw new Error(`seed consume: unknown seed-journal version ${String(journal.version)} (fail-closed)`);
+  }
+  // The committed MARKER file is the commit truth; a journal claiming committed
+  // without it is inconsistent and must be rejected.
+  if (journal.committed !== false) {
+    throw new Error('seed consume: journal committed flag is not false; the marker file is the commit truth (fail-closed)');
   }
   if (!Array.isArray(journal.items)) {
     throw new Error('seed consume: malformed seed-journal items (fail-closed)');
   }
   const items = journal.items.map((raw): SeedJournalItem => {
     const it = raw as { sessionId?: unknown; seq?: unknown; phase?: unknown; reissue?: unknown };
-    if (typeof it.sessionId !== 'string' || typeof it.seq !== 'number' || typeof it.phase !== 'string' || typeof it.reissue !== 'boolean') {
-      throw new Error('seed consume: malformed seed-journal item (fail-closed)');
+    // sessionId is used to build a filesystem path — grammar-validate it to block
+    // empty / traversal / absolute-path ids before any join.
+    if (typeof it.sessionId !== 'string' || !isValidSessionId(it.sessionId)) {
+      throw new Error('seed consume: invalid sessionId (fail-closed)');
+    }
+    if (typeof it.seq !== 'number' || !Number.isInteger(it.seq) || it.seq < 0) {
+      throw new Error(`seed consume: invalid seq for ${it.sessionId} (fail-closed)`);
+    }
+    if (typeof it.phase !== 'string' || !KNOWN_SEED_PHASES.has(it.phase)) {
+      throw new Error(`seed consume: unknown phase for ${it.sessionId} seq ${String(it.seq)} (fail-closed)`);
+    }
+    if (typeof it.reissue !== 'boolean') {
+      throw new Error(`seed consume: invalid reissue flag for ${it.sessionId} seq ${it.seq} (fail-closed)`);
     }
     const bodyPath = join(migrationDir(root), 'bodies', it.sessionId, `${padSeq(it.seq)}.json`);
     if (!existsSync(bodyPath)) {
       throw new Error(`seed consume: missing body for ${it.sessionId} seq ${it.seq} (fail-closed)`);
     }
-    return { sessionId: it.sessionId, seq: it.seq, phase: it.phase, reissue: it.reissue, body: JSON.parse(readFileSync(bodyPath, 'utf8')) as QueuedPrompt };
+    const body = JSON.parse(readFileSync(bodyPath, 'utf8')) as QueuedPrompt;
+    if (body === null || typeof body !== 'object' || typeof (body as { prompt?: unknown }).prompt !== 'string') {
+      throw new Error(`seed consume: malformed body for ${it.sessionId} seq ${it.seq} (fail-closed)`);
+    }
+    return { sessionId: it.sessionId, seq: it.seq, phase: it.phase, reissue: it.reissue, body };
   });
   return { items };
 }

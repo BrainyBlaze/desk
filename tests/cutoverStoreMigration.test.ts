@@ -258,6 +258,50 @@ describe('cutover store migration — durability plan (§10 Option B)', () => {
     rmSync(join(dst, '_engine', 'migration', 'bodies', 'claude', '0000000001.json'), { force: true });
     expect(() => readSeedJournalForConsumption(dst)).toThrow(/missing body/);
   });
+
+  const seedThenTamper = (mutate: (j: any) => void): void => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a' }));
+    writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
+    const p = join(dst, '_engine', 'migration', 'seed-journal.json');
+    const j = JSON.parse(readFileSync(p, 'utf8'));
+    mutate(j);
+    writeFileSync(p, JSON.stringify(j));
+  };
+
+  it('rejects a journal committed flag that is not false (marker is the truth)', () => {
+    seedThenTamper((j) => {
+      j.committed = true;
+    });
+    expect(() => readSeedJournalForConsumption(dst)).toThrow(/committed/);
+  });
+
+  it('fails closed on an invalid sessionId (grammar / path traversal)', () => {
+    seedThenTamper((j) => {
+      j.items[0].sessionId = '../evil';
+    });
+    expect(() => readSeedJournalForConsumption(dst)).toThrow(/invalid sessionId/);
+  });
+
+  it('fails closed on a non-integer or negative seq', () => {
+    seedThenTamper((j) => {
+      j.items[0].seq = -3;
+    });
+    expect(() => readSeedJournalForConsumption(dst)).toThrow(/invalid seq/);
+  });
+
+  it('fails closed on an unknown phase', () => {
+    seedThenTamper((j) => {
+      j.items[0].phase = 'bogus';
+    });
+    expect(() => readSeedJournalForConsumption(dst)).toThrow(/unknown phase/);
+  });
+
+  it('fails closed on a malformed body (no prompt string)', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a' }));
+    writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
+    writeFileSync(join(dst, '_engine', 'migration', 'bodies', 'claude', '0000000001.json'), JSON.stringify({ notPrompt: 1 }));
+    expect(() => readSeedJournalForConsumption(dst)).toThrow(/malformed body/);
+  });
 });
 
 describe('cutover store migration — canary orchestrator (§10)', () => {
