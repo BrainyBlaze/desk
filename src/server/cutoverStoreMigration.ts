@@ -419,3 +419,62 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
     return { phase: next, rollback, failedPhase: phase, error: (error as Error).message, ...partial };
   }
 }
+
+// ---- durability seed CONSUMPTION (Item 2, read side of the contract) ---------
+
+export interface SeedJournalItem {
+  sessionId: string;
+  seq: number;
+  /** Repaired delivery phase (queued | semantic-unknown | submit-confirmed). */
+  phase: string;
+  reissue: boolean;
+  body: QueuedPrompt;
+}
+
+const migrationDir = (root: string): string => join(root, '_engine', 'migration');
+const committedMarkerPath = (root: string): string => join(migrationDir(root), 'seed-journal.committed');
+
+/** The committed marker file is the durable commit truth — NOT the journal's committed field. */
+export function isSeedCommitted(root: string): boolean {
+  return existsSync(committedMarkerPath(root));
+}
+
+/**
+ * Read + validate the durability seed journal for the channels engine to consume
+ * (Item 2). Returns null when no journal is present (nothing to seed). Fails
+ * CLOSED per the contract: an unknown version, a malformed item, or a missing
+ * referenced body throws — so the engine seeds nothing and never sets the marker
+ * on a partial/corrupt seed. Reading does NOT set the marker; the engine writes
+ * it via markSeedCommitted only after every item is seeded.
+ */
+export function readSeedJournalForConsumption(root: string): { items: SeedJournalItem[] } | null {
+  const journalPath = join(migrationDir(root), 'seed-journal.json');
+  if (!existsSync(journalPath)) {
+    return null;
+  }
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { version?: number; items?: unknown };
+  if (journal.version !== SEED_JOURNAL_VERSION) {
+    throw new Error(`seed consume: unknown seed-journal version ${String(journal.version)} (fail-closed)`);
+  }
+  if (!Array.isArray(journal.items)) {
+    throw new Error('seed consume: malformed seed-journal items (fail-closed)');
+  }
+  const items = journal.items.map((raw): SeedJournalItem => {
+    const it = raw as { sessionId?: unknown; seq?: unknown; phase?: unknown; reissue?: unknown };
+    if (typeof it.sessionId !== 'string' || typeof it.seq !== 'number' || typeof it.phase !== 'string' || typeof it.reissue !== 'boolean') {
+      throw new Error('seed consume: malformed seed-journal item (fail-closed)');
+    }
+    const bodyPath = join(migrationDir(root), 'bodies', it.sessionId, `${padSeq(it.seq)}.json`);
+    if (!existsSync(bodyPath)) {
+      throw new Error(`seed consume: missing body for ${it.sessionId} seq ${it.seq} (fail-closed)`);
+    }
+    return { sessionId: it.sessionId, seq: it.seq, phase: it.phase, reissue: it.reissue, body: JSON.parse(readFileSync(bodyPath, 'utf8')) as QueuedPrompt };
+  });
+  return { items };
+}
+
+/** Write the durable committed marker — the engine calls this only AFTER seeding every item. */
+export function markSeedCommitted(root: string): void {
+  mkdirSync(migrationDir(root), { recursive: true });
+  writeFileAtomic(committedMarkerPath(root), `${JSON.stringify({ version: SEED_JOURNAL_VERSION })}\n`);
+}

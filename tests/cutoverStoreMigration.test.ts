@@ -7,7 +7,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrateManifestToCanary, migratePausedStoreFile, planDurabilityMigration, runCanaryMigration, writeDurabilitySeedJournal } from '../src/server/cutoverStoreMigration.js';
+import {
+  isSeedCommitted,
+  markSeedCommitted,
+  migrateManifestToCanary,
+  migratePausedStoreFile,
+  planDurabilityMigration,
+  readSeedJournalForConsumption,
+  runCanaryMigration,
+  writeDurabilitySeedJournal
+} from '../src/server/cutoverStoreMigration.js';
 import { readManifestFile, writeManifestFile } from '../src/core/config.js';
 import type { DeskManifest } from '../src/core/types.js';
 
@@ -218,6 +227,36 @@ describe('cutover store migration — durability plan (§10 Option B)', () => {
     expect(() => writeDurabilitySeedJournal(plan, dst)).toThrow(/dropped/);
     const report = writeDurabilitySeedJournal(plan, dst, { acknowledgeDropped: true });
     expect(report).toMatchObject({ written: 0, droppedAck: 1 });
+  });
+
+  it('reads + validates the seed journal for consumption, resolving bodies', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a1' }));
+    writeItem('tmux-a', 2, 'delivered', JSON.stringify({ prompt: 'a2' }));
+    writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
+    const seed = readSeedJournalForConsumption(dst);
+    expect(seed?.items.map((i) => [i.sessionId, i.seq, i.phase, i.body])).toEqual([
+      ['claude', 1, 'queued', { prompt: 'a1' }],
+      ['claude', 2, 'semantic-unknown', { prompt: 'a2' }]
+    ]);
+  });
+
+  it('returns null when no seed journal is present', () => {
+    expect(readSeedJournalForConsumption(dst)).toBeNull();
+  });
+
+  it('the committed marker is the durable commit truth', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a1' }));
+    writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
+    expect(isSeedCommitted(dst)).toBe(false);
+    markSeedCommitted(dst);
+    expect(isSeedCommitted(dst)).toBe(true);
+  });
+
+  it('fails closed on a missing body', () => {
+    writeItem('tmux-a', 1, 'json', JSON.stringify({ prompt: 'a1' }));
+    writeDurabilitySeedJournal(planDurabilityMigration(src, map, false), dst);
+    rmSync(join(dst, '_engine', 'migration', 'bodies', 'claude', '0000000001.json'), { force: true });
+    expect(() => readSeedJournalForConsumption(dst)).toThrow(/missing body/);
   });
 });
 
