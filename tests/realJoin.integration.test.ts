@@ -16,6 +16,7 @@ import { Role, RecordType } from '../src/shared/atchWire/frames.js';
 import { type RecordEnvelope } from '../src/shared/atchWire/messages.js';
 import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type EmulatorEvent, type BpFrame } from '../src/shared/runtime/index.js';
+import { XtermEmulatorFactory } from '../src/server/runtime/xtermEmulator.js';
 import { BpFrameType } from '../src/shared/browserProtocol/index.js';
 
 const ATCH_BIN = process.env.ATCH_BIN ?? '/home/dev/.config/superpowers/worktrees/atch/phase-a-implementation/atch';
@@ -174,5 +175,42 @@ describe.skipIf(!AVAILABLE)('REAL join — daemon ↔ real atch master (§7.1)',
     // retire runs `atch kill -f NAME`; the session socket disappears.
     mgr.retire(name);
     expect(await until(() => !existsSync(sockPath), 4000)).toBe(true);
+  });
+
+  it('FULL STACK with the REAL @xterm/headless emulator: real atch output renders into the screen snapshot', { timeout: 25000 }, async () => {
+    const name = track(`deskfull${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`);
+    const sockPath = join(SOCK_DIR, name);
+    const browserOut: { channelId: number; frame: BpFrame }[] = [];
+    const mgr = new SessionManager({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
+      emulatorFactory: new XtermEmulatorFactory(), // the REAL headless emulator
+      now: () => Date.now(),
+      sendBrowser: (_sid, channelId, frame) => browserOut.push({ channelId, frame })
+    });
+    await mgr.spawnAndAttach(name, {
+      binPath: ATCH_BIN,
+      args: ['start', name, 'cat'],
+      sockPath,
+      geometry: { rows: 24, cols: 80 },
+      detached: true,
+      killSpec: { binPath: ATCH_BIN, args: ['kill', '-f', name] },
+      readyTimeoutMs: 6000
+    });
+    mgr.subscribe(name, 'surface-1', 24, 80);
+    await wait(200);
+    mgr.onBrowserInput(name, 1, false, new TextEncoder().encode('render-me\n'));
+    // wait until the real emulator has rendered the echoed output (browser OUTPUT arrives)
+    await until(() => browserOut.some((x) => x.frame.type === BpFrameType.OUTPUT && new TextDecoder().decode((x.frame as Extract<BpFrame, { type: BpFrameType.OUTPUT }>).bytes).includes('render-me')), 5000);
+    await wait(150); // let the async xterm parser drain
+
+    // A NEW surface's SNAPSHOT is the real emulator's serialized screen — it must
+    // carry the rendered text, proving the headless emulator is the screen authority.
+    browserOut.length = 0;
+    mgr.subscribe(name, 'surface-2', 24, 80);
+    const snap = browserOut.find((x) => x.frame.type === BpFrameType.SNAPSHOT) as { frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }> } | undefined;
+    expect(snap, 'snapshot emitted').toBeDefined();
+    expect(snap!.frame.text, `snapshot: ${JSON.stringify(snap?.frame.text)}`).toContain('render-me');
+    mgr.retire(name);
   });
 });
