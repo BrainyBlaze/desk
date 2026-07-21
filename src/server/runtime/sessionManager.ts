@@ -16,7 +16,9 @@ import { type HookInput } from '../../shared/runtime/sessionRuntime.js';
 import { type ControlState, type IntakeResult, type Source } from '../../shared/controlPlane/index.js';
 import { type BpFrame } from '../../shared/browserProtocol/index.js';
 import { MasterClient } from './masterClient.js';
+import { spawnMaster } from './spawnMaster.js';
 import { Role } from '../../shared/atchWire/frames.js';
+import { type ChildProcess } from 'node:child_process';
 
 export interface SessionManagerDeps {
   ledger: GenerationLedger;
@@ -30,6 +32,7 @@ export interface SessionManagerDeps {
 export class SessionManager {
   private readonly core: DaemonCore;
   private readonly masters = new Map<string, MasterClient>();
+  private readonly children = new Map<string, ChildProcess>();
 
   constructor(deps: SessionManagerDeps) {
     this.core = new DaemonCore({
@@ -65,6 +68,25 @@ export class SessionManager {
     return true;
   }
 
+  /**
+   * Ensure a session, SPAWN its atch master with the ledger generation injected
+   * as ATCH_GENERATION (§4.8.1 spawn contract), then attach. The generation the
+   * master will own is exactly the durable-ledger value the daemon allocated, so
+   * the fence is consistent across the join. Returns the ensure result.
+   */
+  async spawnAndAttach(
+    sessionId: string,
+    opts: { binPath: string; args: string[]; sockPath: string; geometry: { rows: number; cols: number }; readyTimeoutMs?: number }
+  ): Promise<EnsureResult> {
+    const ens = this.ensure(sessionId, opts.geometry);
+    if (!ens.ok) return ens;
+    const { child } = await spawnMaster({ binPath: opts.binPath, args: opts.args, sockPath: opts.sockPath, generation: ens.generation, readyTimeoutMs: opts.readyTimeoutMs });
+    this.children.set(sessionId, child);
+    child.once('exit', () => this.retire(sessionId));
+    await this.attachMaster(sessionId, opts.sockPath, opts.geometry);
+    return ens;
+  }
+
   subscribe(sessionId: string, surfaceId: string, rows: number, cols: number): number | undefined {
     return this.core.subscribe(sessionId, surfaceId, rows, cols);
   }
@@ -90,6 +112,9 @@ export class SessionManager {
   retire(sessionId: string): void {
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
+    const child = this.children.get(sessionId);
+    if (child !== undefined && child.exitCode === null) child.kill();
+    this.children.delete(sessionId);
     this.core.retire(sessionId);
   }
 
