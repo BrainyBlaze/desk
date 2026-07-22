@@ -654,11 +654,19 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         }
         for (const target of targets) {
           // targets are raw tmuxSession strings (API contract until the field
-          // rename). LSP wiring keys sessionId — normalize; the surface broker
-          // and tool journal keep the legacy key until the env-rename window.
-          managedAgentLsp.cleanup(nativeIdForTmuxSession(target));
+          // rename). LSP wiring keys sessionId; broker rings and tool journals
+          // key by the host's env identity, which is the sessionId for hosts
+          // launched after the DESK_SESSION_ID rename and the tmux name for
+          // ones still running from before it — dispose both (idempotent
+          // no-op for whichever does not exist; dies at the no-tmux gate).
+          const targetId = nativeIdForTmuxSession(target);
+          managedAgentLsp.cleanup(targetId);
           agentSurfaceBroker.disposeSession(target);
           deleteToolJournal(target);
+          if (targetId !== target) {
+            agentSurfaceBroker.disposeSession(targetId);
+            deleteToolJournal(targetId);
+          }
         }
         return deleteSessionFromManifest(manifest, { projectId, groupId, sessionName, projectCwd });
       });

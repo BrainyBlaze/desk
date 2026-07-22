@@ -20,16 +20,18 @@ function manifest(): DeskManifest {
             sessions: [
               {
                 name: 'chat',
+                sessionId: 'chat',
                 agent: 'claude',
                 resume: '00000000-0000-7000-8000-000000000001',
                 uiMode: 'terminal',
                 tmuxSession: 'agentdesk-alpha-main-chat-00000000'
               },
-              { name: 'fresh', agent: 'codex', uiMode: 'terminal' },
-              { name: 'shell', agent: 'bash' },
-              { name: 'custom', command: 'htop' },
+              { name: 'fresh', sessionId: 'fresh', agent: 'codex', uiMode: 'terminal' },
+              { name: 'shell', sessionId: 'shell', agent: 'bash' },
+              { name: 'custom', sessionId: 'custom', command: 'htop' },
               {
                 name: 'native-chat',
+                sessionId: 'native-chat',
                 agent: 'opencode',
                 resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
                 uiMode: 'native',

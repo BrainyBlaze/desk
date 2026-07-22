@@ -23,7 +23,7 @@ import type { AgentHostEnv } from './types.js';
  * to the desk server's broker over /ws/agent-host.
  *
  * Lifecycle (spec docs/native-ui-mode-spec.md §5):
- *   1. read env (DESK_TMUX_SESSION, DESK_AGENT, DESK_AGENT_RESUME, DESK_AGENT_BYPASS,
+ *   1. read env (DESK_SESSION_ID, DESK_AGENT, DESK_AGENT_RESUME, DESK_AGENT_BYPASS,
  *      DESK_SERVER_URL, DESK_AGENT_HOST_TOKEN, optional DESK_AGENT_CWD,
  *      DESK_AGENT_HOST_LOG_LEVEL)
  *   2. print pane banner + structured one-line logs (R5)
@@ -136,7 +136,7 @@ export class AgentHost {
     this.now = opts.now ?? (() => new Date());
     this.scheduler = opts.scheduler ?? { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as NodeJS.Timeout) };
     this.signals = opts.signals ?? ['SIGTERM', 'SIGINT'];
-    this.toolJournal = opts.toolJournal ?? createToolJournal({ path: toolJournalPath(opts.env.DESK_TMUX_SESSION) });
+    this.toolJournal = opts.toolJournal ?? createToolJournal({ path: toolJournalPath(opts.env.DESK_SESSION_ID) });
   }
 
   /**
@@ -248,13 +248,13 @@ export class AgentHost {
   private sendHello(): void {
     const frame: AgentHostClientFrame = {
       type: 'hello',
-      session: this.env.DESK_TMUX_SESSION,
+      session: this.env.DESK_SESSION_ID,
       token: this.env.DESK_AGENT_HOST_TOKEN,
       agent: this.env.DESK_AGENT,
       pid: this.pid
     };
     this.sendFrame(frame);
-    this.logger.info(`hello sent session=${this.env.DESK_TMUX_SESSION} agent=${this.env.DESK_AGENT} pid=${this.pid}`);
+    this.logger.info(`hello sent session=${this.env.DESK_SESSION_ID} agent=${this.env.DESK_AGENT} pid=${this.pid}`);
   }
 
   private async runMessageLoop(

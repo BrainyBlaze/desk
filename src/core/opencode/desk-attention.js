@@ -3,7 +3,7 @@
 // used as delivery authority; liveness is Desk-side and events are best-effort.
 
 async function post(kind, extra = {}) {
-  const session = process.env.DESK_TMUX_SESSION;
+  const session = process.env.DESK_SESSION_ID;
   if (!session) return;
   // Bound the POST so a half-open / stalled server cannot hang the awaited event hook
   // (the sibling agentHooks shim bounds its fetch the same way).

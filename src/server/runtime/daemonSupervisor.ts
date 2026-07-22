@@ -24,7 +24,11 @@ import { findPackageRoot } from '../../shared/packageRoot.js';
  */
 const LEAKED_SESSION_ENV = [
   'DESK_AGENT',
+  // Both identity keys: DESK_SESSION_ID is what launches export now; the
+  // legacy DESK_TMUX_SESSION entry guards servers started from a pre-rename
+  // agent context and is deleted at the final no-tmux gate.
   'DESK_TMUX_SESSION',
+  'DESK_SESSION_ID',
   'DESK_SERVER_URL',
   'DESK_HOST_TOKEN',
   'DESK_RESUME',

@@ -67,7 +67,7 @@ class MockSocket implements WebSocketLike {
 
 function makeEnv(overrides: Partial<AgentHostEnv> = {}): AgentHostEnv {
   return {
-    DESK_TMUX_SESSION: 'sess-test',
+    DESK_SESSION_ID: 'sess-test',
     DESK_AGENT: 'opencode',
     DESK_AGENT_BYPASS: '0',
     DESK_SERVER_URL: 'http://127.0.0.1:5173',

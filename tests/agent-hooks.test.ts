@@ -74,7 +74,7 @@ describe('agent hook configuration generation', () => {
     const shim = buildDeskAgentEventShim();
 
     expect(shim).toContain('process.stdin');
-    expect(shim).toContain('DESK_TMUX_SESSION');
+    expect(shim).toContain('DESK_SESSION_ID');
     expect(shim).toContain('/api/agent-event');
     expect(shim).toContain('schemaVersion: 2');
     expect(shim).toContain('process.exit(0)');
@@ -135,7 +135,7 @@ describe('agent hook shim runtime (child process)', () => {
       const result = spawnSync(process.execPath, [shimPath, '--event', 'Stop'], {
         input: '{}',
         // Unreachable endpoint => fetch rejects (ECONNREFUSED) well before the 1.5s abort.
-        env: { ...env, DESK_TMUX_SESSION: 'runtime-test', DESK_API: 'http://127.0.0.1:1' },
+        env: { ...env, DESK_SESSION_ID: 'runtime-test', DESK_API: 'http://127.0.0.1:1' },
         encoding: 'utf8',
         timeout: 10_000
       });

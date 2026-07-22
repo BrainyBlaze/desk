@@ -149,7 +149,7 @@ process.stdin.on('end', async () => {
   };
   const hookEventName = arg('--event') || '';
   const agent = process.env.DESK_AGENT || arg('--agent') || 'unknown';
-  const session = process.env.DESK_TMUX_SESSION || '';
+  const session = process.env.DESK_SESSION_ID || '';
   if (!session || !hookEventName) {
     finish(hookEventName);
     return;

@@ -13,7 +13,7 @@ import type { DeskAgent } from '../../../core/types.js';
  * wires its exit callback to process.exit).
  *
  * Required env:
- *   DESK_TMUX_SESSION     — tmux session name (broker hello field, ring key)
+ *   DESK_SESSION_ID       — durable session identity (broker hello field, ring key)
  *   DESK_AGENT            — claude | codex | opencode
  *   DESK_AGENT_BYPASS     — '1' or '0'
  *   DESK_SERVER_URL       — desk server URL (e.g. http://127.0.0.1:5173)
@@ -35,7 +35,7 @@ export function runAgentHostFromEnv(env: NodeJS.ProcessEnv = process.env): Promi
 
 /** Parse + validate the env contract. Throws on missing/invalid required keys. */
 export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
-  const DESK_TMUX_SESSION = requireEnv(env, 'DESK_TMUX_SESSION');
+  const DESK_SESSION_ID = requireEnv(env, 'DESK_SESSION_ID');
   const DESK_AGENT = requireEnv(env, 'DESK_AGENT') as DeskAgent;
   if (!isDeskAgent(DESK_AGENT)) {
     throw new Error(`DESK_AGENT must be one of claude | codex | opencode | bash; got ${String(DESK_AGENT)}`);
@@ -48,7 +48,7 @@ export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
   const DESK_AGENT_HOST_TOKEN = requireEnv(env, 'DESK_AGENT_HOST_TOKEN');
 
   const result: AgentHostEnv = {
-    DESK_TMUX_SESSION,
+    DESK_SESSION_ID,
     DESK_AGENT,
     DESK_AGENT_BYPASS,
     DESK_SERVER_URL,

@@ -816,9 +816,10 @@ function sessionOfFrame(frame: AgentUiClientFrame): string | undefined {
 }
 
 const defaultAttentionSink: AttentionSink = {
-  // TRANSITIONAL: the broker keys sessions by the agent-host hello value
-  // (DESK_TMUX_SESSION until the env rename); the tracker keys sessionId.
-  // The signal fanout keeps the legacy key until the channels flip.
+  // The broker keys sessions by the agent-host hello value — DESK_SESSION_ID
+  // for new launches, the tmux name for hosts started pre-rename (until
+  // restart); the normalizer absorbs both. The signal fanout keeps the
+  // legacy key until the channels flip.
   pushEvent: (session, kind, message) => attentionTracker.pushEvent(nativeIdForTmuxSession(session), kind, message),
   notifySignal: (session, kind) => notifyAgentSignal(session, kind),
   raise: (session) => attentionTracker.raise(nativeIdForTmuxSession(session))

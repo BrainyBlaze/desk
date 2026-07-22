@@ -21,7 +21,7 @@ describe('desk-attention opencode plugin source', () => {
     const plugin = attentionPluginSource();
     expect(plugin).toContain('/api/agent-event');
     expect(plugin).toContain('schemaVersion: 2');
-    expect(plugin).toContain('DESK_TMUX_SESSION');
+    expect(plugin).toContain('DESK_SESSION_ID');
     expect(plugin).not.toContain('/dev/tty');
     expect(plugin).not.toContain(']9;');
     expect(plugin).toContain('export default');

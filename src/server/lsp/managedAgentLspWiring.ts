@@ -59,10 +59,7 @@ export function createManagedAgentLspWiring(options: ManagedAgentLspWiringOption
         session.agent === 'claude'
           ? writeClaudeConfig(dir, envFilePath)
           : { envFilePath };
-      // buildAgentCommand still receives the tmuxSession — it becomes the
-      // DESK_TMUX_SESSION env value the agent self-reports with, until the
-      // DESK_SESSION_ID rename window. Tracking keys by the durable identity.
-      const command = buildAgentCommand(session, session.cwd, homedir(), session.tmuxSession, launchConfig);
+      const command = buildAgentCommand(session, session.cwd, homedir(), session.sessionId, launchConfig);
       tracked.set(session.sessionId, { token: binding.token, dir });
       return {
         session: { ...session, command },

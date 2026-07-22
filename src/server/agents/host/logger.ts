@@ -17,12 +17,12 @@ export class AgentHostLogger {
   constructor(private readonly level: AgentHostLogLevel = 'info') {}
 
   /** Print the static pane banner so a `tmux attach`er sees what they're looking at. */
-  banner(env: { DESK_TMUX_SESSION: string; DESK_AGENT: string; DESK_SERVER_URL?: string }): void {
+  banner(env: { DESK_SESSION_ID: string; DESK_AGENT: string; DESK_SERVER_URL?: string }): void {
     process.stdout.write(
       [
         '═══════════════════════════════════════════════════════════════════',
         'desk agent-host — native UI mode adapter',
-        `  session : ${env.DESK_TMUX_SESSION}`,
+        `  session : ${env.DESK_SESSION_ID}`,
         `  agent   : ${env.DESK_AGENT}`,
         env.DESK_SERVER_URL ? `  server  : ${env.DESK_SERVER_URL}` : '',
         '  view this session in the desk UI; logs follow.',

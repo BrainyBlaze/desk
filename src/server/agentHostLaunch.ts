@@ -21,7 +21,7 @@ export function rewriteNativeLaunchCommand(spec: SessionSpec, context: NativeLau
     return spec;
   }
   const env = [
-    `DESK_TMUX_SESSION=${shellQuote(spec.tmuxSession)}`,
+    `DESK_SESSION_ID=${shellQuote(spec.sessionId)}`,
     `DESK_AGENT=${shellQuote(spec.agent ?? '')}`,
     ...(spec.resume ? [`DESK_AGENT_RESUME=${shellQuote(spec.resume)}`] : []),
     `DESK_AGENT_BYPASS=${shellQuote(spec.bypassPermissions ? '1' : '0')}`,

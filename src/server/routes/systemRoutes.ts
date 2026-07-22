@@ -155,10 +155,10 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
       const body = await readJsonBody(req);
       const normalized = normalizeAgentEventForApi(body);
       const session = normalized.event.session;
-      // TRANSITIONAL: agents self-report DESK_TMUX_SESSION until the env
-      // rename; the tracker keys sessionId. The channels engine, signal
-      // fanout, and resume capture below keep the legacy key until their own
-      // flip steps.
+      // Mixed-era normalize: agents launched before the DESK_SESSION_ID
+      // rename self-report the tmux name until restarted; new launches report
+      // the sessionId (identity here). The channels engine, signal fanout,
+      // and resume capture below keep the legacy key until their own flips.
       const sessionId = nativeIdForTmuxSession(session);
       if (normalized.attentionKind) {
         attentionTracker.raise(sessionId);
