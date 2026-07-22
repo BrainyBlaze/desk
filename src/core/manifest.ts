@@ -1,5 +1,5 @@
 import YAML from 'yaml';
-import { checkGlobalUniqueness, isValidSessionId, validateManifestMigration } from '../shared/migration/index.js';
+import { checkGlobalUniqueness, isValidSessionId } from '../shared/migration/index.js';
 import { shellQuote } from '../shared/shell.js';
 import { isSupportedAgent } from './types.js';
 import type {
@@ -13,15 +13,12 @@ import type {
 } from './types.js';
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
 import {
-  buildManifestMigration,
   collectSessions,
-  deskManifestToEntries,
   type LegacyDeskGroup,
   type LegacyDeskManifest,
   type LegacyDeskSession
 } from './sessionIdentity.js';
 
-const DEFAULT_NAMESPACE = 'agentdesk';
 const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
 
 export class ManifestValidationError extends Error {
@@ -131,21 +128,9 @@ export function buildSessionSpecs(
   manifest: DeskManifest,
   options: BuildSessionOptions
 ): SessionSpec[] {
-  const namespace = options.namespace ?? DEFAULT_NAMESPACE;
-
   const rootSpecs = manifest.groups.flatMap((group) =>
     group.sessions.map((session) => {
       const cwd = expandHome(session.cwd ?? options.homeDir, options.homeDir);
-      const tmuxSession =
-        session.tmuxSession ??
-        [
-          namespace,
-          slugPart(group.id),
-          slugPart(session.name),
-          session.resume ? session.resume.slice(0, 8) : shortHash(sessionHashSeed(session, cwd))
-        ]
-          .filter(Boolean)
-          .join('-');
       const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
       const command =
         session.command ?? buildAgentCommand(session, cwd, options.homeDir, session.sessionId, options.agentMcp?.(session, cwd));
@@ -162,7 +147,7 @@ export function buildSessionSpecs(
         resume: session.resume,
         bypassPermissions: session.bypassPermissions,
         ...(hasCustomCommand ? { customCommand: true } : {}),
-        tmuxSession,
+        sessionId: session.sessionId,
         command,
         uiMode: resolveSessionUiMode(session),
         ...(session.model ? { model: session.model } : {})
@@ -174,7 +159,6 @@ export function buildSessionSpecs(
     project.groups.flatMap((group) =>
       group.sessions.map((session) =>
         buildProjectSessionSpec({
-          namespace,
           project,
           group,
           session,
@@ -185,25 +169,7 @@ export function buildSessionSpecs(
     )
   );
 
-  // Attach the atch-native durable sessionId (§10), preserved or minted in the
-  // same canonical traversal order (root groups, then projects) that
-  // buildManifestMigration uses — so entry[i] lines up with spec[i].
-  const specs = [...rootSpecs, ...projectSpecs];
-  const migration = buildManifestMigration(manifest);
-  const validation = validateManifestMigration(deskManifestToEntries(manifest), migration);
-  if (!validation.ok) {
-    if (validation.reason === 'sessionid-grammar') {
-      throw new ManifestValidationError(`sessionId "${validation.value}" violates the identity grammar`);
-    }
-    if (validation.reason === 'sessionid-collision') {
-      throw new ManifestValidationError(`duplicate sessionId "${validation.value}"`);
-    }
-    throw new ManifestValidationError(`duplicate tmuxSession "${validation.value}"`);
-  }
-  if (migration.entries.length !== specs.length) {
-    throw new ManifestValidationError(`sessionId transform produced ${migration.entries.length} ids for ${specs.length} sessions`);
-  }
-  return specs.map((spec, i) => ({ ...spec, sessionId: migration.entries[i].sessionId }));
+  return [...rootSpecs, ...projectSpecs];
 }
 
 export function expandHome(path: string, homeDir: string): string {
@@ -268,14 +234,12 @@ export function resolveSessionUiMode(session: Pick<DeskSession, 'agent' | 'comma
 }
 
 function buildProjectSessionSpec({
-  namespace,
   project,
   group,
   session,
   homeDir,
   agentMcp
 }: {
-  namespace: string;
   project: DeskProject;
   group: DeskGroup;
   session: DeskSession;
@@ -283,17 +247,6 @@ function buildProjectSessionSpec({
   agentMcp?: (session: DeskSession, cwd: string) => AgentMcpLaunchConfig | undefined;
 }): SessionSpec {
   const cwd = expandHome(session.cwd ?? project.cwd, homeDir);
-  const tmuxSession =
-    session.tmuxSession ??
-    [
-      namespace,
-      slugPart(project.id),
-      slugPart(group.id),
-      slugPart(session.name),
-      session.resume ? session.resume.slice(0, 8) : shortHash(sessionHashSeed(session, cwd))
-    ]
-      .filter(Boolean)
-      .join('-');
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
   const command = session.command ?? buildAgentCommand(session, cwd, homeDir, session.sessionId, agentMcp?.(session, cwd));
 
@@ -313,7 +266,6 @@ function buildProjectSessionSpec({
     resume: session.resume,
     bypassPermissions: session.bypassPermissions,
     ...(hasCustomCommand ? { customCommand: true } : {}),
-    tmuxSession,
     sessionId: session.sessionId,
     command,
     uiMode: resolveSessionUiMode(session),
@@ -323,10 +275,8 @@ function buildProjectSessionSpec({
 
 /**
  * Turn-complete / approval notifications: agents are launched so their TUIs
- * emit a terminal BEL Desk can capture both attached (PTY sniff) and
- * unattached (tmux bell-flag latch). BEL is chosen over OSC 9 because tmux
- * passthrough only delivers to attached clients — background sessions would
- * be silent. Applies to newly started/restarted sessions.
+ * emit a terminal BEL Desk can capture from the authoritative terminal stream.
+ * Applies to newly started/restarted sessions.
  */
 const CODEX_NOTIFICATION_FLAGS =
   '-c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always';
@@ -465,30 +415,7 @@ function shellDoubleQuoteHomePath(pathAfterHome: string): string {
   return `"$HOME${pathAfterHome.replace(/(["\\`$])/g, '\\$1')}"`;
 }
 
-function sessionHashSeed(session: DeskSession, cwd: string): string {
-  if (session.command) {
-    return session.command;
-  }
-  return [session.agent ?? 'command', session.name, cwd, session.bypassPermissions === false ? 'ask' : 'allow'].join('|');
-}
-
 // shellQuote now lives in ../shared/shell.ts (single audited copy).
-
-function slugPart(value: string): string {
-  return value
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function shortHash(value: string): string {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0').slice(0, 8);
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

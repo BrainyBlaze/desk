@@ -107,7 +107,7 @@ describe('desk config', () => {
     expect(reparsed.groups[0].sessions[0].uiMode).toBe('native');
   });
 
-  it('preserves uiMode and the pinned tmux session name across edits', () => {
+  it('preserves uiMode across edits', () => {
     const manifest = addSessionToManifest(createEmptyManifest(), {
       groupId: 'research',
       groupLabel: 'Research',
@@ -115,8 +115,7 @@ describe('desk config', () => {
         name: 'chat-agent',
         cwd: '~/projects/sample',
         agent: 'claude',
-        uiMode: 'native',
-        tmuxSession: 'agentdesk-research-chat-agent-pinned00'
+        uiMode: 'native'
       }
     });
 
@@ -134,7 +133,6 @@ describe('desk config', () => {
 
     const session = edited.groups[0].sessions[0];
     expect(session.uiMode).toBe('native');
-    expect(session.tmuxSession).toBe('agentdesk-research-chat-agent-pinned00');
     expect(session.bypassPermissions).toBe(true);
   });
 
@@ -303,7 +301,7 @@ groups:
             id: 'alpha',
             cwd: '~/projects/alpha',
             groups: [
-              { id: 'main', sessions: [{ name: 'agent', agent: 'codex', resume: 'abc' }] },
+              { id: 'main', sessions: [{ name: 'agent', sessionId: 'agent', agent: 'codex', resume: 'abc' }] },
               { id: 'next', sessions: [] }
             ]
           }
@@ -322,10 +320,10 @@ groups:
     expect(updated.projects?.[0]?.groups[1]?.sessions).toEqual([
       {
         name: 'agent',
+        sessionId: 'agent',
         agent: 'codex',
         resume: 'abc',
-        cwd: `${HOME}/projects/alpha`,
-        tmuxSession: 'agentdesk-alpha-main-agent-abc'
+        cwd: `${HOME}/projects/alpha`
       }
     ]);
   });

@@ -10,5 +10,4 @@ export {
   writeManifestFile
 } from './core/config.js';
 export { buildSessionSpecs, parseDeskManifest } from './core/manifest.js';
-export { createAttachArgv, createCaptureArgv, createTmuxPlan } from './core/tmux.js';
-export type { DeskGroup, DeskManifest, DeskSession, SessionSpec, TmuxPlanAction } from './core/types.js';
+export type { DeskGroup, DeskManifest, DeskSession, SessionPlanAction, SessionSpec } from './core/types.js';

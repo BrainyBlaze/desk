@@ -58,6 +58,22 @@ groups:
 `)
     ).toThrow(/duplicate sessionId/);
   });
+
+  it('builds runtime specs with sessionId as the only lifecycle identity', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: alpha
+        sessionId: alpha
+        cwd: /workspace
+        command: bash
+`);
+
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
+    expect(spec.sessionId).toBe('alpha');
+    expect(spec).not.toHaveProperty('tmuxSession');
+  });
 });
 
 describe('desk manifest ui mode', () => {
@@ -76,7 +92,7 @@ groups:
         cwd: ~/projects/alpha
         agent: codex
 `);
-    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'native']);
   });
 
@@ -95,7 +111,7 @@ groups:
         cwd: ~/projects/alpha
         command: htop
 `);
-    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(specs.map((spec) => spec.uiMode)).toEqual(['terminal', 'terminal']);
   });
 
@@ -111,7 +127,7 @@ groups:
         uiMode: native
         model: zai-coding-plan/glm-5.2
 `);
-    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(spec.model).toBe('zai-coding-plan/glm-5.2');
   });
 
@@ -126,7 +142,7 @@ groups:
         agent: claude
         uiMode: native
 `);
-    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(spec.command).toBe("cd '/workspace/projects/alpha' && exec desk agent-host");
   });
 
@@ -276,10 +292,7 @@ groups:
         resume: 00000000-0000-7000-8000-000000000002
 `);
 
-    const specs = buildSessionSpecs(manifest, {
-      homeDir: '/workspace',
-      namespace: 'agentdesk'
-    });
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
 
     expect(specs).toEqual([
       {
@@ -293,7 +306,6 @@ groups:
         groupLayout: undefined,
         groupOrder: undefined,
         order: undefined,
-        tmuxSession: 'agentdesk-group-1-alpha-00000000',
         sessionId: 'alpha',
         command: "cd '/workspace/projects/alpha' && exec desk agent-host",
         uiMode: 'native'
@@ -309,7 +321,6 @@ groups:
         groupLayout: undefined,
         groupOrder: undefined,
         order: undefined,
-        tmuxSession: 'agentdesk-group-1-project-mu-00000000',
         sessionId: 'project-mu',
         command: "cd '/workspace/projects/project-μ' && exec desk agent-host",
         uiMode: 'native'

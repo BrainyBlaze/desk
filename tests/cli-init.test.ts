@@ -7,12 +7,12 @@ import { main } from '../src/cli/main.js';
 // `desk init` must never silently destroy an existing config (finding C1). Driven
 // in-process via main() with console spies (a subprocess-per-case was flaky under
 // full-suite parallel load — many concurrent tsx spawns).
-function runInit(args: string[]): { code: number; stderr: string } {
+async function runInit(args: string[]): Promise<{ code: number; stderr: string }> {
   const errors: string[] = [];
   const errSpy = vi.spyOn(console, 'error').mockImplementation((line = '') => errors.push(String(line)));
   const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   try {
-    return { code: main(['init', ...args]), stderr: errors.join('\n') };
+    return { code: await main(['init', ...args]), stderr: errors.join('\n') };
   } finally {
     errSpy.mockRestore();
     logSpy.mockRestore();
@@ -34,9 +34,9 @@ describe('desk init', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('refuses to overwrite an existing config and leaves it untouched', () => {
+  it('refuses to overwrite an existing config and leaves it untouched', async () => {
     writeFileSync(manifest, POPULATED);
-    const res = runInit(['--file', manifest]);
+    const res = await runInit(['--file', manifest]);
     expect(res.code).toBe(1);
     expect(res.stderr).toContain('already exists');
     // The original config is intact — no data loss.
@@ -44,16 +44,16 @@ describe('desk init', () => {
     expect(existsSync(`${manifest}.bak`)).toBe(false);
   });
 
-  it('creates a fresh config when none exists', () => {
-    const res = runInit(['--file', manifest]);
+  it('creates a fresh config when none exists', async () => {
+    const res = await runInit(['--file', manifest]);
     expect(res.code).toBe(0);
     expect(existsSync(manifest)).toBe(true);
     expect(readFileSync(manifest, 'utf8')).not.toContain('id: g');
   });
 
-  it('overwrites with --force but keeps a .bak of the previous config', () => {
+  it('overwrites with --force but keeps a .bak of the previous config', async () => {
     writeFileSync(manifest, POPULATED);
-    const res = runInit(['--file', manifest, '--force']);
+    const res = await runInit(['--file', manifest, '--force']);
     expect(res.code).toBe(0);
     // New config is empty; the old one is recoverable from .bak.
     expect(readFileSync(manifest, 'utf8')).not.toContain('id: g');

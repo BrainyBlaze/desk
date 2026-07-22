@@ -77,11 +77,6 @@ export interface DeskSettings {
   lsp?: DeskLspSettings;
   /** sidebar widths in px, keyed by subsystem (agents/editor/git/notes/…) */
   sidebars?: Record<string, number>;
-  /** desk-owned tmux session options applied at launch */
-  tmux?: {
-    /** 'off' drops tmux's status line in desk-launched sessions (the cell tab already names the session). YAML parses a bare off as false — both forms count. */
-    statusLine?: 'on' | 'off' | boolean;
-  };
 }
 
 export interface DeskManifest {
@@ -114,9 +109,7 @@ export interface DeskSession {
   resume?: string;
   bypassPermissions?: boolean;
   command?: string;
-  /** Temporary migration read-source. Runtime manifests reject this key. */
-  tmuxSession?: string;
-  /** atch-native durable session identity (§10), globally unique per user. */
+  /** Durable session identity (§10), globally unique per user. */
   sessionId: string;
   order?: number;
   uiMode?: DeskSessionUiMode;
@@ -143,8 +136,7 @@ export interface SessionSpec {
   resume?: string;
   bypassPermissions?: boolean;
   customCommand?: boolean;
-  tmuxSession: string;
-  /** atch-native durable session identity (§10). */
+  /** Durable lifecycle identity and atch socket key (§10). */
   sessionId: string;
   command: string;
   uiMode: DeskSessionUiMode;
@@ -158,15 +150,13 @@ export interface AgentMcpLaunchConfig {
 
 export interface BuildSessionOptions {
   homeDir: string;
-  namespace?: string;
   agentMcp?: (session: DeskSession, cwd: string) => AgentMcpLaunchConfig | undefined;
 }
 
-export type TmuxPlanActionType = 'start' | 'preserve';
+export type SessionPlanActionType = 'start' | 'preserve';
 
-export interface TmuxPlanAction {
-  type: TmuxPlanActionType;
+export interface SessionPlanAction {
+  type: SessionPlanActionType;
   session: SessionSpec;
-  argv: string[];
   opencodeLaunchResumeId?: string;
 }

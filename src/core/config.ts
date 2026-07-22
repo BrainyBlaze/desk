@@ -566,11 +566,6 @@ function replaceSession(
     }
     replaced = true;
     const merged: DeskSession = { ...nextSession, sessionId: session.sessionId };
-    // Preserve the pinned tmux session name unless the edit provides one:
-    // dropping it would re-derive the name and orphan the running session.
-    if (merged.tmuxSession === undefined && session.tmuxSession !== undefined) {
-      merged.tmuxSession = session.tmuxSession;
-    }
     // A persisted sessionId is the durable identity, not an editable field.
     // Preserve it even if a stale or forged edit payload supplies another id.
     merged.sessionId = session.sessionId;
@@ -620,8 +615,7 @@ function findMoveSourceSpec(manifest: DeskManifest, options: MoveProjectSessionO
 function materializeMovedSession(session: DeskSession, sourceSpec: SessionSpec | undefined): DeskSession {
   return {
     ...session,
-    cwd: session.cwd ?? sourceSpec?.cwd,
-    tmuxSession: session.tmuxSession ?? sourceSpec?.tmuxSession
+    cwd: session.cwd ?? sourceSpec?.cwd
   };
 }
 

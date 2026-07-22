@@ -12,7 +12,11 @@
 import type { DeskGroup, DeskManifest, DeskProject, DeskSession, DeskSettings } from './types.js';
 import { migrateManifestSessions, type LegacySessionEntry, type ManifestMigration } from '../shared/migration/index.js';
 
-export type LegacyDeskSession = Omit<DeskSession, 'sessionId'> & { sessionId?: string };
+export type LegacyDeskSession = Omit<DeskSession, 'sessionId'> & {
+  sessionId?: string;
+  /** Migration-only source key; runtime manifests reject it. */
+  tmuxSession?: string;
+};
 export type LegacyDeskGroup = Omit<DeskGroup, 'sessions'> & { sessions: LegacyDeskSession[] };
 export type LegacyDeskProject = Omit<DeskProject, 'groups'> & { groups: LegacyDeskGroup[] };
 export interface LegacyDeskManifest {
