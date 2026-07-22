@@ -4,7 +4,6 @@ import * as runner from '../../src/core/runner.js';
 import {
   atchCommandFor,
   createNativeChannelsTransport,
-  daemonHttpBase,
   drainNativeAttentionEvents,
   nativeSessionsEnabled,
   provisionNativeSession,
@@ -56,21 +55,6 @@ describe('atchCommandFor', () => {
 
   it('falls back to the login shell when there is no command', () => {
     expect(atchCommandFor({ ...baseSpec, command: '' })).toEqual(['sh', '-c', 'cd \'/tmp/work\' || exit 1\n"${SHELL:-bash}"']);
-  });
-});
-
-describe('daemonHttpBase', () => {
-  it('derives http from the ws daemon url', () => {
-    setEnv('DESK_DAEMON_URL', 'ws://127.0.0.1:5178');
-    expect(daemonHttpBase()).toBe('http://127.0.0.1:5178');
-  });
-  it('derives https from wss', () => {
-    setEnv('DESK_DAEMON_URL', 'wss://daemon.example:443');
-    expect(daemonHttpBase()).toBe('https://daemon.example:443');
-  });
-  it('defaults to the local daemon', () => {
-    setEnv('DESK_DAEMON_URL', undefined);
-    expect(daemonHttpBase()).toBe('http://127.0.0.1:5178');
   });
 });
 

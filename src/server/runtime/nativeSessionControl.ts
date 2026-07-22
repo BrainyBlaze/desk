@@ -9,21 +9,15 @@
 // never a silent no-op.
 
 import { statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
+import { daemonControl, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
 import { loadDeskCached, restartSession, runningSessionSet, startSession } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { shellQuote } from '../../shared/shell.js';
 
 export function nativeSessionsEnabled(): boolean {
   return process.env.DESK_ATCH_NATIVE === '1';
-}
-
-/** The daemon control-plane base (HTTP), derived from the WS DESK_DAEMON_URL. */
-export function daemonHttpBase(): string {
-  const raw = process.env.DESK_DAEMON_URL ?? 'ws://127.0.0.1:5178';
-  return raw.replace(/^ws(s?):\/\//, 'http$1://');
 }
 
 /**
@@ -40,43 +34,9 @@ export function atchCommandFor(spec: SessionSpec): string[] {
   return ['sh', '-c', `${cd}${run}`];
 }
 
-interface DaemonControlResult {
-  ok: boolean;
-  error?: string;
-  /** The daemon's parsed JSON response (present on ok for payload-bearing calls). */
-  body?: Record<string, unknown>;
-}
-
-async function daemonControl(path: string, payload: unknown): Promise<DaemonControlResult> {
-  const url = `${daemonHttpBase()}${path}`;
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10_000)
-    });
-    const text = await res.text();
-    let parsed: Record<string, unknown> = {};
-    try {
-      parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-    } catch {
-      // non-JSON body; fall through to the HTTP-status verdict below
-    }
-    if (res.ok && parsed.ok !== false) {
-      return { ok: true, body: parsed };
-    }
-    return { ok: false, error: typeof parsed.error === 'string' ? parsed.error : `terminal daemon returned HTTP ${res.status}` };
-  } catch (error) {
-    return { ok: false, error: `terminal daemon unreachable at ${url}: ${error instanceof Error ? error.message : String(error)}` };
-  }
-}
-
-/** Collapse a control call to its public {ok, error?} contract (no body leak). */
-async function toOkResult(call: Promise<DaemonControlResult>): Promise<{ ok: boolean; error?: string }> {
-  const result = await call;
-  return result.ok ? { ok: true } : { ok: false, error: result.error };
-}
+// HTTP transport lives in the shared daemonControlClient (one client for the
+// server wrapper here and the codex-lane core/CLI consumers, R8.4/R6.1-style
+// single audited copy). This module keeps only the session-level semantics.
 
 /** Provision (spawn + attach) a session's atch master via the daemon. */
 export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
