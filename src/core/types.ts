@@ -114,19 +114,18 @@ export interface DeskSession {
   resume?: string;
   bypassPermissions?: boolean;
   command?: string;
+  /** Temporary migration read-source. Runtime manifests reject this key. */
   tmuxSession?: string;
-  /**
-   * atch-native durable session identity (§10). Preserved once assigned; legacy
-   * entries without one receive a name-derived id from the migration transform.
-   * Optional during the transitional cutover; it becomes the sole identity (and
-   * tmuxSession is dropped) at the Phase 5 legacy deletion.
-   */
-  sessionId?: string;
+  /** atch-native durable session identity (§10), globally unique per user. */
+  sessionId: string;
   order?: number;
   uiMode?: DeskSessionUiMode;
   /** Runtime model override (provider/model string, driver-interpreted). NOT part of session identity. */
   model?: string;
 }
+
+/** Create/edit payload. The config boundary allocates or preserves sessionId. */
+export type DeskSessionDraft = Omit<DeskSession, 'sessionId'> & { sessionId?: string };
 
 export interface SessionSpec {
   groupId: string;
@@ -145,8 +144,8 @@ export interface SessionSpec {
   bypassPermissions?: boolean;
   customCommand?: boolean;
   tmuxSession: string;
-  /** atch-native durable session identity (§10); optional during the transitional cutover. */
-  sessionId?: string;
+  /** atch-native durable session identity (§10). */
+  sessionId: string;
   command: string;
   uiMode: DeskSessionUiMode;
   model?: string;

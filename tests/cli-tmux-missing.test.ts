@@ -27,6 +27,7 @@ describe('desk CLI without tmux on PATH', () => {
       - name: alpha
         cwd: /tmp
         command: bash
+        sessionId: alpha
 `
     );
     vi.stubEnv('PATH', '');

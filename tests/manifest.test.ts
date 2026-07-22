@@ -3,7 +3,62 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildSessionSpecs, ManifestValidationError, parseDeskManifest } from '../src/core/manifest';
+import {
+  buildSessionSpecs,
+  ManifestValidationError,
+  parseDeskManifest,
+  parseLegacyDeskManifest
+} from '../src/core/manifest';
+
+describe('desk manifest native identity boundary', () => {
+  it('rejects a legacy session at the runtime parser boundary', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: legacy
+        cwd: /workspace
+        command: bash
+        tmuxSession: agentdesk-main-legacy
+`)
+    ).toThrow(/sessionId/);
+  });
+
+  it('accepts legacy identity only through the migration parser', () => {
+    const legacy = parseLegacyDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: legacy
+        cwd: /workspace
+        command: bash
+        tmuxSession: agentdesk-main-legacy
+`);
+    expect(legacy.groups[0].sessions[0]).toMatchObject({
+      name: 'legacy',
+      tmuxSession: 'agentdesk-main-legacy'
+    });
+  });
+
+  it('rejects duplicate runtime sessionIds before building specs', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: one
+        sessionId: same-id
+        cwd: /workspace
+        command: bash
+      - name: two
+        sessionId: same-id
+        cwd: /workspace
+        command: bash
+`)
+    ).toThrow(/duplicate sessionId/);
+  });
+});
 
 describe('desk manifest ui mode', () => {
   it('defaults SDK-backed agent sessions to native ui mode when none is declared', () => {
@@ -12,10 +67,12 @@ groups:
   - id: group-1
     sessions:
       - name: chat
+        sessionId: chat
         cwd: ~/projects/alpha
         agent: claude
         uiMode: native
       - name: plain
+        sessionId: plain
         cwd: ~/projects/alpha
         agent: codex
 `);
@@ -29,10 +86,12 @@ groups:
   - id: group-1
     sessions:
       - name: old-school
+        sessionId: old-school
         cwd: ~/projects/alpha
         agent: claude
         uiMode: terminal
       - name: scripted
+        sessionId: scripted
         cwd: ~/projects/alpha
         command: htop
 `);
@@ -46,6 +105,7 @@ groups:
   - id: group-1
     sessions:
       - name: chat
+        sessionId: chat
         cwd: ~/projects/alpha
         agent: opencode
         uiMode: native
@@ -61,6 +121,7 @@ groups:
   - id: group-1
     sessions:
       - name: chat
+        sessionId: chat
         cwd: ~/projects/alpha
         agent: claude
         uiMode: native
@@ -131,6 +192,7 @@ groups:
   - id: group-1
     sessions:
       - name: claude
+        sessionId: claude
         cwd: ${cwd}
         agent: claude
         resume: ${resume}
@@ -203,10 +265,12 @@ groups:
     label: Research
     sessions:
       - name: alpha
+        sessionId: alpha
         cwd: ~/projects/alpha
         agent: codex
         resume: 00000000-0000-7000-8000-000000000001
       - name: project-mu
+        sessionId: project-mu
         cwd: ~/projects/project-μ
         agent: codex
         resume: 00000000-0000-7000-8000-000000000002
@@ -254,7 +318,7 @@ groups:
   });
 
   it('fails closed on invalid or duplicate persisted sessionIds', () => {
-    const invalid = parseDeskManifest(`
+    expect(() => parseDeskManifest(`
 groups:
   - id: group-1
     sessions:
@@ -262,10 +326,9 @@ groups:
         cwd: /workspace
         command: bash
         sessionId: bad/id
-`);
-    expect(() => buildSessionSpecs(invalid, { homeDir: '/workspace' })).toThrow(/sessionId "bad\/id" violates the identity grammar/);
+`)).toThrow(/sessionId/);
 
-    const nonString = parseDeskManifest(`
+    expect(() => parseDeskManifest(`
 groups:
   - id: group-1
     sessions:
@@ -273,10 +336,9 @@ groups:
         cwd: /workspace
         command: bash
         sessionId: true
-`);
-    expect(() => buildSessionSpecs(nonString, { homeDir: '/workspace' })).toThrow(/sessionId "true" violates the identity grammar/);
+`)).toThrow(/sessionId/);
 
-    const duplicate = parseDeskManifest(`
+    expect(() => parseDeskManifest(`
 groups:
   - id: group-1
     sessions:
@@ -288,8 +350,7 @@ groups:
         cwd: /workspace
         command: bash
         sessionId: same-id
-`);
-    expect(() => buildSessionSpecs(duplicate, { homeDir: '/workspace' })).toThrow(/duplicate sessionId "same-id"/);
+`)).toThrow(/duplicate sessionId "same-id"/);
   });
 
   it('requires session cwd and either a command or a supported agent', () => {
@@ -311,6 +372,7 @@ groups:
   - id: group-1
     sessions:
       - name: beta
+        sessionId: beta
         command: cd '/workspace/projects/beta' && codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume 'abc'
 `);
 
@@ -330,17 +392,21 @@ projects:
       - id: main
         sessions:
           - name: bash
+            sessionId: bash-x
             agent: bash
           - name: claude
+            sessionId: claude
             agent: claude
             bypassPermissions: true
             resume: abc123
             uiMode: terminal
           - name: codex
+            sessionId: codex
             agent: codex
             bypassPermissions: true
             uiMode: terminal
           - name: opencode
+            sessionId: opencode
             agent: opencode
             resume: ses_12a31855dffeHTCs6tcfOmsddP
             uiMode: terminal
@@ -442,6 +508,7 @@ projects:
       - id: main
         sessions:
           - name: oc-yolo
+            sessionId: oc-yolo
             agent: opencode
             uiMode: terminal
             bypassPermissions: true
@@ -458,6 +525,7 @@ projects:
       - id: main
         sessions:
           - name: oc-gated
+            sessionId: oc-gated
             agent: opencode
             uiMode: terminal
             bypassPermissions: false
@@ -479,6 +547,7 @@ projects:
       - id: main
         sessions:
           - name: opencode
+            sessionId: opencode
             agent: opencode
             uiMode: terminal
 `),
@@ -496,10 +565,12 @@ groups:
   - id: group-1
     sessions:
       - name: claude
+        sessionId: claude
         cwd: ~/projects/sample
         agent: claude
         uiMode: terminal
       - name: codex
+        sessionId: codex
         cwd: ~/projects/sample
         agent: codex
         resume: abc123
@@ -537,6 +608,7 @@ projects:
       - id: main
         sessions:
           - name: claude
+            sessionId: claude
             agent: claude
             bypassPermissions: true
             resume: 'a$(id)b'

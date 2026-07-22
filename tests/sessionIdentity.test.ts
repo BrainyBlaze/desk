@@ -108,6 +108,7 @@ describe('sessionIdentity — manifest glue (§10)', () => {
       }
     }
     expect(appliedSessions.map((s) => s.sessionId)).toEqual(['claude', 'server', 'claude-2', 'fresh-session']);
+    expect(appliedSessions.every((s) => !('tmuxSession' in s))).toBe(true);
 
     // Non-mutating: the original manifest is untouched.
     expect(original.groups[0].sessions[0].sessionId).toBeUndefined();

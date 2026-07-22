@@ -53,6 +53,7 @@ projects:
       - id: main
         sessions:
           - name: custom
+            sessionId: custom
             command: printf custom
             agent: opencode
             uiMode: terminal
@@ -174,6 +175,7 @@ projects:
       - id: main
         sessions:
           - name: custom
+            sessionId: custom
             command: printf custom
             agent: opencode
             uiMode: terminal
@@ -221,6 +223,7 @@ projects:
       - id: main
         sessions:
           - name: opencode
+            sessionId: opencode
             agent: opencode
             uiMode: terminal
 `),
@@ -292,6 +295,7 @@ projects:
       - id: main
         sessions:
           - name: opencode
+            sessionId: opencode
             agent: opencode
             uiMode: terminal
 `),

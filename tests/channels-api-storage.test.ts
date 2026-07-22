@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   handleChannelsRequest,
   initChannelsRuntime,
@@ -42,11 +42,16 @@ describe('channels storage API endpoints', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'desk-api-storage-'));
+    vi.stubEnv('HOME', home);
+    const manifestDir = join(home, '.config', 'desk');
+    mkdirSync(manifestDir, { recursive: true });
+    writeFileSync(join(manifestDir, 'desk.yml'), 'groups: []\n');
     initChannelsRuntime({ home });
   });
 
   afterEach(() => {
     resetChannelsRuntime();
+    vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
 

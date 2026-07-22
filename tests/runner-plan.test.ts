@@ -14,6 +14,7 @@ projects:
       - id: g
         sessions:
           - name: n
+            sessionId: native-session
             agent: claude
 `),
     { homeDir: '/tmp' }

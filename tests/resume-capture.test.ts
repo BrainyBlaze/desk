@@ -26,9 +26,9 @@ projects:
     groups:
       - id: main
         sessions:
-          - { name: fresh, agent: codex, uiMode: terminal }
-          - { name: resumed, agent: codex, resume: 11111111-aaaa-7000-8000-000000000001, uiMode: terminal }
-          - { name: open, agent: opencode, uiMode: terminal }
+          - { name: fresh, sessionId: fresh, agent: codex, uiMode: terminal }
+          - { name: resumed, sessionId: resumed, agent: codex, resume: 11111111-aaaa-7000-8000-000000000001, uiMode: terminal }
+          - { name: open, sessionId: open, agent: opencode, uiMode: terminal }
 `;
 
 const originalEnv = { ...process.env };
@@ -231,8 +231,8 @@ projects:
     groups:
       - id: main
         sessions:
-          - { name: existing, agent: opencode, uiMode: terminal }
-          - { name: concurrent, agent: opencode, uiMode: terminal }
+          - { name: existing, sessionId: existing, agent: opencode, uiMode: terminal }
+          - { name: concurrent, sessionId: concurrent, agent: opencode, uiMode: terminal }
 `),
       { homeDir: root }
     );

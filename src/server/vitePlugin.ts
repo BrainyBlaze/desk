@@ -4,6 +4,7 @@ import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
 import { handleChannelsRequest } from './channelsApi.js';
 import { createDeskApiMiddleware } from './deskApiRouter.js';
 import type { DeskApiHost } from './deskApiTypes.js';
+import { ensureProductionCutoverMigration } from './cutoverStoreMigration.js';
 import { installDeskRuntime } from './deskRuntime.js';
 import { createDeskServices } from './deskServices.js';
 import { createDisposerRegistry } from './disposerRegistry.js';
@@ -31,6 +32,8 @@ export {
 
 export interface InstallDeskApiOptions {
   plugins?: DeskPlugin[];
+  /** Test seam for proving the first-start migration blocks all service setup. */
+  runCutoverMigration?: () => void;
 }
 
 /**
@@ -39,6 +42,7 @@ export interface InstallDeskApiOptions {
  * owning modules; this function only wires those boundaries together.
  */
 export function installDeskApi(host: DeskApiHost, options: InstallDeskApiOptions = {}): void {
+  (options.runCutoverMigration ?? ensureProductionCutoverMigration)();
   const plugins = options.plugins ?? [];
   const services = createDeskServices(host.httpServer);
   const disposers = createDisposerRegistry();
@@ -79,7 +83,13 @@ export function deskApiPlugin(options: InstallDeskApiOptions = {}): Plugin {
     options.plugins ?? (await loadPluginsFromEnv());
   return {
     name: 'desk-api',
-    configureServer: async (server) => installDeskApi(toHost(server), { plugins: await resolvePlugins() }),
-    configurePreviewServer: async (server) => installDeskApi(toHost(server), { plugins: await resolvePlugins() })
+    configureServer: async (server) => installDeskApi(toHost(server), {
+      plugins: await resolvePlugins(),
+      runCutoverMigration: options.runCutoverMigration
+    }),
+    configurePreviewServer: async (server) => installDeskApi(toHost(server), {
+      plugins: await resolvePlugins(),
+      runCutoverMigration: options.runCutoverMigration
+    })
   };
 }

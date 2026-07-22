@@ -12,14 +12,16 @@ import {
   markSeedCommitted,
   migrateManifestToCanary,
   migratePausedStoreFile,
+  ensureProductionCutoverMigration,
   partitionSeedForDelivery,
   planDurabilityMigration,
+  readLegacyManifestFile,
   readSeedJournalForConsumption,
   runCanaryMigration,
   writeDurabilitySeedJournal
 } from '../src/server/cutoverStoreMigration.js';
 import { readManifestFile, writeManifestFile } from '../src/core/config.js';
-import type { DeskManifest } from '../src/core/types.js';
+import type { LegacyDeskManifest } from '../src/core/sessionIdentity.js';
 
 describe('cutover store migration — paused store (§10)', () => {
   let src: string;
@@ -100,7 +102,7 @@ describe('cutover store migration — canary manifest write (§10)', () => {
   it('persists a sessionId-bearing manifest to the canary root, leaving the source read-only', () => {
     const srcPath = join(src, 'desk.yml');
     const dstPath = join(dst, 'canary-desk.yml');
-    const legacy: DeskManifest = {
+    const legacy: LegacyDeskManifest = {
       groups: [
         {
           id: 'g1',
@@ -121,7 +123,7 @@ describe('cutover store migration — canary manifest write (§10)', () => {
     expect(target.groups[0].sessions.map((s) => s.sessionId)).toEqual(['claude', 'server']);
 
     // Source manifest is untouched (no sessionId written back).
-    const source = readManifestFile(srcPath);
+    const source = readLegacyManifestFile(srcPath);
     expect(source.groups[0].sessions[0].sessionId).toBeUndefined();
   });
 });
@@ -330,7 +332,7 @@ describe('cutover store migration — canary orchestrator (§10)', () => {
   });
 
   const seed = (ghost = false): void => {
-    const manifest: DeskManifest = { groups: [{ id: 'g1', sessions: [{ name: 'Claude', cwd: '/w', agent: 'claude', tmuxSession: 'tmux-a' }] }] };
+    const manifest: LegacyDeskManifest = { groups: [{ id: 'g1', sessions: [{ name: 'Claude', cwd: '/w', agent: 'claude', tmuxSession: 'tmux-a' }] }] };
     writeManifestFile(join(src, 'desk.yml'), manifest);
     mkdirSync(join(src, '_engine'), { recursive: true });
     writeFileSync(join(src, '_engine', 'paused.json'), JSON.stringify({ version: 1, items: [{ tmuxSession: 'tmux-a', pausedAt: '2026-07-21T00:00:00.000Z' }] }));
@@ -358,7 +360,7 @@ describe('cutover store migration — canary orchestrator (§10)', () => {
     expect(existsSync(join(target, '_engine', 'migration', 'migration.done'))).toBe(true);
     expect(existsSync(join(backup, 'desk.yml'))).toBe(true);
     expect(existsSync(join(backup, '_engine', 'paused.json'))).toBe(true);
-    expect(readManifestFile(join(src, 'desk.yml')).groups[0].sessions[0].sessionId).toBeUndefined();
+    expect(readLegacyManifestFile(join(src, 'desk.yml')).groups[0].sessions[0].sessionId).toBeUndefined();
   });
 
   it('aborts at transform with restore-backup when an unmapped drop is not acknowledged', () => {
@@ -382,3 +384,129 @@ describe('cutover store migration — canary orchestrator (§10)', () => {
   });
 });
 
+describe('cutover store migration — production first-start gate (§10)', () => {
+  let root: string;
+  let manifestPath: string;
+  let channelsRoot: string;
+  let migrationRoot: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'desk-production-cutover-'));
+    manifestPath = join(root, '.config', 'desk', 'desk.yml');
+    channelsRoot = join(root, '.config', 'desk', 'channels');
+    migrationRoot = join(root, '.config', 'desk', '_migration', 'session-id-v1');
+    mkdirSync(join(channelsRoot, '_engine', 'queue', 'tmux-a'), { recursive: true });
+    mkdirSync(join(root, '.config', 'desk', 'tool-journal'), { recursive: true });
+    writeFileSync(
+      manifestPath,
+      `groups:\n  - id: main\n    sessions:\n      - name: Claude\n        cwd: /workspace\n        agent: claude\n        tmuxSession: tmux-a\n`
+    );
+    writeFileSync(
+      join(channelsRoot, '_engine', 'paused.json'),
+      `${JSON.stringify({ version: 1, items: [{ tmuxSession: 'tmux-a', pausedAt: '2026-07-22T00:00:00.000Z' }] })}\n`
+    );
+    writeFileSync(join(channelsRoot, '_engine', 'queue', 'tmux-a', '0000000001.json'), JSON.stringify({ prompt: 'resume me' }));
+    writeFileSync(
+      join(channelsRoot, '_engine', 'events.jsonl'),
+      `${JSON.stringify({ seq: 1, at: 'now', tmuxSession: 'tmux-a', kind: 'queued', channel: 'desk' })}\n`
+    );
+    mkdirSync(join(channelsRoot, 'desk', '_members'), { recursive: true });
+    writeFileSync(
+      join(channelsRoot, 'desk', '_members', 'claude.md'),
+      '---\nname: claude\ntype: claude-cli\ntmux: tmux-a\nrole: implementer\n---\n'
+    );
+    writeFileSync(
+      join(root, '.config', 'desk', 'resume-captures.json'),
+      `${JSON.stringify({ captures: [{ tmuxSession: 'tmux-a', agent: 'codex', cwd: '/workspace', sinceMs: 1, deadlineMs: 2 }] })}\n`
+    );
+    writeFileSync(join(root, '.config', 'desk', 'tool-journal', 'tmux-a.jsonl'), '{}\n');
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  const migrate = (overrides: Record<string, unknown> = {}) =>
+    ensureProductionCutoverMigration({
+      homeDir: root,
+      manifestPath,
+      channelsRoot,
+      migrationRoot,
+      availableBytes: () => 1024n * 1024n * 1024n,
+      ...overrides
+    });
+
+  it('refuses before staging when the legacy channels engine is live', () => {
+    mkdirSync(join(channelsRoot, '_engine'), { recursive: true });
+    writeFileSync(join(channelsRoot, '_engine', 'engine.pid'), '4242\n777\n');
+    expect(() =>
+      migrate({ processProbe: () => ({ alive: true, starttime: 777 }) })
+    ).toThrow(/legacy channels engine.*active/);
+    expect(existsSync(join(migrationRoot, 'stage'))).toBe(false);
+    expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(false);
+  });
+
+  it('stages, validates, selectively backs up, commits, and writes the marker last', () => {
+    const phases: string[] = [];
+    const result = migrate({ afterPhase: (phase: string) => phases.push(phase) });
+    expect(result.status).toBe('migrated');
+    expect(phases.at(-1)).toBe('done');
+
+    const session = readManifestFile(manifestPath).groups[0].sessions[0];
+    expect(session.sessionId).toBe('claude');
+    expect('tmuxSession' in session).toBe(false);
+    expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'paused.json'), 'utf8')).items[0].sessionId).toBe('claude');
+    expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'migration', 'seed-journal.json'), 'utf8')).items[0].sessionId).toBe('claude');
+    expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'events.jsonl'), 'utf8'))).toMatchObject({ sessionId: 'claude' });
+    expect(readFileSync(join(channelsRoot, 'desk', '_members', 'claude.md'), 'utf8')).toContain('session: claude');
+    expect(JSON.parse(readFileSync(join(root, '.config', 'desk', 'resume-captures.json'), 'utf8')).captures[0]).toMatchObject({ sessionId: 'claude' });
+    expect(existsSync(join(channelsRoot, '_engine', 'queue'))).toBe(false);
+    expect(existsSync(join(root, '.config', 'desk', 'tool-journal'))).toBe(false);
+    expect(existsSync(join(migrationRoot, 'backup', 'manifest', 'desk.yml'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'backup', 'channels', '_engine', 'queue', 'tmux-a', '0000000001.json'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'backup', 'channels', '_engine', 'events.jsonl'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'backup', 'channels', 'desk', '_members', 'claude.md'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'backup', 'resume-captures.json'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'backup', 'tool-journal', 'tmux-a.jsonl'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(true);
+  });
+
+  it('fails before staging when free space cannot hold transformed output', () => {
+    expect(() => migrate({ availableBytes: () => 0n })).toThrow(/free space/);
+    expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(false);
+    expect(readLegacyManifestFile(manifestPath).groups[0].sessions[0].tmuxSession).toBe('tmux-a');
+  });
+
+  it('detects source mutation after transform and refuses to commit', () => {
+    expect(() =>
+      migrate({
+        beforeSourceRecheck: () => writeFileSync(manifestPath, `${readFileSync(manifestPath, 'utf8')}# changed\n`)
+      })
+    ).toThrow(/source mutated/);
+    expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(false);
+    expect(readLegacyManifestFile(manifestPath).groups[0].sessions[0].tmuxSession).toBe('tmux-a');
+  });
+
+  it('resumes from a durable staged journal and remains idempotent after commit', () => {
+    expect(() =>
+      migrate({ afterPhase: (phase: string) => { if (phase === 'staged') throw new Error('simulated crash'); } })
+    ).toThrow(/simulated crash/);
+    expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(false);
+
+    expect(migrate().status).toBe('migrated');
+    expect(migrate().status).toBe('already-migrated');
+    expect(readManifestFile(manifestPath).groups[0].sessions[0].sessionId).toBe('claude');
+  });
+
+  it('accepts durable sessions added after the one-time migration', () => {
+    expect(migrate().status).toBe('migrated');
+    const manifest = readManifestFile(manifestPath);
+    manifest.groups[0].sessions.push({
+      name: 'Shell',
+      cwd: '/workspace',
+      command: 'bash',
+      sessionId: 'shell'
+    });
+    writeManifestFile(manifestPath, manifest);
+
+    expect(migrate()).toMatchObject({ status: 'already-migrated', sessions: 2 });
+  });
+});

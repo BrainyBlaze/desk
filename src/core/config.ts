@@ -4,9 +4,10 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
+import { mintSessionId } from '../shared/migration/index.js';
 import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
-import { buildManifestMigration, collectSessions } from './sessionIdentity.js';
-import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, SessionSpec } from './types.js';
+import { collectSessions } from './sessionIdentity.js';
+import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, DeskSessionDraft, SessionSpec } from './types.js';
 
 export class ManifestMutationError extends Error {
   readonly code = 'manifest-conflict';
@@ -25,7 +26,7 @@ export interface ResolveDefaultManifestPathOptions {
 export interface AddSessionOptions {
   groupId: string;
   groupLabel?: string;
-  session: DeskSession;
+  session: DeskSessionDraft;
 }
 
 export interface AddGroupOptions {
@@ -47,7 +48,7 @@ export interface AddProjectGroupOptions extends AddGroupOptions {
 export interface AddProjectSessionOptions {
   projectId: string;
   groupId: string;
-  session: DeskSession;
+  session: DeskSessionDraft;
 }
 
 export interface EditProjectOptions {
@@ -208,11 +209,9 @@ export function addSessionToManifest(manifest: DeskManifest, options: AddSession
     throw new ManifestMutationError(`session ${options.session.name} already exists in group ${options.groupId}`);
   }
 
-  const addedSession = { ...options.session };
+  const addedSession = materializeAddedSession(manifest, options.session);
   group.sessions.push(addedSession);
-  const next = { ...manifest, groups };
-  pinAddedSessionId(next, addedSession);
-  return next;
+  return { ...manifest, groups };
 }
 
 export function addGroupToManifest(manifest: DeskManifest, options: AddGroupOptions): DeskManifest {
@@ -283,11 +282,9 @@ export function addSessionToProjectManifest(manifest: DeskManifest, options: Add
   if (group.sessions.some((session) => session.name === options.session.name)) {
     throw new ManifestMutationError(`session ${options.session.name} already exists in group ${options.groupId}`);
   }
-  const addedSession = { ...options.session };
+  const addedSession = materializeAddedSession(manifest, options.session);
   group.sessions.push(addedSession);
-  const next = { ...manifest, projects };
-  pinAddedSessionId(next, addedSession);
-  return next;
+  return { ...manifest, projects };
 }
 
 export function editProjectInManifest(manifest: DeskManifest, options: EditProjectOptions): DeskManifest {
@@ -558,7 +555,7 @@ function updateTargetGroup(
 function replaceSession(
   sessions: DeskSession[],
   currentName: string,
-  nextSession: DeskSession,
+  nextSession: DeskSessionDraft,
   cwd?: string,
   clearResume?: boolean
 ): DeskSession[] {
@@ -568,7 +565,7 @@ function replaceSession(
       return session;
     }
     replaced = true;
-    const merged = { ...nextSession };
+    const merged: DeskSession = { ...nextSession, sessionId: session.sessionId };
     // Preserve the pinned tmux session name unless the edit provides one:
     // dropping it would re-derive the name and orphan the running session.
     if (merged.tmuxSession === undefined && session.tmuxSession !== undefined) {
@@ -576,9 +573,7 @@ function replaceSession(
     }
     // A persisted sessionId is the durable identity, not an editable field.
     // Preserve it even if a stale or forged edit payload supplies another id.
-    if (session.sessionId !== undefined) {
-      merged.sessionId = session.sessionId;
-    }
+    merged.sessionId = session.sessionId;
     // Preserve an async-captured resume id unless the edit explicitly clears it:
     // a form loaded before capture finished must not silently erase the id.
     if (merged.resume === undefined && session.resume !== undefined && clearResume !== true) {
@@ -630,15 +625,10 @@ function materializeMovedSession(session: DeskSession, sourceSpec: SessionSpec |
   };
 }
 
-function pinAddedSessionId(manifest: DeskManifest, addedSession: DeskSession): void {
-  // New identities are allocated internally; never trust a caller-supplied id.
-  delete addedSession.sessionId;
-  const index = collectSessions(manifest).indexOf(addedSession);
-  const migrated = buildManifestMigration(manifest).entries[index];
-  if (!migrated) {
-    throw new ManifestMutationError(`failed to assign sessionId for ${addedSession.name}`);
-  }
-  addedSession.sessionId = migrated.sessionId;
+function materializeAddedSession(manifest: DeskManifest, draft: DeskSessionDraft): DeskSession {
+  const { sessionId: _untrustedId, ...session } = draft;
+  const taken = new Set(collectSessions(manifest).map((existing) => existing.sessionId));
+  return { ...session, sessionId: mintSessionId(session.name, taken) };
 }
 
 function cwdMatches(candidate: string, target: string): boolean {

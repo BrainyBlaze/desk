@@ -26,7 +26,7 @@ import { createServeLaunch, findPackageRoot, parseServeOptions, runServeLaunch }
 import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
-import type { DeskSession } from '../core/types.js';
+import type { DeskSessionDraft } from '../core/types.js';
 
 const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
 
@@ -274,8 +274,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, manifestPath, dryRun, force, target, lines, options };
 }
 
-function readSessionOptions(options: Map<string, string>): DeskSession {
-  const session: DeskSession = {
+function readSessionOptions(options: Map<string, string>): DeskSessionDraft {
+  const session: DeskSessionDraft = {
     name: requireOption(options, 'name'),
     cwd: requireOption(options, 'cwd')
   };

@@ -13,6 +13,7 @@ groups:
         cwd: ~/projects/sample
         agent: codex
         resume: 00000000-0000-7000-8000-000000000000
+        sessionId: sample-agent
 `,
       new Set(['agentdesk-research-sample-agent-00000000']),
       {
@@ -75,6 +76,7 @@ groups:
         cwd: ~/projects/sample
         agent: codex
         uiMode: terminal
+        sessionId: sample-agent
 `,
       new Set(),
       {

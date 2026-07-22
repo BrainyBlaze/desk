@@ -699,7 +699,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
               cwd: manifestDir,
               agent: 'opencode',
               uiMode: 'native',
-              tmuxSession: 'sess-test-resume'
+              sessionId: 'sess-test-resume'
             }
           ]
         }
@@ -727,12 +727,12 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
       attention: NOOP_ATTENTION,
       persistResume:
         persistOverride ??
-        ((tmuxSession, resume) => {
+        ((sessionId, resume) => {
           const manifest = readManifestFile(manifestPath);
           let wrote = false;
           for (const group of manifest.groups) {
             for (const session of group.sessions) {
-              if (session.tmuxSession === tmuxSession && !session.resume) {
+              if (session.sessionId === sessionId && !session.resume) {
                 session.resume = resume;
                 wrote = true;
               }
@@ -755,7 +755,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     };
   }
 
-  it('fresh session-info with valid opencode resume id → manifest gains resume + pinned tmuxSession', async () => {
+  it('fresh session-info with valid opencode resume id preserves the durable sessionId', async () => {
     const harness = await startBrokerWithResumeSink();
     const host = await harness.connectHost();
     host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
@@ -770,7 +770,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     const updated = readManifestFile(manifestPath);
     const session = updated.groups[0]!.sessions[0]!;
     expect(session.resume).toBe('ses_abc123def456ghi789jkl012mno345pqr678stu901vwx');
-    expect(session.tmuxSession).toBe('sess-test-resume');
+    expect(session.sessionId).toBe('sess-test-resume');
 
     host.close();
     harness.close();

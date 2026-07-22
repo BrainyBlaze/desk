@@ -8,12 +8,32 @@
 // isolated data root. Pointing target at the live root is possible but is the
 // gated Phase 5 commit, never done here.
 
-import { cpSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  cpSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statfsSync,
+  statSync,
+  writeSync
+} from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
+import { dirname, join, relative } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
 import { readManifestFile, writeManifestFile } from '../core/config.js';
-import { applyMigratedSessionIds, buildManifestMigration, collectSessions, deskManifestToEntries } from '../core/sessionIdentity.js';
+import { parseLegacyDeskManifest } from '../core/manifest.js';
+import { applyMigratedSessionIds, buildManifestMigration, collectSessions, deskManifestToEntries, type LegacyDeskManifest } from '../core/sessionIdentity.js';
+import { withFileLockSync } from '../shared/fileLock.js';
+import { migrateResumeCaptureStore, type PendingResumeCapture } from '../core/resumeCaptureState.js';
+import { migrateDeliveryEventLine } from './channelsEvents.js';
+import { migrateMemberManifestContent } from './channelsProtocol.js';
 import { advanceMigration, isValidSessionId, validateManifestMigration, type MigrationPhase, type Rollback } from '../shared/migration/index.js';
 import {
   EXT_CONSUMED,
@@ -76,7 +96,7 @@ export interface ManifestMigrationReport {
  * durable identity source, so future loads/edits preserve the assigned ids.
  */
 export function migrateManifestToCanary(sourceManifestPath: string, targetManifestPath: string): ManifestMigrationReport {
-  const manifest = readManifestFile(sourceManifestPath); // read-only
+  const manifest = readLegacyManifestFile(sourceManifestPath); // read-only
   const migration = buildManifestMigration(manifest);
   const migrated = applyMigratedSessionIds(manifest, migration);
   writeManifestFile(targetManifestPath, migrated); // atomic (temp + rename)
@@ -88,6 +108,18 @@ export function migrateManifestToCanary(sourceManifestPath: string, targetManife
     throw new Error(`cutover: manifest YAML round-trip dropped or altered sessionIds at ${targetManifestPath} — refusing (fail-closed)`);
   }
   return { sessions: expected.length, targetPath: targetManifestPath };
+}
+
+/** Read the legacy schema only inside the migration boundary. */
+export function readLegacyManifestFile(path: string): LegacyDeskManifest {
+  if (!existsSync(path)) {
+    return { groups: [] };
+  }
+  const source = readFileSync(path, 'utf8');
+  if (source.trim() === '') {
+    throw new Error(`desk manifest is empty: ${path}`);
+  }
+  return parseLegacyDeskManifest(source);
 }
 
 /** Read the legacy (version-1, tmuxSession-keyed) paused store as transform entries. */
@@ -391,7 +423,7 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
     backupSource(options);
     phase = advance(phase); // → transform
 
-    const map = buildManifestMigration(readManifestFile(options.sourceManifestPath)).tmuxToSessionId;
+    const map = buildManifestMigration(readLegacyManifestFile(options.sourceManifestPath)).tmuxToSessionId;
     partial.manifest = migrateManifestToCanary(options.sourceManifestPath, options.targetManifestPath);
     partial.paused = migratePausedStoreFile(options.sourceRoot, options.targetRoot, map);
     const plan = planDurabilityMigration(options.sourceRoot, map);
@@ -402,7 +434,7 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
     phase = advance(phase); // → validate
 
     // Validate before commit: reverify the identity mint is collision-free.
-    const source = readManifestFile(options.sourceManifestPath);
+    const source = readLegacyManifestFile(options.sourceManifestPath);
     const check = validateManifestMigration(deskManifestToEntries(source), buildManifestMigration(source));
     if (!check.ok) {
       throw new Error(`cutover: canary validation failed (${check.reason}: ${check.value})`);
@@ -417,6 +449,671 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
   } catch (error) {
     const { next, rollback } = advanceMigration(phase, 'fail');
     return { phase: next, rollback, failedPhase: phase, error: (error as Error).message, ...partial };
+  }
+}
+
+// ---- production first-start migration -------------------------------------
+
+const PRODUCTION_MIGRATION_VERSION = 1;
+const PRODUCTION_MIGRATION_RESERVE_BYTES = 16n * 1024n * 1024n;
+
+type ProductionPhase = 'staged' | 'committing' | 'done';
+
+interface SourceFingerprintEntry {
+  path: string;
+  kind: 'missing' | 'file' | 'directory';
+  size?: number;
+  mtimeMs?: number;
+  ino?: number;
+}
+
+interface ProductionArtifact {
+  id: string;
+  mode: 'replace' | 'expire';
+  sourcePath: string;
+  backupPath: string;
+  stagedPath?: string;
+  sourceExisted: boolean;
+}
+
+interface ProductionJournal {
+  version: number;
+  phase: ProductionPhase;
+  manifestPath: string;
+  channelsRoot: string;
+  sourceFingerprint: SourceFingerprintEntry[];
+  artifacts: ProductionArtifact[];
+  committedArtifacts: string[];
+  sessions: number;
+  identityMap: [string, string][];
+}
+
+export interface ProductionProcessProbe {
+  alive: boolean;
+  starttime: number | null;
+}
+
+export interface ProductionCutoverMigrationOptions {
+  homeDir?: string;
+  manifestPath?: string;
+  channelsRoot?: string;
+  migrationRoot?: string;
+  availableBytes?: (path: string) => bigint;
+  processProbe?: (pid: number) => ProductionProcessProbe;
+  /** Test/diagnostic hook after a durable phase transition. */
+  afterPhase?: (phase: ProductionPhase) => void;
+  /** Test hook used to falsify the source-stability check. */
+  beforeSourceRecheck?: () => void;
+}
+
+export interface ProductionCutoverMigrationResult {
+  status: 'migrated' | 'already-migrated';
+  sessions: number;
+  markerPath: string;
+}
+
+/**
+ * First-start production cutover. This function is synchronous on purpose: it
+ * must complete (or throw) before any runtime service can open an old store.
+ * The committed marker is the only success truth and is written last.
+ */
+export function ensureProductionCutoverMigration(
+  options: ProductionCutoverMigrationOptions = {}
+): ProductionCutoverMigrationResult {
+  const homeDir = options.homeDir ?? process.env.HOME ?? '';
+  if (!homeDir) {
+    throw new Error('cutover: HOME is unavailable; refusing production migration');
+  }
+  const manifestPath = options.manifestPath ?? join(homeDir, '.config', 'desk', 'desk.yml');
+  const channelsRoot = options.channelsRoot ?? join(homeDir, '.config', 'desk', 'channels');
+  const migrationRoot = options.migrationRoot ?? join(dirname(manifestPath), '_migration', 'session-id-v1');
+  const markerPath = join(migrationRoot, 'migration.done');
+  const journalPath = join(migrationRoot, 'journal.json');
+  const lockPath = join(migrationRoot, 'migration.lock');
+
+  mkdirSync(dirname(manifestPath), { recursive: true });
+  mkdirSync(channelsRoot, { recursive: true });
+  mkdirSync(migrationRoot, { recursive: true });
+
+  return withFileLockSync(`${manifestPath}.lock`, () =>
+    withFileLockSync(lockPath, () => {
+      if (existsSync(markerPath)) {
+        readProductionMarker(markerPath);
+        // A marker never suppresses runtime validation. Its session count is
+        // migration-time evidence, not a permanent cardinality lock: normal
+        // config edits can add or remove durable sessions after cutover.
+        const sessions = collectSessions(readManifestFile(manifestPath)).length;
+        validateProductionCommittedStores(channelsRoot);
+        return { status: 'already-migrated', sessions, markerPath };
+      }
+
+      assertLegacyEngineInactive(channelsRoot, options.processProbe ?? defaultProductionProcessProbe);
+
+      const existing = readProductionJournal(journalPath, manifestPath, channelsRoot);
+      if (existing?.phase === 'done') {
+        return finishProductionMarker(existing, markerPath, options.afterPhase);
+      }
+      if (existing?.phase === 'committing') {
+        return finishProductionCommit(existing, journalPath, markerPath, options.afterPhase);
+      }
+      if (existing?.phase === 'staged') {
+        assertSourceFingerprint(existing.sourceFingerprint, productionSourceRoots(homeDir, manifestPath, channelsRoot));
+        existing.phase = 'committing';
+        writeProductionJournal(journalPath, existing);
+        options.afterPhase?.('committing');
+        return finishProductionCommit(existing, journalPath, markerPath, options.afterPhase);
+      }
+
+      const stageRoot = join(migrationRoot, 'stage');
+      const backupRoot = join(migrationRoot, 'backup');
+      rmSync(stageRoot, { recursive: true, force: true });
+      requireEmptyDir(backupRoot, 'production backup');
+      assertSameFilesystem([migrationRoot, dirname(manifestPath), channelsRoot]);
+
+      const sourceRoots = productionSourceRoots(homeDir, manifestPath, channelsRoot);
+      const sourceFingerprint = fingerprintSources(sourceRoots);
+      const requiredBytes = estimateStageBytes(fingerprintSources(productionStageSourceRoots(homeDir, manifestPath, channelsRoot))) + PRODUCTION_MIGRATION_RESERVE_BYTES;
+      const availableBytes = (options.availableBytes ?? defaultAvailableBytes)(migrationRoot);
+      if (availableBytes < requiredBytes) {
+        throw new Error(`cutover: insufficient free space (${availableBytes} available, ${requiredBytes} required)`);
+      }
+
+      const stageManifestPath = join(stageRoot, 'manifest', 'desk.yml');
+      const stageChannelsRoot = join(stageRoot, 'channels');
+      const legacyManifest = readLegacyManifestFile(manifestPath);
+      const migration = buildManifestMigration(legacyManifest);
+      const identityCheck = validateManifestMigration(deskManifestToEntries(legacyManifest), migration);
+      if (!identityCheck.ok) {
+        throw new Error(`cutover: identity validation failed (${identityCheck.reason}: ${identityCheck.value})`);
+      }
+      const manifestReport = migrateManifestToCanary(manifestPath, stageManifestPath);
+      const pausedReport = migratePausedStoreFile(channelsRoot, stageChannelsRoot, migration.tmuxToSessionId);
+      if (pausedReport.dropped.length > 0) {
+        throw new Error(`cutover: ${pausedReport.dropped.length} paused sessions are unmapped; refusing partial migration`);
+      }
+      const durabilityPlan = planDurabilityMigration(channelsRoot, migration.tmuxToSessionId);
+      writeDurabilitySeedJournal(durabilityPlan, stageChannelsRoot);
+      const additionalArtifacts = stageOwnedProductionStores({
+        homeDir,
+        channelsRoot,
+        stageRoot,
+        backupRoot,
+        tmuxToSessionId: migration.tmuxToSessionId
+      });
+      validateProductionStage(stageManifestPath, stageChannelsRoot, manifestReport.sessions);
+
+      options.beforeSourceRecheck?.();
+      const currentFingerprint = fingerprintSources(sourceRoots);
+      if (JSON.stringify(currentFingerprint) !== JSON.stringify(sourceFingerprint)) {
+        throw new Error('cutover: source mutated during transform; refusing to commit');
+      }
+
+      const artifacts = productionArtifacts({
+        homeDir,
+        manifestPath,
+        channelsRoot,
+        stageRoot,
+        backupRoot,
+        additionalArtifacts
+      });
+      const journal: ProductionJournal = {
+        version: PRODUCTION_MIGRATION_VERSION,
+        phase: 'staged',
+        manifestPath,
+        channelsRoot,
+        sourceFingerprint,
+        artifacts,
+        committedArtifacts: [],
+        sessions: manifestReport.sessions,
+        identityMap: [...migration.tmuxToSessionId]
+      };
+      writeProductionJournal(journalPath, journal);
+      options.afterPhase?.('staged');
+
+      journal.phase = 'committing';
+      writeProductionJournal(journalPath, journal);
+      options.afterPhase?.('committing');
+      return finishProductionCommit(journal, journalPath, markerPath, options.afterPhase);
+    })
+  );
+}
+
+function productionSourceRoots(homeDir: string, manifestPath: string, channelsRoot: string): string[] {
+  return [
+    manifestPath,
+    channelsRoot,
+    join(homeDir, '.config', 'desk', 'resume-captures.json'),
+    join(homeDir, '.config', 'desk', 'tool-journal')
+  ];
+}
+
+function productionStageSourceRoots(homeDir: string, manifestPath: string, channelsRoot: string): string[] {
+  return [
+    manifestPath,
+    join(channelsRoot, '_engine', 'paused.json'),
+    join(channelsRoot, '_engine', 'queue'),
+    join(channelsRoot, '_engine', 'events.jsonl'),
+    join(homeDir, '.config', 'desk', 'resume-captures.json'),
+    ...collectMemberManifestPaths(channelsRoot)
+  ];
+}
+
+function productionArtifacts(paths: {
+  homeDir: string;
+  manifestPath: string;
+  channelsRoot: string;
+  stageRoot: string;
+  backupRoot: string;
+  additionalArtifacts: ProductionArtifact[];
+}): ProductionArtifact[] {
+  const replace = (id: string, sourcePath: string, stagedPath: string, backupPath: string): ProductionArtifact => ({
+    id,
+    mode: 'replace',
+    sourcePath,
+    stagedPath,
+    backupPath,
+    sourceExisted: existsSync(sourcePath)
+  });
+  const expire = (id: string, sourcePath: string, backupPath: string): ProductionArtifact => ({
+    id,
+    mode: 'expire',
+    sourcePath,
+    backupPath,
+    sourceExisted: existsSync(sourcePath)
+  });
+  return [
+    replace('paused', join(paths.channelsRoot, '_engine', 'paused.json'), join(paths.stageRoot, 'channels', '_engine', 'paused.json'), join(paths.backupRoot, 'channels', '_engine', 'paused.json')),
+    replace('durability-seed', join(paths.channelsRoot, '_engine', 'migration'), join(paths.stageRoot, 'channels', '_engine', 'migration'), join(paths.backupRoot, 'channels', '_engine', 'migration')),
+    expire('durability-queue', join(paths.channelsRoot, '_engine', 'queue'), join(paths.backupRoot, 'channels', '_engine', 'queue')),
+    expire('tool-journal', join(paths.homeDir, '.config', 'desk', 'tool-journal'), join(paths.backupRoot, 'tool-journal')),
+    ...paths.additionalArtifacts,
+    replace('manifest', paths.manifestPath, join(paths.stageRoot, 'manifest', 'desk.yml'), join(paths.backupRoot, 'manifest', 'desk.yml'))
+  ];
+}
+
+function stageOwnedProductionStores(options: {
+  homeDir: string;
+  channelsRoot: string;
+  stageRoot: string;
+  backupRoot: string;
+  tmuxToSessionId: ReadonlyMap<string, string>;
+}): ProductionArtifact[] {
+  const artifacts: ProductionArtifact[] = [];
+  const replaceArtifact = (id: string, sourcePath: string, stagedPath: string, backupPath: string): void => {
+    artifacts.push({
+      id,
+      mode: 'replace',
+      sourcePath,
+      stagedPath,
+      backupPath,
+      sourceExisted: true
+    });
+  };
+
+  const resumePath = join(options.homeDir, '.config', 'desk', 'resume-captures.json');
+  if (existsSync(resumePath)) {
+    const captures = readLegacyResumeCaptures(resumePath);
+    const migrated = migrateResumeCaptureStore(captures, options.tmuxToSessionId);
+    if (migrated.dropped.length > 0) {
+      throw new Error(`cutover: ${migrated.dropped.length} resume captures are unmapped; refusing partial migration`);
+    }
+    const stagedPath = join(options.stageRoot, 'resume-captures.json');
+    writeFileAtomic(stagedPath, `${JSON.stringify({ version: 2, captures: migrated.items }, null, 2)}\n`);
+    replaceArtifact('resume-captures', resumePath, stagedPath, join(options.backupRoot, 'resume-captures.json'));
+  }
+
+  const eventsPath = join(options.channelsRoot, '_engine', 'events.jsonl');
+  if (existsSync(eventsPath)) {
+    const stagedPath = join(options.stageRoot, 'channels', '_engine', 'events.jsonl');
+    streamMigrateDeliveryEvents(eventsPath, stagedPath, options.tmuxToSessionId);
+    replaceArtifact('delivery-events', eventsPath, stagedPath, join(options.backupRoot, 'channels', '_engine', 'events.jsonl'));
+  }
+
+  let memberIndex = 0;
+  for (const sourcePath of collectMemberManifestPaths(options.channelsRoot)) {
+    const migrated = migrateMemberManifestContent(readFileSync(sourcePath, 'utf8'), options.tmuxToSessionId);
+    if (migrated.unmapped.length > 0) {
+      throw new Error(`cutover: member manifest ${sourcePath} has ${migrated.unmapped.length} unmapped sessions`);
+    }
+    if (!migrated.migrated) {
+      continue;
+    }
+    const relativePath = relative(options.channelsRoot, sourcePath);
+    const stagedPath = join(options.stageRoot, 'channels', relativePath);
+    const backupPath = join(options.backupRoot, 'channels', relativePath);
+    writeFileAtomic(stagedPath, migrated.content);
+    replaceArtifact(`member-${memberIndex++}`, sourcePath, stagedPath, backupPath);
+  }
+  return artifacts;
+}
+
+function readLegacyResumeCaptures(path: string): PendingResumeCapture[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+  } catch (error) {
+    throw new Error(`cutover: malformed resume-capture store at ${path}: ${(error as Error).message}`);
+  }
+  const values = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { captures?: unknown }).captures)
+      ? (parsed as { captures: unknown[] }).captures
+      : null;
+  if (values === null) {
+    throw new Error(`cutover: malformed resume-capture store at ${path}`);
+  }
+  return values.map((value, index): PendingResumeCapture => {
+    if (value === null || typeof value !== 'object') {
+      throw new Error(`cutover: malformed resume capture ${index} at ${path}`);
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.tmuxSession !== 'string' ||
+      (record.agent !== 'codex' && record.agent !== 'opencode') ||
+      typeof record.cwd !== 'string' ||
+      typeof record.sinceMs !== 'number' ||
+      !Number.isFinite(record.sinceMs) ||
+      typeof record.deadlineMs !== 'number' ||
+      !Number.isFinite(record.deadlineMs) ||
+      (record.launchResumeId !== undefined && typeof record.launchResumeId !== 'string')
+    ) {
+      throw new Error(`cutover: malformed resume capture ${index} at ${path}`);
+    }
+    return {
+      tmuxSession: record.tmuxSession,
+      agent: record.agent,
+      cwd: record.cwd,
+      sinceMs: record.sinceMs,
+      deadlineMs: record.deadlineMs,
+      ...(record.launchResumeId !== undefined ? { launchResumeId: record.launchResumeId } : {})
+    };
+  });
+}
+
+const EVENT_STREAM_CHUNK_BYTES = 64 * 1024;
+const EVENT_STREAM_MAX_LINE_BYTES = 1024 * 1024;
+
+/** Fixed-chunk, capped-line migration for the multi-GiB delivery ring. */
+function streamMigrateDeliveryEvents(
+  sourcePath: string,
+  stagedPath: string,
+  tmuxToSessionId: ReadonlyMap<string, string>
+): void {
+  mkdirSync(dirname(stagedPath), { recursive: true });
+  const input = openSync(sourcePath, 'r');
+  const output = openSync(stagedPath, 'wx');
+  const buffer = Buffer.allocUnsafe(EVENT_STREAM_CHUNK_BYTES);
+  const decoder = new StringDecoder('utf8');
+  let carry = '';
+  let lineNumber = 0;
+  const writeLine = (line: string, newline: boolean): void => {
+    lineNumber += 1;
+    const migrated = migrateDeliveryEventLine(line, tmuxToSessionId);
+    if (migrated.kind === 'malformed') {
+      throw new Error(`cutover: malformed delivery event at ${sourcePath}:${lineNumber}`);
+    }
+    if (migrated.kind === 'unmapped') {
+      throw new Error(`cutover: unmapped delivery event session ${migrated.tmuxSession} at ${sourcePath}:${lineNumber}`);
+    }
+    writeSync(output, `${migrated.line}${newline ? '\n' : ''}`, undefined, 'utf8');
+  };
+  try {
+    for (;;) {
+      const bytes = readSync(input, buffer, 0, buffer.length, null);
+      if (bytes === 0) {
+        carry += decoder.end();
+        break;
+      }
+      carry += decoder.write(buffer.subarray(0, bytes));
+      let newline: number;
+      while ((newline = carry.indexOf('\n')) >= 0) {
+        const line = carry.slice(0, newline);
+        carry = carry.slice(newline + 1);
+        if (Buffer.byteLength(line, 'utf8') > EVENT_STREAM_MAX_LINE_BYTES) {
+          throw new Error(`cutover: delivery event line exceeds ${EVENT_STREAM_MAX_LINE_BYTES} bytes at ${sourcePath}`);
+        }
+        writeLine(line, true);
+      }
+      if (Buffer.byteLength(carry, 'utf8') > EVENT_STREAM_MAX_LINE_BYTES) {
+        throw new Error(`cutover: delivery event line exceeds ${EVENT_STREAM_MAX_LINE_BYTES} bytes at ${sourcePath}`);
+      }
+    }
+    if (carry.length > 0) {
+      writeLine(carry, false);
+    }
+  } catch (error) {
+    closeSync(input);
+    closeSync(output);
+    rmSync(stagedPath, { force: true });
+    throw error;
+  }
+  closeSync(input);
+  closeSync(output);
+}
+
+function collectMemberManifestPaths(channelsRoot: string): string[] {
+  const out: string[] = [];
+  for (const channel of readdirSync(channelsRoot).sort()) {
+    if (channel.startsWith('.') || channel.startsWith('_')) {
+      continue;
+    }
+    const channelPath = join(channelsRoot, channel);
+    const channelStat = lstatSync(channelPath);
+    if (channelStat.isSymbolicLink()) {
+      throw new Error(`cutover: refusing symlinked channel ${channelPath}`);
+    }
+    if (!channelStat.isDirectory()) {
+      continue;
+    }
+    const membersPath = join(channelPath, '_members');
+    if (!existsSync(membersPath)) {
+      continue;
+    }
+    const membersStat = lstatSync(membersPath);
+    if (membersStat.isSymbolicLink() || !membersStat.isDirectory()) {
+      throw new Error(`cutover: invalid members directory ${membersPath}`);
+    }
+    for (const name of readdirSync(membersPath).sort()) {
+      const path = join(membersPath, name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`cutover: refusing symlinked member manifest ${path}`);
+      }
+      if (stat.isFile() && name.endsWith('.md')) {
+        out.push(path);
+      }
+    }
+  }
+  return out;
+}
+
+function finishProductionCommit(
+  journal: ProductionJournal,
+  journalPath: string,
+  markerPath: string,
+  afterPhase?: (phase: ProductionPhase) => void
+): ProductionCutoverMigrationResult {
+  for (const artifact of journal.artifacts) {
+    if (!journal.committedArtifacts.includes(artifact.id)) {
+      commitProductionArtifact(artifact);
+      journal.committedArtifacts.push(artifact.id);
+      writeProductionJournal(journalPath, journal);
+    }
+  }
+
+  const sessions = collectSessions(readManifestFile(journal.manifestPath)).length;
+  if (sessions !== journal.sessions) {
+    throw new Error(`cutover: post-commit manifest cardinality ${sessions} does not match staged ${journal.sessions}`);
+  }
+  validateProductionCommittedStores(journal.channelsRoot);
+  writeFileAtomic(
+    join(dirname(markerPath), 'session-id-map.json'),
+    `${JSON.stringify({ version: PRODUCTION_MIGRATION_VERSION, entries: journal.identityMap }, null, 2)}\n`
+  );
+  journal.phase = 'done';
+  writeProductionJournal(journalPath, journal);
+  rmSync(join(dirname(markerPath), 'stage'), { recursive: true, force: true });
+  // Durable commit truth, deliberately the final filesystem write.
+  writeFileAtomic(markerPath, `${JSON.stringify({ version: PRODUCTION_MIGRATION_VERSION, sessions }, null, 2)}\n`);
+  afterPhase?.('done');
+  return { status: 'migrated', sessions, markerPath };
+}
+
+function finishProductionMarker(
+  journal: ProductionJournal,
+  markerPath: string,
+  afterPhase?: (phase: ProductionPhase) => void
+): ProductionCutoverMigrationResult {
+  const sessions = collectSessions(readManifestFile(journal.manifestPath)).length;
+  if (sessions !== journal.sessions) {
+    throw new Error(`cutover: done journal cardinality ${journal.sessions} does not match manifest ${sessions}`);
+  }
+  validateProductionCommittedStores(journal.channelsRoot);
+  rmSync(join(dirname(markerPath), 'stage'), { recursive: true, force: true });
+  writeFileAtomic(markerPath, `${JSON.stringify({ version: PRODUCTION_MIGRATION_VERSION, sessions }, null, 2)}\n`);
+  afterPhase?.('done');
+  return { status: 'migrated', sessions, markerPath };
+}
+
+function commitProductionArtifact(artifact: ProductionArtifact): void {
+  const sourceExists = existsSync(artifact.sourcePath);
+  const backupExists = existsSync(artifact.backupPath);
+  const stagedExists = artifact.stagedPath !== undefined && existsSync(artifact.stagedPath);
+
+  if (artifact.mode === 'expire') {
+    if (sourceExists && backupExists) {
+      throw new Error(`cutover: both live and backup exist for ${artifact.id}; refusing ambiguous resume`);
+    }
+    if (sourceExists) {
+      mkdirSync(dirname(artifact.backupPath), { recursive: true });
+      renameSync(artifact.sourcePath, artifact.backupPath);
+    } else if (artifact.sourceExisted && !backupExists) {
+      throw new Error(`cutover: ${artifact.id} disappeared without a backup; refusing data loss`);
+    }
+    return;
+  }
+
+  if (stagedExists) {
+    if (sourceExists) {
+      if (backupExists) {
+        throw new Error(`cutover: both live and backup exist for ${artifact.id}; refusing ambiguous resume`);
+      }
+      mkdirSync(dirname(artifact.backupPath), { recursive: true });
+      renameSync(artifact.sourcePath, artifact.backupPath);
+    } else if (artifact.sourceExisted && !backupExists) {
+      throw new Error(`cutover: ${artifact.id} source disappeared before backup`);
+    }
+    mkdirSync(dirname(artifact.sourcePath), { recursive: true });
+    renameSync(artifact.stagedPath!, artifact.sourcePath);
+    return;
+  }
+
+  // Crash after staged rename but before the journal update: live + backup is
+  // the fully-installed state for a replacement that originally existed.
+  if (sourceExists && (!artifact.sourceExisted || backupExists)) {
+    return;
+  }
+  throw new Error(`cutover: cannot resume replacement ${artifact.id}; staged output is missing`);
+}
+
+function validateProductionStage(manifestPath: string, channelsRoot: string, sessions: number): void {
+  if (collectSessions(readManifestFile(manifestPath)).length !== sessions) {
+    throw new Error('cutover: staged manifest cardinality mismatch');
+  }
+  validateProductionCommittedStores(channelsRoot);
+}
+
+function validateProductionCommittedStores(channelsRoot: string): void {
+  const paused = JSON.parse(readFileSync(join(channelsRoot, '_engine', 'paused.json'), 'utf8')) as { version?: number; items?: unknown };
+  if (paused.version !== PAUSED_STORE_VERSION || !Array.isArray(paused.items)) {
+    throw new Error('cutover: paused store failed post-cutover validation');
+  }
+  const seed = JSON.parse(readFileSync(join(channelsRoot, '_engine', 'migration', 'seed-journal.json'), 'utf8')) as { version?: number; items?: unknown };
+  if (seed.version !== SEED_JOURNAL_VERSION || !Array.isArray(seed.items)) {
+    throw new Error('cutover: durability seed failed post-cutover validation');
+  }
+}
+
+function readProductionMarker(path: string): { version: number; sessions: number } {
+  const marker = JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown; sessions?: unknown };
+  if (marker.version !== PRODUCTION_MIGRATION_VERSION || !Number.isSafeInteger(marker.sessions) || (marker.sessions as number) < 0) {
+    throw new Error(`cutover: malformed or unknown committed marker at ${path}`);
+  }
+  return marker as { version: number; sessions: number };
+}
+
+function writeProductionJournal(path: string, journal: ProductionJournal): void {
+  writeFileAtomic(path, `${JSON.stringify(journal, null, 2)}\n`);
+}
+
+function readProductionJournal(path: string, manifestPath: string, channelsRoot: string): ProductionJournal | null {
+  if (!existsSync(path)) {
+    return null;
+  }
+  const journal = JSON.parse(readFileSync(path, 'utf8')) as ProductionJournal;
+  if (
+    journal.version !== PRODUCTION_MIGRATION_VERSION ||
+    !['staged', 'committing', 'done'].includes(journal.phase) ||
+    journal.manifestPath !== manifestPath ||
+    journal.channelsRoot !== channelsRoot ||
+    !Array.isArray(journal.artifacts) ||
+    !Array.isArray(journal.sourceFingerprint)
+  ) {
+    throw new Error(`cutover: malformed or mismatched migration journal at ${path}`);
+  }
+  return journal;
+}
+
+function fingerprintSources(roots: readonly string[]): SourceFingerprintEntry[] {
+  const out: SourceFingerprintEntry[] = [];
+  const visit = (path: string): void => {
+    if (!existsSync(path)) {
+      out.push({ path, kind: 'missing' });
+      return;
+    }
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`cutover: refusing symlinked source entry ${path}`);
+    }
+    if (stat.isDirectory()) {
+      out.push({ path, kind: 'directory', mtimeMs: stat.mtimeMs, ino: stat.ino });
+      for (const child of readdirSync(path).sort()) {
+        visit(join(path, child));
+      }
+      return;
+    }
+    if (stat.isFile()) {
+      out.push({ path, kind: 'file', size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino });
+      return;
+    }
+    throw new Error(`cutover: unsupported source entry ${path}`);
+  };
+  for (const root of roots) {
+    visit(root);
+  }
+  return out;
+}
+
+function assertSourceFingerprint(expected: SourceFingerprintEntry[], roots: readonly string[]): void {
+  const current = fingerprintSources(roots);
+  if (JSON.stringify(current) !== JSON.stringify(expected)) {
+    throw new Error('cutover: source mutated after staging; refusing to resume commit');
+  }
+}
+
+function estimateStageBytes(entries: readonly SourceFingerprintEntry[]): bigint {
+  return entries.reduce((total, entry) => total + BigInt(entry.size ?? 0), 0n);
+}
+
+function assertSameFilesystem(paths: readonly string[]): void {
+  const devices = new Set(paths.map((path) => statSync(path).dev));
+  if (devices.size !== 1) {
+    throw new Error('cutover: stage, manifest, and channels stores must share one filesystem');
+  }
+}
+
+function defaultAvailableBytes(path: string): bigint {
+  const stat = statfsSync(path, { bigint: true });
+  return stat.bavail * stat.bsize;
+}
+
+function assertLegacyEngineInactive(
+  channelsRoot: string,
+  probe: (pid: number) => ProductionProcessProbe
+): void {
+  const path = join(channelsRoot, '_engine', 'engine.pid');
+  if (!existsSync(path)) {
+    return;
+  }
+  const lines = readFileSync(path, 'utf8').trim().split(/\s+/);
+  const pid = Number.parseInt(lines[0] ?? '', 10);
+  const recorded = lines[1] === undefined ? null : Number.parseInt(lines[1], 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || (recorded !== null && !Number.isSafeInteger(recorded))) {
+    throw new Error(`cutover: malformed legacy channels engine lock at ${path}; refusing migration`);
+  }
+  const state = probe(pid);
+  if (state.alive && (recorded === null || state.starttime === null || state.starttime === recorded)) {
+    throw new Error(`cutover: legacy channels engine is active (pid ${pid}); stop it before migration`);
+  }
+}
+
+function defaultProductionProcessProbe(pid: number): ProductionProcessProbe {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+      return { alive: false, starttime: null };
+    }
+    return { alive: true, starttime: null };
+  }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    const fields = stat.slice(close + 2).trim().split(/\s+/);
+    const starttime = Number.parseInt(fields[19] ?? '', 10);
+    return { alive: true, starttime: Number.isSafeInteger(starttime) ? starttime : null };
+  } catch {
+    return { alive: true, starttime: null };
   }
 }
 
