@@ -55,6 +55,7 @@ describe('source-backed installer contract', () => {
     expect(source).toContain('${DESK_HOME}.install-lock');
     expect(source).not.toContain('DESK_INSTALL_DIR');
     expect(source).not.toContain(['desk', 'server'].join('-'));
+    expect(source).not.toMatch(/tmux/i);
     expect(source).not.toMatch(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/u);
   });
 
@@ -144,16 +145,16 @@ describe('source-backed installer contract', () => {
   it('holds the sibling lock before invoking the host package manager', () => {
     const value = fixture();
     const log = join(value.root, 'package-manager.log');
-    const tmux = join(value.binDir, 'tmux');
+    const git = join(value.binDir, 'git');
     const packageManager = join(value.binDir, process.platform === 'darwin' ? 'brew' : 'apt-get');
     const sudo = join(value.binDir, 'sudo');
-    writeFileSync(tmux, '#!/usr/bin/env bash\nprintf "tmux 2.9\\n"\n');
+    writeFileSync(git, '#!/usr/bin/env bash\nprintf "git version 2.20.0\\n"\n');
     writeFileSync(
       packageManager,
       '#!/usr/bin/env bash\n[ "${1:-}" = "shellenv" ] && exit 0\n[ -d "${DESK_HOME}.install-lock" ] || exit 95\nprintf "%s\\n" "$*" >> "$PACKAGE_LOG"\nexit 73\n'
     );
     writeFileSync(sudo, '#!/usr/bin/env bash\nexec "$@"\n');
-    chmodSync(tmux, 0o755);
+    chmodSync(git, 0o755);
     chmodSync(packageManager, 0o755);
     chmodSync(sudo, 0o755);
 

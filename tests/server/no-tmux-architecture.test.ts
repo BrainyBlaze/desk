@@ -3,7 +3,17 @@ import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SANCTIONS, scanFlagSurface, scanLegacySurface, type ScannedFile } from './noTmuxScan.js';
 
-const SRC = join(__dirname, '..', '..', 'src');
+const ROOT = join(__dirname, '..', '..');
+const SRC = join(ROOT, 'src');
+const SHIPPED_RUNTIME_FILES = [
+  'Dockerfile',
+  'install.sh',
+  'package.json',
+  'scripts/smoke-serve-modes.mjs',
+  ...readdirSync(join(ROOT, '.github', 'workflows'))
+    .filter((name) => /\.ya?ml$/.test(name))
+    .map((name) => `.github/workflows/${name}`)
+].sort();
 
 /**
  * The Track B terminal gate: tmux is gone. EVERY source is scanned — the
@@ -29,6 +39,13 @@ function scannedTree(): ScannedFile[] {
   }));
 }
 
+function scannedShippedRuntime(): ScannedFile[] {
+  return SHIPPED_RUNTIME_FILES.map((rel) => ({
+    rel,
+    source: readFileSync(join(ROOT, rel), 'utf8')
+  }));
+}
+
 describe('no-tmux architecture gate (Track B terminal state)', () => {
   it('keeps every source inside the exact sanctioned legacy surface (pattern + count per file)', () => {
     expect(scanLegacySurface(scannedTree())).toEqual([]);
@@ -36,6 +53,10 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
 
   it('keeps the native flag out of the runtime — one path, no gate', () => {
     expect(scanFlagSurface(scannedTree())).toEqual([]);
+  });
+
+  it('keeps the retired transport out of shipped runtime, installer, smoke, and CI surfaces', () => {
+    expect(scanLegacySurface(scannedShippedRuntime())).toEqual([]);
   });
 });
 

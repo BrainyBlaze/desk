@@ -57,7 +57,7 @@ jobs:
             -v "$PWD:/src:ro" \
             -v "$RUNNER_TEMP/installer-release:/release:ro" \
             "${{ matrix.image }}" \
-            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_VERSION=v0.3.0 DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; tmux -V; git --version; python3 --version || python --version; make --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
+            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_VERSION=v0.3.0 DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; git --version; python3 --version || python --version; make --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
 
   macos:
     strategy:
@@ -76,5 +76,4 @@ jobs:
           node-version: 22.23.1
           cache: npm
       - run: npm ci
-      - run: brew install tmux
       - run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts

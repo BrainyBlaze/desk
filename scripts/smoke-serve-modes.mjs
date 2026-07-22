@@ -3,7 +3,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   accessSync,
-  chmodSync,
   constants,
   existsSync,
   mkdtempSync,
@@ -29,52 +28,41 @@ const responseLimitBytes = 2 << 20;
 const activeProcesses = new Set();
 let childEnvironment;
 
-function createIsolatedTmuxEnvironment() {
+async function createIsolatedRuntimeEnvironment() {
   const smokeHome = mkdtempSync(join(realpathSync(tmpdir()), 'desk-smoke-home-'));
-  const tmuxTmpdir = mkdtempSync(join(realpathSync(tmpdir()), 'desk-smoke-tmux-'));
-  chmodSync(tmuxTmpdir, 0o700);
+  const atchBin = join(smokeHome, 'atch-smoke-stub');
+  const daemonPort = await unusedPort();
+  writeFileSync(atchBin, '#!/bin/sh\nexit 64\n', { mode: 0o700 });
   childEnvironment = {
     ...process.env,
+    DESK_ATCH_BIN: atchBin,
+    DESK_ATCH_SOCKET_ROOT: join(smokeHome, 'atch'),
+    DESK_DAEMON_HOME: join(smokeHome, '.config', 'desk'),
+    DESK_DAEMON_HOST: '127.0.0.1',
+    DESK_DAEMON_PORT: String(daemonPort),
+    DESK_DAEMON_URL: `ws://127.0.0.1:${daemonPort}`,
     FORCE_COLOR: '0',
     HOME: smokeHome,
     NO_COLOR: '1',
     TMPDIR: smokeHome,
-    TMUX_TMPDIR: tmuxTmpdir,
     XDG_CACHE_HOME: join(smokeHome, '.cache'),
     XDG_CONFIG_HOME: join(smokeHome, '.config'),
     XDG_DATA_HOME: join(smokeHome, '.local', 'share')
   };
-  delete childEnvironment.TMUX;
   delete childEnvironment.DESK_CHANNELS_DEBUG;
   delete childEnvironment.DESK_CODEX_HOME;
+  delete childEnvironment.DESK_DAEMON_CMD;
+  delete childEnvironment.DESK_DAEMON_EXTERNAL;
+  delete childEnvironment.DESK_DAEMON_NONCE;
   delete childEnvironment.DESK_HOST;
   delete childEnvironment.DESK_OPENCODE_BIN;
   delete childEnvironment.DESK_PLUGINS;
   delete childEnvironment.DESK_PORT;
-  return { childEnvironment, smokeHome, tmuxTmpdir };
+  return { childEnvironment, smokeHome };
 }
 
-function cleanupIsolatedTmux({ childEnvironment: environment, smokeHome, tmuxTmpdir }) {
-  try {
-    const result = spawnSync('tmux', ['kill-server'], {
-      encoding: 'utf8',
-      env: environment,
-      maxBuffer: 1 << 20
-    });
-    if (result.error !== undefined && result.error.code !== 'ENOENT') {
-      throw result.error;
-    }
-    if (
-      result.error === undefined &&
-      result.status !== 0 &&
-      !/no server running|failed to connect|no such file or directory/i.test(result.stderr)
-    ) {
-      throw new Error(`isolated tmux cleanup failed: ${result.stderr.trim()}`);
-    }
-  } finally {
-    rmSync(tmuxTmpdir, { recursive: true, force: true });
-    rmSync(smokeHome, { recursive: true, force: true });
-  }
+function cleanupIsolatedRuntime({ smokeHome }) {
+  rmSync(smokeHome, { recursive: true, force: true });
 }
 
 function formatFailure(error, indent = '') {
@@ -803,7 +791,7 @@ if (process.platform === 'win32') {
 const options = parseOptions(process.argv.slice(2));
 validateDeskCommand(options.desk);
 const preparedCwd = prepareWorkingDirectory(options.cwd);
-const isolatedTmux = createIsolatedTmuxEnvironment();
+const isolatedRuntime = await createIsolatedRuntimeEnvironment();
 let failure;
 
 try {
@@ -820,12 +808,12 @@ try {
         : new AggregateError([failure, error], 'smoke failure plus child-process cleanup failure');
   }
   try {
-    cleanupIsolatedTmux(isolatedTmux);
+    cleanupIsolatedRuntime(isolatedRuntime);
   } catch (error) {
     failure =
       failure === undefined
         ? error
-        : new AggregateError([failure, error], 'smoke failure plus isolated-tmux cleanup failure');
+        : new AggregateError([failure, error], 'smoke failure plus isolated-runtime cleanup failure');
   }
   if (preparedCwd.temporaryCwd !== undefined) {
     rmSync(preparedCwd.temporaryCwd, { recursive: true, force: true });

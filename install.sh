@@ -267,13 +267,6 @@ probe_sha256() {
   fi
 }
 
-probe_tmux() {
-  local value
-  have tmux || return 1
-  value="$(tmux -V 2>/dev/null | awk '{print $2}')"
-  [ -n "$value" ] && version_ge "$value" "3.2"
-}
-
 probe_git() {
   local value
   have git || return 1
@@ -291,7 +284,6 @@ probe_bootstrap_capabilities() {
 probe_host_capabilities() {
   MISSING_CAPABILITIES=()
   probe_bootstrap_capabilities
-  probe_tmux || MISSING_CAPABILITIES+=("tmux>=3.2")
   probe_git || MISSING_CAPABILITIES+=("git>=2.30")
   probe_python || MISSING_CAPABILITIES+=("python>=${PYTHON_MIN_VERSION}")
   have make || MISSING_CAPABILITIES+=("make")
@@ -344,28 +336,28 @@ install_missing_packages() {
   case "$PACKAGE_MANAGER" in
     brew)
       ensure_macos_tooling
-      packages=(tmux git python coreutils gnu-tar)
+      packages=(git python coreutils gnu-tar)
       brew install "${packages[@]}"
       ;;
     apt-get)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make g++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make g++)
       run_privileged apt-get update
       run_privileged apt-get install -y "${packages[@]}"
       ;;
     dnf|yum)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc-c++)
       run_privileged "$PACKAGE_MANAGER" install -y "${packages[@]}"
       ;;
     pacman)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python make gcc)
+      packages=(ca-certificates curl tar gzip coreutils git python make gcc)
       run_privileged pacman -Sy --needed --noconfirm "${packages[@]}"
       ;;
     zypper)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make gcc gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++)
       run_privileged zypper --non-interactive install "${packages[@]}"
       ;;
     apk)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make build-base)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make build-base)
       run_privileged apk add "${packages[@]}"
       ;;
     *) die "unsupported package manager: $PACKAGE_MANAGER" ;;
