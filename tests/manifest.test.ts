@@ -416,7 +416,9 @@ projects:
     expect(commands[0]).toBe("cd '/workspace/projects/sample' && exec bash");
     // Agent launches carry explicit Desk identity for globally installed hooks.
     expect(commands[1]).toContain("cd '/workspace/projects/sample' && desk_claude_session=");
-    expect(commands[1]).toContain("DESK_TMUX_SESSION='agentdesk-sample-main-claude-");
+    expect(commands[1]).toContain("DESK_SESSION_ID='claude'");
+    expect(commands[1]).not.toContain('DESK_TMUX_SESSION');
+    expect(commands[1]).not.toContain('tmux display-message');
     expect(commands[1]).toContain("DESK_AGENT='claude' claude");
     expect(commands[1]).toContain('--settings');
     expect(commands[1]).toContain('preferredNotifChannel');
@@ -428,11 +430,12 @@ projects:
     expect(commands[1]).toContain('desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics');
     expect(commands[1]).toContain('exec "${SHELL:-/bin/sh}"');
     expect(commands[1]).toContain('--continue');
-    expect(commands[2]).toContain("DESK_AGENT='codex' codex -c tui.notifications=true");
+    expect(commands[2]).toContain("DESK_SESSION_ID='codex' DESK_AGENT='codex' codex -c tui.notifications=true");
     expect(commands[2]).toContain('tui.notification_method=bel');
     expect(commands[2]).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(commands[3]).toContain("cd '/workspace/projects/sample' && ");
-    expect(commands[3]).toContain("DESK_TMUX_SESSION='agentdesk-sample-main-opencode-");
+    expect(commands[3]).toContain("DESK_SESSION_ID='opencode'");
+    expect(commands[3]).not.toContain('DESK_TMUX_SESSION');
     expect(commands[3]).toContain("DESK_AGENT='opencode'");
     expect(commands[3]).toContain('desk_opencode="${DESK_OPENCODE_BIN:-$(command -v opencode 2>/dev/null || true)}"');
     expect(commands[3]).toContain('desk_opencode="$HOME/.opencode/bin/opencode"');

@@ -148,7 +148,7 @@ export function buildSessionSpecs(
           .join('-');
       const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
       const command =
-        session.command ?? buildAgentCommand(session, cwd, options.homeDir, tmuxSession, options.agentMcp?.(session, cwd));
+        session.command ?? buildAgentCommand(session, cwd, options.homeDir, session.sessionId, options.agentMcp?.(session, cwd));
 
       return {
         groupId: group.id,
@@ -295,7 +295,7 @@ function buildProjectSessionSpec({
       .filter(Boolean)
       .join('-');
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  const command = session.command ?? buildAgentCommand(session, cwd, homeDir, tmuxSession, agentMcp?.(session, cwd));
+  const command = session.command ?? buildAgentCommand(session, cwd, homeDir, session.sessionId, agentMcp?.(session, cwd));
 
   return {
     projectId: project.id,
@@ -333,15 +333,15 @@ const CODEX_NOTIFICATION_FLAGS =
 
 /**
  * Claude Code: hooks are the reliable channel (preferredNotifChannel is a
- * config-store key and silently no-ops via --settings). The hook resolves its
- * own tmux session from the inherited TMUX_PANE and POSTs a typed event to
- * Desk's /api/agent-event (port overridable via DESK_API in the session env).
+ * config-store key and silently no-ops via --settings). The hook posts the
+ * durable Desk identity inherited in DESK_SESSION_ID to /api/agent-event
+ * (port overridable via DESK_API in the session env).
  */
 function claudeEventHook(kind: 'turn-complete' | 'approval-requested'): string {
   return (
     'payload=$(cat); ' +
     'sid=$(printf %s "$payload" | grep -o \'"session_id":"[^"]*"\' | head -1 | cut -d\'"\' -f4); ' +
-    's=$(tmux display-message -p -t "$TMUX_PANE" \'#{session_name}\' 2>/dev/null); ' +
+    's="${DESK_SESSION_ID:-}"; ' +
     '[ -n "$s" ] && curl -s -m 2 -X POST "${DESK_API:-http://127.0.0.1:5173}/api/agent-event" ' +
     `-H 'content-type: application/json' --data "{\\"session\\":\\"$s\\",\\"kind\\":\\"${kind}\\",\\"sessionId\\":\\"$sid\\"}" >/dev/null 2>&1; exit 0`
   );
@@ -363,7 +363,7 @@ export function buildAgentCommand(
   session: DeskSession,
   cwd: string,
   homeDir: string,
-  tmuxSession: string,
+  sessionId: string,
   agentMcp?: AgentMcpLaunchConfig
 ): string {
   if (resolveSessionUiMode(session) === 'native') {
@@ -375,7 +375,7 @@ export function buildAgentCommand(
   if (session.agent === 'bash') {
     return `cd ${shellQuote(cwd)} && exec bash`;
   }
-  const env = agentEnvPrefix(session.agent, tmuxSession);
+  const env = agentEnvPrefix(session.agent, sessionId);
   if (session.agent === 'claude') {
     const args = ['claude', CLAUDE_NOTIFICATION_FLAGS];
     if (agentMcp?.claudeConfigPath) {
@@ -411,12 +411,12 @@ export function buildAgentCommand(
     return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
   }
   if (session.agent === 'opencode') {
-    return buildOpencodeCommand(session, cwd, homeDir, tmuxSession);
+    return buildOpencodeCommand(session, cwd, homeDir, sessionId);
   }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }
 
-function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string, tmuxSession: string): string {
+function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string, sessionId: string): string {
   const args = ['"$desk_opencode"'];
   const defaultConfigDir = defaultOpencodeConfigDir(homeDir);
   if (session.resume) {
@@ -427,7 +427,7 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
   // dangerous flag). Default is yolo (only an explicit unchecked box -> ask).
   const bypass = session.bypassPermissions !== false;
   const permissionContent = opencodePermissionConfigContent(bypass);
-  const envPrefix = `${agentEnvPrefix(session.agent, tmuxSession)} OPENCODE_CONFIG_DIR="$desk_opencode_config" OPENCODE_CONFIG_CONTENT=${shellQuote(permissionContent)} OPENCODE_DISABLE_MOUSE=1`;
+  const envPrefix = `${agentEnvPrefix(session.agent, sessionId)} OPENCODE_CONFIG_DIR="$desk_opencode_config" OPENCODE_CONFIG_CONTENT=${shellQuote(permissionContent)} OPENCODE_DISABLE_MOUSE=1`;
   const launch = session.resume
     ? `${envPrefix} exec ${args.join(' ')}`
     : `if [ -n "\${DESK_OPENCODE_RESUME_ID:-}" ]; then ${envPrefix} exec "$desk_opencode" --session "$DESK_OPENCODE_RESUME_ID"; else ${envPrefix} exec "$desk_opencode"; fi`;
@@ -442,8 +442,8 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
   ].join(' && ');
 }
 
-function agentEnvPrefix(agent: string | undefined, tmuxSession: string): string {
-  return `DESK_TMUX_SESSION=${shellQuote(tmuxSession)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
+function agentEnvPrefix(agent: string | undefined, sessionId: string): string {
+  return `DESK_SESSION_ID=${shellQuote(sessionId)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
 }
 
 function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {
