@@ -60,7 +60,7 @@ let webglActiveCount = 0;
 /**
  * On reveal, a freshly-shown group's cells each create a WebGL context +
  * compile shaders synchronously — measured as the dominant cost of an otherwise
- * "warm" (0-socket, 0-tmux) group switch (hundreds of ms to seconds under
+ * "warm" (0-socket, 0-stream) group switch (hundreds of ms to seconds under
  * software GL). We keep the switch off the GL critical path: paint immediately
  * with xterm's DOM renderer, then upgrade visible cells to WebGL shortly after
  * the switch settles. A small random spread avoids all visible cells compiling
@@ -279,7 +279,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       const hostNode = hostRef.current;
       if (!hostNode || hostNode.clientWidth === 0 || hostNode.clientHeight === 0) {
         // Hidden keep-alive mount: a fit here would shrink the terminal to
-        // nothing and resize tmux with it. Yield the WebGL context to the
+        // nothing and resize the session with it. Yield the WebGL context to the
         // visible cells; the ResizeObserver fires again on reveal. Tell the
         // broker we are hidden so it stops streaming live output to this cell.
         if (cellVisibleRef.current) {
@@ -297,7 +297,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       updateScrollRail();
       if (wasHidden) {
         // Reveal: the broker replies with a self-contained snapshot, then resumes
-        // live output. No client-side reconnect or tmux repaint needed.
+        // live output. No client-side reconnect or transport repaint needed.
         brokerVisibilityRef.current(true);
       }
     };
@@ -541,7 +541,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       event.stopPropagation();
       const activeSession = sessionRef.current;
       if (activeSession?.state === 'running' && terminal.buffer.active.baseY <= 0) {
-        // Live tmux view has no local scrollback: any rail interaction enters frozen scrollback,
+        // The live broker view has no local scrollback: any rail interaction enters frozen scrollback,
         // where the overlay's native scrollbar takes over.
         enterScrollback(terminal.rows * 3);
         return;
@@ -761,18 +761,18 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       return;
     }
 
-    const resizeTmuxWindow = (cols: number, rows: number): void => {
+    const resizeSession = (cols: number, rows: number): void => {
       if (!session || session.state !== 'running') {
         return;
       }
-      // Never drive tmux below a usable size: a fit() against a collapsing or
+      // Never drive the PTY below a usable size: a fit() against a collapsing or
       // mid-transition host can momentarily report tiny dimensions, and the
       // server pins whatever it receives as manual window-size. Dropping these
       // keeps the last good size instead of corrupting the window to 12x6.
       if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) {
         return;
       }
-      const key = `${session.spec.tmuxSession}:${cols}:${rows}`;
+      const key = `${session.spec.sessionId}:${cols}:${rows}`;
       if (lastResizeRef.current === key) {
         return;
       }
@@ -785,13 +785,13 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }, 80);
     };
 
-    notifyResizeRef.current = resizeTmuxWindow;
+    notifyResizeRef.current = resizeSession;
     // Hidden keep-alive mounts skip the fit/resize: fit() against a 0-size
-    // host would collapse the terminal, and tmux must not follow a cell the
+    // host would collapse the terminal, and the PTY must not follow a cell the
     // user cannot see. The reveal refit covers it.
     if (hostRef.current && hostRef.current.clientWidth > 0) {
       fitRef.current?.fit();
-      resizeTmuxWindow(terminal.cols, terminal.rows);
+      resizeSession(terminal.cols, terminal.rows);
     }
     scrollbackActiveRef.current = false;
     captureRequestRef.current += 1;
@@ -814,21 +814,21 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       terminal.clear();
       terminal.writeln(`\x1b[36m${session.spec.name}\x1b[0m  \x1b[33mMISSING\x1b[0m`);
       terminal.writeln(`cwd      ${session.spec.cwd}`);
-      terminal.writeln(`tmux     ${session.spec.tmuxSession}`);
+      terminal.writeln(`session  ${session.spec.sessionId}`);
       terminal.writeln('');
       terminal.writeln('Boot it from this cell, or Up in the header starts all missing sessions.');
       return;
     }
 
     terminal.clear();
-    terminal.writeln(`\x1b[36mDESK LIVE ATTACH\x1b[0m ${session.spec.tmuxSession}`);
+    terminal.writeln(`\x1b[36mDESK LIVE ATTACH\x1b[0m ${session.spec.sessionId}`);
     terminal.writeln(`cwd ${session.spec.cwd}`);
     terminal.writeln('');
 
-    const tmuxTarget = session.spec.tmuxSession;
-    // The daemon keys sessions by the atch-native sessionId; subscribe by it when
-    // present (transitional fallback to tmuxSession until Phase 5 drops the latter).
-    const daemonSessionId = session.spec.sessionId ?? tmuxTarget;
+    // Only the frozen-scrollback and compatibility repaint REST calls still need
+    // this legacy alias. The broker and all browser-local identity use sessionId.
+    const legacyTmuxTarget = session.spec.tmuxSession;
+    const daemonSessionId = session.spec.sessionId;
     const surfaceId = surfaceIdRef.current;
     let disposed = false;
     let stabilizeTimer: number | undefined;
@@ -854,7 +854,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         if (rows < 3) {
           return;
         }
-        const key = `${tmuxTarget}:${cols}:${rows}`;
+        const key = `${daemonSessionId}:${cols}:${rows}`;
         if (lastResizeRef.current === key) {
           return; // already the right size — no redundant resize/repaint
         }
@@ -863,7 +863,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         }
         lastResizeRef.current = key;
         binaryTerminalBroker.sendResize(surfaceId, cols, rows);
-        void repaintTerminal({ session: tmuxTarget }).catch(() => undefined);
+        void repaintTerminal({ session: legacyTmuxTarget }).catch(() => undefined);
       }, 450);
     };
 
@@ -929,7 +929,8 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       onBinaryDisposable.dispose();
       binaryTerminalBroker.unsubscribe(surfaceId);
     };
-    // Keyed on the STABLE session identity (tmux target, state, name, cwd), not
+    // Keyed on the stable session identity (plus the temporary REST transport
+    // alias, state, name, and cwd), not
     // the session object: a mutation elsewhere ships a fresh snapshot whose
     // session objects have new identities but identical content, and re-running
     // this effect then would clear/resubscribe/reflash every mounted terminal
@@ -938,9 +939,9 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     //
     // `revision` is NOT a global mutation counter — it is this session's entry in
     // the per-session terminalRevisions map (AgentMultiplexer passes
-    // terminalRevisions[tmuxSession]), bumped ONLY by restartExistingSession and
+    // terminalRevisions[sessionId]), bumped ONLY by restartExistingSession and
     // confirmUiModeSwitch for THAT session (App.tsx). Those genuinely replace the
-    // tmux target/mode, so re-attaching this one terminal is required and correct;
+    // terminal target/mode, so re-attaching this one terminal is required and correct;
     // an unrelated boot/layout/reorder never changes it. Keep it in the deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terminalSessionKey(session), revision]);

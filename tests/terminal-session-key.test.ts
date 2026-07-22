@@ -33,6 +33,12 @@ describe('terminalSessionKey', () => {
     );
   });
 
+  it('changes with the durable terminal session identity', () => {
+    expect(terminalSessionKey(view({ sessionId: 'session-web' }))).not.toBe(
+      terminalSessionKey(view({ sessionId: 'session-api' }))
+    );
+  });
+
   it('changes when run-state flips (boot/kill → repaint)', () => {
     expect(terminalSessionKey(view({}, 'missing'))).not.toBe(terminalSessionKey(view({}, 'running')));
   });
