@@ -13,7 +13,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import type { DeskSessionView } from './types.js';
 import { MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from '../core/terminalSizing.js';
-import { captureTerminal, repaintTerminal } from './api.js';
+import { captureTerminal } from './api.js';
 import {
   applicationScrollProfileForAgent,
   chooseScrollStrategy,
@@ -343,7 +343,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       const requestId = captureRequestRef.current + 1;
       captureRequestRef.current = requestId;
       void captureTerminal({
-        session: activeSession.spec.tmuxSession,
+        sessionId: activeSession.spec.sessionId,
         rows: SCROLLBACK_FETCH_ROWS,
         offset: 0
       })
@@ -825,24 +825,15 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     terminal.writeln(`cwd ${session.spec.cwd}`);
     terminal.writeln('');
 
-    // Only the frozen-scrollback and compatibility repaint REST calls still need
-    // this legacy alias. The broker and all browser-local identity use sessionId.
-    const legacyTmuxTarget = session.spec.tmuxSession;
     const daemonSessionId = session.spec.sessionId;
     const surfaceId = surfaceIdRef.current;
     let disposed = false;
     let stabilizeTimer: number | undefined;
 
-    // A freshly attached tmux window can be painted for stale dimensions (a
-    // redraw that raced the resize). Stabilize repairs that ONCE, after the
-    // layout settles — but only when the settled size actually differs from
-    // what attach already established. Previously it unconditionally posted a
-    // direct resize + repaint on every cold mount (the 2nd resize + the repaint
-    // measured as 18 resizes / 9 repaints for a 9-cell cold switch); with the
-    // bridge attaching via ignore-size the window is already correct, so the
-    // common path is now a no-op. The min-size guard keeps a transient tiny fit
-    // from pinning the window. The repaint still chains after the resize so it
-    // paints at the corrected size.
+    // A fresh snapshot can race the first layout pass. Stabilize repairs the
+    // authoritative daemon size once after layout settles, but only when it
+    // differs from the dimensions already sent. The min-size guard keeps a
+    // transient tiny fit from pinning the PTY.
     const stabilize = (): void => {
       window.clearTimeout(stabilizeTimer);
       stabilizeTimer = window.setTimeout(() => {
@@ -856,14 +847,13 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         }
         const key = `${daemonSessionId}:${cols}:${rows}`;
         if (lastResizeRef.current === key) {
-          return; // already the right size — no redundant resize/repaint
+          return; // already the right size
         }
         if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) {
           return; // never pin a degenerate size
         }
         lastResizeRef.current = key;
         binaryTerminalBroker.sendResize(surfaceId, cols, rows);
-        void repaintTerminal({ session: legacyTmuxTarget }).catch(() => undefined);
       }, 450);
     };
 
@@ -881,8 +871,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         terminal.reset();
         terminal.options.theme = { ...builtThemeRef.current.terminal };
         terminal.write(data);
-        // The snapshot is the current screen; repair tmux size once if the
-        // settled cell size differs from what the window currently has.
+        // Repair the PTY size once if the settled cell differs from the daemon.
         stabilize();
       },
       onExit: (code, signal) => {

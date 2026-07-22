@@ -280,12 +280,12 @@ export async function deleteProjectSession(payload: {
   groupId: string;
   sessionName: string;
   projectCwd?: string;
-  tmuxSession?: string;
+  sessionId?: string;
 }): Promise<DeskSnapshot> {
   return postSnapshot('/api/delete-project-session', payload);
 }
 
-export async function restartProjectSession(payload: { tmuxSession: string }): Promise<DeskSnapshot> {
+export async function restartProjectSession(payload: { sessionId: string }): Promise<DeskSnapshot> {
   return postSnapshot('/api/restart-project-session', payload);
 }
 
@@ -300,7 +300,7 @@ export class ApiCodeError extends Error {
 }
 
 export async function setSessionUiMode(payload: {
-  tmuxSession: string;
+  sessionId: string;
   uiMode: 'terminal' | 'native';
   confirmDiscard?: boolean;
 }): Promise<DeskSnapshot> {
@@ -362,38 +362,11 @@ export async function saveGroupLayoutSizes(payload: {
   );
 }
 
-export async function resizeTerminal(payload: { session: string; cols: number; rows: number }): Promise<void> {
-  await readJson(
-    fetch('/api/terminal-resize', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
-}
-
-/** Server-side stabilize: tmux repaints the window at its true size (deduped per session). */
-export async function repaintTerminal(payload: { session: string }): Promise<void> {
-  await readJson(
-    fetch('/api/terminal-repaint', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
-}
-
-export async function scrollTerminal(payload: { session: string; lines: number; exitCopyMode?: boolean }): Promise<void> {
-  await readJson(
-    fetch('/api/terminal-scroll', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
-}
-
-export async function captureTerminal(payload: { session: string; rows: number; offset: number }): Promise<{ lines: string[] }> {
+export async function captureTerminal(payload: {
+  sessionId: string;
+  rows: number;
+  offset: number;
+}): Promise<{ lines: string[]; totalAvailable?: number }> {
   return readJson(
     fetch('/api/terminal-capture', {
       method: 'POST',

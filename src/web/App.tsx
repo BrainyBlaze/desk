@@ -1294,7 +1294,7 @@ export function App(): JSX.Element {
         groupId: modalGroup.groupId,
         sessionName: modalSession.spec.name,
         projectCwd: modalGroup.projectCwd,
-        tmuxSession: modalSession.spec.tmuxSession
+        sessionId: modalSession.spec.sessionId
       });
       setSnapshot(next);
       setSelectedSessionId(undefined);
@@ -1327,7 +1327,7 @@ export function App(): JSX.Element {
         });
       }
       const next = await setSessionUiMode({
-        tmuxSession: modalSession.spec.tmuxSession,
+        sessionId: modalSession.spec.sessionId,
         uiMode: sessionForm.uiMode,
         confirmDiscard: uiModeSwitchDiscard
       });
@@ -1362,7 +1362,7 @@ export function App(): JSX.Element {
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
       setSelectedSessionId(session.spec.sessionId);
-      const next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
+      const next = await restartProjectSession({ sessionId: session.spec.sessionId });
       setSnapshot(next);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
@@ -1857,7 +1857,7 @@ export function App(): JSX.Element {
   async function bootSession(session: DeskSessionView): Promise<void> {
     setBusy(true);
     try {
-      const next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
+      const next = await restartProjectSession({ sessionId: session.spec.sessionId });
       setSnapshot(next);
       pushToast(`Booted ${session.spec.name}`, 'ok');
     } catch (err) {
@@ -1877,7 +1877,7 @@ export function App(): JSX.Element {
     try {
       let next: DeskSnapshot | null = null;
       for (const session of missing) {
-        next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
+        next = await restartProjectSession({ sessionId: session.spec.sessionId });
       }
       if (next) {
         setSnapshot(next);

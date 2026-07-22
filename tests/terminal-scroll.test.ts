@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { chooseScrollStrategy, encodeApplicationScrollInput } from '../src/web/terminalScroll';
 
 describe('terminal scroll strategy', () => {
-  it('uses local xterm scrollback before tmux virtual capture', () => {
+  it('uses local xterm scrollback before shared terminal history', () => {
     expect(
       chooseScrollStrategy({
         running: true,
@@ -13,7 +13,7 @@ describe('terminal scroll strategy', () => {
     ).toBe('local');
   });
 
-  it('uses tmux capture when upward local scrollback is exhausted', () => {
+  it('uses shared terminal history when upward local scrollback is exhausted', () => {
     expect(
       chooseScrollStrategy({
         running: true,
@@ -21,17 +21,17 @@ describe('terminal scroll strategy', () => {
         localViewportY: 0,
         requestedLines: -8
       })
-    ).toBe('tmux');
+    ).toBe('history');
   });
 
-  it('uses tmux capture only when no local xterm scrollback exists', () => {
+  it('uses shared terminal history only when no local xterm scrollback exists', () => {
     expect(
       chooseScrollStrategy({
         running: true,
         localScrollbackRows: 0,
         requestedLines: -8
       })
-    ).toBe('tmux');
+    ).toBe('history');
   });
 
   it('keeps non-running terminals on local scroll handling', () => {
@@ -44,7 +44,7 @@ describe('terminal scroll strategy', () => {
     ).toBe('local');
   });
 
-  it('uses application scroll for alternate-screen buffers instead of the tmux capture overlay', () => {
+  it('uses application scroll for alternate-screen buffers instead of the history overlay', () => {
     expect(
       chooseScrollStrategy({
         activeBufferType: 'alternate',
@@ -56,7 +56,7 @@ describe('terminal scroll strategy', () => {
     ).toBe('application');
   });
 
-  it('keeps normal-buffer OpenCode on the shared tmux scrollback path', () => {
+  it('keeps normal-buffer OpenCode on the shared terminal history path', () => {
     expect(
       chooseScrollStrategy({
         activeBufferType: 'normal',
@@ -66,7 +66,7 @@ describe('terminal scroll strategy', () => {
         localViewportY: 0,
         requestedLines: -8
       })
-    ).toBe('tmux');
+    ).toBe('history');
   });
 
   it('encodes OpenCode application scroll as repeated line-scroll keys', () => {

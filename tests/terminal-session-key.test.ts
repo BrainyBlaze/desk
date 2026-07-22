@@ -27,8 +27,8 @@ describe('terminalSessionKey', () => {
     expect(terminalSessionKey(a)).toBe(terminalSessionKey(b));
   });
 
-  it('changes with the transitional terminal transport target', () => {
-    expect(terminalSessionKey(view({ tmuxSession: 'legacy-web' }))).not.toBe(
+  it('ignores the retired terminal transport alias', () => {
+    expect(terminalSessionKey(view({ tmuxSession: 'legacy-web' }))).toBe(
       terminalSessionKey(view({ tmuxSession: 'legacy-api' }))
     );
   });

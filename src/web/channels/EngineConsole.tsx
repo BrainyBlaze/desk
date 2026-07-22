@@ -126,7 +126,7 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
   }, [open, refresh]);
 
   const act = useCallback(
-    async (action: EngineActionName, opts?: { tmuxSession?: string; seq?: number }) => {
+    async (action: EngineActionName, opts?: { sessionId?: string; seq?: number }) => {
       setBusyAction(true);
       try {
         const res = await channelsEngineAction(action, opts ?? {});
@@ -214,23 +214,23 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
                   return next;
                 })
               }
-              onMarkIdle={() => void act('mark-idle', { tmuxSession: s.sessionId })}
-              onDropQueue={() => void act('drop-queue', { tmuxSession: s.sessionId })}
-              onDropMessage={(seq) => void act('drop-message', { tmuxSession: s.sessionId, seq })}
+              onMarkIdle={() => void act('mark-idle', { sessionId: s.sessionId })}
+              onDropQueue={() => void act('drop-queue', { sessionId: s.sessionId })}
+              onDropMessage={(seq) => void act('drop-message', { sessionId: s.sessionId, seq })}
               onForce={() =>
                 setConfirm({
                   label: `Force-deliver to ${s.sessionId} now? This bypasses the busy/ready gate and can land inside a working agent's turn.`,
-                  run: () => act('force-deliver', { tmuxSession: s.sessionId })
+                  run: () => act('force-deliver', { sessionId: s.sessionId })
                 })
               }
               onForceItem={(seq) =>
                 setConfirm({
                   label: `Force-deliver stuck message ${seq} to ${s.sessionId} now? This reverts the stuck item to queued and delivers it, bypassing the busy/ready gate.`,
-                  run: () => act('force-deliver', { tmuxSession: s.sessionId, seq })
+                  run: () => act('force-deliver', { sessionId: s.sessionId, seq })
                 })
               }
-              onPause={() => void act('pause-session', { tmuxSession: s.sessionId })}
-              onResume={() => void act('resume-session', { tmuxSession: s.sessionId })}
+              onPause={() => void act('pause-session', { sessionId: s.sessionId })}
+              onResume={() => void act('resume-session', { sessionId: s.sessionId })}
             />
           ))}
           {diag && sessions.length === 0 ? <div className="chanEngineEmpty">No tracked sessions.</div> : null}

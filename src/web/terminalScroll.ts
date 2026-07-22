@@ -1,5 +1,5 @@
 export type TerminalBufferType = 'normal' | 'alternate';
-export type TerminalScrollStrategy = 'local' | 'tmux' | 'application';
+export type TerminalScrollStrategy = 'local' | 'history' | 'application';
 export type ApplicationScrollProfile = 'opencode' | 'page-keys';
 
 export interface TerminalScrollStrategyInput {
@@ -22,7 +22,7 @@ export function chooseScrollStrategy(input: TerminalScrollStrategyInput): Termin
     input.requestedLines < 0 &&
     (input.localScrollbackRows <= 0 || (input.localViewportY ?? input.localScrollbackRows) <= 0)
   ) {
-    return 'tmux';
+    return 'history';
   }
   return 'local';
 }
