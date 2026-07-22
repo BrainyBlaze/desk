@@ -49,7 +49,7 @@ function pulse(unread: number): DeskPulse {
       events: [
         {
           id: 'event-1',
-          tmuxSession: 'agent-1',
+          sessionId: 'agent-1',
           kind: 'turn-complete',
           at: '2026-07-12T22:00:00.000Z',
           read: false

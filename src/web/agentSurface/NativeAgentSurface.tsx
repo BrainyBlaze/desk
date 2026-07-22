@@ -74,7 +74,7 @@ const composerDrafts = new Map<string, string>();
 
 /**
  * Both per-session Maps below live for the tab's lifetime and are keyed by
- * tmux session name — without a cap they grow one entry per session ever
+ * durable session id - without a cap they grow one entry per session ever
  * visited. 200 sessions of drafts/counts is far beyond any real wall; evict
  * the least-recently-touched entry past that.
  */
@@ -876,7 +876,7 @@ function shouldShowUnreadMarkerBeforeItem(
 }
 
 export interface NativeAgentSurfaceProps {
-  /** Tmux session name (broker key). */
+  /** Durable session id (broker key). */
   session: string;
   /** Bumped by the parent when restart/switch happens so we resubscribe fresh. */
   revision: number;

@@ -10,6 +10,7 @@ const sessions: SessionSpec[] = [
     cwd: '/workspace/projects/alpha',
     agent: 'codex',
     resume: '00000000-0000-7000-8000-000000000001',
+    sessionId: 'session-alpha',
     tmuxSession: 'agentdesk-group-1-alpha-00000000',
     command:
       'codex --dangerously-bypass-approvals-and-sandbox resume 00000000-0000-7000-8000-000000000001'
@@ -21,6 +22,7 @@ const sessions: SessionSpec[] = [
     cwd: '/workspace/projects/beta',
     agent: 'codex',
     resume: '00000000-0000-7000-8000-000000000002',
+    sessionId: 'session-beta',
     tmuxSession: 'agentdesk-group-2-beta-00000000',
     command:
       'codex --dangerously-bypass-approvals-and-sandbox resume 00000000-0000-7000-8000-000000000002'
@@ -29,7 +31,7 @@ const sessions: SessionSpec[] = [
 
 describe('desk view model', () => {
   it('groups sessions and derives running/missing counters', () => {
-    const model = buildDeskViewModel(sessions, new Set(['agentdesk-group-1-alpha-00000000']));
+    const model = buildDeskViewModel(sessions, new Set(['session-alpha']));
 
     expect(model.totals).toEqual({
       projects: 2,
@@ -122,7 +124,7 @@ describe('desk view model', () => {
           projectCwd: '/workspace/projects/beta'
         }
       ],
-      new Set(['agentdesk-group-1-alpha-00000000'])
+      new Set(['session-alpha'])
     );
 
     expect(model.totals.projects).toBe(2);

@@ -24,6 +24,7 @@ const view: DeskViewModel = {
             cwd: '/tmp/a1',
             agent: 'codex',
             resume: '00000000-0000-7000-8000-000000000001',
+            sessionId: 'session-a1',
             tmuxSession: 'agentdesk-alpha-a1-00000000',
             command: 'codex resume 00000000-0000-7000-8000-000000000001'
           }
@@ -37,6 +38,7 @@ const view: DeskViewModel = {
             cwd: '/tmp/a2',
             agent: 'codex',
             resume: '00000000-0000-7000-8000-000000000002',
+            sessionId: 'session-a2',
             tmuxSession: 'agentdesk-alpha-a2-00000000',
             command: 'codex resume 00000000-0000-7000-8000-000000000002'
           }
@@ -62,6 +64,7 @@ const view: DeskViewModel = {
             cwd: '/tmp/b1',
             agent: 'codex',
             resume: '00000000-0000-7000-8000-000000000003',
+            sessionId: 'session-b1',
             tmuxSession: 'agentdesk-beta-b1-00000000',
             command: 'codex resume 00000000-0000-7000-8000-000000000003'
           }
@@ -84,8 +87,7 @@ const view: DeskViewModel = {
 describe('workspace state', () => {
   it('selects group tabs and session tabs from the view model', () => {
     const state = buildWorkspaceState(view, {
-      groupId: 'beta',
-      tmuxSession: undefined
+      sessionId: 'session-b1'
     });
 
     expect(state.activeGroup.id).toBe('beta');

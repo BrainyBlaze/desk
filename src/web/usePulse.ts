@@ -31,7 +31,7 @@ interface UsePulseResult {
 
 /**
  * Owns the 2s pulse loop: fetches system telemetry + attention/events and folds
- * live tmux run-states into the snapshot. Attention/events/snapshot state stays
+ * live session run-states into the snapshot. Attention/events/snapshot state stays
  * owned by App; this hook receives their setters so the coupling is preserved
  * exactly (the pulse writes them, App invalidates stale responses after its
  * own optimistic mutations).
@@ -104,7 +104,7 @@ export function usePulse({
           }
           setUnreadEvents(pulse.attention.unread ?? 0);
         }
-        // Liveness self-heal: fold the live tmux set into the snapshot.
+        // Liveness self-heal: fold the live session-id set into the snapshot.
         // patchViewLiveness preserves identity of untouched sessions so
         // terminal sockets never churn on a state-only patch.
         // Known constraint: pulse patches RUN STATES only. Manifest edits made

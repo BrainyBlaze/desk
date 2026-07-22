@@ -113,7 +113,7 @@ export function buildDeskViewModel(
   }
 
   for (const spec of sessions) {
-    const state = runningSessions.has(spec.tmuxSession) ? 'running' : 'missing';
+    const state = runningSessions.has(spec.sessionId) ? 'running' : 'missing';
     const project = ensureProject(projects, { ...projectFromSession(spec), order: spec.projectOrder });
     const groupKey = `${project.id}:${spec.groupId}`;
     let group = groups.get(groupKey);

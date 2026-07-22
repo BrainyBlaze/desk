@@ -3,7 +3,7 @@ import type { DeskGroupView, DeskProjectView, DeskSessionView, DeskViewModel } f
 export interface WorkspaceSelection {
   projectId?: string;
   groupId?: string;
-  tmuxSession?: string;
+  sessionId?: string;
 }
 
 export interface WorkspaceCell {
@@ -29,12 +29,12 @@ export function buildWorkspaceState(view: DeskViewModel, selection: WorkspaceSel
   const activeGroup =
     view.groups.find((group) => group.id === selection.groupId) ??
     view.groups.find((group) => group.projectId === selection.projectId) ??
-    view.groups.find((group) => group.sessions.some((session) => session.spec.tmuxSession === selection.tmuxSession)) ??
+    view.groups.find((group) => group.sessions.some((session) => session.spec.sessionId === selection.sessionId)) ??
     view.groups[0]!;
   const activeProject = view.projects.find((project) => project.id === activeGroup.projectId) ?? view.projects[0]!;
 
   const activeSession =
-    activeGroup.sessions.find((session) => session.spec.tmuxSession === selection.tmuxSession) ??
+    activeGroup.sessions.find((session) => session.spec.sessionId === selection.sessionId) ??
     activeGroup.sessions[0];
 
   return {
@@ -60,7 +60,7 @@ function buildMultiplexerCells(group: DeskGroupView, activeSession?: DeskSession
 
   for (const cell of cells) {
     cell.activeSession =
-      cell.sessions.find((session) => session.spec.tmuxSession === activeSession?.spec.tmuxSession) ?? cell.sessions[0];
+      cell.sessions.find((session) => session.spec.sessionId === activeSession?.spec.sessionId) ?? cell.sessions[0];
   }
 
   return cells;

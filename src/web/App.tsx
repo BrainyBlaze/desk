@@ -114,7 +114,7 @@ import {
 } from './sidebarPanel.js';
 import { usePersistedCollapse } from './usePersistedCollapse.js';
 import { useSubsystemSidebars } from './useSubsystemSidebars.js';
-import { getMovedSessionTmux, getProjectDropGroup } from './sidebarMove.js';
+import { getMovedSessionId, getProjectDropGroup } from './sidebarMove.js';
 import { usePulse } from './usePulse.js';
 import { useStableCallbacks } from './stableCallbacks.js';
 import { useClampedMenu } from './menuPosition.js';
@@ -254,7 +254,7 @@ export function App(): JSX.Element {
   const [subsystem, setSubsystem] = useState<Subsystem>(() => readStoredSubsystem(localStorage.getItem('desk.subsystem')));
   // Keep-alive multiplexer mounts: the active group plus the most recently
   // visited ones stay mounted hidden, so switching back reuses live
-  // terminals — no socket/PTY churn, no WebGL context churn, no tmux resize
+  // terminals — no socket/PTY churn, no WebGL context churn, no daemon resize
   // storm. The agents subsystem itself is also display-gated now instead of
   // unmounting on subsystem switches (every other subsystem already worked
   // that way), which retired the fresh-group-id remount trick the panel
@@ -266,7 +266,7 @@ export function App(): JSX.Element {
   const [activeGroupId, setActiveGroupId] = useState<string | undefined>(
     () => localStorage.getItem('desk.activeGroup') ?? undefined
   );
-  const [selectedTmux, setSelectedTmux] = useState<string | undefined>(
+  const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(
     () => localStorage.getItem('desk.activeSession') ?? undefined
   );
   const [cellAssignments, setCellAssignments] = useState<Record<string, Record<string, number>>>(() =>
@@ -306,7 +306,7 @@ export function App(): JSX.Element {
   const pendingEditorRevealRef = useRef<string | null>(null);
   const gitNavigatorRef = useRef<((target: GitNavigateTarget) => void) | null>(null);
   const pendingGitNavRef = useRef<GitNavigateTarget | null>(null);
-  const [draggedTmux, setDraggedTmux] = useState<string | null>(null);
+  const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null);
   const agentSidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringAgentSidebarRef = useRef(false);
   // Persisted agents-sidebar width: localStorage cache, desk.yml as truth.
@@ -739,9 +739,9 @@ export function App(): JSX.Element {
     return buildWorkspaceState(snapshot.view, {
       projectId: activeProjectId,
       groupId: activeGroupId,
-      tmuxSession: selectedTmux
+      sessionId: selectedSessionId
     });
-  }, [activeGroupId, activeProjectId, selectedTmux, snapshot]);
+  }, [activeGroupId, activeProjectId, selectedSessionId, snapshot]);
 
   const activeProject = workspace?.activeProject ?? snapshot?.view.projects.find((project) => project.id === activeProjectId) ?? snapshot?.view.projects[0];
   const activeGroup = workspace?.activeGroup;
@@ -785,13 +785,13 @@ export function App(): JSX.Element {
 
   // Agents status-bar context: identity of the selected session. Project and
   // group already live in the topbar scope cell — the bar adds what is
-  // missing: which session, which agent, its liveness, and a copyable tmux
-  // target for `tmux attach -t`.
+  // missing: which session, which agent, its liveness, and its copyable
+  // durable identity.
   useEffect(() => {
     const session = snapshot?.view.projects
       .flatMap((project) => project.groups)
       .flatMap((group) => group.sessions)
-      .find((candidate) => candidate.spec.tmuxSession === selectedTmux);
+      .find((candidate) => candidate.spec.sessionId === selectedSessionId);
     if (!session) {
       publishStatus('agents', [
         { key: 'session', icon: <TerminalSquare size={11} />, text: 'no session selected', hint: 'Select a session in the sidebar' }
@@ -809,15 +809,15 @@ export function App(): JSX.Element {
       { key: 'agent', icon: <Bot size={11} />, text: session.spec.agent ?? 'shell', hint: 'Agent kind' },
       { key: 'cwd', icon: <Folder size={11} />, text: session.spec.cwd, hint: `Working directory: ${session.spec.cwd}` },
       {
-        key: 'tmux',
+        key: 'session-id',
         icon: <Copy size={11} />,
-        text: session.spec.tmuxSession,
-        hint: `Copy tmux target — tmux attach -t ${session.spec.tmuxSession}`,
+        text: session.spec.sessionId,
+        hint: `Copy session ID: ${session.spec.sessionId}`,
         onClick: () => {
-          const copied = navigator.clipboard?.writeText(session.spec.tmuxSession);
+          const copied = navigator.clipboard?.writeText(session.spec.sessionId);
           if (copied) {
             void copied
-              .then(() => pushToast(`Copied ${session.spec.tmuxSession}`, 'ok'))
+              .then(() => pushToast(`Copied ${session.spec.sessionId}`, 'ok'))
               .catch(() => pushToast('Copy failed', 'error'));
           } else {
             pushToast('Copy failed', 'error');
@@ -825,11 +825,11 @@ export function App(): JSX.Element {
         }
       }
     ];
-    if (selectedTmux && attention[selectedTmux]) {
+    if (selectedSessionId && attention[selectedSessionId]) {
       segments.push({ key: 'attn', icon: <Bell size={11} />, text: 'needs input', tone: 'danger', hint: 'This agent is waiting for you' });
     }
     publishStatus('agents', segments);
-  }, [attention, pushToast, selectedTmux, snapshot]);
+  }, [attention, pushToast, selectedSessionId, snapshot]);
 
   // App-wide signals for the status bar's right side. System metrics live in
   // the topbar; these are the workflow ones: agents waiting on input, unread
@@ -986,7 +986,7 @@ export function App(): JSX.Element {
           activeGroup,
           cellAssignments[activeGroup.id] ?? {},
           cellActiveSessions[activeGroup.id] ?? {},
-          selectedTmux
+          selectedSessionId
         );
         const cell = cells[Number(key) - 1];
         const target = cell?.activeSession ?? cell?.sessions[0];
@@ -1004,19 +1004,19 @@ export function App(): JSX.Element {
         if (all.length === 0) {
           return;
         }
-        const index = all.findIndex((session) => session.spec.tmuxSession === selectedTmux);
+        const index = all.findIndex((session) => session.spec.sessionId === selectedSessionId);
         const step = key === 'ArrowRight' ? 1 : -1;
         const next = index === -1 ? all[0] : all[(index + step + all.length) % all.length];
         event.preventDefault();
         event.stopPropagation();
-        revealAgentSession(next.spec.tmuxSession);
+        revealAgentSession(next.spec.sessionId);
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
     // selectCellSession/revealAgentSession are per-render closures over the same state
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroup, cellActiveSessions, cellAssignments, selectedTmux, snapshot, subsystem, modal]);
+  }, [activeGroup, cellActiveSessions, cellAssignments, selectedSessionId, snapshot, subsystem, modal]);
 
   useEffect(() => {
     // The agents group REMOUNTS on subsystem switches and gets its width from
@@ -1045,10 +1045,10 @@ export function App(): JSX.Element {
     localStorage.setItem('desk.activeProject', workspace.activeProject.id);
     localStorage.setItem('desk.activeGroup', workspace.activeGroup.id);
     if (workspace.activeSession) {
-      setSelectedTmux(workspace.activeSession.spec.tmuxSession);
-      localStorage.setItem('desk.activeSession', workspace.activeSession.spec.tmuxSession);
+      setSelectedSessionId(workspace.activeSession.spec.sessionId);
+      localStorage.setItem('desk.activeSession', workspace.activeSession.spec.sessionId);
     }
-  }, [workspace?.activeProject.id, workspace?.activeGroup.id, workspace?.activeSession?.spec.tmuxSession]);
+  }, [workspace?.activeProject.id, workspace?.activeGroup.id, workspace?.activeSession?.spec.sessionId]);
 
   useEffect(() => {
     void refresh();
@@ -1114,7 +1114,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(groupForm.projectId || activeProjectId);
       setActiveGroupId(groupForm.projectId ? `${groupForm.projectId}:${groupForm.groupId}` : groupForm.groupId);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setGroupForm(emptyGroupForm);
       setModal(null);
       setError(null);
@@ -1250,7 +1250,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(undefined);
       setActiveGroupId(undefined);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setModal(null);
       setError(null);
     } catch (err) {
@@ -1273,7 +1273,7 @@ export function App(): JSX.Element {
       });
       setSnapshot(next);
       setActiveGroupId(undefined);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setModal(null);
       setError(null);
     } catch (err) {
@@ -1297,7 +1297,7 @@ export function App(): JSX.Element {
         tmuxSession: modalSession.spec.tmuxSession
       });
       setSnapshot(next);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setModal(null);
       setError(null);
     } catch (err) {
@@ -1334,7 +1334,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setTerminalRevisions((current) => ({
         ...current,
-        [modalSession.spec.tmuxSession]: (current[modalSession.spec.tmuxSession] ?? 0) + 1
+        [modalSession.spec.sessionId]: (current[modalSession.spec.sessionId] ?? 0) + 1
       }));
       setUiModeSwitchDiscard(false);
       setModal(null);
@@ -1361,15 +1361,15 @@ export function App(): JSX.Element {
     try {
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setSelectedTmux(session.spec.tmuxSession);
+      setSelectedSessionId(session.spec.sessionId);
       const next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
       setSnapshot(next);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setSelectedTmux(session.spec.tmuxSession);
+      setSelectedSessionId(session.spec.sessionId);
       setTerminalRevisions((current) => ({
         ...current,
-        [session.spec.tmuxSession]: (current[session.spec.tmuxSession] ?? 0) + 1
+        [session.spec.sessionId]: (current[session.spec.sessionId] ?? 0) + 1
       }));
       setModal(null);
       setError(null);
@@ -1423,8 +1423,8 @@ export function App(): JSX.Element {
       setCellAssignments((current) => {
         const currentGroup = current[group.id] ?? {};
         const reassigned = Object.fromEntries(
-          Object.entries(currentGroup).map(([tmuxSession, index]) => [
-            tmuxSession,
+          Object.entries(currentGroup).map(([sessionId, index]) => [
+            sessionId,
             index === cell.index ? 0 : Math.min(index, group.layout.cellCount - 2)
           ])
         );
@@ -1445,11 +1445,11 @@ export function App(): JSX.Element {
     draggedSidebarSessionRef.current = value;
   }
 
-  function resolveSidebarDrag(tmuxSession?: string): { session: DeskSessionView; group: DeskGroupView } | null {
-    if (tmuxSession && snapshot) {
+  function resolveSidebarDrag(sessionId?: string): { session: DeskSessionView; group: DeskGroupView } | null {
+    if (sessionId && snapshot) {
       for (const project of snapshot.view.projects) {
         for (const group of project.groups) {
-          const session = group.sessions.find((candidate) => candidate.spec.tmuxSession === tmuxSession);
+          const session = group.sessions.find((candidate) => candidate.spec.sessionId === sessionId);
           if (session) {
             return { session, group };
           }
@@ -1459,8 +1459,8 @@ export function App(): JSX.Element {
     return draggedSidebarSessionRef.current;
   }
 
-  async function moveSidebarSession(targetGroup: DeskGroupView, tmuxSession?: string): Promise<void> {
-    const draggedSession = resolveSidebarDrag(tmuxSession);
+  async function moveSidebarSession(targetGroup: DeskGroupView, sessionId?: string): Promise<void> {
+    const draggedSession = resolveSidebarDrag(sessionId);
     if (!draggedSession || draggedSession.group.id === targetGroup.id) {
       setDraggedSidebarSession(null);
       return;
@@ -1479,7 +1479,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(targetGroup.projectId);
       setActiveGroupId(targetGroup.id);
-      setSelectedTmux(getMovedSessionTmux(next, targetGroup.id, draggedSession.session.spec.name));
+      setSelectedSessionId(getMovedSessionId(next, targetGroup.id, draggedSession.session.spec.name));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1649,7 +1649,7 @@ export function App(): JSX.Element {
   }
 
   function openSessionModal(mode: ModalMode, session: DeskSessionView, group?: DeskGroupView): void {
-    setSelectedTmux(session.spec.tmuxSession);
+    setSelectedSessionId(session.spec.sessionId);
     setModalSession(session);
     setModalGroup(group ?? activeGroup);
     setSessionForm({
@@ -1674,13 +1674,13 @@ export function App(): JSX.Element {
     setActiveProjectId(project.id);
     const firstGroup = project.groups[0];
     setActiveGroupId(firstGroup?.id);
-    setSelectedTmux(firstGroup?.sessions[0]?.spec.tmuxSession);
+    setSelectedSessionId(firstGroup?.sessions[0]?.spec.sessionId);
   }
 
   function selectGroup(group: DeskGroupView): void {
     setActiveProjectId(group.projectId);
     setActiveGroupId(group.id);
-    setSelectedTmux(group.sessions[0]?.spec.tmuxSession);
+    setSelectedSessionId(group.sessions[0]?.spec.sessionId);
   }
 
   function openAgentEvent(event: AgentEvent): void {
@@ -1690,8 +1690,8 @@ export function App(): JSX.Element {
     fireAndForget(markEventsRead({ ids: [event.id] }), 'mark event read');
     // Reading an event acknowledges its session's sidebar lamp, even when the
     // session is gone from the snapshot and cannot be revealed anymore.
-    if (event.tmuxSession) {
-      touchSession(event.tmuxSession);
+    if (event.sessionId) {
+      touchSession(event.sessionId);
     }
     if (event.kind === 'channel') {
       // Jump to the channels subsystem and reveal the exact message.
@@ -1701,23 +1701,23 @@ export function App(): JSX.Element {
       }
       return;
     }
-    revealAgentSession(event.tmuxSession);
+    revealAgentSession(event.sessionId);
   }
 
   /** Jump to the agents subsystem with the given session selected + revealed. */
-  function revealAgentSession(tmuxSession: string): void {
+  function revealAgentSession(sessionId: string): void {
     for (const project of snapshot?.view.projects ?? []) {
       for (const group of project.groups) {
-        const session = group.sessions.find((candidate) => candidate.spec.tmuxSession === tmuxSession);
+        const session = group.sessions.find((candidate) => candidate.spec.sessionId === sessionId);
         if (session) {
           // Jump to agents first so the sidebar/terminal exist when the
           // reveal scroll fires (deferred 80ms).
           setSubsystem('agents');
-          touchSession(session.spec.tmuxSession);
+          touchSession(session.spec.sessionId);
           setActiveProjectId(group.projectId);
           setActiveGroupId(group.id);
-          setSelectedTmux(session.spec.tmuxSession);
-          revealSidebarSession(group, session.spec.tmuxSession);
+          setSelectedSessionId(session.spec.sessionId);
+          revealSidebarSession(group, session.spec.sessionId);
           return;
         }
       }
@@ -1757,15 +1757,15 @@ export function App(): JSX.Element {
     fireAndForget(clearAllEvents(), 'clear all events');
   }
 
-  function touchSession(tmuxSession: string): void {
-    recordAgentRecent(tmuxSession);
+  function touchSession(sessionId: string): void {
+    recordAgentRecent(sessionId);
     invalidateAttentionPulse();
     setAttention((current) => {
-      if (!current[tmuxSession]) {
+      if (!current[sessionId]) {
         return current;
       }
       const next = { ...current };
-      delete next[tmuxSession];
+      delete next[sessionId];
       return next;
     });
     // The server marks this session's events read on touch; mirror it locally
@@ -1773,7 +1773,7 @@ export function App(): JSX.Element {
     setAgentEvents((current) => {
       let unreadDelta = 0;
       const next = current.map((event) => {
-        if (event.tmuxSession === tmuxSession && !event.read) {
+        if (event.sessionId === sessionId && !event.read) {
           unreadDelta += 1;
           return { ...event, read: true };
         }
@@ -1785,53 +1785,53 @@ export function App(): JSX.Element {
       }
       return current;
     });
-    fireAndForget(clearAttention(tmuxSession), 'clear attention');
+    fireAndForget(clearAttention(sessionId), 'clear attention');
   }
 
-  function revealSidebarSession(group: DeskGroupView, tmuxSession: string): void {
+  function revealSidebarSession(group: DeskGroupView, sessionId: string): void {
     setCollapsedProjects((current) => (group.projectId && current[group.projectId] ? { ...current, [group.projectId]: false } : current));
     setCollapsedGroups((current) => (current[group.id] ? { ...current, [group.id]: false } : current));
     window.setTimeout(() => {
       document
-        .querySelector(`[data-sidebar-session="true"][data-tmux-session="${CSS.escape(tmuxSession)}"]`)
+        .querySelector(`[data-sidebar-session="true"][data-session-id="${CSS.escape(sessionId)}"]`)
         ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }, 80);
   }
 
   function selectCellSession(group: DeskGroupView, cell: PanelCell, session: DeskSessionView): void {
-    touchSession(session.spec.tmuxSession);
+    touchSession(session.spec.sessionId);
     setActiveProjectId(group.projectId);
     setActiveGroupId(group.id);
-    setSelectedTmux(session.spec.tmuxSession);
-    revealSidebarSession(group, session.spec.tmuxSession);
+    setSelectedSessionId(session.spec.sessionId);
+    revealSidebarSession(group, session.spec.sessionId);
     setCellActiveSessions((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [cell.id]: session.spec.tmuxSession
+        [cell.id]: session.spec.sessionId
       }
     }));
   }
 
   function assignDraggedSession(group: DeskGroupView, cell: PanelCell): void {
-    if (!draggedTmux) {
+    if (!draggedSessionId) {
       return;
     }
     setCellAssignments((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [draggedTmux]: cell.index
+        [draggedSessionId]: cell.index
       }
     }));
     setCellActiveSessions((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [cell.id]: draggedTmux
+        [cell.id]: draggedSessionId
       }
     }));
-    setDraggedTmux(null);
+    setDraggedSessionId(null);
   }
 
   /** Tap-to-assign for empty cells — the DnD path without the drag. */
@@ -1840,17 +1840,17 @@ export function App(): JSX.Element {
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [session.spec.tmuxSession]: cell.index
+        [session.spec.sessionId]: cell.index
       }
     }));
     setCellActiveSessions((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [cell.id]: session.spec.tmuxSession
+        [cell.id]: session.spec.sessionId
       }
     }));
-    setSelectedTmux(session.spec.tmuxSession);
+    setSelectedSessionId(session.spec.sessionId);
   }
 
   /** Boot one missing session straight from its cell. */
@@ -1995,14 +1995,14 @@ export function App(): JSX.Element {
     onGroupBoot: bootGroupMissing,
     onDragSession: setDraggedSidebarSession,
     onDropSession: moveSidebarSession,
-    onDropSessionToProject: (project: DeskProjectView, tmuxSession?: string) => {
+    onDropSessionToProject: (project: DeskProjectView, sessionId?: string) => {
       const targetGroup = getProjectDropGroup(project);
       if (!targetGroup) {
         setError(`project ${project.label} has no groups`);
         setDraggedSidebarSession(null);
         return;
       }
-      void moveSidebarSession(targetGroup, tmuxSession);
+      void moveSidebarSession(targetGroup, sessionId);
     },
     onReorderProjects: reorderProjectsList,
     onReorderGroups: reorderGroupsList,
@@ -2010,10 +2010,10 @@ export function App(): JSX.Element {
     onSelectProject: selectProject,
     onSelectGroup: selectGroup,
     onSelectSession: (session: DeskSessionView, group: DeskGroupView) => {
-      touchSession(session.spec.tmuxSession);
+      touchSession(session.spec.sessionId);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setSelectedTmux(session.spec.tmuxSession);
+      setSelectedSessionId(session.spec.sessionId);
       if (isNarrowViewport() && !agentSidebarCollapsed) {
         // drawer behavior: picking a session reveals it
         collapseAgentSidebar();
@@ -2153,7 +2153,7 @@ export function App(): JSX.Element {
                           attention={attention}
                           activeProjectId={activeProject?.id}
                           activeGroupId={activeGroup?.id}
-                          activeTmux={selectedTmux}
+                          activeSessionId={selectedSessionId}
                           collapsedProjects={collapsedProjects}
                           collapsedGroups={collapsedGroups}
                           {...sidebarHandlers}
@@ -2179,10 +2179,10 @@ export function App(): JSX.Element {
                             visible={subsystem === 'agents' && Boolean(activeGroup) && mountedGroup.id === activeGroup?.id}
                             assignments={cellAssignments[mountedGroup.id] ?? EMPTY_CELL_MAP}
                             activeByCell={cellActiveSessions[mountedGroup.id] ?? EMPTY_ACTIVE_MAP}
-                            selectedTmux={selectedTmux}
+                            selectedSessionId={selectedSessionId}
                             attention={attention}
                             busy={busy}
-                            onDragSession={setDraggedTmux}
+                            onDragSession={setDraggedSessionId}
                             terminalRevisions={terminalRevisions}
                             handlers={muxHandlers}
                           />
@@ -2331,9 +2331,9 @@ export function App(): JSX.Element {
                   projects={snapshot?.view.projects ?? []}
                   attention={attention}
                   onClose={() => setAgentPaletteOpen(false)}
-                  onPick={(tmuxSession) => {
+                  onPick={(sessionId) => {
                     setAgentPaletteOpen(false);
-                    revealAgentSession(tmuxSession);
+                    revealAgentSession(sessionId);
                   }}
                 />
               ) : null}
@@ -2412,7 +2412,7 @@ export function App(): JSX.Element {
             icon: <Plus size={13} />,
             help: (
               <>
-                <div>Terminals are tmux sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
+                <div>Terminals are durable sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
                 <div style={{ marginTop: '8px' }}>
                   <a href="https://docs.desk.cloud/guide-create-agent-fleet/#3-add-agent-sessions" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
                     Learn more →
@@ -2449,7 +2449,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Delete ${modalProject?.label ?? 'project'}`}
-                detail="This kills the project's tmux sessions and removes the project from config. For legacy mixed groups, only sessions under this project CWD are removed."
+                detail="This stops the project's sessions and removes the project from config. For mixed groups, only sessions under this project CWD are removed."
                 busy={busy}
                 onConfirm={confirmDeleteProject}
               />
@@ -2474,7 +2474,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Delete ${modalGroup?.label ?? 'group'}`}
-                detail="This kills the group's tmux sessions and removes the group from config. For legacy mixed groups, only sessions under this project CWD are removed."
+                detail="This stops the group's sessions and removes the group from config. For mixed groups, only sessions under this project CWD are removed."
                 busy={busy}
                 onConfirm={confirmDeleteGroup}
               />
@@ -2544,7 +2544,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Delete ${modalSession?.spec.name ?? 'session'}`}
-                detail="This kills the tmux session process and removes the session from config."
+                detail="This stops the session process and removes the session from config."
                 busy={busy}
                 onConfirm={confirmDeleteSession}
               />
@@ -2557,7 +2557,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Restart ${modalSession?.spec.name ?? 'session'}`}
-                detail="This kills the running tmux session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
+                detail="This stops the running session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
                 busy={busy}
                 confirmLabel="Restart session"
                 confirmIcon={<RotateCw size={12} />}
@@ -2583,7 +2583,7 @@ export function App(): JSX.Element {
                 detail={
                   uiModeSwitchDiscard
                     ? 'No resume id has been captured for this session yet, so the switch cannot rejoin the conversation. Confirming starts a FRESH conversation in the new mode; the current one stays only in the agent-native history.'
-                    : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
+                    : 'This respawns the session in the selected UI mode: the running session is stopped and relaunched, resuming the same conversation by its captured id. In-flight work is interrupted.'
                 }
                 busy={busy}
                 confirmLabel={uiModeSwitchDiscard ? 'Switch UI mode (start fresh)' : 'Switch UI mode'}
@@ -2783,7 +2783,7 @@ function KillConfirm({
       <div className="confirmCopy">
         <strong>Terminate ALL agents?</strong>
         <span>
-          This kills every Codex and Claude CLI process and its tmux session — including agents not managed by Desk.
+          This stops every Codex and Claude CLI process and its session, including agents not managed by Desk.
           Sessions with a stored resume id can be restarted; in-progress turns are lost.
         </span>
       </div>
@@ -3286,7 +3286,7 @@ function NotificationDrawerImpl({
     for (const project of snapshot?.view.projects ?? []) {
       for (const group of project.groups) {
         for (const session of group.sessions) {
-          labels.set(session.spec.tmuxSession, `${project.label} / ${session.spec.name}`);
+          labels.set(session.spec.sessionId, `${project.label} / ${session.spec.name}`);
         }
       }
     }
@@ -3391,7 +3391,7 @@ function NotificationDrawerImpl({
                       bleeps.click?.play();
                       onOpenEvent(event);
                     }}
-                    title={event.tmuxSession}
+                    title={event.sessionId}
                   >
                     <span className="notifCardTop">
                       {/* Always mounted: an unmounting lamp shifted every sibling 14px on read. */}
@@ -3399,7 +3399,7 @@ function NotificationDrawerImpl({
                       <i className="notifCardKind">{meta.label}</i>
                       <small title={new Date(event.at).toLocaleString()}>{shortTimeAgo(event.at)}</small>
                     </span>
-                    <strong>{sessionLabels.get(event.tmuxSession) ?? event.tmuxSession}</strong>
+                    <strong>{sessionLabels.get(event.sessionId) ?? event.sessionId}</strong>
                     {event.message ? <span className="notifCardMessage">{event.message}</span> : null}
                   </Animated>
                 </Animator>
@@ -3438,7 +3438,7 @@ const EMPTY_CELL_MAP: Record<string, number> = {};
 const EMPTY_ACTIVE_MAP: Record<string, string> = {};
 
 interface MuxHandlers {
-  onTouchSession: (tmuxSession: string) => void;
+  onTouchSession: (sessionId: string) => void;
   onAddCell: (group: DeskGroupView) => void;
   onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
   onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
@@ -3461,17 +3461,17 @@ interface MountedMuxProps {
   visible: boolean;
   assignments: Record<string, number>;
   activeByCell: Record<string, string>;
-  selectedTmux?: string;
+  selectedSessionId?: string;
   attention: Record<string, { attention: true; since: string }>;
   busy: boolean;
-  onDragSession: (tmuxSession: string | null) => void;
+  onDragSession: (sessionId: string | null) => void;
   terminalRevisions: Record<string, number>;
   handlers: MuxHandlers;
 }
 
 // Keep-alive can hold many groups mounted-hidden. Those hidden groups have
 // nothing on screen, so they must NOT re-render when global volatile props
-// churn — selection (selectedTmux), the 2s attention pulse, busy, or terminal
+// churn — selection (selectedSessionId), the 2s attention pulse, busy, or terminal
 // revisions. Without this, every selection change and every pulse tick
 // re-rendered ALL warm groups, not just the visible one. A hidden-staying-hidden
 // group re-renders only when its OWN structure changes (group identity / cell
@@ -3492,7 +3492,7 @@ function mountedMuxPropsEqual(prev: MountedMuxProps, next: MountedMuxProps): boo
     prev.visible === next.visible &&
     prev.assignments === next.assignments &&
     prev.activeByCell === next.activeByCell &&
-    prev.selectedTmux === next.selectedTmux &&
+    prev.selectedSessionId === next.selectedSessionId &&
     prev.attention === next.attention &&
     prev.busy === next.busy &&
     prev.onDragSession === next.onDragSession &&
@@ -3506,7 +3506,7 @@ const MountedMux = memo(function MountedMuxImpl({
   visible,
   assignments,
   activeByCell,
-  selectedTmux,
+  selectedSessionId,
   attention,
   busy,
   onDragSession,
@@ -3514,8 +3514,8 @@ const MountedMux = memo(function MountedMuxImpl({
   handlers
 }: MountedMuxProps): JSX.Element {
   const cells = useMemo(
-    () => buildPanelCells(group, assignments, activeByCell, selectedTmux),
-    [activeByCell, assignments, group, selectedTmux]
+    () => buildPanelCells(group, assignments, activeByCell, selectedSessionId),
+    [activeByCell, assignments, group, selectedSessionId]
   );
   return (
     <div className="muxMount" style={{ display: visible ? 'flex' : 'none' }} aria-hidden={!visible}>
@@ -3524,7 +3524,7 @@ const MountedMux = memo(function MountedMuxImpl({
           group={group}
           visible={visible}
           cells={cells}
-          selectedTmux={selectedTmux}
+          selectedSessionId={selectedSessionId}
           attention={attention}
           busy={busy}
           onDragSession={onDragSession}
@@ -3548,8 +3548,8 @@ function readAgentRecents(): string[] {
   }
 }
 
-function recordAgentRecent(tmuxSession: string): void {
-  const next = [tmuxSession, ...readAgentRecents().filter((value) => value !== tmuxSession)].slice(0, 12);
+function recordAgentRecent(sessionId: string): void {
+  const next = [sessionId, ...readAgentRecents().filter((value) => value !== sessionId)].slice(0, 12);
   localStorage.setItem(AGENT_RECENTS_KEY, JSON.stringify(next));
 }
 
@@ -3574,7 +3574,7 @@ function AgentsPalette({
   projects: DeskProjectView[];
   attention: Record<string, { attention: true; since: string }>;
   onClose: () => void;
-  onPick: (tmuxSession: string) => void;
+  onPick: (sessionId: string) => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [query, setQuery] = useState('');
@@ -3594,18 +3594,18 @@ function AgentsPalette({
     const text = query.trim().toLowerCase();
     if (text === '') {
       const recents = readAgentRecents();
-      const recentRank = (tmuxSession: string): number => {
-        const at = recents.indexOf(tmuxSession);
+      const recentRank = (sessionId: string): number => {
+        const at = recents.indexOf(sessionId);
         return at === -1 ? Number.MAX_SAFE_INTEGER : at;
       };
       return [...all]
         .sort((a, b) => {
-          const aAttn = attention[a.session.spec.tmuxSession] ? 0 : 1;
-          const bAttn = attention[b.session.spec.tmuxSession] ? 0 : 1;
+          const aAttn = attention[a.session.spec.sessionId] ? 0 : 1;
+          const bAttn = attention[b.session.spec.sessionId] ? 0 : 1;
           if (aAttn !== bAttn) {
             return aAttn - bAttn;
           }
-          return recentRank(a.session.spec.tmuxSession) - recentRank(b.session.spec.tmuxSession);
+          return recentRank(a.session.spec.sessionId) - recentRank(b.session.spec.sessionId);
         })
         .slice(0, 40);
     }
@@ -3615,7 +3615,7 @@ function AgentsPalette({
         name,
         entry.group.label.toLowerCase(),
         entry.project.label.toLowerCase(),
-        entry.session.spec.tmuxSession.toLowerCase()
+        entry.session.spec.sessionId.toLowerCase()
       ];
       for (let field = 0; field < haystacks.length; field += 1) {
         const at = haystacks[field].indexOf(text);
@@ -3656,7 +3656,7 @@ function AgentsPalette({
             } else if (event.key === 'Enter') {
               const target = results[boundedIndex];
               if (target) {
-                onPick(target.session.spec.tmuxSession);
+                onPick(target.session.spec.sessionId);
               }
             }
           }}
@@ -3667,19 +3667,19 @@ function AgentsPalette({
           ) : (
             results.map((entry, rowIndex) => (
               <button
-                key={entry.session.spec.tmuxSession}
+                key={entry.session.spec.sessionId}
                 type="button"
                 className={`quickOpenRow ${rowIndex === boundedIndex ? 'selected' : ''}`}
-                title={entry.session.spec.tmuxSession}
+                title={entry.session.spec.sessionId}
                 onMouseEnter={() => setIndex(rowIndex)}
                 onClick={() => {
                   bleeps.click?.play();
-                  onPick(entry.session.spec.tmuxSession);
+                  onPick(entry.session.spec.sessionId);
                 }}
               >
                 <StatusDot
                   state={entry.session.state}
-                  attention={Boolean(attention[entry.session.spec.tmuxSession])}
+                  attention={Boolean(attention[entry.session.spec.sessionId])}
                 />
                 <span className="quickOpenName">{entry.session.spec.name}</span>
                 <small className="quickOpenDir">{entry.project.label} / {entry.group.label}</small>
@@ -3932,8 +3932,8 @@ function SessionInfo({ session }: { session?: DeskSessionView }): JSX.Element {
       <dd>{session?.state ?? '-'}</dd>
       <dt>CWD</dt>
       <dd>{session?.spec.cwd ?? '-'}</dd>
-      <dt>TMUX</dt>
-      <dd>{session?.spec.tmuxSession ?? '-'}</dd>
+      <dt>Session ID</dt>
+      <dd>{session?.spec.sessionId ?? '-'}</dd>
       <dt>Command</dt>
       <dd>{session?.spec.command ?? '-'}</dd>
     </dl>
@@ -4026,7 +4026,7 @@ function buildPanelCells(
   group: DeskGroupView,
   assignments: Record<string, number>,
   activeByCell: Record<string, string>,
-  selectedTmux?: string
+  selectedSessionId?: string
 ): PanelCell[] {
   const cells = Array.from({ length: group.layout.cellCount }, (_, index) => ({
     id: `${group.id}:cell-${index + 1}`,
@@ -4037,14 +4037,14 @@ function buildPanelCells(
   }));
 
   for (const [index, session] of group.sessions.entries()) {
-    const assignedIndex = clamp(assignments[session.spec.tmuxSession] ?? index % cells.length, 0, cells.length - 1);
+    const assignedIndex = clamp(assignments[session.spec.sessionId] ?? index % cells.length, 0, cells.length - 1);
     cells[assignedIndex]!.sessions.push(session);
   }
 
   for (const cell of cells) {
     cell.activeSession =
-      cell.sessions.find((session) => session.spec.tmuxSession === selectedTmux) ??
-      cell.sessions.find((session) => session.spec.tmuxSession === activeByCell[cell.id]) ??
+      cell.sessions.find((session) => session.spec.sessionId === selectedSessionId) ??
+      cell.sessions.find((session) => session.spec.sessionId === activeByCell[cell.id]) ??
       cell.sessions[0];
   }
 

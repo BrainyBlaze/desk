@@ -30,7 +30,7 @@ export type AgentEventKind = 'turn-complete' | 'approval-requested' | 'input-req
 
 export interface AgentEvent {
   id: string;
-  tmuxSession: string;
+  sessionId: string;
   kind: AgentEventKind;
   message?: string;
   at: string;
@@ -50,7 +50,7 @@ export interface AttentionSnapshot {
 export interface DeskPulse {
   system: SystemSnapshot;
   attention: AttentionSnapshot;
-  /** every live tmux session name — patches run-states without a snapshot fetch */
+  /** every live durable session ID — patches run-states without a snapshot fetch */
   running: string[];
 }
 

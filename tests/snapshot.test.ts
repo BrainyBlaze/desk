@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildDeskSnapshotFromManifest } from '../src/server/snapshot';
 
 describe('desk snapshot', () => {
-  it('builds UI state from manifest content and running tmux sessions', () => {
+  it('builds UI state from manifest content and running session ids', () => {
     const snapshot = buildDeskSnapshotFromManifest(
       `
 groups:
@@ -15,7 +15,7 @@ groups:
         resume: 00000000-0000-7000-8000-000000000000
         sessionId: sample-agent
 `,
-      new Set(['agentdesk-research-sample-agent-00000000']),
+      new Set(['sample-agent']),
       {
         homeDir: '/workspace',
         manifestPath: '/workspace/.config/desk/desk.yml'

@@ -22,7 +22,7 @@ import type { DeskBleepName } from './arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from './arwes/motion.js';
 import { countSidebarAgents } from './sidebarCounts.js';
 import { computeReorder, getReorderData, setReorderData } from './sidebarReorder.js';
-import { getSidebarDropSessionTmux } from './sidebarMove.js';
+import { getSidebarDropSessionId } from './sidebarMove.js';
 import { StatusDot } from './statusDot.js';
 import type { DeskGroupView, DeskProjectView, DeskSessionView } from '../ui/model.js';
 
@@ -35,7 +35,7 @@ function AgentsSidebarImpl({
   attention,
   activeProjectId,
   activeGroupId,
-  activeTmux,
+  activeSessionId,
   collapsedProjects,
   collapsedGroups,
   onAddProject,
@@ -71,7 +71,7 @@ function AgentsSidebarImpl({
   attention: Record<string, { attention: true; since: string }>;
   activeProjectId?: string;
   activeGroupId?: string;
-  activeTmux?: string;
+  activeSessionId?: string;
   collapsedProjects: Record<string, boolean>;
   collapsedGroups: Record<string, boolean>;
   onAddProject: () => void;
@@ -94,8 +94,8 @@ function AgentsSidebarImpl({
   onSessionRepair: () => void;
   onGroupBoot: (group: DeskGroupView) => void;
   onDragSession: (value: { session: DeskSessionView; group: DeskGroupView } | null) => void;
-  onDropSession: (group: DeskGroupView, tmuxSession?: string) => void;
-  onDropSessionToProject: (project: DeskProjectView, tmuxSession?: string) => void;
+  onDropSession: (group: DeskGroupView, sessionId?: string) => void;
+  onDropSessionToProject: (project: DeskProjectView, sessionId?: string) => void;
   onReorderProjects: (orderedProjectIds: string[]) => void;
   onReorderGroups: (projectId: string, orderedGroupIds: string[]) => void;
   onReorderSessions: (projectId: string, groupId: string, projectCwd: string, orderedSessionNames: string[]) => void;
@@ -104,10 +104,10 @@ function AgentsSidebarImpl({
   onSelectSession: (session: DeskSessionView, group: DeskGroupView) => void;
 }): JSX.Element {
   const treeRef = useRef<HTMLDivElement | null>(null);
-  const pointerDragTmuxRef = useRef<string | undefined>(undefined);
+  const pointerDragSessionIdRef = useRef<string | undefined>(undefined);
   const pointerDragIdRef = useRef<number | undefined>(undefined);
   const bleeps = useBleeps<DeskBleepName>();
-  // Tree filter: substring on session name / tmux target (group and project
+  // Tree filter: substring on session name / durable ID (group and project
   // labels match their whole subtree), plus a needs-input-only chip. While
   // filtering, collapse state is ignored so matches are always on screen.
   const [filter, setFilter] = useState('');
@@ -120,7 +120,7 @@ function AgentsSidebarImpl({
       total +
       project.groups.reduce(
         (groupTotal, group) =>
-          groupTotal + group.sessions.filter((session) => attention[session.spec.tmuxSession]).length,
+          groupTotal + group.sessions.filter((session) => attention[session.spec.sessionId]).length,
         0
       ),
     0
@@ -128,7 +128,7 @@ function AgentsSidebarImpl({
   const visibleGroupSessions = (group: DeskGroupView, labelMatched: boolean): DeskSessionView[] => {
     let sessions = group.sessions;
     if (attentionOnly) {
-      sessions = sessions.filter((session) => attention[session.spec.tmuxSession]);
+      sessions = sessions.filter((session) => attention[session.spec.sessionId]);
     }
     if (filterText === '' || labelMatched || group.label.toLowerCase().includes(filterText)) {
       return sessions;
@@ -136,7 +136,7 @@ function AgentsSidebarImpl({
     return sessions.filter(
       (session) =>
         session.spec.name.toLowerCase().includes(filterText) ||
-        session.spec.tmuxSession.toLowerCase().includes(filterText)
+        session.spec.sessionId.toLowerCase().includes(filterText)
     );
   };
 
@@ -161,7 +161,7 @@ function AgentsSidebarImpl({
       if (event.button !== 0) {
         return;
       }
-      pointerDragTmuxRef.current = undefined;
+      pointerDragSessionIdRef.current = undefined;
       pointerDragIdRef.current = undefined;
       dragging = false;
       onDragSession(null);
@@ -169,41 +169,41 @@ function AgentsSidebarImpl({
         return;
       }
       const sessionNode = event.target.closest<HTMLElement>('[data-sidebar-session="true"]');
-      const tmuxSession = sessionNode?.dataset.tmuxSession;
-      if (!tmuxSession) {
+      const sessionId = sessionNode?.dataset.sessionId;
+      if (!sessionId) {
         return;
       }
-      pointerDragTmuxRef.current = tmuxSession;
+      pointerDragSessionIdRef.current = sessionId;
       pointerDragIdRef.current = event.pointerId;
       armedX = event.clientX;
       armedY = event.clientY;
     };
 
     const handlePointerMove = (event: PointerEvent): void => {
-      const tmuxSession = pointerDragTmuxRef.current;
-      if (!tmuxSession || dragging || event.pointerId !== pointerDragIdRef.current) {
+      const sessionId = pointerDragSessionIdRef.current;
+      if (!sessionId || dragging || event.pointerId !== pointerDragIdRef.current) {
         return;
       }
       if (Math.abs(event.clientX - armedX) < 6 && Math.abs(event.clientY - armedY) < 6) {
         return;
       }
       dragging = true;
-      const sessionNode = tree.querySelector<HTMLElement>(`[data-tmux-session="${CSS.escape(tmuxSession)}"]`);
+      const sessionNode = tree.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`);
       const groupNode = sessionNode?.closest<HTMLElement>('[data-sidebar-group="true"]');
       const group = findGroup(groupNode?.dataset.projectId, groupNode?.dataset.groupId);
-      const session = group?.sessions.find((candidate) => candidate.spec.tmuxSession === tmuxSession);
+      const session = group?.sessions.find((candidate) => candidate.spec.sessionId === sessionId);
       if (group && session) {
         onDragSession({ session, group });
       }
     };
 
     const handlePointerUp = (event: PointerEvent): void => {
-      const tmuxSession = pointerDragTmuxRef.current;
+      const sessionId = pointerDragSessionIdRef.current;
       const pointerId = pointerDragIdRef.current;
       if (pointerId !== undefined && event.pointerId !== pointerId) {
         return;
       }
-      pointerDragTmuxRef.current = undefined;
+      pointerDragSessionIdRef.current = undefined;
       pointerDragIdRef.current = undefined;
       if (!dragging) {
         // plain click/tap: let the row's own onClick handle selection
@@ -211,7 +211,7 @@ function AgentsSidebarImpl({
         return;
       }
       dragging = false;
-      if (!tmuxSession || !(event.target instanceof Element)) {
+      if (!sessionId || !(event.target instanceof Element)) {
         onDragSession(null);
         return;
       }
@@ -221,7 +221,7 @@ function AgentsSidebarImpl({
         if (group) {
           event.preventDefault();
           event.stopPropagation();
-          onDropSession(group, tmuxSession);
+          onDropSession(group, sessionId);
           onDragSession(null);
           return;
         }
@@ -231,7 +231,7 @@ function AgentsSidebarImpl({
       if (project) {
         event.preventDefault();
         event.stopPropagation();
-        onDropSessionToProject(project, tmuxSession);
+        onDropSessionToProject(project, sessionId);
       }
       onDragSession(null);
     };
@@ -300,7 +300,7 @@ function AgentsSidebarImpl({
             return null;
           }
           const projectAttention = project.groups.some((group) =>
-            group.sessions.some((session) => attention[session.spec.tmuxSession])
+            group.sessions.some((session) => attention[session.spec.sessionId])
           );
           const projectCollapsed = filtering ? false : Boolean(collapsedProjects[project.id]);
           return (
@@ -335,7 +335,7 @@ function AgentsSidebarImpl({
                   }
                   return;
                 }
-                onDropSessionToProject(project, getSidebarDropSessionTmux(event.dataTransfer));
+                onDropSessionToProject(project, getSidebarDropSessionId(event.dataTransfer));
               }}
             >
               <button
@@ -378,7 +378,7 @@ function AgentsSidebarImpl({
                   if (filtering && visibleSessions.length === 0 && !projectLabelMatched) {
                     return null;
                   }
-                  const groupAttention = group.sessions.some((session) => attention[session.spec.tmuxSession]);
+                  const groupAttention = group.sessions.some((session) => attention[session.spec.sessionId]);
                   const groupCollapsed = filtering ? false : Boolean(collapsedGroups[group.id]);
                   return (
                   <section
@@ -408,8 +408,8 @@ function AgentsSidebarImpl({
                       if (reorder?.kind === 'session' && reorder.projectId === project.id && reorder.groupId === group.groupId) {
                         return; // same-group session on the group area is a no-op (reorder by dropping on a session row)
                       }
-                      // Cross-group session move (the session drag also carries its tmux id).
-                      onDropSession(group, getSidebarDropSessionTmux(event.dataTransfer));
+                      // Cross-group session move (the session drag also carries its durable ID).
+                      onDropSession(group, getSidebarDropSessionId(event.dataTransfer));
                     }}
                   >
                   <div
@@ -475,12 +475,12 @@ function AgentsSidebarImpl({
                     <Animator combine manager="stagger" duration={{ stagger: LIST_REVEAL.stagger, limit: LIST_REVEAL.limit }}>
                       <div className="sessionBranch">
                         {visibleSessions.map((session) => (
-                          <Animator key={session.spec.tmuxSession} duration={LIST_ROW_DURATION}>
+                          <Animator key={session.spec.sessionId} duration={LIST_ROW_DURATION}>
                             <Animated
-                              className={`treeRow sessionNode ${session.spec.tmuxSession === activeTmux ? 'selected' : ''}`}
+                              className={`treeRow sessionNode ${session.spec.sessionId === activeSessionId ? 'selected' : ''}`}
                               animated={['fade', ['x', -10, 0]]}
                               data-sidebar-session="true"
-                              data-tmux-session={session.spec.tmuxSession}
+                              data-session-id={session.spec.sessionId}
                               draggable
                               onDragStart={(event: DragEvent<HTMLDivElement>) => {
                                 event.stopPropagation();
@@ -490,8 +490,8 @@ function AgentsSidebarImpl({
                                   groupId: group.groupId,
                                   id: session.spec.name
                                 });
-                                // Also expose the tmux session so a cross-group drop still moves it.
-                                event.dataTransfer.setData('application/x-desk-session', session.spec.tmuxSession);
+                                // Also expose the durable ID so a cross-group drop still moves it.
+                                event.dataTransfer.setData('application/x-desk-session', session.spec.sessionId);
                                 event.dataTransfer.effectAllowed = 'move';
                               }}
                               onDragOver={(event: DragEvent<HTMLDivElement>) => {
@@ -512,7 +512,7 @@ function AgentsSidebarImpl({
                                 // A cross-group session drop falls through to the group section's onDrop (move).
                               }}
                             >
-                              {session.spec.tmuxSession === activeTmux ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
+                              {session.spec.sessionId === activeSessionId ? <FrameUnderline squareSize={6} strokeWidth={1} /> : null}
                               <span className="treeToggle spacer" aria-hidden="true" />
                               <button
                                 className="treeMain"
@@ -521,9 +521,9 @@ function AgentsSidebarImpl({
                                   bleeps.click?.play();
                                   onSelectSession(session, group);
                                 }}
-                                title={session.spec.tmuxSession}
+                                title={session.spec.sessionId}
                               >
-                                <StatusDot state={session.state} attention={Boolean(attention[session.spec.tmuxSession])} />
+                                <StatusDot state={session.state} attention={Boolean(attention[session.spec.sessionId])} />
                                 <span>{session.spec.name}</span>
                               </button>
                               <ActionCluster>
@@ -540,7 +540,7 @@ function AgentsSidebarImpl({
                                 {/*
                                   Repair remains wired for non-sidebar recovery paths, but the
                                   per-session sidebar action is intentionally hidden: accidental
-                                  clicks can mutate live tmux windows.
+                                  clicks can mutate live sessions.
                                   <IconButton icon={<Wrench size={10} />} label="Repair session" onClick={onSessionRepair} />
                                 */}
                                 <IconButton icon={<Trash2 size={10} />} label="Delete session" onClick={() => onSessionDelete(session, group)} />
@@ -564,7 +564,7 @@ function AgentsSidebarImpl({
       {agentsHelpOpen ? (
         <Modal title="Agents" icon={<Activity size={13} />} onClose={() => setAgentsHelpOpen(false)}>
           <div style={{ padding: '16px 14px', color: 'var(--desk-text-dim)', fontSize: '12px', lineHeight: '1.5' }}>
-            <div>Agents are AI assistants and execution environments that work on tasks. Each agent is a tmux session with Claude or another AI running commands.</div>
+            <div>Agents are AI assistants and execution environments that work on tasks. Each agent is a durable terminal session running Claude or another AI.</div>
             <div style={{ marginTop: '12px' }}>Create agent projects to organize work, add groups to coordinate on related tasks, and create sessions for individual agents to execute work.</div>
             <div style={{ marginTop: '12px' }}>Use the boot button to start missing sessions, edit to modify names and settings, and delete to remove sessions. Sessions show live status with a dot indicator — green for running, yellow for waiting for input, gray for inactive.</div>
             <div style={{ marginTop: '12px' }}>Active sessions appear in the terminal multiplexer where you can see output and send input. Featured messages can reference agents with @name mentions to direct messages and task assignments.</div>

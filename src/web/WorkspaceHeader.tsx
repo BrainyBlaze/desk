@@ -129,11 +129,11 @@ function WorkspaceHeaderImpl({
           <Pill title="Projects"><b>P</b> {totals?.projects ?? 0}</Pill>
           <Pill title="Groups"><b>G</b> {totals?.groups ?? 0}</Pill>
           <Pill title="Configured agent sessions"><b>A</b> {totals?.sessions ?? 0}</Pill>
-          <Pill tone="ok" title="Agents with a live tmux session"><b>RUN</b> {totals?.running ?? 0}</Pill>
+          <Pill tone="ok" title="Agents with a live session"><b>RUN</b> {totals?.running ?? 0}</Pill>
           <Pill
             tone={totals?.missing ? 'warn' : 'ok'}
             pulse={Boolean(totals?.missing)}
-            title={totals?.missing ? 'Configured sessions without a live tmux session — click to boot them (Up)' : 'Configured sessions without a live tmux session'}
+            title={totals?.missing ? 'Configured sessions without a live session - click to boot them (Up)' : 'Configured sessions without a live session'}
             onClick={totals?.missing && !busy ? () => void onUp() : undefined}
           >
             <b>MISS</b> {totals?.missing ?? 0}
@@ -213,7 +213,7 @@ function WorkspaceHeaderImpl({
               <RefreshCw size={14} className={busy ? 'spinSlow' : undefined} />
               <span className="headerMenuLabel">
                 Refresh
-                <small>re-read the manifest and tmux state</small>
+                <small>re-read the manifest and runtime state</small>
               </span>
             </button>
             <button
@@ -289,11 +289,11 @@ function WorkspaceHeaderImpl({
             primary row, but RUN/MISS are the two operationally vital counts —
             they reappear here as compact chips (desktop hides this cluster). */}
         <div className="telemetryFleet" aria-label="Fleet stats">
-          <Pill tone="ok" title="Agents with a live tmux session"><b>RUN</b> {totals?.running ?? 0}</Pill>
+          <Pill tone="ok" title="Agents with a live session"><b>RUN</b> {totals?.running ?? 0}</Pill>
           <Pill
             tone={totals?.missing ? 'warn' : 'ok'}
             pulse={Boolean(totals?.missing)}
-            title={totals?.missing ? 'Configured sessions without a live tmux session — click to boot them (Up)' : 'Configured sessions without a live tmux session'}
+            title={totals?.missing ? 'Configured sessions without a live session - click to boot them (Up)' : 'Configured sessions without a live session'}
             onClick={totals?.missing && !busy ? () => void onUp() : undefined}
           >
             <b>MISS</b> {totals?.missing ?? 0}
