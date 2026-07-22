@@ -295,16 +295,24 @@ describe('public CLI serve dispatch', () => {
       argv: ['agent-host', '--standalone'],
       expectedError: 'unknown option --standalone'
     }
-  ])('rejects $argv before opening a port', { timeout: 30_000 }, async ({ argv, expectedError }) => {
-    const port = await randomUnusedPort();
-    const cli = startNpxCli(argv, port);
-    const outcome = await within(cli.closed, cliExitTimeoutMs);
+  ])('rejects $argv without leaving a runtime process', { timeout: 30_000 }, async ({ argv, expectedError }) => {
+    const unrelatedListener = await bindRandomPort();
+    try {
+      const cli = startNpxCli(argv, unrelatedListener.port);
+      const cliPid = cli.child.pid;
+      if (cliPid === undefined) {
+        throw new Error('expected the CLI process to have a pid');
+      }
+      const outcome = await within(cli.closed, cliExitTimeoutMs);
 
-    expect(outcome).not.toBeNull();
-    expect(outcome?.code).not.toBe(0);
-    expect(cli.stderr).toContain(expectedError);
-    expect(cli.stdout).not.toContain('Local:');
-    expect(await portIsOpen(port)).toBe(false);
+      expect(outcome).not.toBeNull();
+      expect(outcome?.code).not.toBe(0);
+      expect(cli.stderr).toContain(expectedError);
+      expect(cli.stdout).not.toContain('Local:');
+      expect(await waitForProcessGroupExit(cliPid, 1_000)).toBe(true);
+    } finally {
+      await closeServer(unrelatedListener.server);
+    }
   });
 
   it('documents both serve forms, precedence, and no second public server command', { timeout: 30_000 }, async () => {
