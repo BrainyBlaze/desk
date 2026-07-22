@@ -1,14 +1,21 @@
-// atch-native terminal daemon process entry (cutover). A STANDALONE process
-// (not a `desk` subcommand — kept out of the public CLI dispatch): it starts the
-// terminal daemon server and provisions an atch master for each manifest session,
-// then runs until SIGINT/SIGTERM. The web server (DESK_ATCH_NATIVE=1) proxies
-// browser /ws/terminal traffic to it. Config via env so the canary can fully
-// isolate HOME / socket root / port.
+// atch-native terminal daemon process entry — the target of the internal
+// `desk terminal-daemon` CLI subcommand (spawned + supervised by the web
+// server's daemonSupervisor under DESK_ATCH_NATIVE; not user-facing). Starts
+// the terminal daemon server, RECONCILES with already-live atch masters, and
+// runs until SIGINT/SIGTERM. Config via env so a canary can fully isolate
+// HOME / socket root / port.
+//
+// Startup semantics are reconcile, not provision: `desk serve` never boots
+// sessions (that is `desk up` / the Boot button, via /control/provision), so
+// the daemon attaches ONLY to sessions whose atch socket already exists — a
+// daemon restart re-binds running sessions instead of double-spawning them.
 
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
 import { loadDesk } from '../../core/runner.js';
-import { runTerminalDaemon, type ProvisionRequest, type RunningTerminalDaemon } from './terminalDaemon.js';
+import { runTerminalDaemon, type RunningTerminalDaemon, type TerminalDaemon } from './terminalDaemon.js';
 
 export interface TerminalDaemonMainConfig {
   homeRoot: string;
@@ -24,26 +31,80 @@ export function resolveDaemonConfig(env: NodeJS.ProcessEnv = process.env): Termi
   return {
     homeRoot: home,
     atchBinPath: env.DESK_ATCH_BIN ?? 'atch',
-    atchSocketRoot: env.DESK_ATCH_SOCKET_ROOT ?? join('/tmp', `desk-atch-${process.pid}`),
+    atchSocketRoot: resolveAtchSocketRoot(env),
     host: env.DESK_DAEMON_HOST ?? '127.0.0.1',
     port: Number(env.DESK_DAEMON_PORT ?? 5178)
   };
 }
 
-/** Build a provisioning request per manifest session (run its command under a shell via atch). */
-export function manifestProvisionRequests(): ProvisionRequest[] {
-  return loadDesk({}).sessions.map((session) => ({
-    sessionId: session.sessionId ?? session.tmuxSession,
-    spec: { command: ['sh', '-c', session.command], geometry: { rows: 24, cols: 80 } }
-  }));
+export interface ReconcileTarget {
+  sessionId: string;
+  sockPath: string;
 }
 
-/** Start the daemon, provision the manifest's sessions, and install signal shutdown. */
+/** Manifest sessions whose atch master socket is already live under the root. */
+export function manifestReconcileTargets(
+  atchSocketRoot: string,
+  socketExists: (path: string) => boolean = existsSync
+): ReconcileTarget[] {
+  return loadDesk({}).sessions.flatMap((session) => {
+    const sessionId = session.sessionId ?? session.tmuxSession;
+    const sockPath = join(atchSocketRoot, `${sessionId}.sock`);
+    return socketExists(sockPath) ? [{ sessionId, sockPath }] : [];
+  });
+}
+
+/**
+ * Re-adopt each already-live master (restore at the durable ledger generation
+ * + attach + register the atch kill command — NEVER ensure/spawn: an allocate
+ * here would fence the surviving master out, and a missing killSpec would
+ * orphan it on the next retire). Failures are isolated per session and
+ * reported — one dead socket must not stop the rest from re-binding.
+ */
+export async function reconcileExistingSessions(
+  daemon: Pick<TerminalDaemon, 'router'>,
+  targets: readonly ReconcileTarget[],
+  atchBinPath: string,
+  geometry = { rows: 24, cols: 80 }
+): Promise<{ sessionId: string; ok: boolean; error?: string }[]> {
+  const results: { sessionId: string; ok: boolean; error?: string }[] = [];
+  for (const { sessionId, sockPath } of targets) {
+    try {
+      const restored = await daemon.router.sessions.restoreAndAttach(sessionId, {
+        sockPath,
+        geometry,
+        killSpec: { binPath: atchBinPath, args: ['kill', '-f', sockPath] }
+      });
+      results.push(restored.ok ? { sessionId, ok: true } : { sessionId, ok: false, error: restored.reason });
+    } catch (error) {
+      results.push({ sessionId, ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
+}
+
+/** Start the daemon, re-attach to live masters, and install signal shutdown. */
 export async function runTerminalDaemonMain(config = resolveDaemonConfig()): Promise<RunningTerminalDaemon> {
-  const running = await runTerminalDaemon({ ...config, sessions: manifestProvisionRequests() });
-  const ok = running.provisioned.filter((p) => p.ok).length;
+  // deferReady: every control route (health included) 503s until the reconcile
+  // pass below reaches a terminal state — a provision accepted mid-reconcile
+  // could allocate over a surviving master and then destroy it on the ACK
+  // mismatch. Readiness must not lie about reconciliation.
+  const running = await runTerminalDaemon({ ...config, sessions: [], deferReady: true });
+  const reconciled = await reconcileExistingSessions(
+    running.daemon,
+    manifestReconcileTargets(config.atchSocketRoot),
+    config.atchBinPath
+  );
+  running.daemon.markReady();
+  const ok = reconciled.filter((r) => r.ok).length;
+  for (const failure of reconciled.filter((r) => !r.ok)) {
+    // eslint-disable-next-line no-console
+    console.error(`desk terminal daemon: could not re-attach ${failure.sessionId}: ${failure.error}`);
+  }
   // eslint-disable-next-line no-console
-  console.log(`desk terminal daemon: ws://${config.host}:${running.port}/ws/terminal — provisioned ${ok}/${running.provisioned.length}`);
+  console.log(
+    `desk terminal daemon: ws://${config.host}:${running.port}/ws/terminal — re-attached ${ok}/${reconciled.length} live sessions`
+  );
   const shutdown = (): void => {
     void running.close().then(() => process.exit(0));
   };

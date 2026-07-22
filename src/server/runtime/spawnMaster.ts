@@ -47,13 +47,31 @@ export async function spawnMaster(opts: SpawnMasterOptions): Promise<{ child: Ch
     const deadline = Date.now() + timeout;
     const iv = setInterval(check, poll);
     child.once('exit', onExit);
+    child.once('error', onError);
     function finish(err?: Error): void {
       if (done) return;
       done = true;
       clearInterval(iv);
       child.removeListener('exit', onExit);
-      if (err) reject(err);
-      else resolve();
+      child.removeListener('error', onError);
+      if (err) {
+        // Ownership: this call created the child — a failure must never leak a
+        // live process the caller never receives (e.g. a binary that runs but
+        // never creates its socket).
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            /* best effort */
+          }
+        }
+        reject(err);
+      } else resolve();
+    }
+    function onError(error: Error): void {
+      // An unspawnable binary (ENOENT/EACCES) emits 'error', not 'exit' — a
+      // controlled rejection, never an unhandled error event.
+      finish(new Error(`atch spawn failed: ${error.message}`));
     }
     function onExit(code: number | null): void {
       // Detached launcher: a clean exit is expected; keep polling for the socket.

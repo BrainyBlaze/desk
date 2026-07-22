@@ -44,6 +44,10 @@ export type EnsureResult =
   | { ok: true; generation: number; created: boolean }
   | { ok: false; reason: 'cap-exceeded' };
 
+export type RestoreResult =
+  | { ok: true; generation: number }
+  | { ok: false; reason: 'cap-exceeded' | 'no-generation' | 'already-live' };
+
 export class DaemonCore {
   private readonly d: DaemonCoreDeps;
   private readonly sessions = new Map<string, SessionEntry>();
@@ -73,6 +77,12 @@ export class DaemonCore {
     if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
 
     const generation = this.d.ledger.allocate(sessionId); // durable, fsync-before-spawn
+    this.admitSession(sessionId, geometry, generation);
+    return { ok: true, generation, created: true };
+  }
+
+  /** Shared session bring-up for ensure (fresh generation) + restore (adopted). */
+  private admitSession(sessionId: string, geometry: { rows: number; cols: number }, generation: number): void {
     const emulator = this.d.emulatorFactory.create(geometry);
     // BEL/OSC9 → attention (the tmux bell-flag poller's native replacement).
     // Filtered here so consumers only ever see attention-relevant kinds; the
@@ -96,7 +106,27 @@ export class DaemonCore {
       sendMaster: (frame) => this.d.sendMaster(sessionId, frame)
     });
     this.sessions.set(sessionId, { runtime, lease: createLeaseState(), generation });
-    return { ok: true, generation, created: true };
+  }
+
+  /**
+   * Re-adopt a session whose atch master SURVIVED a daemon restart: create the
+   * runtime at the ledger's durable CURRENT generation without allocating. The
+   * surviving master owns exactly that generation — an ensure() here would
+   * allocate current+1 and the fence would reject every frame in both
+   * directions. Fails closed when the ledger has no durable generation for the
+   * sessionId (an unknown socket is not adoptable — its generation is
+   * unknowable) or the session is already live.
+   */
+  restore(sessionId: string, geometry: { rows: number; cols: number }): RestoreResult {
+    if (this.sessions.has(sessionId)) return { ok: false, reason: 'already-live' };
+    const generation = this.d.ledger.current(sessionId);
+    if (generation === 0) return { ok: false, reason: 'no-generation' };
+
+    const admit = this.d.supervisor.admit(sessionId, this.d.now());
+    if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
+
+    this.admitSession(sessionId, geometry, generation);
+    return { ok: true, generation };
   }
 
   /**

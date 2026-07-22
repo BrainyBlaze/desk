@@ -14,6 +14,7 @@ interface DaemonMock {
   input: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
   attentionEventsSince: ReturnType<typeof vi.fn>;
+  isReady: ReturnType<typeof vi.fn>;
 }
 
 function invoke(
@@ -52,10 +53,11 @@ function invoke(
 function daemonMock(provisionResult: unknown = { ok: true, generation: 1, created: true }): DaemonMock {
   return {
     provision: vi.fn().mockResolvedValue(provisionResult),
-    retire: vi.fn(),
+    retire: vi.fn().mockResolvedValue({ ok: true }),
     input: vi.fn().mockReturnValue(true),
     tail: vi.fn().mockReturnValue(['line-a', 'line-b']),
-    attentionEventsSince: vi.fn().mockReturnValue({ events: [{ seq: 3, sessionId: 'shell', kind: 'bell' }], lastSeq: 3 })
+    attentionEventsSince: vi.fn().mockReturnValue({ events: [{ seq: 3, sessionId: 'shell', kind: 'bell' }], lastSeq: 3 }),
+    isReady: vi.fn().mockReturnValue(true)
   };
 }
 
@@ -110,11 +112,18 @@ describe('daemon control handler', () => {
     expect(result.body?.error).toContain('spawn failed');
   });
 
-  it('retires a session', async () => {
+  it('retires a session (200 only after the awaited kill reports done)', async () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
     expect(result).toEqual({ status: 200, body: { ok: true } });
     expect(daemon.retire).toHaveBeenCalledWith('sess-a');
+  });
+
+  it('surfaces a failed kill as non-2xx, never a silent success', async () => {
+    const daemon = { ...daemonMock(), retire: vi.fn().mockResolvedValue({ ok: false, error: 'kill command exited 1' }) };
+    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    expect(result.status).toBe(502);
+    expect(result.body?.error).toContain('kill command exited 1');
   });
 
   it('answers the health probe', async () => {
@@ -175,6 +184,26 @@ describe('daemon control handler', () => {
     const unknown = { ...daemonMock(), tail: vi.fn().mockReturnValue(undefined) };
     const result = await invoke(unknown, 'POST', '/control/tail', { sessionId: 'ghost' });
     expect(result.status).toBe(404);
+  });
+
+  it('503s EVERY route (health included) until startup reconciliation is terminal', async () => {
+    const daemon = { ...daemonMock(), isReady: vi.fn().mockReturnValue(false) };
+    for (const [method, path, body] of [
+      ['GET', '/control/health', undefined],
+      ['POST', '/control/provision', { sessionId: 'sess-a', command: ['bash'] }],
+      ['POST', '/control/retire', { sessionId: 'sess-a' }],
+      ['POST', '/control/input', { sessionId: 'sess-a', text: 'x' }],
+      ['POST', '/control/tail', { sessionId: 'sess-a' }],
+      ['POST', '/control/attention', { since: 0 }]
+    ] as const) {
+      const result = await invoke(daemon, method, path, body);
+      expect(result.status).toBe(503);
+      expect(result.body?.error).toBe('starting');
+    }
+    // a pre-ready provision must never reach the daemon — it could destroy a
+    // surviving master that reconcile was about to adopt
+    expect(daemon.provision).not.toHaveBeenCalled();
+    expect(daemon.retire).not.toHaveBeenCalled();
   });
 
   it('drains attention events since a cursor, defaulting a bad cursor to 0', async () => {

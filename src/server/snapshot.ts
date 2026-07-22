@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { readManifestFile, resolveManifestPath } from '../core/config.js';
 import { buildSessionSpecs, parseDeskManifest } from '../core/manifest.js';
 import { listTmuxSessions } from '../core/runner.js';
@@ -15,7 +16,7 @@ import type { DeskManifest, SessionSpec } from '../core/types.js';
  * by tmuxSession during the transitional cutover), so the mapping is preserved.
  */
 function atchRunningTmuxSessions(sessions: readonly SessionSpec[]): Set<string> {
-  const socketRoot = process.env.DESK_ATCH_SOCKET_ROOT ?? join(tmpdir(), 'desk-atch');
+  const socketRoot = resolveAtchSocketRoot();
   const running = new Set<string>();
   for (const session of sessions) {
     const sessionId = session.sessionId ?? session.tmuxSession;

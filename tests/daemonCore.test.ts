@@ -198,3 +198,63 @@ describe('DaemonCore — semantic attention events (bell/OSC9 → onSemanticEven
     expect(emu.cb).toBeUndefined();
   });
 });
+
+describe('DaemonCore — restore (re-adopt a surviving master after daemon restart)', () => {
+  function coreOverLedger(ledger: GenerationLedger) {
+    const masterOut: { sessionId: string; frame: RawFrame }[] = [];
+    const core = new DaemonCore({
+      ledger,
+      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+      emulatorFactory: { create: () => new FakeEmu() },
+      now: () => 1000,
+      sendBrowser: () => {},
+      sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame })
+    });
+    return { core, masterOut };
+  }
+
+  it('adopts the durable CURRENT generation without allocating (ensure would fence the master out)', () => {
+    const store = new InMemoryGenerationLedger();
+    // The ORIGINAL daemon spawned the master at generation 1.
+    new GenerationLedger(store).allocate('s1');
+
+    // A RESTARTED daemon over the same durable store re-adopts, never allocates.
+    const ledger = new GenerationLedger(store);
+    const { core, masterOut } = coreOverLedger(ledger);
+    const restored = core.restore('s1', { rows: 24, cols: 80 });
+    expect(restored).toEqual({ ok: true, generation: 1 });
+    expect(ledger.current('s1')).toBe(1); // NOT bumped — the surviving master owns 1
+
+    // Frames the runtime sends to the master carry the ADOPTED generation, so
+    // the master's fence accepts them; an ensure() would have stamped 2.
+    core.injectInput('s1', new TextEncoder().encode('hi'));
+    expect(masterOut).toHaveLength(1);
+    expect(masterOut[0].frame.generation).toBe(1);
+  });
+
+  it('fails closed when the ledger has no durable generation for the socket', () => {
+    const { core } = coreOverLedger(new GenerationLedger(new InMemoryGenerationLedger()));
+    expect(core.restore('ghost', { rows: 24, cols: 80 })).toEqual({ ok: false, reason: 'no-generation' });
+  });
+
+  it('refuses to restore over an already-live session', () => {
+    const store = new InMemoryGenerationLedger();
+    const { core } = coreOverLedger(new GenerationLedger(store));
+    expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
+    expect(core.restore('s1', { rows: 24, cols: 80 })).toEqual({ ok: false, reason: 'already-live' });
+  });
+
+  it('ensure AFTER a retire still allocates a HIGHER generation than the restored one', () => {
+    const store = new InMemoryGenerationLedger();
+    new GenerationLedger(store).allocate('s1'); // original spawn: 1
+    const ledger = new GenerationLedger(store);
+    const { core } = coreOverLedger(ledger);
+    expect(core.restore('s1', { rows: 24, cols: 80 }).ok).toBe(true);
+    core.retire('s1');
+    const recreated = core.ensure('s1', { rows: 24, cols: 80 });
+    expect(recreated.ok).toBe(true);
+    if (recreated.ok) {
+      expect(recreated.generation).toBe(2); // the tombstone still advances (§4.8.1)
+    }
+  });
+});

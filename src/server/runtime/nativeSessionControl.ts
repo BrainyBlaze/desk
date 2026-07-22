@@ -11,6 +11,7 @@
 import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
 import { loadDeskCached, restartSession, runningSessionSet, startSession } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { shellQuote } from '../../shared/shell.js';
@@ -258,7 +259,7 @@ export function createNativeChannelsTransport(
       return (await daemonControl('/control/input', { sessionId: nativeIdForTmuxSession(tmuxSession), text: '\r' })).ok;
     },
     async sessionCreatedAt(tmuxSession) {
-      const socketRoot = process.env.DESK_ATCH_SOCKET_ROOT ?? join(tmpdir(), 'desk-atch');
+      const socketRoot = resolveAtchSocketRoot();
       try {
         const stat = statSync(join(socketRoot, `${nativeIdForTmuxSession(tmuxSession)}.sock`));
         // Some filesystems report no birthtime (0); the socket is created at

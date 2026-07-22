@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
 import { createCaptureArgv, createKillSessionArgv, createStartSessionArgv } from './tmux.js';
+import { resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { resolveSessionUiMode } from './manifest.js';
 import type { SessionSpec, TmuxPlanAction } from './types.js';
 
@@ -146,7 +147,7 @@ export function runningSessionSet(): Set<string> {
   if (process.env.DESK_ATCH_NATIVE !== '1') {
     return listTmuxSessionsCached();
   }
-  const socketRoot = process.env.DESK_ATCH_SOCKET_ROOT ?? join(tmpdir(), 'desk-atch');
+  const socketRoot = resolveAtchSocketRoot();
   const running = new Set<string>();
   for (const session of loadDeskCached().sessions) {
     const sessionId = session.sessionId ?? session.tmuxSession;

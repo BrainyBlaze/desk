@@ -13,6 +13,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { join } from 'node:path';
+import { ensurePrivateSocketRoot } from '../../shared/atchPaths.js';
 import { GenerationLedger } from '../../shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../../shared/runtime/index.js';
 import { TerminalWsRouter } from './terminalWsRouter.js';
@@ -54,12 +55,20 @@ export interface DaemonAttentionEvent {
   data?: string;
 }
 
+/** Provision outcome: ensure result, or the spawn/attach failure that rolled back. */
+export type ProvisionResult = EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' };
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
   /** Spawn + attach the atch master for a session (CREATE contract). */
-  provision(sessionId: string, spec: TerminalDaemonSessionSpec): Promise<EnsureResult>;
-  /** Retire a session (KILL contract runs via the SessionManager cleanup). */
-  retire(sessionId: string): void;
+  provision(sessionId: string, spec: TerminalDaemonSessionSpec): Promise<ProvisionResult>;
+  /**
+   * Retire a session (KILL contract), resolving only after the kill command
+   * completed AND the master's socket disappeared — the restart flow provisions
+   * immediately after, and a stale socket would be adopted at the old
+   * generation. A failed kill is a failure, never a silent 200.
+   */
+  retire(sessionId: string): Promise<{ ok: boolean; error?: string }>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
   /** The session's on-screen tail as plain text, or undefined if unknown. */
@@ -71,6 +80,13 @@ export interface TerminalDaemon {
    * reads as 0 (deliver everything buffered) rather than silently nothing.
    */
   attentionEventsSince(since: number): { events: DaemonAttentionEvent[]; lastSeq: number };
+  /**
+   * Startup completeness: /control/health answers 503 until markReady, so the
+   * supervisor's probe cannot report a daemon ready while its startup
+   * reconcile is still pending or failed — readiness must not lie.
+   */
+  isReady(): boolean;
+  markReady(): void;
   /** Tear down the WS bridge + its timers. */
   dispose(): void;
 }
@@ -83,6 +99,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
   const attentionRing: DaemonAttentionEvent[] = [];
   let attentionSeq = 0;
+  let ready = false;
   const router = new TerminalWsRouter({
     ledger,
     supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
@@ -119,7 +136,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       });
     },
     retire(sessionId) {
-      router.sessions.retire(sessionId);
+      return router.sessions.retireAwaited(sessionId);
     },
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
@@ -130,6 +147,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     attentionEventsSince(since) {
       const cursor = since > attentionSeq ? 0 : since; // stale cursor from a prior daemon incarnation
       return { events: attentionRing.filter((event) => event.seq > cursor), lastSeq: attentionSeq };
+    },
+    isReady() {
+      return ready;
+    },
+    markReady() {
+      ready = true;
     },
     dispose() {
       disposeBridge();
@@ -173,12 +196,22 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
 export function createDaemonControlHandler(
-  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail' | 'attentionEventsSince'>
+  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail' | 'attentionEventsSince' | 'isReady'>
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
       try {
         const url = new URL(req.url ?? '/', 'http://daemon.local');
+        if (!daemon.isReady()) {
+          // Startup reconciliation has not reached a terminal state. EVERY
+          // control route (health included) answers 503: a provision accepted
+          // now could ensure() at N+1 over a surviving master that reconcile
+          // was about to adopt at N, and the ACK-mismatch cleanup would then
+          // DESTROY that master. Callers retry; the supervisor probe reads
+          // not-ready.
+          sendJson(res, 503, { ok: false, error: 'starting' });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/control/provision') {
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
           if (!isSafeDaemonSessionId(body.sessionId)) {
@@ -206,7 +239,11 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
             return;
           }
-          daemon.retire(body.sessionId);
+          const retired = await daemon.retire(body.sessionId);
+          if (!retired.ok) {
+            sendJson(res, 502, { ok: false, error: retired.error ?? 'retire failed' });
+            return;
+          }
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -299,9 +336,17 @@ export interface RunTerminalDaemonOptions extends Omit<TerminalDaemonOptions, 'h
   host?: string;
   port: number;
   sessions: readonly ProvisionRequest[];
+  /**
+   * Leave the daemon NOT-ready after provisioning (every control route 503s)
+   * so the caller can finish its own startup work — the process entry defers
+   * until its reconcile pass reaches a terminal state, closing the window
+   * where a provision could destroy a surviving master mid-adoption.
+   */
+  deferReady?: boolean;
 }
 
 export interface RunningTerminalDaemon {
+  daemon: TerminalDaemon;
   server: import('node:http').Server;
   port: number;
   provisioned: { sessionId: string; ok: boolean; error?: string }[];
@@ -316,8 +361,13 @@ export interface RunningTerminalDaemon {
  */
 export async function runTerminalDaemon(options: RunTerminalDaemonOptions): Promise<RunningTerminalDaemon> {
   const server = await startTerminalDaemonServer(options);
+  // provisionSessions drives the daemon directly (not over HTTP), so the
+  // not-ready gate does not block this startup provisioning.
   const provisioned = await provisionSessions(server.daemon, options.sessions);
-  return { server: server.server, port: server.port, provisioned, close: server.close };
+  if (options.deferReady !== true) {
+    server.daemon.markReady();
+  }
+  return { daemon: server.daemon, server: server.server, port: server.port, provisioned, close: server.close };
 }
 
 export interface TerminalDaemonServer {
@@ -339,6 +389,10 @@ export async function startTerminalDaemonServer(
   options: Omit<TerminalDaemonOptions, 'httpServer'> & { host?: string; port: number }
 ): Promise<TerminalDaemonServer> {
   const server = createServer();
+  // The socket root must exist (0700, this user) BEFORE anything can bind
+  // <root>/<sessionId>.sock — atch skips its own mkdir for slash-bearing names
+  // and the master's bind() fails ENOENT on an absent parent.
+  ensurePrivateSocketRoot(options.atchSocketRoot);
   const daemon = createTerminalDaemon({ ...options, httpServer: server });
   server.on('request', createDaemonControlHandler(daemon)); // on-demand provision/retire (spawn cutover)
   await new Promise<void>((resolve) => server.listen(options.port, options.host ?? '127.0.0.1', resolve));

@@ -1,0 +1,364 @@
+import { EventEmitter } from 'node:events';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  daemonChildEnv,
+  resolveAtchBinPath,
+  resolveDaemonCommand,
+  resolveReleaseRoot,
+  startDaemonSupervisor
+} from '../../src/server/runtime/daemonSupervisor.js';
+
+class FakeChild extends EventEmitter {
+  stdout = null;
+  stderr = null;
+  killed: string | undefined;
+  constructor(public pid = 4242) {
+    super();
+  }
+  kill(signal?: string): boolean {
+    this.killed = signal ?? 'SIGTERM';
+    return true;
+  }
+}
+
+interface Harness {
+  spawns: { bin: string; args: string[]; env: NodeJS.ProcessEnv }[];
+  children: FakeChild[];
+  timers: { fn: () => void; ms: number }[];
+  logs: string[];
+}
+
+function makeSupervisor(options: { maxRestarts?: number; restartWindowMs?: number } = {}) {
+  const h: Harness = { spawns: [], children: [], timers: [], logs: [] };
+  const supervisor = startDaemonSupervisor({
+    command: ['node', 'daemon.js'],
+    env: { DESK_DAEMON_PORT: '5178' },
+    maxRestarts: options.maxRestarts ?? 2,
+    restartWindowMs: options.restartWindowMs ?? 60_000,
+    backoffMs: () => 5,
+    log: (message) => h.logs.push(message),
+    spawnFn: ((bin: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+      const child = new FakeChild();
+      h.spawns.push({ bin, args, env: opts.env });
+      h.children.push(child);
+      return child;
+    }) as never,
+    setTimeoutFn: (fn, ms) => {
+      h.timers.push({ fn, ms });
+      return { unref: () => undefined } as unknown as NodeJS.Timeout;
+    }
+  });
+  return { supervisor, h };
+}
+
+const savedEnv: Record<string, string | undefined> = {};
+function setEnv(key: string, value: string | undefined): void {
+  if (!(key in savedEnv)) savedEnv[key] = process.env[key];
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+afterEach(() => {
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  for (const key of Object.keys(savedEnv)) delete savedEnv[key];
+  vi.restoreAllMocks();
+});
+
+describe('startDaemonSupervisor', () => {
+  it('spawns the command with the extra env and SCRUBS leaked agent-session vars', () => {
+    setEnv('DESK_AGENT', 'codex');
+    setEnv('DESK_TMUX_SESSION', 'agentdesk-leaked');
+    const { supervisor, h } = makeSupervisor();
+    expect(h.spawns).toHaveLength(1);
+    expect(h.spawns[0].bin).toBe('node');
+    expect(h.spawns[0].args).toEqual(['daemon.js']);
+    expect(h.spawns[0].env.DESK_DAEMON_PORT).toBe('5178');
+    expect(h.spawns[0].env.DESK_AGENT).toBeUndefined();
+    expect(h.spawns[0].env.DESK_TMUX_SESSION).toBeUndefined();
+    expect(supervisor.status()).toMatchObject({ state: 'running', pid: 4242 });
+    supervisor.dispose();
+  });
+
+  it('restarts after an unexpected exit, with backoff', () => {
+    const { supervisor, h } = makeSupervisor();
+    h.children[0].emit('exit', 1, null);
+    expect(supervisor.status().state).toBe('restarting');
+    expect(h.timers).toHaveLength(1);
+    h.timers[0].fn();
+    expect(h.spawns).toHaveLength(2);
+    expect(supervisor.status()).toMatchObject({ state: 'running', restarts: 1 });
+    supervisor.dispose();
+  });
+
+  it('gives up (fail closed) past the restart cap inside the window', () => {
+    const { supervisor, h } = makeSupervisor({ maxRestarts: 2 });
+    for (let i = 0; i < 2; i += 1) {
+      h.children[h.children.length - 1].emit('exit', 1, null);
+      h.timers[h.timers.length - 1].fn();
+    }
+    // third crash inside the window exceeds the cap
+    h.children[h.children.length - 1].emit('exit', 1, null);
+    expect(supervisor.status().state).toBe('gave-up');
+    expect(h.spawns).toHaveLength(3); // no further spawn
+    expect(h.logs.some((line) => line.includes('giving up'))).toBe(true);
+    supervisor.dispose();
+  });
+
+  it('dispose SIGTERMs the child and suppresses any restart', () => {
+    const { supervisor, h } = makeSupervisor();
+    supervisor.dispose();
+    expect(h.children[0].killed).toBe('SIGTERM');
+    h.children[0].emit('exit', null, 'SIGTERM');
+    expect(h.timers).toHaveLength(0); // no restart scheduled after dispose
+    expect(supervisor.status().state).toBe('disposed');
+  });
+
+  it('routes a spawn error (ENOENT) through the same bounded-restart accounting', () => {
+    const { supervisor, h } = makeSupervisor();
+    h.children[0].emit('error', new Error('spawn ENOENT'));
+    expect(h.logs.some((line) => line.includes('spawn failed'))).toBe(true);
+    expect(supervisor.status().state).toBe('restarting');
+    supervisor.dispose();
+  });
+
+  it('a late exit from an OLD child neither clears the live child nor spawns a third daemon', () => {
+    const { supervisor, h } = makeSupervisor();
+    const childA = h.children[0];
+    // A errors → accounted once → restart timer fires → B is live.
+    childA.emit('error', new Error('crash'));
+    h.timers[0].fn();
+    expect(h.spawns).toHaveLength(2);
+    const pidB = h.children[1].pid;
+    // A's LATE exit (error and exit both fire for one child) must be a no-op:
+    childA.emit('exit', 1, null);
+    expect(supervisor.status()).toMatchObject({ state: 'running', pid: pidB });
+    expect(h.timers).toHaveLength(1); // no second restart scheduled
+    expect(h.spawns).toHaveLength(2); // and no concurrent third daemon
+    supervisor.dispose();
+  });
+
+  it('probes health per child: ready flips true, resets on relaunch, stale probes ignored', async () => {
+    const h: { spawns: number; children: FakeChild[]; timers: { fn: () => void; ms: number }[] } = {
+      spawns: 0,
+      children: [],
+      timers: []
+    };
+    let healthy = false;
+    const supervisor = startDaemonSupervisor({
+      command: ['node', 'daemon.js'],
+      healthUrl: 'http://127.0.0.1:5178/control/health',
+      probeFn: async () => healthy,
+      healthProbe: { attempts: 5, intervalMs: 1 },
+      backoffMs: () => 1,
+      log: () => undefined,
+      spawnFn: (() => {
+        h.spawns += 1;
+        const child = new FakeChild(1000 + h.spawns);
+        h.children.push(child);
+        return child;
+      }) as never,
+      setTimeoutFn: (fn, ms) => {
+        h.timers.push({ fn, ms });
+        return { unref: () => undefined } as unknown as NodeJS.Timeout;
+      }
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(supervisor.status().ready).toBe(false); // first probe returned unhealthy
+    healthy = true;
+    // drive the queued probe retry tick
+    h.timers.shift()?.fn();
+    await new Promise((r) => setImmediate(r));
+    expect(supervisor.status().ready).toBe(true);
+
+    // crash → relaunch → readiness resets until the NEW child answers
+    healthy = false;
+    h.children[0].emit('exit', 1, null);
+    h.timers.shift()?.fn(); // restart timer → child B
+    await new Promise((r) => setImmediate(r));
+    expect(supervisor.status()).toMatchObject({ state: 'running', ready: false });
+    healthy = true;
+    h.timers.shift()?.fn(); // B's probe retry
+    await new Promise((r) => setImmediate(r));
+    expect(supervisor.status().ready).toBe(true);
+    supervisor.dispose();
+  });
+});
+
+describe('resolveReleaseRoot + production shape', () => {
+  it('falls back to a release-shaped cwd when the module URL is not on a release filesystem (compiled standalone)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
+      expect(resolveReleaseRoot('file:///$bunfs/root/desk-standalone', root)).toBe(root);
+      expect(() => resolveReleaseRoot('file:///$bunfs/root/desk-standalone', '/nonexistent-cwd')).toThrow(/DESK_DAEMON_CMD/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers the release runtime/node over process.execPath (installed layout)', () => {
+    setEnv('DESK_DAEMON_CMD', undefined);
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
+      mkdirSync(join(root, 'runtime'), { recursive: true });
+      writeFileSync(join(root, 'runtime', 'node'), '#!/bin/sh\n');
+      chmodSync(join(root, 'runtime', 'node'), 0o755);
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+      expect(resolveDaemonCommand(fromUrl, process.env, '/opt/desk/libexec/desk-standalone')).toEqual([
+        join(root, 'runtime', 'node'),
+        join(root, 'dist', 'cli', 'main.js'),
+        'terminal-daemon'
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when execPath is the Bun standalone and no runtime/node ships (never recurse the HTTP entrypoint)', () => {
+    setEnv('DESK_DAEMON_CMD', undefined);
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+      expect(() => resolveDaemonCommand(fromUrl, process.env, '/opt/desk/libexec/desk-standalone')).toThrow(/not node/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveDaemonCommand', () => {
+  it('honors the explicit DESK_DAEMON_CMD override', () => {
+    setEnv('DESK_DAEMON_CMD', 'node /tmp/daemon.cjs');
+    expect(resolveDaemonCommand('file:///nowhere/module.js')).toEqual(['node', '/tmp/daemon.cjs']);
+  });
+
+  it('derives the same-release node + dist CLI entry, never PATH desk', () => {
+    setEnv('DESK_DAEMON_CMD', undefined);
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+      expect(resolveDaemonCommand(fromUrl)).toEqual([process.execPath, join(root, 'dist', 'cli', 'main.js'), 'terminal-daemon']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the release has no built CLI entry', () => {
+    setEnv('DESK_DAEMON_CMD', undefined);
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      writeFileSync(join(root, 'vite.config.ts'), '');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+      expect(() => resolveDaemonCommand(fromUrl)).toThrow(/dist\/cli\/main\.js|DESK_DAEMON_CMD/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveAtchBinPath', () => {
+  it('preflights DESK_ATCH_BIN, then release libexec/atch, then an ABSOLUTE PATH hit, else throws', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    const pathDir = mkdtempSync(join(tmpdir(), 'desk-path-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      writeFileSync(join(root, 'vite.config.ts'), '');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+
+      // an explicit-but-unusable DESK_ATCH_BIN fails BEFORE launch, not at first provision
+      setEnv('DESK_ATCH_BIN', '/opt/custom/atch');
+      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/not an executable/);
+
+      const custom = join(pathDir, 'custom-atch');
+      writeFileSync(custom, '#!/bin/sh\n');
+      chmodSync(custom, 0o755);
+      setEnv('DESK_ATCH_BIN', custom);
+      expect(resolveAtchBinPath(fromUrl)).toBe(custom);
+
+      // no explicit, no bundled, nothing on PATH → fail closed
+      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('PATH', '/nonexistent-dir');
+      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/no atch binary/);
+
+      // a PATH hit resolves to the ABSOLUTE preflighted path, never the bare name
+      writeFileSync(join(pathDir, 'atch'), '#!/bin/sh\n');
+      chmodSync(join(pathDir, 'atch'), 0o755);
+      setEnv('PATH', pathDir);
+      expect(resolveAtchBinPath(fromUrl)).toBe(join(pathDir, 'atch'));
+
+      // the same-release bundled binary outranks PATH
+      mkdirSync(join(root, 'libexec'), { recursive: true });
+      writeFileSync(join(root, 'libexec', 'atch'), '#!/bin/sh\n');
+      chmodSync(join(root, 'libexec', 'atch'), 0o755);
+      expect(resolveAtchBinPath(fromUrl)).toBe(join(root, 'libexec', 'atch'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(pathDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('probe exhaustion', () => {
+  it('terminates a never-ready child so bounded-restart accounting decides', async () => {
+    const children: FakeChild[] = [];
+    const timers: { fn: () => void; ms: number }[] = [];
+    const logs: string[] = [];
+    const supervisor = startDaemonSupervisor({
+      command: ['node', 'daemon.js'],
+      healthUrl: 'http://127.0.0.1:5178/control/health',
+      probeFn: async () => false,
+      healthProbe: { attempts: 2, intervalMs: 1 },
+      backoffMs: () => 1,
+      log: (message) => logs.push(message),
+      spawnFn: (() => {
+        const child = new FakeChild(2000 + children.length);
+        children.push(child);
+        return child;
+      }) as never,
+      setTimeoutFn: (fn, ms) => {
+        timers.push({ fn, ms });
+        return { unref: () => undefined } as unknown as NodeJS.Timeout;
+      }
+    });
+    await new Promise((r) => setImmediate(r)); // probe attempt 1 (unhealthy)
+    timers.shift()?.fn(); // probe retry tick → attempt 2 = exhaustion
+    await new Promise((r) => setImmediate(r));
+    expect(children[0].killed).toBe('SIGTERM');
+    expect(logs.some((line) => line.includes('terminating it for restart accounting'))).toBe(true);
+    supervisor.dispose();
+  });
+});
+
+describe('daemonChildEnv', () => {
+  it('derives host and port from DESK_DAEMON_URL so proxy and daemon stay in lockstep', () => {
+    setEnv('DESK_DAEMON_URL', 'ws://10.0.0.5:6001');
+    expect(daemonChildEnv()).toEqual({ DESK_DAEMON_HOST: '10.0.0.5', DESK_DAEMON_PORT: '6001' });
+    setEnv('DESK_DAEMON_URL', undefined);
+    expect(daemonChildEnv()).toEqual({ DESK_DAEMON_HOST: '127.0.0.1', DESK_DAEMON_PORT: '5178' });
+    setEnv('DESK_DAEMON_URL', 'not a url');
+    expect(daemonChildEnv()).toEqual({ DESK_DAEMON_HOST: '127.0.0.1', DESK_DAEMON_PORT: '5178' });
+  });
+});

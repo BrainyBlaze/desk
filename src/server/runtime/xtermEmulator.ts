@@ -8,13 +8,23 @@
 // xterm's write() is async (parsed on a microtask), so reads that must reflect a
 // just-written chunk should await flush().
 
-import { Terminal } from '@xterm/headless';
-import { SerializeAddon } from '@xterm/addon-serialize';
+import { createRequire } from 'node:module';
+import type { Terminal as XtermTerminal } from '@xterm/headless';
+import type { SerializeAddon as XtermSerializeAddon } from '@xterm/addon-serialize';
 import { type EmulatorEvent, type EmulatorFactory, type EmulatorPort } from '../../shared/runtime/emulatorPort.js';
 
+// Both @xterm packages are CommonJS; a named ESM import works under
+// vite/vitest interop but FAILS under plain node running the tsc-emitted ESM
+// ("does not provide an export named 'Terminal'") — which is exactly how the
+// supervised `desk terminal-daemon` child runs in production. createRequire
+// side-steps the interop entirely; types stay via import type.
+const require = createRequire(import.meta.url);
+const { Terminal } = require('@xterm/headless') as { Terminal: typeof XtermTerminal };
+const { SerializeAddon } = require('@xterm/addon-serialize') as { SerializeAddon: typeof XtermSerializeAddon };
+
 export class XtermEmulator implements EmulatorPort {
-  private readonly term: Terminal;
-  private readonly serializer: SerializeAddon;
+  private readonly term: XtermTerminal;
+  private readonly serializer: XtermSerializeAddon;
   private listeners: ((e: EmulatorEvent) => void)[] = [];
 
   constructor(opts: { rows: number; cols: number }) {
@@ -25,9 +35,9 @@ export class XtermEmulator implements EmulatorPort {
     // emulator ALSO applies them (observe, do not suppress) — suppression is the
     // browser addon's job (§7.7), not the authoritative worker's.
     this.term.onBell(() => this.emit({ kind: 'bell' }));
-    this.term.parser.registerOscHandler(0, (data) => (this.emit({ kind: 'title', data }), false));
-    this.term.parser.registerOscHandler(8, (data) => (this.emit({ kind: 'link', data }), false));
-    this.term.parser.registerOscHandler(9, (data) => (this.emit({ kind: 'osc', code: 9, data }), false));
+    this.term.parser.registerOscHandler(0, (data: string) => (this.emit({ kind: 'title', data }), false));
+    this.term.parser.registerOscHandler(8, (data: string) => (this.emit({ kind: 'link', data }), false));
+    this.term.parser.registerOscHandler(9, (data: string) => (this.emit({ kind: 'osc', code: 9, data }), false));
   }
 
   write(bytes: Uint8Array): void {

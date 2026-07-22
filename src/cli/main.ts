@@ -44,6 +44,7 @@ Usage: desk <command> [options]
   capture <name|tmux|resume> [--lines N]    Print recent output of a session
   hooks install [--home DIR]                 Install global agent event hooks
   agent-host                                Run the native UI adapter host (spawned by desk; not user-facing)
+  terminal-daemon                           Run the atch terminal daemon (spawned by desk serve; not user-facing)
   channels <list|read|post> …               Agent messaging channels (desk channels help)
   config                                    Print the active config path
   help                                      Show this help
@@ -327,6 +328,19 @@ if (isCliEntry) {
   const cliArgs = process.argv.slice(2);
   if (cliArgs[0] === 'channels') {
     process.exitCode = await runChannelsCli(cliArgs.slice(1));
+  } else if (cliArgs[0] === 'terminal-daemon') {
+    // The atch terminal daemon: spawned + supervised by `desk serve` under
+    // DESK_ATCH_NATIVE (daemonSupervisor). Runs until SIGINT/SIGTERM; a fatal
+    // start error exits non-zero so the supervisor's bounded restart sees it.
+    try {
+      const { runTerminalDaemonMain } = await import('../server/runtime/terminalDaemonMain.js');
+      await new Promise<void>((_resolve, reject) => {
+        runTerminalDaemonMain().catch(reject);
+      });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
   } else if (cliArgs[0] === 'agent-host') {
     const argument = cliArgs[1];
     if (argument !== undefined) {
