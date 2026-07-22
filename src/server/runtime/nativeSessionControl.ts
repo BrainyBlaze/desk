@@ -14,25 +14,16 @@ import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
 import { daemonControl, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
 import { loadDeskCached, restartSession, runningSessionSet, startSession } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
-import { shellQuote } from '../../shared/shell.js';
+import { atchCommandFor } from '../../shared/atchCommand.js';
 
 export function nativeSessionsEnabled(): boolean {
   return process.env.DESK_ATCH_NATIVE === '1';
 }
 
-/**
- * The atch child command for a session: run the session's command in its cwd,
- * exactly as `tmux new-session -c cwd command` would. A command-less session
- * falls back to the login shell. Matches the proven canary form `sh -c bash`.
- * The cwd is escaped through the single audited quoter (R6.1); the command is
- * the session's own shell command, run as-is exactly as the tmux path does.
- */
-export function atchCommandFor(spec: SessionSpec): string[] {
-  const command = (spec.command ?? '').trim();
-  const cd = spec.cwd ? `cd ${shellQuote(spec.cwd)} || exit 1\n` : '';
-  const run = command.length > 0 ? command : '"${SHELL:-bash}"';
-  return ['sh', '-c', `${cd}${run}`];
-}
+// The atch child command lives in shared/atchCommand — one audited copy for
+// this wrapper and the core runner lifecycle. Re-exported for existing
+// consumers/tests.
+export { atchCommandFor };
 
 // HTTP transport lives in the shared daemonControlClient (one client for the
 // server wrapper here and the codex-lane core/CLI consumers, R8.4/R6.1-style
@@ -40,7 +31,7 @@ export function atchCommandFor(spec: SessionSpec): string[] {
 
 /** Provision (spawn + attach) a session's atch master via the daemon. */
 export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
-  const sessionId = spec.sessionId ?? spec.tmuxSession;
+  const sessionId = spec.sessionId;
   return toOkResult(
     daemonControl('/control/provision', {
       sessionId,
@@ -58,7 +49,7 @@ export function retireNativeSession(sessionId: string): Promise<{ ok: boolean; e
 /**
  * The native identity a session edit leaves behind, or undefined if unchanged.
  *
- * A session's atch master is keyed by `sessionId ?? tmuxSession`. A persisted
+ * A session's atch master is keyed by its durable sessionId. A persisted
  * sessionId survives renames, so only a LEGACY entry lacking one (whose id is
  * minted from the name) can change identity on rename — leaving the running
  * master keyed by the old id. The edit path retires the returned id so that
@@ -72,8 +63,8 @@ export function staleNativeIdentityAfterEdit(
   if (!oldSpec || !newSpec) {
     return undefined;
   }
-  const oldId = oldSpec.sessionId ?? oldSpec.tmuxSession;
-  const newId = newSpec.sessionId ?? newSpec.tmuxSession;
+  const oldId = oldSpec.sessionId;
+  const newId = newSpec.sessionId;
   return oldId !== newId ? oldId : undefined;
 }
 
@@ -114,41 +105,12 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
   if (!nativeSessionsEnabled()) {
     return restartSession(spec);
   }
-  const sessionId = spec.sessionId ?? spec.tmuxSession;
+  const sessionId = spec.sessionId;
   const retired = await retireNativeSession(sessionId);
   if (!retired.ok) {
     return retired;
   }
   return provisionNativeSession(spec);
-}
-
-/**
- * TRANSITIONAL (dies at the final key flip): the sessionId for a value that
- * may still be a legacy tmuxSession. Identity when the input already is a
- * sessionId (no spec matches by tmuxSession), so callers can normalize
- * mixed-era inputs safely.
- */
-export function nativeIdForTmuxSession(tmuxSession: string): string {
-  return findSpecSoft((candidate) => candidate.tmuxSession === tmuxSession)?.sessionId ?? tmuxSession;
-}
-
-/** The inverse: the tmuxSession consumers key on, for a daemon-reported sessionId. */
-export function tmuxSessionForNativeId(sessionId: string): string {
-  return findSpecSoft((candidate) => (candidate.sessionId ?? candidate.tmuxSession) === sessionId)?.tmuxSession ?? sessionId;
-}
-
-/**
- * Best-effort spec lookup for the transitional normalizers: identity mapping
- * is the contract when no mapping is derivable, and the strict manifest
- * reader THROWS on unmigrated content — a mapping helper must degrade to
- * identity there, never take down its caller.
- */
-function findSpecSoft(predicate: (spec: SessionSpec) => boolean): SessionSpec | undefined {
-  try {
-    return loadDeskCached({}).sessions.find(predicate);
-  } catch {
-    return undefined;
-  }
 }
 
 export interface NativeAttentionEvent {
@@ -183,27 +145,24 @@ export async function drainNativeAttentionEvents(
 }
 
 /**
- * The channels-delivery transport for atch-native terminal sessions: the four
- * engine deps that default to tmux (paste/has-session/capture-pane/send-keys),
- * reimplemented over the daemon control plane. The engine keeps keying by
- * tmuxSession; the sessionId mapping happens here at the boundary — same
- * derivation as provisioning and the running-set, so the three stay coherent.
- * The uiMode=native broker path is unaffected (it never used tmux).
+ * The channels-delivery transport for terminal sessions, over the daemon
+ * control plane. The engine keys by sessionId end-to-end — the values pass
+ * through untouched. The uiMode=native broker path is unaffected.
  */
 export interface NativeChannelsTransport {
   /** Paste text then a delayed Enter — mirrors sendTextToTmux semantics. */
-  sendText: (tmuxSession: string, text: string) => Promise<boolean>;
+  sendText: (sessionId: string, text: string) => Promise<boolean>;
   /** Running iff the session's atch master socket exists. */
-  sessionRunning: (tmuxSession: string) => boolean;
+  sessionRunning: (sessionId: string) => boolean;
   /** The emulator's on-screen tail (plain text), null when unobservable. */
-  capturePane: (tmuxSession: string) => Promise<string | null>;
+  capturePane: (sessionId: string) => Promise<string | null>;
   /** Bare Enter (the submit-verification retry). */
-  sendEnter: (tmuxSession: string) => Promise<boolean>;
+  sendEnter: (sessionId: string) => Promise<boolean>;
   /**
    * Session start time in epoch SECONDS (tmux #{session_created} parity),
    * from the atch socket's stat; null when unobservable.
    */
-  sessionCreatedAt: (tmuxSession: string) => Promise<number | null>;
+  sessionCreatedAt: (sessionId: string) => Promise<number | null>;
 }
 
 export function createNativeChannelsTransport(
@@ -212,8 +171,7 @@ export function createNativeChannelsTransport(
   const enterDelayMs = options.enterDelayMs ?? 1200;
   const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   return {
-    async sendText(tmuxSession, text) {
-      const sessionId = nativeIdForTmuxSession(tmuxSession);
+    async sendText(sessionId, text) {
       // paste:true mirrors tmux `paste-buffer -p` — the daemon wraps in
       // bracketed-paste codes only when the app enabled the mode.
       const delivered = await daemonControl('/control/input', { sessionId, text, paste: true });
@@ -223,22 +181,22 @@ export function createNativeChannelsTransport(
       await wait(enterDelayMs);
       return (await daemonControl('/control/input', { sessionId, text: '\r' })).ok;
     },
-    sessionRunning(tmuxSession) {
+    sessionRunning(sessionId) {
       // runningSessionSet is already flag-aware (atch socket probe) and cached.
-      return runningSessionSet().has(tmuxSession);
+      return runningSessionSet().has(sessionId);
     },
-    async capturePane(tmuxSession) {
-      const result = await daemonControl('/control/tail', { sessionId: nativeIdForTmuxSession(tmuxSession), rows: 200 });
+    async capturePane(sessionId) {
+      const result = await daemonControl('/control/tail', { sessionId: sessionId, rows: 200 });
       const lines = result.ok ? result.body?.lines : undefined;
       return Array.isArray(lines) && lines.every((line) => typeof line === 'string') ? lines.join('\n') : null;
     },
-    async sendEnter(tmuxSession) {
-      return (await daemonControl('/control/input', { sessionId: nativeIdForTmuxSession(tmuxSession), text: '\r' })).ok;
+    async sendEnter(sessionId) {
+      return (await daemonControl('/control/input', { sessionId: sessionId, text: '\r' })).ok;
     },
-    async sessionCreatedAt(tmuxSession) {
+    async sessionCreatedAt(sessionId) {
       const socketRoot = resolveAtchSocketRoot();
       try {
-        const stat = statSync(join(socketRoot, `${nativeIdForTmuxSession(tmuxSession)}.sock`));
+        const stat = statSync(join(socketRoot, `${sessionId}.sock`));
         // Some filesystems report no birthtime (0); the socket is created at
         // session start and never rewritten, so ctime is a faithful fallback.
         const ms = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs;

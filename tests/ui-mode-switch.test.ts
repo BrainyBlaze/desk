@@ -23,8 +23,7 @@ function manifest(): DeskManifest {
                 sessionId: 'chat',
                 agent: 'claude',
                 resume: '00000000-0000-7000-8000-000000000001',
-                uiMode: 'terminal',
-                tmuxSession: 'agentdesk-alpha-main-chat-00000000'
+                uiMode: 'terminal'
               },
               { name: 'fresh', sessionId: 'fresh', agent: 'codex', uiMode: 'terminal' },
               { name: 'shell', sessionId: 'shell', agent: 'bash' },
@@ -34,8 +33,7 @@ function manifest(): DeskManifest {
                 sessionId: 'native-chat',
                 agent: 'opencode',
                 resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
-                uiMode: 'native',
-                tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01'
+                uiMode: 'native'
               }
             ]
           }
@@ -113,7 +111,7 @@ describe('validateUiModeSwitch', () => {
       agent: 'claude',
       resume: '00000000-0000-7000-8000-000000000001',
       uiMode: 'native',
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000'
+      sessionId: 'chat'
     });
   });
 
@@ -127,7 +125,7 @@ describe('validateUiModeSwitch', () => {
       throw new Error(`expected ok, got ${result.code}`);
     }
     expect(result.edit.session.uiMode).toBe('terminal');
-    expect(result.edit.session.tmuxSession).toBe('agentdesk-alpha-main-native-chat-pinned01');
+    expect(result.edit.session.sessionId).toBe('native-chat');
   });
 
   it('treats a same-mode switch as a noop', () => {
@@ -152,7 +150,7 @@ describe('createInFlightGuard', () => {
 });
 
 describe('performUiModeSwitch', () => {
-  it('writes the manifest before restarting, restarts exactly once, and keeps the pinned name', async () => {
+  it('writes the manifest before restarting, restarts exactly once, and keeps durable identity', async () => {
     const calls: string[] = [];
     let written: DeskManifest | undefined;
     let restarted: SessionSpec | undefined;
@@ -183,11 +181,13 @@ describe('performUiModeSwitch', () => {
 
     expect(result.ok).toBe(true);
     expect(calls).toEqual(['write', 'restart']);
-    expect(restarted?.tmuxSession).toBe('agentdesk-alpha-main-chat-00000000');
+    expect(restarted?.sessionId).toBe('chat');
     expect(restarted?.uiMode).toBe('native');
     const persisted = written?.projects?.[0].groups[0].sessions.find((session) => session.name === 'chat');
     expect(persisted?.uiMode).toBe('native');
-    expect(persisted?.tmuxSession).toBe('agentdesk-alpha-main-chat-00000000');
+    // durable identity preserved; the legacy name key is never written back
+    expect(persisted?.sessionId).toBe('chat');
+    expect(persisted).not.toHaveProperty('tmuxSession');
   });
 
   it('propagates restart failures as a typed 500 without retrying', async () => {

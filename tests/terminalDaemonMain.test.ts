@@ -109,16 +109,16 @@ describe('manifestReconcileTargets', () => {
   it('targets only manifest sessions whose atch socket is live, keyed by sessionId', () => {
     vi.spyOn(runner, 'loadDesk').mockReturnValue({
       sessions: [
-        { sessionId: 'shell', tmuxSession: 'agentdesk-g-shell-abc' },
-        { tmuxSession: 'agentdesk-g-legacy-def' },
-        { sessionId: 'gone', tmuxSession: 'agentdesk-g-gone-xyz' }
+        { sessionId: 'shell' },
+        { sessionId: 'other' },
+        { sessionId: 'gone' }
       ]
     } as never);
-    const live = new Set(['/root/shell.sock', '/root/agentdesk-g-legacy-def.sock']);
+    const live = new Set(['/root/shell.sock', '/root/other.sock']);
     const targets = manifestReconcileTargets('/root', (path) => live.has(path));
     expect(targets).toEqual([
       { sessionId: 'shell', sockPath: '/root/shell.sock' },
-      { sessionId: 'agentdesk-g-legacy-def', sockPath: '/root/agentdesk-g-legacy-def.sock' }
+      { sessionId: 'other', sockPath: '/root/other.sock' }
     ]);
   });
 });

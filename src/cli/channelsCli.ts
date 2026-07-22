@@ -10,7 +10,6 @@ import {
   resolveChannelsHome
 } from '../server/channelsStore.js';
 import { parseConversation, type ChannelMessage } from '../server/channelsProtocol.js';
-import { nativeIdForTmuxSession } from '../server/runtime/nativeSessionControl.js';
 import { assertAllowedOption, requireOptionValue } from './args.js';
 
 /**
@@ -338,7 +337,7 @@ function resolveAuthorOffline(home: string, channel: string, tmux: string): stri
         // Mixed-era: a pre-rename host resolves its tmux name — normalize to
         // the durable id members key by (identity for new-era values).
         const detail = readChannelDetail(home, channel);
-        const member = detail.members.find((candidate) => candidate.sessionId === nativeIdForTmuxSession(tmux));
+        const member = detail.members.find((candidate) => candidate.sessionId === tmux);
         if (member) {
           return member.name;
         }

@@ -4,38 +4,26 @@ import { join } from 'node:path';
 import { resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { readManifestFile, resolveManifestPath } from '../core/config.js';
 import { buildSessionSpecs, parseDeskManifest } from '../core/manifest.js';
-import { listTmuxSessions } from '../core/runner.js';
+
 import { buildDeskViewModel } from '../ui/model.js';
 import type { DeskGroupSeed, DeskProjectSeed, DeskViewModel } from '../ui/model.js';
 import type { DeskManifest, SessionSpec } from '../core/types.js';
 
-/**
- * atch-native running-set detection (behind DESK_ATCH_NATIVE): a session is
- * running iff its atch master socket (keyed by sessionId under the socket root)
- * exists — NOT tmux. Returns the set of tmuxSessions still (the view model keys
- * by tmuxSession during the transitional cutover), so the mapping is preserved.
- */
-function atchRunningTmuxSessions(sessions: readonly SessionSpec[]): Set<string> {
+/** The running set, keyed by durable sessionId (atch socket probe). */
+function runningSessionsFor(sessions: readonly SessionSpec[]): Set<string> {
   const socketRoot = resolveAtchSocketRoot();
   const running = new Set<string>();
   for (const session of sessions) {
-    const sessionId = session.sessionId ?? session.tmuxSession;
-    if (existsSync(join(socketRoot, `${sessionId}.sock`))) {
-      running.add(session.tmuxSession);
+    if (existsSync(join(socketRoot, `${session.sessionId}.sock`))) {
+      running.add(session.sessionId);
     }
   }
   return running;
 }
 
-/** The running set: atch sockets under the flag, else the tmux session list. */
-function runningSessionsFor(sessions: readonly SessionSpec[]): Set<string> {
-  return process.env.DESK_ATCH_NATIVE === '1' ? atchRunningTmuxSessions(sessions) : listTmuxSessions();
-}
-
 export interface BuildDeskSnapshotOptions {
   homeDir?: string;
   manifestPath?: string;
-  namespace?: string;
 }
 
 export interface DeskSnapshot {
@@ -49,7 +37,6 @@ export function buildDeskSnapshot(options: BuildDeskSnapshotOptions = {}): DeskS
   const manifest = readManifestFile(manifestPath);
   const sessions = buildSessionSpecs(manifest, {
     homeDir: options.homeDir ?? homedir(),
-    namespace: options.namespace
   });
 
   return {
@@ -61,19 +48,18 @@ export function buildDeskSnapshot(options: BuildDeskSnapshotOptions = {}): DeskS
 
 export function buildDeskSnapshotFromManifest(
   source: string,
-  runningTmuxSessions: Set<string>,
+  runningSessions: Set<string>,
   options: BuildDeskSnapshotOptions = {}
 ): DeskSnapshot {
   const manifestPath = resolveManifestPath(options.manifestPath);
   const manifest = parseDeskManifest(source);
   const sessions = buildSessionSpecs(manifest, {
     homeDir: options.homeDir ?? homedir(),
-    namespace: options.namespace
   });
 
   return {
     configPath: manifestPath,
-    view: buildDeskViewModel(sessions, runningTmuxSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
     generatedAt: new Date().toISOString()
   };
 }

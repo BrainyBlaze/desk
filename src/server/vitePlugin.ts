@@ -68,7 +68,7 @@ export function installDeskApi(host: DeskApiHost, options: InstallDeskApiOptions
       nativeAgentLaunch: services.nativeAgentLaunch,
       agentSurfaceBroker: services.agentSurfaceBroker
     }),
-    createTerminalRoutes(services.terminalBroker),
+    createTerminalRoutes(),
     ...plugins.flatMap((plugin) => plugin.routes ?? [])
   ];
   host.middlewares.use(createDeskApiMiddleware(routes));

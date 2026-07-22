@@ -29,7 +29,6 @@ import { createSemanticTokensService } from './lsp/semanticTokensService.js';
 import { normalizeLspSettings, type NormalizedLspSettings } from './lsp/settings.js';
 import { createSignatureHelpService } from './lsp/signatureHelpService.js';
 import { createLspWarmSessionCoordinator } from './lsp/warmSessionCoordinator.js';
-import { createDefaultTerminalBroker } from './terminalBroker.js';
 
 function canonicalLocalApiBaseUrl(httpServer: NodeHttpServer | null): string | undefined {
   const address = httpServer?.address();
@@ -40,7 +39,6 @@ function canonicalLocalApiBaseUrl(httpServer: NodeHttpServer | null): string | u
 }
 
 export function createDeskServices(httpServer: NodeHttpServer | null) {
-  const terminalBroker = createDefaultTerminalBroker();
   const agentSurfaceBroker = new AgentSurfaceBroker();
   const lspDiagnosticsStore = new LspDiagnosticsStore();
   const lspManager = new LspManager(undefined, { diagnosticsStore: lspDiagnosticsStore });
@@ -125,12 +123,11 @@ export function createDeskServices(httpServer: NodeHttpServer | null) {
     return rewriteNativeLaunchCommand(spec, {
       serverUrl,
       ...(lspEnvFilePath ? { lspEnvFilePath } : {}),
-      token: deriveAgentHostToken(secret, spec.tmuxSession, spec.agent ?? '')
+      token: deriveAgentHostToken(secret, spec.sessionId, spec.agent ?? '')
     });
   };
 
   return {
-    terminalBroker,
     agentSurfaceBroker,
     lspManager,
     lspCapabilityTokens,

@@ -41,10 +41,6 @@ const ROUTE_OWNERS = {
     '/api/reorder-sessions'
   ],
   'routes/terminalRoutes.ts': [
-    '/api/terminal-broker-metrics',
-    '/api/terminal-resize',
-    '/api/terminal-repaint',
-    '/api/terminal-scroll',
     '/api/terminal-capture'
   ]
 } as const;

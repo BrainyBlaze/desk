@@ -1,71 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   AttentionTracker,
-  containsTerminalNotification,
-  detectBellEdges,
-  extractTerminalNotifications,
-  isLikelyUserInput,
-  parseBellFlagsOutput
 } from '../src/server/attention.js';
 import { TerminalSequenceTokenizer } from '../src/shared/terminalSequenceTokenizer.js';
 
-describe('parseBellFlagsOutput', () => {
-  it('parses session/flag/activity rows, ignoring blanks', () => {
-    const out = 'sess-a\t1\t1700000000\nsess-b\t0\t1700000050\n\n';
-    const flags = parseBellFlagsOutput(out);
-    expect(flags.get('sess-a')).toEqual({ bellFlag: 1, activity: 1700000000 });
-    expect(flags.get('sess-b')).toEqual({ bellFlag: 0, activity: 1700000050 });
-    expect(flags.size).toBe(2);
-  });
 
-  it('treats any non-1 flag as 0 and missing activity as 0', () => {
-    const flags = parseBellFlagsOutput('sess-c\t\t');
-    expect(flags.get('sess-c')).toEqual({ bellFlag: 0, activity: 0 });
-  });
-});
-
-describe('extractTerminalNotifications', () => {
-  it('parses OSC 9 message into kind', () => {
-    expect(extractTerminalNotifications('\x1b]9;Codex: turn complete\x07')).toEqual([
-      { kind: 'turn-complete', message: 'Codex: turn complete' }
-    ]);
-    expect(extractTerminalNotifications('\x1b]9;Approval requested: rm -rf\x1b\\')).toEqual([
-      { kind: 'approval-requested', message: 'Approval requested: rm -rf' }
-    ]);
-    expect(extractTerminalNotifications('\x1b]9;opencode needs input\x07')).toEqual([
-      { kind: 'input-requested', message: 'opencode needs input' }
-    ]);
-  });
-
-  it('reports bare BEL as a generic bell, ignoring OSC-terminating BELs', () => {
-    expect(extractTerminalNotifications('done\x07')).toEqual([{ kind: 'bell' }]);
-    expect(extractTerminalNotifications('\x1b]0;title\x07')).toEqual([]);
-  });
-
-  it('keeps OSC 9 state across PTY chunk boundaries', () => {
-    const tokenizer = new TerminalSequenceTokenizer();
-    expect(extractTerminalNotifications('\x1b]9;turn', tokenizer)).toEqual([]);
-    expect(extractTerminalNotifications(' complete\x07', tokenizer)).toEqual([
-      { kind: 'turn-complete', message: 'turn complete' }
-    ]);
-  });
-
-  it('does not drop plain middle chunks while an OSC is buffered', () => {
-    const tokenizer = new TerminalSequenceTokenizer();
-    expect(extractTerminalNotifications('\x1b]9;turn', tokenizer)).toEqual([]);
-    expect(extractTerminalNotifications(' complete', tokenizer)).toEqual([]);
-    expect(extractTerminalNotifications('\x07', tokenizer)).toEqual([{ kind: 'turn-complete', message: 'turn complete' }]);
-  });
-
-  it('fast-path returns empty for plain output with no BEL or OSC-9 marker', () => {
-    // The indexOf guard must not change results: plain colored output has no markers.
-    const plain = '\x1b[32mline 1 lorem ipsum\x1b[0m\r\nline 2 dolor sit amet\r\n';
-    expect(extractTerminalNotifications(plain)).toEqual([]);
-    expect(extractTerminalNotifications('')).toEqual([]);
-    // OSC-9 terminated by ST (no BEL anywhere) must still be detected past the guard.
-    expect(extractTerminalNotifications('\x1b]9;done\x1b\\')).toEqual([{ kind: 'turn-complete', message: 'done' }]);
-  });
-});
 
 describe('AttentionTracker events', () => {
   it('stores events newest-first with unread counting and mark-read', () => {
@@ -183,89 +122,8 @@ describe('AttentionTracker events', () => {
   });
 });
 
-describe('containsTerminalNotification', () => {
-  it('detects a bare BEL', () => {
-    expect(containsTerminalNotification('done\x07')).toBe(true);
-    expect(containsTerminalNotification('plain output')).toBe(false);
-  });
 
-  it('detects OSC 9 notifications (BEL or ST terminated)', () => {
-    expect(containsTerminalNotification('\x1b]9;Turn complete\x07')).toBe(true);
-    expect(containsTerminalNotification('\x1b]9;Turn complete\x1b\\')).toBe(true);
-  });
 
-  it('ignores BEL used as OSC terminator for non-notification OSC (title set)', () => {
-    // OSC 0 (title) terminated by BEL is routine TUI noise, not a notification.
-    expect(containsTerminalNotification('\x1b]0;my title\x07')).toBe(false);
-  });
-});
-
-describe('detectBellEdges', () => {
-  const flags = (bellFlag: number, activity = 100) => ({ bellFlag, activity });
-
-  it('reports sessions whose bell flag rose since the previous poll', () => {
-    const previous = new Map([
-      ['a', 0],
-      ['b', 1]
-    ]);
-    const current = new Map([
-      ['a', flags(1)],
-      ['b', flags(1)],
-      ['c', flags(1)]
-    ]);
-    expect(detectBellEdges(previous, current).sort()).toEqual(['a', 'c']);
-  });
-
-  it('does not re-report a latched flag without new activity', () => {
-    const previous = new Map([['a', 1]]);
-    const current = new Map([['a', flags(1, 100)]]);
-    expect(detectBellEdges(previous, current, () => 200)).toEqual([]);
-  });
-
-  it('re-raises a latched flag when output happened after the last user touch', () => {
-    const previous = new Map([['a', 1]]);
-    const current = new Map([['a', flags(1, 300)]]);
-    expect(detectBellEdges(previous, current, () => 200)).toEqual(['a']);
-  });
-
-  it('ignores sessions with no bell flag', () => {
-    const current = new Map([['a', flags(0, 999)]]);
-    expect(detectBellEdges(new Map(), current, () => 1)).toEqual([]);
-  });
-});
-
-describe('isLikelyUserInput', () => {
-  it('treats typing, enter, and control chars as user input', () => {
-    expect(isLikelyUserInput('a')).toBe(true);
-    expect(isLikelyUserInput('\r')).toBe(true);
-    expect(isLikelyUserInput('\x03')).toBe(true); // ctrl+c
-    expect(isLikelyUserInput('hello world\r')).toBe(true);
-  });
-
-  it('treats arrow keys and bracketed paste as user input', () => {
-    expect(isLikelyUserInput('\x1b[A')).toBe(true);
-    expect(isLikelyUserInput('\x1b[200~pasted\x1b[201~')).toBe(true);
-  });
-
-  it('ignores terminal auto-replies (DA, CPR, DSR, DECRPM, OSC, DCS, focus)', () => {
-    expect(isLikelyUserInput('\x1b[?1;2c')).toBe(false); // DA1 response
-    expect(isLikelyUserInput('\x1b[>0;276;0c')).toBe(false); // DA2 response
-    expect(isLikelyUserInput('\x1b[24;80R')).toBe(false); // CPR
-    expect(isLikelyUserInput('\x1b[?24;80;1R')).toBe(false); // DECXCPR
-    expect(isLikelyUserInput('\x1b[0n')).toBe(false); // DSR ok
-    expect(isLikelyUserInput('\x1b[?2026;2$y')).toBe(false); // DECRPM
-    expect(isLikelyUserInput('\x1b]10;rgb:bf/fc/ff\x07')).toBe(false); // OSC color reply
-    expect(isLikelyUserInput('\x1bP1+r544e\x1b\\')).toBe(false); // DCS reply
-    expect(isLikelyUserInput('\x1b[I')).toBe(false); // focus in
-    expect(isLikelyUserInput('\x1b[O')).toBe(false); // focus out
-    expect(isLikelyUserInput('\x1b[?1;2c\x1b[24;80R')).toBe(false); // combined replies
-    expect(isLikelyUserInput('')).toBe(false);
-  });
-
-  it('detects user input mixed with auto-replies', () => {
-    expect(isLikelyUserInput('\x1b[?1;2cq')).toBe(true);
-  });
-});
 
 describe('AttentionTracker', () => {
   it('raises and clears attention per session', () => {

@@ -3,7 +3,7 @@ import type { AgentEventKindV2, AgentEventV2 } from './agentEvents.js';
 export type PresenceColor = 'green' | 'yellow' | 'red';
 export type PresenceStatus = 'working' | 'idle' | 'blocked' | 'offline';
 export type BlockedReason = 'approval' | 'input';
-export type DegradedReason = 'session-end' | 'stop-failure' | 'tmux-missing' | 'hook-stale' | 'ack-failed';
+export type DegradedReason = 'session-end' | 'stop-failure' | 'session-missing' | 'hook-stale' | 'ack-failed';
 
 export interface PresenceSnapshot {
   session: string;
@@ -118,7 +118,7 @@ export class AgentPresenceModel {
   reconcileLiveness(aliveSessions: Set<string>, now = new Date()): void {
     for (const snapshot of this.sessions.values()) {
       if (!aliveSessions.has(snapshot.session)) {
-        this.markRed(snapshot, 'tmux-missing');
+        this.markRed(snapshot, 'session-missing');
         continue;
       }
       const lastEventMs = Date.parse(snapshot.lastEventAt);

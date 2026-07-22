@@ -60,7 +60,7 @@ describe('parseAgentEventV2', () => {
     ).toThrow(/unsupported agent event kind/);
   });
 
-  it('requires full tmux session identity, not suffix-only identifiers', () => {
+  it('requires full session identity, not suffix-only identifiers', () => {
     expect(() =>
       parseAgentEventV2({
         schemaVersion: 2,
@@ -68,7 +68,7 @@ describe('parseAgentEventV2', () => {
         session: 'fedcba98',
         agent: 'codex'
       })
-    ).toThrow(/full tmux session/);
+    ).toThrow(/full session identity/);
   });
 });
 

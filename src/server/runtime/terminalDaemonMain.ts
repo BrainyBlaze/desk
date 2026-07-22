@@ -51,7 +51,7 @@ export function manifestReconcileTargets(
   socketExists: (path: string) => boolean = existsSync
 ): ReconcileTarget[] {
   return loadDesk({}).sessions.flatMap((session) => {
-    const sessionId = session.sessionId ?? session.tmuxSession;
+    const sessionId = session.sessionId;
     const sockPath = join(atchSocketRoot, `${sessionId}.sock`);
     return socketExists(sockPath) ? [{ sessionId, sockPath }] : [];
   });

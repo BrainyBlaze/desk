@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveManifestPath } from '../../core/config.js';
-import { listTmuxSessionsCached, loadDesk, runningSessionSet } from '../../core/runner.js';
-import { nativeIdForTmuxSession } from '../runtime/nativeSessionControl.js';
+import { loadDesk, runningSessionSet } from '../../core/runner.js';
 import { normalizeAgentEventForApi } from '../agentEvents.js';
 import { attentionTracker, notifyAgentSignal, type AgentEventKind } from '../attention.js';
 import { initChannelsRuntime } from '../channelsApi.js';
@@ -90,11 +89,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
     }
 
     if (req.method === 'GET' && url.pathname === '/api/pulse') {
-      const running = runningSessionSet();
-      // TRANSITIONAL: the running set still carries tmuxSessions; every
-      // consumer below keys sessionId. Map once, serve sessionIds in the
-      // payload — the web lane reads sessionId from this window on.
-      const runningIds = new Set([...running].map(nativeIdForTmuxSession));
+      const runningIds = runningSessionSet();
       managedAgentLsp.reconcile(runningIds);
       attentionTracker.dropDead(runningIds);
       sendJson(res, 200, {
@@ -122,7 +117,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
       const body = await readJsonBody(req);
       // TRANSITIONAL normalizer: an old web build sends the tmuxSession; the
       // converted web sends the sessionId (the normalizer is identity there).
-      attentionTracker.clear(nativeIdForTmuxSession(readRequiredString(body.session, 'session')));
+      attentionTracker.clear(readRequiredString(body.session, 'session'));
       sendJson(res, 200, { ok: true });
       return true;
     }
@@ -158,7 +153,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
       // rename self-report the tmux name until restarted; new launches report
       // the sessionId (identity here). Everything downstream — tracker,
       // signal fanout, channels engine, resume capture — keys the durable id.
-      const sessionId = nativeIdForTmuxSession(normalized.event.session);
+      const sessionId = normalized.event.session;
       if (normalized.attentionKind) {
         attentionTracker.raise(sessionId);
         attentionTracker.pushEvent(
@@ -182,7 +177,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
     }
 
     if (req.method === 'POST' && url.pathname === '/api/kill-all') {
-      const result = executeKillSwitch();
+      const result = await executeKillSwitch();
       managedAgentLsp.cleanupAll();
       sendJson(res, 200, result);
       return true;

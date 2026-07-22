@@ -32,8 +32,8 @@ const manifest: DeskManifest = {
         {
           id: 'main',
           sessions: [
-            { name: 'bash', agent: 'bash' },
-            { name: 'agent', agent: 'codex', resume: 'abc' }
+            { name: 'bash', sessionId: 'bash', agent: 'bash' },
+            { name: 'agent', sessionId: 'agent', agent: 'codex', resume: 'abc' }
           ]
         },
         {
@@ -59,7 +59,7 @@ describe('server session lifecycle helpers', () => {
       homeDir: `${HOME}`
     });
 
-    expect(session?.tmuxSession).toMatch(/^agentdesk-drop-project-main-bash-[a-f0-9]{8}$/);
+    expect(session?.sessionId).toBeTruthy();
     expect(session?.command).toBe(`cd '${HOME}/projects/drop' && exec bash`);
   });
 

@@ -175,7 +175,7 @@ describe('channelsDurability', () => {
     });
 
     it('returns [] when the session dir does not exist', () => {
-      expect(revertAllDeliveringToJson(home, 'tmux-missing')).toEqual([]);
+      expect(revertAllDeliveringToJson(home, 'session-missing')).toEqual([]);
     });
 
     it('is idempotent — second call finds nothing to revert', () => {

@@ -61,17 +61,3 @@ describe('killSessionTargets under DESK_ATCH_NATIVE', () => {
   });
 });
 
-describe('killSessionTargets without the flag (legacy tmux)', () => {
-  it('kills via tmux and never touches the daemon', async () => {
-    delete process.env.DESK_ATCH_NATIVE;
-    const killSpy = vi.spyOn(runner, 'killSession').mockReturnValue({ ok: true });
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await killSessionTargets([spec('shell', 'shell', 'agentdesk-canary-shell-abc'), 'raw-tmux-target']);
-
-    expect(result).toEqual({ ok: true });
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(killSpy.mock.calls.map((c) => c[0])).toEqual(['agentdesk-canary-shell-abc', 'raw-tmux-target']);
-  });
-});

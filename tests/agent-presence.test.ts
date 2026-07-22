@@ -109,7 +109,7 @@ describe('AgentPresenceModel', () => {
     expect(model.get('focus-codex-fedcba98')).toMatchObject({
       color: 'red',
       status: 'offline',
-      degradedReason: 'tmux-missing'
+      degradedReason: 'session-missing'
     });
   });
 

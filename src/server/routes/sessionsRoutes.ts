@@ -27,14 +27,12 @@ import {
 import { buildSessionSpecs, expandHome, sessionSupportsNativeUiMode } from '../../core/manifest.js';
 import {
   killSession,
-  listTmuxSessions,
   loadDesk,
   planDeskUp,
   runningSessionSet,
   runPlan
 } from '../../core/runner.js';
 import {
-  nativeIdForTmuxSession,
   nativeSessionsEnabled,
   restartSessionNativeAware,
   retireNativeSession,
@@ -49,7 +47,7 @@ import type {
   DeskSessionDraft,
   DeskSettings,
   SessionSpec,
-  TmuxPlanAction
+  SessionPlanAction
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
@@ -236,25 +234,14 @@ function cwdMatchesResolved(left: string, right: string): boolean {
 }
 
 export async function killSessionTargets(targets: Array<SessionSpec | string>): Promise<{ ok: boolean; error?: string }> {
-  if (nativeSessionsEnabled()) {
-    // Under the flag a session's atch master is keyed by sessionId; retire it via
-    // the daemon (never tmux) so a delete leaves no orphan master. A bare-string
-    // target (a raw tmuxSession) retires best-effort; retire is idempotent, so a
-    // session the daemon does not know is a harmless no-op.
-    const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId ?? target.tmuxSession)))];
-    for (const sessionId of ids) {
-      const retired = await retireNativeSession(sessionId);
-      if (!retired.ok) {
-        return retired;
-      }
-    }
-    return { ok: true };
-  }
-  const tmuxSessions = targets.map((target) => (typeof target === 'string' ? target : target.tmuxSession));
-  for (const tmuxSession of [...new Set(tmuxSessions)]) {
-    const killed = killSession(tmuxSession);
-    if (!killed.ok) {
-      return killed;
+  // A session's atch master is keyed by sessionId; retire via the daemon so a
+  // delete leaves no orphan master. A bare-string target retires best-effort;
+  // retire is idempotent, so an unknown session is a harmless no-op.
+  const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId)))];
+  for (const sessionId of ids) {
+    const retired = await retireNativeSession(sessionId);
+    if (!retired.ok) {
+      return retired;
     }
   }
   return { ok: true };
@@ -314,7 +301,7 @@ export interface ManagedPlanResult {
 }
 
 export async function runManagedPlan(
-  plan: TmuxPlanAction[],
+  plan: SessionPlanAction[],
   settings: DeskSettings | undefined,
   managedAgentLsp: ManagedAgentLsp,
   nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec,
@@ -328,7 +315,7 @@ export async function runManagedPlan(
     const started = await start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
-      return { exitCode: 1, error: started.error ?? `start failed for ${action.session.tmuxSession}` };
+      return { exitCode: 1, error: started.error ?? `start failed for ${action.session.sessionId}` };
     }
   }
   return { exitCode: 0 };
@@ -344,7 +331,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const plan = planDeskUp(desk.sessions);
       const settings = readManifestFile(resolveManifestPath()).settings;
       const result = dryRun
-        ? { exitCode: runPlan(plan, true) }
+        ? { exitCode: await runPlan(plan, true) }
         : await runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
       const { exitCode } = result;
       if (!dryRun && exitCode === 0) {
@@ -360,7 +347,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         actions: plan.map((action) => ({
           type: action.type,
           session: action.session.name,
-          tmuxSession: action.session.tmuxSession
+          sessionId: action.session.sessionId
         }))
       });
       return true;
@@ -600,7 +587,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         writeManifestFile(manifestPath, next);
         if (
           shouldRespawnAfterEdit(oldSpec, newSpec, (target) =>
-            (nativeSessionsEnabled() ? runningSessionSet() : listTmuxSessions()).has(target)
+            runningSessionSet().has(target)
           ) &&
           newSpec
         ) {
@@ -639,9 +626,9 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           sessionName,
           projectCwd
         });
-        const targets = specTargets.map((candidate) => candidate.tmuxSession);
-        // Retire by SessionSpec so the native path keys on sessionId; a caller-
-        // supplied tmuxSession not among the specs is retired best-effort.
+        const targets = specTargets.map((candidate) => candidate.sessionId);
+        // Retire by SessionSpec; a caller-supplied extra id not among the
+        // specs is retired best-effort.
         const killTargets: Array<SessionSpec | string> = [...specTargets];
         if (extraTarget && !targets.includes(extraTarget)) {
           targets.push(extraTarget);
@@ -659,7 +646,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           // launched after the DESK_SESSION_ID rename and the tmux name for
           // ones still running from before it — dispose both (idempotent
           // no-op for whichever does not exist; dies at the no-tmux gate).
-          const targetId = nativeIdForTmuxSession(target);
+          const targetId = target;
           managedAgentLsp.cleanup(targetId);
           agentSurfaceBroker.disposeSession(target);
           deleteToolJournal(target);
@@ -680,7 +667,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
 
     if (req.method === 'POST' && url.pathname === '/api/restart-project-session') {
       const body = await readJsonBody(req);
-      const sessionId = nativeIdForTmuxSession(readRequiredString(body.sessionId, 'sessionId'));
+      const sessionId = readRequiredString(body.sessionId, 'sessionId');
       const session = loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId);
       if (!session) {
         sendJson(res, 404, { error: `session ${sessionId} does not exist in config` });
@@ -701,7 +688,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
 
     if (req.method === 'POST' && url.pathname === '/api/set-session-ui-mode') {
       const body = await readJsonBody(req);
-      const sessionId = nativeIdForTmuxSession(readRequiredString(body.sessionId, 'sessionId'));
+      const sessionId = readRequiredString(body.sessionId, 'sessionId');
       const uiMode = readRequiredString(body.uiMode, 'uiMode');
       if (uiMode !== 'terminal' && uiMode !== 'native') {
         sendJson(res, 400, { error: 'uiMode must be terminal or native', code: 'ui-mode-invalid' });

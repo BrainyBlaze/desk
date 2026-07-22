@@ -20,7 +20,6 @@ import {
   notifyAgentSignal,
   type AgentEventKind
 } from './attention.js';
-import { nativeIdForTmuxSession } from './runtime/nativeSessionControl.js';
 import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.js';
 
 /**
@@ -106,12 +105,12 @@ export interface AgentSurfaceBrokerOptions {
   attention?: AttentionSink;
   /**
    * Inject the resume-persistence path (test seam). Production leaves this undefined
-   * and the broker calls persistSessionResume(tmuxSession, resume) which writes the
+   * and the broker calls persistSessionResume(sessionId, resume) which writes the
    * default manifest at ~/.config/desk/desk.yml. Tests pass a custom function that
    * writes to a temp manifest so the broker's session-info handling can be exercised
    * hermetically.
    */
-  persistResume?: (tmuxSession: string, resume: string) => boolean | Promise<boolean>;
+  persistResume?: (sessionId: string, resume: string) => boolean | Promise<boolean>;
   now?: () => number;
 }
 
@@ -129,7 +128,7 @@ export class AgentSurfaceBroker {
   private readonly commandTimeoutMs: number;
   private readonly resolveSecret: () => string;
   private readonly attention: AttentionSink;
-  private readonly persistResume: (tmuxSession: string, resume: string) => boolean | Promise<boolean>;
+  private readonly persistResume: (sessionId: string, resume: string) => boolean | Promise<boolean>;
   private readonly now: () => number;
   private readonly sessions = new Map<string, AgentSurfaceSession>();
   private readonly browserClients = new Map<WebSocket, BrowserClient>();
@@ -140,7 +139,7 @@ export class AgentSurfaceBroker {
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.resolveSecret = options.resolveSecret ?? defaultResolveSecret;
     this.attention = options.attention ?? defaultAttentionSink;
-    this.persistResume = options.persistResume ?? ((tmuxSession, resume) => persistSessionResume(tmuxSession, resume));
+    this.persistResume = options.persistResume ?? ((sessionId, resume) => persistSessionResume(sessionId, resume));
     this.now = options.now ?? Date.now;
   }
 
@@ -192,7 +191,7 @@ export class AgentSurfaceBroker {
 
   /**
    * Drop all broker state for a session (ring, state, inflight, guards). Called from
-   * the delete-session route so a recreated session with the same derived tmux name
+   * the delete-session route so a recreated session with the same identity
    * doesn't receive the OLD conversation's ring as its snapshot (BUG-7 root cause:
    * broker session entry survived DeskSession deletion because nothing told the broker
    * the session was gone).
@@ -820,9 +819,9 @@ const defaultAttentionSink: AttentionSink = {
   // for new launches, the tmux name for hosts started pre-rename (until
   // restart); the normalizer absorbs both. The signal fanout keeps the
   // legacy key until the channels flip.
-  pushEvent: (session, kind, message) => attentionTracker.pushEvent(nativeIdForTmuxSession(session), kind, message),
-  notifySignal: (session, kind) => notifyAgentSignal(nativeIdForTmuxSession(session), kind),
-  raise: (session) => attentionTracker.raise(nativeIdForTmuxSession(session))
+  pushEvent: (session, kind, message) => attentionTracker.pushEvent(session, kind, message),
+  notifySignal: (session, kind) => notifyAgentSignal(session, kind),
+  raise: (session) => attentionTracker.raise(session)
 };
 
 let defaultSecret: string | null = null;

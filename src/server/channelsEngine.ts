@@ -1,6 +1,6 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+
 import {
   mentionsHuman,
   resolveTargets,
@@ -43,7 +43,6 @@ import { appendDeliveryEvent, type DeliveryEvent } from './channelsEvents.js';
 import { listPausedSessions } from './channelsPaused.js';
 import { writeFileAtomic } from './fsOps.js';
 import { AgentPresenceModel } from './agentPresence.js';
-import { tmuxSessionForNativeId } from './runtime/nativeSessionControl.js';
 import type { AgentEventV2 } from './agentEvents.js';
 import { NativePromptDeliveryStrategy, NotificationDeliveryStrategy, PromptDeliveryStrategy, type NativeDeliveryState } from './channelsDeliveryStrategy.js';
 
@@ -84,12 +83,12 @@ export type {
 export interface ChannelsEngineOptions {
   home: string;
   /** push a prompt into a tmux session; resolved implementation is injectable for tests */
-  sendText?: (sessionId: string, text: string) => Promise<boolean>;
-  sessionRunning?: (sessionId: string) => boolean;
+  sendText: (sessionId: string, text: string) => Promise<boolean>;
+  sessionRunning: (sessionId: string) => boolean;
   /** capture the tail of a session's pane (injectable for tests); null = capture failed */
-  capturePane?: (sessionId: string) => Promise<string | null>;
+  capturePane: (sessionId: string) => Promise<string | null>;
   /** bare Enter keypress for the submit-verification retry (injectable for tests) */
-  sendEnter?: (sessionId: string) => Promise<boolean>;
+  sendEnter: (sessionId: string) => Promise<boolean>;
   /**
    * Notify the desk UI (events drawer) about every finalised channel message
    * (human-authored included); `file` locates it (root.md / thread-…),
@@ -138,7 +137,7 @@ export interface ChannelsEngineOptions {
   /** never deliver to a tmux session younger than this (TUIs swallow input while booting) */
   bootGraceMs?: number;
   /** epoch-seconds session creation lookup (injectable for tests) */
-  sessionCreatedAt?: (sessionId: string) => Promise<number | null>;
+  sessionCreatedAt: (sessionId: string) => Promise<number | null>;
   /** current process id (injectable for the single-engine guard tests) */
   pid?: number;
   /** liveness probe for the pid in the lock file (injectable for tests) */
@@ -234,169 +233,20 @@ export function defaultPidStarttimeReader(pid: number): number | null {
 }
 
 /**
- * Hard ceiling for any tmux child the engine spawns. A spawned `tmux` process
- * that never emits `exit`/`error` — observed under heavy fleet load on WSL —
- * would otherwise leave the awaiting drain/reconcile suspended forever, which
- * permanently wedges that session's queue (the flag it set never clears). Every
- * spawn here MUST settle; this timeout guarantees it.
+ * Hard ceiling for any transport probe the engine awaits. A capture that never
+ * settles would leave the awaiting drain/reconcile suspended forever, which
+ * permanently wedges that session's queue — every probe MUST settle.
  */
-export const TMUX_SPAWN_TIMEOUT_MS = 4000;
+export const PROBE_SETTLE_TIMEOUT_MS = 4000;
 const DEFAULT_ENGINE_PROBE_TTL_MS = 750;
 const DELIVERY_SEND_TIMEOUT_MS = 30_000;
 const DIAGNOSTIC_PROBE_TIMEOUT_GRACE_MS = 250;
-
-export interface SpawnSettledResult {
-  ok: boolean;
-  /** captured stdout on a clean exit; null on failure/timeout (or capture off) */
-  stdout: string | null;
-}
-
-/**
- * Spawns a command and ALWAYS resolves: on `close`, on `error`, or — critically —
- * after `timeoutMs`, when the child is SIGKILLed and a failure result returned.
- * The unconditional settle is the contract every engine spawn relies on; a
- * promise that can hang forever is exactly what froze channel delivery.
- *
- * Captured stdout is read on `close`, NOT `exit`: `exit` fires when the process
- * terminates, but buffered stdout may not have been emitted as `data` yet, so
- * reading there truncates the capture — to EMPTY for larger panes under the
- * concurrent capture burst the pump/restore generate. An empty pane reads as
- * "not ready", so drain held those queues forever. `close` fires only once all
- * stdio streams have drained, so the capture is complete.
- */
-export function spawnTmuxSettled(
-  args: string[],
-  opts: { capture: boolean; timeoutMs?: number }
-): Promise<SpawnSettledResult> {
-  return new Promise((resolve) => {
-    const child = spawn('tmux', args, { stdio: ['ignore', opts.capture ? 'pipe' : 'ignore', 'ignore'] });
-    let output = '';
-    let settled = false;
-    const finish = (result: SpawnSettledResult): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // already gone — the finish below still settles the promise
-      }
-      finish({ ok: false, stdout: null });
-    }, opts.timeoutMs ?? TMUX_SPAWN_TIMEOUT_MS);
-    timer.unref?.();
-    if (opts.capture) {
-      child.stdout?.on('data', (chunk: Buffer) => {
-        output += chunk.toString('utf8');
-      });
-    }
-    child.on('error', () => finish({ ok: false, stdout: null }));
-    child.on('close', (code) => finish({ ok: code === 0, stdout: code === 0 ? output : null }));
-  });
-}
-
-export function defaultSessionRunning(sessionId: string): boolean {
-  // Legacy transport boundary: tmux keys sessions by name; the engine keys by
-  // durable sessionId. Map here only (dies with the tmux transport deletion).
-  const tmuxSession = tmuxSessionForNativeId(sessionId);
-  // `timeout` bounds the sync call so a stuck tmux server can't block the event
-  // loop; a timed-out probe reports not-running, so the queue safely holds.
-  return (
-    spawnSync('tmux', ['has-session', '-t', `=${tmuxSession}`], {
-      encoding: 'utf8',
-      timeout: TMUX_SPAWN_TIMEOUT_MS
-    }).status === 0
-  );
-}
-
-/** Last ~30 pane lines of the session's active pane (null when capture fails). */
-export async function defaultCapturePane(sessionId: string): Promise<string | null> {
-  const result = await spawnTmuxSettled(['capture-pane', '-p', '-t', `${tmuxSessionForNativeId(sessionId)}:`], { capture: true });
-  return result.stdout === null ? null : tailPaneCapture(result.stdout);
-}
 
 // The pane predicates now live in channelsProbe.ts (one classifier shared by
 // drain, verify, signal-release, and the ops console). Re-exported here so
 // existing importers keep resolving them from the engine module.
 export { isPaneBusy, isPaneReadyForInput, paneFooterRegion, tailPaneCapture } from './channelsProbe.js';
 
-/** Epoch-seconds tmux session creation time (null when unknown). */
-export async function defaultSessionCreatedAt(sessionId: string): Promise<number | null> {
-  const result = await spawnTmuxSettled(['display-message', '-p', '-t', `${tmuxSessionForNativeId(sessionId)}:`, '#{session_created}'], {
-    capture: true
-  });
-  if (result.stdout === null) {
-    return null;
-  }
-  const created = Number(result.stdout.trim());
-  return Number.isFinite(created) && created > 0 ? created : null;
-}
-
-let pasteBufferSeq = 0;
-
-/**
- * Pushes a prompt into an agent's tmux pane and submits it.
- *
- * The body is injected with BRACKETED PASTE (`set-buffer` + `paste-buffer -p`),
- * not `send-keys -l`. Agent TUIs (codex, claude) then receive the whole
- * multi-line block as a single atomic paste — they collapse it to a
- * "[Pasted …]" chip — so embedded newlines stay literal and the separate submit
- * Enter always lands as submit. `send-keys -l` instead fed the text through the
- * pane byte-by-byte: codex re-renders its composer per line and treats a CR that
- * arrives before that line-by-line ingest finishes as a literal newline, so a
- * large prompt's submit Enter (and the verify retries) were swallowed and the
- * message sat unsubmitted in the input box — reproducible with big digests and
- * far worse under load, when the TUI renders the paste slower than the fixed
- * delay budget. Bracketed paste removes the race: a single Enter submits even
- * with no delay. `-p` only emits the paste brackets when the app requested
- * bracketed-paste mode, so it is a safe no-op for anything that did not.
- *
- * The Enter is a separate call after a short settle so the pane has processed
- * the paste before the submit key arrives. `run` is injectable for tests.
- */
-export async function sendTextToTmux(
-  sessionId: string,
-  text: string,
-  enterDelayMs = 1200,
-  run: (args: string[]) => Promise<boolean> = runTmux
-): Promise<boolean> {
-  // Legacy transport boundary (see defaultSessionRunning).
-  const tmuxSession = tmuxSessionForNativeId(sessionId);
-  // `session:` resolves to the session's active pane. The `=name` exact form
-  // is only valid for session targets (has-session) — tmux 3.2a rejects it
-  // as a pane target.
-  const target = `${tmuxSession}:`;
-  // Unique buffer per call: deliveries to different sessions run concurrently,
-  // and a shared/default buffer would let one paste clobber another mid-flight.
-  pasteBufferSeq += 1;
-  const buffer = `deskchan_${tmuxSession.replace(/[^A-Za-z0-9_]/g, '_')}_${pasteBufferSeq}`;
-  const staged = await run(['set-buffer', '-b', buffer, '--', text]);
-  if (!staged) {
-    return false;
-  }
-  // `-p` wraps the data in bracketed-paste control codes (when the TUI asked for
-  // them); `-d` deletes the buffer once pasted.
-  const pasted = await run(['paste-buffer', '-d', '-p', '-b', buffer, '-t', target]);
-  if (!pasted) {
-    await run(['delete-buffer', '-b', buffer]); // best-effort: never leak the buffer
-    return false;
-  }
-  await delay(enterDelayMs);
-  return run(['send-keys', '-t', target, 'Enter']);
-}
-
-/** Bare Enter keypress (used by the submit-verification retry). */
-export function sendEnterToTmux(sessionId: string): Promise<boolean> {
-  return runTmux(['send-keys', '-t', `${tmuxSessionForNativeId(sessionId)}:`, 'Enter']);
-}
-
-function runTmux(args: string[]): Promise<boolean> {
-  return spawnTmuxSettled(args, { capture: false }).then((result) => result.ok);
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -742,23 +592,22 @@ export class ChannelsEngine {
   lockError?: string;
 
   constructor(private readonly options: ChannelsEngineOptions) {
-    this.sendText =
-      options.sendText ?? ((session, text) => sendTextToTmux(session, text, options.enterDelayMs ?? 1200));
-    this.sessionRunning = options.sessionRunning ?? defaultSessionRunning;
-    this.capturePane = options.capturePane ?? defaultCapturePane;
-    this.sendEnter = options.sendEnter ?? sendEnterToTmux;
+    this.sendText = options.sendText;
+    this.sessionRunning = options.sessionRunning;
+    this.capturePane = options.capturePane;
+    this.sendEnter = options.sendEnter;
     this.releaseSettleMs = options.releaseSettleMs ?? 800;
     this.drainWatchdogMs = options.drainWatchdogMs ?? 30_000;
     this.enterVerifyDelayMs = options.enterVerifyDelayMs ?? 1200;
     this.verifyCycles = options.verifyCycles ?? 3;
     this.blockedAfterCycles = options.blockedAfterCycles ?? 3;
-    this.probeTimeoutMs = options.probeTimeoutMs ?? TMUX_SPAWN_TIMEOUT_MS + DIAGNOSTIC_PROBE_TIMEOUT_GRACE_MS;
+    this.probeTimeoutMs = options.probeTimeoutMs ?? PROBE_SETTLE_TIMEOUT_MS + DIAGNOSTIC_PROBE_TIMEOUT_GRACE_MS;
     this.onSubmitStateChange = options.onSubmitStateChange;
     this.staleAfterMs = options.staleAfterMs ?? 10 * 60 * 1000;
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
     this.nativeSessionState = options.nativeSessionState;
     this.bootGraceMs = options.bootGraceMs ?? 15_000;
-    this.sessionCreatedAt = options.sessionCreatedAt ?? defaultSessionCreatedAt;
+    this.sessionCreatedAt = options.sessionCreatedAt;
     // One classifier for the whole engine: it owns sessionRunning(offline),
     // bootGrace(booting), capture(unobservable), and pane classification, so
     // drain/verify/signal/reconcile/inspect share a single source of pane truth.

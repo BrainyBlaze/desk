@@ -62,9 +62,9 @@ function readOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function assertFullTmuxSession(session: string): void {
+function assertFullSessionKey(session: string): void {
   if (/^[a-f0-9]{8}$/i.test(session)) {
-    throw new ApiValidationError('agent event session must be the full tmux session name, not a suffix');
+    throw new ApiValidationError('agent event session must be the full session identity, not a suffix');
   }
 }
 
@@ -81,7 +81,7 @@ export function parseAgentEventV2(input: unknown, now = new Date()): AgentEventV
     throw new ApiValidationError(`unsupported agent event kind: ${kind}`);
   }
   const session = readString(record.session, 'session');
-  assertFullTmuxSession(session);
+  assertFullSessionKey(session);
   const agent = readString(record.agent, 'agent');
   const ts = readOptionalString(record.ts) ?? now.toISOString();
 

@@ -53,7 +53,7 @@ export class PromptDeliveryStrategy implements DeliveryStrategy {
 }
 
 export class NotificationDeliveryStrategy implements DeliveryStrategy {
-  async decide(_tmuxSession: string): Promise<DeliveryDecision> {
+  async decide(_sessionId: string): Promise<DeliveryDecision> {
     return { deliver: true };
   }
 }

@@ -4,8 +4,8 @@ import { extname } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
 import { addAgentSignalListener, attentionTracker } from './attention.js';
 import { loadDesk, loadDeskCached } from '../core/runner.js';
-import { createNativeChannelsTransport, nativeIdForTmuxSession, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
-import { buildOnboardingPrompt, ChannelsEngine, sendTextToTmux } from './channelsEngine.js';
+import { createNativeChannelsTransport, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
+import { buildOnboardingPrompt, ChannelsEngine } from './channelsEngine.js';
 import {
   claimDelivering,
   confirmDelivered,
@@ -103,14 +103,13 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   }
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
   let engine!: ChannelsEngine;
-  // Under DESK_ATCH_NATIVE, terminal-session delivery rides the daemon control
-  // plane instead of tmux (paste/has-session/capture-pane/send-keys would all
-  // silently fail against an atch master). The uiMode=native broker path is
-  // unchanged either way.
-  const nativeTransport = nativeSessionsEnabled() ? createNativeChannelsTransport() : undefined;
+  // Terminal-session delivery rides the daemon control plane — the ONLY
+  // transport (Track B: tmux is gone). The uiMode=native broker path is
+  // unchanged.
+  const nativeTransport = createNativeChannelsTransport();
   const sendChannelDelivery = createChannelDeliverySender({
     agentSurfaceBroker: options.agentSurfaceBroker,
-    ...(nativeTransport ? { terminalSender: nativeTransport.sendText } : {}),
+    terminalSender: nativeTransport.sendText,
     onNonRetryableNativeFailure: (sessionId, error) => {
       pauseEngineSession(home, engine, sessionId, `native channel delivery failed (${error.code}): ${error.message}`);
     }
@@ -187,14 +186,10 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       };
     },
     nativeSessionState: (sessionId) => options.agentSurfaceBroker?.nativeDeliveryState(sessionId) ?? 'offline',
-    ...(nativeTransport
-      ? {
-          sessionRunning: nativeTransport.sessionRunning,
-          capturePane: nativeTransport.capturePane,
-          sendEnter: nativeTransport.sendEnter,
-          sessionCreatedAt: nativeTransport.sessionCreatedAt
-        }
-      : {})
+    sessionRunning: nativeTransport.sessionRunning,
+    capturePane: nativeTransport.capturePane,
+    sendEnter: nativeTransport.sendEnter,
+    sessionCreatedAt: nativeTransport.sessionCreatedAt
   });
   const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
   watcher.start();
@@ -278,14 +273,15 @@ export interface ChannelDeliveryFailure {
 
 export interface ChannelDeliverySenderOptions {
   agentSurfaceBroker?: ChannelDeliveryBroker;
-  terminalSender?: (sessionId: string, text: string) => Promise<boolean>;
+  /** Terminal-mode delivery transport (the daemon control plane — required, tmux is gone). */
+  terminalSender: (sessionId: string, text: string) => Promise<boolean>;
   lookupSession?: (sessionId: string) => ChannelDeliverySession | undefined;
   onNonRetryableNativeFailure?: (sessionId: string, error: ChannelDeliveryFailure) => void;
   log?: (message: string) => void;
 }
 
-export function createChannelDeliverySender(options: ChannelDeliverySenderOptions = {}): (sessionId: string, text: string) => Promise<boolean> {
-  const terminalSender = options.terminalSender ?? sendTextToTmux;
+export function createChannelDeliverySender(options: ChannelDeliverySenderOptions): (sessionId: string, text: string) => Promise<boolean> {
+  const terminalSender = options.terminalSender;
   const lookupSession = options.lookupSession ?? lookupDeskSessionForDelivery;
   const log = options.log ?? ((message: string) => console.warn(message));
   return async (sessionId, text) => {
@@ -382,7 +378,7 @@ function resolveAuthor(home: string, channel: string, body: Record<string, unkno
   if (typeof body.sessionId === 'string' && body.sessionId.length > 0) {
     // The VALUE is still mixed-era (a pre-rename host's CLI falls back to its
     // tmux name) — normalize; members key by sessionId.
-    const sessionKey = nativeIdForTmuxSession(body.sessionId);
+    const sessionKey = body.sessionId;
     const member = members.find((candidate) => candidate.sessionId === sessionKey);
     if (member) {
       return member.name;
@@ -582,7 +578,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/paused') {
       const body = await readJsonBody(req);
       const action = typeof body.action === 'string' ? body.action : 'pause';
-      const sessionId = nativeIdForTmuxSession(requireString(body.sessionId, 'sessionId'));
+      const sessionId = requireString(body.sessionId, 'sessionId');
       if (action === 'pause') {
         pauseEngineSession(home, engine, sessionId, typeof body.reason === 'string' ? body.reason : undefined);
       } else if (action === 'resume') {
@@ -697,7 +693,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const channel = requireChannel(body.channel);
       const sessionId = requireString(body.sessionId, 'sessionId');
       const allSessions = loadDesk({}).sessions;
-      const sessionKey = nativeIdForTmuxSession(sessionId);
+      const sessionKey = sessionId;
       const spec = allSessions.find((candidate) => candidate.sessionId === sessionKey);
       if (!spec) {
         sendJson(res, 404, { error: `no desk session backs ${sessionId}` });
@@ -757,7 +753,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/queue-clear') {
       const body = await readJsonBody(req);
-      engine.dropQueue(nativeIdForTmuxSession(requireString(body.sessionId, 'sessionId')));
+      engine.dropQueue(requireString(body.sessionId, 'sessionId'));
       sendJson(res, 200, { ok: true, delivery: engine.lifecycleStates() });
       return true;
     }

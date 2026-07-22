@@ -14,13 +14,13 @@ import type { SessionSpec } from '../core/types.js';
 export function shouldRespawnAfterEdit(
   oldSpec: SessionSpec | undefined,
   newSpec: SessionSpec | undefined,
-  isRunning: (tmuxSession: string) => boolean
+  isRunning: (sessionId: string) => boolean
 ): boolean {
   if (!oldSpec || !newSpec) {
     return false;
   }
-  if (oldSpec.tmuxSession !== newSpec.tmuxSession) {
-    return false; // identity change — old name reconciles as missing, new name boots fresh
+  if (oldSpec.sessionId !== newSpec.sessionId) {
+    return false; // identity change — old id reconciles as missing, new id boots fresh
   }
   if (oldSpec.uiMode !== newSpec.uiMode) {
     return false; // ui-mode changes must go through the dedicated switch endpoint
@@ -28,5 +28,5 @@ export function shouldRespawnAfterEdit(
   if (oldSpec.command === newSpec.command && oldSpec.model === newSpec.model) {
     return false; // nothing launch-relevant changed
   }
-  return isRunning(newSpec.tmuxSession);
+  return isRunning(newSpec.sessionId);
 }

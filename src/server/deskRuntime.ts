@@ -1,6 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { listTmuxSessions, loadDesk } from '../core/runner.js';
+import { loadDesk } from '../core/runner.js';
 import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
 import {
   attemptResumeCaptureForSession,
@@ -20,7 +20,6 @@ import { installLspWebSocketBridge } from './lspWebSocketBridge.js';
 import { forceKillActiveStdioVirtualSessionChildren } from './lsp/stdioVirtualSession.js';
 import type { DeskPlugin } from './plugin.js';
 import { startSystemSampling, stopSystemSampling } from './systemSampler.js';
-import { installTerminalBroker } from './terminalBroker.js';
 import { installTerminalDaemonProxy } from './terminalDaemonProxy.js';
 import {
   daemonChildEnv,
@@ -28,8 +27,6 @@ import {
   resolveDaemonCommand,
   startDaemonSupervisor
 } from './runtime/daemonSupervisor.js';
-import { repairTinyTmuxWindows } from './terminalBridge.js';
-import { ensureTmuxGlobalOptions } from './tmuxOptions.js';
 
 interface InstallDeskRuntimeOptions {
   host: DeskApiHost;
@@ -38,20 +35,6 @@ interface InstallDeskRuntimeOptions {
   disposers: DisposerRegistry;
 }
 
-function repairConfiguredTinyWindows(): void {
-  try {
-    const running = listTmuxSessions();
-    const sessions = loadDesk({}).sessions.filter((session) => running.has(session.tmuxSession));
-    const repair = repairTinyTmuxWindows(sessions);
-    if (repair.repaired.length > 0 || repair.failed.length > 0) {
-      console.warn(
-        `desk repaired ${repair.repaired.length} tiny tmux window(s); ${repair.failed.length} repair attempt(s) failed`
-      );
-    }
-  } catch (error) {
-    console.warn(`desk tiny-window repair skipped: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
 
 export function installDeskRuntime({ host, services, plugins, disposers }: InstallDeskRuntimeOptions): void {
   const { httpServer } = host;
@@ -106,7 +89,6 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
         }
       }
     }
-    disposers.add(installTerminalBroker(httpServer, services.terminalBroker));
     disposers.add(installAgentSurfaceBroker(httpServer, services.agentSurfaceBroker));
     disposers.add(installFsWatchBridge(httpServer));
     disposers.add(
@@ -149,6 +131,4 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
     );
   });
   disposers.add(() => setRaiseListener(null));
-  ensureTmuxGlobalOptions();
-  repairConfiguredTinyWindows();
 }

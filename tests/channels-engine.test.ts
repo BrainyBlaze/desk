@@ -9,8 +9,6 @@ import {
   ChannelsEngine,
   isPaneBusy,
   isPaneReadyForInput,
-  sendTextToTmux,
-  spawnTmuxSettled,
   tailPaneCapture
 } from '../src/server/channelsEngine.js';
 import {
@@ -93,6 +91,7 @@ describe('ChannelsEngine delivery gating', () => {
     running = new Set(['tmux-a', 'tmux-b']);
     pane = READY_PANE;
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       // fast verify so a delivery's submitState resolves within the test window
@@ -272,6 +271,7 @@ describe('ChannelsEngine delivery gating', () => {
     let pane: 'wedged' | 'ready' = 'wedged';
     let captureStarted = false;
     const wedged = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 15,
@@ -314,6 +314,7 @@ describe('ChannelsEngine delivery gating', () => {
 
     const sentAfterRestart: Array<{ session: string; text: string }> = [];
     const revived = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async (session, text) => {
@@ -338,6 +339,7 @@ describe('ChannelsEngine delivery gating', () => {
   describe('ops console', () => {
     const opsEngine = (overrides: Record<string, unknown>): ChannelsEngine =>
       new ChannelsEngine({
+      sendEnter: async () => true,
         home,
         releaseSettleMs: 0,
         pumpIntervalMs: 100000, // effectively off — drive delivery explicitly in these tests
@@ -592,6 +594,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('records message/delivery/human-mention activity and notifies every message', async () => {
     const notified: Array<{ channel: string; file: string; author: string; pingsHuman: boolean }> = [];
     const noticing = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
@@ -628,6 +631,7 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('records a queued activity event when a prompt is accepted into the engine queue', async () => {
     const queued = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
@@ -700,6 +704,7 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('writes pause/resume/drop and approval/input events to the delivery-history ring', async () => {
     const historical = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
@@ -740,6 +745,7 @@ describe('ChannelsEngine delivery gating', () => {
     const pushed: string[] = [];
     let pane = READY_PANE;
     const paused = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -787,6 +793,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('restores a persisted manual pause before draining restored queues after restart', async () => {
     const pushed: string[] = [];
     const seed = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -806,6 +813,7 @@ describe('ChannelsEngine delivery gating', () => {
 
     persistPausedSession(home, 'tmux-a', 'restart hold', new Date('2026-06-18T20:00:00.000Z'));
     const restored = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -836,6 +844,7 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('inspectSession surfaces manifest resume metadata for the resume inspector', async () => {
     const inspected = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
@@ -870,6 +879,7 @@ describe('ChannelsEngine delivery gating', () => {
     let pane = '✻ Working… (esc to interrupt)';
     const pushed: string[] = [];
     const gated = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -893,6 +903,7 @@ describe('ChannelsEngine delivery gating', () => {
     const pushed: string[] = [];
     let pane = READY_PANE;
     const recovering = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 25,
@@ -926,6 +937,7 @@ describe('ChannelsEngine delivery gating', () => {
     const pushed: string[] = [];
     let failNext = true;
     const flaky = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 20,
@@ -1450,6 +1462,7 @@ describe('ChannelsEngine delivery gating', () => {
     mk(2, 'stuck-paste');
     mk(5, 'stuck-submit');
     const eng = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       sessionRunning: () => true,
       sessionCreatedAt: async () => 1,
@@ -1573,6 +1586,7 @@ describe('ChannelsEngine delivery gating', () => {
       JSON.stringify({ seq: 3, channel: 'ops', messageId: 'm3', author: 'human', prompt: 'p', queuedAt: '2026-06-18T00:00:00.000Z', kind: 'message', file: 'root.md' })
     );
     const eng = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       sendText: async () => true,
       sessionRunning: () => true,
@@ -1661,6 +1675,7 @@ describe('ChannelsEngine delivery gating', () => {
     let createdAt = Math.floor(Date.now() / 1000); // just started
     const pushed: string[] = [];
     const graced = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -1700,6 +1715,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('single-engine guard: a second engine for the same home goes passive', async () => {
     const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-'));
     const owner = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 100,
       pidAlive: () => true,
@@ -1710,6 +1726,7 @@ describe('ChannelsEngine delivery gating', () => {
     });
     const intruderSent: string[] = [];
     const intruder = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 200,
       pidAlive: (pid) => pid === 100, // owner alive
@@ -1729,6 +1746,7 @@ describe('ChannelsEngine delivery gating', () => {
 
     // Dead owner: the next engine takes over.
     const successor = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 300,
       pidAlive: () => false,
@@ -1749,6 +1767,7 @@ describe('ChannelsEngine delivery gating', () => {
     mkdirSync(join(lockedHome, '_engine', 'engine.pid'), { recursive: true });
     const pushed: string[] = [];
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 400,
       sendText: async (_session, text) => {
@@ -1773,6 +1792,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('annotates prompts that sat in the queue past the staleness window', async () => {
     const pushed: string[] = [];
     const stale = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       staleAfterMs: -1, // everything counts as stale (age 0 included)
@@ -1838,6 +1858,7 @@ describe('ChannelsEngine delivery gating', () => {
     let pane = '✻ Working… (esc to interrupt)';
     const pushed: string[] = [];
     const onboarding = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -1863,6 +1884,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('acknowledges native prompts from broker injection without tmux verification', async () => {
     const pushed: string[] = [];
     const native = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -2170,6 +2192,7 @@ describe('channels store', () => {
   it('caps a session queue at 50, dropping the oldest prompts', async () => {
     const capMembers = [member('alpha', 'tmux-a')];
     const blocked = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
@@ -2204,6 +2227,7 @@ describe('engine drain race safety', () => {
     const sent: string[] = [];
     let resolvePush: (() => void) | null = null;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: (session, text) =>
@@ -2234,6 +2258,7 @@ describe('engine drain race safety', () => {
     const sent: string[] = [];
     let resolvePush: (() => void) | null = null;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       drainWatchdogMs: 10,
@@ -2267,6 +2292,7 @@ describe('engine drain race safety', () => {
     const sent: string[] = [];
     let resolvePush: (() => void) | undefined;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       drainWatchdogMs: 10,
@@ -2312,6 +2338,7 @@ describe('engine drain race safety', () => {
       markFirstCaptureStarted = resolve;
     });
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
@@ -2366,6 +2393,7 @@ describe('engine drain race safety', () => {
       markFirstCaptureStarted = resolve;
     });
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
@@ -2428,6 +2456,7 @@ describe('engine drain race safety', () => {
     });
     let firstCapture = true;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
@@ -2477,6 +2506,7 @@ describe('ChannelsEngine digest coalescing', () => {
     sent = [];
     pane = READY_PANE;
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       enterVerifyDelayMs: 100,
@@ -2609,64 +2639,6 @@ describe('tailPaneCapture', () => {
   });
 });
 
-describe('sendTextToTmux (bracketed-paste injection)', () => {
-  it('stages the body in a buffer, injects it as a bracketed paste, then submits with a separate Enter', async () => {
-    const calls: string[][] = [];
-    const ok = await sendTextToTmux('agentdesk-x', 'line one\nline two', 0, async (args) => {
-      calls.push(args);
-      return true;
-    });
-    expect(ok).toBe(true);
-    expect(calls).toHaveLength(3);
-    // 1) the multi-line body is staged verbatim in a named buffer (-- guards a leading dash)
-    expect(calls[0][0]).toBe('set-buffer');
-    expect(calls[0]).toContain('--');
-    expect(calls[0][calls[0].length - 1]).toBe('line one\nline two');
-    const buffer = calls[0][calls[0].indexOf('-b') + 1];
-    // 2) bracketed paste (-p) of that same buffer into the pane, auto-deleted (-d)
-    expect(calls[1][0]).toBe('paste-buffer');
-    expect(calls[1]).toContain('-p');
-    expect(calls[1]).toContain('-d');
-    expect(calls[1][calls[1].indexOf('-b') + 1]).toBe(buffer);
-    expect(calls[1][calls[1].indexOf('-t') + 1]).toBe('agentdesk-x:');
-    // 3) the submit Enter is its OWN call — never in the same burst as the paste
-    expect(calls[2]).toEqual(['send-keys', '-t', 'agentdesk-x:', 'Enter']);
-  });
-
-  it('aborts (no paste, no Enter) when staging the buffer fails', async () => {
-    const calls: string[][] = [];
-    const ok = await sendTextToTmux('s', 'x', 0, async (args) => {
-      calls.push(args);
-      return false;
-    });
-    expect(ok).toBe(false);
-    expect(calls.map((c) => c[0])).toEqual(['set-buffer']);
-  });
-
-  it('cleans up the buffer and does not submit when the paste fails', async () => {
-    const calls: string[][] = [];
-    const ok = await sendTextToTmux('s', 'x', 0, async (args) => {
-      calls.push(args);
-      return args[0] !== 'paste-buffer';
-    });
-    expect(ok).toBe(false);
-    expect(calls.map((c) => c[0])).toEqual(['set-buffer', 'paste-buffer', 'delete-buffer']);
-    expect(calls.some((c) => c[0] === 'send-keys')).toBe(false);
-  });
-
-  it('uses a distinct buffer per call so concurrent deliveries cannot clobber each other', async () => {
-    const buffers: string[] = [];
-    const capture = async (args: string[]): Promise<boolean> => {
-      if (args[0] === 'set-buffer') {
-        buffers.push(args[args.indexOf('-b') + 1]);
-      }
-      return true;
-    };
-    await sendTextToTmux('sess', 'a', 0, capture);
-    await sendTextToTmux('sess', 'b', 0, capture);
-    expect(buffers[0]).not.toBe(buffers[1]);
-  });
-});
 
 describe('sliceMessages (lazy-load windowing)', () => {
   const ids = (window: { messages: ChannelMessage[] }): string[] => window.messages.map((m) => m.id);
@@ -2741,56 +2713,3 @@ describe('sliceMessages (lazy-load windowing)', () => {
   });
 });
 
-describe('spawnTmuxSettled', () => {
-  it('always settles: kills a child that outlives the timeout and reports failure', async () => {
-    const start = Date.now();
-    const result = await spawnTmuxSettled(['wait-for', `desk-test-never-${Date.now()}`], {
-      capture: false,
-      timeoutMs: 80
-    });
-    expect(result.ok).toBe(false);
-    // resolved on the timeout, not after the wait is signaled
-    expect(Date.now() - start).toBeLessThan(2000);
-  });
-
-  it('captures stdout and reports success on a clean exit', async () => {
-    const result = await spawnTmuxSettled(['-V'], { capture: true, timeoutMs: 2000 });
-    expect(result.ok).toBe(true);
-    expect(result.stdout).toMatch(/^tmux /);
-  });
-
-  it('reports failure (no stdout) when the command exits non-zero', async () => {
-    const result = await spawnTmuxSettled(['has-session', '-t', `desk-test-missing-${Date.now()}`], {
-      capture: true,
-      timeoutMs: 2000
-    });
-    expect(result).toMatchObject({ ok: false, stdout: null });
-  });
-
-  it('captures full stdout under concurrency (no truncation race on large output)', async () => {
-    // Reading stdout on `exit` truncates large output to empty under concurrent
-    // load — the bug that stranded channel queues. Many concurrent large-output
-    // tmux spawns must each return their FULL payload.
-    const size = 10_000;
-    const payload = 'x'.repeat(size);
-    const session = `desk-test-spawn-${process.pid}-${Date.now()}`;
-    const started = await spawnTmuxSettled(['new-session', '-d', '-s', session, 'sleep 30'], {
-      capture: false,
-      timeoutMs: 2000
-    });
-    expect(started.ok).toBe(true);
-    try {
-      const results = await Promise.all(
-        Array.from({ length: 12 }, () =>
-          spawnTmuxSettled(['display-message', '-p', '-t', `${session}:`, payload], { capture: true, timeoutMs: 4000 })
-        )
-      );
-      for (const result of results) {
-        expect(result.ok).toBe(true);
-        expect(result.stdout).toBe(`${payload}\n`);
-      }
-    } finally {
-      await spawnTmuxSettled(['kill-session', '-t', session], { capture: false, timeoutMs: 2000 });
-    }
-  });
-});

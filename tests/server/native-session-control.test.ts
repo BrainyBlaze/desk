@@ -11,8 +11,6 @@ import {
   retireStaleIdentityForEdit,
   staleNativeIdentityAfterEdit,
   startSessionNativeAware,
-  nativeIdForTmuxSession,
-  tmuxSessionForNativeId
 } from '../../src/server/runtime/nativeSessionControl.js';
 
 const baseSpec: SessionSpec = {
@@ -89,12 +87,6 @@ describe('provisionNativeSession', () => {
     });
   });
 
-  it('falls back to tmuxSession when no sessionId is set', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
-    vi.stubGlobal('fetch', fetchMock);
-    await provisionNativeSession({ ...baseSpec, sessionId: undefined });
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('agentdesk-g-shell-abc');
-  });
 
   it('surfaces a non-2xx daemon response as an error, not a silent ok', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => JSON.stringify({ ok: false, error: 'atch provision refused: cap-exceeded' }) });
@@ -192,7 +184,7 @@ describe('createNativeChannelsTransport', () => {
     const waits: number[] = [];
     const transport = createNativeChannelsTransport({ enterDelayMs: 700, wait: async (ms) => void waits.push(ms) });
 
-    const sent = await transport.sendText('agentdesk-g-shell-abc', 'msg body');
+    const sent = await transport.sendText('shell', 'msg body');
 
     expect(sent).toBe(true);
     expect(bodies).toEqual([
@@ -207,7 +199,7 @@ describe('createNativeChannelsTransport', () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     vi.stubGlobal('fetch', fetchMock);
     const transport = createNativeChannelsTransport({ wait: async () => {} });
-    expect(await transport.sendText('agentdesk-g-shell-abc', 'msg')).toBe(false);
+    expect(await transport.sendText('shell', 'msg')).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -219,8 +211,8 @@ describe('createNativeChannelsTransport', () => {
       .mockResolvedValueOnce({ ok: false, status: 404, text: async () => '{"ok":false,"error":"no such session"}' });
     vi.stubGlobal('fetch', fetchMock);
     const transport = createNativeChannelsTransport();
-    expect(await transport.capturePane('agentdesk-g-shell-abc')).toBe('a\nb');
-    expect(await transport.capturePane('agentdesk-g-shell-abc')).toBeNull();
+    expect(await transport.capturePane('shell')).toBe('a\nb');
+    expect(await transport.capturePane('shell')).toBeNull();
   });
 
   it('sendEnter sends a bare CR keyed by sessionId', async () => {
@@ -228,14 +220,14 @@ describe('createNativeChannelsTransport', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
     vi.stubGlobal('fetch', fetchMock);
     const transport = createNativeChannelsTransport();
-    expect(await transport.sendEnter('agentdesk-g-shell-abc')).toBe(true);
+    expect(await transport.sendEnter('shell')).toBe(true);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ sessionId: 'shell', text: '\r' });
   });
 
   it('sessionRunning reads the flag-aware running set', () => {
-    const runningSpy = vi.spyOn(runner, 'runningSessionSet').mockReturnValue(new Set(['agentdesk-g-shell-abc']));
+    const runningSpy = vi.spyOn(runner, 'runningSessionSet').mockReturnValue(new Set(['shell']));
     const transport = createNativeChannelsTransport();
-    expect(transport.sessionRunning('agentdesk-g-shell-abc')).toBe(true);
+    expect(transport.sessionRunning('shell')).toBe(true);
     expect(transport.sessionRunning('agentdesk-g-ghost-def')).toBe(false);
     expect(runningSpy).toHaveBeenCalled();
   });
@@ -260,7 +252,7 @@ describe('createNativeChannelsTransport', () => {
       process.env.DESK_ATCH_SOCKET_ROOT = root;
       writeFileSync(join(root, 'shell.sock'), '');
       const transport = createNativeChannelsTransport();
-      const created = await transport.sessionCreatedAt('agentdesk-g-shell-abc');
+      const created = await transport.sessionCreatedAt('shell');
       expect(created).not.toBeNull();
       expect(Math.abs((created ?? 0) - Math.floor(Date.now() / 1000))).toBeLessThan(60);
       expect(await transport.sessionCreatedAt('agentdesk-g-ghost-999')).toBeNull();
@@ -272,31 +264,7 @@ describe('createNativeChannelsTransport', () => {
   });
 });
 
-describe('tmuxSessionForNativeId', () => {
-  it('maps a daemon sessionId back to the consumer-facing tmuxSession', () => {
-    vi.spyOn(runner, 'loadDeskCached').mockReturnValue({
-      sessions: [{ ...baseSpec, tmuxSession: 'agentdesk-g-shell-abc', sessionId: 'shell' }]
-    } as never);
-    expect(tmuxSessionForNativeId('shell')).toBe('agentdesk-g-shell-abc');
-    expect(tmuxSessionForNativeId('unknown-id')).toBe('unknown-id');
-  });
-});
 
-describe('nativeIdForTmuxSession', () => {
-  it('maps a legacy tmuxSession to the durable sessionId and is identity for everything else', () => {
-    vi.spyOn(runner, 'loadDeskCached').mockReturnValue({
-      sessions: [{ ...baseSpec, tmuxSession: 'agentdesk-g-shell-abc', sessionId: 'shell' }]
-    } as never);
-    // a legacy key maps forward
-    expect(nativeIdForTmuxSession('agentdesk-g-shell-abc')).toBe('shell');
-    // an already-converted sessionId passes through unchanged — the property
-    // every mixed-era boundary (attention-clear, agent-event, delete targets)
-    // depends on: normalizing twice is safe
-    expect(nativeIdForTmuxSession('shell')).toBe('shell');
-    // an unknown value (deleted session, foreign input) is preserved, not dropped
-    expect(nativeIdForTmuxSession('agentdesk-gone-zzz')).toBe('agentdesk-gone-zzz');
-  });
-});
 
 describe('drainNativeAttentionEvents', () => {
   it('returns validated events + the advanced cursor', async () => {
@@ -345,11 +313,6 @@ describe('staleNativeIdentityAfterEdit', () => {
     expect(staleNativeIdentityAfterEdit(oldSpec, edited)).toBeUndefined();
   });
 
-  it('falls back to tmuxSession when sessionId is absent', () => {
-    const oldSpec = { ...baseSpec, sessionId: undefined, tmuxSession: 'agentdesk-g-old-abc' };
-    const renamed = { ...baseSpec, sessionId: undefined, tmuxSession: 'agentdesk-g-new-def' };
-    expect(staleNativeIdentityAfterEdit(oldSpec, renamed)).toBe('agentdesk-g-old-abc');
-  });
 
   it('returns undefined when either spec is missing', () => {
     expect(staleNativeIdentityAfterEdit(undefined, baseSpec)).toBeUndefined();

@@ -1,20 +1,14 @@
-import { execFile, spawnSync } from 'node:child_process';
-import { promisify } from 'node:util';
-import { TerminalSequenceTokenizer, type TerminalToken } from '../shared/terminalSequenceTokenizer.js';
-import { drainNativeAttentionEvents, nativeIdForTmuxSession, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
-
-const execFileAsync = promisify(execFile);
+import { drainNativeAttentionEvents } from './runtime/nativeSessionControl.js';
 
 /**
  * Agent-attention tracking.
  *
  * Agent CLIs (Codex, Claude Code) emit terminal notifications when a turn
  * completes and they start waiting for user input — a BEL or an OSC 9
- * sequence, exactly what makes a regular terminal play a sound. Desk captures
- * those signals two ways:
- *  - attached sessions: the PTY bridge sniffs the output stream;
- *  - unattached sessions: tmux latches `window_bell_flag` (monitor-bell is on
- *    by default), polled in one `list-windows -a` call for all sessions.
+ * sequence, exactly what makes a regular terminal play a sound. The daemon's
+ * authoritative emulator observes those events per session and buffers them
+ * in a bounded ring; the poller here drains that ring. Typed agent events
+ * (/api/agent-event hooks) are the second capture path.
  */
 
 export interface AttentionEntry {
@@ -175,127 +169,6 @@ export class AttentionTracker {
   }
 }
 
-/**
- * Extracts terminal notifications from a PTY output chunk:
- * OSC 9 sequences carry a message (codex `tui.notification_method = osc9`);
- * a bare BEL is a generic notification. BELs that merely terminate other OSC
- * sequences (e.g. OSC 0 title updates) do not count.
- */
-export function extractTerminalNotifications(
-  chunk: string,
-  tokenizer: TerminalSequenceTokenizer = new TerminalSequenceTokenizer()
-): Array<{ kind: AgentEventKind; message?: string }> {
-  // Hot path: plain output has no control bytes, so avoid token allocation.
-  if (!tokenizer.hasPending() && chunk.indexOf('\x07') === -1 && chunk.indexOf('\x1b]9') === -1) {
-    return [];
-  }
-  const found: Array<{ kind: AgentEventKind; message?: string }> = [];
-  const tokens: TerminalToken[] = tokenizer.push(chunk);
-  for (const token of tokens) {
-    if (token.kind === 'execute' && token.code === 7) {
-      found.push({ kind: 'bell' });
-    } else if (token.kind === 'osc' && token.command === 9 && token.terminated) {
-      const message = token.payload.trim();
-      const kind: AgentEventKind = /approv|permission/i.test(message)
-        ? 'approval-requested'
-        : /\b(needs input|input requested|question(?:\.asked)?|answer required)\b/i.test(message)
-          ? 'input-requested'
-          : 'turn-complete';
-      found.push({ kind, message: message || undefined });
-    }
-  }
-  return found;
-}
-
-/** Back-compat boolean wrapper around extractTerminalNotifications. */
-export function containsTerminalNotification(chunk: string): boolean {
-  return extractTerminalNotifications(chunk).length > 0;
-}
-
-/**
- * True when websocket data from the browser terminal represents a deliberate
- * user action (typing, enter, arrows, paste) rather than the terminal's own
- * automatic replies to queries (device attributes, cursor position reports,
- * mode reports, OSC color replies, DCS responses, focus events). Auto-replies
- * happen on attach and must NOT count as "the user touched this session".
- */
-export function isLikelyUserInput(data: string): boolean {
-  if (!data) {
-    return false;
-  }
-  const residual = data
-    .replace(/\x1b\[\?[0-9;]*c/g, '') // DA1 response
-    .replace(/\x1b\[>[0-9;]*c/g, '') // DA2 response
-    .replace(/\x1b\[\??[0-9;]*R/g, '') // CPR / DECXCPR
-    .replace(/\x1b\[[0-9]*n/g, '') // DSR status report
-    .replace(/\x1b\[\?[0-9;]*\$y/g, '') // DECRPM mode report
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC replies
-    .replace(/\x1bP[^\x1b]*\x1b\\/g, '') // DCS replies
-    .replace(/\x1b\[[IO]/g, ''); // focus in/out events
-  return residual.length > 0;
-}
-
-export interface TmuxWindowFlags {
-  bellFlag: number;
-  activity: number;
-}
-
-/**
- * Sessions that should raise attention this poll:
- * - bell flag rose 0 -> 1 since the previous poll, or
- * - bell flag is latched (tmux keeps it set while no client views the window)
- *   AND new pane output happened after the user's last touch — i.e. the agent
- *   ran another turn and rang again while latched.
- */
-export function detectBellEdges(
-  previous: Map<string, number>,
-  current: Map<string, TmuxWindowFlags>,
-  lastClearedAt: (session: string) => number = () => 0
-): string[] {
-  const raised: string[] = [];
-  for (const [session, flags] of current) {
-    if (flags.bellFlag !== 1) {
-      continue;
-    }
-    const rose = (previous.get(session) ?? 0) === 0;
-    const cleared = lastClearedAt(session);
-    if (rose || (cleared > 0 && flags.activity > cleared)) {
-      raised.push(session);
-    }
-  }
-  return raised;
-}
-
-/** Parses `tmux list-windows` flag output into the session→flags map. */
-export function parseBellFlagsOutput(stdout: string): Map<string, TmuxWindowFlags> {
-  const flags = new Map<string, TmuxWindowFlags>();
-  for (const line of stdout.split('\n')) {
-    const [name, flag, activity] = line.split('\t');
-    if (name) {
-      flags.set(name, { bellFlag: flag === '1' ? 1 : 0, activity: Number(activity) || 0 });
-    }
-  }
-  return flags;
-}
-
-const BELL_FLAG_ARGS = ['list-windows', '-a', '-F', '#{session_name}\t#{window_bell_flag}\t#{window_activity}'];
-
-/** Polls tmux bell flags + activity for every session in one call (sync). */
-export function pollTmuxBellFlags(): Map<string, TmuxWindowFlags> {
-  const result = spawnSync('tmux', BELL_FLAG_ARGS, { encoding: 'utf8' });
-  return result.status === 0 ? parseBellFlagsOutput(result.stdout) : new Map();
-}
-
-/** Async poll — runs off the event loop so the 2s poller never blocks streams. */
-export async function pollTmuxBellFlagsAsync(): Promise<Map<string, TmuxWindowFlags>> {
-  try {
-    const { stdout } = await execFileAsync('tmux', BELL_FLAG_ARGS, { encoding: 'utf8' });
-    return parseBellFlagsOutput(stdout);
-  } catch {
-    return new Map();
-  }
-}
-
 export const attentionTracker = new AttentionTracker();
 
 let raiseListener: ((sessionId: string) => void) | null = null;
@@ -336,7 +209,6 @@ export function notifyAgentSignal(sessionId: string, kind: AgentEventKind): void
 }
 
 let pollTimer: NodeJS.Timeout | undefined;
-let previousFlags = new Map<string, number>();
 let pollInFlight = false;
 /** Drain cursor into the daemon's attention ring (atch-native path). */
 let nativeAttentionCursor = 0;
@@ -358,36 +230,18 @@ async function drainNativeAttention(): Promise<void> {
   nativeAttentionCursor = lastSeq;
 }
 
-/** Starts the background bell-flag poller (idempotent). */
+/** Starts the background attention drain (idempotent). */
 export function startAttentionPolling(intervalMs = 2000): void {
   if (pollTimer) {
     return;
   }
   const tick = async (): Promise<void> => {
     if (pollInFlight) {
-      return; // a slow tmux must not stack overlapping polls
+      return; // a slow daemon must not stack overlapping drains
     }
     pollInFlight = true;
     try {
-      const flags = await pollTmuxBellFlagsAsync();
-      // TRANSITIONAL: the poller sees tmux names; everything downstream —
-      // tracker, raise listener, signal listeners — keys by sessionId, so map
-      // once at this boundary (identity for unknown names). The whole poller
-      // dies with the legacy transport at the final flip.
-      for (const session of detectBellEdges(previousFlags, flags, (name) => attentionTracker.lastClearedAt(nativeIdForTmuxSession(name)))) {
-        const sessionId = nativeIdForTmuxSession(session);
-        if (attentionTracker.raise(sessionId)) {
-          attentionTracker.pushEvent(sessionId, 'bell');
-        }
-        notifyRaise(sessionId);
-        notifyAgentSignal(sessionId, 'bell');
-      }
-      previousFlags = new Map([...flags].map(([name, value]) => [name, value.bellFlag]));
-      if (nativeSessionsEnabled()) {
-        // Native sessions never appear in tmux flags; their bells ride the
-        // daemon's emulator-event ring. Both paths run during the transition.
-        await drainNativeAttention();
-      }
+      await drainNativeAttention();
     } finally {
       pollInFlight = false;
     }
@@ -401,6 +255,5 @@ export function stopAttentionPolling(): void {
     clearInterval(pollTimer);
     pollTimer = undefined;
   }
-  previousFlags = new Map();
   nativeAttentionCursor = 0;
 }

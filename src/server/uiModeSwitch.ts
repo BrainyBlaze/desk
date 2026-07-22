@@ -29,11 +29,10 @@ export interface ValidateUiModeSwitchOptions {
   uiMode: DeskSessionUiMode;
   confirmDiscard?: boolean;
   homeDir: string;
-  namespace?: string;
 }
 
 export function validateUiModeSwitch(manifest: DeskManifest, options: ValidateUiModeSwitchOptions): UiModeSwitchValidation {
-  const specs = buildSessionSpecs(manifest, { homeDir: options.homeDir, namespace: options.namespace });
+  const specs = buildSessionSpecs(manifest, { homeDir: options.homeDir });
   const spec = specs.find((candidate) => candidate.sessionId === options.sessionId);
   if (!spec) {
     return {
@@ -80,7 +79,6 @@ export interface PerformUiModeSwitchInput {
   manifest: DeskManifest;
   validated: Extract<UiModeSwitchValidation, { ok: true }>;
   homeDir: string;
-  namespace?: string;
 }
 
 export interface PerformUiModeSwitchDeps {
@@ -109,11 +107,11 @@ export async function performUiModeSwitch(
   });
   deps.write(updated);
 
-  const nextSpec = buildSessionSpecs(updated, { homeDir: input.homeDir, namespace: input.namespace }).find(
-    (candidate) => candidate.tmuxSession === validated.spec.tmuxSession
+  const nextSpec = buildSessionSpecs(updated, { homeDir: input.homeDir }).find(
+    (candidate) => candidate.sessionId === validated.spec.sessionId
   );
   if (!nextSpec) {
-    return { ok: false, status: 500, error: `session ${validated.spec.tmuxSession} disappeared during ui-mode switch` };
+    return { ok: false, status: 500, error: `session ${validated.spec.sessionId} disappeared during ui-mode switch` };
   }
   const launchSpec = deps.prepare ? deps.prepare(nextSpec) : nextSpec;
   const restarted = await deps.restart(launchSpec);
@@ -141,7 +139,8 @@ export function createInFlightGuard(): { begin: (key: string) => boolean; end: (
 }
 
 function buildEdit(spec: SessionSpec, record: DeskSession, uiMode: DeskSessionUiMode): UiModeSwitchEdit {
-  const session: DeskSession = { ...record, tmuxSession: spec.tmuxSession };
+  // Durable sessionId already pins identity across the switch — no name pin.
+  const session: DeskSession = { ...record };
   // Always pin the mode explicitly: an absent field resolves to native for
   // SDK-backed agents, so deleting it would silently undo a terminal switch.
   session.uiMode = uiMode;
