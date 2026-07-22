@@ -95,8 +95,8 @@ describe('sessions route validation', () => {
   });
 });
 
-describe('sessions route native edit fail-closed', () => {
-  it('aborts a rename (manifest unchanged, nothing provisioned) when the old identity cannot be retired', async () => {
+describe('sessions route native edit identity', () => {
+  it('a rename with a persisted sessionId KEEPS its identity: no retire, no provision, manifest renamed even with the daemon down', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const home = mkdtempSync(join(tmpdir(), 'desk-edit-home-'));
     const work = mkdtempSync(join(tmpdir(), 'desk-edit-work-'));
@@ -116,15 +116,17 @@ describe('sessions route native edit fail-closed', () => {
           '        label: G',
           '        sessions:',
           '          - name: oldname',
-          '            agent: codex'
+          '            agent: codex',
+          '            sessionId: oldname'
         ].join('\n') + '\n'
       );
       process.env.HOME = home;
       process.env.DESK_ATCH_NATIVE = '1';
       process.env.DESK_DAEMON_URL = 'ws://127.0.0.1:5178';
 
-      // The daemon rejects the retire → the edit must abort before any write/provision.
-      const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => '{"ok":false,"error":"daemon down"}' });
+      // The daemon is DOWN — irrelevant, because a durable sessionId survives
+      // the rename (b506db3): identity is unchanged, so nothing native runs.
+      const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
       vi.stubGlobal('fetch', fetchMock);
 
       const req = Object.assign(new PassThrough(), {
@@ -149,15 +151,14 @@ describe('sessions route native edit fail-closed', () => {
 
       await createDeskApiMiddleware([route])(req, res, vi.fn());
 
-      expect(res.statusCode).toBe(500);
-      // manifest on disk is untouched — the rename never committed
+      expect(res.statusCode).toBe(200);
+      // the rename COMMITTED (identity is durable, no native op was needed)
       const persisted = readFileSync(manifestPath, 'utf8');
-      expect(persisted).toContain('name: oldname');
-      expect(persisted).not.toContain('name: newname');
-      // the retire was attempted, but no provision happened
-      const urls = fetchMock.mock.calls.map((call) => String(call[0]));
-      expect(urls.some((url) => url.includes('/control/retire'))).toBe(true);
-      expect(urls.some((url) => url.includes('/control/provision'))).toBe(false);
+      expect(persisted).toContain('name: newname');
+      expect(persisted).toContain('sessionId: oldname'); // the durable id survived the rename
+      expect(persisted).not.toContain('name: oldname');
+      // and the daemon was never consulted — no retire, no provision
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       process.env.HOME = savedEnv.HOME;
       if (savedEnv.DESK_ATCH_NATIVE === undefined) delete process.env.DESK_ATCH_NATIVE;

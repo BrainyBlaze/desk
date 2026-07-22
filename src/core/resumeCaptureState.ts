@@ -114,6 +114,54 @@ export function clearPendingResumeCaptures(options: ResumeCaptureStateOptions = 
   }
 }
 
+/**
+ * §10 store transform (cutover 3a): the post-cutover pending-capture record,
+ * keyed by the durable sessionId. ADDITIVE — the runtime keeps reading the
+ * legacy shape until the migration gate has committed (3b flips the readers).
+ */
+export interface MigratedPendingResumeCapture {
+  sessionId: string;
+  agent: 'codex' | 'opencode';
+  cwd: string;
+  sinceMs: number;
+  deadlineMs: number;
+  launchResumeId?: string;
+}
+
+export interface ResumeCaptureStoreMigration {
+  items: MigratedPendingResumeCapture[];
+  /** Entries whose tmuxSession has no sessionId (session gone from the manifest) — reported, never silently lost. */
+  dropped: PendingResumeCapture[];
+}
+
+/** Re-key the pending-capture store via the canonical tmuxSession→sessionId map. Pure. */
+export function migrateResumeCaptureStore(
+  items: readonly PendingResumeCapture[],
+  tmuxToSessionId: ReadonlyMap<string, string>
+): ResumeCaptureStoreMigration {
+  const migrated: MigratedPendingResumeCapture[] = [];
+  const dropped: PendingResumeCapture[] = [];
+  for (const item of items) {
+    const sessionId = tmuxToSessionId.get(item.tmuxSession);
+    if (sessionId === undefined) {
+      dropped.push(item);
+      continue;
+    }
+    const out: MigratedPendingResumeCapture = {
+      sessionId,
+      agent: item.agent,
+      cwd: item.cwd,
+      sinceMs: item.sinceMs,
+      deadlineMs: item.deadlineMs
+    };
+    if (item.launchResumeId !== undefined) {
+      out.launchResumeId = item.launchResumeId;
+    }
+    migrated.push(out);
+  }
+  return { items: migrated, dropped };
+}
+
 function isPendingResumeCapture(value: unknown): value is PendingResumeCapture {
   if (!value || typeof value !== 'object') {
     return false;

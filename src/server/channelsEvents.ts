@@ -217,3 +217,48 @@ export function latestEventSeq(home: string): number {
   const events = readDeliveryEvents(home);
   return events.length > 0 ? events[events.length - 1]!.seq : 0;
 }
+
+/**
+ * §10 store transform (cutover 3a): one events.jsonl line, re-keyed from the
+ * legacy `tmuxSession` field to `sessionId`. PURE and PER-LINE so the
+ * migration gate can stream the multi-GiB ring with bounded memory; policy
+ * (keep/drop unmapped, carry malformed) belongs to the gate, this only
+ * classifies. Lines without a tmuxSession field (channel-level events, blanks)
+ * pass through unchanged; an old unmapped record kept as-is stays readable
+ * post-cutover (seq/kind are the only required fields).
+ */
+export type DeliveryEventLineMigration =
+  | { kind: 'migrated'; line: string }
+  | { kind: 'unchanged'; line: string }
+  | { kind: 'unmapped'; line: string; tmuxSession: string }
+  | { kind: 'malformed'; line: string };
+
+export function migrateDeliveryEventLine(
+  line: string,
+  tmuxToSessionId: ReadonlyMap<string, string>
+): DeliveryEventLineMigration {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return { kind: 'unchanged', line };
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return { kind: 'malformed', line };
+    }
+    parsed = value as Record<string, unknown>;
+  } catch {
+    return { kind: 'malformed', line };
+  }
+  const tmuxSession = parsed.tmuxSession;
+  if (typeof tmuxSession !== 'string' || tmuxSession.length === 0) {
+    return { kind: 'unchanged', line };
+  }
+  const sessionId = tmuxToSessionId.get(tmuxSession);
+  if (sessionId === undefined) {
+    return { kind: 'unmapped', line, tmuxSession };
+  }
+  const { tmuxSession: _dropped, ...rest } = parsed;
+  return { kind: 'migrated', line: JSON.stringify({ ...rest, sessionId }) };
+}

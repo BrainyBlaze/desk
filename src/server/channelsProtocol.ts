@@ -656,3 +656,41 @@ export function qualifiedMemberHandle(options: {
   // No project to qualify with — fall back to the group.
   return qualify(options.groupLabel, options.sessionName) || base;
 }
+
+/**
+ * §10 store transform (cutover 3a): member-manifest content re-keyed from the
+ * legacy `tmux:` field line to `session: <sessionId>`. Textual and
+ * line-preserving — everything except the identity line stays byte-identical
+ * (roles/functions/supervisor blocks untouched). The migration gate owns the
+ * file IO and the unmapped policy; the 3b parser flip reads `session:` into
+ * the member's sessionId.
+ */
+export interface MemberManifestMigration {
+  content: string;
+  /** True when at least one tmux: line was re-keyed. */
+  migrated: boolean;
+  /** tmux: values with no sessionId (session gone from the manifest) — left in place, reported. */
+  unmapped: string[];
+}
+
+export function migrateMemberManifestContent(
+  content: string,
+  tmuxToSessionId: ReadonlyMap<string, string>
+): MemberManifestMigration {
+  const unmapped: string[] = [];
+  let migrated = false;
+  const lines = content.split('\n').map((line) => {
+    const match = /^tmux:\s*(.+?)\s*$/.exec(line);
+    if (match === null) {
+      return line;
+    }
+    const sessionId = tmuxToSessionId.get(match[1]);
+    if (sessionId === undefined) {
+      unmapped.push(match[1]);
+      return line;
+    }
+    migrated = true;
+    return `session: ${sessionId}`;
+  });
+  return { content: lines.join('\n'), migrated, unmapped };
+}

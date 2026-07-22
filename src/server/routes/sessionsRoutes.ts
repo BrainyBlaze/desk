@@ -45,7 +45,7 @@ import type {
   DeskLayoutKind,
   DeskLayoutSizes,
   DeskManifest,
-  DeskSession,
+  DeskSessionDraft,
   DeskSettings,
   SessionSpec,
   TmuxPlanAction
@@ -93,14 +93,16 @@ function scheduleAgentResumeCapture(session: SessionSpec): void {
   scheduleOpencodeResumeCapture(session);
 }
 
-export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
+export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSessionDraft {
   if (!value || typeof value !== 'object') {
     throw new ApiValidationError('session body is required');
   }
   const record = value as Record<string, unknown>;
   const command = readOptionalString(record.command);
   const cwd = options.cwdRequired === false ? readOptionalString(record.cwd) : readRequiredString(record.cwd, 'session.cwd');
-  const session: DeskSession = {
+  // A DRAFT, deliberately without identity: the API body never carries a
+  // sessionId — config is the single allocator/preserver of durable identity.
+  const session: DeskSessionDraft = {
     name: readRequiredString(record.name, 'session.name')
   };
   if (cwd) {
