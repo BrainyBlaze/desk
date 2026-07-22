@@ -67,7 +67,8 @@ CLI.
 
 - Native Windows support. WSL uses the Linux path; a native Windows invocation
   fails with an explicit unsupported-platform message.
-- Replacing tmux or porting Desk's Unix process model.
+- Changing the atch protocol or terminal-daemon process model.
+- Resolving the external atch redistribution-license decision.
 - Installing or authenticating optional agent CLIs, `gh`, GPU utilities, or
   other feature-specific tools without an explicit future contract.
 - Making the Vite and Bun runtimes interchangeable or adding automatic fallback.
@@ -191,8 +192,8 @@ The installer first detects `uname` OS and architecture. Supported values are:
 - Darwin x64 and arm64.
 - Linux x64 and arm64, including WSL distributions.
 
-The required host layer includes TLS certificates, archive/checksum tools, tmux,
-git, Python, make, and a C/C++ compiler for native Node dependencies. Detection
+The required host layer includes TLS certificates, archive/checksum tools, Git,
+Python, make, and a C/C++ compiler for native Node dependencies. Detection
 is capability-based and every package-manager action is followed by the same
 probe that triggered it:
 
@@ -201,7 +202,6 @@ probe that triggered it:
 | TLS download | The already-running `curl` can fetch HTTPS using host trust; installed CA certificates are re-probed before later downloads. |
 | Archive extraction | `tar` can list and extract gzip-compressed archives into an explicit directory. |
 | SHA-256 | Either `sha256sum` or `shasum -a 256` produces a valid digest. |
-| tmux | `tmux -V` succeeds and reports version 3.2 or newer. |
 | Git | `git --version` succeeds with Git 2.30 or newer. |
 | Native build | Python 3.6 or newer, `make`, and a C++ compiler can build a trivial native program. |
 | Node/npm | The Desk-owned Node version declared by the release (CI baseline 22.23.1) and its bundled npm pass exact version checks. |
@@ -211,17 +211,22 @@ The implementation owns this minimum package map:
 
 | Host family | Packages/capabilities installed when missing |
 | --- | --- |
-| macOS | Command Line Tools, then Homebrew; `tmux`, Git, Python, and required archive/checksum utilities are installed or upgraded through the detected Brew prefix. |
-| Debian/Ubuntu/WSL (`apt-get`) | `ca-certificates curl tar gzip coreutils tmux git python3 make g++` |
-| Fedora/RHEL (`dnf` or host-provided `yum`) | `ca-certificates curl tar gzip coreutils tmux git python3 make gcc-c++` |
-| Arch (`pacman`) | `ca-certificates curl tar gzip coreutils tmux git python make gcc` |
-| openSUSE (`zypper`) | `ca-certificates curl tar gzip coreutils tmux git python3 make gcc gcc-c++` |
-| Alpine (`apk`) | `ca-certificates curl tar gzip coreutils tmux git python3 make build-base`, only with compatible musl toolchain assets |
+| macOS | Command Line Tools, then Homebrew; Git, Python, and required archive/checksum utilities are installed or upgraded through the detected Brew prefix. |
+| Debian/Ubuntu/WSL (`apt-get`) | `ca-certificates curl tar gzip coreutils git python3 make g++` |
+| Fedora/RHEL (`dnf` or host-provided `yum`) | `ca-certificates curl tar gzip coreutils git python3 make gcc-c++` |
+| Arch (`pacman`) | `ca-certificates curl tar gzip coreutils git python make gcc` |
+| openSUSE (`zypper`) | `ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++` |
+| Alpine (`apk`) | `ca-certificates curl tar gzip coreutils git python3 make build-base`, only with compatible musl toolchain assets |
 
 Package names are implemented in one installer dependency table rather than
 duplicated branches. If a distribution changes a package name or the post-install
 probe still fails, the installer reports the exact unsatisfied capability and
 does not activate Desk.
+
+Terminal operation separately requires an executable `atch`, resolved from
+`DESK_ATCH_BIN`, same-release `libexec/atch`, or `PATH`. The source-backed
+installer does not provision or bundle that external binary while the
+redistribution-license decision remains open.
 
 The supported package-manager families are:
 
@@ -348,7 +353,7 @@ use the same Desk version. State transitions are normative:
   launcher's Desk ownership and resolved `DESK_HOME`, removes the managed
   launcher, releases, toolchains, current link, and install metadata, and then
   removes the empty install root. It preserves `~/.config/desk`, project files,
-  tmux sessions, agent credentials, and all optional host tools. Documentation
+  atch sessions, agent credentials, and all optional host tools. Documentation
   gives a separate explicit command for users who intentionally want to purge
   Desk configuration after inspecting it.
 

@@ -748,11 +748,11 @@ export function App(): JSX.Element {
   // Keep-alive warm budget: the active group leads; recently visited groups stay
   // mounted hidden so switching back is a pure show/hide — no remount, no socket
   // churn. This was a fixed LRU of 3 groups, which made most switches in a
-  // 14-group workspace cold-remount. With the terminal broker delivering output
-  // ONLY to visible surfaces, a hidden warm cell parses nothing, so we can keep
+  // 14-group workspace cold-remount. With the binary terminal client delivering
+  // output ONLY to visible surfaces, a hidden warm cell parses nothing, so we can keep
   // many groups warm cheaply. The cap is a session-count budget (not a group
   // count) so a few large grids and many solos both behave, and it stays at/under
-  // the server's warm-PTY ceiling. The active group is always kept even if it
+  // the browser's mounted-session budget. The active group is always kept even if it
   // alone exceeds the budget. Groups removed from the manifest fall out.
   const maxWarmSessions = narrowViewport ? 16 : 40;
   const mountedMuxGroups = useMemo(() => {

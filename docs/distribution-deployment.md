@@ -14,6 +14,14 @@ Desk distributes one public CLI with two explicit server modes:
 Both mount the same backend API. Neither command falls back to the other when its
 runtime is missing or fails.
 
+<Warning>
+The terminal runtime requires an executable `atch`, resolved from
+`DESK_ATCH_BIN`, same-release `libexec/atch`, or `PATH`. Public release bundling
+is pending the distribution-license decision. Until that is resolved, the
+source-backed installer and container require you to supply the reviewed binary
+separately.
+</Warning>
+
 ## Source-backed installation
 
 ```bash
@@ -45,7 +53,8 @@ desk/
 │   ├── node_modules/
 │   ├── runtime/node
 │   ├── dist/cli/main.js
-│   └── libexec/desk-standalone
+│   ├── libexec/desk-standalone
+│   └── libexec/atch              # present only when the release bundles atch
 ├── toolchains/node-22.23.1/
 ├── toolchains/bun-1.3.14/
 └── current -> releases/<version>/<install-id>
@@ -75,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
   | bash -s -- --uninstall
 ```
 
-Uninstall preserves user configuration, projects, tmux sessions, credentials,
+Uninstall preserves user configuration, projects, atch sessions, credentials,
 and optional tools.
 
 ## Release assets
@@ -145,11 +154,15 @@ docker run --rm -p 127.0.0.1:5174:5174 \
 
 The container binds `0.0.0.0` because port publication is controlled by Docker.
 Publish it only on a trusted host interface. Desk has no built-in authentication.
+The current image does not package atch while the license decision is open;
+mount or install the binary and set `DESK_ATCH_BIN` before starting either
+server mode.
 
 ## Host integrations
 
-The installer owns core build/runtime requirements. These integrations remain
-optional and use the host user's credentials:
+The installer owns the Desk build/runtime toolchains. `atch` is a required
+runtime dependency; the following integrations remain optional and use the
+host user's credentials:
 
 - `codex`, `claude`, and `opencode` for agents
 - `gh` for GitHub and Projects

@@ -3,7 +3,7 @@
 <p align="center"><strong>Native chat UI for coding-agent fleets, with terminal multiplexing, an IDE/CDE, and Slack-style agent channels.</strong></p>
 
 <p align="center">
-  Keep Claude Code, OpenAI Codex, OpenCode, and custom agents alive in tmux.
+  Keep Claude Code, OpenAI Codex, OpenCode, and custom agents alive in durable atch sessions.
   SDK-backed agents open in Desk's native chat surface by default, with the
   terminal multiplexer available when you need the raw TUI. Run the whole
   fleet from one cockpit: native agent transcripts, terminals, a full IDE with
@@ -16,12 +16,12 @@
   <a href="https://docs.desk.cloud"><img src="https://img.shields.io/badge/docs-docs.desk.cloud-0E7490" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/license-BSL%201.1-orange" alt="Business Source License 1.1">
   <img src="https://img.shields.io/badge/node-20%2B-brightgreen" alt="node 20+">
-  <img src="https://img.shields.io/badge/runtime-tmux-1bb91f" alt="tmux runtime">
+  <img src="https://img.shields.io/badge/runtime-atch-0E7490" alt="atch runtime">
 </p>
 
 <p align="center">
   <a href="https://docs.desk.cloud">
-    <img src="docs/images/agents-multiplexer.png" alt="Desk product showcase: app rail, agent tree, host telemetry, fleet controls, and a 2x2 grid of live tmux-backed agent terminals">
+    <img src="docs/images/agents-multiplexer.png" alt="Desk product showcase: app rail, agent tree, host telemetry, fleet controls, and a 2x2 grid of live atch-backed agent terminals">
   </a>
 </p>
 
@@ -36,9 +36,9 @@ coordinate except you, copy-pasting between them.
 
 Desk's answer is a strict separation of lifetime and view:
 
-- **tmux owns the processes.** Every agent in your manifest gets a stable
-  tmux session. Close the browser, restart Desk, reboot the box — the agents
-  keep running and Desk reattaches.
+- **atch owns the processes.** Every agent in your manifest gets a durable
+  session keyed by `sessionId`. Close the browser or restart Desk and the
+  supervised terminal daemon reattaches to the surviving atch master.
 - **The browser owns the agent surface.** A single web UI (bound to
   `127.0.0.1`) renders the default native chat view, terminal grid, Monaco
   editor, git client, GitHub Projects boards, markdown notes, and Slack-like
@@ -58,12 +58,13 @@ once, and let them coordinate — without becoming the message bus yourself.
   theme-aware transcripts. Terminal UI is available per session for raw TUI
   commands and custom shell agents.
 - 🖥️ **A real terminal multiplexer when you need it** — per-group grids of 1–16
-  live xterm.js terminals over tmux. Drag any session onto any cell, resize the
-  splits, and get full-color TUI rendering with faithful scrollback, selection,
-  copy, and search. Fleet controls (start-missing, refresh, host-wide emergency
-  stop, telemetry) ride the toolbar.
-- 🔄 **Nothing dies when you look away** — Desk is a stateless viewer; tmux owns
-  the processes. Close the tab, drop your SSH session, or reboot the box and
+  live xterm.js terminals over Desk's binary terminal transport and atch. Drag
+  any session onto any cell, resize the splits, and get full-color TUI
+  rendering with faithful scrollback, selection, copy, and search. Fleet
+  controls (start-missing, refresh, host-wide emergency stop, telemetry) ride
+  the toolbar.
+- 🔄 **Nothing dies when you look away** — the browser is a view while atch owns
+  the processes. Close the tab, drop your SSH session, or restart Desk and
   every agent keeps running — Desk reattaches the native chat or terminal view
   and **resumes the same agent conversation** instead of starting over.
 - 💬 **Agents that talk to each other** — Slack-like channels over a plain
@@ -95,6 +96,11 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | 
 desk serve            # private Bun server on http://127.0.0.1:5173
 ```
 
+The atch-native runtime requires an executable `atch` from `DESK_ATCH_BIN`, the
+release's `libexec/atch`, or `PATH`, in that order. The public installer does
+not bundle atch while the distribution-license decision is open; install or
+build the reviewed binary separately before starting Desk.
+
 The installer provisions missing host requirements, downloads checksum-verified
 Desk source plus pinned Node 22.23.1 and Bun 1.3.14 toolchains, builds an immutable
 release, and installs the complete `desk` CLI in the first safe directory already
@@ -108,8 +114,8 @@ to the other mode.
 <details>
 <summary>Build from source (for development)</summary>
 
-Match CI with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**, tmux 3.2+, and a
-C/C++ toolchain:
+Match CI with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**, an executable
+`atch`, and a C/C++ toolchain:
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git
@@ -121,7 +127,7 @@ desk serve --dev      # Vite development server on http://127.0.0.1:5173
 
 Open the printed URL and add your first agent from the sidebar — pick a
 directory, choose `codex`, `claude`, `opencode`, or any command, and Desk
-launches it under tmux. SDK-backed agents open in the native chat surface by
+launches it under atch. SDK-backed agents open in the native chat surface by
 default; use the session editor to switch the session to terminal UI when you
 need a raw terminal, custom command, or interactive TUI-only command. Or declare
 sessions in the manifest and run:
@@ -154,7 +160,7 @@ cards near the composer, and slash commands come from the agent driver. Attach
 files, paste files, stop a running turn, and send the next instruction from the
 same composer.
 
-Native mode is backed by tmux and the agent's own resume identity, so the
+Native mode is backed by atch and the agent's own resume identity, so the
 session survives reloads and server restarts. Terminal UI is available:
 switch the session to terminal UI for raw TUI commands, login flows, or custom
 commands that do not expose a native driver.
@@ -166,8 +172,9 @@ drag-to-reorganize, and per-row actions (info, edit, reload, repair, delete).
 Each group can render as a native chat cell or as a terminal grid — 1×1 up to
 4×4, a linear strip, or a custom cell count — with drag-a-session-onto-any-cell
 assignment, resizable splits, and persisted layout. Terminal cells are live
-xterm.js over tmux with full color/TUI support and frozen, color-faithful
-scrollback with native scrolling, selection, and copy.
+xterm.js over the binary terminal WebSocket and supervised daemon, with full
+color/TUI support and frozen, color-faithful scrollback with native scrolling,
+selection, and copy.
 
 The toolbar carries the fleet controls: **Refresh**, **Up** (start missing
 sessions), **KILL** (the emergency stop, behind an alarmed confirm), sound
@@ -253,8 +260,8 @@ desk serve [--port N] [--host H]        # private Bun runtime
 desk serve --dev [--port N] [--host H]  # Vite development runtime
 desk up [--dry-run]               # start every missing session
 desk status                       # show which sessions exist
-desk attach <name|tmux|resume>    # attach a terminal to a session
-desk capture <name|tmux|resume> [--lines N]
+desk attach <name|sessionId|resume>    # attach a terminal to a session
+desk capture <name|sessionId|resume> [--lines N]
 desk add --group G --name N --cwd DIR --agent codex --resume <id>
 desk init                         # create an empty user config
 desk config                       # print the active config path
@@ -268,9 +275,9 @@ desk channels read <channel> [<parent-msg-id>]         # full conversation, or o
 desk channels post <channel> [--thread <id>] [--as <member>] "<body>"
 ```
 
-`post` infers the author from the surrounding tmux session; `--as <member>` is
-the explicit override (always pass it from agent turns — some agent runners
-strip `$TMUX` and an unattributed post falls back to `@human`). `--thread`
+`post` infers the author from the surrounding session's `DESK_SESSION_ID`;
+`--as <member>` is the explicit override (always pass it from agent turns so
+an unattributed post cannot fall back to `@human`). `--thread`
 replies inside an existing message's thread. When the desk server is
 unreachable the CLI appends to the channel file directly and the server's
 watcher dispatches it on the next scan.

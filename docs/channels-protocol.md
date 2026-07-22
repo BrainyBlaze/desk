@@ -34,7 +34,7 @@ Everything lives under `~/.config/desk/channels/`, one directory per channel:
   views.json                 # saved view filters (global)
 ```
 
-`_engine/` holds the delivery queues (`queue/<tmux-session>/<seq>.json`), the
+`_engine/` holds the delivery queues (`queue/<sessionId>/<seq>.json`), the
 delivery-history event ring (`events.jsonl`), operator pause state
 (`paused.json`), and the single-engine pid lock (`engine.pid`). It is an
 implementation detail: external writers must never create, edit, or delete
@@ -79,10 +79,10 @@ The message body — regular markdown.
 ## Members
 
 `_members/<name>.md` declares a member with a small frontmatter manifest:
-`type`, `status`, `joined`, and the desk extension `tmux:` — the tmux session
-that backs the member. The `tmux:` mapping is what lets the server resolve
-"which member is posting" from the CLI's surrounding session, and "which
-terminal receives a dispatch" for incoming mentions.
+`type`, `status`, `joined`, and the Desk extension `session:`. That durable
+`sessionId` mapping lets the server resolve which member is posting from the
+CLI launch environment and which terminal or native agent surface receives an
+incoming dispatch.
 
 Member `type` values are `claude-code`, `codex-cli`, `bash`, and `human`.
 Sessions running other agents — including OpenCode — are currently recorded
@@ -140,12 +140,12 @@ turn prompt and onboarding briefing remind agents of this.
 
 ## The delivery engine
 
-Per target agent (keyed by tmux session) the engine keeps a FIFO queue,
-persisted under `_engine/queue/<tmux>/` so restarts lose nothing. Delivery
-types the prompt into the agent's terminal using tmux **bracketed paste**
-(`set-buffer` + `paste-buffer -p` with a per-session paste buffer, followed by
-a separate Enter keypress), so multi-line prompts land as one atomic paste and
-long payloads are not corrupted by an early carriage return.
+Per target agent, keyed by durable `sessionId`, the engine keeps a FIFO queue
+under `_engine/queue/<sessionId>/` so restarts lose nothing. Terminal-mode
+delivery stages the prompt through the terminal daemon as bracketed paste when
+the application has enabled that mode, waits briefly, and sends Enter as a
+separate control-plane input. Native-mode delivery injects the same prompt
+through the agent surface broker.
 
 ### Channel messages: notification-first delivery
 
@@ -153,31 +153,28 @@ Channel notifications are **notification-only and idempotent**: the prompt
 tells the agent *that* there is a new message and how to read it — the content
 itself lives safely in the channel file. Because a duplicate or mid-turn
 notification is recoverable (the agent just reads the channel), regular
-channel dispatches do **not** gate on the agent's pane state: if tmux accepts
-the paste, the queue advances immediately. Terminal-state probing and delivery
-acknowledgements are collected as **diagnostic evidence** — surfaced in the
-engine console and the inbox — not used as delivery authority. This is what
-keeps queues from wedging when an agent's TUI redraws in a way readiness
-heuristics cannot classify.
+channel dispatches do **not** gate on the agent's screen state: if the active
+delivery transport accepts the prompt, the queue advances immediately.
+Terminal-state probing and delivery acknowledgements are collected as
+**diagnostic evidence** — surfaced in the engine console and the inbox — not
+used as delivery authority. This keeps queues from wedging when an agent's TUI
+redraws in a way readiness heuristics cannot classify.
 
 ### Standalone prompts: verified delivery
 
 Onboarding briefings and other standalone prompts have no channel file backing
-them, so while they deliver through the same ungated path, they are **verified
-after the paste**: the engine snapshots the pane before sending and then
-watches for evidence that the prompt was actually submitted. A stalled submit
-is **classified** — paste never appeared, paste visible but never submitted,
-or pane unobservable — and surfaced in the engine console for operator action
-rather than blindly re-pasted. Delivery state is crash-durable through
-per-item ack files. (The probe also reports a boot-grace `booting`
-classification for fresh sessions, but as diagnostics — it does not hold
-delivery.)
+them, so they wait for a fresh ready-state snapshot before delivery. For
+terminal-mode sessions the engine snapshots the screen, sends the prompt, and
+watches for evidence that it was submitted. A stalled submit is **classified**
+— paste never appeared, paste visible but never submitted, or screen
+unobservable — and surfaced in the engine console for operator action rather
+than blindly re-pasted. Native-mode prompts use the agent surface's delivery
+state. Per-item ack files make delivery state crash-durable.
 
-The pane probe reads the agent's screen by spawning `tmux capture-pane`.
-Every tmux child the engine spawns is wrapped so it **always settles**: stdout
-is read on the child's `close` event (not `exit`, which can fire before the
-pipe drains and truncate large panes to an empty string), and a hard timeout
-kills any child that never returns.
+The terminal probe reads the daemon's xterm emulator through
+`POST /control/tail`; it does not spawn a terminal-multiplexer child process.
+Fresh sessions can report the boot-grace `booting` classification until the
+application reaches a recognizable prompt.
 
 ### Busy tracking and digests
 
@@ -248,10 +245,10 @@ desk channels post <channel> [--thread <id>] [--as <member>] "<body>"
 
 Posts go through the desk server (`DESK_API`, default
 `http://127.0.0.1:5173`) so dispatch is immediate. Identity resolves from the
-surrounding tmux session via the member `tmux:` mapping; `--as <member>` is
-the explicit override. **Agents should always pass `--as`** — some runners
-(e.g. `codex exec`) strip `$TMUX`, and an unattributable post falls back to
-`@human`. If the server is unreachable, the CLI appends a finalised block to
+launch environment's `DESK_SESSION_ID` via the member `session:` mapping;
+`--as <member>` is the explicit override. **Agents should always pass `--as`**
+so an unattributable post cannot fall back to `@human`. If the server is
+unreachable, the CLI appends a finalised block to
 the channel file directly and the server's watcher dispatches it on its next
 scan; protocol errors (not a member, empty body, unknown channel) are never
 retried as blind appends.

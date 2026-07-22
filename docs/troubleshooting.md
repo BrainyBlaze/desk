@@ -55,6 +55,20 @@ desk serve --dev
 The development command does not switch to the private Bun runtime when Vite is
 missing.
 
+### Terminals report missing because Desk cannot find `atch`
+
+Desk preflights the atch executable before starting the terminal daemon. It
+logs the failure and keeps non-terminal workspace features available. Supply
+an absolute executable with `DESK_ATCH_BIN`, install `atch` on `PATH`, or use a
+release that contains `libexec/atch`:
+
+```bash
+DESK_ATCH_BIN=/opt/atch/bin/atch desk serve
+```
+
+Terminal transport fails closed rather than reporting a healthy runtime that
+cannot provision sessions.
+
 ### Startup reports `EMFILE: too many open files`
 
 This is an operating-system watcher limit, not a reason to change server modes.
@@ -100,7 +114,7 @@ Common causes:
 - invalid `cwd`
 - missing agent CLI
 - custom command exits immediately
-- tmux is not installed
+- `atch` is missing or not executable
 
 ### A terminal cell is blank
 
@@ -108,12 +122,11 @@ Check:
 
 ```bash
 desk capture <session-name> --lines 100
-tmux ls
 ```
 
-If capture has output but the browser is blank, inspect terminal broker health
-in [Operations](/operations). If capture is empty, inspect the tmux session
-directly:
+If capture has output but the browser is blank, inspect terminal transport
+health in [Operations](/operations). If capture is empty, attach to the atch
+session directly through Desk:
 
 ```bash
 desk attach <session-name>
@@ -122,9 +135,9 @@ desk attach <session-name>
 ### Scrolling behaves differently for OpenCode
 
 OpenCode is a full-screen TUI. Its conversation scroll lives inside the app,
-not in tmux scrollback like append-style Codex or Claude output. Desk routes
-scroll based on terminal state so full-screen TUIs receive page-scroll keys
-instead of the tmux-backed scrollback overlay.
+not in the daemon's frozen scrollback like append-style Codex or Claude output.
+Desk routes scroll based on terminal state so full-screen TUIs receive
+page-scroll keys instead of the frozen scrollback overlay.
 
 ## Agents
 
@@ -150,7 +163,7 @@ Check the session's `bypassPermissions` value in `desk.yml`.
 - OpenCode receives per-session permission configuration through
   `OPENCODE_CONFIG_CONTENT`.
 
-Restart an already-running pane after changing permission behavior.
+Restart an already-running session after changing permission behavior.
 
 ### Attention events do not appear
 
@@ -252,7 +265,7 @@ on a shared or public interface.
 
 ### Does Desk host my agents?
 
-No. Desk launches local tmux sessions on the host where the server runs.
+No. Desk launches local atch sessions on the host where the server runs.
 
 ### Does Desk store my model credentials?
 
@@ -260,13 +273,14 @@ No. Agent CLIs authenticate through their own configuration.
 
 ### Can I run multiple browsers?
 
-Yes, but remember each browser is a view onto the same local tmux and manifest
-state. Coordinate operator actions when multiple people access the same server.
+Yes, but remember each browser is a view onto the same local atch sessions and
+manifest state. Coordinate operator actions when multiple people access the
+same server.
 
 ### Can I edit the manifest by hand?
 
-Yes. Desk uses `~/.config/desk/desk.yml`. Keep YAML valid and run `desk status`
-or reload the UI afterward.
+Yes. Desk uses `~/.config/desk/desk.yml`. Keep YAML valid, preserve each
+session's durable `sessionId`, and run `desk status` or reload the UI afterward.
 
 ### What should I back up?
 

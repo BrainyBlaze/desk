@@ -5,6 +5,7 @@ import { SANCTIONS, scanFlagSurface, scanLegacySurface, type ScannedFile } from 
 
 const ROOT = join(__dirname, '..', '..');
 const SRC = join(ROOT, 'src');
+const DOCS = join(ROOT, 'docs');
 const SHIPPED_RUNTIME_FILES = [
   'Dockerfile',
   'install.sh',
@@ -14,6 +15,8 @@ const SHIPPED_RUNTIME_FILES = [
     .filter((name) => /\.ya?ml$/.test(name))
     .map((name) => `.github/workflows/${name}`)
 ].sort();
+const HISTORICAL_DOC_PAGES = new Set(['release-notes']);
+const RETIRED_DOC_RUNTIME = /\btmux\b|terminal[ -]broker|terminalBroker|capture-pane|send-keys|warm[- ]PTY/i;
 
 /**
  * The Track B terminal gate: tmux is gone. EVERY source is scanned — the
@@ -46,6 +49,39 @@ function scannedShippedRuntime(): ScannedFile[] {
   }));
 }
 
+function currentRuntimeDocs(): ScannedFile[] {
+  const docsConfig = JSON.parse(readFileSync(join(DOCS, 'docs.json'), 'utf8')) as {
+    navigation: { groups: Array<{ pages?: string[] }> };
+  };
+  const pageEntries = docsConfig.navigation.groups.flatMap((group) => group.pages ?? []);
+  for (const page of pageEntries) {
+    if (typeof page !== 'string') {
+      throw new Error('docs gate requires flat string pages in docs.json navigation');
+    }
+  }
+  const pages = pageEntries.filter((page) => !HISTORICAL_DOC_PAGES.has(page));
+  const rels = [
+    'README.md',
+    ...pages.map((page) => `docs/${page}.md`),
+    'docs/desk-cli-install-and-serve-contract-spec.md',
+    'docs/images/architecture-runtime.svg'
+  ];
+  return [...new Set(rels)].sort().map((rel) => ({
+    rel,
+    source: readFileSync(join(ROOT, rel), 'utf8')
+  }));
+}
+
+function scanRetiredDocRuntime(files: ScannedFile[]): string[] {
+  return files.flatMap(({ rel, source }) =>
+    source
+      .split('\n')
+      .map((text, index) => ({ text, line: index + 1 }))
+      .filter(({ text }) => RETIRED_DOC_RUNTIME.test(text))
+      .map(({ line }) => `${rel}:${line}`)
+  );
+}
+
 describe('no-tmux architecture gate (Track B terminal state)', () => {
   it('keeps every source inside the exact sanctioned legacy surface (pattern + count per file)', () => {
     expect(scanLegacySurface(scannedTree())).toEqual([]);
@@ -57,6 +93,10 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
 
   it('keeps the retired transport out of shipped runtime, installer, smoke, and CI surfaces', () => {
     expect(scanLegacySurface(scannedShippedRuntime())).toEqual([]);
+  });
+
+  it('keeps active public docs on the atch-native runtime', () => {
+    expect(scanRetiredDocRuntime(currentRuntimeDocs())).toEqual([]);
   });
 });
 
@@ -85,6 +125,14 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
   it('rejects any legacy reference in an unsanctioned file', () => {
     const violations = scanLegacySurface([{ rel: 'server/newFeature.ts', source: "exec('tmux attach');" }]);
     expect(violations).toEqual(['server/newFeature.ts:1 — legacy transport reference in unsanctioned file']);
+  });
+
+  it('rejects retired runtime vocabulary added to a current public page', () => {
+    expect(
+      scanRetiredDocRuntime([
+        { rel: 'docs/concepts-architecture.md', source: 'The terminal broker attaches through tmux.' }
+      ])
+    ).toEqual(['docs/concepts-architecture.md:1']);
   });
 
   it('pins the sanction table itself to the migration surface (no runtime file may be added silently)', () => {

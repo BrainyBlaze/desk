@@ -41,7 +41,9 @@ POST /api/add
 
 `/api/system` returns the cached system metrics snapshot.
 
-`/api/pulse` is the UI's regular heartbeat. It includes system metrics, running tmux sessions, attention state, unread event count, LSP status, and channel runtime state.
+`/api/pulse` is the UI's regular heartbeat. It includes system metrics, running
+session ids, attention state, unread event count, LSP status, and channel
+runtime state.
 
 ## Session and layout mutation routes
 
@@ -70,33 +72,25 @@ Agent hooks and plugins post typed events to `/api/agent-event`. Desk uses those
 ## Terminal routes
 
 ```text
-GET  /api/terminal-broker-metrics
-POST /api/terminal-resize
-POST /api/terminal-repaint
-POST /api/terminal-scroll
 POST /api/terminal-capture
 ```
 
-`/api/terminal-broker-metrics` exposes broker counters:
-
-- active browser clients
-- active PTYs
-- warm idle PTYs
-- visible subscriptions
-- hidden subscriptions
-- dropped output frames
-
-Terminal capture uses tmux `capture-pane` with bounded history and returns color-preserving lines for the frozen scrollback viewer.
+Terminal capture accepts a durable `sessionId`, row count, and offset. It proxies
+the terminal daemon's bounded emulator history and returns color-preserving
+lines for the frozen scrollback viewer. Live resize, repaint, input, and
+subscription traffic use the binary WebSocket rather than REST routes.
 
 ## Terminal WebSockets
 
 ```text
-WS /ws/terminal-broker
+WS /ws/terminal
 ```
 
-`/ws/terminal-broker` is the current browser path. One browser connection can subscribe to multiple terminal surfaces. Hidden surfaces stay subscribed but do not receive live output to parse.
-
-The broker attaches to tmux with `ignore-size` behavior and uses resize guards to avoid corrupting tmux windows with tiny dimensions. The retired direct `/ws/terminal` bridge is not installed.
+`/ws/terminal` is the only browser terminal path. One binary connection per
+browser tab carries multiple visible terminal surfaces. Hidden surfaces
+unsubscribe; reveal resubscribes and receives a fresh snapshot before live
+output. Frames are channel- and generation-fenced through the supervised
+terminal daemon to the session's atch master.
 
 ## Filesystem routes
 

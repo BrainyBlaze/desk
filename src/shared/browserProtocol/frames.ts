@@ -1,7 +1,6 @@
 // Loss-aware browser protocol (spec §7.4/§7.6/§7.7) — frozen constants + frame
 // registry. The single multiplexed BINARY WebSocket between the web server and a
-// browser tab, replacing today's string-only JSON (terminalBrokerClient.ts).
-// Pure module (src/shared): no server/web imports.
+// browser tab. Pure module (src/shared): no server/web imports.
 //
 // Each WS binary message IS exactly one frame (WS preserves message boundaries),
 // so there is no magic/reassembly like the atch wire needs — just a 2-byte

@@ -1,10 +1,10 @@
 ---
 title: "Architecture"
-description: "Understand Desk's runtime boundaries: manifest, tmux, server, browser, broker, agents, and local tools."
+description: "Understand Desk's runtime boundaries: manifest, atch, terminal daemon, server, browser, agents, and local tools."
 ---
 
 Desk is a local system, not a hosted control plane. The server runs on the same
-machine as the code, tmux sessions, credentials, and agent CLIs. The browser is
+machine as the code, atch sessions, credentials, and agent CLIs. The browser is
 an operator view over that local runtime.
 
 ## Runtime components
@@ -12,7 +12,7 @@ an operator view over that local runtime.
 <Frame>
   <img
     src="/images/architecture-runtime.svg"
-    alt="Desk runtime architecture. The browser operator view (terminals, channels, editor, git, projects, notes) connects over a WebSocket and the REST /api to a single local Desk server. The server coordinates the terminal broker, channels store, filesystem and editor APIs, git and gh operations, the LSP manager and MCP bridge, attention and agent events, telemetry, and UI assets. It drives the local runtime — the desk.yml manifest to the Desk runner to tmux sessions to agents (Codex, Claude, OpenCode, Bash, custom commands) — which report back through agent hooks that POST to /api/agent-event. Native-mode agent sessions run a desk agent-host process that drives the agent SDK and streams transcript events through the agent surface broker to the browser. State lives on local disk under ~/.config/desk."
+    alt="Desk runtime architecture. The browser operator view connects over a binary terminal WebSocket and REST /api to one local Desk server. The server supervises the terminal daemon, which manages atch sessions keyed by durable sessionId values, and coordinates channels, filesystem and editor APIs, git and gh operations, LSP and MCP, attention, telemetry, and UI assets. Agent hooks report typed events to /api/agent-event, and native-mode sessions stream through the agent surface broker. State lives on local disk under ~/.config/desk."
   />
 </Frame>
 
@@ -34,12 +34,13 @@ an operator view over that local runtime.
 Desk writes the manifest atomically when you edit sessions or layout from the
 UI.
 
-### tmux
+### atch and the terminal daemon
 
-tmux owns process lifetime. Every configured session maps to a deterministic
-tmux session name unless you set one explicitly. Desk can start missing
-sessions, attach to existing sessions, capture scrollback, and resize tmux
-windows, but the agent process is not owned by the browser.
+atch owns process lifetime. Every configured session has a durable `sessionId`
+and a private master socket. The server supervises one terminal daemon, which
+restores live masters after a restart, provisions missing sessions, generation-
+fences terminal traffic, keeps emulator snapshots, and handles input, capture,
+resize, restart, and retire. The browser never owns the agent process.
 
 ### Server
 
@@ -50,9 +51,9 @@ server middleware. The CLI does not fall back between these runtime boundaries.
 
 The server also coordinates:
 
-- terminal broker connections
+- the supervised terminal daemon and binary terminal WebSocket
 - agent surface sessions: native-mode agents run a `desk agent-host` process
-  in their tmux session that drives the agent SDK; the agent surface broker
+  in their atch session that drives the agent SDK; the agent surface broker
   relays its transcript events to every subscribed browser and replays history
   on reconnect
 - filesystem and editor operations
@@ -66,13 +67,15 @@ The server also coordinates:
 
 The browser renders the operator workspace. It owns layout, selected views,
 native agent chats, terminal surfaces, channels panels, editor tabs, project boards, notes, and
-theme state. Closing the browser does not stop tmux sessions.
+theme state. Closing the browser does not stop atch sessions.
 
-### Terminal broker
+### Terminal transport
 
-The broker multiplexes terminal traffic through one browser WebSocket. It keeps
-warm PTYs bounded, renders visible output, snapshots hidden sessions on reveal,
-and exposes metrics through `/api/terminal-broker-metrics`.
+The browser uses one binary WebSocket at `/ws/terminal` for every visible
+terminal surface in the tab. Hidden surfaces unsubscribe, and reveal requests a
+fresh emulator snapshot before live output resumes. The WebSocket bridge routes
+frames to the terminal daemon; the daemon owns the atch master connections and
+per-session generation state.
 
 ### Agent event hooks
 
@@ -101,7 +104,7 @@ configuration. GitHub access is whatever the local `gh` command can do.
 ## Next steps
 
 - Read [Workspace model](/concepts-workspace-model) for projects, groups,
-  sessions, layouts, and tmux naming.
+  sessions, layouts, and durable session identities.
 - Read [Agent integrations](/agent-integrations) for Codex, Claude, OpenCode,
   Bash, and custom command behavior.
 - Read [Security and plugin model](/security-plugin-model) before adding local

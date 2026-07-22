@@ -1,8 +1,8 @@
 /**
- * Browser-singleton terminal broker over the BINARY browser protocol (spec
- * §7.4/§7.6/§7.7). One WebSocket per tab carries every terminal surface's
- * traffic, replacing the string-JSON terminalBrokerClient. This is the browser
- * peer of the server-side terminalWsRouter: it speaks the same channelId-keyed
+ * Browser-singleton terminal client over the BINARY browser protocol (spec
+ * §7.4/§7.6/§7.7). One WebSocket per tab carries every visible terminal
+ * surface's traffic. This is the browser peer of the server-side
+ * terminalWsRouter: it speaks the same channelId-keyed
  * frames and runs one loss-aware resync FSM per channel, so a dropped output
  * delta, a recreated session (generation bump), or a geometry change (revision
  * bump) drives the surface back to a clean snapshot instead of a corrupted

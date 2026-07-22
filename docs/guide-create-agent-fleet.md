@@ -66,7 +66,7 @@ Desk attaches to already-authenticated tools.
 ## 4. Boot the fleet
 
 Press **Up** in the header (or run `desk up`) to start every missing session.
-Each session becomes a durable tmux session — closing the browser, dropping
+Each session becomes a durable atch session — closing the browser, dropping
 the network, or restarting Desk never kills an agent. The RUN/MISS chips in
 the header track fleet state live, and the MISS chip is itself a button that
 boots whatever is down.
@@ -90,8 +90,8 @@ down.
 desk status
 ```
 
-Every configured session should show as running with its tmux name. From
-here:
+Every configured session should show as running with its durable session id.
+From here:
 
 - [Choose the right layouts](/guide-multi-agent-layouts) for each group
 - [Put the agents in a channel](/guide-channels-collaboration) so they can

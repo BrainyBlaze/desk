@@ -35,6 +35,7 @@ groups:
       cells: 2
     sessions:
       - name: scratch-shell
+        sessionId: scratch-shell
         agent: bash
         cwd: ~/projects/product
 
@@ -51,11 +52,14 @@ projects:
           kind: 2x2
         sessions:
           - name: main-codex
+            sessionId: main-codex
             agent: codex
             bypassPermissions: true
           - name: main-claude
+            sessionId: main-claude
             agent: claude
           - name: main-opencode
+            sessionId: main-opencode
             agent: opencode
 
 settings:
@@ -70,8 +74,6 @@ settings:
     disabledLanguages: []
     agents:
       enabled: true
-  tmux:
-    statusLine: off
 ```
 
 ## Projects
@@ -89,6 +91,7 @@ projects:
         label: Main
         sessions:
           - name: desk-codex
+            sessionId: desk-codex
             agent: codex
 ```
 
@@ -108,9 +111,11 @@ groups:
       cells: 6
     sessions:
       - name: api-codex
+        sessionId: api-codex
         agent: codex
         cwd: ~/projects/product
       - name: api-shell
+        sessionId: api-shell
         agent: bash
         cwd: ~/projects/product
 ```
@@ -143,10 +148,14 @@ The UI writes `order` on projects, groups, and sessions when you drag-reorder th
 
 ## Sessions
 
-A session needs a `name` and either a built-in `agent` or a custom `command`.
+A session needs a `name`, a durable `sessionId`, and either a built-in `agent`
+or a custom `command`. The UI and `desk add` mint collision-free ids. When you
+add a session by hand, use a 3-64-character lowercase id that starts with a
+letter and contains only letters, digits, and dashes.
 
 ```yaml
 - name: api-codex
+  sessionId: api-codex
   agent: codex
   cwd: ~/projects/product
   bypassPermissions: true
@@ -172,10 +181,12 @@ manifest error.
 
 ```yaml
 - name: api-codex
+  sessionId: api-codex
   agent: codex
   cwd: ~/projects/product
 
 - name: raw-tui
+  sessionId: raw-tui
   agent: claude
   cwd: ~/projects/product
   uiMode: terminal
@@ -192,6 +203,7 @@ id asks for confirmation first, because switching starts it fresh.
 
 ```yaml
 - name: api-codex
+  sessionId: api-codex
   agent: codex
   cwd: ~/projects/product
   resume: 00000000-0000-0000-0000-000000000000
@@ -199,7 +211,8 @@ id asks for confirmation first, because switching starts it fresh.
 
 Desk validates known resume id formats before persisting them. Codex and Claude use UUID-like ids. OpenCode uses `ses_...` ids.
 
-When Desk captures a fresh resume id, it also pins the current `tmuxSession` in the manifest so the running pane is not orphaned by a later deterministic-name change.
+Capturing a fresh resume id never changes `sessionId`; terminal, channels, and
+attention state remain keyed to the same Desk session.
 
 ### Permission bypass
 
@@ -207,6 +220,7 @@ When Desk captures a fresh resume id, it also pins the current `tmuxSession` in 
 
 ```yaml
 - name: main-opencode
+  sessionId: main-opencode
   agent: opencode
   bypassPermissions: false
 ```
@@ -219,11 +233,14 @@ Custom commands bypass built-in agent launch logic.
 
 ```yaml
 - name: server
+  sessionId: server
   cwd: ~/projects/product
   command: npm run dev
 ```
 
-Desk runs the command inside tmux and exposes it through the terminal broker, but it does not provide agent-specific resume, bypass, or attention hooks unless the command emits compatible terminal notifications.
+Desk runs the command under atch and exposes it through the terminal daemon,
+but it does not provide agent-specific resume, bypass, or attention hooks
+unless the command emits compatible terminal notifications.
 
 ## Settings
 
@@ -256,8 +273,6 @@ settings:
     notes: 300
     projects: 360
     channels: 360
-  tmux:
-    statusLine: off
 ```
 
 ### Editor settings
@@ -294,16 +309,6 @@ Desk detects languages under the active editor root. `disabledLanguages` is the 
 
 Advanced fields such as `serverCommands`, `maxSessions`, and `startupTimeoutMs` override the built-in language server behavior. See [IDE and LSP](/ide-and-lsp) and [Agent integrations](/agent-integrations) before changing them.
 
-### tmux settings
-
-```yaml
-settings:
-  tmux:
-    statusLine: off
-```
-
-`statusLine: off` makes Desk set `tmux status off` on managed sessions. YAML's bare `off` may parse as boolean `false`; Desk accepts both forms.
-
 ## Atomic writes
 
 Desk writes manifest updates through a temporary file and rename. If you edit the manifest by hand while the UI is open, refresh the UI after saving so later UI edits do not overwrite your manual change.
@@ -311,7 +316,7 @@ Desk writes manifest updates through a temporary file and rename. If you edit th
 ## Next steps
 
 - Read [Workspace model](/concepts-workspace-model) for the mental model behind
-  projects, groups, sessions, and tmux names.
+  projects, groups, sessions, and durable session ids.
 - Build a larger manifest with [Create an agent fleet](/guide-create-agent-fleet).
 - Use [Troubleshooting and FAQ](/troubleshooting) if a configured session does
   not appear or start.

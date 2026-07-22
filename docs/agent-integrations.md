@@ -3,9 +3,11 @@ title: "Agent integrations"
 description: "How Desk launches Codex, Claude, OpenCode, bash, and custom commands, including resume ids, permissions, attention, and LSP access."
 ---
 
-Desk runs every managed session inside tmux. The browser is a view over that durable process.
+Desk runs every managed session under an atch master. The browser is a view
+over that durable process.
 
-Built-in agents add launch flags, resume behavior, permission handling, and attention signals on top of that tmux base.
+Built-in agents add launch flags, resume behavior, permission handling, and
+attention signals on top of that atch base.
 
 ## Supported session kinds
 
@@ -26,22 +28,16 @@ Any session can also use a custom `command`.
 
 Custom commands are terminal sessions. They do not get built-in agent resume or permission logic unless the command implements compatible behavior itself.
 
-## tmux identity
+## Session identity
 
-Desk derives deterministic tmux session names from:
-
-- namespace
-- project id or root group id
-- group id
-- session name
-- resume id, custom command, or a stable hash
-
-When a fresh resume id is captured later, Desk can pin the current `tmuxSession` in the manifest so an active pane is not orphaned by a name change.
+Every session has a durable `sessionId`. Desk preserves it across edits and
+uses it for the atch socket, terminal state, channels delivery, attention, and
+agent events. The agent's resume id remains a separate provider-owned value.
 
 Desk sets these environment variables for managed launches:
 
 ```text
-DESK_TMUX_SESSION=<tmux session name>
+DESK_SESSION_ID=<durable Desk session id>
 DESK_AGENT=<agent name>
 ```
 
@@ -147,7 +143,9 @@ Signal kinds include:
 - `bell`
 - `channel`
 
-Attached sessions are sniffed from PTY output. Unattached sessions are detected from tmux bell flags.
+The terminal daemon parses PTY output into emulator events even when no browser
+surface is subscribed, so bell and OSC 9 attention remains available for
+unattached sessions.
 
 Desk upgrades a fresh generic bell when a typed OSC 9 event arrives shortly afterward, so one turn does not create duplicate unread cards.
 

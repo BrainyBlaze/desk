@@ -6,11 +6,11 @@ description: "Desk is single-user, local, self-hosted software. Run it on your o
 
 Desk is **local, single-user, self-hosted software**. It runs on your own
 machine (or your own remote development box) for you — the person who owns the
-code, the tmux sessions, the agent CLIs, and the credentials on that host. It
+code, the atch sessions, the agent CLIs, and the credentials on that host. It
 is not a multi-tenant service and is not meant to be hosted for other people.
 
 <Note>
-Desk has direct access to the host filesystem, tmux, Git, and any credentials
+Desk has direct access to the host filesystem, atch, Git, and any credentials
 available to the user that runs it. Run it as yourself, on a machine you
 control, and keep it bound to localhost.
 </Note>
@@ -101,7 +101,7 @@ In the UI, verify:
 ## Local safety checklist
 
 - Keep the default `127.0.0.1` bind; never use `0.0.0.0`.
-- Run Desk as the user that owns the intended repositories and tmux sessions.
+- Run Desk as the user that owns the intended repositories and atch sessions.
 - Reach a remote box over SSH forwarding, not by exposing the port.
 - Keep agent CLI credentials in their normal tool-managed locations.
 - Use `desk up --dry-run` before starting a large manifest.

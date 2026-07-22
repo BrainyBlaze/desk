@@ -13,9 +13,12 @@ The one CLI exposes two explicit runtime shapes:
 - `desk serve --dev`: Node/Vite runtime with the Desk API mounted as middleware
 
 Both bind to `127.0.0.1:5173` by default, supervise their child process group,
-and fail without switching modes. Send Ctrl-C to the CLI process for clean
-shutdown. See [Distribution and deployment](/distribution-deployment) for runtime
-and release details.
+and fail without switching modes. Each server supervises the terminal daemon.
+If no executable atch binary can be resolved, terminal transport fails closed
+and reports missing while the rest of the workspace remains available. Send
+Ctrl-C to the CLI process for clean shutdown. See
+[Distribution and deployment](/distribution-deployment) for runtime and release
+details.
 
 ## System monitor
 
@@ -39,24 +42,21 @@ GPU commands are run asynchronously with timeouts so telemetry does not block te
 The browser polls pulse state while visible. The pulse response combines:
 
 - the cached system snapshot
-- running tmux sessions
+- running session ids
 - attention state
 - unread event count
 - managed agent LSP status
 - channels runtime state
 
-Desk drops attention markers for tmux sessions that no longer exist, so a dead session does not keep a stale lamp.
+Desk drops attention markers for sessions that no longer exist, so a dead session does not keep a stale lamp.
 
 ## Attention and events
 
-Desk captures terminal notifications from attached and unattached sessions.
-
-Attached sessions are sniffed from PTY output:
+Desk captures terminal notifications from the terminal daemon's emulator event
+stream, whether or not a browser is attached:
 
 - OSC 9 messages can become `turn-complete`, `approval-requested`, or `input-requested`
 - bare BEL becomes a generic `bell`
-
-Unattached sessions are detected through tmux `window_bell_flag` and `window_activity` polling.
 
 When a typed OSC 9 event arrives shortly after a generic bell, Desk upgrades the fresh bell event instead of creating a duplicate card.
 
@@ -64,24 +64,17 @@ Touching a terminal acknowledges that session's unread events. The events drawer
 
 ## Terminal health
 
-Desk's terminal broker keeps one WebSocket per browser tab and subscribes that connection to visible and warm terminal surfaces.
+Desk keeps one binary terminal WebSocket per browser tab and subscribes it only
+to visible terminal surfaces. The supervised terminal daemon owns atch master
+connections, emulator snapshots, and generation state.
 
 Operational guards include:
 
 - visible-only output delivery so hidden cells do not parse terminal streams
-- snapshot-on-reveal from tmux capture-pane
-- bounded warm PTY retention
-- output backpressure counters
-- resize minimums to avoid durable tiny tmux windows
-- startup repair for configured tiny windows
-
-The broker metrics endpoint is:
-
-```text
-GET /api/terminal-broker-metrics
-```
-
-It reports active browser clients, active PTYs, warm idle PTYs, visible subscriptions, hidden subscriptions, and dropped output frames.
+- snapshot-on-reveal from the daemon's xterm emulator
+- per-session generation fencing so stale output cannot corrupt a new process
+- bounded frame sizes, heartbeat detection, and resubscription after gaps
+- private, per-user atch socket roots
 
 ## Session controls
 
@@ -93,21 +86,22 @@ The agents toolbar and session rows expose recovery actions:
 - repair a terminal
 - inspect session metadata
 - delete configured sessions
-- open or attach to a tmux session
+- open or attach to an atch session
 
 `desk up` has the same start-missing behavior as the UI **Up** control. It does not replace running sessions.
 
 ## Emergency kill switch
 
-The emergency kill switch is deliberately broad.
+The emergency kill switch combines configured-session retirement with a
+host-level supported-agent process sweep.
 
 It terminates:
 
-- every tmux session whose name starts with `agentdesk-`
-- any tmux session whose pane command is a Codex or Claude CLI
+- every atch session in the active manifest, through the terminal daemon
 - any remaining host `codex` or `claude` CLI process found by `ps`
 
-This is not limited to the current project or only sessions configured in the active manifest. Treat it as a host-wide stop control for Codex and Claude work.
+The atch retirement is manifest-scoped, but the process sweep is host-wide.
+Treat it as a host-wide stop control for Codex and Claude work.
 
 ## Channels diagnostics
 
@@ -132,7 +126,9 @@ Operator actions include:
 - rebuild the engine
 - drain ready sessions
 
-Regular channel notifications are idempotent: once tmux accepts the paste, the queue advances. Pane probes and ACK files are diagnostics and evidence, not the authority for normal channel-notification delivery. Standalone onboarding or operator prompts still use the legacy verifier path.
+Regular channel notifications are idempotent: once the terminal daemon accepts
+the input, the queue advances. Emulator probes and ACK files are diagnostics
+and evidence, not the authority for normal channel-notification delivery.
 
 ## Logs and troubleshooting
 
@@ -140,14 +136,12 @@ Start with:
 
 ```bash
 desk status
-desk capture <name|tmux-session|resume-id> --lines 200
-tmux list-sessions
+desk capture <name|sessionId|resume> --lines 200
 ```
 
 For UI-visible runtime state, check:
 
 - `/api/pulse`
-- `/api/terminal-broker-metrics`
 - the events drawer
 - the channels engine console
 

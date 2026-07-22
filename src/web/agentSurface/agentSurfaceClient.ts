@@ -1,6 +1,7 @@
 /**
  * Browser-singleton agent-surface broker connection. One WebSocket per tab carries
- * every native UI surface's traffic, mirroring the terminalBrokerClient shape.
+ * every native UI surface's traffic with the same lifecycle discipline as the
+ * binary terminal client.
  *
  * Surfaces subscribe by a stable surfaceId; the broker streams live `event` per
  * session only while at least one surface for that session is visible, and sends a
@@ -49,16 +50,15 @@ const RECONNECT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY;
 const RECONNECT_INITIAL_BACKOFF_MS = 250;
 const RECONNECT_MAX_BACKOFF_MS = 30_000;
 
-/** Resolve the WS base URL lazily so importing this module in a non-DOM context (tests)
- *  does not crash on `location` being undefined. terminalBrokerClient uses the same trick.
- *  Exported for tests. */
+/** Resolve the WS base URL lazily so importing this module in a non-DOM context
+ *  (tests) does not crash on `location` being undefined. Exported for tests. */
 export function defaultBaseUrl(): string {
   if (typeof location !== 'undefined') {
     // Match the page scheme: a secure page (https, e.g. desk behind a tailscale
     // or reverse-proxy TLS front) must use wss, or the browser rejects the ws://
     // connection as mixed content and `new WebSocket()` throws — leaving every
-    // native surface permanently "reconnecting". terminalBrokerClient does the
-    // same; this was the one client that hardcoded ws://.
+    // native surface permanently "reconnecting". Match the binary terminal
+    // client's page-scheme behavior.
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${location.host}`;
   }
@@ -190,8 +190,8 @@ export class AgentSurfaceClient {
     this.socket = socket;
     // Capture socket locally; every handler checks `this.socket !== socket` so a stale
     // socket that fires open/message/close AFTER forceReconnect or closeSocket replaced
-    // it cannot corrupt the current connection state (codex Phase 4 G1 fix, mirroring
-    // terminalBrokerClient's pattern at line ~205).
+    // it cannot corrupt the current connection state. The binary terminal
+    // client uses the same socket-identity guard.
     socket.addEventListener('open', () => {
       if (this.socket !== socket) {
         return;
