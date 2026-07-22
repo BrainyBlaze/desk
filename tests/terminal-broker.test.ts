@@ -55,8 +55,8 @@ class FakeTransport implements BrokerTransport {
 }
 
 const sessions: SessionSpec[] = [
-  { name: 'A', tmuxSession: 'agentdesk-a', cwd: '/tmp', command: 'bash', groupId: 'g', groupLabel: 'g' },
-  { name: 'B', tmuxSession: 'agentdesk-b', cwd: '/tmp', command: 'bash', groupId: 'g', groupLabel: 'g' }
+  { name: 'A', tmuxSession: 'agentdesk-a', sessionId: 'sess-a', cwd: '/tmp', command: 'bash', groupId: 'g', groupLabel: 'g' },
+  { name: 'B', tmuxSession: 'agentdesk-b', sessionId: 'sess-b', cwd: '/tmp', command: 'bash', groupId: 'g', groupLabel: 'g' }
 ];
 
 function createBroker(
@@ -170,10 +170,12 @@ describe('TerminalBroker', () => {
       expect(signals).toEqual([]);
       ptys.get('agentdesk-a')?.emit('prompt\x07ready');
 
+      // Signals keep the legacy tmux key (channels engine, transitional);
+      // the TRACKER keys by the durable sessionId.
       expect(signals).toEqual([{ session: 'agentdesk-a', kind: 'approval-requested' }]);
-      expect(attentionTracker.snapshot()).toHaveProperty('agentdesk-a');
+      expect(attentionTracker.snapshot()).toHaveProperty('sess-a');
       expect(attentionTracker.listEvents()[0]).toMatchObject({
-        tmuxSession: 'agentdesk-a',
+        sessionId: 'sess-a',
         kind: 'approval-requested',
         message: 'permission prompt',
         read: false

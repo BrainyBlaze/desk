@@ -73,7 +73,7 @@ describe('AttentionTracker events', () => {
     tracker.pushEvent('s1', 'bell');
     const second = tracker.pushEvent('s2', 'turn-complete', 'done');
     expect(tracker.unreadCount()).toBe(2);
-    expect(tracker.listEvents()[0]?.tmuxSession).toBe('s2');
+    expect(tracker.listEvents()[0]?.sessionId).toBe('s2');
     tracker.markEventsRead({ ids: [second.id] });
     expect(tracker.unreadCount()).toBe(1);
     tracker.markEventsRead({ all: true });
@@ -117,7 +117,7 @@ describe('AttentionTracker events', () => {
     tracker.pushEvent('s2', 'bell');
     tracker.clear('s1');
     expect(tracker.unreadCount()).toBe(1);
-    expect(tracker.listEvents().find((e) => e.tmuxSession === 's1')?.read).toBe(true);
+    expect(tracker.listEvents().find((e) => e.sessionId === 's1')?.read).toBe(true);
   });
 
   it('clearEvents erases the whole list', () => {

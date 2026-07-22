@@ -122,8 +122,13 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
   return provisionNativeSession(spec);
 }
 
-/** The daemon key for a session the channels engine names by tmuxSession. */
-function nativeIdForTmuxSession(tmuxSession: string): string {
+/**
+ * TRANSITIONAL (dies at the final key flip): the sessionId for a value that
+ * may still be a legacy tmuxSession. Identity when the input already is a
+ * sessionId (no spec matches by tmuxSession), so callers can normalize
+ * mixed-era inputs safely.
+ */
+export function nativeIdForTmuxSession(tmuxSession: string): string {
   const spec = loadDeskCached({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
   return spec?.sessionId ?? tmuxSession;
 }

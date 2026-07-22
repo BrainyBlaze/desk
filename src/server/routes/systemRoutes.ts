@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveManifestPath } from '../../core/config.js';
 import { listTmuxSessionsCached, loadDesk, runningSessionSet } from '../../core/runner.js';
+import { nativeIdForTmuxSession } from '../runtime/nativeSessionControl.js';
 import { normalizeAgentEventForApi } from '../agentEvents.js';
 import { attentionTracker, notifyAgentSignal, type AgentEventKind } from '../attention.js';
 import { initChannelsRuntime } from '../channelsApi.js';
@@ -90,8 +91,12 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
 
     if (req.method === 'GET' && url.pathname === '/api/pulse') {
       const running = runningSessionSet();
-      managedAgentLsp.reconcile(running);
-      attentionTracker.dropDead(running);
+      managedAgentLsp.reconcile(running); // LSP wiring keys tmux until its flip
+      // TRANSITIONAL: the running set still carries tmuxSessions; the tracker
+      // keys sessionId. Map before dropDead, and serve sessionIds in the
+      // payload — the web lane reads sessionId from this window on.
+      const runningIds = new Set([...running].map(nativeIdForTmuxSession));
+      attentionTracker.dropDead(runningIds);
       sendJson(res, 200, {
         system: getSystemSnapshot(),
         attention: {
@@ -99,7 +104,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
           events: attentionTracker.listEvents(),
           unread: attentionTracker.unreadCount()
         },
-        running: [...running]
+        running: [...runningIds]
       });
       return true;
     }
@@ -115,7 +120,9 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
 
     if (req.method === 'POST' && url.pathname === '/api/attention-clear') {
       const body = await readJsonBody(req);
-      attentionTracker.clear(readRequiredString(body.session, 'session'));
+      // TRANSITIONAL normalizer: an old web build sends the tmuxSession; the
+      // converted web sends the sessionId (the normalizer is identity there).
+      attentionTracker.clear(nativeIdForTmuxSession(readRequiredString(body.session, 'session')));
       sendJson(res, 200, { ok: true });
       return true;
     }
@@ -148,10 +155,15 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
       const body = await readJsonBody(req);
       const normalized = normalizeAgentEventForApi(body);
       const session = normalized.event.session;
+      // TRANSITIONAL: agents self-report DESK_TMUX_SESSION until the env
+      // rename; the tracker keys sessionId. The channels engine, signal
+      // fanout, and resume capture below keep the legacy key until their own
+      // flip steps.
+      const sessionId = nativeIdForTmuxSession(session);
       if (normalized.attentionKind) {
-        attentionTracker.raise(session);
+        attentionTracker.raise(sessionId);
         attentionTracker.pushEvent(
-          session,
+          sessionId,
           normalized.attentionKind,
           typeof normalized.event.message === 'string' ? normalized.event.message.slice(0, 300) : undefined
         );

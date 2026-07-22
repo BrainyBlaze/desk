@@ -20,6 +20,7 @@ import {
   notifyAgentSignal,
   type AgentEventKind
 } from './attention.js';
+import { nativeIdForTmuxSession } from './runtime/nativeSessionControl.js';
 import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.js';
 
 /**
@@ -815,9 +816,12 @@ function sessionOfFrame(frame: AgentUiClientFrame): string | undefined {
 }
 
 const defaultAttentionSink: AttentionSink = {
-  pushEvent: (session, kind, message) => attentionTracker.pushEvent(session, kind, message),
+  // TRANSITIONAL: the broker keys sessions by the agent-host hello value
+  // (DESK_TMUX_SESSION until the env rename); the tracker keys sessionId.
+  // The signal fanout keeps the legacy key until the channels flip.
+  pushEvent: (session, kind, message) => attentionTracker.pushEvent(nativeIdForTmuxSession(session), kind, message),
   notifySignal: (session, kind) => notifyAgentSignal(session, kind),
-  raise: (session) => attentionTracker.raise(session)
+  raise: (session) => attentionTracker.raise(nativeIdForTmuxSession(session))
 };
 
 let defaultSecret: string | null = null;

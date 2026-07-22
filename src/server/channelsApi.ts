@@ -4,7 +4,7 @@ import { extname } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
 import { addAgentSignalListener, attentionTracker } from './attention.js';
 import { loadDesk, loadDeskCached } from '../core/runner.js';
-import { createNativeChannelsTransport, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
+import { createNativeChannelsTransport, nativeIdForTmuxSession, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
 import { buildOnboardingPrompt, ChannelsEngine, sendTextToTmux } from './channelsEngine.js';
 import {
   claimDelivering,
@@ -158,8 +158,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       }
     },
     onChannelMessage: (channel, file, message, pingsHuman) => {
-      const authorSession =
-        listChannelMembers(home, channel).find((member) => member.name === message.author)?.tmuxSession ?? '';
+      // TRANSITIONAL: member manifests carry tmuxSession until the member
+      // schema flip; the tracker keys sessionId, so normalize here.
+      const authorSession = nativeIdForTmuxSession(
+        listChannelMembers(home, channel).find((member) => member.name === message.author)?.tmuxSession ?? ''
+      );
       const preview = message.body.replace(/\s+/g, ' ').slice(0, 200);
       attentionTracker.pushEvent(
         authorSession,

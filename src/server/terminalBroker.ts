@@ -333,11 +333,11 @@ export class TerminalBroker {
   private handlePtyData(terminal: BrokerTerminal, chunk: string): void {
     const notifications = extractTerminalNotifications(chunk, terminal.attentionTokenizer);
     if (notifications.length > 0) {
-      attentionTracker.raise(terminal.session.tmuxSession);
-      notifyRaise(terminal.session.tmuxSession);
+      attentionTracker.raise(terminal.session.sessionId);
+      notifyRaise(terminal.session.tmuxSession); // TRANSITIONAL: resume capture keys tmux
       for (const notification of notifications) {
-        attentionTracker.pushEvent(terminal.session.tmuxSession, notification.kind, notification.message);
-        notifyAgentSignal(terminal.session.tmuxSession, notification.kind);
+        attentionTracker.pushEvent(terminal.session.sessionId, notification.kind, notification.message);
+        notifyAgentSignal(terminal.session.tmuxSession, notification.kind); // TRANSITIONAL: engine keys tmux
       }
     }
     const payload = stripTerminalMouseModeControls(chunk, terminal.mouseModeTokenizer);

@@ -1,7 +1,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { TerminalSequenceTokenizer, type TerminalToken } from '../shared/terminalSequenceTokenizer.js';
-import { drainNativeAttentionEvents, nativeSessionsEnabled, tmuxSessionForNativeId } from './runtime/nativeSessionControl.js';
+import { drainNativeAttentionEvents, nativeIdForTmuxSession, nativeSessionsEnabled, tmuxSessionForNativeId } from './runtime/nativeSessionControl.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -28,7 +28,8 @@ export type AgentEventKind = 'turn-complete' | 'approval-requested' | 'input-req
 
 export interface AgentEvent {
   id: string;
-  tmuxSession: string;
+  /** The session's durable identity (sessionId). */
+  sessionId: string;
   kind: AgentEventKind;
   message?: string;
   at: string;
@@ -50,32 +51,32 @@ export class AttentionTracker {
   private eventSeq = 0;
 
   /** Returns true when the session was not already in the attention state. */
-  raise(tmuxSession: string): boolean {
-    if (this.entries.has(tmuxSession)) {
+  raise(sessionId: string): boolean {
+    if (this.entries.has(sessionId)) {
       return false;
     }
-    this.entries.set(tmuxSession, { attention: true, since: new Date().toISOString() });
+    this.entries.set(sessionId, { attention: true, since: new Date().toISOString() });
     return true;
   }
 
-  clear(tmuxSession: string, epochSeconds = Math.floor(Date.now() / 1000)): void {
-    this.entries.delete(tmuxSession);
-    this.clearedAt.set(tmuxSession, epochSeconds);
+  clear(sessionId: string, epochSeconds = Math.floor(Date.now() / 1000)): void {
+    this.entries.delete(sessionId);
+    this.clearedAt.set(sessionId, epochSeconds);
     // Touching a terminal acknowledges its pending notifications.
     for (const event of this.events) {
-      if (event.tmuxSession === tmuxSession) {
+      if (event.sessionId === sessionId) {
         event.read = true;
       }
     }
   }
 
   /** Epoch seconds of the last user touch for a session (0 if never). */
-  lastClearedAt(tmuxSession: string): number {
-    return this.clearedAt.get(tmuxSession) ?? 0;
+  lastClearedAt(sessionId: string): number {
+    return this.clearedAt.get(sessionId) ?? 0;
   }
 
   pushEvent(
-    tmuxSession: string,
+    sessionId: string,
     kind: AgentEventKind,
     message?: string,
     meta?: { channel?: string; messageId?: string; thread?: string }
@@ -86,7 +87,7 @@ export class AttentionTracker {
     if (kind === 'turn-complete' || kind === 'approval-requested' || kind === 'input-requested') {
       const recent = [...this.events]
         .reverse()
-        .find((event) => event.tmuxSession === tmuxSession && event.kind === 'bell' && !event.read);
+        .find((event) => event.sessionId === sessionId && event.kind === 'bell' && !event.read);
       if (recent && Date.now() - Date.parse(recent.at) <= EVENT_UPGRADE_WINDOW_MS) {
         recent.kind = kind;
         if (message) {
@@ -97,7 +98,7 @@ export class AttentionTracker {
     }
     const event: AgentEvent = {
       id: `evt-${++this.eventSeq}`,
-      tmuxSession,
+      sessionId,
       kind,
       message,
       at: new Date().toISOString(),
@@ -126,14 +127,14 @@ export class AttentionTracker {
     for (const event of this.events) {
       if (options.all || options.ids?.includes(event.id) || options.kinds?.includes(event.kind)) {
         event.read = true;
-        touched.add(event.tmuxSession);
+        touched.add(event.sessionId);
       }
     }
     // Read state and the sidebar attention dot are one acknowledgment: a
     // session whose events are all read must not keep a lit lamp.
     const epoch = Math.floor(Date.now() / 1000);
     for (const session of touched) {
-      const hasUnread = this.events.some((event) => event.tmuxSession === session && !event.read);
+      const hasUnread = this.events.some((event) => event.sessionId === session && !event.read);
       if (!hasUnread && this.entries.has(session)) {
         this.entries.delete(session);
         this.clearedAt.set(session, epoch);
@@ -349,12 +350,16 @@ let nativeAttentionCursor = 0;
 async function drainNativeAttention(): Promise<void> {
   const { events, lastSeq } = await drainNativeAttentionEvents(nativeAttentionCursor);
   for (const event of events) {
-    const session = tmuxSessionForNativeId(event.sessionId);
-    if (attentionTracker.raise(session)) {
-      attentionTracker.pushEvent(session, 'bell', event.data);
+    // The tracker keys by sessionId (the daemon's native key — no mapping).
+    if (attentionTracker.raise(event.sessionId)) {
+      attentionTracker.pushEvent(event.sessionId, 'bell', event.data);
     }
-    notifyRaise(session);
-    notifyAgentSignal(session, 'bell');
+    // TRANSITIONAL: the signal fanouts still carry tmuxSession — the channels
+    // engine and the resume-capture raise listener key by it until their own
+    // flip steps. Dies with the final key flip.
+    const legacyKey = tmuxSessionForNativeId(event.sessionId);
+    notifyRaise(legacyKey);
+    notifyAgentSignal(legacyKey, 'bell');
   }
   nativeAttentionCursor = lastSeq;
 }
@@ -371,9 +376,14 @@ export function startAttentionPolling(intervalMs = 2000): void {
     pollInFlight = true;
     try {
       const flags = await pollTmuxBellFlagsAsync();
-      for (const session of detectBellEdges(previousFlags, flags, (name) => attentionTracker.lastClearedAt(name))) {
-        if (attentionTracker.raise(session)) {
-          attentionTracker.pushEvent(session, 'bell');
+      // TRANSITIONAL: the poller sees tmux names; the tracker keys by
+      // sessionId, so map at this boundary (identity for unknown names). The
+      // signal fanouts keep the tmux name until the channels/resume flips.
+      // The whole poller dies with the legacy transport at the final flip.
+      for (const session of detectBellEdges(previousFlags, flags, (name) => attentionTracker.lastClearedAt(nativeIdForTmuxSession(name)))) {
+        const sessionId = nativeIdForTmuxSession(session);
+        if (attentionTracker.raise(sessionId)) {
+          attentionTracker.pushEvent(sessionId, 'bell');
         }
         notifyRaise(session);
         notifyAgentSignal(session, 'bell');
