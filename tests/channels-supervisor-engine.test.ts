@@ -156,6 +156,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     updateMemberSupervisor(home, 'ops', 'supe', true, 1);
     sent = [];
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       pumpIntervalMs: 25,
       releaseSettleMs: 0,

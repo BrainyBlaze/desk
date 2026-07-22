@@ -1462,6 +1462,7 @@ describe('ChannelsEngine delivery gating', () => {
     mk(2, 'stuck-paste');
     mk(5, 'stuck-submit');
     const eng = new ChannelsEngine({
+      sendText: async () => true,
       sendEnter: async () => true,
       home,
       sessionRunning: () => true,

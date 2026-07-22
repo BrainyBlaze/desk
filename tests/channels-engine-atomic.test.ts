@@ -42,6 +42,7 @@ describe('ChannelsEngine atomic queue snapshots', () => {
     crashOnQueueSnapshot();
     const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,

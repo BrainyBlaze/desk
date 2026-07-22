@@ -130,6 +130,7 @@ describe('ChannelsEngine restore consume safety', () => {
     const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
     let sends = 0;
     const restored = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 100000,
@@ -169,6 +170,7 @@ describe('ChannelsEngine restore consume safety', () => {
     const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
     let sends = 0;
     const restored = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 100000,

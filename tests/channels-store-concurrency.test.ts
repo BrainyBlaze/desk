@@ -112,6 +112,7 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
     writeFileSync(join(home, '_engine', 'engine.pid'), `${process.pid}\n99999\n`);
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       pid: process.pid + 1,
       pidAlive: () => true, // holder reports alive — pre-fix code trusted this alone
@@ -143,6 +144,7 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
     writeFileSync(join(home, '_engine', 'engine.pid'), `${process.pid}\n42\n`);
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       pid: process.pid + 1,
       pidAlive: () => true,
@@ -206,6 +208,7 @@ describe('durability restore: engine classifies per-item extensions on restart',
     writeQueueFile(tmux, 5, 'stuck-submit'); // ditto
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,
@@ -230,6 +233,7 @@ describe('durability restore: engine classifies per-item extensions on restart',
     writeQueueFile(tmux, 8, 'stuck-submit');
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,
@@ -254,6 +258,7 @@ describe('durability restore: engine classifies per-item extensions on restart',
     writeQueueFile(tmux, 99, 'delivering');
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,

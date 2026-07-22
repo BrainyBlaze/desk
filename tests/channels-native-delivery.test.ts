@@ -56,6 +56,7 @@ describe('native-mode channel delivery', () => {
       }
     });
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText,
@@ -99,6 +100,7 @@ describe('native-mode channel delivery', () => {
       }
     });
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText,
@@ -155,6 +157,7 @@ describe('native-mode channel delivery', () => {
       }
     });
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async (session, text) => {
