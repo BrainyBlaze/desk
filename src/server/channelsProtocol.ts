@@ -147,7 +147,7 @@ export interface ChannelActivityEvent {
 }
 
 /**
- * Live deliverability of an agent's tmux pane, as the ops console reports it.
+ * Live deliverability of an agent's terminal pane, as the ops console reports it.
  * `empty-capture` is surfaced first-class so the concurrency truncation bug
  * (capture read on `exit` returning '') is visible if it ever regresses.
  */

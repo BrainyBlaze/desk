@@ -1,27 +1,17 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { SANCTIONS, scanFlagSurface, scanLegacySurface, type ScannedFile } from './noTmuxScan.js';
 
 const SRC = join(__dirname, '..', '..', 'src');
 
 /**
- * The Track B terminal gate: tmux is gone. Runtime code must not name the
- * legacy transport — not as an identifier, an env key, a spawned binary, or a
- * flag. The ONLY sanctioned mentions are the one-way migration transforms
- * (they read legacy stores by definition) and their record shapes.
+ * The Track B terminal gate: tmux is gone. EVERY source is scanned — the
+ * sanctioned migration modules included — and every legacy-token line must
+ * match its file's exact allowlist with a pinned per-file count. See
+ * noTmuxScan.ts for the scanner; the mutant suite below proves the gate
+ * rejects one extra legacy reference even inside a sanctioned mixed file.
  */
-const SANCTIONED = new Set([
-  'server/cutoverStoreMigration.ts',
-  'server/channelsEvents.ts', // migrateDeliveryEventLine reads the legacy field
-  'server/channelsProtocol.ts', // migrateMemberManifestContent reads `tmux:` lines
-  'core/resumeCaptureState.ts', // LegacyPendingResumeCapture + its transform
-  'core/manifest.ts', // the permanent fail-closed guard REJECTING the legacy key
-  'core/sessionIdentity.ts' // the migration's legacy read-source shape
-]);
-
-/** The one-way store transforms read legacy shapes by definition. */
-const SANCTIONED_PREFIXES = ['shared/migration/'];
-
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
@@ -32,32 +22,65 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+function scannedTree(): ScannedFile[] {
+  return sourceFiles(SRC).map((file) => ({
+    rel: relative(SRC, file).split(sep).join('/'),
+    source: readFileSync(file, 'utf8')
+  }));
+}
+
 describe('no-tmux architecture gate (Track B terminal state)', () => {
-  it('keeps every runtime source free of tmux identifiers outside the sanctioned migration transforms', () => {
-    const offenders: string[] = [];
-    for (const file of sourceFiles(SRC)) {
-      const rel = relative(SRC, file);
-      if (SANCTIONED.has(rel) || SANCTIONED_PREFIXES.some((prefix) => rel.startsWith(prefix))) {
-        continue;
-      }
-      const source = readFileSync(file, 'utf8');
-      if (/tmux/i.test(source)) {
-        const lines = source
-          .split('\n')
-          .map((line, index) => ({ line, index }))
-          .filter(({ line }) => /tmux/i.test(line))
-          .map(({ index }) => index + 1);
-        offenders.push(`${rel}:${lines.join(',')}`);
-      }
-    }
-    expect(offenders).toEqual([]);
+  it('keeps every source inside the exact sanctioned legacy surface (pattern + count per file)', () => {
+    expect(scanLegacySurface(scannedTree())).toEqual([]);
   });
 
   it('keeps the native flag out of the runtime — one path, no gate', () => {
-    const offenders = sourceFiles(SRC)
-      .map((file) => ({ file, source: readFileSync(file, 'utf8') }))
-      .filter(({ source }) => source.includes('DESK_ATCH_NATIVE') || source.includes('nativeSessionsEnabled'))
-      .map(({ file }) => relative(SRC, file));
-    expect(offenders).toEqual([]);
+    expect(scanFlagSurface(scannedTree())).toEqual([]);
+  });
+});
+
+describe('no-tmux gate oracle (mutant rejection)', () => {
+  const sanctionedRel = 'core/resumeCaptureState.ts';
+  const realSource = readFileSync(join(SRC, sanctionedRel), 'utf8');
+
+  it('rejects a live legacy invocation added to an otherwise sanctioned mixed file', () => {
+    const mutant: ScannedFile = {
+      rel: sanctionedRel,
+      source: `${realSource}\nconst leaked = spawnSync('tmux', ['kill-server']);\n`
+    };
+    const violations = scanLegacySurface([mutant]);
+    expect(violations.some((v) => v.includes('outside the migration allowlist'))).toBe(true);
+  });
+
+  it('rejects an extra reference even when it reuses an allowed migration construct', () => {
+    const mutant: ScannedFile = {
+      rel: sanctionedRel,
+      source: `${realSource}\n// one more tmuxSession mention than the sanction pins\n`
+    };
+    const violations = scanLegacySurface([mutant]);
+    expect(violations.some((v) => v.includes('count drifted'))).toBe(true);
+  });
+
+  it('rejects any legacy reference in an unsanctioned file', () => {
+    const violations = scanLegacySurface([{ rel: 'server/newFeature.ts', source: "exec('tmux attach');" }]);
+    expect(violations).toEqual(['server/newFeature.ts:1 — legacy transport reference in unsanctioned file']);
+  });
+
+  it('pins the sanction table itself to the migration surface (no runtime file may be added silently)', () => {
+    expect(Object.keys(SANCTIONS).sort()).toEqual(
+      [
+        'core/manifest.ts',
+        'core/resumeCaptureState.ts',
+        'core/sessionIdentity.ts',
+        'server/channelsEvents.ts',
+        'server/channelsProtocol.ts',
+        'server/cutoverStoreMigration.ts',
+        'shared/migration/channelsPausedTransform.ts',
+        'shared/migration/durabilityTransform.ts',
+        'shared/migration/index.ts',
+        'shared/migration/manifestTransform.ts',
+        'shared/migration/sessionId.ts'
+      ].sort()
+    );
   });
 });
