@@ -331,7 +331,7 @@ function pendingCaptureForLaunch(session: SessionSpec, launchResumeId?: string) 
   }
   const now = Date.now();
   return {
-    tmuxSession: session.tmuxSession,
+    sessionId: session.sessionId,
     agent: 'opencode' as const,
     cwd: session.cwd,
     sinceMs: now - RESUME_CAPTURE_CLOCK_SKEW_MS,

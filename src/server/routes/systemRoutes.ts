@@ -154,12 +154,11 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
     if (req.method === 'POST' && url.pathname === '/api/agent-event') {
       const body = await readJsonBody(req);
       const normalized = normalizeAgentEventForApi(body);
-      const session = normalized.event.session;
       // Mixed-era normalize: agents launched before the DESK_SESSION_ID
       // rename self-report the tmux name until restarted; new launches report
-      // the sessionId (identity here). The channels engine, signal fanout,
-      // and resume capture below keep the legacy key until their own flips.
-      const sessionId = nativeIdForTmuxSession(session);
+      // the sessionId (identity here). Everything downstream — tracker,
+      // signal fanout, channels engine, resume capture — keys the durable id.
+      const sessionId = nativeIdForTmuxSession(normalized.event.session);
       if (normalized.attentionKind) {
         attentionTracker.raise(sessionId);
         attentionTracker.pushEvent(
@@ -169,14 +168,14 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
         );
       }
       if (normalized.signalKind) {
-        notifyAgentSignal(session, normalized.signalKind);
+        notifyAgentSignal(sessionId, normalized.signalKind);
       }
-      initChannelsRuntime().engine.handleAgentEvent(normalized.event);
-      await attemptResumeCaptureForSession(session, () =>
-        loadDesk({}).sessions.find((candidate) => candidate.tmuxSession === session)
+      initChannelsRuntime().engine.handleAgentEvent({ ...normalized.event, session: sessionId });
+      await attemptResumeCaptureForSession(sessionId, () =>
+        loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId)
       );
       if (typeof normalized.resumeSessionId === 'string' && isValidResumeId(normalized.resumeSessionId)) {
-        await persistSessionResume(session, normalized.resumeSessionId);
+        await persistSessionResume(sessionId, normalized.resumeSessionId);
       }
       sendJson(res, 200, { ok: true, kind: normalized.event.kind });
       return true;

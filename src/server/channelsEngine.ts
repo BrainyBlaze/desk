@@ -43,6 +43,7 @@ import { appendDeliveryEvent, type DeliveryEvent } from './channelsEvents.js';
 import { listPausedSessions } from './channelsPaused.js';
 import { writeFileAtomic } from './fsOps.js';
 import { AgentPresenceModel } from './agentPresence.js';
+import { tmuxSessionForNativeId } from './runtime/nativeSessionControl.js';
 import type { AgentEventV2 } from './agentEvents.js';
 import { NativePromptDeliveryStrategy, NotificationDeliveryStrategy, PromptDeliveryStrategy, type NativeDeliveryState } from './channelsDeliveryStrategy.js';
 
@@ -83,12 +84,12 @@ export type {
 export interface ChannelsEngineOptions {
   home: string;
   /** push a prompt into a tmux session; resolved implementation is injectable for tests */
-  sendText?: (tmuxSession: string, text: string) => Promise<boolean>;
-  sessionRunning?: (tmuxSession: string) => boolean;
+  sendText?: (sessionId: string, text: string) => Promise<boolean>;
+  sessionRunning?: (sessionId: string) => boolean;
   /** capture the tail of a session's pane (injectable for tests); null = capture failed */
-  capturePane?: (tmuxSession: string) => Promise<string | null>;
+  capturePane?: (sessionId: string) => Promise<string | null>;
   /** bare Enter keypress for the submit-verification retry (injectable for tests) */
-  sendEnter?: (tmuxSession: string) => Promise<boolean>;
+  sendEnter?: (sessionId: string) => Promise<boolean>;
   /**
    * Notify the desk UI (events drawer) about every finalised channel message
    * (human-authored included); `file` locates it (root.md / thread-…),
@@ -128,16 +129,16 @@ export interface ChannelsEngineOptions {
    * `'delivering'` (no further fire) — the consumer reverts that from its own
    * sendText wrapper, correlating on the seq from the `'delivering'` fire.
    */
-  onSubmitStateChange?: (tmuxSession: string, state: SubmitState, context: { seq: number }) => void;
+  onSubmitStateChange?: (sessionId: string, state: SubmitState, context: { seq: number }) => void;
   /** prompts older than this at delivery time get a delayed-delivery note */
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
-  sessionInfo?: (tmuxSession: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
-  nativeSessionState?: (tmuxSession: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
+  sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  nativeSessionState?: (sessionId: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
   /** never deliver to a tmux session younger than this (TUIs swallow input while booting) */
   bootGraceMs?: number;
   /** epoch-seconds session creation lookup (injectable for tests) */
-  sessionCreatedAt?: (tmuxSession: string) => Promise<number | null>;
+  sessionCreatedAt?: (sessionId: string) => Promise<number | null>;
   /** current process id (injectable for the single-engine guard tests) */
   pid?: number;
   /** liveness probe for the pid in the lock file (injectable for tests) */
@@ -298,7 +299,10 @@ export function spawnTmuxSettled(
   });
 }
 
-export function defaultSessionRunning(tmuxSession: string): boolean {
+export function defaultSessionRunning(sessionId: string): boolean {
+  // Legacy transport boundary: tmux keys sessions by name; the engine keys by
+  // durable sessionId. Map here only (dies with the tmux transport deletion).
+  const tmuxSession = tmuxSessionForNativeId(sessionId);
   // `timeout` bounds the sync call so a stuck tmux server can't block the event
   // loop; a timed-out probe reports not-running, so the queue safely holds.
   return (
@@ -310,8 +314,8 @@ export function defaultSessionRunning(tmuxSession: string): boolean {
 }
 
 /** Last ~30 pane lines of the session's active pane (null when capture fails). */
-export async function defaultCapturePane(tmuxSession: string): Promise<string | null> {
-  const result = await spawnTmuxSettled(['capture-pane', '-p', '-t', `${tmuxSession}:`], { capture: true });
+export async function defaultCapturePane(sessionId: string): Promise<string | null> {
+  const result = await spawnTmuxSettled(['capture-pane', '-p', '-t', `${tmuxSessionForNativeId(sessionId)}:`], { capture: true });
   return result.stdout === null ? null : tailPaneCapture(result.stdout);
 }
 
@@ -321,8 +325,8 @@ export async function defaultCapturePane(tmuxSession: string): Promise<string | 
 export { isPaneBusy, isPaneReadyForInput, paneFooterRegion, tailPaneCapture } from './channelsProbe.js';
 
 /** Epoch-seconds tmux session creation time (null when unknown). */
-export async function defaultSessionCreatedAt(tmuxSession: string): Promise<number | null> {
-  const result = await spawnTmuxSettled(['display-message', '-p', '-t', `${tmuxSession}:`, '#{session_created}'], {
+export async function defaultSessionCreatedAt(sessionId: string): Promise<number | null> {
+  const result = await spawnTmuxSettled(['display-message', '-p', '-t', `${tmuxSessionForNativeId(sessionId)}:`, '#{session_created}'], {
     capture: true
   });
   if (result.stdout === null) {
@@ -355,11 +359,13 @@ let pasteBufferSeq = 0;
  * the paste before the submit key arrives. `run` is injectable for tests.
  */
 export async function sendTextToTmux(
-  tmuxSession: string,
+  sessionId: string,
   text: string,
   enterDelayMs = 1200,
   run: (args: string[]) => Promise<boolean> = runTmux
 ): Promise<boolean> {
+  // Legacy transport boundary (see defaultSessionRunning).
+  const tmuxSession = tmuxSessionForNativeId(sessionId);
   // `session:` resolves to the session's active pane. The `=name` exact form
   // is only valid for session targets (has-session) — tmux 3.2a rejects it
   // as a pane target.
@@ -384,8 +390,8 @@ export async function sendTextToTmux(
 }
 
 /** Bare Enter keypress (used by the submit-verification retry). */
-export function sendEnterToTmux(tmuxSession: string): Promise<boolean> {
-  return runTmux(['send-keys', '-t', `${tmuxSession}:`, 'Enter']);
+export function sendEnterToTmux(sessionId: string): Promise<boolean> {
+  return runTmux(['send-keys', '-t', `${tmuxSessionForNativeId(sessionId)}:`, 'Enter']);
 }
 
 function runTmux(args: string[]): Promise<boolean> {
@@ -619,7 +625,7 @@ export function buildOnboardingPrompt(options: {
 const MAX_UNOBSERVABLE_RETRIES = 5;
 
 interface MemberRuntime {
-  tmuxSession: string;
+  sessionId: string;
   busy: boolean;
   awaitingApproval: boolean;
   queue: QueuedPrompt[];
@@ -701,22 +707,22 @@ export class ChannelsEngine {
   private activitySeq = 0;
   private queueSeq = 0;
   private disposed = false;
-  private readonly sendText: (tmuxSession: string, text: string) => Promise<boolean>;
-  private readonly sessionRunning: (tmuxSession: string) => boolean;
-  private readonly capturePane: (tmuxSession: string) => Promise<string | null>;
-  private readonly sendEnter: (tmuxSession: string) => Promise<boolean>;
+  private readonly sendText: (sessionId: string, text: string) => Promise<boolean>;
+  private readonly sessionRunning: (sessionId: string) => boolean;
+  private readonly capturePane: (sessionId: string) => Promise<string | null>;
+  private readonly sendEnter: (sessionId: string) => Promise<boolean>;
   private readonly releaseSettleMs: number;
   private readonly drainWatchdogMs: number;
   private readonly enterVerifyDelayMs: number;
   private readonly verifyCycles: number;
   private readonly blockedAfterCycles: number;
   private readonly probeTimeoutMs: number;
-  private readonly onSubmitStateChange?: (tmuxSession: string, state: SubmitState, context: { seq: number }) => void;
+  private readonly onSubmitStateChange?: (sessionId: string, state: SubmitState, context: { seq: number }) => void;
   private readonly staleAfterMs: number;
-  private readonly sessionInfo: (tmuxSession: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
-  private readonly nativeSessionState?: (tmuxSession: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
+  private readonly sessionInfo: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  private readonly nativeSessionState?: (sessionId: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
   private readonly bootGraceMs: number;
-  private readonly sessionCreatedAt: (tmuxSession: string) => Promise<number | null>;
+  private readonly sessionCreatedAt: (sessionId: string) => Promise<number | null>;
   /** single shared pane classifier — drain, verify, signal-release, and the ops console all read it */
   private readonly probe: SessionProbe;
   private readonly promptDeliveryStrategy: PromptDeliveryStrategy;
@@ -944,7 +950,7 @@ export class ChannelsEngine {
         continue;
       }
       const supervisors = members.filter(
-        (member) => member.supervisor === true && member.tmuxSession && member.type !== 'human'
+        (member) => member.supervisor === true && member.sessionId && member.type !== 'human'
       );
       if (supervisors.length === 0) {
         continue;
@@ -958,7 +964,7 @@ export class ChannelsEngine {
       for (const member of members) {
         if (member.type === 'human') continue;
         if (member.supervisor === true) continue;
-        if (!member.tmuxSession) continue;
+        if (!member.sessionId) continue;
         const workerState = entry.workers.get(member.name);
         if (!workerState) continue;
         // Task in play = last prompt from this channel is newer than the
@@ -968,7 +974,7 @@ export class ChannelsEngine {
         const silentForMs = now - workerState.lastPromptAt;
         if (silentForMs < thresholdMs) continue;
         // Currently busy → they're actively responding to the prompt. Not stuck.
-        const runtime = this.members.get(member.tmuxSession);
+        const runtime = this.members.get(member.sessionId);
         if (runtime?.busy === true) continue;
         stuck.push({ name: member.name, stoppedForMinutes: Math.round(silentForMs / 60_000) });
       }
@@ -989,7 +995,7 @@ export class ChannelsEngine {
           role: supervisor.role,
           functions: supervisor.functions
         });
-        this.enqueue(supervisor.tmuxSession!, {
+        this.enqueue(supervisor.sessionId!, {
           channel,
           messageId: `supervisor-check-in-${channel}-${now}`,
           author: 'system',
@@ -1020,13 +1026,13 @@ export class ChannelsEngine {
     if (this.disposed || runtime.pausedByOperator) {
       return;
     }
-    if (this.sessionInfo(runtime.tmuxSession)?.uiMode === 'native' && this.nativeSessionState) {
-      const state = await this.nativeSessionState(runtime.tmuxSession);
+    if (this.sessionInfo(runtime.sessionId)?.uiMode === 'native' && this.nativeSessionState) {
+      const state = await this.nativeSessionState(runtime.sessionId);
       runtime.busy = state === 'busy';
       runtime.awaitingApproval = state === 'approval';
       return;
     }
-    const snap = await this.diagnosticProbe(runtime.tmuxSession);
+    const snap = await this.diagnosticProbe(runtime.sessionId);
     if (snap.paneState === 'unobservable') {
       return; // can't observe — leave the last-known flags (fail-safe)
     }
@@ -1057,9 +1063,9 @@ export class ChannelsEngine {
     }
   }
 
-  private unobservableProbeSnapshot(tmuxSession: string): SessionProbeSnapshot {
+  private unobservableProbeSnapshot(sessionId: string): SessionProbeSnapshot {
     return {
-      tmuxSession,
+      sessionId,
       source: 'inspect',
       observedAt: new Date().toISOString(),
       paneState: 'unobservable',
@@ -1072,15 +1078,15 @@ export class ChannelsEngine {
     };
   }
 
-  private async diagnosticProbe(tmuxSession: string): Promise<SessionProbeSnapshot> {
+  private async diagnosticProbe(sessionId: string): Promise<SessionProbeSnapshot> {
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
-    const probe = this.probe.probe(tmuxSession, { source: 'inspect' });
+    const probe = this.probe.probe(sessionId, { source: 'inspect' });
     const timeout = new Promise<SessionProbeSnapshot>((resolve) => {
       timer = setTimeout(() => {
         timedOut = true;
-        this.probe.clear(tmuxSession);
-        resolve(this.unobservableProbeSnapshot(tmuxSession));
+        this.probe.clear(sessionId);
+        resolve(this.unobservableProbeSnapshot(sessionId));
       }, this.probeTimeoutMs);
       timer.unref?.();
     });
@@ -1090,7 +1096,7 @@ export class ChannelsEngine {
       if (timedOut) {
         void probe
           .finally(() => {
-            this.probe.clear(tmuxSession);
+            this.probe.clear(sessionId);
           })
           .catch(() => {});
       }
@@ -1100,16 +1106,16 @@ export class ChannelsEngine {
     }
   }
 
-  private queueDir(tmuxSession?: string): string {
+  private queueDir(sessionId?: string): string {
     const base = join(this.options.home, '_engine', 'queue');
-    return tmuxSession ? join(base, tmuxSession) : base;
+    return sessionId ? join(base, sessionId) : base;
   }
 
-  private runtime(tmuxSession: string): MemberRuntime {
-    let entry = this.members.get(tmuxSession);
+  private runtime(sessionId: string): MemberRuntime {
+    let entry = this.members.get(sessionId);
     if (!entry) {
-      entry = { tmuxSession, busy: false, awaitingApproval: false, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0, unobservableRetries: 0 };
-      this.members.set(tmuxSession, entry);
+      entry = { sessionId, busy: false, awaitingApproval: false, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0, unobservableRetries: 0 };
+      this.members.set(sessionId, entry);
     }
     return entry;
   }
@@ -1217,7 +1223,7 @@ export class ChannelsEngine {
     pending.timer = undefined;
     if (pending.enterRetries < this.verifyCycles) {
       pending.enterRetries += 1;
-      await this.sendEnter(runtime.tmuxSession);
+      await this.sendEnter(runtime.sessionId);
       if (runtime.pendingAck?.notificationId === notificationId) {
         this.scheduleAckCheck(runtime);
       }
@@ -1226,7 +1232,7 @@ export class ChannelsEngine {
     if (pending.replays < 1) {
       pending.replays += 1;
       pending.enterRetries = 0;
-      const delivered = await this.sendText(runtime.tmuxSession, pending.payload);
+      const delivered = await this.sendText(runtime.sessionId, pending.payload);
       if (!delivered) {
         runtime.busy = false;
         this.clearPendingAck(runtime);
@@ -1241,15 +1247,15 @@ export class ChannelsEngine {
       return;
     }
     runtime.busy = false;
-    this.presence.recordAckFailure(runtime.tmuxSession, notificationId);
+    this.presence.recordAckFailure(runtime.sessionId, notificationId);
     this.setSubmitState(runtime, 'delivery-ack-timeout', pending.seqs);
     this.clearPendingAck(runtime);
     runtime.submitState = undefined;
     runtime.submitStateSeqs = undefined;
   }
 
-  handleDeliveryAck(tmuxSession: string, notificationId: string): boolean {
-    const runtime = this.members.get(tmuxSession);
+  handleDeliveryAck(sessionId: string, notificationId: string): boolean {
+    const runtime = this.members.get(sessionId);
     if (!runtime?.pendingAck || runtime.pendingAck.notificationId !== notificationId) {
       return false;
     }
@@ -1349,7 +1355,7 @@ export class ChannelsEngine {
   /** Restore intentional operator holds before any queued prompt can drain. */
   private restorePausedSessions(): void {
     for (const paused of listPausedSessions(this.options.home)) {
-      const runtime = this.runtime(paused.tmuxSession);
+      const runtime = this.runtime(paused.sessionId);
       runtime.pausedByOperator = { since: paused.pausedAt, reason: paused.reason };
       runtime.busy = false;
       runtime.awaitingApproval = false;
@@ -1366,7 +1372,7 @@ export class ChannelsEngine {
    * them here would lose in-flight and finalized state.
    */
   private persistQueue(runtime: MemberRuntime): void {
-    const dir = this.queueDir(runtime.tmuxSession);
+    const dir = this.queueDir(runtime.sessionId);
     mkdirSync(dir, { recursive: true });
     const liveSeqs = new Set(runtime.queue.map((item) => item.seq));
     for (const item of runtime.queue) {
@@ -1415,8 +1421,8 @@ export class ChannelsEngine {
     }
   }
 
-  private deliveryEventKey(tmuxSession: string, seq: number): string {
-    return `${tmuxSession}:${seq}`;
+  private deliveryEventKey(sessionId: string, seq: number): string {
+    return `${sessionId}:${seq}`;
   }
 
   private queuedEventContext(item: QueuedPrompt, preview?: string): DeliveryEventContext {
@@ -1428,18 +1434,18 @@ export class ChannelsEngine {
     };
   }
 
-  private pushQueuedDeliveryEvent(tmuxSession: string, item: QueuedPrompt, preview?: string): void {
+  private pushQueuedDeliveryEvent(sessionId: string, item: QueuedPrompt, preview?: string): void {
     this.pushDeliveryEvent({
       kind: 'queued',
-      tmuxSession,
+      sessionId,
       ...this.queuedEventContext(item, preview)
     });
   }
 
-  private pushDroppedDeliveryEvent(tmuxSession: string, item: QueuedPrompt): void {
+  private pushDroppedDeliveryEvent(sessionId: string, item: QueuedPrompt): void {
     this.pushDeliveryEvent({
       kind: 'dropped',
-      tmuxSession,
+      sessionId,
       ...this.queuedEventContext(item)
     });
   }
@@ -1487,9 +1493,9 @@ export class ChannelsEngine {
 
     const threadParentId = threadParentIdFromFile(file);
     const threadAuthor = threadParentId ? this.threadParentAuthor(channel, threadParentId) : undefined;
-    const authorSession = members.find((member) => member.name === message.author)?.tmuxSession;
+    const authorSession = members.find((member) => member.name === message.author)?.sessionId;
     for (const target of resolveTargets(message.author, message.body, members, { isThread: Boolean(threadParentId), threadAuthor })) {
-      if (!target.tmuxSession || target.tmuxSession === authorSession) {
+      if (!target.sessionId || target.sessionId === authorSession) {
         continue;
       }
       // Record that THIS channel handed target a prompt (only for non-supervisor
@@ -1512,7 +1518,7 @@ export class ChannelsEngine {
         supervisor: target.supervisor,
         supervisorMaxIdleMinutes: target.supervisorMaxIdleMinutes
       });
-      this.enqueue(target.tmuxSession, {
+      this.enqueue(target.sessionId, {
         channel,
         messageId: message.id,
         author: message.author,
@@ -1567,7 +1573,7 @@ export class ChannelsEngine {
   }
 
   private enqueue(
-    tmuxSession: string,
+    sessionId: string,
     item: {
       channel: string;
       messageId: string;
@@ -1582,8 +1588,8 @@ export class ChannelsEngine {
   ): void {
     // Dispatch dedupe: a message reaches a session at most once, no matter
     // how many paths re-discover it (API + watcher, rescans, re-dispatch).
-    const dedupeKey = `${tmuxSession}:${item.messageId}`;
-    const runtime = this.runtime(tmuxSession);
+    const dedupeKey = `${sessionId}:${item.messageId}`;
+    const runtime = this.runtime(sessionId);
     if (this.delivered.has(dedupeKey) || runtime.queue.some((queued) => queued.messageId === item.messageId)) {
       return;
     }
@@ -1615,17 +1621,17 @@ export class ChannelsEngine {
       file: queued.file ?? 'root.md',
       messageId: queued.messageId,
       author: queued.author,
-      target: tmuxSession,
+      target: sessionId,
       preview: item.preview
     });
-    this.pushQueuedDeliveryEvent(tmuxSession, queued, item.preview);
+    this.pushQueuedDeliveryEvent(sessionId, queued, item.preview);
     // Backstop against runaway loops: drop the OLDEST prompts — the newest
     // carry the current conversation state, stale ones only mislead.
     let dropped = 0;
     while (runtime.queue.length > MAX_QUEUE_PER_SESSION) {
       const removed = runtime.queue.shift();
       if (removed) {
-        this.pushDroppedDeliveryEvent(tmuxSession, removed);
+        this.pushDroppedDeliveryEvent(sessionId, removed);
         dropped += 1;
       }
     }
@@ -1641,8 +1647,8 @@ export class ChannelsEngine {
    * Agent signal hook (wired to desk's attention events). turn-complete and
    * bell mean the agent is back at its input prompt — release and drain.
    */
-  handleAgentSignal(tmuxSession: string, kind: AgentSignalKind): void {
-    const runtime = this.members.get(tmuxSession);
+  handleAgentSignal(sessionId: string, kind: AgentSignalKind): void {
+    const runtime = this.members.get(sessionId);
     if (!runtime) {
       return;
     }
@@ -1652,7 +1658,7 @@ export class ChannelsEngine {
     // immediate re-probe; the live snapshot then drives the diagnostic flags and a
     // drain if the pane is ready. (approval/input still logged for the timeline.)
     if (kind === 'approval-requested' || kind === 'input-requested') {
-      this.pushDeliveryEvent({ kind, tmuxSession });
+      this.pushDeliveryEvent({ kind, sessionId });
     }
     void this.probeAndReconcile(runtime);
   }
@@ -1668,7 +1674,7 @@ export class ChannelsEngine {
         runtime.busy = true;
         runtime.awaitingApproval = snapshot.status === 'blocked';
         if (event.kind === 'approval-requested' || event.kind === 'input-requested') {
-          this.pushDeliveryEvent({ kind: event.kind, tmuxSession: event.session });
+          this.pushDeliveryEvent({ kind: event.kind, sessionId: event.session });
         }
         return;
       case 'red':
@@ -1701,7 +1707,7 @@ export class ChannelsEngine {
     if (this.disposed || runtime.pausedByOperator) {
       return;
     }
-    const snap = await this.probe.probe(runtime.tmuxSession, { source: 'signal', forceFresh: true });
+    const snap = await this.probe.probe(runtime.sessionId, { source: 'signal', forceFresh: true });
     if (this.disposed || runtime.pausedByOperator) {
       return;
     }
@@ -1711,7 +1717,7 @@ export class ChannelsEngine {
       runtime.awaitingApproval = false;
       if (wasHeld) {
         runtime.lastReleaseAt = new Date().toISOString();
-        this.pushDeliveryEvent({ kind: 'released', tmuxSession: runtime.tmuxSession });
+        this.pushDeliveryEvent({ kind: 'released', sessionId: runtime.sessionId });
         this.resetHold(runtime);
       }
       if (runtime.queue.length > 0) {
@@ -1765,18 +1771,18 @@ export class ChannelsEngine {
         return;
       }
       const headSeq = next.seq;
-      const native = this.sessionInfo(runtime.tmuxSession)?.uiMode === 'native';
+      const native = this.sessionInfo(runtime.sessionId)?.uiMode === 'native';
       const strategy = next.kind !== 'prompt'
         ? this.notificationDeliveryStrategy
         : native && this.nativePromptDeliveryStrategy
           ? this.nativePromptDeliveryStrategy
           : this.promptDeliveryStrategy;
-      const decision = await strategy.decide(runtime.tmuxSession);
+      const decision = await strategy.decide(runtime.sessionId);
       if (process.env.DESK_CHANNELS_DEBUG) {
         try {
           appendFileSync(
             '/tmp/chan-engine-debug.log',
-            `${new Date().toISOString()} drain ${runtime.tmuxSession} kind=${next.kind ?? 'message'} deliver=${decision.deliver} queued=${runtime.queue.length}\n`
+            `${new Date().toISOString()} drain ${runtime.sessionId} kind=${next.kind ?? 'message'} deliver=${decision.deliver} queued=${runtime.queue.length}\n`
           );
         } catch {
           // tracing must never break delivery
@@ -1846,7 +1852,7 @@ export class ChannelsEngine {
     // queue item(s) for the durability layer's per-file renames.
     const deliveredSeqs = digest ? digestItems.map((item) => item.seq) : [next.seq];
     const notificationId = digest ? `digest-${deliveredSeqs.join('-')}-${next.messageId}` : next.messageId;
-    const native = this.sessionInfo(runtime.tmuxSession)?.uiMode === 'native';
+    const native = this.sessionInfo(runtime.sessionId)?.uiMode === 'native';
     const needsLegacyVerify = next.kind === 'prompt' && !native;
     runtime.busy = true; // claim before the async push so signals interleave safely
     // Claim the item(s): the durability slice renames <seq>.json → .delivering on
@@ -1866,7 +1872,7 @@ export class ChannelsEngine {
     // path gets its own explicit ACK contract. Channel notifications are force
     // delivered: if tmux accepts the paste, the queue advances immediately.
     const preSnap = needsLegacyVerify
-      ? deliverySnapshot ?? await this.probe.probe(runtime.tmuxSession, { source: 'verify', forceFresh: true })
+      ? deliverySnapshot ?? await this.probe.probe(runtime.sessionId, { source: 'verify', forceFresh: true })
       : undefined;
     runtime.deliveryInFlight = true;
     let delivered: boolean;
@@ -1875,7 +1881,7 @@ export class ChannelsEngine {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         delivered = await Promise.race([
-          this.sendText(runtime.tmuxSession, payload),
+          this.sendText(runtime.sessionId, payload),
           new Promise<boolean>((resolve) => {
             timeout = setTimeout(() => {
               deliveryTimedOut = true;
@@ -1928,7 +1934,7 @@ export class ChannelsEngine {
       file: next.file ?? 'root.md',
       messageId: digest ? `digest-${digestItems.length}-${next.messageId}` : next.messageId,
       author: digest ? 'desk' : next.author,
-      target: runtime.tmuxSession,
+      target: runtime.sessionId,
       preview: payload.split('\n')[0]?.slice(0, 140) ?? ''
     });
     if (needsLegacyVerify && preSnap) {
@@ -1951,7 +1957,7 @@ export class ChannelsEngine {
     runtime.submitState = state;
     runtime.submitStateSeqs = [...seqs];
     for (const seq of seqs) {
-      const key = this.deliveryEventKey(runtime.tmuxSession, seq);
+      const key = this.deliveryEventKey(runtime.sessionId, seq);
       if (state === 'delivering') {
         const item = runtime.queue.find((queued) => queued.seq === seq);
         if (item) {
@@ -1961,7 +1967,7 @@ export class ChannelsEngine {
       const context = this.deliveryEventContext.get(key);
       this.pushDeliveryEvent({
         kind: state,
-        tmuxSession: runtime.tmuxSession,
+        sessionId: runtime.sessionId,
         channel: context?.channel,
         messageId: context?.messageId,
         preview: context?.preview
@@ -1972,7 +1978,7 @@ export class ChannelsEngine {
     }
     if (this.onSubmitStateChange) {
       for (const seq of seqs) {
-        this.onSubmitStateChange(runtime.tmuxSession, state, { seq });
+        this.onSubmitStateChange(runtime.sessionId, state, { seq });
       }
     }
   }
@@ -1985,16 +1991,16 @@ export class ChannelsEngine {
    * holds and never blind-delivers, so the re-enqueue cannot loop into a paste.
    */
   private reenqueueStuck(runtime: MemberRuntime, seqs: number[]): boolean {
-    const dir = this.queueDir(runtime.tmuxSession);
+    const dir = this.queueDir(runtime.sessionId);
     let revived = false;
     for (const seq of seqs) {
-      if (!retryStuckItem(this.options.home, runtime.tmuxSession, seq)) {
+      if (!retryStuckItem(this.options.home, runtime.sessionId, seq)) {
         continue; // no stuck file (already dropped / never marked) — skip
       }
       const item = readQueueItem(dir, `${String(seq).padStart(10, '0')}.${EXT_QUEUED}`);
       if (item && !runtime.queue.some((queued) => queued.seq === item.seq)) {
         runtime.queue.push(item);
-        this.pushQueuedDeliveryEvent(runtime.tmuxSession, item);
+        this.pushQueuedDeliveryEvent(runtime.sessionId, item);
         revived = true;
       }
     }
@@ -2052,7 +2058,7 @@ export class ChannelsEngine {
       if (this.disposed) {
         return;
       }
-      const snap = await this.probe.probe(runtime.tmuxSession, { source: 'verify', forceFresh: true });
+      const snap = await this.probe.probe(runtime.sessionId, { source: 'verify', forceFresh: true });
       if (snap.working) {
         runtime.unobservableRetries = 0; // a confirmed delivery resets the auto-retry budget
         this.setSubmitState(runtime, 'submitted', seqs); // behavioural proof the prompt ran
@@ -2073,7 +2079,7 @@ export class ChannelsEngine {
         if (snap.footerHash !== preFooterHash) {
           footerChanged = true; // the box reflected the paste at some point
         }
-        await this.sendEnter(runtime.tmuxSession); // safe no-op; submits an eaten Enter
+        await this.sendEnter(runtime.sessionId); // safe no-op; submits an eaten Enter
         continue;
       }
       // unrecognized-shape / unobservable / empty-capture / booting / offline:
@@ -2115,24 +2121,24 @@ export class ChannelsEngine {
    * session. Unlike notification-only channel dispatches, these prompts wait
    * for a fresh ready-pane snapshot before delivery.
    */
-  enqueuePrompt(tmuxSession: string, channel: string, prompt: string, idHint: string): void {
+  enqueuePrompt(sessionId: string, channel: string, prompt: string, idHint: string): void {
     if (this.disposed || this.passive) {
       return;
     }
-    this.enqueue(tmuxSession, {
+    this.enqueue(sessionId, {
       channel,
       messageId: `${idHint}-${Date.now().toString(36)}`,
       author: 'desk',
       prompt,
-      target: tmuxSession,
+      target: sessionId,
       preview: prompt.split('\n')[0]?.slice(0, 140) ?? '',
       kind: 'prompt'
     });
   }
 
   /** A member whose session was just (re)started is at a fresh prompt. */
-  markIdle(tmuxSession: string): void {
-    const runtime = this.members.get(tmuxSession);
+  markIdle(sessionId: string): void {
+    const runtime = this.members.get(sessionId);
     if (runtime) {
       runtime.busy = false;
       runtime.awaitingApproval = false;
@@ -2142,19 +2148,19 @@ export class ChannelsEngine {
   }
 
   /** Operator pause: intentional hold, never counted as blocked/stuck. */
-  pauseSession(tmuxSession: string, reason?: string, pausedAt = new Date().toISOString()): void {
-    const runtime = this.runtime(tmuxSession);
+  pauseSession(sessionId: string, reason?: string, pausedAt = new Date().toISOString()): void {
+    const runtime = this.runtime(sessionId);
     const cleanReason = reason?.replace(/\s+/g, ' ').trim();
     runtime.pausedByOperator = { since: pausedAt, reason: cleanReason || undefined };
     runtime.busy = false;
     runtime.awaitingApproval = false;
     this.resetHold(runtime);
-    this.pushDeliveryEvent({ kind: 'paused', tmuxSession, reason: cleanReason || undefined });
+    this.pushDeliveryEvent({ kind: 'paused', sessionId, reason: cleanReason || undefined });
   }
 
   /** Clears an operator pause and resumes normal gated draining. */
-  resumeSession(tmuxSession: string): void {
-    const runtime = this.members.get(tmuxSession);
+  resumeSession(sessionId: string): void {
+    const runtime = this.members.get(sessionId);
     if (!runtime) {
       return;
     }
@@ -2162,22 +2168,22 @@ export class ChannelsEngine {
     runtime.busy = false;
     runtime.awaitingApproval = false;
     this.resetHold(runtime);
-    this.pushDeliveryEvent({ kind: 'resumed', tmuxSession });
+    this.pushDeliveryEvent({ kind: 'resumed', sessionId });
     void this.drain(runtime, false);
   }
 
-  dropQueue(tmuxSession: string): void {
+  dropQueue(sessionId: string): void {
     // Drop durable stuck items too — dropQueue clears the whole backlog,
     // including .stuck-* surfaced for the operator (works even with no runtime).
-    for (const stuck of listStuckItems(this.options.home, tmuxSession)) {
-      if (dropStuckItem(this.options.home, tmuxSession, stuck.seq)) {
-        this.pushDroppedDeliveryEvent(tmuxSession, stuck.item);
+    for (const stuck of listStuckItems(this.options.home, sessionId)) {
+      if (dropStuckItem(this.options.home, sessionId, stuck.seq)) {
+        this.pushDroppedDeliveryEvent(sessionId, stuck.item);
       }
     }
-    const runtime = this.members.get(tmuxSession);
+    const runtime = this.members.get(sessionId);
     if (runtime) {
       for (const item of runtime.queue) {
-        this.pushDroppedDeliveryEvent(tmuxSession, item);
+        this.pushDroppedDeliveryEvent(sessionId, item);
       }
       runtime.queue = [];
       this.resetHold(runtime);
@@ -2186,8 +2192,8 @@ export class ChannelsEngine {
   }
 
   /** Ops console: remove a single queued item by seq. Returns whether it existed. */
-  dropMessage(tmuxSession: string, seq: number): boolean {
-    const runtime = this.members.get(tmuxSession);
+  dropMessage(sessionId: string, seq: number): boolean {
+    const runtime = this.members.get(sessionId);
     if (runtime) {
       const before = runtime.queue.length;
       const headSeq = runtime.queue[0]?.seq;
@@ -2195,7 +2201,7 @@ export class ChannelsEngine {
       runtime.queue = runtime.queue.filter((item) => item.seq !== seq);
       if (runtime.queue.length !== before) {
         if (dropped) {
-          this.pushDroppedDeliveryEvent(tmuxSession, dropped);
+          this.pushDroppedDeliveryEvent(sessionId, dropped);
         }
         if (seq === headSeq) {
           this.resetHold(runtime);
@@ -2205,10 +2211,10 @@ export class ChannelsEngine {
       }
     }
     // Not in the runtime queue — maybe a durable stuck item on disk.
-    const stuck = listStuckItems(this.options.home, tmuxSession).find((item) => item.seq === seq);
-    const dropped = dropStuckItem(this.options.home, tmuxSession, seq);
+    const stuck = listStuckItems(this.options.home, sessionId).find((item) => item.seq === seq);
+    const dropped = dropStuckItem(this.options.home, sessionId, seq);
     if (dropped && stuck) {
-      this.pushDroppedDeliveryEvent(tmuxSession, stuck.item);
+      this.pushDroppedDeliveryEvent(sessionId, stuck.item);
     }
     return dropped;
   }
@@ -2218,12 +2224,12 @@ export class ChannelsEngine {
    * Operator override — can land inside a working agent's turn — so it is only
    * reachable from the console behind a confirm. Returns whether the push landed.
    */
-  async forceDeliver(tmuxSession: string, seq?: number): Promise<boolean> {
+  async forceDeliver(sessionId: string, seq?: number): Promise<boolean> {
     if (this.disposed || this.passive) {
       return false;
     }
-    const runtime = this.members.get(tmuxSession);
-    if (!runtime || !this.sessionRunning(tmuxSession)) {
+    const runtime = this.members.get(sessionId);
+    if (!runtime || !this.sessionRunning(sessionId)) {
       return false;
     }
     if (seq !== undefined) {
@@ -2235,7 +2241,7 @@ export class ChannelsEngine {
       }
     } else if (runtime.queue.length === 0) {
       // No seq + nothing queued — revive the head durable stuck item.
-      const stuck = listStuckItems(this.options.home, tmuxSession)[0];
+      const stuck = listStuckItems(this.options.home, sessionId)[0];
       if (!stuck || !this.reenqueueStuck(runtime, [stuck.seq])) {
         return false;
       }
@@ -2263,8 +2269,8 @@ export class ChannelsEngine {
   }
 
   /** Ops console: queued prompts for a session, body-trimmed to a preview. */
-  queuedItems(tmuxSession: string): QueuedItemMeta[] {
-    const runtime = this.members.get(tmuxSession);
+  queuedItems(sessionId: string): QueuedItemMeta[] {
+    const runtime = this.members.get(sessionId);
     if (!runtime) {
       return [];
     }
@@ -2280,8 +2286,8 @@ export class ChannelsEngine {
   }
 
   /** Ops console: durable unobservable stuck files are actionable; legacy submit/paste stuck files stay historical. */
-  private blockedItems(tmuxSession: string): BlockedItemMeta[] {
-    return listStuckItems(this.options.home, tmuxSession)
+  private blockedItems(sessionId: string): BlockedItemMeta[] {
+    return listStuckItems(this.options.home, sessionId)
       .filter((stuck) => stuck.kind === 'unobservable')
       .map((stuck) => ({
         seq: stuck.seq,
@@ -2295,26 +2301,26 @@ export class ChannelsEngine {
   }
 
   /** Live deliverability of a session's pane (drives the ops-console badge). */
-  private async classifyPane(tmuxSession: string, options: { forceFresh?: boolean } = {}): Promise<PaneState> {
+  private async classifyPane(sessionId: string, options: { forceFresh?: boolean } = {}): Promise<PaneState> {
     const snap = options.forceFresh
-      ? await this.probe.probe(tmuxSession, { source: 'inspect', forceFresh: true })
-      : await this.diagnosticProbe(tmuxSession);
+      ? await this.probe.probe(sessionId, { source: 'inspect', forceFresh: true })
+      : await this.diagnosticProbe(sessionId);
     return this.paneStateFromSnapshot(snap);
   }
 
   /** Ops console: full per-session diagnostic, including a live pane probe. */
-  async inspectSession(tmuxSession: string): Promise<SessionDiagnostic> {
-    const runtime = this.members.get(tmuxSession);
-    const paneState = await this.classifyPane(tmuxSession);
+  async inspectSession(sessionId: string): Promise<SessionDiagnostic> {
+    const runtime = this.members.get(sessionId);
+    const paneState = await this.classifyPane(sessionId);
     if (runtime && runtime.queue.length > 0 && paneState === 'ready') {
       this.resetHold(runtime);
     }
     const block = this.runtimeBlock(runtime);
-    const stuckItems = this.blockedItems(tmuxSession);
+    const stuckItems = this.blockedItems(sessionId);
     const status = runtime ? this.deriveStatus(runtime, block) : 'idle';
     const pause = runtime?.pausedByOperator;
     return {
-      tmuxSession,
+      sessionId,
       paneState,
       status,
       busy: runtime?.busy ?? false,
@@ -2330,14 +2336,14 @@ export class ChannelsEngine {
       ...block,
       droppedQueueItems: runtime?.droppedQueueItems ?? 0,
       blockedItems: stuckItems,
-      items: this.queuedItems(tmuxSession),
-      ...this.resumeInfo(tmuxSession)
+      items: this.queuedItems(sessionId),
+      ...this.resumeInfo(sessionId)
     };
   }
 
   /** Ops console: diagnostics for every tracked session (probes run concurrently). */
   async inspectAll(): Promise<SessionDiagnostic[]> {
-    return Promise.all([...this.members.keys()].map((tmuxSession) => this.inspectSession(tmuxSession)));
+    return Promise.all([...this.members.keys()].map((sessionId) => this.inspectSession(sessionId)));
   }
 
   /**
@@ -2351,12 +2357,12 @@ export class ChannelsEngine {
       if (runtime.queue.length === 0) {
         continue;
       }
-      if ((await this.classifyPane(runtime.tmuxSession, { forceFresh: true })) === 'ready') {
+      if ((await this.classifyPane(runtime.sessionId, { forceFresh: true })) === 'ready') {
         runtime.busy = false;
         runtime.awaitingApproval = false;
         this.resetHold(runtime);
         void this.drain(runtime, false);
-        nudged.push(runtime.tmuxSession);
+        nudged.push(runtime.sessionId);
       }
     }
     return nudged;
@@ -2375,10 +2381,10 @@ export class ChannelsEngine {
    * delivery authority.
    */
   private effectiveBlock(
-    tmuxSession: string,
+    sessionId: string,
     runtime: MemberRuntime | undefined
   ): Pick<SessionDiagnostic, 'deliveryBlocked' | 'blockedReason' | 'blockedSince' | 'blockedCycles' | 'blockedHeadSeq'> {
-    void tmuxSession;
+    void sessionId;
     return this.runtimeBlock(runtime);
   }
 
@@ -2419,10 +2425,10 @@ export class ChannelsEngine {
    */
   lifecycleStates(): LifecycleState[] {
     return [...this.members.values()].map((runtime) => {
-      const block = this.effectiveBlock(runtime.tmuxSession, runtime);
-      const stuckItems = this.blockedItems(runtime.tmuxSession);
+      const block = this.effectiveBlock(runtime.sessionId, runtime);
+      const stuckItems = this.blockedItems(runtime.sessionId);
       return {
-        tmuxSession: runtime.tmuxSession,
+        sessionId: runtime.sessionId,
         busy: runtime.busy,
         awaitingApproval: runtime.awaitingApproval,
         queued: runtime.queue.length,
@@ -2449,8 +2455,8 @@ export class ChannelsEngine {
     return this.activitySeq;
   }
 
-  private resumeInfo(tmuxSession: string): Partial<SessionResumeInfo> {
-    const info = this.sessionInfo(tmuxSession);
+  private resumeInfo(sessionId: string): Partial<SessionResumeInfo> {
+    const info = this.sessionInfo(sessionId);
     if (!info) {
       return {};
     }

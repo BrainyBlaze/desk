@@ -65,7 +65,7 @@ export type DeliveryEventKind =
 export interface DeliveryEvent {
   seq: number;
   at: string;
-  tmuxSession?: string;
+  sessionId?: string;
   channel?: string;
   messageId?: string;
   kind: DeliveryEventKind;
@@ -76,7 +76,7 @@ export interface DeliveryEvent {
 }
 
 export interface DeliveryEventFilter {
-  tmuxSession?: string;
+  sessionId?: string;
   channel?: string;
   sinceSeq?: number;
   kind?: DeliveryEventKind;
@@ -172,7 +172,7 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
     if (typeof parsed.seq !== 'number' || typeof parsed.kind !== 'string') {
       continue;
     }
-    if (filter.tmuxSession && parsed.tmuxSession !== filter.tmuxSession) {
+    if (filter.sessionId && parsed.sessionId !== filter.sessionId) {
       continue;
     }
     if (filter.channel && parsed.channel !== filter.channel) {

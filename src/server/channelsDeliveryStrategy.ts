@@ -8,7 +8,7 @@ export type DeliveryDecision =
 export type NativeDeliveryState = 'ready' | 'busy' | 'booting' | 'offline' | 'approval';
 
 export interface DeliveryStrategy {
-  decide(tmuxSession: string): Promise<DeliveryDecision>;
+  decide(sessionId: string): Promise<DeliveryDecision>;
 }
 
 function blockReasonFromSnapshot(snapshot: SessionProbeSnapshot): DeliveryBlockReason {
@@ -43,8 +43,8 @@ function blockReasonFromSnapshot(snapshot: SessionProbeSnapshot): DeliveryBlockR
 export class PromptDeliveryStrategy implements DeliveryStrategy {
   constructor(private readonly probe: SessionProbe) {}
 
-  async decide(tmuxSession: string): Promise<DeliveryDecision> {
-    const snapshot = await this.probe.probe(tmuxSession, { source: 'drain', forceFresh: true });
+  async decide(sessionId: string): Promise<DeliveryDecision> {
+    const snapshot = await this.probe.probe(sessionId, { source: 'drain', forceFresh: true });
     if (snapshot.paneState === 'ready') {
       return { deliver: true, snapshot };
     }
@@ -59,10 +59,10 @@ export class NotificationDeliveryStrategy implements DeliveryStrategy {
 }
 
 export class NativePromptDeliveryStrategy implements DeliveryStrategy {
-  constructor(private readonly state: (tmuxSession: string) => NativeDeliveryState | Promise<NativeDeliveryState>) {}
+  constructor(private readonly state: (sessionId: string) => NativeDeliveryState | Promise<NativeDeliveryState>) {}
 
-  async decide(tmuxSession: string): Promise<DeliveryDecision> {
-    const state = await this.state(tmuxSession);
+  async decide(sessionId: string): Promise<DeliveryDecision> {
+    const state = await this.state(sessionId);
     if (state === 'ready') {
       return { deliver: true };
     }

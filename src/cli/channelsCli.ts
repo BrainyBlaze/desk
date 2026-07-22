@@ -10,6 +10,7 @@ import {
   resolveChannelsHome
 } from '../server/channelsStore.js';
 import { parseConversation, type ChannelMessage } from '../server/channelsProtocol.js';
+import { nativeIdForTmuxSession } from '../server/runtime/nativeSessionControl.js';
 import { assertAllowedOption, requireOptionValue } from './args.js';
 
 /**
@@ -53,12 +54,18 @@ function apiBase(): string {
 }
 
 /**
- * The tmux session this CLI runs inside (empty outside tmux). Resolved via
+ * This CLI's own session identity (empty when not desk-hosted). The durable
+ * DESK_SESSION_ID env is primary; the tmux introspection below is the
+ * pre-rename fallback (dies at the no-tmux gate). Resolved via
  * TMUX_PANE: a bare `display-message` resolves "current" from the most
  * recently used *client*, which can be a different session entirely when the
  * operator is attached elsewhere — the pane id is the only honest anchor.
  */
-export function currentTmuxSession(): string {
+export function currentSessionKey(): string {
+  const durable = process.env.DESK_SESSION_ID;
+  if (durable) {
+    return durable;
+  }
   if (!process.env.TMUX && !process.env.TMUX_PANE) {
     return '';
   }
@@ -215,7 +222,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         throw new Error('usage: desk channels post <channel> [--thread <id>] [--as <member>] "<body>"');
       }
 
-      const tmux = currentTmuxSession();
+      const tmux = currentSessionKey();
       try {
         const result = await apiPost('/api/channels/post', {
           channel,
@@ -328,8 +335,10 @@ function resolveAuthorOffline(home: string, channel: string, tmux: string): stri
     const membersDir = join(home, channel, '_members');
     if (existsSync(membersDir)) {
       try {
+        // Mixed-era: a pre-rename host resolves its tmux name — normalize to
+        // the durable id members key by (identity for new-era values).
         const detail = readChannelDetail(home, channel);
-        const member = detail.members.find((candidate) => candidate.tmuxSession === tmux);
+        const member = detail.members.find((candidate) => candidate.sessionId === nativeIdForTmuxSession(tmux));
         if (member) {
           return member.name;
         }

@@ -28,7 +28,7 @@ export type ProbeBlockedReason =
 export type ProbeSource = 'drain' | 'verify' | 'signal' | 'inspect' | 'test';
 
 export interface SessionProbeSnapshot {
-  tmuxSession: string;
+  sessionId: string;
   agentKind?: string;
   source: ProbeSource;
   observedAt: string;
@@ -42,20 +42,20 @@ export interface SessionProbeSnapshot {
 }
 
 export interface ClassifyPaneOptions {
-  tmuxSession?: string;
+  sessionId?: string;
   agentKind?: string;
   source?: ProbeSource;
   observedAt?: string;
 }
 
 export interface SessionProbeOptions {
-  sessionRunning: (tmuxSession: string) => boolean | Promise<boolean>;
-  sessionCreatedAt: (tmuxSession: string) => number | null | Promise<number | null>;
-  capturePane: (tmuxSession: string) => string | null | Promise<string | null>;
+  sessionRunning: (sessionId: string) => boolean | Promise<boolean>;
+  sessionCreatedAt: (sessionId: string) => number | null | Promise<number | null>;
+  capturePane: (sessionId: string) => string | null | Promise<string | null>;
   bootGraceMs?: number;
   ttlMs?: number;
   now?: () => number;
-  resolveAgentKind?: (tmuxSession: string) => string | undefined;
+  resolveAgentKind?: (sessionId: string) => string | undefined;
 }
 
 export interface ProbeOptions {
@@ -65,8 +65,8 @@ export interface ProbeOptions {
 }
 
 export interface SessionProbe {
-  probe(tmuxSession: string, options?: ProbeOptions): Promise<SessionProbeSnapshot>;
-  clear(tmuxSession?: string): void;
+  probe(sessionId: string, options?: ProbeOptions): Promise<SessionProbeSnapshot>;
+  clear(sessionId?: string): void;
 }
 
 /** Last ~30 meaningful pane lines, matching the engine's capture normalization. */
@@ -150,7 +150,7 @@ function structuralBlockReason(paneTail: string): ProbeBlockedReason | undefined
 export function classifyPaneTail(paneTail: string, options: ClassifyPaneOptions = {}): SessionProbeSnapshot {
   const footerRegion = paneFooterRegion(paneTail);
   const base = {
-    tmuxSession: options.tmuxSession ?? '',
+    sessionId: options.sessionId ?? '',
     agentKind: options.agentKind,
     source: options.source ?? 'test',
     observedAt: options.observedAt ?? new Date().toISOString(),
@@ -180,13 +180,13 @@ export function isPaneReadyForInput(paneTail: string): boolean {
 }
 
 function stateSnapshot(
-  tmuxSession: string,
+  sessionId: string,
   paneState: ProbePaneState,
   options: Required<Pick<ClassifyPaneOptions, 'source' | 'observedAt'>> & Pick<ClassifyPaneOptions, 'agentKind'>,
   blockedReason?: ProbeBlockedReason
 ): SessionProbeSnapshot {
   return {
-    tmuxSession,
+    sessionId,
     agentKind: options.agentKind,
     source: options.source,
     observedAt: options.observedAt,
@@ -207,59 +207,59 @@ export function createSessionProbe(options: SessionProbeOptions): SessionProbe {
   const cache = new Map<string, { at: number; snapshot: SessionProbeSnapshot }>();
   const inFlight = new Map<string, Promise<SessionProbeSnapshot>>();
 
-  const readFresh = async (tmuxSession: string, probeOptions: ProbeOptions): Promise<SessionProbeSnapshot> => {
+  const readFresh = async (sessionId: string, probeOptions: ProbeOptions): Promise<SessionProbeSnapshot> => {
     const observedAt = new Date(now()).toISOString();
     const source = probeOptions.source ?? 'inspect';
-    const agentKind = probeOptions.agentKind ?? options.resolveAgentKind?.(tmuxSession);
-    if (!(await options.sessionRunning(tmuxSession))) {
-      return stateSnapshot(tmuxSession, 'offline', { source, observedAt, agentKind });
+    const agentKind = probeOptions.agentKind ?? options.resolveAgentKind?.(sessionId);
+    if (!(await options.sessionRunning(sessionId))) {
+      return stateSnapshot(sessionId, 'offline', { source, observedAt, agentKind });
     }
-    const createdAt = await options.sessionCreatedAt(tmuxSession);
+    const createdAt = await options.sessionCreatedAt(sessionId);
     if (createdAt !== null && now() - createdAt * 1000 < bootGraceMs) {
-      return stateSnapshot(tmuxSession, 'booting', { source, observedAt, agentKind });
+      return stateSnapshot(sessionId, 'booting', { source, observedAt, agentKind });
     }
-    const pane = await options.capturePane(tmuxSession);
+    const pane = await options.capturePane(sessionId);
     if (pane === null) {
-      return stateSnapshot(tmuxSession, 'unobservable', { source, observedAt, agentKind }, 'capture-failed');
+      return stateSnapshot(sessionId, 'unobservable', { source, observedAt, agentKind }, 'capture-failed');
     }
-    return classifyPaneTail(tailPaneCapture(pane), { tmuxSession, source, observedAt, agentKind });
+    return classifyPaneTail(tailPaneCapture(pane), { sessionId, source, observedAt, agentKind });
   };
 
   return {
-    async probe(tmuxSession, probeOptions = {}) {
-      const cached = cache.get(tmuxSession);
+    async probe(sessionId, probeOptions = {}) {
+      const cached = cache.get(sessionId);
       if (!probeOptions.forceFresh && cached && now() - cached.at < ttlMs) {
         return cached.snapshot;
       }
       if (!probeOptions.forceFresh) {
-        const existing = inFlight.get(tmuxSession);
+        const existing = inFlight.get(sessionId);
         if (existing) {
           return existing;
         }
       }
       const startedAt = now();
-      const pending = readFresh(tmuxSession, probeOptions)
+      const pending = readFresh(sessionId, probeOptions)
         .then((snapshot) => {
-          const current = cache.get(tmuxSession);
+          const current = cache.get(sessionId);
           if (!current || startedAt >= current.at) {
-            cache.set(tmuxSession, { at: startedAt, snapshot });
+            cache.set(sessionId, { at: startedAt, snapshot });
           }
           return snapshot;
         })
         .finally(() => {
-          if (inFlight.get(tmuxSession) === pending) {
-            inFlight.delete(tmuxSession);
+          if (inFlight.get(sessionId) === pending) {
+            inFlight.delete(sessionId);
           }
         });
       if (!probeOptions.forceFresh) {
-        inFlight.set(tmuxSession, pending);
+        inFlight.set(sessionId, pending);
       }
       return pending;
     },
-    clear(tmuxSession) {
-      if (tmuxSession) {
-        cache.delete(tmuxSession);
-        inFlight.delete(tmuxSession);
+    clear(sessionId) {
+      if (sessionId) {
+        cache.delete(sessionId);
+        inFlight.delete(sessionId);
         return;
       }
       cache.clear();

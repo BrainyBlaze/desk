@@ -46,12 +46,12 @@ const message = (id: string, author: string, body: string): ChannelMessage => ({
   hasEndTurn: true
 });
 
-const member = (name: string, tmuxSession: string, type = 'claude-code'): ChannelMember => ({
+const member = (name: string, sessionId: string, type = 'claude-code'): ChannelMember => ({
   name,
   type,
   status: 'active',
   joined: '2026-06-11 12:00:00',
-  tmuxSession
+  sessionId
 });
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
@@ -118,11 +118,11 @@ describe('ChannelsEngine delivery gating', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), tmuxSession: undefined }];
+  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), sessionId: undefined }];
   const multiMembers = [
     member('alpha', 'tmux-a'),
     member('beta', 'tmux-b'),
-    { ...member('human', '', 'human'), tmuxSession: undefined }
+    { ...member('human', '', 'human'), sessionId: undefined }
   ];
 
   it('force-delivers subsequent notifications even while the pane looks working', async () => {
@@ -137,7 +137,7 @@ describe('ChannelsEngine delivery gating', () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha again') }, members);
     await waitFor(() => sent.length === 2);
     expect(sent[1].text).toContain('msg-2-bbbb');
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({ queued: 0 });
+    expect(engine.lifecycleStates().find((state) => state.sessionId === 'tmux-a')).toMatchObject({ queued: 0 });
   });
 
   it('force-delivers notifications even while diagnostics see an approval menu', async () => {
@@ -150,7 +150,7 @@ describe('ChannelsEngine delivery gating', () => {
     engine.handleAgentSignal('tmux-a', 'approval-requested');
     await waitFor(() => sent.length === 2);
     expect(sent[1].text).toContain('msg-2-bbbb');
-    await waitFor(() => engine.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.awaitingApproval === true);
+    await waitFor(() => engine.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.awaitingApproval === true);
   });
 
   it('does not use hook presence as a regular delivery gate', async () => {
@@ -326,7 +326,7 @@ describe('ChannelsEngine delivery gating', () => {
     });
     await flush();
     expect(sentAfterRestart).toHaveLength(0);
-    expect(revived.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({
+    expect(revived.lifecycleStates().find((state) => state.sessionId === 'tmux-a')).toMatchObject({
       status: 'paused',
       queued: 1
     });
@@ -551,7 +551,7 @@ describe('ChannelsEngine delivery gating', () => {
         }
       ]);
       eng.pauseSession('tmux-a');
-      expect(eng.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.blockedItemCount).toBe(1);
+      expect(eng.lifecycleStates().find((state) => state.sessionId === 'tmux-a')?.blockedItemCount).toBe(1);
       eng.dispose();
     });
 
@@ -680,18 +680,18 @@ describe('ChannelsEngine delivery gating', () => {
     const events = readDeliveryEvents(home);
     expect(events.map((event) => event.kind)).toEqual(expect.arrayContaining(['queued', 'delivering', 'submitted']));
     expect(events.find((event) => event.kind === 'queued')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-1',
       preview: '@alpha history'
     });
     expect(events.find((event) => event.kind === 'delivering')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-1'
     });
     expect(events.find((event) => event.kind === 'submitted')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-1'
     });
@@ -725,11 +725,11 @@ describe('ChannelsEngine delivery gating', () => {
       expect.arrayContaining(['paused', 'resumed', 'queued', 'dropped', 'approval-requested', 'input-requested'])
     );
     expect(events.find((event) => event.kind === 'paused')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       reason: 'operator review'
     });
     expect(events.find((event) => event.kind === 'dropped')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-2'
     });
@@ -819,7 +819,7 @@ describe('ChannelsEngine delivery gating', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 80));
-    const state = restored.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a');
+    const state = restored.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a');
     expect(pushed).toEqual([]);
     expect(state).toMatchObject({
       status: 'paused',
@@ -842,8 +842,8 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
-      sessionInfo: (tmuxSession) =>
-        tmuxSession === 'tmux-a'
+      sessionInfo: (sessionId) =>
+        sessionId === 'tmux-a'
           ? {
               sessionName: 'alpha',
               agent: 'opencode',
@@ -1556,13 +1556,13 @@ describe('ChannelsEngine delivery gating', () => {
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-life-aaaa', 'human', 'hi @alpha') }, members);
     await flush();
-    expect(eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.status).toBe('working'); // busy after the delivery claim
+    expect(eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.status).toBe('working'); // busy after the delivery claim
     // An approval MENU on the live pane -> probe-derived awaiting-approval. A bare
     // signal no longer sets the flag; the re-probe it triggers reads the menu.
     pane = APPROVAL_PANE;
     eng.handleAgentSignal('tmux-a', 'approval-requested');
-    await waitFor(() => eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.status === 'awaiting-approval', 1000);
-    expect(eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.status).toBe('awaiting-approval');
+    await waitFor(() => eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.status === 'awaiting-approval', 1000);
+    expect(eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.status).toBe('awaiting-approval');
     eng.dispose();
   });
 
@@ -1579,7 +1579,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
-    const ls = eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a');
+    const ls = eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a');
     expect(ls?.status).toBe('idle');
     expect(ls?.deliveryBlocked).toBe(false);
     expect(ls?.blockedItemCount).toBe(0);
@@ -1599,8 +1599,8 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '' // empty-capture -> drain holds, never ready
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-grd-aaaa', 'human', 'hi @alpha') }, members);
-    await waitFor(() => eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.queued === 0);
-    const early = eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a');
+    await waitFor(() => eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.queued === 0);
+    const early = eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a');
     expect(early?.deliveryBlocked).toBe(false);
     expect(early?.status).not.toBe('blocked');
     eng.dispose();
@@ -1694,7 +1694,7 @@ describe('ChannelsEngine delivery gating', () => {
     engine.handleAgentSignal('tmux-a', 'turn-complete');
     await flush();
     expect(sent).toHaveLength(1);
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.queued).toBe(0);
+    expect(engine.lifecycleStates().find((state) => state.sessionId === 'tmux-a')?.queued).toBe(0);
   });
 
   it('single-engine guard: a second engine for the same home goes passive', async () => {
@@ -1819,7 +1819,7 @@ describe('ChannelsEngine delivery gating', () => {
       channel: 'ops',
       goal: 'keep the ship flying',
       handle: 'beta',
-      members: [member('alpha', 'tmux-a'), member('beta', 'tmux-b'), { ...member('human', '', 'human'), tmuxSession: undefined }],
+      members: [member('alpha', 'tmux-a'), member('beta', 'tmux-b'), { ...member('human', '', 'human'), sessionId: undefined }],
       messageCount: 7,
       home: '/home/x/.config/desk/channels'
     });
@@ -1895,7 +1895,7 @@ describe('ChannelsEngine delivery gating', () => {
       pumpIntervalMs: 10,
       enterVerifyDelayMs: 1,
       sendText: async () => {
-        busyAtSend = reconciling.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.busy;
+        busyAtSend = reconciling.lifecycleStates().find((state) => state.sessionId === 'tmux-a')?.busy;
         return true;
       },
       sendEnter: async () => true,
@@ -1903,7 +1903,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
-    const busyOf = () => reconciling.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy;
+    const busyOf = () => reconciling.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.busy;
     try {
       reconciling.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-r-aaaa', 'human', '@alpha go') }, members);
       await waitFor(() => busyAtSend !== undefined);
@@ -1936,7 +1936,7 @@ describe('ChannelsEngine delivery gating', () => {
     await flush();
     pane = '✻ Working… (esc to interrupt)'; // genuinely mid-turn now (set before any pump tick)
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(working.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy).toBe(true);
+    expect(working.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.busy).toBe(true);
     working.dispose();
   });
 
@@ -1954,7 +1954,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
-    const busyOf = () => eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy;
+    const busyOf = () => eng.lifecycleStates().find((s) => s.sessionId === 'tmux-a')?.busy;
     // Deliver then release → a runtime that is idle with an empty queue.
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-o-aaaa', 'human', '@alpha go') }, members);
     await flush();
@@ -2184,7 +2184,7 @@ describe('channels store', () => {
       );
     }
     await flush();
-    const state = blocked.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a');
+    const state = blocked.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a');
     expect(state?.queued).toBe(50);
     expect((await blocked.inspectSession('tmux-a')).droppedQueueItems).toBe(10);
     blocked.dispose();
@@ -2500,7 +2500,7 @@ describe('ChannelsEngine digest coalescing', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), tmuxSession: undefined }];
+  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), sessionId: undefined }];
 
   it('coalesces a multi-message backlog into one digest delivery', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
@@ -2513,7 +2513,7 @@ describe('ChannelsEngine digest coalescing', () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha four') }, members);
     await flush();
     expect(sent).toHaveLength(1);
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({ queued: 3 });
+    expect(engine.lifecycleStates().find((state) => state.sessionId === 'tmux-a')).toMatchObject({ queued: 3 });
 
     engine.resumeSession('tmux-a');
     await waitFor(() => sent.length === 2); // ONE digest, not three deliveries
@@ -2525,7 +2525,7 @@ describe('ChannelsEngine digest coalescing', () => {
     expect(digest).toContain('1 from @human');
     expect(digest).toContain('--as alpha');
     expect(digest).not.toContain('@alpha two'); // bodies are NOT inlined — agent reads the channel
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({ queued: 0 });
+    expect(engine.lifecycleStates().find((state) => state.sessionId === 'tmux-a')).toMatchObject({ queued: 0 });
 
     // nothing further to deliver on the next release
     engine.handleAgentSignal('tmux-a', 'turn-complete');

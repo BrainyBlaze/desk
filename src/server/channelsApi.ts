@@ -111,8 +111,8 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   const sendChannelDelivery = createChannelDeliverySender({
     agentSurfaceBroker: options.agentSurfaceBroker,
     ...(nativeTransport ? { terminalSender: nativeTransport.sendText } : {}),
-    onNonRetryableNativeFailure: (tmuxSession, error) => {
-      pauseEngineSession(home, engine, tmuxSession, `native channel delivery failed (${error.code}): ${error.message}`);
+    onNonRetryableNativeFailure: (sessionId, error) => {
+      pauseEngineSession(home, engine, sessionId, `native channel delivery failed (${error.code}): ${error.message}`);
     }
   });
   engine = new ChannelsEngine({
@@ -123,10 +123,10 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     // the set of .delivering files at this point is exactly the digest fan-out
     // for this single failed send. The pump then re-drains the reverted items
     // when the session becomes reachable again.
-    sendText: async (tmuxSession, text) => {
-      const ok = await sendChannelDelivery(tmuxSession, text);
+    sendText: async (sessionId, text) => {
+      const ok = await sendChannelDelivery(sessionId, text);
       if (!ok) {
-        revertAllDeliveringToJson(home, tmuxSession);
+        revertAllDeliveringToJson(home, sessionId);
       }
       return ok;
     },
@@ -135,34 +135,31 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     // states from verifySubmitted). Each helper is idempotent — a re-fire
     // after restart no-ops rather than throws, so crash-mid-transition leaves
     // a clean durable state the restore pass classifies correctly.
-    onSubmitStateChange: (tmuxSession, state, context) => {
+    onSubmitStateChange: (sessionId, state, context) => {
       switch (state) {
         case 'delivering':
-          claimDelivering(home, tmuxSession, context.seq);
+          claimDelivering(home, sessionId, context.seq);
           break;
         case 'submitted':
-          confirmDelivered(home, tmuxSession, context.seq);
+          confirmDelivered(home, sessionId, context.seq);
           break;
         case 'delivery-ack-timeout':
-          confirmDelivered(home, tmuxSession, context.seq);
+          confirmDelivered(home, sessionId, context.seq);
           break;
         case 'submit-stuck-paste':
-          markStuck(home, tmuxSession, context.seq, 'paste');
+          markStuck(home, sessionId, context.seq, 'paste');
           break;
         case 'submit-stuck-submit':
-          markStuck(home, tmuxSession, context.seq, 'submit');
+          markStuck(home, sessionId, context.seq, 'submit');
           break;
         case 'submit-stuck-unobservable':
-          markStuck(home, tmuxSession, context.seq, 'unobservable');
+          markStuck(home, sessionId, context.seq, 'unobservable');
           break;
       }
     },
     onChannelMessage: (channel, file, message, pingsHuman) => {
-      // TRANSITIONAL: member manifests carry tmuxSession until the member
-      // schema flip; the tracker keys sessionId, so normalize here.
-      const authorSession = nativeIdForTmuxSession(
-        listChannelMembers(home, channel).find((member) => member.name === message.author)?.tmuxSession ?? ''
-      );
+      const authorSession =
+        listChannelMembers(home, channel).find((member) => member.name === message.author)?.sessionId ?? '';
       const preview = message.body.replace(/\s+/g, ' ').slice(0, 200);
       attentionTracker.pushEvent(
         authorSession,
@@ -175,8 +172,8 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
         }
       );
     },
-    sessionInfo: (tmuxSession) => {
-      const spec = loadDeskCached({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+    sessionInfo: (sessionId) => {
+      const spec = loadDeskCached({}).sessions.find((candidate) => candidate.sessionId === sessionId);
       if (!spec) {
         return undefined;
       }
@@ -189,7 +186,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
         uiMode: spec.uiMode
       };
     },
-    nativeSessionState: (tmuxSession) => options.agentSurfaceBroker?.nativeDeliveryState(tmuxSession) ?? 'offline',
+    nativeSessionState: (sessionId) => options.agentSurfaceBroker?.nativeDeliveryState(sessionId) ?? 'offline',
     ...(nativeTransport
       ? {
           sessionRunning: nativeTransport.sessionRunning,
@@ -201,23 +198,23 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   });
   const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
   watcher.start();
-  const removeSignalListener = addAgentSignalListener((tmuxSession, kind) => {
+  const removeSignalListener = addAgentSignalListener((sessionId, kind) => {
     if (kind === 'turn-complete' || kind === 'bell' || kind === 'approval-requested' || kind === 'input-requested') {
-      engine.handleAgentSignal(tmuxSession, kind);
+      engine.handleAgentSignal(sessionId, kind);
     }
   });
   runtime = { home, engine, watcher, removeSignalListener };
   return runtime;
 }
 
-function pauseEngineSession(home: string, engine: ChannelsEngine, tmuxSession: string, reason?: string): void {
-  const paused = persistPausedSession(home, tmuxSession, reason);
-  engine.pauseSession(tmuxSession, paused.reason, paused.pausedAt);
+function pauseEngineSession(home: string, engine: ChannelsEngine, sessionId: string, reason?: string): void {
+  const paused = persistPausedSession(home, sessionId, reason);
+  engine.pauseSession(sessionId, paused.reason, paused.pausedAt);
 }
 
-function resumeEngineSession(home: string, engine: ChannelsEngine, tmuxSession: string): void {
-  persistResumedSession(home, tmuxSession);
-  engine.resumeSession(tmuxSession);
+function resumeEngineSession(home: string, engine: ChannelsEngine, sessionId: string): void {
+  persistResumedSession(home, sessionId);
+  engine.resumeSession(sessionId);
 }
 
 /**
@@ -269,7 +266,7 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
 type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage' | 'nativeDeliveryState'>;
 
 interface ChannelDeliverySession {
-  tmuxSession: string;
+  sessionId: string;
   uiMode?: 'terminal' | 'native';
 }
 
@@ -281,41 +278,41 @@ export interface ChannelDeliveryFailure {
 
 export interface ChannelDeliverySenderOptions {
   agentSurfaceBroker?: ChannelDeliveryBroker;
-  terminalSender?: (tmuxSession: string, text: string) => Promise<boolean>;
-  lookupSession?: (tmuxSession: string) => ChannelDeliverySession | undefined;
-  onNonRetryableNativeFailure?: (tmuxSession: string, error: ChannelDeliveryFailure) => void;
+  terminalSender?: (sessionId: string, text: string) => Promise<boolean>;
+  lookupSession?: (sessionId: string) => ChannelDeliverySession | undefined;
+  onNonRetryableNativeFailure?: (sessionId: string, error: ChannelDeliveryFailure) => void;
   log?: (message: string) => void;
 }
 
-export function createChannelDeliverySender(options: ChannelDeliverySenderOptions = {}): (tmuxSession: string, text: string) => Promise<boolean> {
+export function createChannelDeliverySender(options: ChannelDeliverySenderOptions = {}): (sessionId: string, text: string) => Promise<boolean> {
   const terminalSender = options.terminalSender ?? sendTextToTmux;
   const lookupSession = options.lookupSession ?? lookupDeskSessionForDelivery;
   const log = options.log ?? ((message: string) => console.warn(message));
-  return async (tmuxSession, text) => {
-    const session = lookupSession(tmuxSession);
+  return async (sessionId, text) => {
+    const session = lookupSession(sessionId);
     if (session?.uiMode !== 'native') {
-      return terminalSender(tmuxSession, text);
+      return terminalSender(sessionId, text);
     }
     if (!options.agentSurfaceBroker) {
-      log(`native channel delivery failed for ${tmuxSession}: no agent surface broker`);
+      log(`native channel delivery failed for ${sessionId}: no agent surface broker`);
       return false;
     }
     try {
-      await options.agentSurfaceBroker.injectUserMessage(tmuxSession, text, 'channel');
+      await options.agentSurfaceBroker.injectUserMessage(sessionId, text, 'channel');
       return true;
     } catch (error) {
       const failure = channelDeliveryFailure(error);
-      log(`native channel delivery failed for ${tmuxSession}: ${failure.code}: ${failure.message}`);
+      log(`native channel delivery failed for ${sessionId}: ${failure.code}: ${failure.message}`);
       if (failure.retryable === false) {
-        options.onNonRetryableNativeFailure?.(tmuxSession, failure);
+        options.onNonRetryableNativeFailure?.(sessionId, failure);
       }
       return false;
     }
   };
 }
 
-function lookupDeskSessionForDelivery(tmuxSession: string): ChannelDeliverySession | undefined {
-  return loadDeskCached({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+function lookupDeskSessionForDelivery(sessionId: string): ChannelDeliverySession | undefined {
+  return loadDeskCached({}).sessions.find((candidate) => candidate.sessionId === sessionId);
 }
 
 function channelDeliveryFailure(error: unknown): ChannelDeliveryFailure {
@@ -383,11 +380,15 @@ function resolveAuthor(home: string, channel: string, body: Record<string, unkno
     return body.as;
   }
   if (typeof body.tmux === 'string' && body.tmux.length > 0) {
-    const member = members.find((candidate) => candidate.tmuxSession === body.tmux);
+    // Wire param name is renamed in the step-4 API window; the value is
+    // mixed-era (pre-rename hosts send the tmux name) — normalize, members
+    // key by sessionId.
+    const sessionKey = nativeIdForTmuxSession(body.tmux);
+    const member = members.find((candidate) => candidate.sessionId === sessionKey);
     if (member) {
       return member.name;
     }
-    throw new Error(`tmux session ${String(body.tmux)} is not a member of #${channel}`);
+    throw new Error(`session ${String(body.tmux)} is not a member of #${channel}`);
   }
   return 'human';
 }
@@ -449,31 +450,31 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/engine/action') {
       const body = await readJsonBody(req);
       const action = requireString(body.action, 'action');
-      const tmuxSession = typeof body.tmuxSession === 'string' ? body.tmuxSession : undefined;
+      const sessionId = typeof body.tmuxSession === 'string' ? body.tmuxSession : undefined;
       switch (action) {
         case 'mark-idle':
-          engine.markIdle(requireString(tmuxSession, 'tmuxSession'));
+          engine.markIdle(requireString(sessionId, 'tmuxSession'));
           break;
         case 'pause-session':
-          pauseEngineSession(home, engine, requireString(tmuxSession, 'tmuxSession'), typeof body.reason === 'string' ? body.reason : undefined);
+          pauseEngineSession(home, engine, requireString(sessionId, 'tmuxSession'), typeof body.reason === 'string' ? body.reason : undefined);
           break;
         case 'resume-session':
-          resumeEngineSession(home, engine, requireString(tmuxSession, 'tmuxSession'));
+          resumeEngineSession(home, engine, requireString(sessionId, 'tmuxSession'));
           break;
         case 'drop-queue':
-          engine.dropQueue(requireString(tmuxSession, 'tmuxSession'));
+          engine.dropQueue(requireString(sessionId, 'tmuxSession'));
           break;
         case 'drop-message': {
           const seq = Number(body.seq);
           if (!Number.isInteger(seq)) {
             throw new Error('seq is required');
           }
-          engine.dropMessage(requireString(tmuxSession, 'tmuxSession'), seq);
+          engine.dropMessage(requireString(sessionId, 'tmuxSession'), seq);
           break;
         }
         case 'force-deliver': {
           const seq = Number.isInteger(Number(body.seq)) ? Number(body.seq) : undefined;
-          await engine.forceDeliver(requireString(tmuxSession, 'tmuxSession'), seq);
+          await engine.forceDeliver(requireString(sessionId, 'tmuxSession'), seq);
           break;
         }
         case 'drain-ready-all':
@@ -582,11 +583,11 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/paused') {
       const body = await readJsonBody(req);
       const action = typeof body.action === 'string' ? body.action : 'pause';
-      const tmuxSession = requireString(body.tmuxSession, 'tmuxSession');
+      const sessionId = nativeIdForTmuxSession(requireString(body.tmuxSession, 'tmuxSession'));
       if (action === 'pause') {
-        pauseEngineSession(home, engine, tmuxSession, typeof body.reason === 'string' ? body.reason : undefined);
+        pauseEngineSession(home, engine, sessionId, typeof body.reason === 'string' ? body.reason : undefined);
       } else if (action === 'resume') {
-        resumeEngineSession(home, engine, tmuxSession);
+        resumeEngineSession(home, engine, sessionId);
       } else {
         throw new Error(`unknown paused action: ${action}`);
       }
@@ -695,14 +696,15 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/member-add') {
       const body = await readJsonBody(req);
       const channel = requireChannel(body.channel);
-      const tmuxSession = requireString(body.tmuxSession, 'tmuxSession');
+      const sessionId = requireString(body.tmuxSession, 'tmuxSession');
       const allSessions = loadDesk({}).sessions;
-      const spec = allSessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+      const sessionKey = nativeIdForTmuxSession(sessionId);
+      const spec = allSessions.find((candidate) => candidate.sessionId === sessionKey);
       if (!spec) {
-        sendJson(res, 404, { error: `no desk session backs tmux session ${tmuxSession}` });
+        sendJson(res, 404, { error: `no desk session backs ${sessionId}` });
         return true;
       }
-      if (listChannelMembers(home, channel).some((member) => member.tmuxSession === tmuxSession)) {
+      if (listChannelMembers(home, channel).some((member) => member.sessionId === sessionKey)) {
         sendJson(res, 409, { error: `that agent is already a member of #${channel}` });
         return true;
       }
@@ -718,7 +720,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       });
       const member = addMemberWithUniqueHandle(home, channel, handle, {
         type: MEMBER_TYPE_BY_AGENT[spec.agent ?? ''] ?? 'bash',
-        tmuxSession,
+        sessionId: sessionKey,
         agentLabel: [spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')
       });
 
@@ -735,7 +737,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       // Onboarding briefing rides the same gated queue as channel dispatches:
       // it lands when the agent's TUI is actually ready for input.
       engine.enqueuePrompt(
-        tmuxSession,
+        sessionKey,
         channel,
         buildOnboardingPrompt({
           channel,
@@ -749,14 +751,14 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         }),
         `onboard-${channel}`
       );
-      engine.markIdle(tmuxSession);
+      engine.markIdle(sessionKey);
       sendJson(res, 200, { ok: true, member, members: listChannelMembers(home, channel) });
       return true;
     }
 
     if (req.method === 'POST' && url.pathname === '/api/channels/queue-clear') {
       const body = await readJsonBody(req);
-      engine.dropQueue(requireString(body.tmuxSession, 'tmuxSession'));
+      engine.dropQueue(nativeIdForTmuxSession(requireString(body.tmuxSession, 'tmuxSession')));
       sendJson(res, 200, { ok: true, delivery: engine.lifecycleStates() });
       return true;
     }
@@ -767,8 +769,8 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const name = requireString(body.name, 'name');
       const member = listChannelMembers(home, channel).find((candidate) => candidate.name === name);
       removeMember(home, channel, name);
-      if (member?.tmuxSession) {
-        engine.dropQueue(member.tmuxSession);
+      if (member?.sessionId) {
+        engine.dropQueue(member.sessionId);
       }
       sendJson(res, 200, { ok: true, members: listChannelMembers(home, channel) });
       return true;
@@ -858,8 +860,8 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'GET' && url.pathname === '/api/channels/events') {
       const filter: Record<string, unknown> = {};
-      const tmuxSession = url.searchParams.get('tmuxSession');
-      if (tmuxSession) { filter.tmuxSession = tmuxSession; }
+      const sessionId = url.searchParams.get('tmuxSession');
+      if (sessionId) { filter.sessionId = sessionId; }
       const eventChannel = url.searchParams.get('channel');
       if (eventChannel) { filter.channel = eventChannel; }
       const kind = url.searchParams.get('kind');

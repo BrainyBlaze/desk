@@ -191,8 +191,8 @@ describe('durability restore: engine classifies per-item extensions on restart',
     member: 'alpha'
   });
 
-  const writeQueueFile = (tmuxSession: string, seq: number, ext: string, body = sample(seq)): void => {
-    const dir = join(home, '_engine', 'queue', tmuxSession);
+  const writeQueueFile = (sessionId: string, seq: number, ext: string, body = sample(seq)): void => {
+    const dir = join(home, '_engine', 'queue', sessionId);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, seqFile(seq, ext)), JSON.stringify({ ...body, seq }));
   };
@@ -217,7 +217,7 @@ describe('durability restore: engine classifies per-item extensions on restart',
 
     try {
       const states = engine.lifecycleStates();
-      const state = states.find((s) => s.tmuxSession === tmux);
+      const state = states.find((s) => s.sessionId === tmux);
       expect(state?.queued).toBe(2); // seqs 1 + 2 enqueued; 3/4/5 NOT
     } finally {
       engine.dispose();

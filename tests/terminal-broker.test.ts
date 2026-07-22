@@ -170,9 +170,9 @@ describe('TerminalBroker', () => {
       expect(signals).toEqual([]);
       ptys.get('agentdesk-a')?.emit('prompt\x07ready');
 
-      // Signals keep the legacy tmux key (channels engine, transitional);
-      // the TRACKER keys by the durable sessionId.
-      expect(signals).toEqual([{ session: 'agentdesk-a', kind: 'approval-requested' }]);
+      // Tracker AND signal fanout both key by the durable sessionId (the
+      // channels engine flipped with them in step 3).
+      expect(signals).toEqual([{ session: 'sess-a', kind: 'approval-requested' }]);
       expect(attentionTracker.snapshot()).toHaveProperty('sess-a');
       expect(attentionTracker.listEvents()[0]).toMatchObject({
         sessionId: 'sess-a',

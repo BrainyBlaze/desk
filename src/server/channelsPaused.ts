@@ -31,11 +31,11 @@ import { writeFileAtomic } from './fsOps.js';
  */
 
 const PAUSED_FILE = 'paused.json';
-const PAUSED_VERSION = 1;
-const TMUX_SESSION = /^[A-Za-z][A-Za-z0-9_-]*$/;
+const PAUSED_VERSION = 2;
+const SESSION_KEY = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export interface PausedSession {
-  tmuxSession: string;
+  sessionId: string;
   pausedAt: string;
   reason?: string;
 }
@@ -64,12 +64,12 @@ function parseStore(raw: string): PausedStore {
     ? parsed.items.flatMap((item) => {
         if (
           item &&
-          typeof item.tmuxSession === 'string' &&
+          typeof item.sessionId === 'string' &&
           typeof item.pausedAt === 'string' &&
-          TMUX_SESSION.test(item.tmuxSession)
+          SESSION_KEY.test(item.sessionId)
         ) {
           return [{
-            tmuxSession: item.tmuxSession,
+            sessionId: item.sessionId,
             pausedAt: item.pausedAt,
             reason: normalizeOptional(item.reason)
           }];
@@ -103,27 +103,27 @@ export function listPausedSessions(home: string): PausedSession[] {
 }
 
 /** True if the session is currently paused (engine drain gate consumer). */
-export function isSessionPaused(home: string, tmuxSession: string): boolean {
-  return readStore(home).items.some((item) => item.tmuxSession === tmuxSession);
+export function isSessionPaused(home: string, sessionId: string): boolean {
+  return readStore(home).items.some((item) => item.sessionId === sessionId);
 }
 
 /** Looks up the paused-session record (for reason + pausedAt surface). */
-export function getPausedSession(home: string, tmuxSession: string): PausedSession | undefined {
-  return readStore(home).items.find((item) => item.tmuxSession === tmuxSession);
+export function getPausedSession(home: string, sessionId: string): PausedSession | undefined {
+  return readStore(home).items.find((item) => item.sessionId === sessionId);
 }
 
 /** Pauses a session (idempotent — re-pausing updates reason + pausedAt). */
-export function pauseSession(home: string, tmuxSession: string, reason?: string, now = new Date()): PausedSession {
-  if (!TMUX_SESSION.test(tmuxSession)) {
-    throw new Error(`invalid tmux session name: ${tmuxSession}`);
+export function pauseSession(home: string, sessionId: string, reason?: string, now = new Date()): PausedSession {
+  if (!SESSION_KEY.test(sessionId)) {
+    throw new Error(`invalid session id: ${sessionId}`);
   }
   const next: PausedSession = {
-    tmuxSession,
+    sessionId,
     pausedAt: now.toISOString(),
     reason: normalizeOptional(reason)
   };
   const store = readStore(home);
-  const existing = store.items.findIndex((item) => item.tmuxSession === tmuxSession);
+  const existing = store.items.findIndex((item) => item.sessionId === sessionId);
   if (existing === -1) {
     store.items.push(next);
   } else {
@@ -134,13 +134,13 @@ export function pauseSession(home: string, tmuxSession: string, reason?: string,
 }
 
 /** Resumes a session (idempotent — resuming a non-paused session is a no-op). */
-export function resumeSession(home: string, tmuxSession: string): boolean {
-  if (!TMUX_SESSION.test(tmuxSession)) {
-    throw new Error(`invalid tmux session name: ${tmuxSession}`);
+export function resumeSession(home: string, sessionId: string): boolean {
+  if (!SESSION_KEY.test(sessionId)) {
+    throw new Error(`invalid tmux session name: ${sessionId}`);
   }
   const store = readStore(home);
   const before = store.items.length;
-  store.items = store.items.filter((item) => item.tmuxSession !== tmuxSession);
+  store.items = store.items.filter((item) => item.sessionId !== sessionId);
   if (store.items.length === before) {
     return false;
   }

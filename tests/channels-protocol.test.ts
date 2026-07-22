@@ -16,12 +16,12 @@ import {
   type ChannelMember
 } from '../src/server/channelsProtocol.js';
 
-const member = (name: string, type = 'claude-code', tmuxSession?: string): ChannelMember => ({
+const member = (name: string, type = 'claude-code', sessionId?: string): ChannelMember => ({
   name,
   type,
   status: 'active',
   joined: '2026-06-11 12:00:00',
-  tmuxSession
+  sessionId
 });
 
 describe('message format round-trip', () => {
@@ -158,7 +158,7 @@ describe('member manifests', () => {
       name: 'forge',
       type: 'codex-cli',
       joined: '2026-06-11 12:00:00',
-      tmuxSession: 'agentdesk-x-main-forge-1234',
+      sessionId: 'agentdesk-x-main-forge-1234',
       agentLabel: 'x / main / forge'
     });
     const parsed = parseMemberManifest(manifest);
@@ -166,7 +166,7 @@ describe('member manifests', () => {
       name: 'forge',
       type: 'codex-cli',
       status: 'active',
-      tmuxSession: 'agentdesk-x-main-forge-1234'
+      sessionId: 'agentdesk-x-main-forge-1234'
     });
   });
 
@@ -179,7 +179,7 @@ describe('member manifests', () => {
       name: 'supe',
       type: 'claude-code',
       joined: '2026-06-11 12:00:00',
-      tmuxSession: 'agentdesk-x-main-supe-1',
+      sessionId: 'agentdesk-x-main-supe-1',
       supervisor: true,
       supervisorMaxIdleMinutes: 5
     });

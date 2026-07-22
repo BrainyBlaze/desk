@@ -53,7 +53,7 @@ withFileLockSync(statePath + '.lock', () => {
     Atomics.wait(waitState, 0, 0, 5);
   }
   const captures = readPendingResumeCaptures({ path: statePath })
-    .filter((entry) => entry.tmuxSession !== capture.tmuxSession);
+    .filter((entry) => entry.sessionId !== capture.sessionId);
   captures.push(capture);
   writePendingResumeCaptures(captures, { path: statePath });
 });
@@ -83,15 +83,15 @@ describe('applyResumeToManifest', () => {
     const fresh = buildSessionSpecs(manifest, { homeDir }).find((s) => s.name === 'fresh')!;
     expect(fresh.resume).toBeUndefined();
 
-    const updated = applyResumeToManifest(manifest, fresh.tmuxSession, '019eaaaa-bbbb-7000-8000-000000000002', homeDir);
+    const updated = applyResumeToManifest(manifest, fresh.sessionId, '019eaaaa-bbbb-7000-8000-000000000002', homeDir);
     expect(updated).not.toBeNull();
     const session = updated!.projects![0]!.groups[0]!.sessions.find((s) => s.name === 'fresh')!;
     expect(session.resume).toBe('019eaaaa-bbbb-7000-8000-000000000002');
-    expect(session.tmuxSession).toBe(fresh.tmuxSession);
+    expect(session.sessionId).toBe(fresh.sessionId);
 
     // The rebuilt spec must keep the SAME tmux name (pin works) and gain the resume.
     const rebuilt = buildSessionSpecs(updated!, { homeDir }).find((s) => s.name === 'fresh')!;
-    expect(rebuilt.tmuxSession).toBe(fresh.tmuxSession);
+    expect(rebuilt.sessionId).toBe(fresh.sessionId);
     expect(rebuilt.resume).toBe('019eaaaa-bbbb-7000-8000-000000000002');
     expect(rebuilt.command).toContain("resume '019eaaaa-bbbb-7000-8000-000000000002'");
   });
@@ -99,20 +99,20 @@ describe('applyResumeToManifest', () => {
   it('does not touch sessions that already have a resume', () => {
     const manifest = parseDeskManifest(manifestSource);
     const resumed = buildSessionSpecs(manifest, { homeDir }).find((s) => s.name === 'resumed')!;
-    expect(applyResumeToManifest(manifest, resumed.tmuxSession, 'zzz', homeDir)).toBeNull();
+    expect(applyResumeToManifest(manifest, resumed.sessionId, 'zzz', homeDir)).toBeNull();
   });
 
   it('refuses ids already claimed by another session', () => {
     const manifest = parseDeskManifest(manifestSource);
     const fresh = buildSessionSpecs(manifest, { homeDir }).find((s) => s.name === 'fresh')!;
-    expect(applyResumeToManifest(manifest, fresh.tmuxSession, '11111111-aaaa-7000-8000-000000000001', homeDir)).toBeNull();
+    expect(applyResumeToManifest(manifest, fresh.sessionId, '11111111-aaaa-7000-8000-000000000001', homeDir)).toBeNull();
   });
 
   it('rejects non-UUID resume ids (manifest/shell injection guard)', () => {
     const manifest = parseDeskManifest(manifestSource);
     const fresh = buildSessionSpecs(manifest, { homeDir }).find((s) => s.name === 'fresh')!;
     for (const evil of ["'; rm -rf / #", 'abc', '../../etc/passwd', '019eb151-8bf0-7bb2-96bc-8958725d5974x']) {
-      expect(applyResumeToManifest(manifest, fresh.tmuxSession, evil, homeDir)).toBeNull();
+      expect(applyResumeToManifest(manifest, fresh.sessionId, evil, homeDir)).toBeNull();
     }
     expect(isValidResumeId('019eb151-8bf0-7bb2-96bc-8958725d5974')).toBe(true);
     expect(isValidResumeId("'; touch /tmp/pwn'")).toBe(false);
@@ -128,12 +128,12 @@ describe('applyResumeToManifest', () => {
     expect(isValidResumeIdForAgent('codex', resume)).toBe(false);
     expect(isValidResumeIdForAgent('opencode', "ses_12a31855dffeHTCs6tcfOmsddP'; touch /tmp/pwn")).toBe(false);
 
-    const updated = applyResumeToManifest(manifest, open.tmuxSession, resume, homeDir);
+    const updated = applyResumeToManifest(manifest, open.sessionId, resume, homeDir);
     expect(updated).not.toBeNull();
     const session = updated!.projects![0]!.groups[0]!.sessions.find((s) => s.name === 'open')!;
     expect(session.resume).toBe(resume);
-    expect(session.tmuxSession).toBe(open.tmuxSession);
-    expect(applyResumeToManifest(manifest, codex.tmuxSession, resume, homeDir)).toBeNull();
+    expect(session.sessionId).toBe(open.sessionId);
+    expect(applyResumeToManifest(manifest, codex.sessionId, resume, homeDir)).toBeNull();
   });
 
   it('returns null for unknown tmux sessions', () => {
@@ -180,7 +180,7 @@ describe('pending resume capture state', () => {
       const statePath = join(root, 'captures.json');
       upsertPendingResumeCapture(
         {
-          tmuxSession: 'desk-open',
+          sessionId: 'desk-open',
           agent: 'opencode',
           cwd: '/repo',
           sinceMs: 1000,
@@ -191,7 +191,7 @@ describe('pending resume capture state', () => {
       );
       upsertPendingResumeCapture(
         {
-          tmuxSession: 'desk-open',
+          sessionId: 'desk-open',
           agent: 'opencode',
           cwd: '/repo',
           sinceMs: 3000,
@@ -202,7 +202,7 @@ describe('pending resume capture state', () => {
 
       expect(readPendingResumeCaptures({ path: statePath })).toEqual([
         {
-          tmuxSession: 'desk-open',
+          sessionId: 'desk-open',
           agent: 'opencode',
           cwd: '/repo',
           sinceMs: 3000,
@@ -239,14 +239,14 @@ projects:
     const existingSpec = specs.find((spec) => spec.name === 'existing')!;
     const concurrentSpec = specs.find((spec) => spec.name === 'concurrent')!;
     const existingCapture = {
-      tmuxSession: existingSpec.tmuxSession,
+      sessionId: existingSpec.sessionId,
       agent: 'opencode' as const,
       cwd: existingSpec.cwd,
       sinceMs: 1_000,
       deadlineMs: 0
     };
     const concurrentCapture = {
-      tmuxSession: concurrentSpec.tmuxSession,
+      sessionId: concurrentSpec.sessionId,
       agent: 'opencode' as const,
       cwd: concurrentSpec.cwd,
       sinceMs: 2_000,
@@ -299,7 +299,7 @@ projects:
               writeFileSync(releasePath, 'release');
               waitForSync(() =>
                 readPendingResumeCaptures({ path: statePath }).some(
-                  (capture) => capture.tmuxSession === concurrentCapture.tmuxSession
+                  (capture) => capture.sessionId === concurrentCapture.sessionId
                 )
               );
             }
@@ -315,9 +315,9 @@ projects:
       expect(interleaved).toBe(true);
       expect(
         readPendingResumeCaptures({ path: statePath })
-          .map((capture) => capture.tmuxSession)
+          .map((capture) => capture.sessionId)
           .sort()
-      ).toEqual([existingCapture.tmuxSession, concurrentCapture.tmuxSession].sort());
+      ).toEqual([existingCapture.sessionId, concurrentCapture.sessionId].sort());
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill();

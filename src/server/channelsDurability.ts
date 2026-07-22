@@ -6,7 +6,7 @@ import type { QueuedPrompt } from './channelsProtocol.js';
  * Channels delivery durability — the on-disk lifecycle for a single queued
  * prompt across the delivering → submitted / submit-stuck transitions.
  *
- * File extensions under `_engine/queue/<tmuxSession>/`:
+ * File extensions under `_engine/queue/<sessionId>/`:
  *   <seq>.json            — queued, drain candidate
  *   <seq>.delivering      — paste cycle in flight (claimed before sendText)
  *   <seq>.delivered       — submit confirmed (paste landed AND pane went working)
@@ -63,7 +63,7 @@ function padSeq(seq: number): string {
   return String(seq).padStart(10, '0');
 }
 
-function fileWithExt(tmuxSession: string, seq: number, ext: string): string {
+function fileWithExt(sessionId: string, seq: number, ext: string): string {
   return `${padSeq(seq)}.${ext}`;
 }
 
@@ -104,10 +104,10 @@ export function readQueueItem(dir: string, filename: string): QueuedPrompt | nul
  * re-fired callback after restart), an already-.delivering source is success,
  * not an error.
  */
-export function claimDelivering(home: string, tmuxSession: string, seq: number): void {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
-  const fromPath = join(dir, fileWithExt(tmuxSession, seq, EXT_QUEUED));
-  const toPath = join(dir, fileWithExt(tmuxSession, seq, EXT_DELIVERING));
+export function claimDelivering(home: string, sessionId: string, seq: number): void {
+  const dir = join(home, '_engine', 'queue', sessionId);
+  const fromPath = join(dir, fileWithExt(sessionId, seq, EXT_QUEUED));
+  const toPath = join(dir, fileWithExt(sessionId, seq, EXT_DELIVERING));
   if (existsSync(toPath)) {
     return; // already claimed — idempotent
   }
@@ -125,8 +125,8 @@ export function claimDelivering(home: string, tmuxSession: string, seq: number):
  * Idempotent .delivering → .delivered transition. Fired by the 'submitted'
  * callback after verifySubmitted observes the pane going working.
  */
-export function confirmDelivered(home: string, tmuxSession: string, seq: number): void {
-  transitionFromDelivering(home, tmuxSession, seq, EXT_DELIVERED);
+export function confirmDelivered(home: string, sessionId: string, seq: number): void {
+  transitionFromDelivering(home, sessionId, seq, EXT_DELIVERED);
 }
 
 /**
@@ -135,19 +135,19 @@ export function confirmDelivered(home: string, tmuxSession: string, seq: number)
  */
 export function markStuck(
   home: string,
-  tmuxSession: string,
+  sessionId: string,
   seq: number,
   kind: 'paste' | 'submit' | 'unobservable'
 ): void {
   const ext =
     kind === 'paste' ? EXT_STUCK_PASTE : kind === 'submit' ? EXT_STUCK_SUBMIT : EXT_STUCK_UNOBSERVABLE;
-  transitionFromDelivering(home, tmuxSession, seq, ext);
+  transitionFromDelivering(home, sessionId, seq, ext);
 }
 
-function transitionFromDelivering(home: string, tmuxSession: string, seq: number, targetExt: string): void {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
-  const fromPath = join(dir, fileWithExt(tmuxSession, seq, EXT_DELIVERING));
-  const toPath = join(dir, fileWithExt(tmuxSession, seq, targetExt));
+function transitionFromDelivering(home: string, sessionId: string, seq: number, targetExt: string): void {
+  const dir = join(home, '_engine', 'queue', sessionId);
+  const fromPath = join(dir, fileWithExt(sessionId, seq, EXT_DELIVERING));
+  const toPath = join(dir, fileWithExt(sessionId, seq, targetExt));
   if (existsSync(toPath)) {
     return; // already transitioned — idempotent
   }
@@ -168,14 +168,14 @@ function transitionFromDelivering(home: string, tmuxSession: string, seq: number
  * and the normal claim path applies). Returns true if the item is queued after
  * the call (already .json, or a stuck file was reverted), false if none found.
  */
-export function retryStuckItem(home: string, tmuxSession: string, seq: number): boolean {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
-  const toPath = join(dir, fileWithExt(tmuxSession, seq, EXT_QUEUED));
+export function retryStuckItem(home: string, sessionId: string, seq: number): boolean {
+  const dir = join(home, '_engine', 'queue', sessionId);
+  const toPath = join(dir, fileWithExt(sessionId, seq, EXT_QUEUED));
   if (existsSync(toPath)) {
     return true; // already queued — idempotent (the live re-enqueue may double-fire)
   }
   for (const ext of STUCK_EXTS) {
-    const fromPath = join(dir, fileWithExt(tmuxSession, seq, ext));
+    const fromPath = join(dir, fileWithExt(sessionId, seq, ext));
     if (existsSync(fromPath)) {
       try {
         renameSync(fromPath, toPath);
@@ -192,10 +192,10 @@ export function retryStuckItem(home: string, tmuxSession: string, seq: number): 
  * Idempotent unlink of a seq's .stuck-* file (the operator drop action over a
  * durable stuck item). Returns true if a stuck file was removed.
  */
-export function dropStuckItem(home: string, tmuxSession: string, seq: number): boolean {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
+export function dropStuckItem(home: string, sessionId: string, seq: number): boolean {
+  const dir = join(home, '_engine', 'queue', sessionId);
   for (const ext of STUCK_EXTS) {
-    const path = join(dir, fileWithExt(tmuxSession, seq, ext));
+    const path = join(dir, fileWithExt(sessionId, seq, ext));
     if (existsSync(path)) {
       try {
         unlinkSync(path);
@@ -217,8 +217,8 @@ export function dropStuckItem(home: string, tmuxSession: string, seq: number): b
  *
  * Returns the seqs that were reverted (useful for logging / tests).
  */
-export function revertAllDeliveringToJson(home: string, tmuxSession: string): number[] {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
+export function revertAllDeliveringToJson(home: string, sessionId: string): number[] {
+  const dir = join(home, '_engine', 'queue', sessionId);
   if (!existsSync(dir)) {
     return [];
   }
@@ -233,7 +233,7 @@ export function revertAllDeliveringToJson(home: string, tmuxSession: string): nu
       continue;
     }
     const fromPath = join(dir, file);
-    const toPath = join(dir, fileWithExt(tmuxSession, seq, EXT_QUEUED));
+    const toPath = join(dir, fileWithExt(sessionId, seq, EXT_QUEUED));
     try {
       renameSync(fromPath, toPath);
       reverted.push(seq);
@@ -247,8 +247,8 @@ export function revertAllDeliveringToJson(home: string, tmuxSession: string): nu
 /** Sweep for .delivered files older than DELIVERED_TTL_MS. Called on restore
  *  and periodically to keep the dir from growing unbounded. Returns the count
  *  swept (informational). */
-export function sweepDeliveredTtl(home: string, tmuxSession: string, now = Date.now()): number {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
+export function sweepDeliveredTtl(home: string, sessionId: string, now = Date.now()): number {
+  const dir = join(home, '_engine', 'queue', sessionId);
   if (!existsSync(dir)) {
     return 0;
   }
@@ -279,8 +279,8 @@ export interface StuckItem {
   item: QueuedPrompt;
 }
 
-export function listStuckItems(home: string, tmuxSession: string): StuckItem[] {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
+export function listStuckItems(home: string, sessionId: string): StuckItem[] {
+  const dir = join(home, '_engine', 'queue', sessionId);
   if (!existsSync(dir)) {
     return [];
   }
@@ -312,8 +312,8 @@ export function listStuckItems(home: string, tmuxSession: string): StuckItem[] {
 }
 
 /** Ensures the queue dir exists. Mirrors channelsEngine.queueDir's layout. */
-export function ensureQueueDir(home: string, tmuxSession: string): string {
-  const dir = join(home, '_engine', 'queue', tmuxSession);
+export function ensureQueueDir(home: string, sessionId: string): string {
+  const dir = join(home, '_engine', 'queue', sessionId);
   mkdirSync(dir, { recursive: true });
   return dir;
 }

@@ -31,7 +31,7 @@ import { readManifestFile, writeManifestFile } from '../core/config.js';
 import { parseLegacyDeskManifest } from '../core/manifest.js';
 import { applyMigratedSessionIds, buildManifestMigration, collectSessions, deskManifestToEntries, type LegacyDeskManifest } from '../core/sessionIdentity.js';
 import { withFileLockSync } from '../shared/fileLock.js';
-import { migrateResumeCaptureStore, type PendingResumeCapture } from '../core/resumeCaptureState.js';
+import { migrateResumeCaptureStore, type LegacyPendingResumeCapture } from '../core/resumeCaptureState.js';
 import { migrateDeliveryEventLine } from './channelsEvents.js';
 import { migrateMemberManifestContent } from './channelsProtocol.js';
 import { advanceMigration, isValidSessionId, validateManifestMigration, type MigrationPhase, type Rollback } from '../shared/migration/index.js';
@@ -747,7 +747,7 @@ function stageOwnedProductionStores(options: {
   return artifacts;
 }
 
-function readLegacyResumeCaptures(path: string): PendingResumeCapture[] {
+function readLegacyResumeCaptures(path: string): LegacyPendingResumeCapture[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
@@ -762,7 +762,7 @@ function readLegacyResumeCaptures(path: string): PendingResumeCapture[] {
   if (values === null) {
     throw new Error(`cutover: malformed resume-capture store at ${path}`);
   }
-  return values.map((value, index): PendingResumeCapture => {
+  return values.map((value, index): LegacyPendingResumeCapture => {
     if (value === null || typeof value !== 'object') {
       throw new Error(`cutover: malformed resume capture ${index} at ${path}`);
     }

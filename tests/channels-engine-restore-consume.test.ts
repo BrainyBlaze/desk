@@ -37,11 +37,11 @@ const waitFor = async (predicate: () => boolean | Promise<boolean>, timeoutMs = 
 };
 
 const durabilityCallback = (home: string) => ({
-  onSubmitStateChange: (tmuxSession: string, state: string, context: { seq: number }) => {
+  onSubmitStateChange: (sessionId: string, state: string, context: { seq: number }) => {
     if (state === 'delivering') {
-      claimDelivering(home, tmuxSession, context.seq);
+      claimDelivering(home, sessionId, context.seq);
     } else if (state === 'submitted' || state === 'delivery-ack-timeout') {
-      confirmDelivered(home, tmuxSession, context.seq);
+      confirmDelivered(home, sessionId, context.seq);
     }
   }
 });
@@ -97,7 +97,7 @@ describe('ChannelsEngine restore consume safety', () => {
     fsFaults.failPersistQueueScan = true;
     const first = new ChannelsEngine(engineOptions);
     await waitFor(() => sends === 1);
-    expect(first.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a')?.queued).toBe(0);
+    expect(first.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
     expect(sends).toBe(1);
     expect(fsFaults.queueDirReads).toBeGreaterThanOrEqual(2);
     first.dispose();
@@ -106,7 +106,7 @@ describe('ChannelsEngine restore consume safety', () => {
     fsFaults.failPersistQueueScan = false;
     const second = new ChannelsEngine(engineOptions);
     await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(second.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a')?.queued).toBe(0);
+    expect(second.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
     expect(sends).toBe(1);
     second.dispose();
   });
@@ -144,7 +144,7 @@ describe('ChannelsEngine restore consume safety', () => {
     });
 
     await waitFor(() => sends === 1);
-    expect(restored.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a')?.queued).toBe(0);
+    expect(restored.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
     expect(sends).toBe(1);
     restored.dispose();
   });
@@ -183,7 +183,7 @@ describe('ChannelsEngine restore consume safety', () => {
     });
 
     await waitFor(() => sends === 1);
-    expect(restored.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a')?.queued).toBe(0);
+    expect(restored.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
     expect(sends).toBe(1);
     restored.dispose();
   });

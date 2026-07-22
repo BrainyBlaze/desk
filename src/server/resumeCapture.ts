@@ -63,17 +63,17 @@ export function isValidResumeIdForAgent(agent: DeskAgent | undefined, value: str
 
 /**
  * Applies a captured resume id to the manifest entry whose derived spec matches
- * the tmux session name. Pure: returns the updated manifest (or null when no
+ * the durable sessionId. Pure: returns the updated manifest (or null when no
  * matching, resume-less session exists).
  */
 export function applyResumeToManifest(
   manifest: DeskManifest,
-  tmuxSession: string,
+  sessionId: string,
   resume: string,
   homeDir: string
 ): DeskManifest | null {
   const specs = buildSessionSpecs(manifest, { homeDir });
-  const spec = specs.find((candidate) => candidate.tmuxSession === tmuxSession);
+  const spec = specs.find((candidate) => candidate.sessionId === sessionId);
   if (!spec || spec.resume) {
     return null;
   }
@@ -91,7 +91,6 @@ export function applyResumeToManifest(
     for (const session of sessions) {
       if (session.name === spec.name && !session.resume) {
         session.resume = resume;
-        session.tmuxSession = tmuxSession; // pin: keep the running session linked
         return true;
       }
     }
@@ -297,10 +296,10 @@ export async function findOpencodeResume(
 }
 
 /** Reads, applies, writes. Returns true when the manifest was updated. */
-export async function persistSessionResume(tmuxSession: string, resume: string): Promise<boolean> {
+export async function persistSessionResume(sessionId: string, resume: string): Promise<boolean> {
   const manifestPath = resolveManifestPath();
   const updated = await updateManifestFile(manifestPath, (manifest) => {
-    return applyResumeToManifest(manifest, tmuxSession, resume, homedir());
+    return applyResumeToManifest(manifest, sessionId, resume, homedir());
   });
   return updated !== null;
 }
@@ -319,13 +318,13 @@ export function scheduleCodexResumeCapture(
   spec: SessionSpec,
   options: { timeoutMs?: number; intervalMs?: number } = {}
 ): void {
-  if (spec.agent !== 'codex' || spec.resume || pendingCaptures.has(spec.tmuxSession)) {
+  if (spec.agent !== 'codex' || spec.resume || pendingCaptures.has(spec.sessionId)) {
     return;
   }
   const since = Date.now() - 3_000;
   const deadline = Date.now() + (options.timeoutMs ?? 45_000);
-  pendingCaptures.set(spec.tmuxSession, {
-    tmuxSession: spec.tmuxSession,
+  pendingCaptures.set(spec.sessionId, {
+    sessionId: spec.sessionId,
     agent: 'codex',
     cwd: spec.cwd,
     sinceMs: since,
@@ -334,13 +333,13 @@ export function scheduleCodexResumeCapture(
   const interval = options.intervalMs ?? 2_000;
 
   const tick = async (): Promise<void> => {
-    if (!pendingCaptures.has(spec.tmuxSession)) {
+    if (!pendingCaptures.has(spec.sessionId)) {
       return;
     }
     try {
       const resume = findCodexSnapshotUuid(since) ?? findCodexResume(spec.cwd, since);
-      if (resume && (await persistSessionResume(spec.tmuxSession, resume))) {
-        pendingCaptures.delete(spec.tmuxSession);
+      if (resume && (await persistSessionResume(spec.sessionId, resume))) {
+        pendingCaptures.delete(spec.sessionId);
         return;
       }
     } catch {
@@ -363,22 +362,22 @@ export function scheduleOpencodeResumeCapture(
   spec: SessionSpec,
   options: { timeoutMs?: number; intervalMs?: number; statePath?: string } = {}
 ): void {
-  if (spec.agent !== 'opencode' || spec.resume || pendingCaptures.has(spec.tmuxSession)) {
+  if (spec.agent !== 'opencode' || spec.resume || pendingCaptures.has(spec.sessionId)) {
     return;
   }
-  const stored = findPendingResumeCapture(spec.tmuxSession, pendingStateOptions(options));
+  const stored = findPendingResumeCapture(spec.sessionId, pendingStateOptions(options));
   const now = Date.now();
   const pending: PendingResumeCapture =
     stored && stored.agent === 'opencode' && stored.cwd === spec.cwd
       ? stored
       : {
-          tmuxSession: spec.tmuxSession,
+          sessionId: spec.sessionId,
           agent: 'opencode',
           cwd: spec.cwd,
           sinceMs: now - 3_000,
           deadlineMs: now + (options.timeoutMs ?? 45_000)
         };
-  pendingCaptures.set(spec.tmuxSession, pending);
+  pendingCaptures.set(spec.sessionId, pending);
   upsertPendingResumeCapture(pending, pendingStateOptions(options));
   const interval = options.intervalMs ?? 2_000;
   pollOpencodeResumeCapture(spec, pending, interval, pendingStateOptions(options));
@@ -391,7 +390,7 @@ function pollOpencodeResumeCapture(
   stateOptions: ResumeCaptureStateOptions = {}
 ): void {
   const tick = (): void => {
-    if (!pendingCaptures.has(spec.tmuxSession)) {
+    if (!pendingCaptures.has(spec.sessionId)) {
       return;
     }
     void findOpencodeResume(spec.cwd, {
@@ -399,9 +398,9 @@ function pollOpencodeResumeCapture(
       launchResumeId: pending.launchResumeId
     })
       .then(async (resume) => {
-        if (resume && (await persistSessionResume(spec.tmuxSession, resume))) {
-          pendingCaptures.delete(spec.tmuxSession);
-          removePendingResumeCapture(spec.tmuxSession, stateOptions);
+        if (resume && (await persistSessionResume(spec.sessionId, resume))) {
+          pendingCaptures.delete(spec.sessionId);
+          removePendingResumeCapture(spec.sessionId, stateOptions);
           return;
         }
         if (Date.now() < pending.deadlineMs) {
@@ -426,7 +425,7 @@ function pollOpencodeResumeCapture(
  * server restart: any resume-less codex session gets a cwd-matched scan.
  */
 export async function attemptResumeCaptureForSession(
-  tmuxSession: string,
+  sessionId: string,
   lookupSpec: () => SessionSpec | undefined
 ): Promise<void> {
   try {
@@ -434,15 +433,15 @@ export async function attemptResumeCaptureForSession(
     if (!spec || spec.resume) {
       return;
     }
-    const pending = pendingCaptures.get(tmuxSession) ?? findPendingResumeCapture(tmuxSession);
+    const pending = pendingCaptures.get(sessionId) ?? findPendingResumeCapture(sessionId);
     if (pending) {
-      pendingCaptures.set(tmuxSession, pending);
+      pendingCaptures.set(sessionId, pending);
     }
     if (spec.agent === 'codex') {
       const since = pending?.sinceMs ?? 0;
       const resume = findCodexResume(spec.cwd, since) ?? (pending ? findCodexSnapshotUuid(pending.sinceMs) : null);
-      if (resume && (await persistSessionResume(tmuxSession, resume))) {
-        pendingCaptures.delete(tmuxSession);
+      if (resume && (await persistSessionResume(sessionId, resume))) {
+        pendingCaptures.delete(sessionId);
       }
       return;
     }
@@ -455,9 +454,9 @@ export async function attemptResumeCaptureForSession(
         launchResumeId: pending.launchResumeId
       })
         .then(async (resume) => {
-          if (resume && (await persistSessionResume(tmuxSession, resume))) {
-            pendingCaptures.delete(tmuxSession);
-            removePendingResumeCapture(tmuxSession);
+          if (resume && (await persistSessionResume(sessionId, resume))) {
+            pendingCaptures.delete(sessionId);
+            removePendingResumeCapture(sessionId);
           }
         })
         .catch(() => {
@@ -476,15 +475,15 @@ export function restorePendingResumeCaptures(
   const stateOptions = pendingStateOptions(options);
   const keep = updatePendingResumeCaptures((captures) =>
     captures.filter((pending) => {
-      const spec = sessions.find((candidate) => candidate.tmuxSession === pending.tmuxSession);
+      const spec = sessions.find((candidate) => candidate.sessionId === pending.sessionId);
       return Boolean(spec && !spec.resume && spec.agent === pending.agent && spec.cwd === pending.cwd);
     }), stateOptions);
   for (const pending of keep) {
-    const spec = sessions.find((candidate) => candidate.tmuxSession === pending.tmuxSession);
+    const spec = sessions.find((candidate) => candidate.sessionId === pending.sessionId);
     if (!spec) {
       continue;
     }
-    pendingCaptures.set(pending.tmuxSession, pending);
+    pendingCaptures.set(pending.sessionId, pending);
     if (pending.agent === 'opencode') {
       pollOpencodeResumeCapture(spec, pending, options.intervalMs ?? 2_000, stateOptions);
     }

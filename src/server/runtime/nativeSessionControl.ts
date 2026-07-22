@@ -129,14 +129,26 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
  * mixed-era inputs safely.
  */
 export function nativeIdForTmuxSession(tmuxSession: string): string {
-  const spec = loadDeskCached({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
-  return spec?.sessionId ?? tmuxSession;
+  return findSpecSoft((candidate) => candidate.tmuxSession === tmuxSession)?.sessionId ?? tmuxSession;
 }
 
 /** The inverse: the tmuxSession consumers key on, for a daemon-reported sessionId. */
 export function tmuxSessionForNativeId(sessionId: string): string {
-  const spec = loadDeskCached({}).sessions.find((candidate) => (candidate.sessionId ?? candidate.tmuxSession) === sessionId);
-  return spec?.tmuxSession ?? sessionId;
+  return findSpecSoft((candidate) => (candidate.sessionId ?? candidate.tmuxSession) === sessionId)?.tmuxSession ?? sessionId;
+}
+
+/**
+ * Best-effort spec lookup for the transitional normalizers: identity mapping
+ * is the contract when no mapping is derivable, and the strict manifest
+ * reader THROWS on unmigrated content — a mapping helper must degrade to
+ * identity there, never take down its caller.
+ */
+function findSpecSoft(predicate: (spec: SessionSpec) => boolean): SessionSpec | undefined {
+  try {
+    return loadDeskCached({}).sessions.find(predicate);
+  } catch {
+    return undefined;
+  }
 }
 
 export interface NativeAttentionEvent {

@@ -143,9 +143,9 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
   initChannelsRuntime({ agentSurfaceBroker: services.agentSurfaceBroker });
   restorePendingResumeCaptures(loadDesk({}).sessions);
   disposers.add(disposeChannelsRuntime);
-  setRaiseListener((tmuxSession) => {
-    void attemptResumeCaptureForSession(tmuxSession, () =>
-      loadDesk({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession)
+  setRaiseListener((sessionId) => {
+    void attemptResumeCaptureForSession(sessionId, () =>
+      loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId)
     );
   });
   disposers.add(() => setRaiseListener(null));

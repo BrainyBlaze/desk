@@ -18,12 +18,12 @@ const message = (id: string, author: string, body: string): ChannelMessage => ({
   hasEndTurn: true
 });
 
-const member = (name: string, tmuxSession: string, type = 'claude-code'): ChannelMember => ({
+const member = (name: string, sessionId: string, type = 'claude-code'): ChannelMember => ({
   name,
   type,
   status: 'active',
   joined: '2026-06-11 12:00:00',
-  tmuxSession
+  sessionId
 });
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 2000): Promise<void> => {
@@ -151,8 +151,8 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'desk-supe-engine-'));
     createChannel(home, 'ops', 'goal');
-    addMember(home, 'ops', { name: 'supe', type: 'claude-code', tmuxSession: 'tmux-supe' });
-    addMember(home, 'ops', { name: 'agent-a', type: 'claude-code', tmuxSession: 'tmux-a' });
+    addMember(home, 'ops', { name: 'supe', type: 'claude-code', sessionId: 'tmux-supe' });
+    addMember(home, 'ops', { name: 'agent-a', type: 'claude-code', sessionId: 'tmux-a' });
     updateMemberSupervisor(home, 'ops', 'supe', true, 1);
     sent = [];
     engine = new ChannelsEngine({
@@ -183,7 +183,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   const membersFixture = (): ChannelMember[] => [
     member('agent-a', 'tmux-a'),
     { ...member('supe', 'tmux-supe'), supervisor: true, supervisorMaxIdleMinutes: 1 },
-    { ...member('human', '', 'human'), tmuxSession: undefined }
+    { ...member('human', '', 'human'), sessionId: undefined }
   ];
 
   it('does NOT fire a check-in when this channel never handed the worker a prompt', async () => {
@@ -249,8 +249,8 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     const entry = activityMap(engine).get('ops')!;
     entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
     entry.lastCheckInAt = 0;
-    const membersMap = (engine as unknown as { members: Map<string, { tmuxSession: string; busy: boolean; queue: unknown[]; pausedByOperator: boolean }> }).members;
-    membersMap.set('tmux-a', { tmuxSession: 'tmux-a', busy: true, queue: [], pausedByOperator: true });
+    const membersMap = (engine as unknown as { members: Map<string, { sessionId: string; busy: boolean; queue: unknown[]; pausedByOperator: boolean }> }).members;
+    membersMap.set('tmux-a', { sessionId: 'tmux-a', busy: true, queue: [], pausedByOperator: true });
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(0);
   });

@@ -821,7 +821,7 @@ const defaultAttentionSink: AttentionSink = {
   // restart); the normalizer absorbs both. The signal fanout keeps the
   // legacy key until the channels flip.
   pushEvent: (session, kind, message) => attentionTracker.pushEvent(nativeIdForTmuxSession(session), kind, message),
-  notifySignal: (session, kind) => notifyAgentSignal(session, kind),
+  notifySignal: (session, kind) => notifyAgentSignal(nativeIdForTmuxSession(session), kind),
   raise: (session) => attentionTracker.raise(nativeIdForTmuxSession(session))
 };
 

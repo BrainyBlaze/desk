@@ -1,7 +1,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { TerminalSequenceTokenizer, type TerminalToken } from '../shared/terminalSequenceTokenizer.js';
-import { drainNativeAttentionEvents, nativeIdForTmuxSession, nativeSessionsEnabled, tmuxSessionForNativeId } from './runtime/nativeSessionControl.js';
+import { drainNativeAttentionEvents, nativeIdForTmuxSession, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -298,15 +298,15 @@ export async function pollTmuxBellFlagsAsync(): Promise<Map<string, TmuxWindowFl
 
 export const attentionTracker = new AttentionTracker();
 
-let raiseListener: ((tmuxSession: string) => void) | null = null;
+let raiseListener: ((sessionId: string) => void) | null = null;
 
 /** Invoked on every newly raised attention (a turn completed / approval rang). */
-export function setRaiseListener(listener: ((tmuxSession: string) => void) | null): void {
+export function setRaiseListener(listener: ((sessionId: string) => void) | null): void {
   raiseListener = listener;
 }
 
-export function notifyRaise(tmuxSession: string): void {
-  raiseListener?.(tmuxSession);
+export function notifyRaise(sessionId: string): void {
+  raiseListener?.(sessionId);
 }
 
 /**
@@ -316,7 +316,7 @@ export function notifyRaise(tmuxSession: string): void {
  * including repeats while attention is already raised. The channels engine
  * uses this as its "input released" trigger.
  */
-export type AgentSignalListener = (tmuxSession: string, kind: AgentEventKind) => void;
+export type AgentSignalListener = (sessionId: string, kind: AgentEventKind) => void;
 
 const signalListeners = new Set<AgentSignalListener>();
 
@@ -325,10 +325,10 @@ export function addAgentSignalListener(listener: AgentSignalListener): () => voi
   return () => signalListeners.delete(listener);
 }
 
-export function notifyAgentSignal(tmuxSession: string, kind: AgentEventKind): void {
+export function notifyAgentSignal(sessionId: string, kind: AgentEventKind): void {
   for (const listener of signalListeners) {
     try {
-      listener(tmuxSession, kind);
+      listener(sessionId, kind);
     } catch {
       // a faulty listener must not break attention tracking
     }
@@ -343,23 +343,17 @@ let nativeAttentionCursor = 0;
 
 /**
  * Drain the daemon's buffered bell/OSC9 events and raise attention for each —
- * the atch-native replacement for tmux bell flags. Events are keyed by
- * sessionId at the daemon; consumers key by tmuxSession during the
- * transitional cutover, so each event maps back at this boundary.
+ * the atch-native replacement for tmux bell flags. The daemon, the tracker,
+ * and both fanouts all key by sessionId — no mapping anywhere.
  */
 async function drainNativeAttention(): Promise<void> {
   const { events, lastSeq } = await drainNativeAttentionEvents(nativeAttentionCursor);
   for (const event of events) {
-    // The tracker keys by sessionId (the daemon's native key — no mapping).
     if (attentionTracker.raise(event.sessionId)) {
       attentionTracker.pushEvent(event.sessionId, 'bell', event.data);
     }
-    // TRANSITIONAL: the signal fanouts still carry tmuxSession — the channels
-    // engine and the resume-capture raise listener key by it until their own
-    // flip steps. Dies with the final key flip.
-    const legacyKey = tmuxSessionForNativeId(event.sessionId);
-    notifyRaise(legacyKey);
-    notifyAgentSignal(legacyKey, 'bell');
+    notifyRaise(event.sessionId);
+    notifyAgentSignal(event.sessionId, 'bell');
   }
   nativeAttentionCursor = lastSeq;
 }
@@ -376,17 +370,17 @@ export function startAttentionPolling(intervalMs = 2000): void {
     pollInFlight = true;
     try {
       const flags = await pollTmuxBellFlagsAsync();
-      // TRANSITIONAL: the poller sees tmux names; the tracker keys by
-      // sessionId, so map at this boundary (identity for unknown names). The
-      // signal fanouts keep the tmux name until the channels/resume flips.
-      // The whole poller dies with the legacy transport at the final flip.
+      // TRANSITIONAL: the poller sees tmux names; everything downstream —
+      // tracker, raise listener, signal listeners — keys by sessionId, so map
+      // once at this boundary (identity for unknown names). The whole poller
+      // dies with the legacy transport at the final flip.
       for (const session of detectBellEdges(previousFlags, flags, (name) => attentionTracker.lastClearedAt(nativeIdForTmuxSession(name)))) {
         const sessionId = nativeIdForTmuxSession(session);
         if (attentionTracker.raise(sessionId)) {
           attentionTracker.pushEvent(sessionId, 'bell');
         }
-        notifyRaise(session);
-        notifyAgentSignal(session, 'bell');
+        notifyRaise(sessionId);
+        notifyAgentSignal(sessionId, 'bell');
       }
       previousFlags = new Map([...flags].map(([name, value]) => [name, value.bellFlag]));
       if (nativeSessionsEnabled()) {

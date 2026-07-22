@@ -334,10 +334,10 @@ export class TerminalBroker {
     const notifications = extractTerminalNotifications(chunk, terminal.attentionTokenizer);
     if (notifications.length > 0) {
       attentionTracker.raise(terminal.session.sessionId);
-      notifyRaise(terminal.session.tmuxSession); // TRANSITIONAL: resume capture keys tmux
+      notifyRaise(terminal.session.sessionId);
       for (const notification of notifications) {
         attentionTracker.pushEvent(terminal.session.sessionId, notification.kind, notification.message);
-        notifyAgentSignal(terminal.session.tmuxSession, notification.kind); // TRANSITIONAL: engine keys tmux
+        notifyAgentSignal(terminal.session.sessionId, notification.kind);
       }
     }
     const payload = stripTerminalMouseModeControls(chunk, terminal.mouseModeTokenizer);

@@ -24,9 +24,9 @@ describe('channelsEvents', () => {
   });
 
   it('appends events with monotonic seq and reads them back in order', () => {
-    appendDeliveryEvent(home, { kind: 'queued', tmuxSession: 'tmux-a', channel: 'ops', messageId: 'msg-1' });
-    appendDeliveryEvent(home, { kind: 'delivering', tmuxSession: 'tmux-a', messageId: 'msg-1' });
-    appendDeliveryEvent(home, { kind: 'submitted', tmuxSession: 'tmux-a', messageId: 'msg-1' });
+    appendDeliveryEvent(home, { kind: 'queued', sessionId: 'tmux-a', channel: 'ops', messageId: 'msg-1' });
+    appendDeliveryEvent(home, { kind: 'delivering', sessionId: 'tmux-a', messageId: 'msg-1' });
+    appendDeliveryEvent(home, { kind: 'submitted', sessionId: 'tmux-a', messageId: 'msg-1' });
 
     const events = readDeliveryEvents(home);
     expect(events).toHaveLength(3);
@@ -43,14 +43,14 @@ describe('channelsEvents', () => {
     expect(latestEventSeq(home)).toBe(2);
   });
 
-  it('filters by tmuxSession', () => {
-    appendDeliveryEvent(home, { kind: 'queued', tmuxSession: 'tmux-a' });
-    appendDeliveryEvent(home, { kind: 'queued', tmuxSession: 'tmux-b' });
-    appendDeliveryEvent(home, { kind: 'delivering', tmuxSession: 'tmux-a' });
+  it('filters by sessionId', () => {
+    appendDeliveryEvent(home, { kind: 'queued', sessionId: 'tmux-a' });
+    appendDeliveryEvent(home, { kind: 'queued', sessionId: 'tmux-b' });
+    appendDeliveryEvent(home, { kind: 'delivering', sessionId: 'tmux-a' });
 
-    const aEvents = readDeliveryEvents(home, { tmuxSession: 'tmux-a' });
+    const aEvents = readDeliveryEvents(home, { sessionId: 'tmux-a' });
     expect(aEvents).toHaveLength(2);
-    expect(aEvents.every((e) => e.tmuxSession === 'tmux-a')).toBe(true);
+    expect(aEvents.every((e) => e.sessionId === 'tmux-a')).toBe(true);
   });
 
   it('filters by kind', () => {
@@ -124,8 +124,8 @@ describe('channelsEvents', () => {
   });
 
   it('persists across re-reads (engine restore reads the same file)', () => {
-    appendDeliveryEvent(home, { kind: 'paused', tmuxSession: 'tmux-a', reason: 'sensitive' });
-    appendDeliveryEvent(home, { kind: 'resumed', tmuxSession: 'tmux-a' });
+    appendDeliveryEvent(home, { kind: 'paused', sessionId: 'tmux-a', reason: 'sensitive' });
+    appendDeliveryEvent(home, { kind: 'resumed', sessionId: 'tmux-a' });
     // Simulate engine restart: read fresh.
     const events = readDeliveryEvents(home);
     expect(events).toHaveLength(2);

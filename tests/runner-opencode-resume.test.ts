@@ -182,7 +182,7 @@ projects:
 `),
         { homeDir: root }
       )[0]!;
-      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.tmuxSession] }];
+      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.sessionId] }];
 
       expect(runPlan(plan, false)).toBe(0);
       expect(readPendingResumeCaptures({ path: statePath })).toEqual([]);
@@ -229,7 +229,7 @@ projects:
 `),
         { homeDir: root }
       )[0]!;
-      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.tmuxSession] }];
+      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.sessionId] }];
 
       expect(runPlan(plan, true)).toBe(0);
       expect(existsSync(join(configDir, 'plugin', 'desk-attention.js'))).toBe(false);
@@ -240,7 +240,7 @@ projects:
       expect(existsSync(join(configDir, 'plugin', 'desk-attention.js'))).toBe(true);
       expect(readPendingResumeCaptures({ path: statePath })).toEqual([
         expect.objectContaining({
-          tmuxSession: spec.tmuxSession,
+          sessionId: spec.sessionId,
           agent: 'opencode',
           cwd
         })

@@ -68,8 +68,8 @@ export interface ChannelMember {
   type: string;
   status: string;
   joined: string;
-  /** desk extension: tmux session backing this member */
-  tmuxSession?: string;
+  /** desk extension: durable session identity backing this member */
+  sessionId?: string;
   /** agent role in this channel */
   role?: string;
   /** agent functions/responsibilities in this channel */
@@ -106,7 +106,7 @@ export type LifecycleStatus = 'working' | 'submit-stuck' | 'blocked' | 'awaiting
  * blocked DISTINCT from idle without touching the live-probe /engine surface.
  */
 export interface LifecycleState {
-  tmuxSession: string;
+  sessionId: string;
   busy: boolean;
   awaitingApproval: boolean;
   queued: number;
@@ -243,7 +243,7 @@ export interface BlockedItemMeta {
 
 /** Per-session engine diagnostics for the ops console. */
 export interface SessionDiagnostic {
-  tmuxSession: string;
+  sessionId: string;
   paneState: PaneState;
   status: LifecycleStatus;
   busy: boolean;
@@ -510,7 +510,7 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
     type: fields.type ?? 'human',
     status: fields.status ?? 'active',
     joined: fields.joined ?? '',
-    tmuxSession: fields.tmux || undefined,
+    sessionId: fields.session || undefined,
     role: fields.role || undefined,
     functions: fields.functions || undefined,
     supervisor,
@@ -522,7 +522,7 @@ export interface MemberManifestOptions {
   name: string;
   type: string;
   joined: string;
-  tmuxSession?: string;
+  sessionId?: string;
   agentLabel?: string;
   role?: string;
   functions?: string;
@@ -538,8 +538,8 @@ export function formatMemberManifest(options: MemberManifestOptions): string {
     'status: active',
     `joined: ${options.joined}`
   ];
-  if (options.tmuxSession) {
-    lines.push(`tmux: ${options.tmuxSession}`);
+  if (options.sessionId) {
+    lines.push(`session: ${options.sessionId}`);
   }
   if (options.role) {
     lines.push(`role: ${options.role}`);

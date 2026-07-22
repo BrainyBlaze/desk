@@ -9,8 +9,8 @@ import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtoc
 
 const READY_PANE = 'ready prompt';
 
-function member(name: string, tmuxSession: string): ChannelMember {
-  return { name, type: 'codex', tmuxSession };
+function member(name: string, sessionId: string): ChannelMember {
+  return { name, type: 'codex', sessionId };
 }
 
 function message(id: string, author: string, body: string): ChannelMessage {
@@ -44,7 +44,7 @@ describe('native-mode channel delivery', () => {
     const terminalSent: Array<{ session: string; text: string }> = [];
     const nativeSent: Array<{ session: string; text: string; source: string }> = [];
     const sendText = createChannelDeliverySender({
-      lookupSession: (tmuxSession) => ({ tmuxSession, uiMode }),
+      lookupSession: (sessionId) => ({ sessionId, uiMode }),
       terminalSender: async (session, text) => {
         terminalSent.push({ session, text });
         return true;
@@ -87,7 +87,7 @@ describe('native-mode channel delivery', () => {
     const terminalSent: Array<{ session: string; text: string }> = [];
     const nativeSent: Array<{ session: string; text: string; source: string }> = [];
     const sendText = createChannelDeliverySender({
-      lookupSession: (tmuxSession) => ({ tmuxSession, uiMode }),
+      lookupSession: (sessionId) => ({ sessionId, uiMode }),
       terminalSender: async (session, text) => {
         terminalSent.push({ session, text });
         return true;
@@ -125,7 +125,7 @@ describe('native-mode channel delivery', () => {
   it('returns false instead of throwing when a native session has no broker', async () => {
     const logs: string[] = [];
     const sendText = createChannelDeliverySender({
-      lookupSession: (tmuxSession) => ({ tmuxSession, uiMode: 'native' }),
+      lookupSession: (sessionId) => ({ sessionId, uiMode: 'native' }),
       terminalSender: async () => {
         throw new Error('terminal sender should not be used');
       },
@@ -140,7 +140,7 @@ describe('native-mode channel delivery', () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-native-fatal-'));
     let engine!: ChannelsEngine;
     const sendText = createChannelDeliverySender({
-      lookupSession: (tmuxSession) => ({ tmuxSession, uiMode: 'native' }),
+      lookupSession: (sessionId) => ({ sessionId, uiMode: 'native' }),
       agentSurfaceBroker: {
         injectUserMessage: async () => {
           throw Object.assign(new Error('session deleted'), { code: 'not-native-session', retryable: false });
@@ -150,8 +150,8 @@ describe('native-mode channel delivery', () => {
         throw new Error('terminal sender should not be used');
       },
       log: () => undefined,
-      onNonRetryableNativeFailure: (tmuxSession, error) => {
-        engine.pauseSession(tmuxSession, `native channel delivery failed (${error.code}): ${error.message}`);
+      onNonRetryableNativeFailure: (sessionId, error) => {
+        engine.pauseSession(sessionId, `native channel delivery failed (${error.code}): ${error.message}`);
       }
     });
     engine = new ChannelsEngine({
@@ -175,10 +175,10 @@ describe('native-mode channel delivery', () => {
     });
 
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fatal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
-    await waitFor(() => engine.lifecycleStates().some((state) => state.tmuxSession === 'tmux-a' && state.pausedByOperator));
+    await waitFor(() => engine.lifecycleStates().some((state) => state.sessionId === 'tmux-a' && state.pausedByOperator));
 
     expect(readdirSync(join(home, '_engine', 'queue', 'tmux-a'))).toEqual(['0000000001.json']);
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({
+    expect(engine.lifecycleStates().find((state) => state.sessionId === 'tmux-a')).toMatchObject({
       pausedByOperator: true,
       pauseReason: 'native channel delivery failed (not-native-session): session deleted'
     });
