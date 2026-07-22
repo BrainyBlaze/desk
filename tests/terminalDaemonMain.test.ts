@@ -2,7 +2,7 @@
 // restart RE-ADOPTS surviving atch masters — durable generation, killSpec
 // registration — and never ensures/spawns over them.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -796,6 +796,58 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
     }
   });
 
+  it('an uncertain record is never dropped by the socket-absent shortcut: retire stays non-ok until the LATE master surfaces and is killed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-lateuncertain-'));
+    const sockPath = join(dir, 'late.sock');
+    const attempts = join(dir, 'attempts');
+    try {
+      const { manager } = makeManager();
+      // Kill semantics like real atch kill -f: succeeds (and removes the
+      // socket) only when the socket exists; exits 1 otherwise.
+      const atchLikeKill = {
+        binPath: '/bin/sh',
+        args: [
+          '-c',
+          `date +%s%N >> ${shellQuote(attempts)}; if [ -e ${shellQuote(sockPath)} ]; then rm -f ${shellQuote(sockPath)}; exit 0; else exit 1; fi`
+        ]
+      };
+      // ownership-possible spawn timeout: clean launcher exit, no socket yet →
+      // the first cleanup kill runs and FAILS (socket absent), record retained.
+      const result = await manager.spawnAndAttach('late', {
+        binPath: '/bin/sh',
+        args: ['-c', 'exit 0'],
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        readyTimeoutMs: 300,
+        detached: true,
+        killSpec: atchLikeKill
+      });
+      expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+      expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(1);
+
+      // THE MUTANT: control retire while the socket is STILL ABSENT must stay
+      // non-ok with the record retained — the old socket-absent shortcut read
+      // this as clean, deleted the record, and stranded the late master.
+      const early = await manager.retireAwaited('late', { timeoutMs: 2000 });
+      expect(early.ok).toBe(false);
+      expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(2); // the kill RAN (and failed)
+
+      // the half-forked master finally surfaces its socket…
+      const { writeFileSync: wf } = await import('node:fs');
+      wf(sockPath, '');
+      // …and the retained record kills it to confirmed completion.
+      const late = await manager.retireAwaited('late', { timeoutMs: 4000 });
+      expect(late).toEqual({ ok: true });
+      expect(existsSync(sockPath)).toBe(false);
+      expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(3);
+      // consumed: a further retire is idempotent, no fourth kill run
+      expect(await manager.retireAwaited('late')).toEqual({ ok: true });
+      expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('an ownership-possible spawn timeout registers the kill record; a later control retire retries it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-strand2-'));
     const sockPath = join(dir, 'late.sock');
@@ -836,6 +888,96 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe('fatal post-listen startup (a malformed manifest must not leave a zombie server)', () => {
+  function withMalformedHome(): { home: string; restore: () => void } {
+    const home = mkdtempSync(join(tmpdir(), 'desk-badmanifest-'));
+    mkdirSync(join(home, '.config', 'desk'), { recursive: true });
+    writeFileSync(join(home, '.config', 'desk', 'desk.yml'), 'groups: [ {{{ not yaml');
+    const saved = process.env.HOME;
+    process.env.HOME = home;
+    return {
+      home,
+      restore: () => {
+        if (saved === undefined) delete process.env.HOME;
+        else process.env.HOME = saved;
+        rmSync(home, { recursive: true, force: true });
+      }
+    };
+  }
+
+  it('closes the bound server and rethrows (the port is released)', async () => {
+    const { runTerminalDaemonMain } = await import('../src/server/runtime/terminalDaemonMain.js');
+    const ctx = withMalformedHome();
+    const base = mkdtempSync(join(tmpdir(), 'desk-fatal-'));
+    const port = 42000 + (process.pid % 10000);
+    try {
+      const { mkdirSync: mk } = await import('node:fs');
+      mk(join(base, 'home', '_engine'), { recursive: true });
+      await expect(
+        runTerminalDaemonMain({
+          homeRoot: join(base, 'home'),
+          atchBinPath: '/usr/bin/true',
+          atchSocketRoot: join(base, 'atch'),
+          host: '127.0.0.1',
+          port
+        })
+      ).rejects.toThrow();
+      // the port must be free again — a leaked server would EADDRINUSE here
+      const { createServer: mkHttp } = await import('node:http');
+      await new Promise<void>((resolve, reject) => {
+        const probe = mkHttp();
+        probe.once('error', reject);
+        probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
+      });
+    } finally {
+      ctx.restore();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('the CLI child process exits non-zero (never a live zombie)', async () => {
+    const ctx = withMalformedHome();
+    const base = mkdtempSync(join(tmpdir(), 'desk-fatalchild-'));
+    try {
+      const { mkdirSync: mk } = await import('node:fs');
+      mk(join(base, 'home', '_engine'), { recursive: true });
+      const { spawn: sp } = await import('node:child_process');
+      const tsxBin = join(process.cwd(), 'node_modules', '.bin', 'tsx');
+      const entry = join(process.cwd(), 'src', 'server', 'runtime', 'terminalDaemonMain.ts');
+      const child = sp(tsxBin, [entry], {
+        env: {
+          ...process.env,
+          HOME: ctx.home,
+          DESK_DAEMON_HOME: join(base, 'home'),
+          DESK_ATCH_SOCKET_ROOT: join(base, 'atch'),
+          DESK_ATCH_BIN: '/usr/bin/true',
+          DESK_DAEMON_PORT: String(43000 + (process.pid % 10000))
+        },
+        stdio: 'ignore'
+      });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error('daemon child did not exit — zombie server'));
+        }, 20_000);
+        child.on('exit', (exitCode) => {
+          clearTimeout(timer);
+          resolve(exitCode);
+        });
+        child.on('error', (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+      expect(code).not.toBe(0);
+      expect(code).not.toBeNull();
+    } finally {
+      ctx.restore();
+      rmSync(base, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe('startTerminalDaemonServer socket root', () => {

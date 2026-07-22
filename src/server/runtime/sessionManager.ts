@@ -89,7 +89,7 @@ export class SessionManager {
    * disappearance — a retire that returns before the master is gone lets an
    * immediate re-provision adopt the STALE socket at the old generation.
    */
-  private readonly detachedKills = new Map<string, { binPath: string; args: string[]; sockPath: string }>();
+  private readonly detachedKills = new Map<string, { binPath: string; args: string[]; sockPath: string; mustConfirm?: boolean }>();
   /**
    * Ownership token per session, minted fresh by each spawn/restore operation.
    * Deferred callbacks from an OLD operation (a killed child's late 'exit', a
@@ -319,9 +319,9 @@ export class SessionManager {
         // Register FIRST, then attempt to confirmed completion: a failed or
         // unconfirmed cleanup RETAINS the record so a later control retire can
         // finish the job (a half-forked master may surface its socket late).
-        const record = { ...opts.killSpec, sockPath: opts.sockPath };
+        const record = { ...opts.killSpec, sockPath: opts.sockPath, mustConfirm: true };
         this.detachedKills.set(sessionId, record);
-        await this.confirmKill(sessionId, record, 5_000, { skipIfSocketAbsent: false });
+        await this.confirmKill(sessionId, record, 5_000);
       }
       if (ens.created) this.core.retire(sessionId);
       return { ok: false, reason: 'spawn-failed' };
@@ -376,9 +376,10 @@ export class SessionManager {
     cleanup?.(); // foreground child kill (sync)
     const kill = this.detachedKills.get(sessionId);
     if (kill !== undefined) {
-      // Attempt to confirmed completion; failure retains the record so a
-      // later control retire can retry the same teardown.
-      await this.confirmKill(sessionId, kill, 5_000, { skipIfSocketAbsent: false });
+      // This op's master fate is uncertain — attempt to confirmed completion;
+      // failure retains the record so a later control retire can retry it.
+      kill.mustConfirm = true;
+      await this.confirmKill(sessionId, kill, 5_000);
     }
     if (createdSlot) this.core.retire(sessionId);
   }
@@ -490,20 +491,26 @@ export class SessionManager {
    */
   private async confirmKill(
     sessionId: string,
-    kill: { binPath: string; args: string[]; sockPath: string },
-    timeoutMs: number,
-    opts: { skipIfSocketAbsent?: boolean } = {}
+    kill: { binPath: string; args: string[]; sockPath: string; mustConfirm?: boolean },
+    timeoutMs: number
   ): Promise<{ ok: boolean; error?: string }> {
-    if (opts.skipIfSocketAbsent !== false && !existsSync(kill.sockPath)) {
+    // The socket-absent shortcut applies ONLY to records whose master's fate
+    // is certain. A mustConfirm record (an uncertain half-forked master, or a
+    // record whose prior kill attempt failed) may see the socket ABSENT merely
+    // because the master has not surfaced yet — reading that as clean would
+    // delete the only teardown record and strand the late master.
+    if (kill.mustConfirm !== true && !existsSync(kill.sockPath)) {
       this.detachedKills.delete(sessionId); // nothing addressable remains — clean
       return { ok: true };
     }
     const killed = await runKillCommand(kill, timeoutMs); // bounded: a hung kill fails, never blocks forever
     if (!killed.ok) {
+      kill.mustConfirm = true; // fate now uncertain — no shortcut on later retries
       return killed; // record retained for retry
     }
     const gone = await waitForSocketGone(kill.sockPath, timeoutMs);
     if (!gone) {
+      kill.mustConfirm = true;
       return { ok: false, error: `atch socket still present after kill: ${kill.sockPath}` }; // record retained
     }
     this.detachedKills.delete(sessionId); // confirmed — consume

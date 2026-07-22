@@ -110,11 +110,22 @@ export async function runTerminalDaemonMain(config = resolveDaemonConfig()): Pro
   // could allocate over a surviving master and then destroy it on the ACK
   // mismatch. Readiness must not lie about reconciliation.
   const running = await runTerminalDaemon({ ...config, sessions: [], deferReady: true });
-  const reconciled = await reconcileExistingSessions(
-    running.daemon,
-    manifestReconcileTargets(config.atchSocketRoot),
-    config.atchBinPath
-  );
+  let reconciled: { sessionId: string; ok: boolean; error?: string }[];
+  try {
+    reconciled = await reconcileExistingSessions(
+      running.daemon,
+      manifestReconcileTargets(config.atchSocketRoot),
+      config.atchBinPath
+    );
+  } catch (error) {
+    // A post-listen startup failure (e.g. a malformed manifest) must be FATAL:
+    // the bound server would otherwise hold the event loop open forever with
+    // every control route answering 503 "starting" — a zombie the supervisor's
+    // probe would eventually SIGTERM, but the process itself must exit
+    // non-zero so restart accounting sees a crash, not a hang.
+    await running.close();
+    throw error;
+  }
   running.daemon.markReady();
   const ok = reconciled.filter((r) => r.ok).length;
   for (const failure of reconciled.filter((r) => !r.ok)) {

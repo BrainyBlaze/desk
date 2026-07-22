@@ -13,7 +13,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { findPackageRoot } from '../../shared/packageRoot.js';
 
@@ -144,6 +144,12 @@ export function resolveDaemonCommand(
 
 function isExecutableFile(path: string): boolean {
   try {
+    // X_OK alone passes for a DIRECTORY (execute = traverse) — a libexec/atch
+    // or runtime/node directory would preflight as a binary and fail only at
+    // spawn. Require a regular file too.
+    if (!statSync(path).isFile()) {
+      return false;
+    }
     accessSync(path, constants.X_OK);
     return true;
   } catch {

@@ -354,6 +354,39 @@ describe('resolveAtchBinPath', () => {
       rmSync(pathDir, { recursive: true, force: true });
     }
   });
+
+  it('rejects a DIRECTORY at every preflight site (X_OK alone passes for directories)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+
+      // libexec/atch as a DIRECTORY must not preflight as the atch binary
+      mkdirSync(join(root, 'libexec', 'atch'), { recursive: true });
+      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('PATH', '/nonexistent-dir');
+      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/no atch binary/);
+
+      // an explicit DESK_ATCH_BIN naming a directory fails the preflight too
+      setEnv('DESK_ATCH_BIN', join(root, 'libexec', 'atch'));
+      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/not an executable/);
+
+      // runtime/node as a DIRECTORY must not be picked as the release runtime
+      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('DESK_DAEMON_CMD', undefined);
+      mkdirSync(join(root, 'runtime', 'node'), { recursive: true });
+      expect(resolveDaemonCommand(fromUrl, process.env, '/usr/local/bin/node')).toEqual([
+        '/usr/local/bin/node', // falls through to the node execPath, never the directory
+        join(root, 'dist', 'cli', 'main.js'),
+        'terminal-daemon'
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('never-ready hard cap (immune to the rolling window)', () => {
