@@ -1,14 +1,12 @@
-// Binary terminal WS bridge (spec §7.4). Mounts a TerminalWsRouter on a real
-// WebSocket upgrade, the server peer of binaryTerminalBrokerClient. It mirrors
-// installTerminalBroker (the string-JSON path) but carries the binary browser
-// protocol: each WS message IS one frame, relayed verbatim to the router, and
-// the router's server→client frames are sent back as binary messages.
+// Binary terminal WS bridge (spec §7.4) — the ONLY terminal WebSocket path.
+// Mounts a TerminalWsRouter on a real WebSocket upgrade at /ws/terminal, the
+// server peer of binaryTerminalBrokerClient: each WS message IS one binary
+// frame, relayed verbatim to the router, and the router's server→client
+// frames are sent back as binary messages.
 //
-// Additive and non-breaking: this listens on its own path (/ws/terminal) and
-// carries the binary browser protocol end-to-end. Session provisioning
-// (spawn+attach the atch master) is the daemon lifecycle's job, driven by the
-// desk start/stop flow — this bridge only carries surface traffic for sessions
-// the daemon already owns.
+// Session provisioning (spawn+attach the atch master) is the daemon
+// lifecycle's job, driven by the desk start/stop flow — this bridge only
+// carries surface traffic for sessions the daemon already owns.
 
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
