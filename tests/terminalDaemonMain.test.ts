@@ -749,35 +749,90 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
       expect(await manager.retireAwaited('shell')).toEqual({ ok: true });
       expect(existsSync(attempts)).toBe(false);
 
-      // Now the SPAWN-owned case: fake a spawned-and-registered master whose
-      // teardown kill fails — the record must survive for a retry.
+      // Now the SPAWN-owned case: an owned master whose kill FAILS FIRST and
+      // SUCCEEDS SECOND — the record must survive the failure and the retry
+      // must execute the SAME retained record to confirmed completion.
       const store2 = new InMemoryGenerationLedger();
       new GenerationLedger(store2).allocate('owned');
       const { manager: manager2 } = makeManager(store2);
       const sock2 = join(dir, 'owned.sock');
+      const flag = join(dir, 'second-attempt.flag');
       const server2 = await listenAsMaster(sock2, 1);
+      const flakyKill = {
+        binPath: '/bin/sh',
+        args: [
+          '-c',
+          `date +%s%N >> ${shellQuote(attempts)}; if [ -f ${shellQuote(flag)} ]; then rm -f ${shellQuote(sock2)}; exit 0; else : > ${shellQuote(flag)}; exit 1; fi`
+        ]
+      };
       try {
         expect(
           (
             await manager2.restoreAndAttach('owned', {
               sockPath: sock2,
               geometry: { rows: 24, cols: 80 },
-              killSpec: failingKill
+              killSpec: flakyKill
             })
           ).ok
         ).toBe(true);
-        // control retire: kill fails → error reported AND the record was consumed-
-        // and-retried on the SECOND retire (proving it is re-runnable state)
+        // 1st retire: kill exits 1 → non-ok, record RETAINED
         const first = await manager2.retireAwaited('owned');
         expect(first.ok).toBe(false);
-        await waitFor(() => existsSync(attempts));
-        const runsAfterFirst = readFileSync(attempts, 'utf8').trim().split('\n').length;
-        expect(runsAfterFirst).toBe(1);
+        expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(1);
+        // 2nd retire: the SAME record runs again, kill succeeds + socket gone
+        const second = await manager2.retireAwaited('owned', { timeoutMs: 4000 });
+        expect(second).toEqual({ ok: true });
+        expect(existsSync(sock2)).toBe(false);
+        expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(2);
+        // 3rd retire: idempotent — record consumed, nothing runs
+        expect(await manager2.retireAwaited('owned')).toEqual({ ok: true });
+        expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(2);
       } finally {
         server2.close();
       }
     } finally {
       server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ownership-possible spawn timeout registers the kill record; a later control retire retries it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-strand2-'));
+    const sockPath = join(dir, 'late.sock');
+    const attempts = join(dir, 'attempts');
+    const flag = join(dir, 'flag');
+    try {
+      const { manager } = makeManager();
+      // clean-exit launcher, socket never appears in time → ownership-possible
+      // spawn failure; the FIRST cleanup kill fails → record must be registered
+      // and retained.
+      const flakyKill = {
+        binPath: '/bin/sh',
+        args: [
+          '-c',
+          `date +%s%N >> ${shellQuote(attempts)}; if [ -f ${shellQuote(flag)} ]; then rm -f ${shellQuote(sockPath)}; exit 0; else : > ${shellQuote(flag)}; exit 1; fi`
+        ]
+      };
+      const result = await manager.spawnAndAttach('late', {
+        binPath: '/bin/sh',
+        args: ['-c', 'exit 0'],
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        readyTimeoutMs: 300,
+        detached: true,
+        killSpec: flakyKill
+      });
+      expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+      expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(1); // first (failed) attempt ran
+      // the half-started master creates its socket LATE:
+      const { writeFileSync: wf } = await import('node:fs');
+      wf(sockPath, '');
+      // the retained record lets a control retire finish the job
+      const retired = await manager.retireAwaited('late', { timeoutMs: 4000 });
+      expect(retired).toEqual({ ok: true });
+      expect(existsSync(sockPath)).toBe(false);
+      expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(2);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

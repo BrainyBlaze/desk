@@ -42,6 +42,8 @@ export interface DaemonSupervisorOptions {
   restartWindowMs?: number;
   /** Backoff before restart attempt n (1-based); capped by the default. */
   backoffMs?: (attempt: number) => number;
+  /** Grace between SIGTERM and the identity-bound SIGKILL escalation. */
+  terminationGraceMs?: number;
   log?: (message: string) => void;
   /**
    * Health endpoint of the daemon (GET, 200 = ready). When set, each launched
@@ -219,6 +221,45 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
   let restartTimer: NodeJS.Timeout | undefined;
   let restarts = 0;
   const exitTimestamps: number[] = [];
+  /**
+   * Consecutive launches that died WITHOUT ever reaching nonce-exact
+   * readiness. Hard-capped regardless of wall time: each never-ready cycle
+   * burns probe time + backoff, so a rolling window alone lets a permanently
+   * broken child age its failures out and restart forever. Reset only by a
+   * confirmed-ready launch. (The rolling window still governs post-ready
+   * crashes.) Applies only when a health probe is configured — without one,
+   * readiness is unknowable and the window is the only signal.
+   */
+  let consecutivePreReadyFailures = 0;
+  let currentLaunchBecameReady = false;
+  const terminationGraceMs = options.terminationGraceMs ?? 3_000;
+
+  /**
+   * SIGTERM with a bounded, CHILD-IDENTITY-BOUND SIGKILL escalation: a daemon
+   * whose event loop is wedged has the SIGTERM handler installed but never
+   * runs it — without escalation neither bounded restart nor disposal (HMR
+   * replacement on the shared port) can proceed. The escalation targets the
+   * captured child only, never a replacement, and never touches detached atch
+   * masters (they are separate processes reached via their kill command).
+   */
+  const terminate = (target: ChildProcess): void => {
+    try {
+      target.kill('SIGTERM');
+    } catch {
+      /* already gone */
+    }
+    const escalation = setTimeoutFn(() => {
+      if (target.exitCode === null && target.signalCode === null) {
+        log('terminal daemon ignored SIGTERM past the grace period — escalating to SIGKILL');
+        try {
+          target.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    }, terminationGraceMs);
+    escalation.unref?.();
+  };
   /** Children whose demise was already accounted (an 'error' + a late 'exit' fire for ONE child). */
   const handled = new WeakSet<ChildProcess>();
 
@@ -267,6 +308,8 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
         // nonce — that must read as not-ready, never as this child's success.
         if (result.healthy && result.nonce === expectedNonce) {
           ready = true;
+          currentLaunchBecameReady = true;
+          consecutivePreReadyFailures = 0;
           log(`terminal daemon ready (${url})`);
           return;
         }
@@ -277,7 +320,7 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
           // daemon running unsupervised. Identity-guarded above, so a stale
           // probe can never kill a replacement child.
           log(`terminal daemon not ready after ${attempts} probes (${url}) — terminating it for restart accounting`);
-          self.kill('SIGTERM');
+          terminate(self);
           return;
         }
         const timer = setTimeoutFn(tick, intervalMs);
@@ -293,6 +336,7 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
     const next = spawnFn(bin, args, { env: { ...childEnv(), DESK_DAEMON_NONCE: nonce }, stdio: ['ignore', 'pipe', 'pipe'] });
     child = next;
     ready = false;
+    currentLaunchBecameReady = false;
     next.stdout?.on('data', (chunk: Buffer) => log(`[terminal-daemon] ${String(chunk).trimEnd()}`));
     next.stderr?.on('data', (chunk: Buffer) => log(`[terminal-daemon] ${String(chunk).trimEnd()}`));
     next.on('error', (error) => {
@@ -327,6 +371,23 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
     }
     if (disposed || gaveUp || restartTimer !== undefined) {
       return;
+    }
+    // Never-ready launches hard-cap on CONSECUTIVE count, immune to wall time:
+    // each cycle outlives the rolling window, which would otherwise never trip.
+    if (options.healthUrl !== undefined) {
+      if (currentLaunchBecameReady) {
+        consecutivePreReadyFailures = 0;
+      } else {
+        consecutivePreReadyFailures += 1;
+        if (consecutivePreReadyFailures > maxRestarts) {
+          gaveUp = true;
+          log(
+            `terminal daemon failed to become ready ${consecutivePreReadyFailures} consecutive times — giving up. ` +
+              'Native terminals will read MISSING until the server restarts.'
+          );
+          return;
+        }
+      }
     }
     const now = Date.now();
     exitTimestamps.push(now);
@@ -368,7 +429,9 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
         clearTimeout(restartTimer);
         restartTimer = undefined;
       }
-      child?.kill('SIGTERM');
+      if (child !== undefined) {
+        terminate(child); // graceful, with the bounded SIGKILL escalation
+      }
       child = undefined;
       ready = false;
     }

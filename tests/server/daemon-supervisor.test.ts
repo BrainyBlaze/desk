@@ -15,13 +15,24 @@ import {
 class FakeChild extends EventEmitter {
   stdout = null;
   stderr = null;
-  killed: string | undefined;
+  exitCode: number | null = null;
+  signalCode: string | null = null;
+  kills: string[] = [];
   constructor(public pid = 4242) {
     super();
   }
+  get killed(): string | undefined {
+    return this.kills[0];
+  }
   kill(signal?: string): boolean {
-    this.killed = signal ?? 'SIGTERM';
+    this.kills.push(signal ?? 'SIGTERM');
     return true;
+  }
+  /** Emit exit AND set the fields the escalation guard checks. */
+  exit(code: number | null, signal: string | null): void {
+    this.exitCode = code;
+    this.signalCode = signal;
+    this.emit('exit', code, signal);
   }
 }
 
@@ -40,6 +51,7 @@ function makeSupervisor(options: { maxRestarts?: number; restartWindowMs?: numbe
     maxRestarts: options.maxRestarts ?? 2,
     restartWindowMs: options.restartWindowMs ?? 60_000,
     backoffMs: () => 5,
+    terminationGraceMs: 7777, // escalation timers are identifiable by this ms
     log: (message) => h.logs.push(message),
     spawnFn: ((bin: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
       const child = new FakeChild();
@@ -110,12 +122,24 @@ describe('startDaemonSupervisor', () => {
     supervisor.dispose();
   });
 
-  it('dispose SIGTERMs the child and suppresses any restart', () => {
+  it('dispose SIGTERMs the child, escalates a WEDGED child to SIGKILL, and suppresses any restart', () => {
     const { supervisor, h } = makeSupervisor();
     supervisor.dispose();
     expect(h.children[0].killed).toBe('SIGTERM');
-    h.children[0].emit('exit', null, 'SIGTERM');
-    expect(h.timers).toHaveLength(0); // no restart scheduled after dispose
+    // the only scheduled timer is the SIGKILL escalation, not a restart
+    expect(h.timers).toHaveLength(1);
+    // the child is wedged (never exits): the escalation fires SIGKILL
+    h.timers.shift()?.fn();
+    expect(h.children[0].kills).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(supervisor.status().state).toBe('disposed');
+  });
+
+  it('does NOT escalate a child that exited within the grace period', () => {
+    const { supervisor, h } = makeSupervisor();
+    supervisor.dispose();
+    h.children[0].exit(null, 'SIGTERM'); // graceful exit before the grace elapses
+    h.timers.shift()?.fn(); // escalation timer fires — must be a no-op
+    expect(h.children[0].kills).toEqual(['SIGTERM']);
     expect(supervisor.status().state).toBe('disposed');
   });
 
@@ -332,6 +356,50 @@ describe('resolveAtchBinPath', () => {
   });
 });
 
+describe('never-ready hard cap (immune to the rolling window)', () => {
+  it('gives up after maxRestarts consecutive pre-ready failures even when every exit ages out of the window', async () => {
+    const children: FakeChild[] = [];
+    const timers: { fn: () => void; ms: number }[] = [];
+    const logs: string[] = [];
+    const supervisor = startDaemonSupervisor({
+      command: ['node', 'daemon.js'],
+      healthUrl: 'http://127.0.0.1:5178/control/health',
+      probeFn: async () => ({ healthy: false }), // never ready
+      healthProbe: { attempts: 1, intervalMs: 1 }, // exhaust instantly
+      maxRestarts: 2,
+      restartWindowMs: 1, // every exit ages out immediately — the OLD logic never trips
+      backoffMs: () => 1,
+      terminationGraceMs: 7777,
+      log: (message) => logs.push(message),
+      spawnFn: (() => {
+        const child = new FakeChild(3000 + children.length);
+        children.push(child);
+        return child;
+      }) as never,
+      setTimeoutFn: (fn, ms) => {
+        timers.push({ fn, ms });
+        return { unref: () => undefined } as unknown as NodeJS.Timeout;
+      }
+    });
+    // each cycle: probe exhausts → SIGTERM → we emit exit → restart timer → next child
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await new Promise((r) => setImmediate(r)); // probe attempt → exhaustion kill
+      const current = children[children.length - 1];
+      expect(current.killed).toBe('SIGTERM');
+      current.exit(null, 'SIGTERM');
+      await new Promise((r) => setTimeout(r, 3)); // let the window age the exit out
+      const restartIndex = timers.findIndex((t) => t.ms !== 7777);
+      const restart = restartIndex >= 0 ? timers.splice(restartIndex, 1)[0] : undefined;
+      if (supervisor.status().state === 'gave-up') break;
+      restart?.fn();
+    }
+    expect(supervisor.status().state).toBe('gave-up'); // hard cap despite the aged-out window
+    expect(children.length).toBe(3); // 1 initial + 2 restarts, never a 4th
+    expect(logs.some((line) => line.includes('failed to become ready'))).toBe(true);
+    supervisor.dispose();
+  });
+});
+
 describe('probe exhaustion', () => {
   it('terminates a never-ready child so bounded-restart accounting decides', async () => {
     const children: FakeChild[] = [];
@@ -342,6 +410,7 @@ describe('probe exhaustion', () => {
       healthUrl: 'http://127.0.0.1:5178/control/health',
       probeFn: async () => ({ healthy: false }),
       healthProbe: { attempts: 2, intervalMs: 1 },
+      terminationGraceMs: 7777,
       backoffMs: () => 1,
       log: (message) => logs.push(message),
       spawnFn: (() => {
@@ -359,6 +428,16 @@ describe('probe exhaustion', () => {
     await new Promise((r) => setImmediate(r));
     expect(children[0].killed).toBe('SIGTERM');
     expect(logs.some((line) => line.includes('terminating it for restart accounting'))).toBe(true);
+
+    // the child is WEDGED (ignores SIGTERM): the grace escalation SIGKILLs it,
+    // and its eventual exit enters restart accounting EXACTLY once.
+    const escalation = timers.findIndex((t) => t.ms === 7777);
+    expect(escalation).toBeGreaterThanOrEqual(0);
+    timers.splice(escalation, 1)[0].fn();
+    expect(children[0].kills).toEqual(['SIGTERM', 'SIGKILL']);
+    children[0].exit(null, 'SIGKILL');
+    const restarts = timers.filter((t) => t.ms !== 7777);
+    expect(restarts).toHaveLength(1); // one restart scheduled — never double-accounted
     supervisor.dispose();
   });
 });

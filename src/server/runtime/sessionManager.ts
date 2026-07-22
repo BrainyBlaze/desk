@@ -316,8 +316,12 @@ export class SessionManager {
       // call allocated so provision never leaks capacity.
       const ownershipPossible = error instanceof SpawnMasterError ? error.ownershipPossible : true;
       if (opts.detached === true && opts.killSpec !== undefined && ownershipPossible) {
-        await runKillCommand(opts.killSpec);
-        await waitForSocketGone(opts.sockPath, 5_000);
+        // Register FIRST, then attempt to confirmed completion: a failed or
+        // unconfirmed cleanup RETAINS the record so a later control retire can
+        // finish the job (a half-forked master may surface its socket late).
+        const record = { ...opts.killSpec, sockPath: opts.sockPath };
+        this.detachedKills.set(sessionId, record);
+        await this.confirmKill(sessionId, record, 5_000, { skipIfSocketAbsent: false });
       }
       if (ens.created) this.core.retire(sessionId);
       return { ok: false, reason: 'spawn-failed' };
@@ -372,12 +376,9 @@ export class SessionManager {
     cleanup?.(); // foreground child kill (sync)
     const kill = this.detachedKills.get(sessionId);
     if (kill !== undefined) {
-      const killed = await runKillCommand(kill);
-      const gone = killed.ok ? await waitForSocketGone(kill.sockPath, 5_000) : false;
-      if (killed.ok && gone) {
-        this.detachedKills.delete(sessionId);
-      }
-      // else: the record stays — retireAwaited retries the kill later
+      // Attempt to confirmed completion; failure retains the record so a
+      // later control retire can retry the same teardown.
+      await this.confirmKill(sessionId, kill, 5_000, { skipIfSocketAbsent: false });
     }
     if (createdSlot) this.core.retire(sessionId);
   }
@@ -446,20 +447,25 @@ export class SessionManager {
 
   /**
    * Internal/synchronous teardown (socket-close, child-exit, dispose paths):
-   * fire-and-forget the detached kill. Control-plane retires use retireAwaited.
+   * fire-and-forget the detached kill. The kill RECORD is retained — only a
+   * CONFIRMED kill (retireAwaited) may consume it, so an unconfirmed teardown
+   * never strands a master without a retriable teardown path. A retained
+   * record after a successful fire-and-forget kill is harmless: the next
+   * control retire sees the socket already gone and reads clean.
    */
   retire(sessionId: string): void {
-    const teardown = this.beginRetire(sessionId);
-    if (teardown.kill !== undefined) {
-      void runKillCommand(teardown.kill); // best effort — no caller to report to
+    const kill = this.beginRetire(sessionId);
+    if (kill !== undefined) {
+      void runKillCommand(kill); // best effort — no caller to report to
     }
   }
 
   /**
    * Control-plane retire: AWAIT the kill command's completion AND the socket's
-   * disappearance before reporting success. Returning earlier lets an
-   * immediate re-provision (the restart flow) see the STALE socket as ready
-   * and attach to the dying master at its old generation.
+   * disappearance before reporting success — and consume the kill record ONLY
+   * on that confirmation. Returning earlier lets an immediate re-provision see
+   * the STALE socket as ready; deleting the record earlier means one failed
+   * retire loses the ONLY teardown and the next retire reads falsely clean.
    */
   async retireAwaited(sessionId: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; error?: string }> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
@@ -470,33 +476,54 @@ export class SessionManager {
     if (pending !== undefined) {
       await pending.catch(() => undefined);
     }
-    const teardown = this.beginRetire(sessionId);
-    if (teardown.kill === undefined) {
+    const kill = this.beginRetire(sessionId);
+    if (kill === undefined) {
       return { ok: true };
     }
-    const killed = await runKillCommand(teardown.kill, timeoutMs); // bounded: a hung kill fails, never blocks forever
+    return this.confirmKill(sessionId, kill, timeoutMs);
+  }
+
+  /**
+   * Run a retained kill to CONFIRMATION: socket already gone reads clean; a
+   * confirmed kill + disappearance consumes the record; any failure keeps it
+   * for the next retry.
+   */
+  private async confirmKill(
+    sessionId: string,
+    kill: { binPath: string; args: string[]; sockPath: string },
+    timeoutMs: number,
+    opts: { skipIfSocketAbsent?: boolean } = {}
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (opts.skipIfSocketAbsent !== false && !existsSync(kill.sockPath)) {
+      this.detachedKills.delete(sessionId); // nothing addressable remains — clean
+      return { ok: true };
+    }
+    const killed = await runKillCommand(kill, timeoutMs); // bounded: a hung kill fails, never blocks forever
     if (!killed.ok) {
-      return killed;
+      return killed; // record retained for retry
     }
-    const gone = await waitForSocketGone(teardown.kill.sockPath, timeoutMs);
+    const gone = await waitForSocketGone(kill.sockPath, timeoutMs);
     if (!gone) {
-      return { ok: false, error: `atch socket still present after kill: ${teardown.kill.sockPath}` };
+      return { ok: false, error: `atch socket still present after kill: ${kill.sockPath}` }; // record retained
     }
+    this.detachedKills.delete(sessionId); // confirmed — consume
     return { ok: true };
   }
 
-  /** Shared teardown core: detach state, run the foreground cleanup, free the slot. */
-  private beginRetire(sessionId: string): { kill?: { binPath: string; args: string[]; sockPath: string } } {
+  /**
+   * Shared teardown core: detach state, run the foreground cleanup, free the
+   * slot. PEEKS the kill record without consuming it — consumption is the
+   * confirming caller's decision.
+   */
+  private beginRetire(sessionId: string): { binPath: string; args: string[]; sockPath: string } | undefined {
     this.owners.delete(sessionId); // any deferred old-operation callback goes stale
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup !== undefined) cleanup();
     this.cleanups.delete(sessionId);
-    const kill = this.detachedKills.get(sessionId);
-    this.detachedKills.delete(sessionId);
     this.core.retire(sessionId);
-    return kill !== undefined ? { kill } : {};
+    return this.detachedKills.get(sessionId);
   }
 
   get sessionCount(): number {
