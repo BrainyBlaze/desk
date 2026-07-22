@@ -34,6 +34,7 @@ import {
   runPlan
 } from '../../core/runner.js';
 import {
+  nativeIdForTmuxSession,
   nativeSessionsEnabled,
   restartSessionNativeAware,
   retireNativeSession,
@@ -508,7 +509,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         for (const target of targets) {
-          managedAgentLsp.cleanup(target.tmuxSession);
+          managedAgentLsp.cleanup(target.sessionId);
         }
         return deleteProjectFromManifest(manifest, { projectId, cwd });
       });
@@ -552,7 +553,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         for (const target of targets) {
-          managedAgentLsp.cleanup(target.tmuxSession);
+          managedAgentLsp.cleanup(target.sessionId);
         }
         return deleteGroupFromManifest(manifest, { projectId, groupId, projectCwd });
       });
@@ -603,7 +604,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           ) &&
           newSpec
         ) {
-          managedAgentLsp.cleanup(newSpec.tmuxSession);
+          managedAgentLsp.cleanup(newSpec.sessionId);
           const launch = managedAgentLsp.prepare(newSpec, next.settings);
           const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
           if (!restarted.ok) {
@@ -652,7 +653,10 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         for (const target of targets) {
-          managedAgentLsp.cleanup(target);
+          // targets are raw tmuxSession strings (API contract until the field
+          // rename). LSP wiring keys sessionId — normalize; the surface broker
+          // and tool journal keep the legacy key until the env-rename window.
+          managedAgentLsp.cleanup(nativeIdForTmuxSession(target));
           agentSurfaceBroker.disposeSession(target);
           deleteToolJournal(target);
         }
@@ -674,7 +678,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         sendJson(res, 404, { error: `session ${tmuxSession} does not exist in config` });
         return true;
       }
-      managedAgentLsp.cleanup(session.tmuxSession);
+      managedAgentLsp.cleanup(session.sessionId);
       const launch = managedAgentLsp.prepare(session, readManifestFile(resolveManifestPath()).settings);
       const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
       if (!restarted.ok) {
@@ -723,7 +727,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
             {
               write: (next) => writeManifestFile(manifestPath, next),
               prepare: (spec) => {
-                managedAgentLsp.cleanup(spec.tmuxSession);
+                managedAgentLsp.cleanup(spec.sessionId);
                 launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
                 return nativeAgentLaunch(launch?.session ?? spec, launch?.envFilePath);
               },

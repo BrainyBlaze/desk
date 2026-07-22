@@ -65,11 +65,12 @@ describe('managed agent LSP wiring', () => {
 
   it('cleans tracked tokens on reconciliation and cleanupAll', () => {
     const wiring = createWiring();
-    const first = wiring.prepare({ ...baseSession(), tmuxSession: 'agentdesk-one' }, enabledSettings());
-    const second = wiring.prepare({ ...baseSession(), tmuxSession: 'agentdesk-two' }, enabledSettings());
+    const first = wiring.prepare({ ...baseSession(), tmuxSession: 'agentdesk-one', sessionId: 'one' }, enabledSettings());
+    const second = wiring.prepare({ ...baseSession(), tmuxSession: 'agentdesk-two', sessionId: 'two' }, enabledSettings());
 
     expect(wiring.minted).toEqual(['/workspace', '/workspace']);
-    wiring.reconcile(new Set(['agentdesk-two']));
+    // reconcile receives sessionIds (the wiring keys by durable identity)
+    wiring.reconcile(new Set(['two']));
     expect(wiring.revoked).toEqual(['token-1']);
     expect(existsSync(first!.envFilePath)).toBe(false);
     expect(existsSync(second!.envFilePath)).toBe(true);
@@ -112,6 +113,7 @@ function baseSession(): SessionSpec {
     cwd: '/workspace',
     agent: 'claude',
     tmuxSession: 'agentdesk-group-agent-12345678',
+    sessionId: 'agent',
     command: "cd '/workspace' && claude"
   };
 }

@@ -91,11 +91,11 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
 
     if (req.method === 'GET' && url.pathname === '/api/pulse') {
       const running = runningSessionSet();
-      managedAgentLsp.reconcile(running); // LSP wiring keys tmux until its flip
-      // TRANSITIONAL: the running set still carries tmuxSessions; the tracker
-      // keys sessionId. Map before dropDead, and serve sessionIds in the
+      // TRANSITIONAL: the running set still carries tmuxSessions; every
+      // consumer below keys sessionId. Map once, serve sessionIds in the
       // payload — the web lane reads sessionId from this window on.
       const runningIds = new Set([...running].map(nativeIdForTmuxSession));
+      managedAgentLsp.reconcile(runningIds);
       attentionTracker.dropDead(runningIds);
       sendJson(res, 200, {
         system: getSystemSnapshot(),
