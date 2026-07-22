@@ -115,8 +115,8 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
 
     if (req.method === 'POST' && url.pathname === '/api/attention-clear') {
       const body = await readJsonBody(req);
-      // Values are durable sessionIds; an old web build's legacy name passes
-      // converted web sends the sessionId (the normalizer is identity there).
+      // The wire value is the durable sessionId — the same key the tracker
+      // uses everywhere.
       attentionTracker.clear(readRequiredString(body.session, 'session'));
       sendJson(res, 200, { ok: true });
       return true;

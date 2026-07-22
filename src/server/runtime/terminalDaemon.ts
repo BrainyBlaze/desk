@@ -6,9 +6,9 @@
 // ABSOLUTE_SOCKET_PATH`; a slash-bearing name is the socket path, which isolates
 // the canary under a dedicated socket root).
 //
-// Additive: instantiating this touches no other transport. Mounting it as
-// the product's terminal transport (and provisioning real sessions) is the
-// gated, flag-guarded cutover; this is the composable piece that step wires.
+// This IS the product's terminal transport: the daemon supervisor spawns it
+// and the web server proxies /ws/terminal to it. Instantiating it directly is
+// how tests and a hand-run daemon (DESK_DAEMON_EXTERNAL) compose the pieces.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';

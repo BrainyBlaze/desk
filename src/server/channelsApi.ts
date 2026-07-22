@@ -377,8 +377,7 @@ function resolveAuthor(home: string, channel: string, body: Record<string, unkno
     return body.as;
   }
   if (typeof body.sessionId === 'string' && body.sessionId.length > 0) {
-    // The VALUE is still mixed-era (a pre-rename host's CLI falls back to its
-    // legacy name) — normalize; members key by sessionId.
+    // The CLI sends its DESK_SESSION_ID; members key by the same durable id.
     const sessionKey = body.sessionId;
     const member = members.find((candidate) => candidate.sessionId === sessionKey);
     if (member) {

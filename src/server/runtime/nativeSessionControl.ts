@@ -1,10 +1,9 @@
 // Native (atch) session control for the web server (cutover spawn/boot/restart).
 //
 // The three-tier split means the web process never spawns atch itself — the
-// separate daemon process owns the @xterm/headless screen authority. So when
-// session start/restart provisions via the daemon's HTTP
-// control plane (createDaemonControlHandler).
-// Every path returns a concrete {ok,error}; a daemon that is down or refuses a
+// separate daemon process owns the @xterm/headless screen authority, so
+// session start/restart provisions via the daemon's HTTP control plane
+// (createDaemonControlHandler). Every path returns a concrete {ok,error}; a daemon that is down or refuses a
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
 

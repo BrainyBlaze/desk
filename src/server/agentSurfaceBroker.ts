@@ -815,10 +815,9 @@ function sessionOfFrame(frame: AgentUiClientFrame): string | undefined {
 }
 
 const defaultAttentionSink: AttentionSink = {
-  // The broker keys sessions by the agent-host hello value — DESK_SESSION_ID
-  // for new launches, the legacy name for hosts started pre-rename (until
-  // restart); the normalizer absorbs both. The signal fanout keeps the
-  // legacy key until the channels flip.
+  // The broker keys sessions by the agent-host hello value: the durable
+  // DESK_SESSION_ID every launch exports. Tracker and signal fanout use the
+  // same key end-to-end.
   pushEvent: (session, kind, message) => attentionTracker.pushEvent(session, kind, message),
   notifySignal: (session, kind) => notifyAgentSignal(session, kind),
   raise: (session) => attentionTracker.raise(session)
