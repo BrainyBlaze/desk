@@ -106,8 +106,8 @@ export function TimelineView({
                 disabled={!(event.channel && event.messageId)}
               >
                   <span className={`chanTimelineKind ${WARN_KINDS.has(event.kind) ? 'warn' : ''}`}>{KIND_LABEL[event.kind]}</span>
-                  {event.to ?? event.tmuxSession ? (
-                    <span className="chanTimelineSession">{event.to ?? event.tmuxSession}</span>
+                  {event.to ?? event.sessionId ? (
+                    <span className="chanTimelineSession">{event.to ?? event.sessionId}</span>
                   ) : null}
                   {event.channel ? <span className="chanTimelineChannel">#{event.channel}</span> : null}
                   <span className="chanTimelinePreview" title={event.reason ?? event.preview ?? ''}>

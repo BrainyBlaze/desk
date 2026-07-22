@@ -20,7 +20,7 @@ import type {
  */
 export function lifecycleStateSignature(entry: LifecycleState): string {
   return [
-    entry.tmuxSession,
+    entry.sessionId,
     entry.status,
     entry.busy ? 1 : 0,
     entry.queued,
@@ -62,7 +62,7 @@ export function fuzzyMatch(query: string, text: string): boolean {
 export interface InboxItem {
   id: string;
   kind: 'submit-stuck' | 'blocked' | 'awaiting-approval' | 'paused' | 'dropped' | 'needs-reply' | 'mention';
-  tmuxSession?: string;
+  sessionId?: string;
   channel?: string;
   messageId?: string;
   label: string;
@@ -83,42 +83,42 @@ export function buildInboxItems(delivery: LifecycleState[], activity: ChannelAct
   for (const entry of delivery) {
     if (entry.status === 'submit-stuck') {
       items.push({
-        id: `stuck:${entry.tmuxSession}`,
+        id: `stuck:${entry.sessionId}`,
         kind: 'submit-stuck',
-        tmuxSession: entry.tmuxSession,
-        label: `${entry.tmuxSession}: delivery stuck`,
+        sessionId: entry.sessionId,
+        label: `${entry.sessionId}: delivery stuck`,
         detail: entry.blockedItemCount > 0 ? `${entry.blockedItemCount} stuck item(s)` : undefined
       });
     } else if (entry.status === 'blocked') {
       items.push({
-        id: `blocked:${entry.tmuxSession}`,
+        id: `blocked:${entry.sessionId}`,
         kind: 'blocked',
-        tmuxSession: entry.tmuxSession,
-        label: `${entry.tmuxSession}: blocked`,
+        sessionId: entry.sessionId,
+        label: `${entry.sessionId}: blocked`,
         detail: entry.blockedReason
       });
     } else if (entry.status === 'awaiting-approval') {
       items.push({
-        id: `approval:${entry.tmuxSession}`,
+        id: `approval:${entry.sessionId}`,
         kind: 'awaiting-approval',
-        tmuxSession: entry.tmuxSession,
-        label: `${entry.tmuxSession}: awaiting approval / input`
+        sessionId: entry.sessionId,
+        label: `${entry.sessionId}: awaiting approval / input`
       });
     } else if (entry.status === 'paused') {
       items.push({
-        id: `paused:${entry.tmuxSession}`,
+        id: `paused:${entry.sessionId}`,
         kind: 'paused',
-        tmuxSession: entry.tmuxSession,
-        label: `${entry.tmuxSession}: delivery paused`,
+        sessionId: entry.sessionId,
+        label: `${entry.sessionId}: delivery paused`,
         detail: entry.pauseReason
       });
     }
     if (entry.droppedQueueItems > 0) {
       items.push({
-        id: `dropped:${entry.tmuxSession}`,
+        id: `dropped:${entry.sessionId}`,
         kind: 'dropped',
-        tmuxSession: entry.tmuxSession,
-        label: `${entry.tmuxSession}: ${entry.droppedQueueItems} dropped`,
+        sessionId: entry.sessionId,
+        label: `${entry.sessionId}: ${entry.droppedQueueItems} dropped`,
         detail: 'queue overflow shed oldest'
       });
     }
@@ -788,7 +788,7 @@ export type AddableAgentRuntimeState = 'running' | 'missing';
 
 export interface AddableAgentCandidate {
   name: string;
-  tmuxSession: string;
+  sessionId: string;
   cwd: string;
   agent?: string;
   projectId?: string;
@@ -856,7 +856,7 @@ export function filterAddableAgentCandidates<T extends AddableAgentCandidate>(
     const haystack = [
       candidate.name,
       candidate.agent,
-      candidate.tmuxSession,
+      candidate.sessionId,
       candidate.cwd,
       candidate.projectId,
       candidate.projectLabel,

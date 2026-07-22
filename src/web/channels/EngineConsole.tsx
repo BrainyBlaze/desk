@@ -199,38 +199,38 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
         <div className="chanEngineSessions">
           {sessions.map((s) => (
             <SessionRow
-              key={s.tmuxSession}
+              key={s.sessionId}
               session={s}
-              expanded={expanded.has(s.tmuxSession)}
+              expanded={expanded.has(s.sessionId)}
               busy={busyAction}
               onToggle={() =>
                 setExpanded((prev) => {
                   const next = new Set(prev);
-                  if (next.has(s.tmuxSession)) {
-                    next.delete(s.tmuxSession);
+                  if (next.has(s.sessionId)) {
+                    next.delete(s.sessionId);
                   } else {
-                    next.add(s.tmuxSession);
+                    next.add(s.sessionId);
                   }
                   return next;
                 })
               }
-              onMarkIdle={() => void act('mark-idle', { tmuxSession: s.tmuxSession })}
-              onDropQueue={() => void act('drop-queue', { tmuxSession: s.tmuxSession })}
-              onDropMessage={(seq) => void act('drop-message', { tmuxSession: s.tmuxSession, seq })}
+              onMarkIdle={() => void act('mark-idle', { tmuxSession: s.sessionId })}
+              onDropQueue={() => void act('drop-queue', { tmuxSession: s.sessionId })}
+              onDropMessage={(seq) => void act('drop-message', { tmuxSession: s.sessionId, seq })}
               onForce={() =>
                 setConfirm({
-                  label: `Force-deliver to ${s.tmuxSession} now? This bypasses the busy/ready gate and can land inside a working agent's turn.`,
-                  run: () => act('force-deliver', { tmuxSession: s.tmuxSession })
+                  label: `Force-deliver to ${s.sessionId} now? This bypasses the busy/ready gate and can land inside a working agent's turn.`,
+                  run: () => act('force-deliver', { tmuxSession: s.sessionId })
                 })
               }
               onForceItem={(seq) =>
                 setConfirm({
-                  label: `Force-deliver stuck message ${seq} to ${s.tmuxSession} now? This reverts the stuck item to queued and delivers it, bypassing the busy/ready gate.`,
-                  run: () => act('force-deliver', { tmuxSession: s.tmuxSession, seq })
+                  label: `Force-deliver stuck message ${seq} to ${s.sessionId} now? This reverts the stuck item to queued and delivers it, bypassing the busy/ready gate.`,
+                  run: () => act('force-deliver', { tmuxSession: s.sessionId, seq })
                 })
               }
-              onPause={() => void act('pause-session', { tmuxSession: s.tmuxSession })}
-              onResume={() => void act('resume-session', { tmuxSession: s.tmuxSession })}
+              onPause={() => void act('pause-session', { tmuxSession: s.sessionId })}
+              onResume={() => void act('resume-session', { tmuxSession: s.sessionId })}
             />
           ))}
           {diag && sessions.length === 0 ? <div className="chanEngineEmpty">No tracked sessions.</div> : null}
@@ -323,8 +323,8 @@ function SessionRow({
         {session.submitState ? (
           <span className={`chanEnginePill ${submitTone}`}>{SUBMIT_STATE_LABEL[session.submitState]}</span>
         ) : null}
-        <span className="chanEngineSessionName" title={session.tmuxSession}>
-          {session.tmuxSession}
+        <span className="chanEngineSessionName" title={session.sessionId}>
+          {session.sessionId}
         </span>
         <span className="chanEngineQueued">{session.queued}</span>
         {droppedQueueItems > 0 ? (

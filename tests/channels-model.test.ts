@@ -79,7 +79,7 @@ describe('addable agent filtering', () => {
   const candidates = [
     {
       name: 'desk-main',
-      tmuxSession: 'agentdesk-desk-main',
+      sessionId: 'session-desk-main',
       cwd: '/workspace/projects/desk',
       agent: 'codex',
       projectId: 'desk',
@@ -89,7 +89,7 @@ describe('addable agent filtering', () => {
     },
     {
       name: 'sample-audit',
-      tmuxSession: 'agentdesk-sample-audit',
+      sessionId: 'session-sample-audit',
       cwd: '/workspace/projects/sample',
       agent: 'claude',
       projectId: 'sample',
@@ -99,7 +99,7 @@ describe('addable agent filtering', () => {
     },
     {
       name: 'language-tools',
-      tmuxSession: 'agentdesk-language-tools',
+      sessionId: 'session-language-tools',
       cwd: '/workspace/projects/desk',
       agent: 'codex',
       projectId: 'desk',
@@ -116,7 +116,7 @@ describe('addable agent filtering', () => {
     expect(filterAddableAgentCandidates(candidates, { query: 'sample audit' }).map((candidate) => candidate.name)).toEqual([
       'sample-audit'
     ]);
-    expect(filterAddableAgentCandidates(candidates, { query: 'agentdesk-desk-main' }).map((candidate) => candidate.name)).toEqual([
+    expect(filterAddableAgentCandidates(candidates, { query: 'session-desk-main' }).map((candidate) => candidate.name)).toEqual([
       'desk-main'
     ]);
   });
@@ -395,7 +395,7 @@ describe('misc', () => {
 
 describe('lifecycleStateSignature (lifecycle corrective — the refresh diff key must cover lifecycle fields)', () => {
   const base: LifecycleState = {
-    tmuxSession: 'tmux-a',
+    sessionId: 'session-a',
     busy: false,
     awaitingApproval: false,
     queued: 1,
@@ -451,8 +451,8 @@ describe('fuzzyMatch (command palette )', () => {
 });
 
 describe('buildInboxItems (operator inbox)', () => {
-  const session = (tmuxSession: string, over: Partial<LifecycleState>): LifecycleState => ({
-    tmuxSession,
+  const session = (sessionId: string, over: Partial<LifecycleState>): LifecycleState => ({
+    sessionId,
     busy: false,
     awaitingApproval: false,
     queued: 0,
@@ -475,11 +475,11 @@ describe('buildInboxItems (operator inbox)', () => {
   it('surfaces stuck / blocked / awaiting-approval / dropped from lifecycle states; ignores working/idle', () => {
     const items = buildInboxItems(
       [
-        session('tmux-a', { status: 'submit-stuck', blockedItemCount: 2 }),
-        session('tmux-b', { status: 'blocked', blockedReason: 'not-ready' }),
-        session('tmux-c', { status: 'awaiting-approval' }),
-        session('tmux-d', { status: 'idle', droppedQueueItems: 3 }),
-        session('tmux-e', { status: 'working' })
+        session('session-a', { status: 'submit-stuck', blockedItemCount: 2 }),
+        session('session-b', { status: 'blocked', blockedReason: 'not-ready' }),
+        session('session-c', { status: 'awaiting-approval' }),
+        session('session-d', { status: 'idle', droppedQueueItems: 3 }),
+        session('session-e', { status: 'working' })
       ],
       []
     );
@@ -516,15 +516,15 @@ describe('buildInboxItems (operator inbox)', () => {
   });
 
   it('surfaces an operator-paused session with its reason', () => {
-    const items = buildInboxItems([session('tmux-a', { status: 'paused', pausedByOperator: true, pauseReason: 'holding for review' })], []);
+    const items = buildInboxItems([session('session-a', { status: 'paused', pausedByOperator: true, pauseReason: 'holding for review' })], []);
     expect(items).toHaveLength(1);
     expect(items[0]!.kind).toBe('paused');
-    expect(items[0]!.tmuxSession).toBe('tmux-a');
+    expect(items[0]!.sessionId).toBe('session-a');
     expect(items[0]!.detail).toBe('holding for review');
   });
 
   it('returns nothing when all sessions are idle/working and there are no mentions', () => {
-    expect(buildInboxItems([session('tmux-a', { status: 'working' })], [])).toEqual([]);
+    expect(buildInboxItems([session('session-a', { status: 'working' })], [])).toEqual([]);
   });
 });
 

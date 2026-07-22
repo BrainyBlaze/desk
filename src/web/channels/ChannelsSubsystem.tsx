@@ -191,8 +191,8 @@ export function ChannelsSubsystem({
   onInfo: (message: string) => void;
   /** open a file (absolute path) in the editor subsystem */
   onOpenFile: (path: string) => void;
-  /** jump to the agents subsystem with this tmux session selected */
-  onRevealAgent?: (tmuxSession: string) => void;
+  /** jump to the agents subsystem with this durable session selected */
+  onRevealAgent?: (sessionId: string) => void;
   /** total unread messages across channels (drives the rail badge) */
   onUnreadChange?: (count: number) => void;
   /** registers a navigator: jump to a channel / message / thread (event cards) */
@@ -1415,7 +1415,7 @@ export function ChannelsSubsystem({
     if (!selected) {
       return;
     }
-    void channelsMemberAdd(selected, session.spec.tmuxSession)
+    void channelsMemberAdd(selected, session.spec.sessionId)
       .then(async (result) => {
         bleeps.deploy?.play();
         onInfo(`@${result.member.name} joined #${selected}`);
@@ -1602,9 +1602,9 @@ export function ChannelsSubsystem({
   const navigateToMember = useCallback(
     (handle: string): void => {
       const member = detailRef.current?.members.find((candidate) => candidate.name === handle);
-      if (member?.tmuxSession && onRevealAgent) {
+      if (member?.sessionId && onRevealAgent) {
         bleeps.click?.play();
-        onRevealAgent(member.tmuxSession);
+        onRevealAgent(member.sessionId);
       } else {
         onInfo(`@${handle} has no running terminal`);
       }
@@ -1618,7 +1618,7 @@ export function ChannelsSubsystem({
     const map = new Map<string, { view: DeskSessionView; label: string }>();
     const collect = (sessions: DeskSessionView[], scope: string): void => {
       for (const session of sessions) {
-        map.set(session.spec.tmuxSession, { view: session, label: `${scope} / ${session.spec.name}` });
+        map.set(session.spec.sessionId, { view: session, label: `${scope} / ${session.spec.name}` });
       }
     };
     for (const project of snapshot?.view.projects ?? []) {
@@ -1632,14 +1632,14 @@ export function ChannelsSubsystem({
     return map;
   }, [snapshot]);
 
-  /** channel name → project label (via any member's tmuxSession → session.spec.projectLabel).
+  /** channel name → project label (via any member's sessionId → session.spec.projectLabel).
    *  Used by FeaturedView to offer a project filter for saved messages. */
   const channelProjects = useMemo(() => {
     const map: Record<string, string> = {};
     for (const channel of channels) {
       for (const member of channel.members) {
-        if (!member.tmuxSession) continue;
-        const entry = sessionIndex.get(member.tmuxSession);
+        if (!member.sessionId) continue;
+        const entry = sessionIndex.get(member.sessionId);
         const label = entry?.view.spec.projectLabel || entry?.view.spec.projectId;
         if (label) {
           map[channel.name] = label;
@@ -1653,7 +1653,7 @@ export function ChannelsSubsystem({
   const deliveryIndex = useMemo(() => {
     const map = new Map<string, LifecycleState>();
     for (const state of delivery) {
-      map.set(state.tmuxSession, state);
+      map.set(state.sessionId, state);
     }
     return map;
   }, [delivery]);
@@ -1673,7 +1673,7 @@ export function ChannelsSubsystem({
   const workingMembers = useMemo(
     () =>
       agentMembers
-        .filter((member) => member.tmuxSession && deliveryIndex.get(member.tmuxSession)?.status === 'working')
+        .filter((member) => member.sessionId && deliveryIndex.get(member.sessionId)?.status === 'working')
         .map((member) => member.name),
     [agentMembers, deliveryIndex]
   );
@@ -1720,15 +1720,15 @@ export function ChannelsSubsystem({
       run: () => selectChannel(channel.name)
     })),
     ...agentMembers
-      .filter((member) => Boolean(member.tmuxSession) && Boolean(onRevealAgent))
+      .filter((member) => Boolean(member.sessionId) && Boolean(onRevealAgent))
       .map((member) => ({
         id: `agent:${member.name}`,
         label: `@${member.name}`,
         hint: 'open terminal',
         group: 'Agent',
         run: (): void => {
-          if (member.tmuxSession && onRevealAgent) {
-            onRevealAgent(member.tmuxSession);
+          if (member.sessionId && onRevealAgent) {
+            onRevealAgent(member.sessionId);
           }
         }
       })),
@@ -1975,13 +1975,13 @@ export function ChannelsSubsystem({
     jumpTo,
     focusFilter: () => filterInputRef.current?.focus()
   };
-  const memberTmuxSessions = useMemo(
-    () => new Set((detail?.members ?? []).map((member) => member.tmuxSession).filter(Boolean)),
+  const memberSessionIds = useMemo(
+    () => new Set((detail?.members ?? []).map((member) => member.sessionId).filter(Boolean)),
     [detail]
   );
   const addableSessions = useMemo(
-    () => [...sessionIndex.values()].filter((entry) => !memberTmuxSessions.has(entry.view.spec.tmuxSession)),
-    [sessionIndex, memberTmuxSessions]
+    () => [...sessionIndex.values()].filter((entry) => !memberSessionIds.has(entry.view.spec.sessionId)),
+    [sessionIndex, memberSessionIds]
   );
   const addableAgentCandidates = useMemo(
     () =>
@@ -1990,7 +1990,7 @@ export function ChannelsSubsystem({
         return {
           entry,
           name: spec.name,
-          tmuxSession: spec.tmuxSession,
+          sessionId: spec.sessionId,
           cwd: spec.cwd,
           agent: spec.agent,
           projectId: spec.projectId,
@@ -2221,8 +2221,8 @@ export function ChannelsSubsystem({
                     {!membersCollapsed ? (
                       <div id="channels-members-body" className="chanSectionBody">
                         {detail.members.map((member) => {
-                          const live = member.tmuxSession ? sessionIndex.get(member.tmuxSession) : undefined;
-                          const queue = member.tmuxSession ? deliveryIndex.get(member.tmuxSession) : undefined;
+                          const live = member.sessionId ? sessionIndex.get(member.sessionId) : undefined;
+                          const queue = member.sessionId ? deliveryIndex.get(member.sessionId) : undefined;
                           const running = member.type === 'human' ? true : live?.view.state === 'running';
                           return (
                             <div
@@ -2824,10 +2824,10 @@ export function ChannelsSubsystem({
                   const spec = entry.view.spec;
                   return (
                     <button
-                      key={spec.tmuxSession}
+                      key={spec.sessionId}
                       type="button"
                       className="chanPickRow rich"
-                      title={spec.tmuxSession}
+                      title={spec.sessionId}
                       onMouseEnter={() => bleeps.hover?.play()}
                       onClick={() => {
                         bleeps.click?.play();
@@ -3152,11 +3152,11 @@ export function ChannelsSubsystem({
               >
                 <AtSign size={11} /> Mention @{sidebarMenu.member.name}
               </button>
-              {sidebarMenu.member.tmuxSession && onRevealAgent ? (
+              {sidebarMenu.member.sessionId && onRevealAgent ? (
                 <button
                   type="button"
                   className="treeMenuItem"
-                  onClick={() => onRevealAgent(sidebarMenu.member!.tmuxSession!)}
+                  onClick={() => onRevealAgent(sidebarMenu.member!.sessionId!)}
                 >
                   <Bot size={11} /> Go to agent terminal
                 </button>
@@ -3171,13 +3171,13 @@ export function ChannelsSubsystem({
               >
                 <FileText size={11} /> Copy handle
               </button>
-              {sidebarMenu.member.tmuxSession &&
-              (deliveryIndex.get(sidebarMenu.member.tmuxSession)?.queued ?? 0) > 0 ? (
+              {sidebarMenu.member.sessionId &&
+              (deliveryIndex.get(sidebarMenu.member.sessionId)?.queued ?? 0) > 0 ? (
                 <button
                   type="button"
                   className="treeMenuItem"
                   onClick={() => {
-                    void channelsQueueClear(sidebarMenu.member!.tmuxSession!)
+                    void channelsQueueClear(sidebarMenu.member!.sessionId!)
                       .then(() => {
                         onInfo(`queue cleared for @${sidebarMenu.member!.name}`);
                         void refreshState();
