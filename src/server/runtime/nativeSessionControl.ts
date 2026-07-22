@@ -2,8 +2,8 @@
 //
 // The three-tier split means the web process never spawns atch itself — the
 // separate daemon process owns the @xterm/headless screen authority. So when
-// DESK_ATCH_NATIVE=1, session start/restart provisions via the daemon's HTTP
-// control plane (createDaemonControlHandler) instead of `tmux new-session`.
+// session start/restart provisions via the daemon's HTTP
+// control plane (createDaemonControlHandler) instead of `the legacy multiplexer new-session`.
 // Every path returns a concrete {ok,error}; a daemon that is down or refuses a
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
@@ -12,13 +12,9 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
 import { daemonControl, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
-import { loadDeskCached, restartSession, runningSessionSet, startSession } from '../../core/runner.js';
+import { loadDeskCached, runningSessionSet } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { atchCommandFor } from '../../shared/atchCommand.js';
-
-export function nativeSessionsEnabled(): boolean {
-  return process.env.DESK_ATCH_NATIVE === '1';
-}
 
 // The atch child command lives in shared/atchCommand — one audited copy for
 // this wrapper and the core runner lifecycle. Re-exported for existing
@@ -81,9 +77,6 @@ export async function retireStaleIdentityForEdit(
   oldSpec: SessionSpec | undefined,
   newSpec: SessionSpec | undefined
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!nativeSessionsEnabled()) {
-    return { ok: true };
-  }
   const stale = staleNativeIdentityAfterEdit(oldSpec, newSpec);
   if (stale === undefined) {
     return { ok: true };
@@ -95,18 +88,14 @@ export async function retireStaleIdentityForEdit(
   return { ok: false, error: `could not retire old identity ${stale}: ${retired.error}` };
 }
 
-/** Start a session: daemon-provisioned under the flag, else legacy tmux. */
-export function startSessionNativeAware(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string } {
-  return nativeSessionsEnabled() ? provisionNativeSession(spec) : startSession(spec);
+/** Start a session: daemon provision (the server enriches the spec first). */
+export function startSessionNativeAware(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
+  return provisionNativeSession(spec);
 }
 
-/** Restart a session: daemon retire+provision under the flag, else legacy tmux. */
+/** Restart a session: awaited daemon retire, then provision. */
 export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
-  if (!nativeSessionsEnabled()) {
-    return restartSession(spec);
-  }
-  const sessionId = spec.sessionId;
-  const retired = await retireNativeSession(sessionId);
+  const retired = await retireNativeSession(spec.sessionId);
   if (!retired.ok) {
     return retired;
   }
@@ -122,7 +111,7 @@ export interface NativeAttentionEvent {
 
 /**
  * Drain buffered bell/OSC9 events from the daemon (the atch-native replacement
- * for the tmux bell-flag poll). Fails soft to an empty drain with the cursor
+ * for the the legacy multiplexer bell-flag poll). Fails soft to an empty drain with the cursor
  * unmoved — the next poll retries; attention is a lossy-by-design surface and
  * the daemon buffers a bounded ring.
  */
@@ -150,7 +139,7 @@ export async function drainNativeAttentionEvents(
  * through untouched. The uiMode=native broker path is unaffected.
  */
 export interface NativeChannelsTransport {
-  /** Paste text then a delayed Enter — mirrors sendTextToTmux semantics. */
+  /** Paste text then a delayed Enter (bracketed-paste staging + separate submit). */
   sendText: (sessionId: string, text: string) => Promise<boolean>;
   /** Running iff the session's atch master socket exists. */
   sessionRunning: (sessionId: string) => boolean;
@@ -159,7 +148,7 @@ export interface NativeChannelsTransport {
   /** Bare Enter (the submit-verification retry). */
   sendEnter: (sessionId: string) => Promise<boolean>;
   /**
-   * Session start time in epoch SECONDS (tmux #{session_created} parity),
+   * Session start time in epoch SECONDS (legacy session_created parity),
    * from the atch socket's stat; null when unobservable.
    */
   sessionCreatedAt: (sessionId: string) => Promise<number | null>;
@@ -172,7 +161,7 @@ export function createNativeChannelsTransport(
   const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   return {
     async sendText(sessionId, text) {
-      // paste:true mirrors tmux `paste-buffer -p` — the daemon wraps in
+      // paste:true mirrors legacy paste semantics — the daemon wraps in
       // bracketed-paste codes only when the app enabled the mode.
       const delivered = await daemonControl('/control/input', { sessionId, text, paste: true });
       if (!delivered.ok) {
@@ -202,7 +191,7 @@ export function createNativeChannelsTransport(
         const ms = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs;
         return Math.floor(ms / 1000);
       } catch {
-        return null; // unobservable — same degraded read as a dead tmux session
+        return null; // unobservable — same degraded read as a dead session
       }
     }
   };

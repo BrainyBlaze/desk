@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { SessionSpec, TmuxPlanAction } from '../../src/core/types.js';
+import type { SessionPlanAction, SessionSpec } from '../../src/core/types.js';
 import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
 import { createSessionsRoutes, readDeskSessionBody, runManagedPlan } from '../../src/server/routes/sessionsRoutes.js';
 
@@ -25,7 +25,7 @@ const session: SessionSpec = {
 describe('sessions route managed startup', () => {
   it('preserves the actionable startSession failure reason for the API response', async () => {
     const cleanup = vi.fn();
-    const plan: TmuxPlanAction[] = [{ type: 'start', session, argv: [] }];
+    const plan: SessionPlanAction[] = [{ type: 'start', session }];
     const result = await runManagedPlan(
       plan,
       undefined,

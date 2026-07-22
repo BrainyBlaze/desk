@@ -85,7 +85,6 @@ afterEach(() => {
 describe('startDaemonSupervisor', () => {
   it('spawns the command with the extra env and SCRUBS leaked agent-session vars', () => {
     setEnv('DESK_AGENT', 'codex');
-    setEnv('DESK_TMUX_SESSION', 'agentdesk-leaked');
     setEnv('DESK_SESSION_ID', 'leaked-durable-id');
     const { supervisor, h } = makeSupervisor();
     expect(h.spawns).toHaveLength(1);
@@ -93,7 +92,6 @@ describe('startDaemonSupervisor', () => {
     expect(h.spawns[0].args).toEqual(['daemon.js']);
     expect(h.spawns[0].env.DESK_DAEMON_PORT).toBe('5178');
     expect(h.spawns[0].env.DESK_AGENT).toBeUndefined();
-    expect(h.spawns[0].env.DESK_TMUX_SESSION).toBeUndefined();
     expect(h.spawns[0].env.DESK_SESSION_ID).toBeUndefined();
     expect(supervisor.status()).toMatchObject({ state: 'running', pid: 4242 });
     supervisor.dispose();

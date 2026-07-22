@@ -6,7 +6,7 @@
 // ABSOLUTE_SOCKET_PATH`; a slash-bearing name is the socket path, which isolates
 // the canary under a dedicated socket root).
 //
-// Additive: instantiating this does NOT touch the live tmux path. Mounting it as
+// Additive: instantiating this does NOT touch the live the legacy multiplexer path. Mounting it as
 // the product's terminal transport (and provisioning real sessions) is the
 // gated, flag-guarded cutover; this is the composable piece that step wires.
 
@@ -87,7 +87,7 @@ export interface TerminalDaemon {
   tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
   /**
    * Buffered bell/OSC9 events with seq > since (the web's attention poller
-   * drains these — the atch-native replacement for tmux bell flags). A `since`
+   * drains these — the atch-native replacement for legacy bell flags). A `since`
    * ahead of the head is a stale cursor from a previous daemon incarnation and
    * reads as 0 (deliver everything buffered) rather than silently nothing.
    */
@@ -174,7 +174,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
 
 /**
  * A sessionId that is safe to use as a socket filename under the socket root:
- * no path separators, NUL, or traversal. tmuxSession-derived ids (lowercase +
+ * no path separators, NUL, or traversal. the legacy multiplexerSession-derived ids (lowercase +
  * digits + hyphen) and §10 sessionIds both satisfy this. The daemon rejects
  * anything else rather than letting a caller escape the socket root.
  */

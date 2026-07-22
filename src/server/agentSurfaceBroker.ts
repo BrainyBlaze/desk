@@ -325,7 +325,7 @@ export class AgentSurfaceBroker {
     // spec §6: session-info with agentSessionId is the load-bearing path for FRESH native
     // sessions to gain a resume id (the driver can't know the id at start() time — claude
     // streaming-init deadlock fix). Persist via the existing resumeCapture plumbing, which
-    // also pins the tmux session name. persistSessionResume is idempotent; we additionally
+    // also pins the session name. persistSessionResume is idempotent; we additionally
     // gate on session.persistedResumeGuard so repeated session-info events on the same host
     // don't re-read the manifest after the first successful write.
     if (event.kind === 'session-info' && event.agentSessionId && session.host && !session.persistedResumeGuard) {
@@ -816,7 +816,7 @@ function sessionOfFrame(frame: AgentUiClientFrame): string | undefined {
 
 const defaultAttentionSink: AttentionSink = {
   // The broker keys sessions by the agent-host hello value — DESK_SESSION_ID
-  // for new launches, the tmux name for hosts started pre-rename (until
+  // for new launches, the legacy name for hosts started pre-rename (until
   // restart); the normalizer absorbs both. The signal fanout keeps the
   // legacy key until the channels flip.
   pushEvent: (session, kind, message) => attentionTracker.pushEvent(session, kind, message),

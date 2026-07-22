@@ -28,7 +28,7 @@ export interface DaemonCoreDeps {
   sendMaster: (sessionId: string, frame: RawFrame) => void;
   /**
    * Attention-relevant semantic events from the authoritative emulator (§6.6):
-   * bell + OSC9, the atch-native replacement for the tmux bell-flag poller.
+   * bell + OSC9, the atch-native replacement for the legacy bell poller.
    * Optional — a daemon without an attention consumer just drops them.
    */
   onSemanticEvent?: (sessionId: string, event: EmulatorEvent) => void;
@@ -84,7 +84,7 @@ export class DaemonCore {
   /** Shared session bring-up for ensure (fresh generation) + restore (adopted). */
   private admitSession(sessionId: string, geometry: { rows: number; cols: number }, generation: number): void {
     const emulator = this.d.emulatorFactory.create(geometry);
-    // BEL/OSC9 → attention (the tmux bell-flag poller's native replacement).
+    // BEL/OSC9 → attention (the legacy bell poller's native replacement).
     // Filtered here so consumers only ever see attention-relevant kinds; the
     // subscription dies with the emulator on retire.
     if (this.d.onSemanticEvent !== undefined) {

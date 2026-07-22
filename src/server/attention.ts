@@ -149,7 +149,7 @@ export class AttentionTracker {
   }
 
   /**
-   * Drops attention for sessions that no longer exist in tmux — "needs input"
+   * Drops attention for sessions that no longer run — "needs input"
    * on a dead session is a contradiction (verified live: an externally killed
    * session kept its amber lamp). Their unread events are marked read too: an
    * unread badge cannot be acted on once the session is gone. Returns the
@@ -185,7 +185,7 @@ export function notifyRaise(sessionId: string): void {
 /**
  * Kind-aware agent signal fanout. Unlike the raise listener (which only fires
  * on newly raised attention), signal listeners see EVERY turn signal from both
- * capture paths — the tmux bell poller and the typed /api/agent-event hook —
+ * capture paths — the legacy bell poller and the typed /api/agent-event hook —
  * including repeats while attention is already raised. The channels engine
  * uses this as its "input released" trigger.
  */
@@ -215,7 +215,7 @@ let nativeAttentionCursor = 0;
 
 /**
  * Drain the daemon's buffered bell/OSC9 events and raise attention for each —
- * the atch-native replacement for tmux bell flags. The daemon, the tracker,
+ * the atch-native replacement for legacy bell flags. The daemon, the tracker,
  * and both fanouts all key by sessionId — no mapping anywhere.
  */
 async function drainNativeAttention(): Promise<void> {

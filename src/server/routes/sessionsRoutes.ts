@@ -33,7 +33,6 @@ import {
   runPlan
 } from '../../core/runner.js';
 import {
-  nativeSessionsEnabled,
   restartSessionNativeAware,
   retireNativeSession,
   retireStaleIdentityForEdit,
@@ -640,12 +639,12 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         for (const target of targets) {
-          // targets are raw tmuxSession strings (API contract until the field
+          // targets are raw the legacy multiplexerSession strings (API contract until the field
           // rename). LSP wiring keys sessionId; broker rings and tool journals
           // key by the host's env identity, which is the sessionId for hosts
-          // launched after the DESK_SESSION_ID rename and the tmux name for
+          // launched after the DESK_SESSION_ID rename and the legacy name for
           // ones still running from before it — dispose both (idempotent
-          // no-op for whichever does not exist; dies at the no-tmux gate).
+          // no-op for whichever does not exist; dies at the no-the legacy multiplexer gate).
           const targetId = target;
           managedAgentLsp.cleanup(targetId);
           agentSurfaceBroker.disposeSession(target);

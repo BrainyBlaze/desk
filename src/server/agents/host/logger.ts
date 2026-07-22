@@ -1,6 +1,6 @@
 /**
  * Adapter host structured logger — writes one-line ISO-stamped lines to stdout so the
- * tmux pane shows a running diagnostic trail (spec §5 R5: explanatory banner + adapter
+ * terminal pane shows a running diagnostic trail (spec §5 R5: explanatory banner + adapter
  * log). Levels mirror syslog severity; default is 'info'. DEBUG is verbose (every event
  * emit) and intended for local dev only.
  */
@@ -16,7 +16,7 @@ const LEVEL_ORDER: Record<AgentHostLogLevel, number> = {
 export class AgentHostLogger {
   constructor(private readonly level: AgentHostLogLevel = 'info') {}
 
-  /** Print the static pane banner so a `tmux attach`er sees what they're looking at. */
+  /** Print the static pane banner so an attached viewer sees what they're looking at. */
   banner(env: { DESK_SESSION_ID: string; DESK_AGENT: string; DESK_SERVER_URL?: string }): void {
     process.stdout.write(
       [

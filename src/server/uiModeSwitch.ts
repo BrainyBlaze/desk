@@ -7,7 +7,7 @@ import type { DeskManifest, DeskSession, DeskSessionUiMode, SessionSpec } from '
  *
  * validateUiModeSwitch answers every reject with a typed code BEFORE any
  * mutation; performUiModeSwitch runs manifest-write-then-respawn through
- * injected dependencies so the sequencing is unit-testable without tmux.
+ * injected dependencies so the sequencing is unit-testable without a live transport.
  */
 
 export type UiModeSwitchErrorCode = 'unknown-session' | 'ui-mode-unsupported' | 'resume-not-captured';

@@ -4,7 +4,7 @@ import { extname } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
 import { addAgentSignalListener, attentionTracker } from './attention.js';
 import { loadDesk, loadDeskCached } from '../core/runner.js';
-import { createNativeChannelsTransport, nativeSessionsEnabled } from './runtime/nativeSessionControl.js';
+import { createNativeChannelsTransport } from './runtime/nativeSessionControl.js';
 import { buildOnboardingPrompt, ChannelsEngine } from './channelsEngine.js';
 import {
   claimDelivering,
@@ -104,7 +104,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
   let engine!: ChannelsEngine;
   // Terminal-session delivery rides the daemon control plane — the ONLY
-  // transport (Track B: tmux is gone). The uiMode=native broker path is
+  // transport (Track B: the legacy transport is gone). The uiMode=native broker path is
   // unchanged.
   const nativeTransport = createNativeChannelsTransport();
   const sendChannelDelivery = createChannelDeliverySender({
@@ -116,7 +116,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   });
   engine = new ChannelsEngine({
     home,
-    // sendText wrapper: on a false return (tmux unreachable / session vanished),
+    // sendText wrapper: on a false return (daemon unreachable / session vanished),
     // revert EVERY .delivering file for this session back to .json. The engine's
     // draining lock guarantees no concurrent in-flight delivery per session, so
     // the set of .delivering files at this point is exactly the digest fan-out
@@ -273,7 +273,7 @@ export interface ChannelDeliveryFailure {
 
 export interface ChannelDeliverySenderOptions {
   agentSurfaceBroker?: ChannelDeliveryBroker;
-  /** Terminal-mode delivery transport (the daemon control plane — required, tmux is gone). */
+  /** Terminal-mode delivery transport (the daemon control plane — required, the legacy default is gone). */
   terminalSender: (sessionId: string, text: string) => Promise<boolean>;
   lookupSession?: (sessionId: string) => ChannelDeliverySession | undefined;
   onNonRetryableNativeFailure?: (sessionId: string, error: ChannelDeliveryFailure) => void;
@@ -363,7 +363,7 @@ function requireChannel(value: unknown): string {
 /**
  * Resolves the message author for a post:
  *  - explicit member name (`as`), validated against the channel roster;
- *  - a tmux session name (`tmux`) mapped to the member it backs — this is
+ *  - a legacy session name mapped to the member it backs — this is
  *    how `desk channels post` identifies the agent without trusting input;
  *  - otherwise the human operator.
  */
@@ -377,7 +377,7 @@ function resolveAuthor(home: string, channel: string, body: Record<string, unkno
   }
   if (typeof body.sessionId === 'string' && body.sessionId.length > 0) {
     // The VALUE is still mixed-era (a pre-rename host's CLI falls back to its
-    // tmux name) — normalize; members key by sessionId.
+    // legacy name) — normalize; members key by sessionId.
     const sessionKey = body.sessionId;
     const member = members.find((candidate) => candidate.sessionId === sessionKey);
     if (member) {

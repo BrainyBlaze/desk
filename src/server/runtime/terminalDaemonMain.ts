@@ -1,6 +1,6 @@
 // atch-native terminal daemon process entry — the target of the internal
 // `desk terminal-daemon` CLI subcommand (spawned + supervised by the web
-// server's daemonSupervisor under DESK_ATCH_NATIVE; not user-facing). Starts
+// server's daemonSupervisor; not user-facing). Starts
 // the terminal daemon server, RECONCILES with already-live atch masters, and
 // runs until SIGINT/SIGTERM. Config via env so a canary can fully isolate
 // HOME / socket root / port.

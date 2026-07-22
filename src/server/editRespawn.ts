@@ -1,10 +1,10 @@
 import type { SessionSpec } from '../core/types.js';
 
 /**
- * Decide whether a session edit requires respawning the running tmux session.
+ * Decide whether a session edit requires respawning the running session.
  *
  * Runtime-config edits (model; any command change that keeps the name) do NOT
- * change the tmux session name, so nothing downstream would ever apply them —
+ * change the session name, so nothing downstream would ever apply them —
  * the manifest updates but the live process keeps its old launch config
  * silently. Identity edits (agent/cwd/bypass/name) change the name and flow
  * through the existing missing-session reconcile instead. uiMode changes have

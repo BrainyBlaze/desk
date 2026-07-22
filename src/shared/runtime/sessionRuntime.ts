@@ -178,7 +178,7 @@ export class SessionRuntime {
    * Control-plane input injection (channels delivery, not a browser surface):
    * an INPUT frame under the reserved surface id 0 — browser channelIds are
    * allocated from 1, so 0 can never collide with a subscriber. With `paste`,
-   * mirrors tmux `paste-buffer -p`: wrap in bracketed-paste codes ONLY when the
+   * mirrors legacy paste semantics: wrap in bracketed-paste codes ONLY when the
    * app enabled the mode (DECSET 2004), so multi-line text does not submit per
    * newline in a TUI, while a plain shell never sees stray escape codes.
    */
@@ -197,7 +197,7 @@ export class SessionRuntime {
   }
 
   /**
-   * The last `rows` on-screen lines as plain text (the capture-pane equivalent
+   * The last `rows` on-screen lines as plain text (the pane-capture equivalent
    * for channels submit-verify): the authoritative emulator's tail, never
    * escape sequences.
    */

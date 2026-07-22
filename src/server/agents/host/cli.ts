@@ -8,7 +8,7 @@ import type { DeskAgent } from '../../../core/types.js';
  * run the AgentHost until shutdown / fatal error / signal.
  *
  * The native launch path (buildAgentCommand + agentHostLaunch.rewriteNativeLaunchCommand)
- * injects the env keys into the tmux session's spawn env. This entry reads them and
+ * injects the env keys into the session's spawn env. This entry reads them and
  * constructs the AgentHost. Production exits when AgentHost.run() returns (the runner
  * wires its exit callback to process.exit).
  *

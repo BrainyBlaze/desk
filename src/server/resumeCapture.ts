@@ -28,7 +28,7 @@ import { listOpencodeSessions, pickOpencodeCaptureResumeSession } from './openco
  *  - opencode records sessions in its SQLite store after the first user message;
  *    Desk queries `opencode session list --format json` from the session cwd.
  *
- * Persisting MUST also pin the current tmux session name: the derived name
+ * Persisting MUST also pin the current session name: the derived name
  * depends on the resume id, so adding one later would otherwise re-derive a
  * different name and orphan the running session.
  */

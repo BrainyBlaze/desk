@@ -124,7 +124,7 @@ export interface AgentDriver {
    * this call in a short timeout (agent init can take minutes under hook-heavy envs).
    *
    * Should throw on unrecoverable failure (the host emits `agent-error {fatal:true}`
-   * and exits nonzero so the tmux pane surfaces the failure).
+   * and exits nonzero so the terminal pane surfaces the failure).
    */
   start(): Promise<{
     session: { agentSessionId?: string; model?: string; commands?: AgentSurfaceCommand[] };
@@ -168,7 +168,7 @@ export interface AgentDriver {
 
   /**
    * Clean shutdown — close the agent connection, free resources, ensure no further
-   * events are emitted via any subscribed handler. Called once on tmux-session kill
+   * events are emitted via any subscribed handler. Called once on session kill
    * / mode-switch / Desk server shutdown. Should not return until the driver has
    * released its agent resources or given up trying.
    */

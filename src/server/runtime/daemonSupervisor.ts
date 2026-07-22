@@ -1,6 +1,6 @@
 // Production lifecycle for the atch terminal daemon (cutover item 1).
 //
-// Under DESK_ATCH_NATIVE the web server owns the daemon PROCESS: it spawns
+// The web server owns the daemon PROCESS: it spawns
 // `desk terminal-daemon` (or the DESK_DAEMON_CMD override) as a child,
 // restarts it on unexpected exit with capped backoff, and kills it on server
 // close. The daemon stays a SEPARATE process — this module imports
@@ -33,10 +33,6 @@ export { resolveAtchBinPath, resolveReleaseRoot };
  */
 const LEAKED_SESSION_ENV = [
   'DESK_AGENT',
-  // Both identity keys: DESK_SESSION_ID is what launches export now; the
-  // legacy DESK_TMUX_SESSION entry guards servers started from a pre-rename
-  // agent context and is deleted at the final no-tmux gate.
-  'DESK_TMUX_SESSION',
   'DESK_SESSION_ID',
   'DESK_SERVER_URL',
   'DESK_HOST_TOKEN',

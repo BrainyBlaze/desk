@@ -19,7 +19,7 @@ import { createToolJournal, toolJournalPath, type ToolJournal } from './toolJour
 import type { AgentHostEnv } from './types.js';
 
 /**
- * Adapter host runner — the in-tmux process that owns one agent driver and bridges it
+ * Adapter host runner — the session-hosted process that owns one agent driver and bridges it
  * to the desk server's broker over /ws/agent-host.
  *
  * Lifecycle (spec docs/native-ui-mode-spec.md §5):
@@ -40,7 +40,7 @@ import type { AgentHostEnv } from './types.js';
  *      committed events (N1, glm sign-off msg-20260705-152314)
  *  11. reconnect: bounded-pre-hello (10 attempts, exit nonzero on exhaustion);
  *      unbounded-post-hello with capped backoff (parity: agent outlives server restart)
- *  12. crash-exit cleanly on shutdown / fatal driver error so the tmux pane surfaces it
+ *  12. crash-exit cleanly on shutdown / fatal driver error so the terminal pane surfaces it
  */
 
 const RING_SIZE = 200;
@@ -408,7 +408,7 @@ export class AgentHost {
       this.logger.info('driver started');
     } catch (err) {
       this.logger.error(`driver.start failed: ${describeError(err)}`);
-      // start failure is fatal — emit agent-error and exit nonzero so the tmux pane surfaces it
+      // start failure is fatal — emit agent-error and exit nonzero so the terminal pane surfaces it
       this.emitDriverEvent({
         kind: 'agent-error',
         message: describeError(err),

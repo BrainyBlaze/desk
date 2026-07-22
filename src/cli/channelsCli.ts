@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -22,7 +21,7 @@ import { assertAllowedOption, requireOptionValue } from './args.js';
  * Posts go through the desk server (DESK_API, default http://127.0.0.1:5173)
  * so dispatch is immediate; when the server is unreachable the CLI appends to
  * the channel file directly and the server's watcher dispatches on its next
- * scan. Identity comes from the surrounding tmux session — the server maps it
+ * scan. Identity comes from the launch env — the server keys members by it
  * to the channel member it backs — with `--as` as the explicit override.
  */
 
@@ -53,26 +52,12 @@ function apiBase(): string {
 }
 
 /**
- * This CLI's own session identity (empty when not desk-hosted). The durable
- * DESK_SESSION_ID env is primary; the tmux introspection below is the
- * pre-rename fallback (dies at the no-tmux gate). Resolved via
- * TMUX_PANE: a bare `display-message` resolves "current" from the most
- * recently used *client*, which can be a different session entirely when the
- * operator is attached elsewhere — the pane id is the only honest anchor.
+ * This CLI's own session identity: the durable DESK_SESSION_ID every desk
+ * launch exports. Empty when not desk-hosted (author falls back to human or
+ * an explicit --as).
  */
 export function currentSessionKey(): string {
-  const durable = process.env.DESK_SESSION_ID;
-  if (durable) {
-    return durable;
-  }
-  if (!process.env.TMUX && !process.env.TMUX_PANE) {
-    return '';
-  }
-  const args = process.env.TMUX_PANE
-    ? ['display-message', '-p', '-t', process.env.TMUX_PANE, '#{session_name}']
-    : ['display-message', '-p', '#{session_name}'];
-  const result = spawnSync('tmux', args, { encoding: 'utf8' });
-  return result.status === 0 ? result.stdout.trim() : '';
+  return process.env.DESK_SESSION_ID ?? '';
 }
 
 /** The desk server could not be reached at all — the request never left, so a
@@ -221,14 +206,14 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
         throw new Error('usage: desk channels post <channel> [--thread <id>] [--as <member>] "<body>"');
       }
 
-      const tmux = currentSessionKey();
+      const sessionKey = currentSessionKey();
       try {
         const result = await apiPost('/api/channels/post', {
           channel,
           body,
           thread,
           as,
-          sessionId: tmux || undefined
+          sessionId: sessionKey || undefined
         });
         console.log(String(result.id ?? 'posted'));
         return 0;
@@ -241,7 +226,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
           throw error;
         }
         // Server unreachable: append directly; the watcher dispatches later.
-        const author = as ?? resolveAuthorOffline(home, channel, tmux);
+        const author = as ?? resolveAuthorOffline(home, channel, sessionKey);
         if (!readChannelDetail(home, channel).members.some((member) => member.name === author)) {
           throw new Error(`@${author} is not a member of #${channel}`);
         }
@@ -329,15 +314,15 @@ function assertNoArguments(command: string, args: string[]): void {
   throw new Error(`unexpected argument ${unexpected} for desk channels ${command}`);
 }
 
-function resolveAuthorOffline(home: string, channel: string, tmux: string): string {
-  if (tmux) {
+function resolveAuthorOffline(home: string, channel: string, sessionKey: string): string {
+  if (sessionKey) {
     const membersDir = join(home, channel, '_members');
     if (existsSync(membersDir)) {
       try {
-        // Mixed-era: a pre-rename host resolves its tmux name — normalize to
+        // Mixed-era: a pre-rename host resolves its legacy name — normalize to
         // the durable id members key by (identity for new-era values).
         const detail = readChannelDetail(home, channel);
-        const member = detail.members.find((candidate) => candidate.sessionId === tmux);
+        const member = detail.members.find((candidate) => candidate.sessionId === sessionKey);
         if (member) {
           return member.name;
         }

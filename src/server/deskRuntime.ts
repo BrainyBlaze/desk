@@ -54,39 +54,36 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
       disposers.add(() => httpServer.off('upgrade', onUpgrade));
     }
 
-    // atch-native, behind a default-OFF cutover flag: the web server PROXIES
-    // /ws/terminal to the separate daemon process (byte-forwarding, no
-    // @xterm/headless in the web server, so serve startup timing is unaffected)
-    // and OWNS that process's lifecycle via the supervisor (same-release spawn,
-    // bounded restarts, SIGTERM on close). DESK_DAEMON_EXTERNAL=1 skips the
-    // supervisor for a hand-run daemon (debugging). Flag off ⇒ the live tmux
-    // path is untouched; the tmux/string removal is the gated cutover step.
-    if (process.env.DESK_ATCH_NATIVE === '1') {
-      disposers.add(
-        installTerminalDaemonProxy(httpServer, {
-          daemonBaseUrl: process.env.DESK_DAEMON_URL ?? 'ws://127.0.0.1:5178'
-        })
-      );
-      if (process.env.DESK_DAEMON_EXTERNAL !== '1') {
-        try {
-          const childEnv = daemonChildEnv();
-          const supervisor = startDaemonSupervisor({
-            command: resolveDaemonCommand(import.meta.url),
-            env: {
-              ...childEnv,
-              DESK_ATCH_BIN: resolveAtchBinPath(import.meta.url)
-            },
-            healthUrl: `http://${childEnv.DESK_DAEMON_HOST}:${childEnv.DESK_DAEMON_PORT}/control/health`
-          });
-          disposers.add(() => supervisor.dispose());
-        } catch (error) {
-          // Fail closed without taking the web server down: native terminals
-          // read MISSING until the operator fixes the release or sets
-          // DESK_DAEMON_CMD, and the reason is in the log.
-          console.error(
-            `terminal daemon not started: ${error instanceof Error ? error.message : String(error)}`
-          );
-        }
+    // The web server PROXIES /ws/terminal to the separate daemon process
+    // (byte-forwarding, no @xterm/headless in the web server, so serve
+    // startup timing is unaffected) and OWNS that process's lifecycle via the
+    // supervisor (same-release spawn, bounded restarts, SIGTERM on close).
+    // DESK_DAEMON_EXTERNAL=1 skips the supervisor for a hand-run daemon
+    // (debugging). This is the only terminal transport — there is no flag.
+    disposers.add(
+      installTerminalDaemonProxy(httpServer, {
+        daemonBaseUrl: process.env.DESK_DAEMON_URL ?? 'ws://127.0.0.1:5178'
+      })
+    );
+    if (process.env.DESK_DAEMON_EXTERNAL !== '1') {
+      try {
+        const childEnv = daemonChildEnv();
+        const supervisor = startDaemonSupervisor({
+          command: resolveDaemonCommand(import.meta.url),
+          env: {
+            ...childEnv,
+            DESK_ATCH_BIN: resolveAtchBinPath(import.meta.url)
+          },
+          healthUrl: `http://${childEnv.DESK_DAEMON_HOST}:${childEnv.DESK_DAEMON_PORT}/control/health`
+        });
+        disposers.add(() => supervisor.dispose());
+      } catch (error) {
+        // Fail closed without taking the web server down: native terminals
+        // read MISSING until the operator fixes the release or sets
+        // DESK_DAEMON_CMD, and the reason is in the log.
+        console.error(
+          `terminal daemon not started: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
     }
     disposers.add(installAgentSurfaceBroker(httpServer, services.agentSurfaceBroker));

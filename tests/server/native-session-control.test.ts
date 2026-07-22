@@ -5,7 +5,6 @@ import {
   atchCommandFor,
   createNativeChannelsTransport,
   drainNativeAttentionEvents,
-  nativeSessionsEnabled,
   provisionNativeSession,
   restartSessionNativeAware,
   retireStaleIdentityForEdit,
@@ -57,16 +56,6 @@ describe('atchCommandFor', () => {
   });
 });
 
-describe('nativeSessionsEnabled', () => {
-  it('is true only when DESK_ATCH_NATIVE=1', () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
-    expect(nativeSessionsEnabled()).toBe(true);
-    setEnv('DESK_ATCH_NATIVE', '0');
-    expect(nativeSessionsEnabled()).toBe(false);
-    setEnv('DESK_ATCH_NATIVE', undefined);
-    expect(nativeSessionsEnabled()).toBe(false);
-  });
-});
 
 describe('provisionNativeSession', () => {
   it('posts sessionId + command to the daemon control plane and returns ok', async () => {
@@ -115,16 +104,6 @@ describe('startSessionNativeAware', () => {
     expect(fetchMock.mock.calls[0][0]).toContain('/control/provision');
   });
 
-  it('uses the legacy tmux startSession when the flag is off', async () => {
-    setEnv('DESK_ATCH_NATIVE', undefined);
-    const startSpy = vi.spyOn(runner, 'startSession').mockReturnValue({ ok: true });
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await startSessionNativeAware(baseSpec);
-    expect(result).toEqual({ ok: true });
-    expect(startSpy).toHaveBeenCalledWith(baseSpec);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
 });
 
 describe('restartSessionNativeAware', () => {
@@ -154,16 +133,6 @@ describe('restartSessionNativeAware', () => {
     expect(fetchMock.mock.calls[0][0]).toContain('/control/retire');
   });
 
-  it('uses the legacy tmux restartSession when the flag is off', async () => {
-    setEnv('DESK_ATCH_NATIVE', undefined);
-    const restartSpy = vi.spyOn(runner, 'restartSession').mockReturnValue({ ok: true });
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await restartSessionNativeAware(baseSpec);
-    expect(result).toEqual({ ok: true });
-    expect(restartSpy).toHaveBeenCalledWith(baseSpec);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
 });
 
 describe('createNativeChannelsTransport', () => {
@@ -324,13 +293,6 @@ describe('retireStaleIdentityForEdit (fail-closed guard)', () => {
   const oldSpec = { ...baseSpec, sessionId: 'shell' };
   const renamed = { ...baseSpec, sessionId: 'renamed' };
 
-  it('is a no-op (ok) when the flag is off', async () => {
-    setEnv('DESK_ATCH_NATIVE', undefined);
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    expect(await retireStaleIdentityForEdit(oldSpec, renamed)).toEqual({ ok: true });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
 
   it('is a no-op (ok) when the identity is unchanged', async () => {
     setEnv('DESK_ATCH_NATIVE', '1');

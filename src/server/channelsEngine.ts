@@ -50,13 +50,13 @@ import { NativePromptDeliveryStrategy, NotificationDeliveryStrategy, PromptDeliv
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
  *
  * Every finalised channel message is resolved to its @mention targets; each
- * target gets a notification queued under its tmux session. Notification-only
+ * target gets a notification queued under its session. Notification-only
  * items are idempotent and force-delivered without pane gating. Standalone
  * prompts, such as onboarding, require a fresh ready-pane snapshot so injected
  * text cannot answer an approval dialog or interrupt a running turn. Explicit
  * operator force-delivery bypasses that prompt gate.
  *
- * Queues survive server restarts via _engine/queue/<tmux>/<seq>.json files.
+ * Queues survive server restarts via _engine/queue/<sessionId>/<seq>.json files.
  */
 
 export type AgentSignalKind = 'turn-complete' | 'approval-requested' | 'input-requested' | 'bell';
@@ -82,7 +82,7 @@ export type {
 
 export interface ChannelsEngineOptions {
   home: string;
-  /** push a prompt into a tmux session; resolved implementation is injectable for tests */
+  /** push a prompt into a session; resolved implementation is injectable for tests */
   sendText: (sessionId: string, text: string) => Promise<boolean>;
   sessionRunning: (sessionId: string) => boolean;
   /** capture the tail of a session's pane (injectable for tests); null = capture failed */
@@ -134,7 +134,7 @@ export interface ChannelsEngineOptions {
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
   nativeSessionState?: (sessionId: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
-  /** never deliver to a tmux session younger than this (TUIs swallow input while booting) */
+  /** never deliver to a session younger than this (TUIs swallow input while booting) */
   bootGraceMs?: number;
   /** epoch-seconds session creation lookup (injectable for tests) */
   sessionCreatedAt: (sessionId: string) => Promise<number | null>;
@@ -482,7 +482,7 @@ interface MemberRuntime {
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
   draining: boolean;
-  /** true while the physical tmux paste is in flight; never reclaim this drain */
+  /** true while the physical paste is in flight; never reclaim this drain */
   deliveryInFlight: boolean;
   /**
    * Single-flight generation. Every drain/forceDeliver attempt captures
@@ -748,7 +748,7 @@ export class ChannelsEngine {
   // steal ownership. The holder pid dying is the release.
 
   /**
-   * Background pump: turn-release signals are best-effort (tmux latches the
+   * Background pump: turn-release signals are best-effort (the legacy transport latched the
    * bell flag, so an agent that rings twice without a user touch produces no
    * second edge). The pump re-attempts every queued delivery; drain() itself
    * decides readiness from the live pane.
@@ -1118,7 +1118,7 @@ export class ChannelsEngine {
   /**
    * Reload persisted queues after a server restart (agents assumed idle).
    *
-   * Per-item lifecycle extensions under _engine/queue/<tmux>/:
+   * Per-item lifecycle extensions under _engine/queue/<sessionId>/:
    *   .json       — queued, re-enqueue (existing behavior).
    *   .delivering — paste was in-flight when the previous process died; treat
    *                 as queued (at-least-once re-send). The prompt body embeds
@@ -1672,7 +1672,7 @@ export class ChannelsEngine {
    * agent, removes it from the queue, persists, records activity, and kicks off
    * submit verification. The caller MUST hold the draining lock and have already
    * decided the agent is eligible (drain's gates, or a forced operator override
-   * from the ops console). Returns whether the push reached tmux.
+   * from the ops console). Returns whether the push reached the legacy multiplexer.
    */
   private async deliverNext(
     runtime: MemberRuntime,
@@ -1719,7 +1719,7 @@ export class ChannelsEngine {
     // Standalone prompts (onboarding/operator nudges) are not idempotent
     // notification items, so keep the legacy pane verifier for them until that
     // path gets its own explicit ACK contract. Channel notifications are force
-    // delivered: if tmux accepts the paste, the queue advances immediately.
+    // delivered: if the legacy multiplexer accepts the paste, the queue advances immediately.
     const preSnap = needsLegacyVerify
       ? deliverySnapshot ?? await this.probe.probe(runtime.sessionId, { source: 'verify', forceFresh: true })
       : undefined;
@@ -1759,7 +1759,7 @@ export class ChannelsEngine {
       runtime.submitStateSeqs = undefined;
       if (deliveryTimedOut) {
         // The transport may still settle after the timeout. Do not retry: a
-        // late tmux paste plus a retry would duplicate the prompt.
+        // late the legacy multiplexer paste plus a retry would duplicate the prompt.
         runtime.queue = runtime.queue.filter((item) => item.seq !== next.seq);
         this.persistQueue(runtime);
       }

@@ -8,7 +8,7 @@ import { writeFileAtomic } from './fsOps.js';
  * dir. Mirrors the channelsFeatured pattern (versioned JSON, atomic writes,
  * server-only writer).
  *
- * Each entry records a manual operator pause on a tmux session. The engine
+ * Each entry records a manual operator pause on a session. The engine
  * reads this on restore (alongside restoreQueues) and applies
  * `runtime.pausedByOperator` per session; the drain gate (engine lane) checks
  * the flag — manual hold never masquerades as busy/stuck, and the drain holds
@@ -136,7 +136,7 @@ export function pauseSession(home: string, sessionId: string, reason?: string, n
 /** Resumes a session (idempotent — resuming a non-paused session is a no-op). */
 export function resumeSession(home: string, sessionId: string): boolean {
   if (!SESSION_KEY.test(sessionId)) {
-    throw new Error(`invalid tmux session name: ${sessionId}`);
+    throw new Error(`invalid session id: ${sessionId}`);
   }
   const store = readStore(home);
   const before = store.items.length;

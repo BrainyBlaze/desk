@@ -17,7 +17,7 @@ import { type EmulatorEvent, type EmulatorFactory, type EmulatorPort } from '../
 
 /**
  * Retained history bound per session (screen rows + scrollback). Matches the
- * legacy tmux capture window the web's frozen-scrollback UX was built for.
+ * legacy the legacy multiplexer capture window the web's frozen-scrollback UX was built for.
  */
 export const SCROLLBACK_LINES = 2000;
 

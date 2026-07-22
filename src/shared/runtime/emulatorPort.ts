@@ -52,7 +52,7 @@ export interface EmulatorPort {
   /**
    * Whether the app enabled bracketed-paste mode (DECSET 2004). Optional so
    * test fakes stay minimal; absent reads as false. Channels delivery uses it
-   * to mirror tmux `paste-buffer -p` (wrap pasted text only when asked for).
+   * to mirror legacy bracketed-paste staging (wrap pasted text only when asked for).
    */
   bracketedPaste?(): boolean;
   /** Subscribe to semantic parser events (§6.6). Returns an unsubscribe fn. */

@@ -6,7 +6,7 @@ import { readJsonBody, sendJson } from '../httpUtil.js';
 /**
  * Terminal REST surface. One route remains after the cutover: the frozen
  * scrollback capture, proxying the daemon emulator's ranged history. Resize,
- * repaint, and scroll were tmux-bridge concepts — the browser terminal talks
+ * repaint, and scroll were legacy bridge concepts — the browser terminal talks
  * to the daemon directly over /ws/terminal for everything live.
  */
 export function createTerminalRoutes(): DeskRoute {
