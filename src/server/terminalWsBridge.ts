@@ -5,7 +5,7 @@
 // the router's server→client frames are sent back as binary messages.
 //
 // Additive and non-breaking: this listens on its own path (/ws/terminal) and
-// does not touch the the legacy multiplexer /ws/terminal-broker route. Session provisioning
+// carries the binary browser protocol end-to-end. Session provisioning
 // (spawn+attach the atch master) is the daemon lifecycle's job, driven by the
 // desk start/stop flow — this bridge only carries surface traffic for sessions
 // the daemon already owns.

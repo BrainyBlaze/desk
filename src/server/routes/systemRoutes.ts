@@ -24,7 +24,7 @@ interface ManagedAgentLifecycle {
 
 /**
  * The session-identity map for the pre-React localStorage migration (cutover
- * step 4): the committed the legacy multiplexerSession→sessionId mappings plus the CURRENT
+ * step 4): the committed legacy-name→sessionId mappings plus the CURRENT
  * strict-manifest sessionIds (so post-cutover additions are preserved rather
  * than dropped). Read-only. Before the migration marker exists the map is
  * simply not available (409); AFTER the gate a missing or malformed map file
@@ -115,7 +115,7 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
 
     if (req.method === 'POST' && url.pathname === '/api/attention-clear') {
       const body = await readJsonBody(req);
-      // TRANSITIONAL normalizer: an old web build sends the the legacy multiplexerSession; the
+      // Values are durable sessionIds; an old web build's legacy name passes
       // converted web sends the sessionId (the normalizer is identity there).
       attentionTracker.clear(readRequiredString(body.session, 'session'));
       sendJson(res, 200, { ok: true });

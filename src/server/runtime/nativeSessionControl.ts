@@ -3,7 +3,7 @@
 // The three-tier split means the web process never spawns atch itself — the
 // separate daemon process owns the @xterm/headless screen authority. So when
 // session start/restart provisions via the daemon's HTTP
-// control plane (createDaemonControlHandler) instead of `the legacy multiplexer new-session`.
+// control plane (createDaemonControlHandler).
 // Every path returns a concrete {ok,error}; a daemon that is down or refuses a
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
@@ -111,7 +111,7 @@ export interface NativeAttentionEvent {
 
 /**
  * Drain buffered bell/OSC9 events from the daemon (the atch-native replacement
- * for the the legacy multiplexer bell-flag poll). Fails soft to an empty drain with the cursor
+ * for terminal-stream attention). Fails soft to an empty drain with the cursor
  * unmoved — the next poll retries; attention is a lossy-by-design surface and
  * the daemon buffers a bounded ring.
  */

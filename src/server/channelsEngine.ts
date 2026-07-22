@@ -748,10 +748,10 @@ export class ChannelsEngine {
   // steal ownership. The holder pid dying is the release.
 
   /**
-   * Background pump: turn-release signals are best-effort (the legacy transport latched the
-   * bell flag, so an agent that rings twice without a user touch produces no
-   * second edge). The pump re-attempts every queued delivery; drain() itself
-   * decides readiness from the live pane.
+   * Background pump: turn-release signals are best-effort (an agent that
+   * rings while its bell is already raised produces no fresh edge). The pump
+   * re-attempts every queued delivery; drain() itself decides readiness from
+   * the live pane.
    */
   private startPump(intervalMs: number): void {
     this.pumpTimer = setInterval(() => {
@@ -1672,7 +1672,7 @@ export class ChannelsEngine {
    * agent, removes it from the queue, persists, records activity, and kicks off
    * submit verification. The caller MUST hold the draining lock and have already
    * decided the agent is eligible (drain's gates, or a forced operator override
-   * from the ops console). Returns whether the push reached the legacy multiplexer.
+   * from the ops console). Returns whether the push reached the session's terminal.
    */
   private async deliverNext(
     runtime: MemberRuntime,
@@ -1719,7 +1719,7 @@ export class ChannelsEngine {
     // Standalone prompts (onboarding/operator nudges) are not idempotent
     // notification items, so keep the legacy pane verifier for them until that
     // path gets its own explicit ACK contract. Channel notifications are force
-    // delivered: if the legacy multiplexer accepts the paste, the queue advances immediately.
+    // delivered: if the terminal accepts the paste, the queue advances immediately.
     const preSnap = needsLegacyVerify
       ? deliverySnapshot ?? await this.probe.probe(runtime.sessionId, { source: 'verify', forceFresh: true })
       : undefined;
@@ -1759,7 +1759,7 @@ export class ChannelsEngine {
       runtime.submitStateSeqs = undefined;
       if (deliveryTimedOut) {
         // The transport may still settle after the timeout. Do not retry: a
-        // late the legacy multiplexer paste plus a retry would duplicate the prompt.
+        // late paste plus a retry would duplicate the prompt.
         runtime.queue = runtime.queue.filter((item) => item.seq !== next.seq);
         this.persistQueue(runtime);
       }

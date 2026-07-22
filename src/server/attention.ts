@@ -185,7 +185,8 @@ export function notifyRaise(sessionId: string): void {
 /**
  * Kind-aware agent signal fanout. Unlike the raise listener (which only fires
  * on newly raised attention), signal listeners see EVERY turn signal from both
- * capture paths — the legacy bell poller and the typed /api/agent-event hook —
+ * capture paths — the daemon's emulator-event ring and the typed
+ * /api/agent-event hook —
  * including repeats while attention is already raised. The channels engine
  * uses this as its "input released" trigger.
  */

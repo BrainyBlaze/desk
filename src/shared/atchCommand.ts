@@ -7,8 +7,8 @@
 import { shellQuote } from './shell.js';
 
 /**
- * Run the session's command in its cwd, exactly as `the legacy multiplexer new-session -c cwd
- * command` did. A command-less session falls back to the login shell. Matches
+ * Run the session's command in its cwd. A command-less session falls back
+ * to the login shell. Matches
  * the proven canary form `sh -c bash`. The cwd is escaped through the single
  * audited quoter; the command is the session's own shell command, run as-is.
  */

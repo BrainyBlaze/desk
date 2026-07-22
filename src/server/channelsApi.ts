@@ -363,8 +363,9 @@ function requireChannel(value: unknown): string {
 /**
  * Resolves the message author for a post:
  *  - explicit member name (`as`), validated against the channel roster;
- *  - a legacy session name mapped to the member it backs — this is
- *    how `desk channels post` identifies the agent without trusting input;
+ *  - the caller's session identity (sessionId) matched to the member it
+ *    backs — how `desk channels post` identifies the agent without trusting
+ *    free-text input;
  *  - otherwise the human operator.
  */
 function resolveAuthor(home: string, channel: string, body: Record<string, unknown>): string {

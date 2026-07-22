@@ -6,7 +6,7 @@
 // ABSOLUTE_SOCKET_PATH`; a slash-bearing name is the socket path, which isolates
 // the canary under a dedicated socket root).
 //
-// Additive: instantiating this does NOT touch the live the legacy multiplexer path. Mounting it as
+// Additive: instantiating this touches no other transport. Mounting it as
 // the product's terminal transport (and provisioning real sessions) is the
 // gated, flag-guarded cutover; this is the composable piece that step wires.
 
@@ -174,7 +174,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
 
 /**
  * A sessionId that is safe to use as a socket filename under the socket root:
- * no path separators, NUL, or traversal. the legacy multiplexerSession-derived ids (lowercase +
+ * no path separators, NUL, or traversal. Minted session ids (lowercase +
  * digits + hyphen) and §10 sessionIds both satisfy this. The daemon rejects
  * anything else rather than letting a caller escape the socket root.
  */
