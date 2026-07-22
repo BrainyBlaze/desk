@@ -25,7 +25,7 @@ import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.j
 /**
  * Agent-surface broker — Phase 2 server core.
  *
- * Mirrors the terminalBroker shape with two WebSocket endpoints:
+ * Two WebSocket endpoints:
  *  - `/ws/agent-host` — adapter hosts connect here with hello {session, token, agent, pid};
  *    the broker verifies the HMAC token against the persistent desk-host secret, replies
  *    hello-ack {lastSeq}, and forwards host events to subscribed browser surfaces (with
@@ -599,7 +599,7 @@ export class AgentSurfaceBroker {
     // The browser-side client fans each frame to every subscribed surface for the session;
     // sending one frame per surface would multiply deliveries (N surfaces × M ws surfaces
     // per session = N*M arrivals per surface). Per-ws dedup collapses it to one arrival
-    // per surface, matching terminalBroker's output fanout shape.
+    // per surface.
     for (const [ws, surfaces] of session.clients.entries()) {
       let shouldSend = false;
       for (const sub of surfaces.values()) {
