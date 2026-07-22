@@ -71,3 +71,44 @@ daemonSupervisor.ts, terminalDaemon.ts, terminalDaemonMain.ts (comments +
 - The env identity rename is producer+consumer atomic; no dual-reading.
 - The 5173 live desk is untouched; validation happens on the supervised
   canary and isolated ports only.
+
+## DESK_SESSION_ID rename window — exact site plan (staged, awaiting the producer)
+
+The rename is one atomic pair of commits: the codex producer
+(`agentEnvPrefix` in `src/core/manifest.ts`) and this consumer set, landed
+adjacently with no dual-reading. Every site below is enumerated so the
+consumer commit is mechanical.
+
+Producer on this lane (flips with the pair):
+
+- `src/server/agentHostLaunch.ts` — emits
+  `DESK_SESSION_ID=${shellQuote(spec.sessionId)}` for native host launches.
+
+Consumers (all this lane):
+
+- `src/server/agents/host/types.ts` — env struct field becomes
+  `DESK_SESSION_ID`.
+- `src/server/agents/host/cli.ts` — `requireEnv('DESK_SESSION_ID')`; doc
+  header follows.
+- `src/server/agents/host/runner.ts` — tool-journal path keys the env
+  sessionId; the broker `hello.session` field carries it (the surface
+  broker keys rings by the hello value, so its keying flips implicitly).
+- `src/server/agents/host/logger.ts` — banner field rename.
+- `src/core/agentHooks.ts` — hook payload reads `DESK_SESSION_ID`.
+- `src/core/opencode/desk-attention.js` — plugin reads `DESK_SESSION_ID`.
+- `src/server/runtime/daemonSupervisor.ts` — scrub list gains
+  `DESK_SESSION_ID`; the legacy `DESK_TMUX_SESSION` entry stays until the
+  step-6 no-tmux gate (a web server launched from a pre-flip agent context
+  can still inherit the old var at runtime).
+
+Mixed-era runtime rules (agents launched before the flip keep their old
+env until restarted):
+
+- Self-reports keep flowing: old agents report the tmux name, new agents
+  the sessionId; `/api/agent-event` and `/api/attention-clear` already
+  normalize via `nativeIdForTmuxSession`, which is pinned identity for
+  already-converted inputs.
+- Disposal at session delete must cover both eras during the window:
+  `disposeSession` and `deleteToolJournal` run against both the raw legacy
+  target and the normalized sessionId (idempotent no-op for whichever does
+  not exist). The double-call dies at the step-6 gate.

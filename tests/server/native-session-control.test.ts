@@ -11,6 +11,7 @@ import {
   retireStaleIdentityForEdit,
   staleNativeIdentityAfterEdit,
   startSessionNativeAware,
+  nativeIdForTmuxSession,
   tmuxSessionForNativeId
 } from '../../src/server/runtime/nativeSessionControl.js';
 
@@ -278,6 +279,22 @@ describe('tmuxSessionForNativeId', () => {
     } as never);
     expect(tmuxSessionForNativeId('shell')).toBe('agentdesk-g-shell-abc');
     expect(tmuxSessionForNativeId('unknown-id')).toBe('unknown-id');
+  });
+});
+
+describe('nativeIdForTmuxSession', () => {
+  it('maps a legacy tmuxSession to the durable sessionId and is identity for everything else', () => {
+    vi.spyOn(runner, 'loadDeskCached').mockReturnValue({
+      sessions: [{ ...baseSpec, tmuxSession: 'agentdesk-g-shell-abc', sessionId: 'shell' }]
+    } as never);
+    // a legacy key maps forward
+    expect(nativeIdForTmuxSession('agentdesk-g-shell-abc')).toBe('shell');
+    // an already-converted sessionId passes through unchanged — the property
+    // every mixed-era boundary (attention-clear, agent-event, delete targets)
+    // depends on: normalizing twice is safe
+    expect(nativeIdForTmuxSession('shell')).toBe('shell');
+    // an unknown value (deleted session, foreign input) is preserved, not dropped
+    expect(nativeIdForTmuxSession('agentdesk-gone-zzz')).toBe('agentdesk-gone-zzz');
   });
 });
 
