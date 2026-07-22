@@ -54,9 +54,9 @@ function specFor(name: string): SessionSpec {
 }
 
 describe('validateUiModeSwitch', () => {
-  it('rejects unknown tmux sessions with 404', () => {
+  it('rejects unknown sessions with 404', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-ghost-00000000',
+      sessionId: 'ghost',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -65,7 +65,7 @@ describe('validateUiModeSwitch', () => {
 
   it('rejects native mode for bash sessions with a typed 400', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('shell').tmuxSession,
+      sessionId: specFor('shell').sessionId,
       uiMode: 'native',
       homeDir: HOME
     });
@@ -74,7 +74,7 @@ describe('validateUiModeSwitch', () => {
 
   it('rejects native mode for custom-command sessions with a typed 400', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('custom').tmuxSession,
+      sessionId: specFor('custom').sessionId,
       uiMode: 'native',
       homeDir: HOME
     });
@@ -83,14 +83,14 @@ describe('validateUiModeSwitch', () => {
 
   it('gates switching a session with no captured resume id behind confirmDiscard', () => {
     const blocked = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('fresh').tmuxSession,
+      sessionId: specFor('fresh').sessionId,
       uiMode: 'native',
       homeDir: HOME
     });
     expect(blocked).toMatchObject({ ok: false, status: 409, code: 'resume-not-captured' });
 
     const confirmed = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('fresh').tmuxSession,
+      sessionId: specFor('fresh').sessionId,
       uiMode: 'native',
       confirmDiscard: true,
       homeDir: HOME
@@ -100,7 +100,7 @@ describe('validateUiModeSwitch', () => {
 
   it('accepts a resume-captured switch and pins identity while preserving fields', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -119,7 +119,7 @@ describe('validateUiModeSwitch', () => {
 
   it('switches native back to terminal by pinning the field so the native default cannot resurrect it', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01',
+      sessionId: 'native-chat',
       uiMode: 'terminal',
       homeDir: HOME
     });
@@ -132,7 +132,7 @@ describe('validateUiModeSwitch', () => {
 
   it('treats a same-mode switch as a noop', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01',
+      sessionId: 'native-chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -158,7 +158,7 @@ describe('performUiModeSwitch', () => {
     let restarted: SessionSpec | undefined;
 
     const validated = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -193,7 +193,7 @@ describe('performUiModeSwitch', () => {
   it('propagates restart failures as a typed 500 without retrying', async () => {
     let restartCalls = 0;
     const validated = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -219,7 +219,7 @@ describe('performUiModeSwitch', () => {
   it('awaits an async (native daemon) restart before reporting success', async () => {
     const order: string[] = [];
     const validated = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -248,7 +248,7 @@ describe('performUiModeSwitch', () => {
 
   it('propagates an async restart failure as a typed 500', async () => {
     const validated = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });

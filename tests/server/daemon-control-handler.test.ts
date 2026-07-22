@@ -55,7 +55,7 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     provision: vi.fn().mockResolvedValue(provisionResult),
     retire: vi.fn().mockResolvedValue({ ok: true }),
     input: vi.fn().mockReturnValue(true),
-    tail: vi.fn().mockReturnValue(['line-a', 'line-b']),
+    tail: vi.fn().mockReturnValue({ lines: ['line-a', 'line-b'], totalAvailable: 42 }),
     attentionEventsSince: vi.fn().mockReturnValue({ events: [{ seq: 3, sessionId: 'shell', kind: 'bell' }], lastSeq: 3 }),
     isReady: vi.fn().mockReturnValue(true)
   };
@@ -174,16 +174,29 @@ describe('daemon control handler', () => {
     const result = await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a', rows: 5000 });
     expect(result.status).toBe(200);
     expect(result.body?.lines).toEqual(['line-a', 'line-b']);
-    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 1000);
+    expect(result.body?.totalAvailable).toBe(42);
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 2000, 0);
   });
 
-  it('defaults tail rows when absent and 404s an unknown session', async () => {
+  it('defaults tail rows and offset when absent and 404s an unknown session', async () => {
     const daemon = daemonMock();
     await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a' });
-    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 200);
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 200, 0);
     const unknown = { ...daemonMock(), tail: vi.fn().mockReturnValue(undefined) };
     const result = await invoke(unknown, 'POST', '/control/tail', { sessionId: 'ghost' });
     expect(result.status).toBe(404);
+  });
+
+  it('parses and bounds the tail offset (lines back from the live edge)', async () => {
+    const daemon = daemonMock();
+    await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a', rows: 100, offset: 250 });
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 100, 250);
+    await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a', rows: 100, offset: 99999 });
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 100, 5000);
+    await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a', rows: 100, offset: -3 });
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 100, 0);
+    await invoke(daemon, 'POST', '/control/tail', { sessionId: 'sess-a', rows: 100, offset: 'junk' });
+    expect(daemon.tail).toHaveBeenCalledWith('sess-a', 100, 0);
   });
 
   it('503s EVERY route (health included) until startup reconciliation is terminal', async () => {

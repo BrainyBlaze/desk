@@ -206,6 +206,19 @@ export class SessionRuntime {
   }
 
   /**
+   * Ranged history (frozen-scrollback reads). Degrades honestly on an
+   * emulator without history: offset 0 serves the live tail, anything deeper
+   * is empty — the same shape a fully-scrolled-back reader sees.
+   */
+  historyText(rows: number, offset: number): { lines: string[]; totalAvailable: number } {
+    if (this.d.emulator.readHistoryText) {
+      return this.d.emulator.readHistoryText(rows, offset);
+    }
+    const lines = offset === 0 ? this.d.emulator.readTailText(rows) : [];
+    return { lines, totalAvailable: this.d.emulator.readTailText(Number.MAX_SAFE_INTEGER).length };
+  }
+
+  /**
    * Browser-initiated resize (§7.5): resize the authoritative emulator and tell
    * the master to resize the PTY. Lease enforcement (only the owning surface may
    * resize) is the §7.5 refinement layered above; here the frame carries the

@@ -3,7 +3,9 @@
 // terminal session is the authoritative screen: it renders OUTPUT bytes, exposes
 // plain-text rows for the §6.8 classifier, a SerializeAddon restorable string for
 // §7.3 snapshots, and semantic events (bell/OSC) via the PUBLIC parser hooks
-// (§7.2). scrollback is 0 — history comes from the journal, not per-headless.
+// (§7.2). scrollback is SCROLLBACK_LINES — the emulator IS the history
+// authority for the frozen-scrollback UX (/control/tail ranged reads); there
+// is no journal-replay path.
 //
 // xterm's write() is async (parsed on a microtask), so reads that must reflect a
 // just-written chunk should await flush().
@@ -12,6 +14,12 @@ import { createRequire } from 'node:module';
 import type { Terminal as XtermTerminal } from '@xterm/headless';
 import type { SerializeAddon as XtermSerializeAddon } from '@xterm/addon-serialize';
 import { type EmulatorEvent, type EmulatorFactory, type EmulatorPort } from '../../shared/runtime/emulatorPort.js';
+
+/**
+ * Retained history bound per session (screen rows + scrollback). Matches the
+ * legacy tmux capture window the web's frozen-scrollback UX was built for.
+ */
+export const SCROLLBACK_LINES = 2000;
 
 // Both @xterm packages are CommonJS; a named ESM import works under
 // vite/vitest interop but FAILS under plain node running the tsc-emitted ESM
@@ -28,7 +36,7 @@ export class XtermEmulator implements EmulatorPort {
   private listeners: ((e: EmulatorEvent) => void)[] = [];
 
   constructor(opts: { rows: number; cols: number }) {
-    this.term = new Terminal({ rows: opts.rows, cols: opts.cols, scrollback: 0, allowProposedApi: true });
+    this.term = new Terminal({ rows: opts.rows, cols: opts.cols, scrollback: SCROLLBACK_LINES, allowProposedApi: true });
     this.serializer = new SerializeAddon();
     this.term.loadAddon(this.serializer);
     // Semantic events via PUBLIC hooks (§7.2). OSC handlers return false so the
@@ -59,6 +67,24 @@ export class XtermEmulator implements EmulatorPort {
     const start = Math.max(0, buf.length - rows);
     for (let i = start; i < buf.length; i++) out.push(buf.getLine(i)?.translateToString(true) ?? '');
     return out;
+  }
+
+  /**
+   * A ranged plain-text window into screen + scrollback. `offset` counts lines
+   * back from the live edge (0 = the current tail — identical to
+   * readTailText); the window is [end - rows, end) with end = total - offset,
+   * clamped at the top, so an offset at or beyond the top yields [] and the
+   * caller pages by offset until it does. `totalAvailable` is the lines the
+   * emulator currently retains (bounded by SCROLLBACK_LINES + screen rows).
+   */
+  readHistoryText(rows: number, offset: number): { lines: string[]; totalAvailable: number } {
+    const buf = this.term.buffer.active;
+    const totalAvailable = buf.length;
+    const end = Math.max(0, totalAvailable - Math.max(0, offset));
+    const start = Math.max(0, end - Math.max(0, rows));
+    const lines: string[] = [];
+    for (let i = start; i < end; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '');
+    return { lines, totalAvailable };
   }
 
   serialize(): string {

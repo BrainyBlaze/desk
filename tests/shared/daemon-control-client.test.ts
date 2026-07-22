@@ -33,7 +33,7 @@ describe('daemonControl', () => {
       { baseUrl: 'http://127.0.0.1:6123' }
     );
 
-    expect(result).toEqual({ ok: true, body: { ok: true, lines: ['ready'] } });
+    expect(result).toEqual({ ok: true, body: { ok: true, lines: ['ready'] }, status: 200 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('http://127.0.0.1:6123/control/tail');
@@ -57,11 +57,13 @@ describe('daemonControl', () => {
 
     await expect(daemonControl('/control/provision', {}, { baseUrl: 'http://daemon' })).resolves.toEqual({
       ok: false,
-      error: 'cap-exceeded'
+      error: 'cap-exceeded',
+      status: 503
     });
     await expect(daemonControl('/control/provision', {}, { baseUrl: 'http://daemon' })).resolves.toEqual({
       ok: false,
-      error: 'terminal daemon returned an invalid JSON response (HTTP 200)'
+      error: 'terminal daemon returned an invalid JSON response (HTTP 200)',
+      status: 200
     });
   });
 

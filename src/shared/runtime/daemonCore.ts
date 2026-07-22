@@ -201,6 +201,11 @@ export class DaemonCore {
     return this.sessions.get(sessionId)?.runtime.tailText(rows);
   }
 
+  /** Ranged history window (see SessionRuntime.historyText), undefined if unknown. */
+  historyText(sessionId: string, rows: number, offset: number): { lines: string[]; totalAvailable: number } | undefined {
+    return this.sessions.get(sessionId)?.runtime.historyText(rows, offset);
+  }
+
   /** Route INPUT by channelId alone (the router validated ownership). No-op if stale. */
   onBrowserInputByChannel(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
     const sessionId = this.channelToSession.get(channelId);

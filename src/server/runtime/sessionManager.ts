@@ -438,6 +438,10 @@ export class SessionManager {
     return this.core.tailText(sessionId, rows);
   }
 
+  historyText(sessionId: string, rows: number, offset: number): { lines: string[]; totalAvailable: number } | undefined {
+    return this.core.historyText(sessionId, rows, offset);
+  }
+
   state(sessionId: string): { state: ControlState; source: Source; generation: number } | undefined {
     return this.core.state(sessionId);
   }

@@ -229,7 +229,7 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
           body,
           thread,
           as,
-          tmux: tmux || undefined
+          sessionId: tmux || undefined
         });
         console.log(String(result.id ?? 'posted'));
         return 0;

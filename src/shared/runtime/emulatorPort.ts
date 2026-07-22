@@ -38,6 +38,13 @@ export interface EmulatorPort {
    * degraded worker-rendered classifier (§6.8). Never escape sequences.
    */
   readTailText(rows: number): string[];
+  /**
+   * Ranged plain-text history (screen + scrollback): `offset` lines back from
+   * the live edge, `rows` per page, clamped at the top (beyond-top reads
+   * yield []). Optional so minimal fakes stay minimal — absent means the
+   * emulator retains no history beyond the live tail.
+   */
+  readHistoryText?(rows: number, offset: number): { lines: string[]; totalAvailable: number };
   /** A restorable display snapshot string (SerializeAddon, §7.3). */
   serialize(): string;
   /** Current cursor position (for CPR/DSR worker replies, §7.7). */

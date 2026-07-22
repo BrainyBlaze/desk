@@ -25,7 +25,7 @@ export type UiModeSwitchValidation =
   | { ok: false; status: 400 | 404 | 409; code: UiModeSwitchErrorCode; error: string };
 
 export interface ValidateUiModeSwitchOptions {
-  tmuxSession: string;
+  sessionId: string;
   uiMode: DeskSessionUiMode;
   confirmDiscard?: boolean;
   homeDir: string;
@@ -34,13 +34,13 @@ export interface ValidateUiModeSwitchOptions {
 
 export function validateUiModeSwitch(manifest: DeskManifest, options: ValidateUiModeSwitchOptions): UiModeSwitchValidation {
   const specs = buildSessionSpecs(manifest, { homeDir: options.homeDir, namespace: options.namespace });
-  const spec = specs.find((candidate) => candidate.tmuxSession === options.tmuxSession);
+  const spec = specs.find((candidate) => candidate.sessionId === options.sessionId);
   if (!spec) {
     return {
       ok: false,
       status: 404,
       code: 'unknown-session',
-      error: `session ${options.tmuxSession} does not exist in config`
+      error: `session ${options.sessionId} does not exist in config`
     };
   }
   const record = findSessionRecord(manifest, spec);
@@ -49,7 +49,7 @@ export function validateUiModeSwitch(manifest: DeskManifest, options: ValidateUi
       ok: false,
       status: 404,
       code: 'unknown-session',
-      error: `session ${options.tmuxSession} has no manifest record`
+      error: `session ${options.sessionId} has no manifest record`
     };
   }
   if (options.uiMode === 'native' && !sessionSupportsNativeUiMode(record)) {

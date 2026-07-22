@@ -118,7 +118,7 @@ describe('channels storage API endpoints', () => {
   it('persists pause/resume actions through both the paused endpoint and engine action endpoint', async () => {
     const paused = await callChannelsApi('POST', '/api/channels/paused', {
       action: 'pause',
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       reason: ' operator hold '
     });
     expect(paused.status).toBe(200);
@@ -131,20 +131,20 @@ describe('channels storage API endpoints', () => {
 
     const resumed = await callChannelsApi('POST', '/api/channels/engine/action', {
       action: 'resume-session',
-      tmuxSession: 'tmux-a'
+      sessionId: 'tmux-a'
     });
     expect(resumed.status).toBe(200);
     expect(listPausedSessions(home)).toEqual([]);
 
     const pausedViaEngine = await callChannelsApi('POST', '/api/channels/engine/action', {
       action: 'pause-session',
-      tmuxSession: 'tmux-b',
+      sessionId: 'tmux-b',
       reason: 'api action'
     });
     expect(pausedViaEngine.status).toBe(200);
     expect(listPausedSessions(home).map((item) => item.sessionId)).toEqual(['tmux-b']);
 
-    await callChannelsApi('POST', '/api/channels/paused', { action: 'resume', tmuxSession: 'tmux-b' });
+    await callChannelsApi('POST', '/api/channels/paused', { action: 'resume', sessionId: 'tmux-b' });
     expect(listPausedSessions(home)).toEqual([]);
   });
 });

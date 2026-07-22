@@ -379,16 +379,15 @@ function resolveAuthor(home: string, channel: string, body: Record<string, unkno
     }
     return body.as;
   }
-  if (typeof body.tmux === 'string' && body.tmux.length > 0) {
-    // Wire param name is renamed in the step-4 API window; the value is
-    // mixed-era (pre-rename hosts send the tmux name) — normalize, members
-    // key by sessionId.
-    const sessionKey = nativeIdForTmuxSession(body.tmux);
+  if (typeof body.sessionId === 'string' && body.sessionId.length > 0) {
+    // The VALUE is still mixed-era (a pre-rename host's CLI falls back to its
+    // tmux name) — normalize; members key by sessionId.
+    const sessionKey = nativeIdForTmuxSession(body.sessionId);
     const member = members.find((candidate) => candidate.sessionId === sessionKey);
     if (member) {
       return member.name;
     }
-    throw new Error(`session ${String(body.tmux)} is not a member of #${channel}`);
+    throw new Error(`session ${String(body.sessionId)} is not a member of #${channel}`);
   }
   return 'human';
 }
@@ -450,31 +449,31 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/engine/action') {
       const body = await readJsonBody(req);
       const action = requireString(body.action, 'action');
-      const sessionId = typeof body.tmuxSession === 'string' ? body.tmuxSession : undefined;
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined;
       switch (action) {
         case 'mark-idle':
-          engine.markIdle(requireString(sessionId, 'tmuxSession'));
+          engine.markIdle(requireString(sessionId, 'sessionId'));
           break;
         case 'pause-session':
-          pauseEngineSession(home, engine, requireString(sessionId, 'tmuxSession'), typeof body.reason === 'string' ? body.reason : undefined);
+          pauseEngineSession(home, engine, requireString(sessionId, 'sessionId'), typeof body.reason === 'string' ? body.reason : undefined);
           break;
         case 'resume-session':
-          resumeEngineSession(home, engine, requireString(sessionId, 'tmuxSession'));
+          resumeEngineSession(home, engine, requireString(sessionId, 'sessionId'));
           break;
         case 'drop-queue':
-          engine.dropQueue(requireString(sessionId, 'tmuxSession'));
+          engine.dropQueue(requireString(sessionId, 'sessionId'));
           break;
         case 'drop-message': {
           const seq = Number(body.seq);
           if (!Number.isInteger(seq)) {
             throw new Error('seq is required');
           }
-          engine.dropMessage(requireString(sessionId, 'tmuxSession'), seq);
+          engine.dropMessage(requireString(sessionId, 'sessionId'), seq);
           break;
         }
         case 'force-deliver': {
           const seq = Number.isInteger(Number(body.seq)) ? Number(body.seq) : undefined;
-          await engine.forceDeliver(requireString(sessionId, 'tmuxSession'), seq);
+          await engine.forceDeliver(requireString(sessionId, 'sessionId'), seq);
           break;
         }
         case 'drain-ready-all':
@@ -583,7 +582,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/paused') {
       const body = await readJsonBody(req);
       const action = typeof body.action === 'string' ? body.action : 'pause';
-      const sessionId = nativeIdForTmuxSession(requireString(body.tmuxSession, 'tmuxSession'));
+      const sessionId = nativeIdForTmuxSession(requireString(body.sessionId, 'sessionId'));
       if (action === 'pause') {
         pauseEngineSession(home, engine, sessionId, typeof body.reason === 'string' ? body.reason : undefined);
       } else if (action === 'resume') {
@@ -696,7 +695,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/member-add') {
       const body = await readJsonBody(req);
       const channel = requireChannel(body.channel);
-      const sessionId = requireString(body.tmuxSession, 'tmuxSession');
+      const sessionId = requireString(body.sessionId, 'sessionId');
       const allSessions = loadDesk({}).sessions;
       const sessionKey = nativeIdForTmuxSession(sessionId);
       const spec = allSessions.find((candidate) => candidate.sessionId === sessionKey);
@@ -758,7 +757,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/queue-clear') {
       const body = await readJsonBody(req);
-      engine.dropQueue(nativeIdForTmuxSession(requireString(body.tmuxSession, 'tmuxSession')));
+      engine.dropQueue(nativeIdForTmuxSession(requireString(body.sessionId, 'sessionId')));
       sendJson(res, 200, { ok: true, delivery: engine.lifecycleStates() });
       return true;
     }
@@ -860,7 +859,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'GET' && url.pathname === '/api/channels/events') {
       const filter: Record<string, unknown> = {};
-      const sessionId = url.searchParams.get('tmuxSession');
+      const sessionId = url.searchParams.get('sessionId');
       if (sessionId) { filter.sessionId = sessionId; }
       const eventChannel = url.searchParams.get('channel');
       if (eventChannel) { filter.channel = eventChannel; }

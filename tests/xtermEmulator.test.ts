@@ -4,7 +4,7 @@
 // semantic events — all headless in Node.
 
 import { describe, expect, it } from 'vitest';
-import { XtermEmulator, XtermEmulatorFactory } from '../src/server/runtime/xtermEmulator.js';
+import { SCROLLBACK_LINES, XtermEmulator, XtermEmulatorFactory } from '../src/server/runtime/xtermEmulator.js';
 import { type EmulatorEvent } from '../src/shared/runtime/index.js';
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -78,6 +78,41 @@ describe('xterm emulator adapter (§3.3/§7.3)', () => {
     expect(events.some((ev) => ev.kind === 'title' && ev.data === 'my title')).toBe(true);
     expect(events.some((ev) => ev.kind === 'osc' && ev.code === 9)).toBe(true);
     expect(events.some((ev) => ev.kind === 'bell')).toBe(true);
+    e.dispose();
+  });
+
+  it('retains scrollback and serves ranged history windows (frozen-scrollback contract)', async () => {
+    const e = new XtermEmulator({ rows: 5, cols: 20 });
+    for (let i = 1; i <= 50; i++) e.write(new TextEncoder().encode(`line-${i}\r\n`));
+    await e.flush();
+    // offset 0 = the live tail, identical to readTailText
+    const live = e.readHistoryText(5, 0);
+    expect(live.lines).toEqual(e.readTailText(5));
+    expect(live.totalAvailable).toBeGreaterThanOrEqual(50);
+    // a mid-window read pages back exactly `offset` lines from the live edge
+    const back = e.readHistoryText(3, 10);
+    const all = e.readHistoryText(live.totalAvailable, 0).lines;
+    expect(back.lines).toEqual(all.slice(all.length - 13, all.length - 10));
+    // clamped at the top: a partial window survives, beyond-top is empty
+    const top = e.readHistoryText(10, live.totalAvailable - 4);
+    expect(top.lines).toHaveLength(4);
+    expect(e.readHistoryText(10, live.totalAvailable).lines).toEqual([]);
+    expect(e.readHistoryText(10, live.totalAvailable + 500).lines).toEqual([]);
+    e.dispose();
+  });
+
+  it('bounds retained history at SCROLLBACK_LINES + screen rows', async () => {
+    const e = new XtermEmulator({ rows: 5, cols: 20 });
+    for (let i = 1; i <= SCROLLBACK_LINES + 300; i++) e.write(new TextEncoder().encode(`l${i}\r\n`));
+    await e.flush();
+    const { totalAvailable } = e.readHistoryText(1, 0);
+    expect(totalAvailable).toBeLessThanOrEqual(SCROLLBACK_LINES + 5);
+    // the OLDEST retained line proves eviction happened from the top
+    const oldest = e.readHistoryText(1, totalAvailable - 1).lines[0];
+    expect(oldest).not.toBe('l1');
+    // the newest written line survives at the live edge (cursor sits on a
+    // fresh empty row after the trailing newline)
+    expect(e.readHistoryText(3, 0).lines.join('\n')).toContain(`l${SCROLLBACK_LINES + 300}`);
     e.dispose();
   });
 

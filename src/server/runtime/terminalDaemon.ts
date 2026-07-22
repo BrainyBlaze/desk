@@ -78,8 +78,13 @@ export interface TerminalDaemon {
   retire(sessionId: string): Promise<{ ok: boolean; error?: string }>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
-  /** The session's on-screen tail as plain text, or undefined if unknown. */
-  tail(sessionId: string, rows: number): string[] | undefined;
+  /**
+   * Ranged plain-text window into the session's screen + scrollback. `offset`
+   * counts lines back from the live edge (0/absent = the live tail); reads at
+   * or beyond the top yield empty lines with totalAvailable telling the
+   * caller where the top is. Undefined when the session is unknown.
+   */
+  tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
   /**
    * Buffered bell/OSC9 events with seq > since (the web's attention poller
    * drains these — the atch-native replacement for tmux bell flags). A `since`
@@ -148,8 +153,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
-    tail(sessionId, rows) {
-      return router.sessions.tailText(sessionId, rows);
+    tail(sessionId, rows, offset = 0) {
+      return router.sessions.historyText(sessionId, rows, offset);
     },
     attentionEventsSince(since) {
       const cursor = since > attentionSeq ? 0 : since; // stale cursor from a prior daemon incarnation
@@ -282,13 +287,17 @@ export function createDaemonControlHandler(
             return;
           }
           const rows = Number(body.rows);
-          const bounded = Number.isFinite(rows) && rows > 0 ? Math.min(Math.floor(rows), 1000) : 200;
-          const lines = daemon.tail(body.sessionId, bounded);
-          if (lines === undefined) {
+          const bounded = Number.isFinite(rows) && rows > 0 ? Math.min(Math.floor(rows), 2000) : 200;
+          // offset counts lines back from the live edge; absent/invalid = 0
+          // (the live tail — the pre-range contract unchanged).
+          const offsetRaw = Number(body.offset);
+          const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.min(Math.floor(offsetRaw), 5000) : 0;
+          const window = daemon.tail(body.sessionId, bounded, offset);
+          if (window === undefined) {
             sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
             return;
           }
-          sendJson(res, 200, { ok: true, lines });
+          sendJson(res, 200, { ok: true, lines: window.lines, totalAvailable: window.totalAvailable });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/attention') {

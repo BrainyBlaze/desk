@@ -3,6 +3,12 @@ export interface DaemonControlResult {
   error?: string;
   /** Parsed response object for payload-bearing successful calls. */
   body?: Record<string, unknown>;
+  /**
+   * The daemon's HTTP status when a response was received at all; absent on
+   * transport failure (unreachable/timeout). Lets route wrappers preserve
+   * semantic statuses (404 unknown-session) instead of flattening to 500.
+   */
+  status?: number;
 }
 
 export interface DaemonControlOptions {
@@ -60,18 +66,19 @@ export async function daemonControl(
     });
     const parsed = parseResponseObject(await response.text());
     if (response.ok && parsed?.ok === true) {
-      return { ok: true, body: parsed };
+      return { ok: true, body: parsed, status: response.status };
     }
     if (typeof parsed?.error === 'string') {
-      return { ok: false, error: parsed.error };
+      return { ok: false, error: parsed.error, status: response.status };
     }
     if (parsed === undefined && response.ok) {
       return {
         ok: false,
-        error: `terminal daemon returned an invalid JSON response (HTTP ${response.status})`
+        error: `terminal daemon returned an invalid JSON response (HTTP ${response.status})`,
+        status: response.status
       };
     }
-    return { ok: false, error: `terminal daemon returned HTTP ${response.status}` };
+    return { ok: false, error: `terminal daemon returned HTTP ${response.status}`, status: response.status };
   } catch (error) {
     return {
       ok: false,

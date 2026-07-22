@@ -630,7 +630,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const groupId = readRequiredString(body.groupId, 'groupId');
       const sessionName = readRequiredString(body.sessionName, 'sessionName');
       const projectCwd = readOptionalString(body.projectCwd);
-      const tmuxSession = readOptionalString(body.tmuxSession);
+      const extraTarget = readOptionalString(body.sessionId);
       let deleteError: string | undefined;
       const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const specTargets = collectSessionDeleteTargets(manifest, {
@@ -643,9 +643,9 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         // Retire by SessionSpec so the native path keys on sessionId; a caller-
         // supplied tmuxSession not among the specs is retired best-effort.
         const killTargets: Array<SessionSpec | string> = [...specTargets];
-        if (tmuxSession && !targets.includes(tmuxSession)) {
-          targets.push(tmuxSession);
-          killTargets.push(tmuxSession);
+        if (extraTarget && !targets.includes(extraTarget)) {
+          targets.push(extraTarget);
+          killTargets.push(extraTarget);
         }
         const killed = await killSessionTargets(killTargets);
         if (!killed.ok) {
@@ -680,10 +680,10 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
 
     if (req.method === 'POST' && url.pathname === '/api/restart-project-session') {
       const body = await readJsonBody(req);
-      const tmuxSession = readRequiredString(body.tmuxSession, 'tmuxSession');
-      const session = loadDesk({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+      const sessionId = nativeIdForTmuxSession(readRequiredString(body.sessionId, 'sessionId'));
+      const session = loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId);
       if (!session) {
-        sendJson(res, 404, { error: `session ${tmuxSession} does not exist in config` });
+        sendJson(res, 404, { error: `session ${sessionId} does not exist in config` });
         return true;
       }
       managedAgentLsp.cleanup(session.sessionId);
@@ -701,7 +701,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
 
     if (req.method === 'POST' && url.pathname === '/api/set-session-ui-mode') {
       const body = await readJsonBody(req);
-      const tmuxSession = readRequiredString(body.tmuxSession, 'tmuxSession');
+      const sessionId = nativeIdForTmuxSession(readRequiredString(body.sessionId, 'sessionId'));
       const uiMode = readRequiredString(body.uiMode, 'uiMode');
       if (uiMode !== 'terminal' && uiMode !== 'native') {
         sendJson(res, 400, { error: 'uiMode must be terminal or native', code: 'ui-mode-invalid' });
@@ -711,7 +711,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       await withManifestFileLock(manifestPath, async () => {
         const manifest = readManifestFile(manifestPath);
         const validated = validateUiModeSwitch(manifest, {
-          tmuxSession,
+          sessionId,
           uiMode,
           confirmDiscard: body.confirmDiscard === true,
           homeDir: homedir()
@@ -724,8 +724,8 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           sendJson(res, 200, buildDeskSnapshot());
           return;
         }
-        if (!uiModeSwitchGuard.begin(tmuxSession)) {
-          sendJson(res, 409, { error: `ui-mode switch already in progress for ${tmuxSession}`, code: 'switch-in-progress' });
+        if (!uiModeSwitchGuard.begin(sessionId)) {
+          sendJson(res, 409, { error: `ui-mode switch already in progress for ${sessionId}`, code: 'switch-in-progress' });
           return;
         }
         try {
@@ -750,7 +750,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           }
           sendJson(res, 200, buildDeskSnapshot());
         } finally {
-          uiModeSwitchGuard.end(tmuxSession);
+          uiModeSwitchGuard.end(sessionId);
         }
       });
       return true;
