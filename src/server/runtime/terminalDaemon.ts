@@ -38,6 +38,13 @@ export interface TerminalDaemonOptions {
   httpServer: UpgradeServer;
   /** WS path (default /ws/terminal). */
   wsPath?: string;
+  /**
+   * Per-launch identity echoed by /control/health (from DESK_DAEMON_NONCE).
+   * The supervisor requires an exact match before marking a child ready — on
+   * a shared port an OLD daemon still draining its SIGTERM answers the same
+   * URL, and a nonce-less 200 would mark the NEW child ready from it.
+   */
+  healthNonce?: string;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -196,7 +203,8 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
 export function createDaemonControlHandler(
-  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail' | 'attentionEventsSince' | 'isReady'>
+  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail' | 'attentionEventsSince' | 'isReady'>,
+  handlerOptions: { healthNonce?: string } = {}
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
@@ -291,7 +299,10 @@ export function createDaemonControlHandler(
           return;
         }
         if (req.method === 'GET' && url.pathname === '/control/health') {
-          sendJson(res, 200, { ok: true });
+          sendJson(res, 200, {
+            ok: true,
+            ...(handlerOptions.healthNonce !== undefined ? { nonce: handlerOptions.healthNonce } : {})
+          });
           return;
         }
         sendJson(res, 404, { ok: false, error: 'not found' });
@@ -394,8 +405,23 @@ export async function startTerminalDaemonServer(
   // and the master's bind() fails ENOENT on an absent parent.
   ensurePrivateSocketRoot(options.atchSocketRoot);
   const daemon = createTerminalDaemon({ ...options, httpServer: server });
-  server.on('request', createDaemonControlHandler(daemon)); // on-demand provision/retire (spawn cutover)
-  await new Promise<void>((resolve) => server.listen(options.port, options.host ?? '127.0.0.1', resolve));
+  server.on(
+    'request',
+    createDaemonControlHandler(daemon, options.healthNonce !== undefined ? { healthNonce: options.healthNonce } : {})
+  );
+  // Reject cleanly on a bind failure (EADDRINUSE during an HMR/serve overlap)
+  // instead of emitting an unhandled server 'error'.
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      daemon.dispose();
+      reject(error);
+    };
+    server.once('error', onError);
+    server.listen(options.port, options.host ?? '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : options.port;
   return {

@@ -16,7 +16,7 @@ import { type HookInput } from '../../shared/runtime/sessionRuntime.js';
 import { type ControlState, type IntakeResult, type Source } from '../../shared/controlPlane/index.js';
 import { type BpFrame } from '../../shared/browserProtocol/index.js';
 import { MasterClient } from './masterClient.js';
-import { spawnMaster } from './spawnMaster.js';
+import { SpawnMasterError, spawnMaster } from './spawnMaster.js';
 import { Role } from '../../shared/atchWire/frames.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -142,7 +142,8 @@ export class SessionManager {
   ): Promise<RestoreResult | { ok: false; reason: 'attach-failed' }> {
     const restored = this.core.restore(sessionId, opts.geometry);
     if (!restored.ok) return restored;
-    this.owners.set(sessionId, Symbol('restore-op')); // stale prior-op callbacks go inert
+    const token = Symbol('restore-op');
+    this.owners.set(sessionId, token); // stale prior-op callbacks go inert
     // Register the kill command BEFORE the attach so a close that races the
     // attach's success can never leave an attached-but-unkillable master; the
     // attach itself only validates (it never closes a healthy master).
@@ -153,6 +154,7 @@ export class SessionManager {
       // runtime stamps frames with it; any other ACK would split the fence.
       attached = await this.attachMaster(sessionId, opts.sockPath, opts.geometry, {
         expectGeneration: restored.generation,
+        stillValid: () => this.owners.get(sessionId) === token,
         ...(opts.ackTimeoutMs !== undefined ? { ackTimeoutMs: opts.ackTimeoutMs } : {})
       });
     } catch {
@@ -185,7 +187,7 @@ export class SessionManager {
     sessionId: string,
     sockPath: string,
     geometry: { rows: number; cols: number },
-    opts: { expectGeneration?: number; ackTimeoutMs?: number } = {}
+    opts: { expectGeneration?: number; ackTimeoutMs?: number; stillValid?: () => boolean } = {}
   ): Promise<boolean> {
     if (this.core.state(sessionId) === undefined) return false;
     let attached = false;
@@ -226,7 +228,10 @@ export class SessionManager {
     timer.unref?.();
     const ok = await acked;
     clearTimeout(timer);
-    if (!ok) {
+    // Re-check AFTER the await: a concurrent retire may have torn the session
+    // down while the ACK was in flight — installing the client then would
+    // resurrect a retired session with its teardown already consumed.
+    if (!ok || (opts.stillValid !== undefined && !opts.stillValid()) || this.core.state(sessionId) === undefined) {
       client.close();
       return false;
     }
@@ -278,11 +283,18 @@ export class SessionManager {
       killSpec?: { binPath: string; args: string[] };
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
+    if (this.core.state(sessionId) !== undefined && this.masters.has(sessionId)) {
+      return this.ensure(sessionId, opts.geometry); // already provisioned AND attached — idempotent no-op
+    }
+    // Foreign-socket preflight BEFORE any durable allocation: ensure() would
+    // advance the ledger to N+1 over a surviving generation-N master, fencing
+    // it out of every future reconcile even though we never touch it.
+    // spawnMaster repeats this check as the race-closing second gate.
+    if (opts.detached === true && existsSync(opts.sockPath)) {
+      return { ok: false, reason: 'spawn-failed' };
+    }
     const ens = this.ensure(sessionId, opts.geometry);
     if (!ens.ok) return ens;
-    if (!ens.created && this.masters.has(sessionId)) {
-      return ens; // already provisioned AND attached — idempotent no-op
-    }
     const token = Symbol('spawn-op');
     this.owners.set(sessionId, token);
     let child: Awaited<ReturnType<typeof spawnMaster>>['child'];
@@ -295,14 +307,15 @@ export class SessionManager {
         readyTimeoutMs: opts.readyTimeoutMs,
         detached: opts.detached
       }));
-    } catch {
-      // The master never came up. A DETACHED launcher may still have forked a
-      // master before timing out — kill it AND wait for its socket to vanish
-      // (bounded), or the immediate retry adopts the stale socket at the old
-      // generation. Then free the slot THIS call allocated so provision never
-      // leaks capacity. The op fails as spawn-failed either way; the teardown
-      // is about leaving nothing behind, not about changing the verdict.
-      if (opts.detached && opts.killSpec !== undefined) {
+    } catch (error) {
+      // The master never came up. Run the kill ONLY when this operation could
+      // have created one (SpawnMasterError.ownershipPossible): a clean-exit
+      // timeout may have half-forked a master, but a pre-existing socket or a
+      // nonzero launcher exit is a FOREIGN or never-forked master — killing
+      // there would destroy someone else's session. Then free the slot THIS
+      // call allocated so provision never leaks capacity.
+      const ownershipPossible = error instanceof SpawnMasterError ? error.ownershipPossible : true;
+      if (opts.detached === true && opts.killSpec !== undefined && ownershipPossible) {
         await runKillCommand(opts.killSpec);
         await waitForSocketGone(opts.sockPath, 5_000);
       }
@@ -331,7 +344,8 @@ export class SessionManager {
     // The ACK must carry exactly the generation this daemon injected at spawn
     // (§4.8.1) — anything else is a fenced/foreign master, not a success.
     const attached = await this.attachMaster(sessionId, opts.sockPath, opts.geometry, {
-      expectGeneration: ens.generation
+      expectGeneration: ens.generation,
+      stillValid: () => this.owners.get(sessionId) === token
     });
     if (!attached) {
       // Kill ONLY the master this operation spawned — foreground child OR the
@@ -345,16 +359,25 @@ export class SessionManager {
     return ens;
   }
 
-  /** Ownership-complete cleanup after a post-spawn failure: kill what THIS op created, leave no stale teardown. */
+  /**
+   * Ownership-complete cleanup after a post-spawn failure: kill what THIS op
+   * created. The kill record is deleted only on a CONFIRMED kill + socket
+   * disappearance — a failed teardown keeps it registered so a later control
+   * retire can retry, instead of stranding a detached master with no
+   * teardown path at all (fail closed on the record, not just the verdict).
+   */
   private async teardownFailedSpawn(sessionId: string, createdSlot: boolean): Promise<void> {
     const cleanup = this.cleanups.get(sessionId);
     this.cleanups.delete(sessionId);
     cleanup?.(); // foreground child kill (sync)
     const kill = this.detachedKills.get(sessionId);
-    this.detachedKills.delete(sessionId);
     if (kill !== undefined) {
-      await runKillCommand(kill);
-      await waitForSocketGone(kill.sockPath, 5_000);
+      const killed = await runKillCommand(kill);
+      const gone = killed.ok ? await waitForSocketGone(kill.sockPath, 5_000) : false;
+      if (killed.ok && gone) {
+        this.detachedKills.delete(sessionId);
+      }
+      // else: the record stays — retireAwaited retries the kill later
     }
     if (createdSlot) this.core.retire(sessionId);
   }
@@ -440,6 +463,13 @@ export class SessionManager {
    */
   async retireAwaited(sessionId: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; error?: string }> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
+    // Order behind an in-flight provision: tearing down mid-operation would
+    // consume the killSpec while the ACK continuation later installs a client
+    // against a retired core. The provision settles deterministically first.
+    const pending = this.inflight.get(sessionId);
+    if (pending !== undefined) {
+      await pending.catch(() => undefined);
+    }
     const teardown = this.beginRetire(sessionId);
     if (teardown.kill === undefined) {
       return { ok: true };

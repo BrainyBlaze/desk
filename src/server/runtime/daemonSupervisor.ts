@@ -12,6 +12,7 @@
 // sessions read MISSING rather than the supervisor thrashing forever.
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { findPackageRoot } from '../../shared/packageRoot.js';
@@ -44,14 +45,17 @@ export interface DaemonSupervisorOptions {
   log?: (message: string) => void;
   /**
    * Health endpoint of the daemon (GET, 200 = ready). When set, each launched
-   * child is probed until it answers; `status().ready` reflects the result.
-   * Readiness is observability, not gating — the WS proxy buffers until the
-   * daemon binds, and crash accounting stays with the exit handler.
+   * child gets a fresh NONCE in its env (DESK_DAEMON_NONCE) and is probed until
+   * the health response echoes exactly that nonce — on a shared port, an OLD
+   * daemon still draining its SIGTERM answers the same URL, and a nonce-less
+   * probe would mark the NEW child ready from the old child's response.
    */
   healthUrl?: string;
   healthProbe?: { attempts?: number; intervalMs?: number };
-  /** Test seam: replaces the fetch-based probe. Resolves true when healthy. */
-  probeFn?: (url: string) => Promise<boolean>;
+  /** Test seam: replaces the fetch-based probe. Reports health + the echoed nonce. */
+  probeFn?: (url: string) => Promise<{ healthy: boolean; nonce?: string }>;
+  /** Test seam: the per-launch nonce mint. */
+  mintNonce?: () => string;
   /** Test seam. */
   spawnFn?: typeof spawn;
   /** Test seam for the restart timer. */
@@ -228,19 +232,21 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
     return merged;
   };
 
-  const probeHealth = (self: ChildProcess): void => {
+  const probeHealth = (self: ChildProcess, expectedNonce: string): void => {
     if (options.healthUrl === undefined) {
       return;
     }
     const url = options.healthUrl;
     const probe =
       options.probeFn ??
-      (async (target: string): Promise<boolean> => {
+      (async (target: string): Promise<{ healthy: boolean; nonce?: string }> => {
         try {
           const res = await fetch(target, { signal: AbortSignal.timeout(2_000) });
-          return res.ok;
+          if (!res.ok) return { healthy: false };
+          const body = (await res.json().catch(() => ({}))) as { nonce?: unknown };
+          return { healthy: true, ...(typeof body.nonce === 'string' ? { nonce: body.nonce } : {}) };
         } catch {
-          return false;
+          return { healthy: false };
         }
       });
     const attempts = options.healthProbe?.attempts ?? 30;
@@ -251,11 +257,15 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
         return; // a dead or replaced child's probe stops silently
       }
       attempt += 1;
-      void probe(url).then((healthy) => {
+      void probe(url).then((result) => {
         if (disposed || child !== self) {
           return;
         }
-        if (healthy) {
+        // Readiness is CHILD-INSTANCE-BOUND: the response must echo THIS
+        // launch's nonce. On a shared port, an old daemon still draining its
+        // SIGTERM (or an overlapping serve) answers healthy with a different
+        // nonce — that must read as not-ready, never as this child's success.
+        if (result.healthy && result.nonce === expectedNonce) {
           ready = true;
           log(`terminal daemon ready (${url})`);
           return;
@@ -279,7 +289,8 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
 
   const launch = (): void => {
     const [bin, ...args] = options.command;
-    const next = spawnFn(bin, args, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const nonce = (options.mintNonce ?? randomUUID)();
+    const next = spawnFn(bin, args, { env: { ...childEnv(), DESK_DAEMON_NONCE: nonce }, stdio: ['ignore', 'pipe', 'pipe'] });
     child = next;
     ready = false;
     next.stdout?.on('data', (chunk: Buffer) => log(`[terminal-daemon] ${String(chunk).trimEnd()}`));
@@ -294,7 +305,7 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
       log(`terminal daemon exited (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
       handleExit(next);
     });
-    probeHealth(next);
+    probeHealth(next, nonce);
   };
 
   /**

@@ -143,22 +143,28 @@ describe('startDaemonSupervisor', () => {
     supervisor.dispose();
   });
 
-  it('probes health per child: ready flips true, resets on relaunch, stale probes ignored', async () => {
-    const h: { spawns: number; children: FakeChild[]; timers: { fn: () => void; ms: number }[] } = {
+  it('probes health per child: readiness is NONCE-bound, resets on relaunch, and an old daemon on the shared port cannot mark the new child ready', async () => {
+    const h: { spawns: number; children: FakeChild[]; timers: { fn: () => void; ms: number }[]; spawnedEnvs: NodeJS.ProcessEnv[] } = {
       spawns: 0,
       children: [],
-      timers: []
+      timers: [],
+      spawnedEnvs: []
     };
-    let healthy = false;
+    // the daemon currently ANSWERING on the shared port (may be the OLD one)
+    let serving: { healthy: boolean; nonce?: string } = { healthy: false };
+    const nonces = ['nonce-A', 'nonce-B'];
+    let minted = 0;
     const supervisor = startDaemonSupervisor({
       command: ['node', 'daemon.js'],
       healthUrl: 'http://127.0.0.1:5178/control/health',
-      probeFn: async () => healthy,
+      probeFn: async () => serving,
+      mintNonce: () => nonces[minted++],
       healthProbe: { attempts: 5, intervalMs: 1 },
       backoffMs: () => 1,
       log: () => undefined,
-      spawnFn: (() => {
+      spawnFn: ((_bin: string, _args: string[], opts: { env: NodeJS.ProcessEnv }) => {
         h.spawns += 1;
+        h.spawnedEnvs.push(opts.env);
         const child = new FakeChild(1000 + h.spawns);
         h.children.push(child);
         return child;
@@ -168,22 +174,27 @@ describe('startDaemonSupervisor', () => {
         return { unref: () => undefined } as unknown as NodeJS.Timeout;
       }
     });
+    // the child received ITS nonce in env
+    expect(h.spawnedEnvs[0].DESK_DAEMON_NONCE).toBe('nonce-A');
     await new Promise((r) => setImmediate(r));
-    expect(supervisor.status().ready).toBe(false); // first probe returned unhealthy
-    healthy = true;
-    // drive the queued probe retry tick
+    expect(supervisor.status().ready).toBe(false); // nothing serving yet
+    serving = { healthy: true, nonce: 'nonce-A' };
     h.timers.shift()?.fn();
     await new Promise((r) => setImmediate(r));
     expect(supervisor.status().ready).toBe(true);
 
-    // crash → relaunch → readiness resets until the NEW child answers
-    healthy = false;
+    // crash → relaunch as child B (nonce-B) while the OLD daemon still answers
+    // with nonce-A on the shared port: B must NOT become ready from it.
     h.children[0].emit('exit', 1, null);
     h.timers.shift()?.fn(); // restart timer → child B
+    expect(h.spawnedEnvs[1].DESK_DAEMON_NONCE).toBe('nonce-B');
     await new Promise((r) => setImmediate(r));
     expect(supervisor.status()).toMatchObject({ state: 'running', ready: false });
-    healthy = true;
-    h.timers.shift()?.fn(); // B's probe retry
+    h.timers.shift()?.fn(); // B's probe retry — old daemon STILL answering nonce-A
+    await new Promise((r) => setImmediate(r));
+    expect(supervisor.status().ready).toBe(false); // the pin: no readiness from A's response
+    serving = { healthy: true, nonce: 'nonce-B' }; // the new daemon finally binds
+    h.timers.shift()?.fn();
     await new Promise((r) => setImmediate(r));
     expect(supervisor.status().ready).toBe(true);
     supervisor.dispose();
@@ -329,7 +340,7 @@ describe('probe exhaustion', () => {
     const supervisor = startDaemonSupervisor({
       command: ['node', 'daemon.js'],
       healthUrl: 'http://127.0.0.1:5178/control/health',
-      probeFn: async () => false,
+      probeFn: async () => ({ healthy: false }),
       healthProbe: { attempts: 2, intervalMs: 1 },
       backoffMs: () => 1,
       log: (message) => logs.push(message),

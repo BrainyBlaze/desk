@@ -40,9 +40,18 @@ function attachAckFrame(generation) {
   return frame;
 }
 
+const ackDelayMs = Number.parseInt(process.env.FAKE_ATCH_ACK_DELAY_MS ?? '0', 10);
+
 const server = createServer((sock) => {
-  // Accept the daemon's HELLO/ATTACH bytes, then ACK with the injected generation.
-  sock.once('data', () => sock.write(attachAckFrame(gen)));
+  // Accept the daemon's HELLO/ATTACH bytes, then ACK with the injected
+  // generation (optionally delayed, for retire-vs-provision race pins).
+  sock.once('data', () => {
+    if (ackDelayMs > 0) {
+      setTimeout(() => sock.write(attachAckFrame(gen)), ackDelayMs);
+    } else {
+      sock.write(attachAckFrame(gen));
+    }
+  });
   sock.on('error', () => sock.destroy());
 });
 server.listen(sockPath);

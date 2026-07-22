@@ -125,32 +125,44 @@ export class MasterClient {
   }
 
   private route(f: RawFrame): void {
-    switch (f.type) {
-      case FrameType.RECORD:
-        try {
+    // EVERY decode failure takes the same fail-closed path: report + close
+    // THIS client. A malformed ACK/ERROR from one bad master must never throw
+    // across the socket 'data' callback — that would take down the whole
+    // multi-session daemon and drive the supervisor into its restart cap.
+    try {
+      switch (f.type) {
+        case FrameType.RECORD:
           this.h.onRecord?.(decodeRecord(f.payload));
-        } catch (e) {
-          if (e instanceof WireError) this.h.onProtocolError?.(e);
+          return;
+        case FrameType.ATTACH_ACK: {
+          if (this.generation !== 0) {
+            return; // duplicate post-attach ACK: never re-adopt/mutate the generation
+          }
+          const ack = decodeBody(FrameType.ATTACH_ACK, f.payload);
+          // Adopt the session generation so post-attach frames pass the master's fence.
+          this.generation = (ack as { generation: number }).generation;
+          this.h.onAttachAck?.(ack);
+          return;
         }
-        return;
-      case FrameType.ATTACH_ACK: {
-        const ack = decodeBody(FrameType.ATTACH_ACK, f.payload);
-        // Adopt the session generation so post-attach frames pass the master's fence.
-        this.generation = (ack as { generation: number }).generation;
-        this.h.onAttachAck?.(ack);
+        case FrameType.ERROR: {
+          const body = decodeBody(FrameType.ERROR, f.payload) as { code: number; detail: string };
+          this.h.onError?.(body.code, body.detail);
+          return;
+        }
+        case FrameType.HELLO:
+        case FrameType.OUTPUT_ACK:
+        case FrameType.HEARTBEAT:
+          return; // negotiation / ack / keepalive — no runtime action needed here
+        default:
+          return; // lease/checkpoint/etc. handled by dedicated paths as wired
+      }
+    } catch (e) {
+      if (e instanceof WireError) {
+        this.h.onProtocolError?.(e);
+        this.close();
         return;
       }
-      case FrameType.ERROR: {
-        const body = decodeBody(FrameType.ERROR, f.payload) as { code: number; detail: string };
-        this.h.onError?.(body.code, body.detail);
-        return;
-      }
-      case FrameType.HELLO:
-      case FrameType.OUTPUT_ACK:
-      case FrameType.HEARTBEAT:
-        return; // negotiation / ack / keepalive — no runtime action needed here
-      default:
-        return; // lease/checkpoint/etc. handled by dedicated paths as wired
+      throw e; // a non-wire bug must still surface
     }
   }
 }

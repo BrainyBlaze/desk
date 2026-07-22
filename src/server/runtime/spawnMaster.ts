@@ -28,12 +28,39 @@ export interface SpawnMasterOptions {
 }
 
 /**
- * Spawn the atch master and resolve once its socket exists (ready) — or reject
- * if it exits first or times out. ATCH_GENERATION is the ledger value as a
- * bounded u32 decimal; the master owns the generation from here, so a reused
- * sessionId (higher ledger generation) can never be echoed down to a stale value.
+ * A spawn failure with its OWNERSHIP verdict: teardown (the atch kill command)
+ * may only run when this operation could plausibly have created a master.
+ * A pre-existing socket or a nonzero launcher exit never establishes
+ * ownership — running a kill there would destroy a FOREIGN master.
+ */
+export class SpawnMasterError extends Error {
+  constructor(
+    message: string,
+    readonly ownershipPossible: boolean
+  ) {
+    super(message);
+    this.name = 'SpawnMasterError';
+  }
+}
+
+/**
+ * Spawn the atch master and resolve once ownership is PROVEN — or reject.
+ * ATCH_GENERATION is the ledger value as a bounded u32 decimal; the master
+ * owns the generation from here, so a reused sessionId (higher ledger
+ * generation) can never be echoed down to a stale value.
+ *
+ * Detached ownership (`atch start` forks and exits): the socket must be
+ * ABSENT before launch (an existing one belongs to someone else — real atch
+ * fails EADDRINUSE there, but a stale socket would otherwise read as "ready"),
+ * and readiness requires the launcher to exit 0 AND the socket to exist.
  */
 export async function spawnMaster(opts: SpawnMasterOptions): Promise<{ child: ChildProcess; sockPath: string }> {
+  if (opts.detached === true && existsSync(opts.sockPath)) {
+    throw new SpawnMasterError(
+      `socket already exists: ${opts.sockPath} — refusing to launch over a master this operation did not spawn`,
+      false
+    );
+  }
   const genStr = String(opts.generation >>> 0); // bounded u32 decimal
   const child = spawn(opts.binPath, opts.args, {
     env: { ...process.env, ...opts.env, ATCH_GENERATION: genStr },
@@ -44,6 +71,7 @@ export async function spawnMaster(opts: SpawnMasterOptions): Promise<{ child: Ch
 
   await new Promise<void>((resolve, reject) => {
     let done = false;
+    let launcherExitedClean = false;
     const deadline = Date.now() + timeout;
     const iv = setInterval(check, poll);
     child.once('exit', onExit);
@@ -71,19 +99,35 @@ export async function spawnMaster(opts: SpawnMasterOptions): Promise<{ child: Ch
     function onError(error: Error): void {
       // An unspawnable binary (ENOENT/EACCES) emits 'error', not 'exit' — a
       // controlled rejection, never an unhandled error event.
-      finish(new Error(`atch spawn failed: ${error.message}`));
+      finish(new SpawnMasterError(`atch spawn failed: ${error.message}`, false));
     }
     function onExit(code: number | null): void {
-      // Detached launcher: a clean exit is expected; keep polling for the socket.
       if (opts.detached) {
+        // Ownership needs BOTH: a clean launcher exit and the socket. A nonzero
+        // exit means atch start failed (e.g. EADDRINUSE) and forked nothing.
+        if (code !== 0) {
+          finish(new SpawnMasterError(`atch launcher exited ${code ?? 'null'}`, false));
+          return;
+        }
+        launcherExitedClean = true;
         if (existsSync(opts.sockPath)) finish();
         return;
       }
-      finish(new Error(`atch exited before its socket appeared (code ${code})`));
+      finish(new SpawnMasterError(`atch exited before its socket appeared (code ${code})`, true));
     }
     function check(): void {
-      if (existsSync(opts.sockPath)) finish();
-      else if (Date.now() > deadline) finish(new Error(`timed out waiting for atch socket ${opts.sockPath}`));
+      if (existsSync(opts.sockPath)) {
+        // Detached readiness waits for the clean launcher exit too — a socket
+        // alone does not prove OUR launch created it.
+        if (opts.detached !== true || launcherExitedClean) finish();
+        if (Date.now() > deadline) {
+          finish(new SpawnMasterError(`atch launcher still running past ${timeout}ms with socket present`, true));
+        }
+        return;
+      }
+      if (Date.now() > deadline) {
+        finish(new SpawnMasterError(`timed out waiting for atch socket ${opts.sockPath}`, launcherExitedClean));
+      }
     }
   });
   return { child, sockPath: opts.sockPath };

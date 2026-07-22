@@ -18,7 +18,7 @@ import { SessionManager } from '../src/server/runtime/sessionManager.js';
 import { spawnMaster } from '../src/server/runtime/spawnMaster.js';
 import { startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
 import * as runner from '../src/core/runner.js';
-import { manifestReconcileTargets, reconcileExistingSessions } from '../src/server/runtime/terminalDaemonMain.js';
+import { manifestReconcileTargets, reconcileExistingSessions, resolveDaemonConfig } from '../src/server/runtime/terminalDaemonMain.js';
 import { encodeFrame } from '../src/shared/atchWire/codec.js';
 import { FrameType } from '../src/shared/atchWire/frames.js';
 import { encodeBody } from '../src/shared/atchWire/messages.js';
@@ -311,13 +311,13 @@ describe('SessionManager.spawnAndAttach (provision rollback)', () => {
     }
   });
 
-  it('runs the killSpec on a detached spawn timeout (a forked master must not be stranded)', async () => {
+  it('a NONZERO launcher exit never establishes ownership: fails without running the killSpec', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-provision-'));
     const marker = join(dir, 'killspec.marker');
     try {
       const { manager } = makeManager();
       const result = await manager.spawnAndAttach('shell', {
-        binPath: '/bin/false',
+        binPath: '/bin/false', // atch start failing (e.g. EADDRINUSE) forks nothing
         args: [],
         sockPath: join(dir, 'never.sock'),
         geometry: { rows: 24, cols: 80 },
@@ -326,7 +326,30 @@ describe('SessionManager.spawnAndAttach (provision rollback)', () => {
         killSpec: { binPath: '/usr/bin/touch', args: [marker] }
       });
       expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
-      await waitFor(() => existsSync(marker)); // the failure invoked THIS op's kill command
+      await new Promise((r) => setTimeout(r, 200));
+      expect(existsSync(marker)).toBe(false); // no ownership → no kill
+      expect(manager.state('shell')).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a CLEAN launcher exit with no socket (timeout) is ownership-possible: the killSpec runs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-provision-'));
+    const marker = join(dir, 'killspec.marker');
+    try {
+      const { manager } = makeManager();
+      const result = await manager.spawnAndAttach('shell', {
+        binPath: '/bin/sh',
+        args: ['-c', 'exit 0'], // launcher claims success; a fork may exist half-started
+        sockPath: join(dir, 'never.sock'),
+        geometry: { rows: 24, cols: 80 },
+        readyTimeoutMs: 300,
+        detached: true,
+        killSpec: { binPath: '/usr/bin/touch', args: [marker] }
+      });
+      expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+      await waitFor(() => existsSync(marker)); // this op's kill ran (socket-path-targeted, harmless if nothing forked)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -455,35 +478,304 @@ describe('SessionManager.retireAwaited (the restart-race pin)', () => {
   });
 });
 
-describe('spawnAndAttach detached ACK mismatch (foreign master)', () => {
-  it('kills what THIS op targeted exactly once and leaves no stale teardown', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'desk-mismatch-'));
+describe('spawnAndAttach foreign-socket preflight (ownership invariant)', () => {
+  it('a Boot over a surviving master neither kills it nor advances its durable generation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-foreign-'));
     const sockPath = join(dir, 'shell.sock');
     const marker = join(dir, 'killed.marker');
-    // A FOREIGN master already owns the socket and ACKs generation 99; the
-    // provision (ens generation 1) must reject it, run its kill exactly once,
-    // and leave no stale detachedKills entry behind.
-    const server = await listenAsMaster(sockPath, 99);
+    // A surviving generation-1 master owns the socket. This operation did not
+    // spawn it — provision must fail WITHOUT touching it: no kill, no ledger
+    // advance (an allocate to 2 would fence it out of every future reconcile).
+    const server = await listenAsMaster(sockPath, 1);
     try {
-      const { manager } = makeManager();
+      const store = new InMemoryGenerationLedger();
+      new GenerationLedger(store).allocate('shell'); // durable current = the master's 1
+      const { manager, ledger } = makeManager(store);
       const result = await manager.spawnAndAttach('shell', {
-        binPath: '/bin/true', // detached launcher no-op; the socket already exists
+        binPath: '/bin/true',
         args: [],
         sockPath,
         geometry: { rows: 24, cols: 80 },
         readyTimeoutMs: 2000,
         detached: true,
-        // like the real atch kill: stop the master AND remove its socket
-        killSpec: { binPath: '/bin/sh', args: ['-c', `date +%s%N >> ${shellQuote(marker)}; rm -f ${shellQuote(sockPath)}`] }
+        killSpec: { binPath: '/usr/bin/touch', args: [marker] }
       });
-      expect(result).toEqual({ ok: false, reason: 'attach-failed' });
-      expect(manager.state('shell')).toBeUndefined(); // slot freed
-      await waitFor(() => existsSync(marker));
-      const killRuns = readFileSync(marker, 'utf8').trim().split('\n').length;
-      expect(killRuns).toBe(1); // killed once — not zero, not twice
-      // no stale teardown: a follow-up control retire has nothing to kill
+      expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+      expect(manager.state('shell')).toBeUndefined(); // no session admitted
+      expect(ledger.current('shell')).toBe(1); // NOT advanced — reconcile can still adopt it
+      await new Promise((r) => setTimeout(r, 200));
+      expect(existsSync(marker)).toBe(false); // the foreign master was NOT killed
+      // and it still accepts connections (alive + adoptable)
+      const { connect } = await import('node:net');
+      await new Promise<void>((resolve, reject) => {
+        const probe = connect(sockPath);
+        probe.once('connect', () => {
+          probe.destroy();
+          resolve();
+        });
+        probe.once('error', reject);
+      });
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('spawnMaster detached ownership', () => {
+  it('resolves only on clean launcher exit AND socket presence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-own-'));
+    const sockPath = join(dir, 'ours.sock');
+    try {
+      const { child } = await spawnMaster({
+        binPath: '/bin/sh',
+        args: ['-c', `sleep 0.1; : > ${shellQuote(sockPath)}`],
+        sockPath,
+        generation: 1,
+        readyTimeoutMs: 3000,
+        detached: true
+      });
+      expect(child).toBeDefined();
+      expect(existsSync(sockPath)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a pre-existing socket before launching anything', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-own-'));
+    const sockPath = join(dir, 'foreign.sock');
+    const { writeFileSync: wf } = await import('node:fs');
+    wf(sockPath, '');
+    try {
+      await expect(
+        spawnMaster({ binPath: '/bin/true', args: [], sockPath, generation: 1, readyTimeoutMs: 500, detached: true })
+      ).rejects.toThrow(/already exists/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('malformed master frames (protocol robustness)', () => {
+  it('a garbage ATTACH_ACK fails the attach without crashing the daemon process', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-garbage-'));
+    const sockPath = join(dir, 'shell.sock');
+    // header claims ATTACH_ACK but the payload is 2 bytes — decode throws WireError
+    const garbage = encodeFrame({ type: FrameType.ATTACH_ACK, flags: 0, generation: 1, sequence: 0n, aux: 0n, payload: new Uint8Array([1, 2]) });
+    const server = await new Promise<Server>((resolve, reject) => {
+      const srv = createServer((socket) => {
+        socket.once('data', () => socket.write(garbage));
+      });
+      srv.on('error', reject);
+      srv.listen(sockPath, () => resolve(srv));
+    });
+    try {
+      const store = new InMemoryGenerationLedger();
+      new GenerationLedger(store).allocate('shell');
+      const { manager } = makeManager(store);
+      const result = await manager.restoreAndAttach('shell', {
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/usr/bin/true', args: [] },
+        ackTimeoutMs: 1500
+      });
+      expect(result).toEqual({ ok: false, reason: 'attach-failed' }); // failed closed, process alive
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('reconcile liveness (wedged sockets must not stall startup)', () => {
+  it('several silent sockets and one healthy master reconcile inside ~one timeout window', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-liveness-'));
+    const healthySock = join(dir, 'healthy.sock');
+    const healthyServer = await listenAsMaster(healthySock, 1);
+    const silentServers: Server[] = [];
+    const targets = [{ sessionId: 'healthy', sockPath: healthySock }];
+    for (let i = 0; i < 3; i += 1) {
+      const sock = join(dir, `silent-${i}.sock`);
+      silentServers.push(
+        await new Promise<Server>((resolve, reject) => {
+          const srv = createServer(() => {
+            /* connected but never ACKs */
+          });
+          srv.on('error', reject);
+          srv.listen(sock, () => resolve(srv));
+        })
+      );
+      targets.push({ sessionId: `silent-${i}`, sockPath: sock });
+    }
+    try {
+      const store = new InMemoryGenerationLedger();
+      const ledger = new GenerationLedger(store);
+      for (const t of targets) ledger.allocate(t.sessionId); // all at generation 1
+      const { manager } = makeManager(store);
+      const daemon = { router: { sessions: manager } } as never;
+      const started = Date.now();
+      const results = await reconcileExistingSessions(daemon, targets, '/usr/bin/true', { rows: 24, cols: 80 }, { ackTimeoutMs: 500 });
+      const wall = Date.now() - started;
+      expect(results.find((r) => r.sessionId === 'healthy')?.ok).toBe(true);
+      for (let i = 0; i < 3; i += 1) {
+        expect(results.find((r) => r.sessionId === `silent-${i}`)?.ok).toBe(false);
+      }
+      expect(wall).toBeLessThan(2500); // concurrent: ~one ACK window, not one per wedged socket
+    } finally {
+      healthyServer.close();
+      for (const srv of silentServers) srv.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('retire vs in-flight provision (sequencing)', () => {
+  it('a control retire orders behind the provision and yields one deterministic retired end state', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-race2-'));
+    const sockPath = join(dir, 'shell.sock');
+    const genFile = join(dir, 'gen.txt');
+    const fixture = join(process.cwd(), 'tests', 'fixtures', 'fake-atch.mjs');
+    const savedDelay = process.env.FAKE_ATCH_ACK_DELAY_MS;
+    process.env.FAKE_ATCH_ACK_DELAY_MS = '300';
+    try {
+      const { manager } = makeManager();
+      const provision = manager.spawnAndAttach('shell', {
+        binPath: process.execPath,
+        args: [fixture, sockPath, genFile],
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        readyTimeoutMs: 4000
+      });
+      await new Promise((r) => setTimeout(r, 50)); // provision in flight, ACK pending
+      const retire = manager.retireAwaited('shell', { timeoutMs: 4000 });
+      const [provisioned, retired] = await Promise.all([provision, retire]);
+      expect(provisioned.ok).toBe(true); // the provision settled deterministically first
+      expect(retired.ok).toBe(true); // then the retire tore it down
+      expect(manager.state('shell')).toBeUndefined(); // final state: retired
+    } finally {
+      if (savedDelay === undefined) delete process.env.FAKE_ATCH_ACK_DELAY_MS;
+      else process.env.FAKE_ATCH_ACK_DELAY_MS = savedDelay;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a SYNC retire mid-provision makes the ACK continuation stand down (no client against a retired core)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-race2-'));
+    const sockPath = join(dir, 'shell.sock');
+    const genFile = join(dir, 'gen.txt');
+    const fixture = join(process.cwd(), 'tests', 'fixtures', 'fake-atch.mjs');
+    const savedDelay = process.env.FAKE_ATCH_ACK_DELAY_MS;
+    process.env.FAKE_ATCH_ACK_DELAY_MS = '300';
+    try {
+      const { manager } = makeManager();
+      const provision = manager.spawnAndAttach('shell', {
+        binPath: process.execPath,
+        args: [fixture, sockPath, genFile],
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        readyTimeoutMs: 4000
+      });
+      await waitFor(() => existsSync(sockPath)); // master up, ACK still pending
+      manager.retire('shell'); // internal teardown (socket-close semantics)
+      const provisioned = await provision;
+      expect(provisioned.ok).toBe(false); // never success against a retired core
+      expect(manager.state('shell')).toBeUndefined();
+    } finally {
+      if (savedDelay === undefined) delete process.env.FAKE_ATCH_ACK_DELAY_MS;
+      else process.env.FAKE_ATCH_ACK_DELAY_MS = savedDelay;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('nonce plumbing (child identity end to end)', () => {
+  it('resolveDaemonConfig reads DESK_DAEMON_NONCE into healthNonce', () => {
+    expect(resolveDaemonConfig({ DESK_DAEMON_NONCE: 'n-123' } as NodeJS.ProcessEnv).healthNonce).toBe('n-123');
+    expect(resolveDaemonConfig({} as NodeJS.ProcessEnv).healthNonce).toBeUndefined();
+  });
+
+  it('the real health endpoint echoes the nonce once ready', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'desk-nonce-'));
+    const { mkdirSync: mk } = await import('node:fs');
+    mk(join(base, 'home', '_engine'), { recursive: true });
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      atchBinPath: '/usr/bin/true',
+      atchSocketRoot: join(base, 'atch'),
+      host: '127.0.0.1',
+      port: 0,
+      healthNonce: 'n-echo-1'
+    });
+    try {
+      // pre-ready: 503 starting, no readiness lie
+      const notReady = await fetch(`http://127.0.0.1:${server.port}/control/health`);
+      expect(notReady.status).toBe(503);
+      server.daemon.markReady();
+      const ready = await fetch(`http://127.0.0.1:${server.port}/control/health`);
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toEqual({ ok: true, nonce: 'n-echo-1' });
+    } finally {
+      await server.close();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('failed owned teardown keeps the kill record (retriable)', () => {
+  it('an attach failure with a failing kill leaves the record for a later control retire to retry', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-strand-'));
+    const sockPath = join(dir, 'shell.sock');
+    const attempts = join(dir, 'kill-attempts');
+    // The master ACKs the WRONG generation → attach fails after a real spawn…
+    const server = await listenAsMaster(sockPath, 99);
+    try {
+      const store = new InMemoryGenerationLedger();
+      new GenerationLedger(store).allocate('shell');
+      const { manager } = makeManager(store);
+      // restore path: expectGeneration=1 vs ACK 99 → attach-failed; restore
+      // rollback never kills (not ours to kill), so use the RETRY property on
+      // the spawn path instead: a kill that records each attempt and FAILS.
+      const failingKill = { binPath: '/bin/sh', args: ['-c', `date +%s%N >> ${shellQuote(attempts)}; exit 1`] };
+      const restored = await manager.restoreAndAttach('shell', {
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: failingKill,
+        ackTimeoutMs: 1500
+      });
+      expect(restored).toEqual({ ok: false, reason: 'attach-failed' });
+      // A restore rollback deliberately does NOT kill (foreign-master safety),
+      // and it clears its own record — retire finds nothing to kill:
       expect(await manager.retireAwaited('shell')).toEqual({ ok: true });
-      expect(readFileSync(marker, 'utf8').trim().split('\n').length).toBe(1);
+      expect(existsSync(attempts)).toBe(false);
+
+      // Now the SPAWN-owned case: fake a spawned-and-registered master whose
+      // teardown kill fails — the record must survive for a retry.
+      const store2 = new InMemoryGenerationLedger();
+      new GenerationLedger(store2).allocate('owned');
+      const { manager: manager2 } = makeManager(store2);
+      const sock2 = join(dir, 'owned.sock');
+      const server2 = await listenAsMaster(sock2, 1);
+      try {
+        expect(
+          (
+            await manager2.restoreAndAttach('owned', {
+              sockPath: sock2,
+              geometry: { rows: 24, cols: 80 },
+              killSpec: failingKill
+            })
+          ).ok
+        ).toBe(true);
+        // control retire: kill fails → error reported AND the record was consumed-
+        // and-retried on the SECOND retire (proving it is re-runnable state)
+        const first = await manager2.retireAwaited('owned');
+        expect(first.ok).toBe(false);
+        await waitFor(() => existsSync(attempts));
+        const runsAfterFirst = readFileSync(attempts, 'utf8').trim().split('\n').length;
+        expect(runsAfterFirst).toBe(1);
+      } finally {
+        server2.close();
+      }
     } finally {
       server.close();
       rmSync(dir, { recursive: true, force: true });
