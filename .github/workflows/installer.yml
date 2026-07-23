@@ -33,20 +33,28 @@ jobs:
           node-version: 22.23.1
           cache: npm
       - run: npm ci
+      # The fixture version always mirrors package.json (create-release-assets
+      # refuses any other), so a version bump can never break this matrix.
+      - name: Resolve the fixture version
+        id: fixver
+        shell: bash
+        run: echo "value=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Build a checksum-valid fail-closed release fixture
         shell: bash
+        env:
+          FIXTURE_VERSION: ${{ steps.fixver.outputs.value }}
         run: |
-          npm run release:assets -- --version v0.3.0 --out-dir "$RUNNER_TEMP/installer-release"
-          node --input-type=module - "$RUNNER_TEMP/installer-release" <<'NODE'
+          npm run release:assets -- --version "$FIXTURE_VERSION" --out-dir "$RUNNER_TEMP/installer-release"
+          node --input-type=module - "$RUNNER_TEMP/installer-release" "$FIXTURE_VERSION" <<'NODE'
           import { createHash } from 'node:crypto';
           import { readFileSync, writeFileSync } from 'node:fs';
           import { join } from 'node:path';
-          const root = process.argv[2];
+          const [root, version] = process.argv.slice(2);
           const manifestPath = join(root, 'desk-install-manifest.json');
           const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
           for (const target of Object.values(manifest.node.targets)) target.sha256 = '0'.repeat(64);
           writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-          const names = ['desk-install-manifest.json', 'desk-v0.3.0-source.tar.gz'].sort();
+          const names = ['desk-install-manifest.json', `desk-${version}-source.tar.gz`].sort();
           const sums = names.map((name) => `${createHash('sha256').update(readFileSync(join(root, name))).digest('hex')}  ${name}`);
           writeFileSync(join(root, 'SHA256SUMS'), `${sums.join('\n')}\n`);
           NODE
@@ -56,8 +64,9 @@ jobs:
           docker run --rm \
             -v "$PWD:/src:ro" \
             -v "$RUNNER_TEMP/installer-release:/release:ro" \
+            -e DESK_VERSION="${{ steps.fixver.outputs.value }}" \
             "${{ matrix.image }}" \
-            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_VERSION=v0.3.0 DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; tmux -V; git --version; python3 --version || python --version; make --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
+            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; tmux -V; git --version; python3 --version || python --version; make --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
 
   macos:
     strategy:

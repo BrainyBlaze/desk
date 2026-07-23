@@ -90,6 +90,18 @@ exec "$script" "$@"
       join(nodeRoot, 'bin', 'npm'),
       `#!/usr/bin/env bash
 set -euo pipefail
+# The real npm is a Node script behind a \`#!/usr/bin/env node\` shebang: it can
+# only run when a \`node\` is resolvable on PATH — and the pinned toolchain must
+# be SELF-sufficient, never leaning on whatever ambient node a dev machine or CI
+# runner happens to have (a pristine host has none). Encode that invariant here:
+# any caller must put this toolchain's own bin first on PATH, or npm fails in
+# tests exactly as it does on a pristine host.
+own_node="$(cd "$(dirname "$0")" && pwd)/node"
+resolved_node="$(command -v node 2>/dev/null || true)"
+if [ "$resolved_node" != "$own_node" ]; then
+  printf 'npm: toolchain node is not first on PATH (resolved: %s)\\n' "\${resolved_node:-none}" >&2
+  exit 90
+fi
 if [ "\${1:-}" = "--version" ]; then printf '10.9.8\\n'; exit 0; fi
 if [ "\${1:-}" = "ci" ]; then exit 0; fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build:distribution" ]; then
