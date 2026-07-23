@@ -1,6 +1,6 @@
 {
   "name": "desk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Agent-first from the ground up: a terminal multiplexer for whole agent fleets, an IDE/CDE with LSPs visible to agents out of the box, and Slack-style inter-agent chat — plus git, notes, and more.",
   "license": "BUSL-1.1",
