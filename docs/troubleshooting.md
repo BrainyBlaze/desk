@@ -58,9 +58,11 @@ missing.
 ### Terminals report missing because Desk cannot find `atch`
 
 Desk preflights the atch executable before starting the terminal daemon. It
-logs the failure and keeps non-terminal workspace features available. Supply
-an absolute executable with `DESK_ATCH_BIN`, install `atch` on `PATH`, or use a
-release that contains `libexec/atch`:
+logs the failure and keeps non-terminal workspace features available. Resolution
+is `DESK_ATCH_BIN`, same-release `libexec/atch`, then `PATH`, in that order.
+Managed releases and the Docker image include the pinned same-release binary.
+Reinstall or rebuild a missing or corrupt bundle; use an absolute override only
+when intentionally testing another build:
 
 ```bash
 DESK_ATCH_BIN=/opt/atch/bin/atch desk serve

@@ -30,12 +30,9 @@ let childEnvironment;
 
 async function createIsolatedRuntimeEnvironment() {
   const smokeHome = mkdtempSync(join(realpathSync(tmpdir()), 'desk-smoke-home-'));
-  const atchBin = join(smokeHome, 'atch-smoke-stub');
   const daemonPort = await unusedPort();
-  writeFileSync(atchBin, '#!/bin/sh\nexit 64\n', { mode: 0o700 });
   childEnvironment = {
     ...process.env,
-    DESK_ATCH_BIN: atchBin,
     DESK_ATCH_SOCKET_ROOT: join(smokeHome, 'atch'),
     DESK_DAEMON_HOME: join(smokeHome, '.config', 'desk'),
     DESK_DAEMON_HOST: '127.0.0.1',
@@ -49,6 +46,7 @@ async function createIsolatedRuntimeEnvironment() {
     XDG_CONFIG_HOME: join(smokeHome, '.config'),
     XDG_DATA_HOME: join(smokeHome, '.local', 'share')
   };
+  delete childEnvironment.DESK_ATCH_BIN;
   delete childEnvironment.DESK_CHANNELS_DEBUG;
   delete childEnvironment.DESK_CODEX_HOME;
   delete childEnvironment.DESK_DAEMON_CMD;
@@ -699,7 +697,7 @@ async function runStatusPropagationProbe(command, cwd, runtimePath) {
   try {
     renameSync(runtimePath, backupPath);
     originalMoved = true;
-    writeFileSync(runtimePath, '#!/usr/bin/env node\nprocess.exit(37);\n', {
+    writeFileSync(runtimePath, '#!/bin/sh\nexit 37;\n', {
       encoding: 'utf8',
       flag: 'wx',
       mode: 0o700

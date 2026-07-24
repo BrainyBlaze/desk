@@ -27,10 +27,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && chmod +x dist/cli/main.js dist/server/lsp/deskLspMcpCli.js",
+    "build:atch": "node scripts/build-atch.mjs",
     "build:ui": "vite build",
     "build:standalone:assets": "vite build && node scripts/make-assets.mjs",
     "build:standalone": "npm run build:standalone:assets && bun run scripts/build-standalone.ts",
-    "build:distribution": "npm run build:standalone && npm run build",
+    "build:distribution": "npm run build:atch && npm run build:standalone && npm run build",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dev": "tsx src/cli/main.ts",

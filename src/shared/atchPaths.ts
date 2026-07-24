@@ -74,8 +74,8 @@ export function isExecutableFile(path: string): boolean {
 /**
  * The atch binary for the daemon child: DESK_ATCH_BIN wins, then the
  * same-release bundled libexec/atch when present and executable, then PATH.
- * The licensing/packaging decision (bundle vs user-installed) changes only
- * which branch fires, never the runtime semantics.
+ * Operator and development overrides change only which branch fires, never
+ * the runtime semantics.
  */
 export function resolveAtchBinPath(fromUrl: string, env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string {
   const explicit = env.DESK_ATCH_BIN?.trim();

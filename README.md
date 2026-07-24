@@ -96,10 +96,10 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | 
 desk serve            # private Bun server on http://127.0.0.1:5173
 ```
 
-The atch-native runtime requires an executable `atch` from `DESK_ATCH_BIN`, the
-release's `libexec/atch`, or `PATH`, in that order. The public installer does
-not bundle atch while the distribution-license decision is open; install or
-build the reviewed binary separately before starting Desk.
+Desk bundles the audited atch 1.6-bb1 fork as the release's `libexec/atch`.
+Runtime resolution remains `DESK_ATCH_BIN`, same-release `libexec/atch`, then
+`PATH`, in that order, so explicit development and operator overrides still
+work.
 
 The installer provisions missing host requirements, downloads checksum-verified
 Desk source plus pinned Node 22.23.1 and Bun 1.3.14 toolchains, builds an immutable
@@ -114,8 +114,9 @@ to the other mode.
 <details>
 <summary>Build from source (for development)</summary>
 
-Match CI with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**, an executable
-`atch`, and a C/C++ toolchain:
+Match CI with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**, `make`, and a
+C/C++ toolchain. The distribution build compiles the pinned vendored atch
+snapshot for the host:
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git
@@ -317,8 +318,9 @@ isolated instance (a temporary `HOME` directory running `vite --port 5190`).
 
 `desk serve --dev` runs the UI through Vite with the Desk API mounted as server
 middleware. Plain `desk serve` launches `libexec/desk-standalone`, whose embedded
-UI and API do not load Vite. `npm run build:distribution` builds the private Bun
-runtime first and the Node CLI last because Vite clears `dist/` during its build.
+UI and API do not load Vite. `npm run build:distribution` verifies and builds
+the pinned atch snapshot, builds the private Bun runtime, and builds the Node CLI
+last because Vite clears `dist/` during its build.
 
 The sci-fi/HUD design system lives in `src/web/arwes/`:
 

@@ -6,6 +6,7 @@ import { SANCTIONS, scanFlagSurface, scanLegacySurface, type ScannedFile } from 
 const ROOT = join(__dirname, '..', '..');
 const SRC = join(ROOT, 'src');
 const DOCS = join(ROOT, 'docs');
+const VENDORED_ATCH = join(ROOT, 'vendor', 'atch');
 const SHIPPED_RUNTIME_FILES = [
   'Dockerfile',
   'install.sh',
@@ -36,6 +37,8 @@ function sourceFiles(dir: string): string[] {
 }
 
 function scannedTree(): ScannedFile[] {
+  // The fork is shipped source, not Desk runtime source. Its own historical
+  // vocabulary is intentionally outside this gate and pinned by provenance.
   return sourceFiles(SRC).map((file) => ({
     rel: relative(SRC, file).split(sep).join('/'),
     source: readFileSync(file, 'utf8')
@@ -97,6 +100,12 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
 
   it('keeps active public docs on the atch-native runtime', () => {
     expect(scanRetiredDocRuntime(currentRuntimeDocs())).toEqual([]);
+  });
+
+  it('deliberately keeps the pinned fork source outside the Desk vocabulary gate', () => {
+    expect(relative(ROOT, VENDORED_ATCH).split(sep).join('/')).toBe('vendor/atch');
+    expect(statSync(VENDORED_ATCH).isDirectory()).toBe(true);
+    expect(scannedTree().every(({ rel }) => !rel.startsWith('vendor/atch/'))).toBe(true);
   });
 });
 

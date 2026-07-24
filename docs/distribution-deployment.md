@@ -14,13 +14,11 @@ Desk distributes one public CLI with two explicit server modes:
 Both mount the same backend API. Neither command falls back to the other when its
 runtime is missing or fails.
 
-<Warning>
-The terminal runtime requires an executable `atch`, resolved from
-`DESK_ATCH_BIN`, same-release `libexec/atch`, or `PATH`. Public release bundling
-is pending the distribution-license decision. Until that is resolved, the
-source-backed installer and container require you to supply the reviewed binary
-separately.
-</Warning>
+<Note>
+Desk releases build the pinned, audited atch 1.6-bb1 fork for the target host.
+The runtime resolves `DESK_ATCH_BIN`, same-release `libexec/atch`, then `PATH`,
+in that order.
+</Note>
 
 ## Source-backed installation
 
@@ -38,8 +36,10 @@ The installer:
 5. downloads and verifies the source archive plus pinned Node/npm and Bun
    toolchains;
 6. safely extracts each archive into an empty staging directory;
-7. runs `npm ci` and `npm run build:distribution` with the Desk-owned toolchains;
-8. smokes the staged CLI, activates it atomically, and smokes the public launcher.
+7. runs `npm ci` and `npm run build:distribution` with the Desk-owned toolchains,
+   including the pinned atch build;
+8. probes the staged atch and CLI, activates atomically, and smokes the public
+   launcher.
 
 The default install root is
 `${XDG_DATA_HOME:-$HOME/.local/share}/desk`. `DESK_HOME` overrides that root.
@@ -54,7 +54,7 @@ desk/
 │   ├── runtime/node
 │   ├── dist/cli/main.js
 │   ├── libexec/desk-standalone
-│   └── libexec/atch              # present only when the release bundles atch
+│   └── libexec/atch              # pinned host-native atch 1.6-bb1
 ├── toolchains/node-22.23.1/
 ├── toolchains/bun-1.3.14/
 └── current -> releases/<version>/<install-id>
@@ -99,6 +99,11 @@ The install manifest declares the source digest and exact target-qualified Node
 and Bun assets. It contains no caller-controlled URLs. The installer constructs
 toolchain URLs only from the official Node and Bun release origins.
 
+The source archive includes the audited atch fork under `vendor/atch`; its exact
+origin, upstream base, patch range, tree, and canonical snapshot digest are
+recorded in `vendor/atch/PROVENANCE.json`. `libexec/atch` is a build output, not
+a separately published asset.
+
 There is no separately installable server executable. The compiled runtime is a
 private release component at `libexec/desk-standalone`.
 
@@ -115,9 +120,10 @@ npm run smoke:serve-modes
 npm run build
 ```
 
-`build:distribution` runs the compiled-runtime build first and the TypeScript
-CLI build last. This order matters because Vite clears `dist/`. Run `npm run
-build` after any later UI build to restore the Node CLI.
+`build:distribution` verifies and compiles the pinned atch snapshot first, runs
+the compiled-runtime build next, and runs the TypeScript CLI build last. This
+order matters because Vite clears `dist/`. Run `npm run build` after any later
+UI build to restore the Node CLI.
 
 The real smoke script proves:
 
@@ -154,15 +160,15 @@ docker run --rm -p 127.0.0.1:5174:5174 \
 
 The container binds `0.0.0.0` because port publication is controlled by Docker.
 Publish it only on a trusted host interface. Desk has no built-in authentication.
-The current image does not package atch while the license decision is open;
-mount or install the binary and set `DESK_ATCH_BIN` before starting either
-server mode.
+The image packages and probes the same pinned `libexec/atch` binary built in its
+builder stage. `DESK_ATCH_BIN` remains available as an explicit operator
+override.
 
 ## Host integrations
 
-The installer owns the Desk build/runtime toolchains. `atch` is a required
-runtime dependency; the following integrations remain optional and use the
-host user's credentials:
+The installer owns the Desk build/runtime toolchains and bundled `atch`
+component. The following integrations remain optional and use the host user's
+credentials:
 
 - `codex`, `claude`, and `opencode` for agents
 - `gh` for GitHub and Projects

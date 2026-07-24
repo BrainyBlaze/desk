@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "fork": {
+    "repository": "https://github.com/BrainyBlaze/atch.git",
+    "commit": "0dd332eea478b5415ac54c39bcc1e28c2c9761f3",
+    "tree": "6eb4f166fa972843ed71e888f62cf80601864ceb",
+    "version": "1.6-bb1"
+  },
+  "upstream": {
+    "repository": "https://github.com/mobydeck/atch.git",
+    "baseCommit": "15e0d3a0912618c08f7a74f85e41cca673b313f0"
+  },
+  "patches": {
+    "range": "15e0d3a0912618c08f7a74f85e41cca673b313f0..0dd332eea478b5415ac54c39bcc1e28c2c9761f3",
+    "count": 41,
+    "commits": [
+      {
+        "commit": "6c6648014ea0a26b0850e8916835f9d510ce9d3c",
+        "subject": "fork: zero-replay + DECSET state preamble + 4 KB push payload"
+      },
+      {
+        "commit": "16f6bb9abc1dd1db3b993f22cf003d5589985a16",
+        "subject": "ci: build static atch on tag push, publish release tarballs"
+      },
+      {
+        "commit": "35d8ebbf7df145c7d8bb2c060157d56ad7b1845b",
+        "subject": "Add child stderr passthrough + terminal capability auto-response; bump to 1.0"
+      },
+      {
+        "commit": "1c2a718546874be5f1e3af45f3ad034aeb064019",
+        "subject": "Restore release workflow on main (lost between tags)"
+      },
+      {
+        "commit": "1676f9f23aaeaa7a26d6e324b92a1e553970fe87",
+        "subject": "Allow .github in repo (negate `/.*` ignore)"
+      },
+      {
+        "commit": "54ca7a82a34f4c67043af42bbdc0c6d9e2964e37",
+        "subject": "Add -S sanitize_env injector + hardcoded GUARD + /tmp session dir"
+      },
+      {
+        "commit": "820876a7b625748b144ecd68d6f52cf33ce71b42",
+        "subject": "tests: point at /tmp/.<basename>-<uid> session dir"
+      },
+      {
+        "commit": "455e56dc4df0c80f93f27172e56deae6ff3a97d1",
+        "subject": "Merge our-main: zero-replay + DECSET + 4 KB push payload + CI workflow"
+      },
+      {
+        "commit": "c2327a56d304ccebbdfae81f47b9380ffe4b07a5",
+        "subject": "state: track busy/idle from agent CLI's OSC 0 title"
+      },
+      {
+        "commit": "210720a4024e32169425470bdbdaa687116f1f4b",
+        "subject": "events: replace .state sidecar with consumer-owned ndjson bus (-T <path>)"
+      },
+      {
+        "commit": "0dee2cff3800a9d0c2bf358496b6ac51a5a8a6de",
+        "subject": "caps: mirror kitty 0.47.0 preamble + OSC 8 link event; bump 1.5-bb1"
+      },
+      {
+        "commit": "432d60db7c9619232b81704cd645116edd9db33b",
+        "subject": "caps: inject TERM_PROGRAM=kitty env so env-honest TUIs detect OSC 8; bump 1.6-bb1"
+      },
+      {
+        "commit": "177658740939bebd76cad65af567331bd1ff1c76",
+        "subject": "security: add bounded trusted atch storage primitives"
+      },
+      {
+        "commit": "80a11bf1ab5b71f142e255c211e783bec8b74a5f",
+        "subject": "fix: close security and storage review findings"
+      },
+      {
+        "commit": "65ac77b8e964201eec1449dc34b4e49e3f6ef131",
+        "subject": "integrate security storage primitives"
+      },
+      {
+        "commit": "1a33a7ab5a9d75fbfd37218b81d4991f31a66a21",
+        "subject": "fix: close second security review findings"
+      },
+      {
+        "commit": "a92e6d06a986e7d4ab71b3b5f6253e5d5a0c35fc",
+        "subject": "fix: harden production sink paths"
+      },
+      {
+        "commit": "fc039e9afd95e236b4f75c166ae331f43e335912",
+        "subject": "feat: add atch v3 wire codec and conformance vectors"
+      },
+      {
+        "commit": "612909cf3c058f7fb67d0f1f790307145dad932b",
+        "subject": "fix: harden v3 reassembly and checkpoint integrity"
+      },
+      {
+        "commit": "466b3469ae76c255af6af6b0a3a198671165555e",
+        "subject": "sync complete frozen wire vectors"
+      },
+      {
+        "commit": "c4f47f3936b97079fd1471444da17dd8592a03ff",
+        "subject": "feat: complete all frame payload conformance"
+      },
+      {
+        "commit": "37477fe472e3867184f8eb1aadddc2f9c624ddd8",
+        "subject": "fix: enforce typed validation during reassembly"
+      },
+      {
+        "commit": "59b81246d41a552aa960dacae0f4c60ece1b830c",
+        "subject": "test: use schema-valid payloads for reassembly"
+      },
+      {
+        "commit": "76d51744015c75285b7520fe9bbd01b661347064",
+        "subject": "fix: validate completed more payloads"
+      },
+      {
+        "commit": "a21989b34bfa1791cf0d03d4a4e0f7d30af9037a",
+        "subject": "test: validate completed more payload schemas"
+      },
+      {
+        "commit": "e7f69e9d74411d2c3e5add23b2b05f8f9d1767c4",
+        "subject": "feat: add durable generation journal checkpoint core"
+      },
+      {
+        "commit": "2fbc20d95337ca4afd6fa3ec5f79c4e01b1c991e",
+        "subject": "fix: harden durable journal checkpoint recovery"
+      },
+      {
+        "commit": "ff9cdec3c6be6fe6e86e18fd09e16d9f77af8b0f",
+        "subject": "fix: close final durable core review findings"
+      },
+      {
+        "commit": "d7e23f288689acf82c4faa0fe4c4d509066a7149",
+        "subject": "feat: add truthful atch spawn lifecycle core"
+      },
+      {
+        "commit": "7dd07272b720b038643524c7d684367f2476e7ed",
+        "subject": "build: include spawn lifecycle target"
+      },
+      {
+        "commit": "dc935495e334a76ea7bf8f3b5e4eeaba8f3237f3",
+        "subject": "sync invalid wire vectors"
+      },
+      {
+        "commit": "de86dd150ebe403c0b0739de1be79e38e7117ccf",
+        "subject": "fix: harden reassembler validation and recovery"
+      },
+      {
+        "commit": "46f4233ef4a869d7c041fbffdd957488fff52182",
+        "subject": "Add additive v3 client path"
+      },
+      {
+        "commit": "614b539f3870ea986002210696dd42d2255db9ae",
+        "subject": "Finish atch v3 client dispatch"
+      },
+      {
+        "commit": "85e53721e98f1b245d50e9e3f94672caa6596ba6",
+        "subject": "fix: align v3 master input and resize schemas"
+      },
+      {
+        "commit": "5008dc1a122e8952e4fd86cfb3098b97ba1d441f",
+        "subject": "fix: match v3 handshake input and resize wire"
+      },
+      {
+        "commit": "4f43f0bd0380e4a188071a4e0de70225ff11dd16",
+        "subject": "fix: match resize generation and attach ack state"
+      },
+      {
+        "commit": "bec83275fee98343a4fc90f9c860d5416bf5552d",
+        "subject": "feat: pass daemon generation into v3 master"
+      },
+      {
+        "commit": "e2bbbf980d349dfaa2c92ec77ca80fc014d6f6a2",
+        "subject": "fix: keep raw output off v3 clients"
+      },
+      {
+        "commit": "2aaa03cd84c37366665ddad1a902b858769780c3",
+        "subject": "fix: release master loop after v3 output"
+      },
+      {
+        "commit": "0dd332eea478b5415ac54c39bcc1e28c2c9761f3",
+        "subject": "fix: accept single-byte v3 terminal input"
+      }
+    ]
+  },
+  "snapshot": {
+    "algorithm": "sha256",
+    "format": "git-path-mode-content-v1",
+    "digest": "94c43f96fb9b13128e10e15df88c0c2d14eca827af78f2460337f7364608f234"
+  }
+}

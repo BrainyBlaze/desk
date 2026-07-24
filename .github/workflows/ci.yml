@@ -33,6 +33,8 @@ jobs:
           trap 'rm -rf "$test_tmp"' EXIT
           TMPDIR="$test_tmp" npm test
       - run: npm run build:distribution
+      - name: Probe bundled atch
+        run: ./libexec/atch --version
       - run: npm run smoke:serve-modes
       - name: Restore and verify the Node CLI after runtime smoke
         run: npm run build

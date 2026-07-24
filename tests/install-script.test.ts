@@ -57,6 +57,7 @@ describe('source-backed installer contract', () => {
     expect(source).not.toContain(['desk', 'server'].join('-'));
     expect(source).not.toMatch(/tmux/i);
     expect(source).not.toMatch(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/u);
+    expect(source).toContain('PATH="$root/bin:$PATH" "$root/bin/npm" --version');
   });
 
   it('has valid Bash syntax', () => {
@@ -177,6 +178,10 @@ describe('installer lifecycle', () => {
     expect(readFileSync(value.launcher(), 'utf8')).toContain('# desk-managed-launcher-v1');
     expect(readlinkSync(join(value.deskHome, 'current'))).toMatch(/^releases\/v0\.3\.0\//);
     expect(value.releaseInstances()).toHaveLength(1);
+    const release = realpathSync(join(value.deskHome, 'current'));
+    const atch = spawnSync(join(release, 'libexec', 'atch'), ['--version'], { encoding: 'utf8' });
+    expect(atch.status, atch.stderr).toBe(0);
+    expect(atch.stdout).toMatch(/^atch - version 1\.6-bb1,/);
 
     const help = spawnSync(value.launcher(), ['help'], {
       env: { ...process.env, DESK_HOME: value.deskHome },
@@ -184,6 +189,16 @@ describe('installer lifecycle', () => {
     });
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('Desk fixture help');
+  }, 20_000);
+
+  it('rejects a non-runnable bundled atch before activating the release', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_ATCH_MODE: 'broken' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/bundled atch.*version probe/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);
 
   it('reinstalls the same version into a new immutable instance and retains the previous one', () => {

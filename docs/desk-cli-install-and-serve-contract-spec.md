@@ -68,7 +68,7 @@ CLI.
 - Native Windows support. WSL uses the Linux path; a native Windows invocation
   fails with an explicit unsupported-platform message.
 - Changing the atch protocol or terminal-daemon process model.
-- Resolving the external atch redistribution-license decision.
+- Changing the audited atch fork beyond the pinned 1.6-bb1 snapshot.
 - Installing or authenticating optional agent CLIs, `gh`, GPU utilities, or
   other feature-specific tools without an explicit future contract.
 - Making the Vite and Bun runtimes interchangeable or adding automatic fallback.
@@ -223,10 +223,11 @@ duplicated branches. If a distribution changes a package name or the post-instal
 probe still fails, the installer reports the exact unsatisfied capability and
 does not activate Desk.
 
-Terminal operation separately requires an executable `atch`, resolved from
-`DESK_ATCH_BIN`, same-release `libexec/atch`, or `PATH`. The source-backed
-installer does not provision or bundle that external binary while the
-redistribution-license decision remains open.
+Terminal operation requires an executable `atch`, resolved from
+`DESK_ATCH_BIN`, same-release `libexec/atch`, or `PATH`, in that order. The
+source-backed installer verifies the vendored provenance and snapshot digest,
+builds the pinned 1.6-bb1 fork for the host, and probes the staged
+`libexec/atch` before activation.
 
 The supported package-manager families are:
 
@@ -291,11 +292,12 @@ The installer performs the following flow:
 9. Extract into a unique staging directory on the same filesystem as
    `releases/`, create the ownership manifest and release-local Node binding, and
    run `npm ci` with the pinned Node/npm toolchain.
-10. Run a distribution build that produces the private Bun executable and then
-    builds the Node CLI last. The final ordering preserves the CLI after Vite's
-    output cleanup.
-11. Run installation smoke checks from the staged tree, including launcher
-    resolution with the release-bound Node runtime.
+10. Run a distribution build that verifies and compiles the pinned atch
+    snapshot, produces the private Bun executable, and then builds the Node CLI
+    last. The final ordering preserves the CLI after Vite's output cleanup.
+11. Probe staged `libexec/atch`, then run installation smoke checks from the
+    staged tree, including launcher resolution with the release-bound Node
+    runtime.
 12. Rename the completed staging directory into a new immutable
     `releases/<version>/<install-id>` instance.
 13. Preflight the version-independent public launcher, its destination, and the
@@ -435,8 +437,9 @@ command or compatibility path.
 ### 8. Docker contract
 
 The Docker image must obey the same public command contract. Its runtime stage
-contains the built full CLI, the source/dependencies required by Vite, Node, and
-the private Bun executable. It uses this exec-form contract:
+contains the built full CLI, the source/dependencies required by Vite, Node, the
+private Bun executable, and the probed bundled `libexec/atch`. It uses this
+exec-form contract:
 
 ```dockerfile
 ENTRYPOINT ["desk"]

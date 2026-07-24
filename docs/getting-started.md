@@ -24,12 +24,11 @@ working C++ compiler. It maintains its own checksum-verified Node 22.23.1,
 npm 10.9.8, and Bun 1.3.14 under the Desk install root. It does not replace your
 global runtimes.
 
-<Warning>
-The atch-native runtime also requires an executable `atch` from
-`DESK_ATCH_BIN`, the release's `libexec/atch`, or `PATH`, in that order.
-Public-installer bundling is pending the distribution-license decision, so
-installations currently require a separately installed reviewed binary.
-</Warning>
+<Note>
+The installer builds the pinned bundled atch 1.6-bb1 fork for the host and
+verifies it before activation. Desk resolves `DESK_ATCH_BIN`, same-release
+`libexec/atch`, then `PATH`, in that order.
+</Note>
 
 Agent CLIs (`codex`, `claude`, and `opencode`), `gh`, and GPU telemetry commands
 are optional. Install only the integrations you intend to use.
@@ -151,7 +150,7 @@ rm -rf ~/.config/desk
 ## Build from source
 
 Contributors should use the same pins as CI: Node 22.23.1, npm 10.9.8, and Bun
-1.3.14.
+1.3.14, plus `make` and a working C/C++ toolchain.
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git
