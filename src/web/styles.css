@@ -1202,6 +1202,19 @@ select:focus {
   scrollbar-width: thin;
 }
 
+/* xterm 6 ships its own hover-overlay scrollbar (.xterm-scrollable-element >
+   .scrollbar). On live cells the custom terminalScrollRail is the ONLY
+   position indicator — showing both duplicates the scrollbar on hover. The
+   scrollback overlay keeps the built-in one: that mode's scrolling is
+   xterm-owned and the rail is hidden there. */
+.terminalSurface .xterm .xterm-scrollable-element > .scrollbar {
+  display: none;
+}
+
+.terminalScrollbackOverlay .xterm .xterm-scrollable-element > .scrollbar {
+  display: block;
+}
+
 .terminalScrollbackOverlay {
   position: absolute;
   inset: 0;
