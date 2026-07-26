@@ -14,3 +14,7 @@ export function supportsBypassPermissions(agent: string): boolean {
 export function supportsNativeUi(agent: string, hasCustomCommand: boolean): boolean {
   return !hasCustomCommand && (agent === 'codex' || agent === 'claude' || agent === 'opencode');
 }
+
+export function supportsAgentProfiles(agent: string, hasCustomCommand: boolean): agent is 'codex' | 'claude' {
+  return !hasCustomCommand && (agent === 'codex' || agent === 'claude');
+}

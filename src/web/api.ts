@@ -1,5 +1,6 @@
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 import type { DeskLspUiSettings } from '../core/lspSettings.js';
+import type { AgentProfile, ProfileProvider } from '../core/types.js';
 import { readJson } from './httpJson.js';
 
 interface LayoutPayload {
@@ -11,6 +12,7 @@ interface SessionPayload {
   name: string;
   cwd?: string;
   agent?: string;
+  profileId?: string;
   resume?: string;
   clearResume?: boolean;
   bypassPermissions?: boolean;
@@ -24,6 +26,75 @@ export async function fetchDeskSnapshot(): Promise<DeskSnapshot> {
 
 export async function fetchSystemSnapshot(): Promise<SystemSnapshot> {
   return readJson(fetch('/api/system'));
+}
+
+export interface AgentProfilesResponse {
+  profile?: AgentProfile;
+  profiles: AgentProfile[];
+  ok?: true;
+}
+
+export class AgentProfileApiError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+    readonly sessions?: string[]
+  ) {
+    super(message);
+    this.name = 'AgentProfileApiError';
+  }
+}
+
+function readAgentProfilesResponse(request: Promise<Response>): Promise<AgentProfilesResponse> {
+  return readJson(request, ({ status, body }) => {
+    const message = typeof body?.error === 'string' ? body.error : `request failed (${status})`;
+    const code = typeof body?.code === 'string' ? body.code : undefined;
+    const sessions = Array.isArray(body?.sessions)
+      ? body.sessions.filter((session): session is string => typeof session === 'string')
+      : undefined;
+    return new AgentProfileApiError(message, code, sessions);
+  });
+}
+
+export async function fetchAgentProfiles(): Promise<AgentProfile[]> {
+  const response = await readAgentProfilesResponse(fetch('/api/profiles'));
+  return response.profiles;
+}
+
+export async function createAgentProfile(payload: {
+  provider: ProfileProvider;
+  label: string;
+}): Promise<AgentProfilesResponse> {
+  return readAgentProfilesResponse(
+    fetch('/api/profiles', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+  );
+}
+
+export async function updateAgentProfile(payload: {
+  id: string;
+  label: string;
+}): Promise<AgentProfilesResponse> {
+  return readAgentProfilesResponse(
+    fetch('/api/profiles/rename', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+  );
+}
+
+export async function deleteAgentProfile(id: string): Promise<AgentProfilesResponse> {
+  return readAgentProfilesResponse(
+    fetch('/api/profiles/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id })
+    })
+  );
 }
 
 export type AgentEventKind = 'turn-complete' | 'approval-requested' | 'input-requested' | 'bell' | 'channel';

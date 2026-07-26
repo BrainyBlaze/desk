@@ -47,6 +47,7 @@ import {
   StickyNote,
   TerminalSquare,
   Trash2,
+  Users,
   Volume2,
   VolumeX,
   Wrench,
@@ -70,6 +71,7 @@ import {
   editProjectSession,
   setSessionUiMode,
   ApiCodeError,
+  fetchAgentProfiles,
   fetchDeskSnapshot,
   killAllAgents,
   fetchSettings,
@@ -120,9 +122,15 @@ import { useStableCallbacks } from './stableCallbacks.js';
 import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
 import { buildSessionPayload } from './sessionFormPayload.js';
-import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
-import type { DeskSessionUiMode } from '../core/types.js';
+import {
+  SESSION_AGENT_OPTIONS,
+  supportsAgentProfiles,
+  supportsBypassPermissions,
+  supportsNativeUi
+} from './sessionAgentOptions.js';
+import type { AgentProfile, DeskSessionUiMode } from '../core/types.js';
 import { CommandButton } from './headerPrimitives.js';
+import { AgentProfilesSettings } from './AgentProfilesSettings.js';
 import { WorkspaceHeader } from './WorkspaceHeader.js';
 import { AgentsSidebar } from './AgentsSidebar.js';
 import { AgentMultiplexer } from './AgentMultiplexer.js';
@@ -211,6 +219,7 @@ interface SessionForm {
   name: string;
   cwd: string;
   agent: string;
+  profileId: string;
   resume: string;
   initialResume: string;
   bypassPermissions: boolean;
@@ -239,6 +248,7 @@ const emptySessionForm: SessionForm = {
   name: '',
   cwd: '',
   agent: 'codex',
+  profileId: '',
   resume: '',
   initialResume: '',
   bypassPermissions: true,
@@ -352,6 +362,7 @@ export function App(): JSX.Element {
   const [projectForm, setProjectForm] = useState<ProjectForm>(emptyProjectForm);
   const [groupForm, setGroupForm] = useState<GroupForm>(emptyGroupForm);
   const [sessionForm, setSessionForm] = useState<SessionForm>(emptySessionForm);
+  const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
   const [modalProject, setModalProject] = useState<DeskProjectView | undefined>();
   const [modalGroup, setModalGroup] = useState<DeskGroupView | undefined>();
   const [modalSession, setModalSession] = useState<DeskSessionView | undefined>();
@@ -1052,6 +1063,7 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     void refresh();
+    void refreshAgentProfiles();
   }, []);
 
   async function refresh(): Promise<void> {
@@ -1064,6 +1076,14 @@ export function App(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function refreshAgentProfiles(): Promise<void> {
+    try {
+      setAgentProfiles(await fetchAgentProfiles());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -1658,6 +1678,7 @@ export function App(): JSX.Element {
       name: session.spec.name,
       cwd: session.spec.cwd,
       agent: session.spec.agent ?? 'codex',
+      profileId: session.spec.profileId ?? '',
       resume: session.spec.resume ?? '',
       initialResume: session.spec.resume ?? '',
       bypassPermissions: session.spec.bypassPermissions ?? true,
@@ -2424,6 +2445,7 @@ export function App(): JSX.Element {
               <SessionFormView
                 form={sessionForm}
                 projects={snapshot?.view.projects ?? []}
+                profiles={agentProfiles}
                 busy={busy}
                 onSubmit={submitSession}
                 onFormChange={setSessionForm}
@@ -2494,6 +2516,7 @@ export function App(): JSX.Element {
               <SessionFormView
                 form={sessionForm}
                 projects={snapshot?.view.projects ?? []}
+                profiles={agentProfiles}
                 busy={busy}
                 onSubmit={submitSessionEdit}
                 onFormChange={setSessionForm}
@@ -2515,6 +2538,8 @@ export function App(): JSX.Element {
             wide: true,
             body: (
               <SettingsView
+                profiles={agentProfiles}
+                onProfilesChange={setAgentProfiles}
                 themeName={themeName}
                 onThemeChange={handleThemeNameChange}
                 autosaveMode={autosaveMode}
@@ -2847,9 +2872,10 @@ function ThemeSettings({
   );
 }
 
-type SettingsSection = 'theme' | 'editor' | 'sound' | 'lsp';
+type SettingsSection = 'profiles' | 'theme' | 'editor' | 'sound' | 'lsp';
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: ReactNode }> = [
+  { id: 'profiles', label: 'Profiles', icon: <Users size={13} /> },
   { id: 'theme', label: 'Theme', icon: <Palette size={13} /> },
   { id: 'editor', label: 'Editor', icon: <FileCode size={13} /> },
   { id: 'sound', label: 'Sound', icon: <Volume2 size={13} /> },
@@ -2857,6 +2883,8 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: React
 ];
 
 function SettingsView({
+  profiles,
+  onProfilesChange,
   themeName,
   onThemeChange,
   autosaveMode,
@@ -2877,6 +2905,8 @@ function SettingsView({
   onLspLanguageToggle,
   onLspRefresh
 }: {
+  profiles: AgentProfile[];
+  onProfilesChange: (profiles: AgentProfile[]) => void;
   themeName: DeskThemeName;
   onThemeChange: (name: DeskThemeName) => void;
   autosaveMode: DeskAutosaveMode;
@@ -2898,7 +2928,7 @@ function SettingsView({
   onLspRefresh: () => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
-  const [section, setSection] = useState<SettingsSection>('theme');
+  const [section, setSection] = useState<SettingsSection>('profiles');
   return (
     <div className="settingsLayout">
       <nav className="settingsTabs" aria-label="Settings sections">
@@ -2929,6 +2959,9 @@ function SettingsView({
           zero duration and Arwes rejects the transition */}
       <Animator key={section} duration={{ enter: 0.2 }}>
         <Animated className="settingsContent" animated={['fade', ['y', 8, 0]]}>
+          {section === 'profiles' ? (
+            <AgentProfilesSettings profiles={profiles} onProfilesChange={onProfilesChange} />
+          ) : null}
           {section === 'theme' ? <ThemeSettings current={themeName} onSelect={onThemeChange} /> : null}
           {section === 'editor' ? (
             <AutosaveSettings
@@ -3774,18 +3807,26 @@ function GroupFormView({
 function SessionFormView({
   form,
   projects,
+  profiles,
   busy,
   onSubmit,
   onFormChange
 }: {
   form: SessionForm;
   projects: DeskProjectView[];
+  profiles: AgentProfile[];
   busy: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onFormChange: (form: SessionForm) => void;
 }): JSX.Element {
   const selectedProject = projects.find((project) => project.id === form.projectId) ?? projects[0];
   const groups = selectedProject?.groups ?? [];
+  const profileOptions = [
+    { value: '', label: 'Ambient account' },
+    ...profiles
+      .filter((profile) => profile.provider === form.agent)
+      .map((profile) => ({ value: profile.id, label: profile.label }))
+  ];
   return (
     <form className="thinForm modalForm" onSubmit={onSubmit}>
       <label>
@@ -3817,16 +3858,32 @@ function SessionFormView({
         <DeskSelect
           value={form.agent}
           options={SESSION_AGENT_OPTIONS}
-          onChange={(agent) =>
+          onChange={(agent) => {
+            const profileMatchesAgent =
+              supportsAgentProfiles(agent, form.command.trim() !== '') &&
+              profiles.some((profile) => profile.id === form.profileId && profile.provider === agent)
+                ? form.profileId
+                : '';
             onFormChange({
               ...form,
               agent,
+              profileId: profileMatchesAgent,
               bypassPermissions: supportsBypassPermissions(agent) ? form.bypassPermissions : false,
               uiMode: supportsNativeUi(agent, form.command.trim() !== '') ? form.uiMode : 'terminal'
-            })
-          }
+            });
+          }}
         />
       </label>
+      {supportsAgentProfiles(form.agent, form.command.trim() !== '') ? (
+        <label>
+          <span>Profile</span>
+          <DeskSelect
+            value={form.profileId}
+            options={profileOptions}
+            onChange={(profileId) => onFormChange({ ...form, profileId })}
+          />
+        </label>
+      ) : null}
       {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
         <label>
           <span>UI mode</span>
@@ -3867,6 +3924,7 @@ function SessionFormView({
           onFormChange({
             ...form,
             command,
+            profileId: command.trim() === '' ? form.profileId : '',
             uiMode: supportsNativeUi(form.agent, command.trim() !== '') ? form.uiMode : 'terminal'
           })
         }

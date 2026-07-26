@@ -2591,6 +2591,156 @@ select {
   padding-right: 4px;
 }
 
+/* ---------- Settings: agent profiles ---------- */
+.agentProfilesSettings {
+  display: grid;
+  gap: 14px;
+}
+
+.profileCreateForm {
+  grid-template-columns: 120px minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin: 0;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+.profileCreateForm .deskCmd {
+  min-width: 116px;
+}
+
+.profileSettingsError {
+  padding: 7px 9px;
+  border-left: 2px solid var(--desk-error);
+  background: color-mix(in srgb, var(--desk-error) 10%, transparent);
+  color: var(--desk-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.profileList {
+  display: grid;
+}
+
+.profileRow {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+.profileProvider {
+  color: var(--desk-accent);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.profileIdentity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.profileIdentity strong {
+  color: var(--desk-text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.profileIdentity input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-input-bg);
+  color: var(--desk-text);
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.profileIdentity input:focus {
+  outline: none;
+  border-color: var(--desk-line-strong);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+.profileIdentity small,
+.profileId {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.profileId {
+  font-family: var(--desk-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.profileActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 64px;
+}
+
+.profileDeletePrompt,
+.profileEmpty {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+
+.profileEmpty {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+@media (max-width: 640px) {
+  .settingsLayout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .settingsTabs {
+    flex-direction: row;
+    gap: 2px;
+    overflow-x: auto;
+    padding-right: 0;
+    padding-bottom: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--desk-line);
+  }
+
+  .settingsTab {
+    flex: 0 0 auto;
+    padding: 6px 8px;
+    white-space: nowrap;
+  }
+
+  .profileCreateForm {
+    grid-template-columns: 1fr;
+  }
+
+  .profileCreateForm .deskCmd {
+    justify-self: start;
+  }
+
+  .profileRow {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .profileActions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+}
+
 /* ---------- Editor subsystem: viewers (image / pdf / markdown) ---------- */
 .editorHostWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .editorHostWrap > .monacoHost { flex: 1; min-height: 0; }

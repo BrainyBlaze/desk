@@ -17,6 +17,7 @@ import { createLspRoutes } from './routes/lspRoutes.js';
 import { createSessionsRoutes } from './routes/sessionsRoutes.js';
 import { createSettingsRoutes } from './routes/settingsRoutes.js';
 import { createSystemRoutes } from './routes/systemRoutes.js';
+import { createProfileRoutes } from './routes/profileRoutes.js';
 import { createTerminalRoutes } from './routes/terminalRoutes.js';
 
 export type { DeskApiHost } from './deskApiTypes.js';
@@ -69,6 +70,7 @@ export function installDeskApi(host: DeskApiHost, options: InstallDeskApiOptions
       agentSurfaceBroker: services.agentSurfaceBroker
     }),
     createTerminalRoutes(),
+    createProfileRoutes(),
     ...plugins.flatMap((plugin) => plugin.routes ?? [])
   ];
   host.middlewares.use(createDeskApiMiddleware(routes));

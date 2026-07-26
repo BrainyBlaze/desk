@@ -81,8 +81,24 @@ export interface DeskSettings {
 
 export interface DeskManifest {
   settings?: DeskSettings;
+  /** Agent profiles: isolated provider credential directories, one per account. */
+  profiles?: AgentProfile[];
   groups: DeskGroup[];
   projects?: DeskProject[];
+}
+
+/** Providers that support an isolated credential directory today. */
+export type ProfileProvider = 'claude' | 'codex';
+
+/**
+ * One named provider account. `id` is immutable and keys the credential
+ * directory; `label` is operator-facing and may change freely. Desk stores no
+ * credentials — only this pointer; the provider CLI writes its own files.
+ */
+export interface AgentProfile {
+  id: string;
+  provider: ProfileProvider;
+  label: string;
 }
 
 export interface DeskProject {
@@ -115,6 +131,11 @@ export interface DeskSession {
   uiMode?: DeskSessionUiMode;
   /** Runtime model override (provider/model string, driver-interpreted). NOT part of session identity. */
   model?: string;
+  /**
+   * Optional agent profile (isolated provider credential directory). Absent =
+   * the ambient account, exactly as before profiles existed.
+   */
+  profileId?: string;
 }
 
 /** Create/edit payload. The config boundary allocates or preserves sessionId. */
@@ -138,6 +159,8 @@ export interface SessionSpec {
   customCommand?: boolean;
   /** Durable lifecycle identity and atch socket key (§10). */
   sessionId: string;
+  /** Selected agent profile, or absent for the ambient account. */
+  profileId?: string;
   command: string;
   uiMode: DeskSessionUiMode;
   model?: string;

@@ -25,8 +25,15 @@ export function shouldRespawnAfterEdit(
   if (oldSpec.uiMode !== newSpec.uiMode) {
     return false; // ui-mode changes must go through the dedicated switch endpoint
   }
-  if (oldSpec.command === newSpec.command && oldSpec.model === newSpec.model) {
+  if (
+    oldSpec.command === newSpec.command &&
+    oldSpec.model === newSpec.model &&
+    oldSpec.profileId === newSpec.profileId
+  ) {
     return false; // nothing launch-relevant changed
   }
+  // A profile change IS launch-relevant: the running process still holds the
+  // OLD account's credentials, so leaving it alive would answer the operator
+  // under the account they just switched away from.
   return isRunning(newSpec.sessionId);
 }

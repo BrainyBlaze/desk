@@ -49,6 +49,7 @@ import type {
   SessionPlanAction
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
+import { isValidProfileId } from '../../shared/agentProfiles.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
 import { shouldRespawnAfterEdit } from '../editRespawn.js';
@@ -118,8 +119,21 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
   if (record.bypassPermissions !== undefined) {
     session.bypassPermissions = Boolean(record.bypassPermissions);
   }
+  // Profile selection: validated here so a malformed id never reaches the
+  // manifest, and cross-checked against the agent by manifest validation.
+  // Absent (or an explicit null from "ambient" in the dropdown) means ambient.
+  const profileId = readOptionalString(record.profileId);
+  if (profileId !== undefined) {
+    if (!isValidProfileId(profileId)) {
+      throw new ApiValidationError('session.profileId is not a valid profile id');
+    }
+    session.profileId = profileId;
+  }
 
   if (command) {
+    if (session.profileId !== undefined) {
+      throw new ApiValidationError('session.profileId is not supported for custom-command sessions');
+    }
     if (record.uiMode === 'native') {
       throw new ApiValidationError('session.uiMode native is not supported for custom-command sessions');
     }

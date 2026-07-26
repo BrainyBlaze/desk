@@ -167,6 +167,39 @@ describe('session form payload', () => {
     expect('model' in buildSessionPayload({ ...base, model: '' })).toBe(false);
   });
 
+  it('carries a selected profile for a managed Claude or Codex launch', () => {
+    const payload = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'profiled',
+      cwd: '/tmp/profiled',
+      agent: 'claude',
+      profileId: 'work-claude',
+      resume: '',
+      initialResume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'native'
+    });
+    expect(payload.profileId).toBe('work-claude');
+  });
+
+  it('omits profile selection for ambient and custom-command launches', () => {
+    const base = {
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/profiled',
+      agent: 'codex',
+      resume: '',
+      initialResume: '',
+      bypassPermissions: false,
+      uiMode: 'terminal' as const
+    };
+    expect('profileId' in buildSessionPayload({ ...base, profileId: '', command: '' })).toBe(false);
+    expect('profileId' in buildSessionPayload({ ...base, profileId: 'work-codex', command: 'codex-wrapper' })).toBe(false);
+  });
+
   it('marks a deliberate resume clear only when the field held a value at load', () => {
     const cleared = buildSessionPayload({
       projectId: 'alpha',
@@ -250,5 +283,15 @@ describe('session form modal source contract', () => {
   it('does not replay the preliminary edit after the resume-discard switch gate', () => {
     expect(source).toMatch(/if \(!uiModeSwitchDiscard\) \{\n\s+editedSnapshot = await editProjectSession/);
     expect(source).toContain('setSnapshot(editedSnapshot)');
+  });
+
+  it('renders profile selection in both add and edit session modals', () => {
+    const sessionForms = source.match(/<SessionFormView[\s\S]*?\/>/g) ?? [];
+    expect(source).toContain('profileId: string');
+    expect(source).toMatch(/profileId: session\.spec\.profileId \?\? ''/);
+    expect(sessionForms).toHaveLength(2);
+    expect(sessionForms.every((form) => form.includes('profiles={agentProfiles}'))).toBe(true);
+    expect(source).toContain('<span>Profile</span>');
+    expect(source).toContain("value: '', label: 'Ambient account'");
   });
 });

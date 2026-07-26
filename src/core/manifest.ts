@@ -4,6 +4,7 @@ import { shellQuote } from '../shared/shell.js';
 import { isSupportedAgent } from './types.js';
 import type {
   AgentMcpLaunchConfig,
+  AgentProfile,
   BuildSessionOptions,
   DeskGroup,
   DeskManifest,
@@ -18,8 +19,14 @@ import {
   type LegacyDeskManifest,
   type LegacyDeskSession
 } from './sessionIdentity.js';
+import {
+  isProfileProvider,
+  isValidProfileId,
+  profileEnvPrefix,
+  profileScrubPrefix
+} from '../shared/agentProfiles.js';
 
-const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
+const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'profiles', 'groups', 'projects']);
 
 export class ManifestValidationError extends Error {
   readonly code = 'manifest-invalid';
@@ -62,6 +69,9 @@ export function parseLegacyDeskManifest(source: string): LegacyDeskManifest {
     // dropped every project/session with zero diagnostics, and the next write
     // spread the empty manifest back to disk — permanent data loss. Throw
     // instead; an ABSENT key still means "none".
+    // Same rule as groups/projects: absent means none, present-but-not-a-list
+    // is a mistake worth throwing rather than silently dropping every profile.
+    profiles: requireManifestListOrAbsent(parsed.profiles, 'profiles') as DeskManifest['profiles'],
     groups: (requireManifestListOrAbsent(parsed.groups, 'groups') ?? []) as LegacyDeskManifest['groups'],
     projects: requireManifestListOrAbsent(parsed.projects, 'projects') as LegacyDeskManifest['projects']
   } as LegacyDeskManifest;
@@ -109,6 +119,50 @@ function validateRuntimeSessionIdentities(manifest: LegacyDeskManifest): asserts
   if (!unique.ok) {
     throw new ManifestValidationError(`duplicate sessionId "${unique.duplicate}"`);
   }
+  validateAgentProfiles(manifest as DeskManifest, sessions as DeskSession[]);
+}
+
+/**
+ * Profiles fail CLOSED (R2): an unknown id, a provider that does not match the
+ * session's agent, or a profile on a session that has no provider credential
+ * store is a manifest error — never a silent fall back to the ambient account,
+ * which is exactly the wrong-account outcome profiles exist to prevent.
+ */
+function validateAgentProfiles(manifest: DeskManifest, sessions: DeskSession[]): void {
+  const byId = new Map<string, AgentProfile>();
+  for (const profile of manifest.profiles ?? []) {
+    if (!isValidProfileId(profile.id)) {
+      throw new ManifestValidationError(`profile has an invalid id: ${JSON.stringify(profile.id)}`);
+    }
+    if (!isProfileProvider(profile.provider)) {
+      throw new ManifestValidationError(`profile ${profile.id} has an unsupported provider: ${JSON.stringify(profile.provider)}`);
+    }
+    if (typeof profile.label !== 'string' || profile.label.trim() === '') {
+      throw new ManifestValidationError(`profile ${profile.id} has an empty label`);
+    }
+    if (byId.has(profile.id)) {
+      throw new ManifestValidationError(`duplicate profile id "${profile.id}"`);
+    }
+    byId.set(profile.id, profile);
+  }
+  for (const session of sessions) {
+    const profileId = session.profileId;
+    if (profileId === undefined) {
+      continue; // ambient — unchanged behavior
+    }
+    const profile = byId.get(profileId);
+    if (!profile) {
+      throw new ManifestValidationError(`session ${session.name} references unknown profile "${profileId}"`);
+    }
+    if (session.command !== undefined) {
+      throw new ManifestValidationError(`session ${session.name} is a custom command and cannot use a profile`);
+    }
+    if (session.agent !== profile.provider) {
+      throw new ManifestValidationError(
+        `session ${session.name} uses agent ${session.agent ?? 'none'} but profile ${profileId} is for ${profile.provider}`
+      );
+    }
+  }
 }
 
 /** A manifest top-level list (`groups`/`projects`) may be absent (→ undefined,
@@ -148,6 +202,7 @@ export function buildSessionSpecs(
         bypassPermissions: session.bypassPermissions,
         ...(hasCustomCommand ? { customCommand: true } : {}),
         sessionId: session.sessionId,
+        ...(session.profileId ? { profileId: session.profileId } : {}),
         command,
         uiMode: resolveSessionUiMode(session),
         ...(session.model ? { model: session.model } : {})
@@ -267,6 +322,7 @@ function buildProjectSessionSpec({
     bypassPermissions: session.bypassPermissions,
     ...(hasCustomCommand ? { customCommand: true } : {}),
     sessionId: session.sessionId,
+    ...(session.profileId ? { profileId: session.profileId } : {}),
     command,
     uiMode: resolveSessionUiMode(session),
     ...(session.model ? { model: session.model } : {})
@@ -325,7 +381,9 @@ export function buildAgentCommand(
   if (session.agent === 'bash') {
     return `cd ${shellQuote(cwd)} && exec bash`;
   }
-  const env = agentEnvPrefix(session.agent, sessionId);
+  // Profiles prepend a scrub + the provider's credential-dir assignment; the
+  // ambient path yields '' so its command is byte-identical to before.
+  const env = `${profileCommandPrefix(session, homeDir)}${agentEnvPrefix(session.agent, sessionId)}`;
   if (session.agent === 'claude') {
     const args = ['claude', CLAUDE_NOTIFICATION_FLAGS];
     if (agentMcp?.claudeConfigPath) {
@@ -394,6 +452,19 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
 
 function agentEnvPrefix(agent: string | undefined, sessionId: string): string {
   return `DESK_SESSION_ID=${shellQuote(sessionId)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
+}
+
+/**
+ * The profile contribution to a terminal launch: scrub inherited provider
+ * credentials, then point the CLI at the profile's own directory. Empty for an
+ * ambient session, so its command stays byte-identical to pre-profile Desk.
+ */
+function profileCommandPrefix(session: DeskSession, homeDir: string): string {
+  const profileId = session.profileId;
+  if (profileId === undefined || !isProfileProvider(session.agent)) {
+    return '';
+  }
+  return `${profileScrubPrefix()} ${profileEnvPrefix(session.agent, profileId, homeDir)} `;
 }
 
 function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {

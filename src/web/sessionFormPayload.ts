@@ -1,5 +1,5 @@
 import type { DeskSessionUiMode } from '../core/types.js';
-import { supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
+import { supportsAgentProfiles, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
 
 export interface SessionFormPayloadInput {
   projectId: string;
@@ -7,6 +7,8 @@ export interface SessionFormPayloadInput {
   name: string;
   cwd: string;
   agent: string;
+  /** Empty string selects the ambient account. */
+  profileId?: string;
   resume: string;
   /** Resume value at form load; distinguishes a deliberate clear from a stale-empty field. */
   initialResume: string;
@@ -21,6 +23,7 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   name: string;
   cwd?: string;
   agent?: string;
+  profileId?: string;
   resume?: string;
   clearResume?: boolean;
   bypassPermissions?: boolean;
@@ -34,8 +37,10 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   // Only an emptied field that previously SHOWED a value is a deliberate clear;
   // an empty field that loaded empty may simply predate async resume capture.
   const clearResume = resume === '' && form.initialResume.trim() !== '';
+  const profileId = (form.profileId ?? '').trim();
   const agentFields = {
     agent: form.agent,
+    ...(profileId && supportsAgentProfiles(form.agent, command !== '') ? { profileId } : {}),
     resume: resume || undefined,
     ...(clearResume ? { clearResume: true } : {}),
     bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined

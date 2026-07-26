@@ -9,7 +9,7 @@
 // decides the identities. The flatten and apply MUST traverse in the identical
 // order so entry[i] corresponds to the i-th session in both directions.
 
-import type { DeskGroup, DeskManifest, DeskProject, DeskSession, DeskSettings } from './types.js';
+import type { AgentProfile, DeskGroup, DeskManifest, DeskProject, DeskSession, DeskSettings } from './types.js';
 import { migrateManifestSessions, type LegacySessionEntry, type ManifestMigration } from '../shared/migration/index.js';
 
 export type LegacyDeskSession = Omit<DeskSession, 'sessionId'> & {
@@ -21,6 +21,12 @@ export type LegacyDeskGroup = Omit<DeskGroup, 'sessions'> & { sessions: LegacyDe
 export type LegacyDeskProject = Omit<DeskProject, 'groups'> & { groups: LegacyDeskGroup[] };
 export interface LegacyDeskManifest {
   settings?: DeskSettings;
+  /**
+   * Profiles are NOT part of the identity migration — they carry no
+   * sessionId — but they must survive it. The type carries them so the
+   * reconstruction below cannot silently drop the key.
+   */
+  profiles?: AgentProfile[];
   groups: LegacyDeskGroup[];
   projects?: LegacyDeskProject[];
 }
@@ -80,8 +86,12 @@ export function applyMigratedSessionIds(manifest: LegacyDeskManifest, migration:
   };
   const mapGroup = (group: LegacyDeskGroup): DeskGroup => ({ ...group, sessions: group.sessions.map(withId) });
   const mapProject = (project: LegacyDeskProject): DeskProject => ({ ...project, groups: project.groups.map(mapGroup) });
+  // Every top-level key the manifest carries must be reconstructed here:
+  // this function REPLACES the manifest, so an omitted key is silent data
+  // loss on the next write (profiles were lost exactly this way).
   return {
     ...(manifest.settings !== undefined ? { settings: manifest.settings } : {}),
+    ...(manifest.profiles !== undefined ? { profiles: manifest.profiles } : {}),
     groups: manifest.groups.map(mapGroup),
     ...(manifest.projects !== undefined ? { projects: manifest.projects.map(mapProject) } : {})
   };
