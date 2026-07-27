@@ -93,6 +93,17 @@ export default {
       if (sessionID) await deskRegisterEndpoint(deskServerUrl, String(sessionID));
     };
 
+    // Announce the plugin the moment it comes up, so the producer is BOUND
+    // before anyone talks to this OpenCode. Binding is the precondition for
+    // attaching an endpoint to it at all; a session that never gets bound can
+    // never be polled, and so can never be recovered by anything but its own
+    // next action.
+    //
+    // A beat, never an activity claim: the plugin can load while a turn is
+    // running, and calling that idle would paint a busy agent free. deskPost is
+    // best effort, so a Desk that is down cannot stop OpenCode from starting.
+    await deskPost({ type: 'hook:plugin.loaded' });
+
     return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== 'string') return;

@@ -190,14 +190,25 @@ await hooks.event({
     });
     expect(result.status, result.stderr).toBe(0);
 
+    // Two posts, in this order: the load beat that BINDS the producer, then the
+    // event this test drove. Asserting the pair — rather than filtering one out
+    // — is what would catch the load post silently turning into an activity
+    // claim, which is the one thing it must never become.
     const bodies = posted();
-    expect(bodies).toHaveLength(1);
-    const envelope = observationEnvelope(bodies[0], { observedAt: 1_760_000_000_000 });
-    expect(envelope.kind).toBe('envelope');
-    if (envelope.kind !== 'envelope') return;
-    expect(() => parseAgentStateEnvelope(envelope.envelope)).not.toThrow();
-    expect(envelope.envelope.producer).toBe('opencode-terminal');
-    expect(envelope.envelope.facts).toEqual([{ kind: 'activity', activity: 'working' }]);
+    expect(bodies).toHaveLength(2);
+    const envelopes = bodies.map((body) =>
+      observationEnvelope(body, { observedAt: 1_760_000_000_000 })
+    );
+    for (const envelope of envelopes) {
+      expect(envelope.kind).toBe('envelope');
+      if (envelope.kind !== 'envelope') return;
+      expect(() => parseAgentStateEnvelope(envelope.envelope)).not.toThrow();
+      expect(envelope.envelope.producer).toBe('opencode-terminal');
+    }
+    expect(envelopes.map((e) => (e.kind === 'envelope' ? e.envelope.facts : null))).toEqual([
+      [{ kind: 'heartbeat' }],
+      [{ kind: 'activity', activity: 'working' }]
+    ]);
   });
 });
 

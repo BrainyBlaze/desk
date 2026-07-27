@@ -110,8 +110,9 @@ describe('daemon OpenCode recovery', () => {
   }
 
   it('uses only the registered provider session and emits canonical poll evidence', async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
-      new Response(
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(
+      async () =>
+        new Response(
         JSON.stringify({
           stale_other_conversation: { type: 'busy' },
           'provider-a': { type: 'idle' }
@@ -120,13 +121,20 @@ describe('daemon OpenCode recovery', () => {
       )
     );
     const running = start(fetch);
+    await vi.waitFor(() => {
+      expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'idle'
+      });
+    });
     now = 1_100;
 
     await expect(running.reconcileAgentProviders(['opencode-a'])).resolves.toEqual([
       { sessionId: 'opencode-a', kind: 'reconciled' }
     ]);
 
-    expect(fetch).toHaveBeenCalledWith(
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenLastCalledWith(
       'http://127.0.0.1:4096/session/status',
       expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
@@ -136,8 +144,31 @@ describe('daemon OpenCode recovery', () => {
       evidence: {
         producerInstanceId: 'plugin-a',
         transport: 'poll',
-        producerSeq: 1
+        producerSeq: 2
       }
+    });
+  });
+
+  it('reconciles immediately after accepting a provider endpoint registration', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ 'provider-a': { type: 'idle' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    const running = start(fetch);
+
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'idle',
+        evidence: {
+          producerInstanceId: 'plugin-a',
+          transport: 'poll',
+          producerSeq: 1
+        }
+      });
     });
   });
 
@@ -150,12 +181,12 @@ describe('daemon OpenCode recovery', () => {
     );
     const running = start(fetch);
 
-    await expect(running.reconcileAgentProviders(['opencode-a'])).resolves.toEqual([
-      { sessionId: 'opencode-a', kind: 'skipped', reason: 'no-facts' }
-    ]);
-    expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
-      kind: 'agent',
-      activity: 'unknown'
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'unknown'
+      });
     });
   });
 
@@ -187,7 +218,7 @@ describe('daemon OpenCode recovery', () => {
       { sessionId: 'opencode-a', kind: 'skipped', reason: 'recovery-error' },
       { sessionId: 'missing', kind: 'skipped', reason: 'not-opencode-session' }
     ]);
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
       kind: 'agent',
       activity: 'unknown'

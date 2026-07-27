@@ -56,7 +56,7 @@ let pluginCounter = 0;
  * the module cache, which the plugin's per-process identity and heartbeat
  * window depend on being fresh.
  */
-async function loadHooks(): Promise<OpencodeHooks> {
+async function loadPlugin(input: unknown = {}): Promise<OpencodeHooks> {
   pluginDir ??= mkdtempSync(join(tmpdir(), 'desk-oc-plugin-'));
   pluginCounter += 1;
   const path = join(pluginDir, `desk-attention-${pluginCounter}.mjs`);
@@ -64,13 +64,60 @@ async function loadHooks(): Promise<OpencodeHooks> {
   const module = (await import(path)) as unknown as {
     default: { server: (input: unknown) => Promise<OpencodeHooks> };
   };
-  return module.default.server({});
+  return module.default.server(input);
+}
+
+/**
+ * Loads the plugin and DISCARDS what it posts on load, so each test below reads
+ * only the interaction it drives. The load post has its own test — asserting it
+ * here as well would make every other assertion depend on it.
+ */
+async function loadHooks(): Promise<OpencodeHooks> {
+  const hooks = await loadPlugin();
+  posted = [];
+  return hooks;
 }
 
 /** The facts Desk learns from everything the plugin posted for one interaction. */
 function learnedFacts(): AgentSemanticFact[] {
   return posted.flatMap((body) => opencodeFacts((body.observation ?? {}) as OpencodeObservation));
 }
+
+describe('the plugin announces itself on load without claiming a state', () => {
+  // Binding the producer is what lets the endpoint be registered and polled at
+  // all; until some canonical event is accepted, the daemon has no producer
+  // identity to attach an address to. A beat does that job while asserting
+  // nothing about the turn.
+  it('posts exactly one observation when the plugin loads', async () => {
+    await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
+    expect(posted).toHaveLength(1);
+  });
+
+  // The load beat must NEVER become an activity claim. A plugin can be loaded
+  // while a turn is running, and `idle` there would paint a busy agent free and
+  // reopen delivery into the middle of its turn — the failure that killed the
+  // earlier server.connected mapping.
+  it('asserts LIVENESS only — never idle, never working', async () => {
+    await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
+    expect(learnedFacts()).toEqual([{ kind: 'heartbeat' }]);
+  });
+
+  it('stays silent on load without a Desk session identity', async () => {
+    delete process.env.DESK_SESSION_ID;
+    await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
+    expect(posted).toEqual([]);
+  });
+
+  // Desk may be down, starting, or refusing when OpenCode comes up. Observing a
+  // session must never be able to stop it from running.
+  it('still returns its hooks when the load post fails outright', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('desk is down');
+    }) as unknown as typeof globalThis.fetch;
+    const hooks = await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
+    expect(typeof hooks.event).toBe('function');
+  });
+});
 
 describe('opencode plugin reports the events that actually exist', () => {
   it('learns WORKING from a busy session status', async () => {

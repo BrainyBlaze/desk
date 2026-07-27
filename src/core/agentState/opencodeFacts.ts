@@ -151,6 +151,16 @@ export function opencodeFacts(observation: OpencodeObservation): AgentSemanticFa
     case 'message.updated':
     case 'message.part.updated':
       return [{ kind: 'heartbeat' }];
+    // The plugin coming up. This binds the producer, which is the only way an
+    // endpoint can be attached to it and polled later — until some canonical
+    // event is accepted, the daemon has no identity to hang an address on.
+    //
+    // It stays a BEAT on purpose. A plugin can be loaded while a turn is
+    // already running, so an activity claim here would be the same lie that
+    // retired the `server.connected` mapping: a busy agent painted free, with
+    // the delivery gate acting on it.
+    case 'hook:plugin.loaded':
+      return [{ kind: 'heartbeat' }];
     default:
       return [];
   }

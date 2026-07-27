@@ -397,7 +397,11 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return router.sessions.historyText(sessionId, rows, offset);
     },
     agentEndpoint(input) {
-      return endpointStore.register(input);
+      const result = endpointStore.register(input);
+      if (result.kind === 'accepted') {
+        void reconcileAgentProviders([result.registration.sessionId]);
+      }
+      return result;
     },
     reconcileAgentProviders,
     agentEvent(input) {
