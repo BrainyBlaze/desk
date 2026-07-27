@@ -5,8 +5,6 @@ import type {
   ChannelMessage,
   ChannelActivityEvent,
   LifecycleState,
-  LifecycleStatus,
-  PaneState,
   SubmitState,
   DeliveryBlockReason,
   QueuedItemMeta,
@@ -35,8 +33,6 @@ export type {
   ChannelMessage,
   ChannelActivityEvent,
   LifecycleState,
-  LifecycleStatus,
-  PaneState,
   SubmitState,
   DeliveryBlockReason,
   QueuedItemMeta,
@@ -379,7 +375,9 @@ export interface EngineDiagnostics {
 }
 
 export type EngineActionName =
-  | 'mark-idle'
+  // No 'mark-idle': Channels may not mutate agent activity. Activity is the
+  // authority's, derived from typed agent evidence — an operator button that
+  // wrote it would be a second source of truth with a human behind it.
   | 'pause-session'
   | 'resume-session'
   | 'drop-queue'

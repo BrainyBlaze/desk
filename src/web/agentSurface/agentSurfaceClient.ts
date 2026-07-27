@@ -27,7 +27,7 @@ export interface AgentSurfaceSocket {
 export type AgentSurfaceSocketFactory = (url: string) => AgentSurfaceSocket;
 
 export interface SurfaceHandlers {
-  onSnapshot(data: { state: AgentSurfaceState; lastSeq: number; events: AgentSurfaceEvent[] }): void;
+  onSnapshot(data: { lastSeq: number; events: AgentSurfaceEvent[] }): void;
   onEvent(event: AgentSurfaceEvent): void;
   onError?(code: string, message: string): void;
   onExit?(reason: 'killed' | 'crashed' | 'mode-switched'): void;
@@ -296,7 +296,11 @@ export class AgentSurfaceClient {
         if (!set) return;
         for (const surfaceId of set) {
           const surface = this.surfaces.get(surfaceId);
-          surface?.handlers.onSnapshot({ state: frame.state, lastSeq: frame.lastSeq, events: frame.events });
+          // No `state` here on purpose: the broker snapshot is conversation
+          // TRANSPORT. Operator-facing status comes from the canonical
+          // authority via the pulse, and a second copy on this frame would be
+          // a competing truth that drifts the moment one of them lags.
+          surface?.handlers.onSnapshot({ lastSeq: frame.lastSeq, events: frame.events });
         }
         return;
       }

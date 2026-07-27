@@ -14,8 +14,17 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
+import {
+  sessionStateSubjectFor,
+  type SessionRegistration
+} from '../../shared/controlPlane/index.js';
 import { loadDesk } from '../../core/runner.js';
-import { runTerminalDaemon, type RunningTerminalDaemon, type TerminalDaemon } from './terminalDaemon.js';
+import {
+  runTerminalDaemon,
+  type AgentProviderReconcileResult,
+  type RunningTerminalDaemon,
+  type TerminalDaemon
+} from './terminalDaemon.js';
 
 export interface TerminalDaemonMainConfig {
   homeRoot: string;
@@ -43,6 +52,7 @@ export function resolveDaemonConfig(env: NodeJS.ProcessEnv = process.env): Termi
 export interface ReconcileTarget {
   sessionId: string;
   sockPath: string;
+  subject: SessionRegistration['subject'];
 }
 
 /** Manifest sessions whose atch master socket is already live under the root. */
@@ -53,7 +63,9 @@ export function manifestReconcileTargets(
   return loadDesk({}).sessions.flatMap((session) => {
     const sessionId = session.sessionId;
     const sockPath = join(atchSocketRoot, `${sessionId}.sock`);
-    return socketExists(sockPath) ? [{ sessionId, sockPath }] : [];
+    return socketExists(sockPath)
+      ? [{ sessionId, sockPath, subject: sessionStateSubjectFor(session) }]
+      : [];
   });
 }
 
@@ -85,7 +97,7 @@ export async function reconcileExistingSessions(
       const index = next;
       next += 1;
       if (index >= targets.length) return;
-      const { sessionId, sockPath } = targets[index];
+      const { sessionId, sockPath, subject } = targets[index];
       try {
         const restored = await daemon.router.sessions.restoreAndAttach(sessionId, {
           sockPath,
@@ -95,7 +107,8 @@ export async function reconcileExistingSessions(
             args: ['kill', '-f', sockPath],
             staleCleanupSpec: { binPath: atchBinPath, args: ['rm', sockPath] }
           },
-          ackTimeoutMs
+          ackTimeoutMs,
+          subject
         });
         results[index] = restored.ok ? { sessionId, ok: true } : { sessionId, ok: false, error: restored.reason };
       } catch (error) {
@@ -107,6 +120,29 @@ export async function reconcileExistingSessions(
   return results;
 }
 
+export async function completeDaemonStartup(
+  daemon: Pick<
+    TerminalDaemon,
+    'router' | 'reconcileAgentProviders' | 'markReady'
+  >,
+  targets: readonly ReconcileTarget[],
+  atchBinPath: string
+): Promise<{
+  reconciled: { sessionId: string; ok: boolean; error?: string }[];
+  providerRecovery: AgentProviderReconcileResult[];
+}> {
+  const reconciled = await reconcileExistingSessions(
+    daemon,
+    targets,
+    atchBinPath
+  );
+  const providerRecovery = await daemon.reconcileAgentProviders(
+    reconciled.filter((result) => result.ok).map((result) => result.sessionId)
+  );
+  daemon.markReady();
+  return { reconciled, providerRecovery };
+}
+
 /** Start the daemon, re-attach to live masters, and install signal shutdown. */
 export async function runTerminalDaemonMain(config = resolveDaemonConfig()): Promise<RunningTerminalDaemon> {
   // deferReady: every control route (health included) 503s until the reconcile
@@ -116,11 +152,11 @@ export async function runTerminalDaemonMain(config = resolveDaemonConfig()): Pro
   const running = await runTerminalDaemon({ ...config, sessions: [], deferReady: true });
   let reconciled: { sessionId: string; ok: boolean; error?: string }[];
   try {
-    reconciled = await reconcileExistingSessions(
+    ({ reconciled } = await completeDaemonStartup(
       running.daemon,
       manifestReconcileTargets(config.atchSocketRoot),
       config.atchBinPath
-    );
+    ));
   } catch (error) {
     // A post-listen startup failure (e.g. a malformed manifest) must be FATAL:
     // the bound server would otherwise hold the event loop open forever with
@@ -130,7 +166,6 @@ export async function runTerminalDaemonMain(config = resolveDaemonConfig()): Pro
     await running.close();
     throw error;
   }
-  running.daemon.markReady();
   const ok = reconciled.filter((r) => r.ok).length;
   for (const failure of reconciled.filter((r) => !r.ok)) {
     // eslint-disable-next-line no-console

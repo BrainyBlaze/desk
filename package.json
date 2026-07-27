@@ -26,7 +26,7 @@
     "desk-lsp-mcp": "./dist/server/lsp/deskLspMcpCli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && chmod +x dist/cli/main.js dist/server/lsp/deskLspMcpCli.js",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli/main.js dist/server/lsp/deskLspMcpCli.js",
     "build:atch": "node scripts/build-atch.mjs",
     "build:ui": "vite build",
     "build:standalone:assets": "vite build && node scripts/make-assets.mjs",

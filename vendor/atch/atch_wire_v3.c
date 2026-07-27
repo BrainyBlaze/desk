@@ -18,7 +18,7 @@ static void put64(unsigned char *p, uint64_t v) { int i; for (i = 0; i < 8; ++i)
 static size_t putstr(unsigned char *p, size_t n, const char *s) { size_t l=strlen(s); if (l>ATCH_V3_MAX_STR16 || n<l+2) return 0; put16(p,(uint16_t)l); memcpy(p+2,s,l); return l+2; }
 static int getstr(const unsigned char *p,size_t n,char *out,size_t cap,size_t *used) { size_t l; if(n<2||(l=u16(p))>n-2||l+1>cap)return ATCH_V3_TRUNCATED; memcpy(out,p+2,l);out[l]=0;*used=l+2;return 0; }
 static int valid_type(uint16_t t) {
-    static const uint16_t a[] = {1,2,3,4,5,6,16,17,18,19,20,21,32,33,34,48,50,51,52,53,64,65,66,67,68,69,70,80,82,83};
+    static const uint16_t a[] = {1,2,3,4,5,6,16,17,18,19,20,21,32,33,34,48,50,51,52,53,64,65,66,67,68,69,70,80,82,83,84};
     size_t i; for (i=0; i<sizeof(a)/sizeof(a[0]); ++i) if (a[i]==t) return 1; return 0;
 }
 
@@ -49,6 +49,12 @@ int atch_v3_validate_payload(uint16_t type, const unsigned char *b, size_t n) {
     case 48: return fixed_or_tail(n, 25);
     case 50: case 51: return n == 21 ? 0 : ATCH_V3_TRUNCATED;
     case 52: return n == 29 ? 0 : ATCH_V3_TRUNCATED;
+    /* 84 TERMINAL_STATE: blob32 (length u32 + payload) carrying the child's
+     * live ANSI mode preamble. Connection-local and non-durable, so there is
+     * no record_seq/offset to validate — only that the declared blob length
+     * matches the body exactly, which keeps a truncated or padded frame from
+     * being accepted. An empty preamble is legitimate (no modes set yet). */
+    case 84: return n >= 4 && (size_t)u32(b) == n - 4 ? 0 : ATCH_V3_TRUNCATED;
     case 53: return n == 17 ? 0 : ATCH_V3_TRUNCATED;
     case 64: return n >= 76 ? 0 : ATCH_V3_TRUNCATED;
     case 65: return n == 26 ? 0 : ATCH_V3_TRUNCATED;

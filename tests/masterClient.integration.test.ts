@@ -13,7 +13,6 @@ import { FrameReassembler, encodeFrame, type RawFrame } from '../src/shared/atch
 import { FrameType, RecordType, Role } from '../src/shared/atchWire/frames.js';
 import { decodeBody, encodeBody, encodeRecord, type Body } from '../src/shared/atchWire/messages.js';
 import { MasterClient } from '../src/server/runtime/masterClient.js';
-import { InMemoryIntakeStore } from '../src/shared/controlPlane/index.js';
 import { InMemoryCmdCache } from '../src/shared/delivery/index.js';
 import { SessionRuntime, type BpFrame, type EmulatorPort, type EmulatorEvent } from '../src/shared/runtime/index.js';
 import { BpFrameType } from '../src/shared/browserProtocol/index.js';
@@ -159,7 +158,6 @@ describe('master client — v3 handshake + record intake over a real socket (§7
       sessionId: 'web-1',
       generation: 1,
       emulator: emu,
-      intakeStore: new InMemoryIntakeStore(),
       cmdCache: new InMemoryCmdCache(),
       now: () => 1000,
       sendBrowser: (_ch, frame) => browserOut.push(frame),

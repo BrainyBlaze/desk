@@ -9,7 +9,6 @@ import { ByteWriter, type RawFrame } from '../src/shared/atchWire/codec.js';
 import { EventType, FrameType, RecordType } from '../src/shared/atchWire/frames.js';
 import { type RecordEnvelope, decodeBody } from '../src/shared/atchWire/messages.js';
 import { BpFrameType, type BpFrame } from '../src/shared/browserProtocol/index.js';
-import { InMemoryIntakeStore } from '../src/shared/controlPlane/index.js';
 import { InMemoryCmdCache } from '../src/shared/delivery/index.js';
 import { SessionRuntime, type EmulatorPort, type EmulatorEvent } from '../src/shared/runtime/index.js';
 
@@ -58,7 +57,6 @@ function makeHarness(generation = 1): Harness {
     sessionId: 's1',
     generation,
     emulator: emu,
-    intakeStore: new InMemoryIntakeStore(),
     cmdCache: new InMemoryCmdCache(),
     now: () => clock.t,
     sendBrowser: (channelId, frame) => browserOut.push({ channelId, frame }),
@@ -147,37 +145,17 @@ describe('SessionRuntime — browser → master', () => {
   });
 });
 
-describe('SessionRuntime — control plane + delivery (typed hook)', () => {
-  it('a typed hook drives BOTH session state AND submit-confirmed', () => {
-    const h = makeHarness(1);
+describe('SessionRuntime — delivery confirmation', () => {
+  it('confirms an accepted delivery correlation without owning agent state', () => {
+    const h = makeHarness();
     // A delivery is in flight: body + submit accepted, awaiting semantic proof.
     const txn = h.rt.openTxn('txn-42', 's1:1:txn-42:body', 's1:1:txn-42:submit');
     h.rt.onBodyAck('txn-42', 'ok');
     h.rt.onSubmitAck('txn-42', 'ok');
     expect(txn.phase).toBe('submit-accepted'); // accepted != delivered
 
-    // The agent's typed UserPromptSubmit hook echoes the txnId marker.
-    const res = h.rt.ingestHook({ source: 'typed-hook', carriedGeneration: 1, invocationId: 'inv-1', state: 'working', txnId: 'txn-42' });
-    expect(res.kind).toBe('accepted');
-    expect(h.rt.currentState().state).toBe('working'); // control plane
-    expect(h.rt.currentState().source).toBe('typed-hook');
+    h.rt.confirmDelivery('txn-42');
     expect(h.rt.txnPhase('txn-42')?.phase).toBe('submit-confirmed'); // delivery
-  });
-
-  it('a hook carrying a STALE generation is fenced (no state change)', () => {
-    const h = makeHarness(2); // session is at generation 2
-    const res = h.rt.ingestHook({ source: 'typed-hook', carriedGeneration: 1, invocationId: 'inv-x', state: 'working' });
-    expect(res.kind).toBe('rejected');
-    expect(h.rt.currentState().state).toBe('unknown'); // fenced, untouched
-  });
-
-  it('a retried hook (same invocationId) is idempotent', () => {
-    const h = makeHarness(1);
-    const a = h.rt.ingestHook({ source: 'typed-hook', carriedGeneration: 1, invocationId: 'inv-1', state: 'working' });
-    const b = h.rt.ingestHook({ source: 'typed-hook', carriedGeneration: 1, invocationId: 'inv-1', state: 'working' });
-    expect(a.kind).toBe('accepted');
-    expect(b.kind).toBe('duplicate');
-    expect(a.event.eventId).toBe(b.event.eventId); // same eventId, counted once
   });
 });
 
@@ -211,7 +189,6 @@ describe('SessionRuntime — control-plane input injection + tail (channels deli
       sessionId: 's1',
       generation: 1,
       emulator: emu,
-      intakeStore: new InMemoryIntakeStore(),
       cmdCache: new InMemoryCmdCache(),
       now: () => 1,
       sendBrowser: () => {},

@@ -24,6 +24,8 @@ import { countSidebarAgents } from './sidebarCounts.js';
 import { computeReorder, getReorderData, setReorderData } from './sidebarReorder.js';
 import { getSidebarDropSessionId } from './sidebarMove.js';
 import { StatusDot } from './statusDot.js';
+import { needsOperator, viewFor } from './agentStatusModel.js';
+import type { SessionStatusMap } from './usePulse.js';
 import type { DeskGroupView, DeskProjectView, DeskSessionView } from '../ui/model.js';
 
 function ActionCluster({ children }: { children: ReactNode }): JSX.Element {
@@ -32,7 +34,7 @@ function ActionCluster({ children }: { children: ReactNode }): JSX.Element {
 
 function AgentsSidebarImpl({
   projects,
-  attention,
+  statusViews,
   activeProjectId,
   activeGroupId,
   activeSessionId,
@@ -68,7 +70,7 @@ function AgentsSidebarImpl({
   onSelectSession
 }: {
   projects: DeskProjectView[];
-  attention: Record<string, { attention: true; since: string }>;
+  statusViews: SessionStatusMap;
   activeProjectId?: string;
   activeGroupId?: string;
   activeSessionId?: string;
@@ -120,7 +122,7 @@ function AgentsSidebarImpl({
       total +
       project.groups.reduce(
         (groupTotal, group) =>
-          groupTotal + group.sessions.filter((session) => attention[session.spec.sessionId]).length,
+          groupTotal + group.sessions.filter((session) => needsOperator(statusViews, session.spec.sessionId)).length,
         0
       ),
     0
@@ -128,7 +130,7 @@ function AgentsSidebarImpl({
   const visibleGroupSessions = (group: DeskGroupView, labelMatched: boolean): DeskSessionView[] => {
     let sessions = group.sessions;
     if (attentionOnly) {
-      sessions = sessions.filter((session) => attention[session.spec.sessionId]);
+      sessions = sessions.filter((session) => needsOperator(statusViews, session.spec.sessionId));
     }
     if (filterText === '' || labelMatched || group.label.toLowerCase().includes(filterText)) {
       return sessions;
@@ -300,7 +302,7 @@ function AgentsSidebarImpl({
             return null;
           }
           const projectAttention = project.groups.some((group) =>
-            group.sessions.some((session) => attention[session.spec.sessionId])
+            group.sessions.some((session) => needsOperator(statusViews, session.spec.sessionId))
           );
           const projectCollapsed = filtering ? false : Boolean(collapsedProjects[project.id]);
           return (
@@ -378,7 +380,7 @@ function AgentsSidebarImpl({
                   if (filtering && visibleSessions.length === 0 && !projectLabelMatched) {
                     return null;
                   }
-                  const groupAttention = group.sessions.some((session) => attention[session.spec.sessionId]);
+                  const groupAttention = group.sessions.some((session) => needsOperator(statusViews, session.spec.sessionId));
                   const groupCollapsed = filtering ? false : Boolean(collapsedGroups[group.id]);
                   return (
                   <section
@@ -523,7 +525,7 @@ function AgentsSidebarImpl({
                                 }}
                                 title={session.spec.sessionId}
                               >
-                                <StatusDot state={session.state} attention={Boolean(attention[session.spec.sessionId])} />
+                                <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                                 <span>{session.spec.name}</span>
                               </button>
                               <ActionCluster>

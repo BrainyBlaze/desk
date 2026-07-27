@@ -133,9 +133,22 @@ describe('SessionManager — full daemon-side pipe against a fake master (§7.1)
     expect(await mgr.attachMaster('ghost', sockPath, { rows: 1, cols: 1 })).toBe(false);
   });
 
-  it('a hook drives state; list reflects it', async () => {
-    mgr.ensure('web-1', { rows: 1, cols: 1 });
-    mgr.ingestHook('web-1', { source: 'typed-hook', carriedGeneration: 1, invocationId: 'i1', state: 'working' });
-    expect(mgr.state('web-1')?.state).toBe('working');
+  it('a validated attach advances an agent from starting/unknown to running/unknown', async () => {
+    mgr.ensure('web-1', { rows: 1, cols: 1 }, {
+      kind: 'agent',
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks'
+    });
+    expect(mgr.stateSnapshot('web-1')).toMatchObject({
+      lifecycle: 'starting',
+      subject: { kind: 'agent', activity: 'unknown' }
+    });
+
+    expect(await mgr.attachMaster('web-1', sockPath, { rows: 1, cols: 1 })).toBe(true);
+    expect(mgr.stateSnapshot('web-1')).toMatchObject({
+      lifecycle: 'running',
+      subject: { kind: 'agent', activity: 'unknown' }
+    });
   });
 });

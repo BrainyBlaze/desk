@@ -9,41 +9,46 @@ import {
   type AgentHostClientFrame,
   type AgentHostServerFrame,
   type AgentSurfaceEvent,
-  type AgentSurfaceState,
   type AgentUiClientFrame,
   type AgentUiErrorCode,
   type AgentUiServerFrame
 } from '../core/agentSurfaceProtocol.js';
-import { verifyAgentHostToken } from './agentHostToken.js';
 import {
-  attentionTracker,
-  notifyAgentSignal,
-  type AgentEventKind
-} from './attention.js';
+  AGENT_STATE_SCHEMA_VERSION,
+  parseAgentStateEnvelope,
+  type AgentProvider,
+  type AgentProducer,
+  type AgentStateEnvelope
+} from '../shared/controlPlane/contract.js';
+import { daemonControl } from '../shared/daemonControlClient.js';
+import {
+  nativeAgentFactsFor,
+  type NativeAgentObservation
+} from '../shared/runtime/nativeLifecycle.js';
+import { verifyAgentHostToken } from './agentHostToken.js';
 import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.js';
 
 /**
  * Agent-surface broker — Phase 2 server core.
  *
  * Two WebSocket endpoints:
- *  - `/ws/agent-host` — adapter hosts connect here with hello {session, token, agent, pid};
+ *  - `/ws/agent-host` — adapter hosts connect here with a generation-fenced hello;
  *    the broker verifies the HMAC token against the persistent desk-host secret, replies
  *    hello-ack {lastSeq}, and forwards host events to subscribed browser surfaces (with
  *    visibility-gated delta forwarding).
  *  - `/ws/agent-ui` — browser surfaces subscribe/unsubscribe/inject here; the broker
  *    forwards commands to the host and routes command-result back via requestId.
  *
- * Per-session state: host connection, surface subscriptions, FSM state, lastSeq, and a
+ * Per-session state: host connection, surface subscriptions, lastSeq, and a
  * bounded committed-event ring (default 2000 events / 16 MiB, FIFO) for snapshot
  * replies to late or reconnecting subscribers. Spec §6.
- *
- * Attention synthesis (R3 amendment): one mapping from normalized events → existing
- * AttentionTracker/agentEvents so lamps/sounds/pulse/channel-engine behavior is identical
- * in native and terminal modes with zero driver-specific code.
+ * Agent semantics are adapted once and published to the daemon-owned authority; the
+ * broker does not retain a second activity/wait state.
  */
 
 const DEFAULT_RING_MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
+const NATIVE_HEARTBEAT_WINDOW_MS = 5_000;
 
 interface RetainedAgentSurfaceEvent {
   event: AgentSurfaceEvent;
@@ -74,8 +79,19 @@ interface InflightCommand {
 interface HostConnection {
   ws: WebSocket;
   pid: number;
-  agent: DeskAgent;
+  agent: AgentProvider;
   session: string;
+  producer: NativeProducerCursor;
+}
+
+interface NativeProducerCursor {
+  generation: number;
+  provider: AgentProvider;
+  producer: AgentProducer;
+  producerInstanceId: string;
+  producerSeq: number;
+  publishTail: Promise<void>;
+  lastHeartbeatAt?: number;
 }
 
 interface AgentSurfaceSession {
@@ -87,8 +103,8 @@ interface AgentSurfaceSession {
   clients: Map<WebSocket, Map<string, SurfaceSubscription>>;
   ring: RetainedAgentSurfaceEvent[];
   ringBytes: number;
-  currentState: AgentSurfaceState | null;
   lastSeq: number;
+  producer: NativeProducerCursor | null;
   inflight: Map<string, InflightCommand>;
   /** Once true, skip the persistSessionResume manifest write on subsequent session-info. */
   persistedResumeGuard: boolean;
@@ -101,8 +117,8 @@ export interface AgentSurfaceBrokerOptions {
   commandTimeoutMs?: number;
   /** Inject the secret provider (test seam); production uses getOrCreateAgentHostSecret. */
   resolveSecret?: () => string;
-  /** Inject the attention tracker (test seam); production uses the singleton. */
-  attention?: AttentionSink;
+  /** Inject the canonical authority publisher (test seam). */
+  publishAgentState?: (envelope: AgentStateEnvelope) => void | Promise<void>;
   /**
    * Inject the resume-persistence path (test seam). Production leaves this undefined
    * and the broker calls persistSessionResume(sessionId, resume) which writes the
@@ -114,12 +130,6 @@ export interface AgentSurfaceBrokerOptions {
   now?: () => number;
 }
 
-export interface AttentionSink {
-  pushEvent(session: string, kind: AgentEventKind, message?: string): unknown;
-  notifySignal(session: string, kind: AgentEventKind): void;
-  raise(session: string): unknown;
-}
-
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
 export class AgentSurfaceBroker {
@@ -127,7 +137,7 @@ export class AgentSurfaceBroker {
   private readonly ringMaxBytes: number;
   private readonly commandTimeoutMs: number;
   private readonly resolveSecret: () => string;
-  private readonly attention: AttentionSink;
+  private readonly publishAgentState: (envelope: AgentStateEnvelope) => void | Promise<void>;
   private readonly persistResume: (sessionId: string, resume: string) => boolean | Promise<boolean>;
   private readonly now: () => number;
   private readonly sessions = new Map<string, AgentSurfaceSession>();
@@ -138,7 +148,7 @@ export class AgentSurfaceBroker {
     this.ringMaxBytes = positiveInteger(options.ringMaxBytes ?? DEFAULT_RING_MAX_BYTES, 'agent surface ringMaxBytes');
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.resolveSecret = options.resolveSecret ?? defaultResolveSecret;
-    this.attention = options.attention ?? defaultAttentionSink;
+    this.publishAgentState = options.publishAgentState ?? defaultPublishAgentState;
     this.persistResume = options.persistResume ?? ((sessionId, resume) => persistSessionResume(sessionId, resume));
     this.now = options.now ?? Date.now;
   }
@@ -166,27 +176,13 @@ export class AgentSurfaceBroker {
     await result;
   }
 
-  /** Snapshot for the pulse API: sessions with their FSM state + lastSeq (read-only). */
-  snapshot(): Array<{ session: string; state: AgentSurfaceState | null; lastSeq: number; hostConnected: boolean }> {
+  /** Conversation-transport diagnostics only; semantic state lives in the authority. */
+  snapshot(): Array<{ session: string; lastSeq: number; hostConnected: boolean }> {
     return [...this.sessions.values()].map((s) => ({
       session: s.session,
-      state: s.currentState,
       lastSeq: s.lastSeq,
       hostConnected: s.host !== null
     }));
-  }
-
-  nativeDeliveryState(session: string): 'ready' | 'busy' | 'booting' | 'offline' | 'approval' {
-    const current = this.sessions.get(session);
-    if (!current?.host) return 'offline';
-    switch (current.currentState) {
-      case 'idle': return 'ready';
-      case 'processing':
-      case 'tool-executing': return 'busy';
-      case 'awaiting-permission': return 'approval';
-      case 'starting': return 'booting';
-      default: return 'offline';
-    }
   }
 
   /**
@@ -239,15 +235,29 @@ export class AgentSurfaceBroker {
       ws.close(1008, 'auth failure');
       return;
     }
+    const provider = nativeProviderFor(frame.agent);
+    if (provider === undefined) {
+      this.send(ws, {
+        type: 'error',
+        code: 'invalid-frame',
+        message: `native host provider is not supported: ${frame.agent}`
+      });
+      ws.close(1008, 'unsupported provider');
+      return;
+    }
     const session = this.acquireSession(frame.session);
     // Spec §4 line 150: "broker resets a session's ring when a new host instance
     // (different pid/spawn) says hello". Same pid reconnecting after a transient socket
     // drop keeps the ring (lastSeq>0 path). Track lastHostPid across socket close so the
     // reset is keyed on pid change, not on current socket state.
-    if (session.lastHostPid !== null && session.lastHostPid !== frame.pid) {
+    const changedSpawn =
+      session.producer !== null &&
+      (session.producer.generation !== frame.generation ||
+        session.producer.producerInstanceId !== frame.producerInstanceId ||
+        session.lastHostPid !== frame.pid);
+    if (changedSpawn) {
       session.ring = [];
       session.ringBytes = 0;
-      session.currentState = null;
       session.lastSeq = 0;
       // A new pid is a fresh spawn — the agent may mint a NEW session id (e.g.
       // confirmDiscard switch where the user explicitly accepted losing the prior
@@ -268,16 +278,44 @@ export class AgentSurfaceBroker {
       }
     }
     session.lastHostPid = frame.pid;
-    const host: HostConnection = { ws, pid: frame.pid, agent: frame.agent, session: session.session };
+    const producerName = nativeProducerFor(provider);
+    const priorProducer = session.producer;
+    const producer =
+      priorProducer !== null &&
+      priorProducer.generation === frame.generation &&
+      priorProducer.provider === provider &&
+      priorProducer.producer === producerName &&
+      priorProducer.producerInstanceId === frame.producerInstanceId
+        ? priorProducer
+        : {
+            generation: frame.generation,
+            provider,
+            producer: producerName,
+            producerInstanceId: frame.producerInstanceId,
+            producerSeq: 0,
+            publishTail: Promise.resolve()
+          };
+    session.producer = producer;
+    const host: HostConnection = {
+      ws,
+      pid: frame.pid,
+      agent: provider,
+      session: session.session,
+      producer
+    };
     session.host = host;
     session.idleSince = undefined;
     ws.removeAllListeners('message');
-    ws.on('message', (raw2) => this.handleHostFrame(session, raw2));
+    ws.on('message', (raw2) => this.handleHostFrame(session, host, raw2));
 
     this.send(ws, { type: 'hello-ack', lastSeq: session.lastSeq });
+    this.publishNativeObservation(session, host, { kind: 'host-connected' }, this.now());
   }
 
-  private handleHostFrame(session: AgentSurfaceSession, raw: unknown): void {
+  private handleHostFrame(session: AgentSurfaceSession, host: HostConnection, raw: unknown): void {
+    if (session.host !== host) {
+      return;
+    }
     let frame: AgentHostClientFrame;
     try {
       frame = parseAgentHostClientFrame(JSON.parse(String(raw)));
@@ -293,7 +331,7 @@ export class AgentSurfaceBroker {
         // Duplicate hello — ignore (already verified).
         return;
       case 'event':
-        this.handleHostEvent(session, frame.event);
+        this.handleHostEvent(session, host, frame.event);
         return;
       case 'command-result':
         this.handleCommandResult(session, frame.requestId, frame.ok, frame.ok ? undefined : frame.error);
@@ -301,7 +339,11 @@ export class AgentSurfaceBroker {
     }
   }
 
-  private handleHostEvent(session: AgentSurfaceSession, event: AgentSurfaceEvent): void {
+  private handleHostEvent(
+    session: AgentSurfaceSession,
+    host: HostConnection,
+    event: AgentSurfaceEvent
+  ): void {
     if (event.seq <= session.lastSeq) {
       return; // already accepted (idempotent — protects against host re-emits on reconnect)
     }
@@ -318,9 +360,6 @@ export class AgentSurfaceBroker {
           }
         }
       }
-    }
-    if (event.kind === 'status') {
-      session.currentState = event.state;
     }
     // spec §6: session-info with agentSessionId is the load-bearing path for FRESH native
     // sessions to gain a resume id (the driver can't know the id at start() time — claude
@@ -346,13 +385,20 @@ export class AgentSurfaceBroker {
           });
       }
     }
-    this.synthesizeAttention(session.session, event);
+    this.publishNativeObservation(
+      session,
+      host,
+      event,
+      eventOccurredAt(event, this.now()),
+      correlationFor(event)
+    );
     this.fanEventToSurfaces(session, event);
   }
 
   private handleHostGone(ws: WebSocket): void {
     for (const session of this.sessions.values()) {
       if (session.host?.ws === ws) {
+        const host = session.host;
         session.host = null;
         session.idleSince = this.now();
         // Notify subscribed surfaces so they can render a disconnected state.
@@ -361,6 +407,12 @@ export class AgentSurfaceBroker {
         // BUG-9 duplicate-rows is fixed at the codex history-mapper level (id mismatch
         // between live optimistic rows and backfill rows), not here.
         this.broadcast(session, { type: 'exit', session: session.session, reason: 'crashed' });
+        this.publishNativeObservation(
+          session,
+          host,
+          { kind: 'host-disconnected' },
+          this.now()
+        );
       }
     }
   }
@@ -529,8 +581,8 @@ export class AgentSurfaceBroker {
         clients: new Map(),
         ring: [],
         ringBytes: 0,
-        currentState: null,
         lastSeq: 0,
+        producer: null,
         inflight: new Map(),
         persistedResumeGuard: false
       };
@@ -587,7 +639,6 @@ export class AgentSurfaceBroker {
       type: 'snapshot',
       session: session.session,
       surfaceId,
-      state: session.currentState ?? 'starting',
       lastSeq: session.lastSeq,
       events
     });
@@ -677,41 +728,60 @@ export class AgentSurfaceBroker {
     }
   }
 
-  private synthesizeAttention(session: string, event: AgentSurfaceEvent): void {
-    switch (event.kind) {
-      case 'status':
-        if (event.state === 'awaiting-permission') {
-          this.attention.raise(session);
-          this.attention.pushEvent(session, 'approval-requested', event.detail);
-          this.attention.notifySignal(session, 'approval-requested');
-        }
-        return;
-      case 'turn-complete':
-        this.attention.raise(session);
-        this.attention.pushEvent(session, 'turn-complete');
-        this.attention.notifySignal(session, 'turn-complete');
-        return;
-      case 'agent-error':
-        if (event.fatal) {
-          this.attention.raise(session);
-          this.attention.pushEvent(session, 'input-requested', event.message);
-          this.attention.notifySignal(session, 'input-requested');
-        }
-        return;
-      case 'attention-hint': {
-        const mapped: AgentEventKind = event.attention === 'idle-prompt' ? 'input-requested' : event.attention === 'session-status' ? 'turn-complete' : 'input-requested';
-        if (mapped === 'input-requested') {
-          this.attention.raise(session);
-          this.attention.pushEvent(session, mapped, event.detail);
-          this.attention.notifySignal(session, mapped);
-          return;
-        }
-        this.attention.pushEvent(session, mapped, event.detail);
-        return;
-      }
-      default:
-        return;
+  private publishNativeObservation(
+    session: AgentSurfaceSession,
+    host: HostConnection,
+    observation: NativeAgentObservation,
+    occurredAt: number,
+    correlation?: AgentStateEnvelope['correlation']
+  ): void {
+    const observedAt = this.now();
+    const facts = nativeAgentFactsFor(observation);
+    if (
+      facts.length === 1 &&
+      facts[0]?.kind === 'heartbeat' &&
+      host.producer.lastHeartbeatAt !== undefined &&
+      observedAt - host.producer.lastHeartbeatAt < NATIVE_HEARTBEAT_WINDOW_MS
+    ) {
+      return;
     }
+    if (facts.length === 1 && facts[0]?.kind === 'heartbeat') {
+      host.producer.lastHeartbeatAt = observedAt;
+    }
+    host.producer.producerSeq += 1;
+    const eventId = `${host.producer.producerInstanceId}:${host.producer.producerSeq}`;
+    let envelope: AgentStateEnvelope;
+    try {
+      envelope = parseAgentStateEnvelope({
+        schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+        sessionId: session.session,
+        generation: host.producer.generation,
+        provider: host.producer.provider,
+        mode: 'native',
+        producer: host.producer.producer,
+        producerInstanceId: host.producer.producerInstanceId,
+        producerSeq: host.producer.producerSeq,
+        eventId,
+        invocationId: eventId,
+        occurredAt,
+        observedAt,
+        facts,
+        ...(correlation === undefined ? {} : { correlation })
+      });
+    } catch (error) {
+      console.error(
+        `[agent-surface] invalid canonical observation for ${session.session}: ${describeError(error)}`
+      );
+      return;
+    }
+    host.producer.publishTail = host.producer.publishTail
+      .then(() => this.publishAgentState(envelope))
+      .then(() => undefined)
+      .catch((error) => {
+        console.error(
+          `[agent-surface] canonical observation rejected for ${session.session}: ${describeError(error)}`
+        );
+      });
   }
 
   private send(ws: WebSocket, frame: AgentUiServerFrame | AgentHostServerFrame | { type: 'error'; code: AgentUiErrorCode; message: string }): void {
@@ -814,14 +884,60 @@ function sessionOfFrame(frame: AgentUiClientFrame): string | undefined {
   return frame.session;
 }
 
-const defaultAttentionSink: AttentionSink = {
-  // The broker keys sessions by the agent-host hello value: the durable
-  // DESK_SESSION_ID every launch exports. Tracker and signal fanout use the
-  // same key end-to-end.
-  pushEvent: (session, kind, message) => attentionTracker.pushEvent(session, kind, message),
-  notifySignal: (session, kind) => notifyAgentSignal(session, kind),
-  raise: (session) => attentionTracker.raise(session)
-};
+function nativeProviderFor(agent: DeskAgent): AgentProvider | undefined {
+  return agent === 'claude' || agent === 'codex' || agent === 'opencode'
+    ? agent
+    : undefined;
+}
+
+function nativeProducerFor(provider: AgentProvider): AgentProducer {
+  switch (provider) {
+    case 'claude':
+      return 'claude-native';
+    case 'codex':
+      return 'codex-native';
+    case 'opencode':
+      return 'opencode-native';
+  }
+}
+
+function eventOccurredAt(event: AgentSurfaceEvent, fallback: number): number {
+  const parsed = Date.parse(event.ts);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function correlationFor(
+  event: AgentSurfaceEvent
+): AgentStateEnvelope['correlation'] | undefined {
+  switch (event.kind) {
+    case 'assistant-delta':
+    case 'assistant-message':
+    case 'turn-complete':
+      return { turnId: boundedIdentifier(event.turnId) };
+    case 'tool-start':
+    case 'tool-output-delta':
+    case 'tool-end':
+      return { toolUseId: boundedIdentifier(event.toolUseId) };
+    case 'permission-request':
+    case 'permission-resolved':
+      return { permissionId: boundedIdentifier(event.requestId) };
+    default:
+      return undefined;
+  }
+}
+
+function boundedIdentifier(value: string): string {
+  return value.trim().slice(0, 512);
+}
+
+async function defaultPublishAgentState(envelope: AgentStateEnvelope): Promise<void> {
+  const result = await daemonControl('/control/agent-event', envelope, {
+    timeoutMs: 1_500
+  });
+  if (!result.ok) {
+    throw new Error(result.error ?? 'terminal daemon rejected native agent observation');
+  }
+}
 
 let defaultSecret: string | null = null;
 function defaultResolveSecret(): string {

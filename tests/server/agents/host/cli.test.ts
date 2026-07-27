@@ -3,6 +3,7 @@ import { parseAgentHostEnv } from '../../../../src/server/agents/host/cli';
 
 const VALID_ENV: NodeJS.ProcessEnv = {
   DESK_SESSION_ID: 'agentdesk-main-codex-abc12345',
+  DESK_SESSION_GENERATION: '7',
   DESK_AGENT: 'codex',
   DESK_AGENT_BYPASS: '1',
   DESK_SERVER_URL: 'http://127.0.0.1:5173',
@@ -29,6 +30,7 @@ describe('parseAgentHostEnv — required keys', () => {
   it('accepts a fully populated env', () => {
     expect(parseAgentHostEnv(makeEnv())).toEqual({
       DESK_SESSION_ID: 'agentdesk-main-codex-abc12345',
+      DESK_SESSION_GENERATION: 7,
       DESK_AGENT: 'codex',
       DESK_AGENT_BYPASS: '1',
       DESK_SERVER_URL: 'http://127.0.0.1:5173',
@@ -61,6 +63,18 @@ describe('parseAgentHostEnv — required keys', () => {
 
   it('rejects empty DESK_SESSION_ID', () => {
     expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_ID: '' }))).toThrow(/DESK_SESSION_ID/);
+  });
+
+  it('requires a positive integer DESK_SESSION_GENERATION', () => {
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_GENERATION: undefined }))).toThrow(
+      /DESK_SESSION_GENERATION/
+    );
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_GENERATION: '0' }))).toThrow(
+      /DESK_SESSION_GENERATION/
+    );
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_GENERATION: '1.5' }))).toThrow(
+      /DESK_SESSION_GENERATION/
+    );
   });
 
   it('rejects missing DESK_AGENT', () => {

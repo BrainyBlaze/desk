@@ -38,7 +38,7 @@ describe('native agent grid visibility', () => {
     const source = nativeSurfaceSource();
 
     expect(source).toMatch(
-      /onSnapshot: \(\{ state, lastSeq, events \}\) => \{[\s\S]*?setPipelineLive\(true\);[\s\S]*?setModel\(rowsFromSnapshot\(events, state, lastSeq\)\);/
+      /onSnapshot: \(\{ lastSeq, events \}\) => \{[\s\S]*?setPipelineLive\(true\);[\s\S]*?setModel\(rowsFromSnapshot\(events, undefined, lastSeq\)\);/
     );
   });
 });

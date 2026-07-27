@@ -110,7 +110,11 @@ describe('daemon server — RPC over a real unix socket (§3.2)', () => {
     expect((list.result as unknown[]).length).toBe(1);
 
     const state = await c.call('state', { sessionId: 'web-1' });
-    expect((state.result as { state: string }).state).toBe('unknown'); // no source yet
+    expect(state.result).toEqual((list.result as unknown[])[0]);
+    expect(state.result).toMatchObject({
+      lifecycle: 'starting',
+      subject: { kind: 'terminal' }
+    });
     c.close();
   });
 

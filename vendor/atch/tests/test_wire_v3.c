@@ -18,8 +18,8 @@ static void vectors(void) {
     for (p=s; (p=strstr(p,"\"frameHex\": \"")); p+=10) { unsigned char *b,*h; size_t n=read_hex(p+13,&b), hn; atch_v3_frame f;
         assert(atch_v3_decode_frame(b,n,&f)==ATCH_V3_OK); assert(atch_v3_decode_frame_ex(b,n,&f,1)==ATCH_V3_OK); h=malloc(ATCH_V3_HEADER_LEN); hn=atch_v3_encode_header(h,ATCH_V3_HEADER_LEN,f.type,f.flags,f.generation,f.sequence,f.aux,f.payload_length); assert(hn==ATCH_V3_HEADER_LEN); assert(!memcmp(h,b,hn)); free(h); free(b); ++count;
     }
-    /* Exercise every frameHex entry in the pinned 30-vector corpus. */
-    assert(count == 30);
+    /* Exercise every frameHex entry in the pinned 32-vector corpus. */
+    assert(count == 32);
     p=strstr(s,"\"bad_magic\""); assert(p); { unsigned char *b; assert(read_hex(strstr(p,"\"hex\": \"")+8,&b)==36); assert(atch_v3_decode_frame(b,36,&(atch_v3_frame){0})==ATCH_V3_BAD_MAGIC); free(b); }
     p=strstr(s,"\"bad_version\""); assert(p); { unsigned char *b; assert(read_hex(strstr(p,"\"hex\": \"")+8,&b)==36); assert(atch_v3_decode_frame(b,36,&(atch_v3_frame){0})==ATCH_V3_BAD_VERSION); free(b); }
     free(s);
@@ -76,4 +76,30 @@ static void timeout(void) {
     unsigned char b[64]; size_t n; atch_v3_frame f; atch_v3_reassembler r;
     atch_v3_reassembler_init(&r); n=atch_v3_encode_header(b,sizeof b,16,4,0,1,0,1); b[n]=1; assert(atch_v3_reassembler_push_at(&r,b,n+1,100,&f)==ATCH_V3_TRUNCATED); assert(atch_v3_reassembler_expired(&r,5100)); n=atch_v3_encode_header(b,sizeof b,16,0,0,2,0,1); b[n]=2; assert(atch_v3_reassembler_push_at(&r,b,n+1,5100,&f)==ATCH_V3_TRUNCATED); atch_v3_reassembler_free(&r);
 }
-int main(void) { vectors(); payload_schema_negatives(); bounds_and_u64(); record_crc(); typed(); timeout(); puts("wire-v3 conformance: ok"); return 0; }
+
+/*
+** TERMINAL_STATE (84): connection-local blob32 carrying the child's live ANSI
+** mode preamble, so a controller re-attaching with a fresh emulator learns the
+** modes the child set once at startup. The golden vector only exercises the
+** cases it contains, so the boundaries are pinned here explicitly.
+*/
+static void terminal_state(void) {
+    unsigned char b[64]; atch_v3_frame f; size_t n;
+
+    /* Accepted as a known type (STRICT decode would reject an unknown one). */
+    n = atch_v3_encode_header(b, sizeof b, 84, 0, 0, 1, 0, 5);
+    b[n] = 1; b[n+1] = 0; b[n+2] = 0; b[n+3] = 0; b[n+4] = 0x1b;
+    assert(atch_v3_decode_frame(b, n + 5, &f) == 0 && f.type == 84);
+
+    /* Declared blob length must match the body EXACTLY: short, long, and the
+     * missing-prefix case are all truncations, never silently accepted. */
+    b[n] = 1; assert(atch_v3_validate_payload(84, b + n, 5) == 0);
+    b[n] = 2; assert(atch_v3_validate_payload(84, b + n, 5) == ATCH_V3_TRUNCATED);
+    b[n] = 0; assert(atch_v3_validate_payload(84, b + n, 5) == ATCH_V3_TRUNCATED);
+    assert(atch_v3_validate_payload(84, b + n, 3) == ATCH_V3_TRUNCATED);
+
+    /* An empty preamble is legitimate: the child may have set no modes yet. */
+    b[n] = b[n+1] = b[n+2] = b[n+3] = 0;
+    assert(atch_v3_validate_payload(84, b + n, 4) == 0);
+}
+int main(void) { vectors(); payload_schema_negatives(); bounds_and_u64(); record_crc(); typed(); timeout(); terminal_state(); puts("wire-v3 conformance: ok"); return 0; }

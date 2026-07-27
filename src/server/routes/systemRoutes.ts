@@ -1,25 +1,152 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveManifestPath } from '../../core/config.js';
-import { loadDesk, runningSessionSet } from '../../core/runner.js';
-import { normalizeAgentEventForApi } from '../agentEvents.js';
-import { attentionTracker, notifyAgentSignal, type AgentEventKind } from '../attention.js';
-import { initChannelsRuntime } from '../channelsApi.js';
+import { loadDesk } from '../../core/runner.js';
+import { observationEnvelope } from '../../core/agentState/providerAdapter.js';
+import {
+  adaptAgentEndpointRegistration,
+  parseDeskEventClearResponse,
+  parseDeskEventFeedResponse,
+  parseDeskEventReadRequest,
+  parseDeskEventReadResponse,
+  parseSessionStateSnapshot,
+  type AgentEndpointRegistration,
+  type AgentStateEnvelope,
+  type DeskEventReadRequest,
+  type SessionStateSnapshot
+} from '../../shared/controlPlane/index.js';
+import {
+  daemonControl,
+  daemonControlGet,
+  type DaemonControlResult
+} from '../../shared/daemonControlClient.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
 import { executeKillSwitch } from '../killSwitch.js';
 import type { DeskRoute } from '../plugin.js';
-import {
-  attemptResumeCaptureForSession,
-  isValidResumeId,
-  persistSessionResume
-} from '../resumeCapture.js';
 import { buildDeskSnapshot } from '../snapshot.js';
 import { getSystemSnapshot } from '../systemSampler.js';
-import { readRequiredString } from '../apiValidation.js';
 
 interface ManagedAgentLifecycle {
   reconcile(runningSessions: Set<string>): void;
   cleanupAll(): void;
+}
+
+export interface AgentStateGateway {
+  submitEvent(envelope: AgentStateEnvelope): Promise<DaemonControlResult>;
+  readStates(): Promise<DaemonControlResult>;
+}
+
+export interface AgentEndpointGateway {
+  registerEndpoint(registration: AgentEndpointRegistration): Promise<DaemonControlResult>;
+}
+
+export interface DeskEventGateway {
+  readEvents(limit: number): Promise<DaemonControlResult>;
+  markEventsRead(input: DeskEventReadRequest): Promise<DaemonControlResult>;
+  clearEvents(): Promise<DaemonControlResult>;
+}
+
+export interface SystemRoutesOptions {
+  agentStateGateway?: AgentStateGateway;
+  agentEndpointGateway?: AgentEndpointGateway;
+  deskEventGateway?: DeskEventGateway;
+  now?: () => number;
+}
+
+interface AgentStateView {
+  revision: number;
+  snapshots: SessionStateSnapshot[];
+}
+
+type AgentStateRead =
+  | { ok: true; view: AgentStateView }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+const defaultAgentStateGateway: AgentStateGateway = {
+  submitEvent: (envelope) => daemonControl('/control/agent-event', envelope),
+  readStates: () => daemonControlGet('/control/agent-states')
+};
+
+const defaultAgentEndpointGateway: AgentEndpointGateway = {
+  registerEndpoint: (registration) =>
+    daemonControl('/control/agent-endpoint', registration)
+};
+
+const defaultDeskEventGateway: DeskEventGateway = {
+  readEvents: (limit) =>
+    daemonControlGet(`/control/events?limit=${encodeURIComponent(limit)}`),
+  markEventsRead: (input) => daemonControl('/control/events/read', input),
+  clearEvents: () => daemonControl('/control/events/clear', {})
+};
+
+function gatewayFailure(result: DaemonControlResult): Extract<AgentStateRead, { ok: false }> {
+  const status =
+    result.status !== undefined && result.status >= 400 && result.status <= 599
+      ? result.status
+      : 503;
+  return {
+    ok: false,
+    status,
+    body:
+      result.body ??
+      {
+        ok: false,
+        error: result.error ?? 'terminal daemon unavailable'
+      }
+  };
+}
+
+async function readAgentStateView(gateway: AgentStateGateway): Promise<AgentStateRead> {
+  let result: DaemonControlResult;
+  try {
+    result = await gateway.readStates();
+  } catch (error) {
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        ok: false,
+        error: `terminal daemon unavailable: ${error instanceof Error ? error.message : String(error)}`
+      }
+    };
+  }
+  if (!result.ok) {
+    return gatewayFailure(result);
+  }
+
+  const revision = result.body?.revision;
+  const rawSnapshots = result.body?.snapshots;
+  if (
+    result.body?.ok !== true ||
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0 ||
+    !Array.isArray(rawSnapshots)
+  ) {
+    return {
+      ok: false,
+      status: 502,
+      body: { ok: false, error: 'terminal daemon returned malformed agent state' }
+    };
+  }
+
+  try {
+    const snapshots = rawSnapshots.map(parseSessionStateSnapshot);
+    const sessionIds = new Set<string>();
+    for (const snapshot of snapshots) {
+      if (snapshot.revision > revision || sessionIds.has(snapshot.sessionId)) {
+        throw new Error('inconsistent agent-state revision');
+      }
+      sessionIds.add(snapshot.sessionId);
+    }
+    return { ok: true, view: { revision, snapshots } };
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      body: { ok: false, error: 'terminal daemon returned malformed agent state' }
+    };
+  }
 }
 
 /**
@@ -66,7 +193,15 @@ export function readSessionIdentityMap(
   return { ok: true, payload: { version: 1, mappings, sessionIds } };
 }
 
-export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): DeskRoute {
+export function createSystemRoutes(
+  managedAgentLsp: ManagedAgentLifecycle,
+  options: SystemRoutesOptions = {}
+): DeskRoute {
+  const agentStateGateway = options.agentStateGateway ?? defaultAgentStateGateway;
+  const agentEndpointGateway =
+    options.agentEndpointGateway ?? defaultAgentEndpointGateway;
+  const deskEventGateway = options.deskEventGateway ?? defaultDeskEventGateway;
+  const now = options.now ?? Date.now;
   return async (req, res, url) => {
     if (req.method === 'GET' && url.pathname === '/api/desk') {
       sendJson(res, 200, buildDeskSnapshot());
@@ -89,90 +224,217 @@ export function createSystemRoutes(managedAgentLsp: ManagedAgentLifecycle): Desk
     }
 
     if (req.method === 'GET' && url.pathname === '/api/pulse') {
-      const runningIds = runningSessionSet();
+      const stateRead = await readAgentStateView(agentStateGateway);
+      if (!stateRead.ok) {
+        sendJson(res, 200, { system: getSystemSnapshot() });
+        return true;
+      }
+      const runningIds = new Set(
+        stateRead.view.snapshots
+          .filter((snapshot) => snapshot.lifecycle === 'running')
+          .map((snapshot) => snapshot.sessionId)
+      );
       managedAgentLsp.reconcile(runningIds);
-      attentionTracker.dropDead(runningIds);
       sendJson(res, 200, {
         system: getSystemSnapshot(),
-        attention: {
-          sessions: attentionTracker.snapshot(),
-          events: attentionTracker.listEvents(),
-          unread: attentionTracker.unreadCount()
-        },
+        agentStates: stateRead.view,
         running: [...runningIds]
       });
       return true;
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/attention') {
-      sendJson(res, 200, {
-        sessions: attentionTracker.snapshot(),
-        events: attentionTracker.listEvents(),
-        unread: attentionTracker.unreadCount()
-      });
-      return true;
-    }
-
-    if (req.method === 'POST' && url.pathname === '/api/attention-clear') {
-      const body = await readJsonBody(req);
-      // The wire value is the durable sessionId — the same key the tracker
-      // uses everywhere.
-      attentionTracker.clear(readRequiredString(body.session, 'session'));
-      sendJson(res, 200, { ok: true });
-      return true;
-    }
-
-    if (req.method === 'POST' && url.pathname === '/api/attention-read') {
-      const body = await readJsonBody(req);
-      if (body.clear === true) {
-        attentionTracker.clearEvents();
-        sendJson(res, 200, { ok: true, unread: 0 });
+    if (req.method === 'GET' && url.pathname === '/api/agent-states') {
+      const stateRead = await readAgentStateView(agentStateGateway);
+      if (!stateRead.ok) {
+        sendJson(res, stateRead.status, stateRead.body);
         return true;
       }
-      attentionTracker.markEventsRead({
-        all: body.all === true,
-        ids: Array.isArray(body.ids) ? body.ids.map(String) : undefined,
-        kinds: Array.isArray(body.kinds)
-          ? (body.kinds.filter((kind: unknown) =>
-              kind === 'turn-complete' ||
-              kind === 'approval-requested' ||
-              kind === 'input-requested' ||
-              kind === 'bell' ||
-              kind === 'channel'
-            ) as AgentEventKind[])
-          : undefined
-      });
-      sendJson(res, 200, { ok: true, unread: attentionTracker.unreadCount() });
+      sendJson(res, 200, { ok: true, ...stateRead.view });
       return true;
     }
 
     if (req.method === 'POST' && url.pathname === '/api/agent-event') {
       const body = await readJsonBody(req);
-      const normalized = normalizeAgentEventForApi(body);
-      // Mixed-era normalize: agents launched before the DESK_SESSION_ID
-      // rename self-report the legacy name until restarted; new launches report
-      // the sessionId (identity here). Everything downstream — tracker,
-      // signal fanout, channels engine, resume capture — keys the durable id.
-      const sessionId = normalized.event.session;
-      if (normalized.attentionKind) {
-        attentionTracker.raise(sessionId);
-        attentionTracker.pushEvent(
-          sessionId,
-          normalized.attentionKind,
-          typeof normalized.event.message === 'string' ? normalized.event.message.slice(0, 300) : undefined
-        );
+      const adapted = observationEnvelope(body, { observedAt: now() });
+      if (adapted.kind === 'invalid') {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'invalid agent-state observation',
+          reason: adapted.reason
+        });
+        return true;
       }
-      if (normalized.signalKind) {
-        notifyAgentSignal(sessionId, normalized.signalKind);
+      if (adapted.kind === 'no-facts') {
+        sendJson(res, 200, { ok: true, kind: 'no-facts' });
+        return true;
       }
-      initChannelsRuntime().engine.handleAgentEvent({ ...normalized.event, session: sessionId });
-      await attemptResumeCaptureForSession(sessionId, () =>
-        loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId)
-      );
-      if (typeof normalized.resumeSessionId === 'string' && isValidResumeId(normalized.resumeSessionId)) {
-        await persistSessionResume(sessionId, normalized.resumeSessionId);
+      const envelope: AgentStateEnvelope = adapted.envelope;
+
+      let result: DaemonControlResult;
+      try {
+        result = await agentStateGateway.submitEvent(envelope);
+      } catch (error) {
+        result = {
+          ok: false,
+          error: `terminal daemon unavailable: ${error instanceof Error ? error.message : String(error)}`
+        };
       }
-      sendJson(res, 200, { ok: true, kind: normalized.event.kind });
+      if (!result.ok) {
+        const failure = gatewayFailure(result);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      if (result.body?.ok !== true) {
+        sendJson(res, 502, { ok: false, error: 'terminal daemon returned malformed agent-event receipt' });
+        return true;
+      }
+      sendJson(res, result.status ?? 200, result.body);
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/agent-endpoint') {
+      const body = await readJsonBody(req);
+      const adapted = adaptAgentEndpointRegistration(body, { observedAt: now() });
+      if (adapted.kind === 'invalid') {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'invalid agent endpoint registration',
+          reason: adapted.reason
+        });
+        return true;
+      }
+
+      let result: DaemonControlResult;
+      try {
+        result = await agentEndpointGateway.registerEndpoint(adapted.registration);
+      } catch (error) {
+        result = {
+          ok: false,
+          error: `terminal daemon unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        };
+      }
+      if (!result.ok) {
+        const failure = gatewayFailure(result);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      if (result.body?.ok !== true) {
+        sendJson(res, 502, {
+          ok: false,
+          error: 'terminal daemon returned malformed agent endpoint receipt'
+        });
+        return true;
+      }
+      sendJson(res, result.status ?? 200, result.body);
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/events') {
+      const requested = Number(url.searchParams.get('limit'));
+      const limit =
+        Number.isSafeInteger(requested) && requested > 0
+          ? Math.min(requested, 1_000)
+          : 200;
+      let result: DaemonControlResult;
+      try {
+        result = await deskEventGateway.readEvents(limit);
+      } catch (error) {
+        result = {
+          ok: false,
+          error: `terminal daemon unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        };
+      }
+      if (!result.ok) {
+        const failure = gatewayFailure(result);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      try {
+        const feed = parseDeskEventFeedResponse({
+          schemaVersion: result.body?.schemaVersion,
+          latestSeq: result.body?.latestSeq,
+          unread: result.body?.unread,
+          items: result.body?.items
+        });
+        if (result.body?.ok !== true) throw new Error('missing ok');
+        sendJson(res, 200, feed);
+      } catch {
+        sendJson(res, 502, {
+          ok: false,
+          error: 'terminal daemon returned malformed event feed'
+        });
+      }
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/events/read') {
+      const body = await readJsonBody(req);
+      let input: DeskEventReadRequest;
+      try {
+        input = parseDeskEventReadRequest(body);
+      } catch {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'invalid event read request'
+        });
+        return true;
+      }
+      let result: DaemonControlResult;
+      try {
+        result = await deskEventGateway.markEventsRead(input);
+      } catch (error) {
+        result = {
+          ok: false,
+          error: `terminal daemon unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        };
+      }
+      if (!result.ok) {
+        const failure = gatewayFailure(result);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      try {
+        sendJson(res, 200, parseDeskEventReadResponse(result.body));
+      } catch {
+        sendJson(res, 502, {
+          ok: false,
+          error: 'terminal daemon returned malformed event read receipt'
+        });
+      }
+      return true;
+    }
+
+    if (req.method === 'DELETE' && url.pathname === '/api/events') {
+      let result: DaemonControlResult;
+      try {
+        result = await deskEventGateway.clearEvents();
+      } catch (error) {
+        result = {
+          ok: false,
+          error: `terminal daemon unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        };
+      }
+      if (!result.ok) {
+        const failure = gatewayFailure(result);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      try {
+        sendJson(res, 200, parseDeskEventClearResponse(result.body));
+      } catch {
+        sendJson(res, 502, {
+          ok: false,
+          error: 'terminal daemon returned malformed event clear receipt'
+        });
+      }
       return true;
     }
 

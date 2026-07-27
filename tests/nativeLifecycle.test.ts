@@ -8,7 +8,7 @@ import {
   applyNativeEvent,
   createNativeHostState,
   decideNativeRestart,
-  nativeControlState
+  nativeAgentFactsFor
 } from '../src/shared/runtime/index.js';
 
 const T0 = 1_000_000;
@@ -44,27 +44,81 @@ describe('native lifecycle — host phase FSM (§6.9)', () => {
   });
 });
 
-describe('native lifecycle — control-plane projection (§6.9 native-fsm source)', () => {
-  it('maps live phases + last command-result to ControlState', () => {
-    const s = createNativeHostState();
-    applyNativeEvent(s, { kind: 'handshake' });
-    applyNativeEvent(s, { kind: 'command-result', result: 'working' });
-    expect(nativeControlState(s)).toBe('working');
-    applyNativeEvent(s, { kind: 'command-result', result: 'idle' });
-    expect(nativeControlState(s, 'blocked')).toBe('blocked');
-    expect(nativeControlState(s, 'awaiting-approval')).toBe('awaiting-approval');
-    expect(nativeControlState(s)).toBe('idle');
+describe('native lifecycle — canonical semantic adapter', () => {
+  it('maps provider status, turn, and tool facts without a parallel state model', () => {
+    expect(nativeAgentFactsFor({ kind: 'status', state: 'processing' })).toEqual([
+      { kind: 'activity', activity: 'working' }
+    ]);
+    expect(
+      nativeAgentFactsFor({
+        kind: 'tool-start',
+        toolUseId: 'tool-1',
+        name: 'exec',
+        summary: 'running tests'
+      })
+    ).toEqual([{ kind: 'activity', activity: 'working' }]);
+    expect(nativeAgentFactsFor({ kind: 'turn-complete', turnId: 'turn-1' })).toEqual([
+      { kind: 'activity', activity: 'idle' }
+    ]);
   });
 
-  it('starting/exited/crashed are unknown (fail-closed, never coerced to idle)', () => {
-    const starting = createNativeHostState();
-    expect(nativeControlState(starting)).toBe('unknown');
-    const exited = createNativeHostState();
-    applyNativeEvent(exited, { kind: 'exit', code: 0 });
-    expect(nativeControlState(exited)).toBe('unknown');
-    const crashed = createNativeHostState();
-    applyNativeEvent(crashed, { kind: 'crash', code: 1 });
-    expect(nativeControlState(crashed)).toBe('unknown');
+  it('maps permission and provider waits with explicit ownership', () => {
+    expect(
+      nativeAgentFactsFor({
+        kind: 'permission-request',
+        requestId: 'permission-1',
+        variant: 'file-edit',
+        title: 'Approve edit',
+        options: []
+      })
+    ).toEqual([
+      {
+        kind: 'blocked',
+        wait: {
+          kind: 'permission-file-edit',
+          owner: 'operator',
+          detail: 'Approve edit'
+        }
+      }
+    ]);
+    expect(
+      nativeAgentFactsFor({
+        kind: 'attention-hint',
+        attention: 'session-status',
+        detail: 'provider retry'
+      })
+    ).toEqual([
+      {
+        kind: 'blocked',
+        wait: {
+          kind: 'provider-status',
+          owner: 'provider',
+          detail: 'provider retry'
+        }
+      }
+    ]);
+    expect(
+      nativeAgentFactsFor({
+        kind: 'permission-resolved',
+        requestId: 'permission-1',
+        optionId: 'allow',
+        via: 'ui'
+      })
+    ).toEqual([{ kind: 'unblocked' }]);
+  });
+
+  it('degrades a disconnected host to unknown instead of preserving stale work', () => {
+    expect(nativeAgentFactsFor({ kind: 'host-disconnected', detail: 'socket closed' })).toEqual([
+      { kind: 'activity', activity: 'unknown' },
+      {
+        kind: 'health',
+        health: {
+          status: 'degraded',
+          reason: 'native-host-disconnected',
+          detail: 'socket closed'
+        }
+      }
+    ]);
   });
 });
 

@@ -1,7 +1,7 @@
 export interface DaemonControlResult {
   ok: boolean;
   error?: string;
-  /** Parsed response object for payload-bearing successful calls. */
+  /** Parsed response object for payload-bearing success or semantic rejection. */
   body?: Record<string, unknown>;
   /**
    * The daemon's HTTP status when a response was received at all; absent on
@@ -55,21 +55,52 @@ export async function daemonControl(
   payload: unknown,
   options: DaemonControlOptions = {}
 ): Promise<DaemonControlResult> {
+  return daemonRequest(path, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+/**
+ * GET one payload-bearing control resource (the canonical state snapshots).
+ *
+ * Shares the POST path's response handling rather than repeating it: the rules
+ * that matter — a body is trusted only on a 2xx AND `ok:true`, and an
+ * unreachable daemon is a transport error rather than an empty success — are
+ * the ones a second hand-written copy would eventually get wrong.
+ */
+export async function daemonControlGet(
+  path: string,
+  options: DaemonControlOptions = {}
+): Promise<DaemonControlResult> {
+  return daemonRequest(path, options, { method: 'GET' });
+}
+
+async function daemonRequest(
+  path: string,
+  options: DaemonControlOptions,
+  init: RequestInit
+): Promise<DaemonControlResult> {
   const baseUrl = options.baseUrl ?? daemonHttpBase(options.env);
   const url = `${baseUrl.replace(/\/+$/, '')}${path}`;
   try {
     const response = await (options.fetchImpl ?? globalThis.fetch)(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
+      ...init,
       signal: AbortSignal.timeout(options.timeoutMs ?? 10_000)
     });
     const parsed = parseResponseObject(await response.text());
     if (response.ok && parsed?.ok === true) {
       return { ok: true, body: parsed, status: response.status };
     }
-    if (typeof parsed?.error === 'string') {
-      return { ok: false, error: parsed.error, status: response.status };
+    if (parsed !== undefined) {
+      const error =
+        typeof parsed.error === 'string'
+          ? parsed.error
+          : typeof parsed.reason === 'string'
+            ? parsed.reason
+            : `terminal daemon returned HTTP ${response.status}`;
+      return { ok: false, error, status: response.status, body: parsed };
     }
     if (parsed === undefined && response.ok) {
       return {

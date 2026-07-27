@@ -14,6 +14,7 @@ import type { DeskAgent } from '../../../core/types.js';
  *
  * Required env:
  *   DESK_SESSION_ID       — durable session identity (broker hello field, ring key)
+ *   DESK_SESSION_GENERATION — positive daemon generation used to fence native observations
  *   DESK_AGENT            — claude | codex | opencode
  *   DESK_AGENT_BYPASS     — '1' or '0'
  *   DESK_SERVER_URL       — desk server URL (e.g. http://127.0.0.1:5173)
@@ -36,6 +37,13 @@ export function runAgentHostFromEnv(env: NodeJS.ProcessEnv = process.env): Promi
 /** Parse + validate the env contract. Throws on missing/invalid required keys. */
 export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
   const DESK_SESSION_ID = requireEnv(env, 'DESK_SESSION_ID');
+  const generationText = requireEnv(env, 'DESK_SESSION_GENERATION');
+  const DESK_SESSION_GENERATION = Number(generationText);
+  if (!Number.isSafeInteger(DESK_SESSION_GENERATION) || DESK_SESSION_GENERATION < 1) {
+    throw new Error(
+      `DESK_SESSION_GENERATION must be a positive integer; got ${JSON.stringify(generationText)}`
+    );
+  }
   const DESK_AGENT = requireEnv(env, 'DESK_AGENT') as DeskAgent;
   if (!isDeskAgent(DESK_AGENT)) {
     throw new Error(`DESK_AGENT must be one of claude | codex | opencode | bash; got ${String(DESK_AGENT)}`);
@@ -49,6 +57,7 @@ export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
 
   const result: AgentHostEnv = {
     DESK_SESSION_ID,
+    DESK_SESSION_GENERATION,
     DESK_AGENT,
     DESK_AGENT_BYPASS,
     DESK_SERVER_URL,

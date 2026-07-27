@@ -2,8 +2,12 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname } from 'node:path';
 import { readJsonBody, sendJson } from './httpUtil.js';
-import { addAgentSignalListener, attentionTracker } from './attention.js';
 import { loadDesk, loadDeskCached } from '../core/runner.js';
+import {
+  daemonControl,
+  type DaemonControlResult
+} from '../shared/daemonControlClient.js';
+import type { ChannelMessageDeskEventInput } from '../shared/controlPlane/index.js';
 import { createNativeChannelsTransport } from './runtime/nativeSessionControl.js';
 import { buildOnboardingPrompt, ChannelsEngine } from './channelsEngine.js';
 import {
@@ -66,6 +70,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentSurfaceBroker } from './agentSurfaceBroker.js';
+import { readAgentStatePulse } from './agentStatePulse.js';
 
 /**
  * /api/channels/* — slack-like messaging between desk agents over the
@@ -86,8 +91,6 @@ interface ChannelsRuntime {
   home: string;
   engine: ChannelsEngine;
   watcher: ChannelsWatcher;
-  /** unsubscribes the engine from agent turn signals */
-  removeSignalListener: () => void;
 }
 
 let runtime: ChannelsRuntime | undefined;
@@ -95,13 +98,23 @@ let runtime: ChannelsRuntime | undefined;
 export interface ChannelsRuntimeOptions {
   home?: string;
   agentSurfaceBroker?: ChannelDeliveryBroker;
+  channelEventPublisher?: ChannelEventPublisher;
 }
+
+export type ChannelEventPublisher = (
+  input: ChannelMessageDeskEventInput
+) => Promise<DaemonControlResult>;
+
+const defaultChannelEventPublisher: ChannelEventPublisher = (input) =>
+  daemonControl('/control/events/channel', input);
 
 export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): ChannelsRuntime {
   if (runtime) {
     return runtime;
   }
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
+  const publishChannelEvent =
+    options.channelEventPublisher ?? defaultChannelEventPublisher;
   let engine!: ChannelsEngine;
   // Terminal-session delivery rides the daemon control plane — the ONLY
   // transport (Track B: the legacy transport is gone). The uiMode=native broker path is
@@ -158,16 +171,41 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     },
     onChannelMessage: (channel, file, message, pingsHuman) => {
       const authorSession =
-        listChannelMembers(home, channel).find((member) => member.name === message.author)?.sessionId ?? '';
-      const preview = message.body.replace(/\s+/g, ' ').slice(0, 200);
-      attentionTracker.pushEvent(
-        authorSession,
-        'channel',
-        `${pingsHuman ? '@human · ' : ''}#${channel} @${message.author}: ${preview}`,
-        {
-          channel,
-          messageId: message.id,
-          thread: file.startsWith('thread-') ? file.slice('thread-'.length, -'.md'.length) : undefined
+        listChannelMembers(home, channel).find(
+          (member) => member.name === message.author
+        )?.sessionId;
+      const event: ChannelMessageDeskEventInput = {
+        ...(authorSession === undefined ? {} : { sessionId: authorSession }),
+        channel,
+        messageId: message.id,
+        ...(file.startsWith('thread-')
+          ? {
+              thread: file.slice(
+                'thread-'.length,
+                -'.md'.length
+              )
+            }
+          : {}),
+        author: message.author,
+        mentionsOperator: pingsHuman,
+        message: message.body.replace(/\s+/g, ' ').trim().slice(0, 10_000)
+      };
+      void publishChannelEvent(event).then(
+        (result) => {
+          if (!result.ok) {
+            console.error(
+              `channel event journal rejected ${channel}/${message.id}: ${
+                result.error ?? 'unknown error'
+              }`
+            );
+          }
+        },
+        (error) => {
+          console.error(
+            `channel event journal unavailable for ${channel}/${message.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
         }
       );
     },
@@ -185,20 +223,13 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
         uiMode: spec.uiMode
       };
     },
-    nativeSessionState: (sessionId) => options.agentSurfaceBroker?.nativeDeliveryState(sessionId) ?? 'offline',
-    sessionRunning: nativeTransport.sessionRunning,
+    readAgentStates: readAgentStatePulse,
     capturePane: nativeTransport.capturePane,
-    sendEnter: nativeTransport.sendEnter,
-    sessionCreatedAt: nativeTransport.sessionCreatedAt
+    sendEnter: nativeTransport.sendEnter
   });
   const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
   watcher.start();
-  const removeSignalListener = addAgentSignalListener((sessionId, kind) => {
-    if (kind === 'turn-complete' || kind === 'bell' || kind === 'approval-requested' || kind === 'input-requested') {
-      engine.handleAgentSignal(sessionId, kind);
-    }
-  });
-  runtime = { home, engine, watcher, removeSignalListener };
+  runtime = { home, engine, watcher };
   return runtime;
 }
 
@@ -221,7 +252,6 @@ function resumeEngineSession(home: string, engine: ChannelsEngine, sessionId: st
 export function disposeChannelsRuntime(): void {
   runtime?.watcher.stop();
   runtime?.engine.dispose();
-  runtime?.removeSignalListener();
   runtime = undefined;
 }
 
@@ -258,7 +288,7 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
   '.log': 'text/plain; charset=utf-8'
 };
 
-type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage' | 'nativeDeliveryState'>;
+type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage'>;
 
 interface ChannelDeliverySession {
   sessionId: string;
@@ -416,7 +446,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       sendJson(res, 200, {
         home,
         channels: listChannels(home),
-        delivery: engine.lifecycleStates(),
+        delivery: await engine.lifecycleStates(),
         activity: engine.listActivity(since).slice(-100),
         activitySeq: engine.latestActivitySeq(),
         // another live desk process owns dispatch for this channels home
@@ -435,7 +465,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         home,
         passive: engine.passive,
         pumpAlive: engine.pumpAlive(),
-        totalQueued: sessions.reduce((sum, session) => sum + session.queued, 0),
+        totalQueued: sessions.reduce((sum, session) => sum + session.queueDepth, 0),
         sessions,
         activity: engine.listActivity(0).slice(-100)
       });
@@ -447,9 +477,6 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const action = requireString(body.action, 'action');
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined;
       switch (action) {
-        case 'mark-idle':
-          engine.markIdle(requireString(sessionId, 'sessionId'));
-          break;
         case 'pause-session':
           pauseEngineSession(home, engine, requireString(sessionId, 'sessionId'), typeof body.reason === 'string' ? body.reason : undefined);
           break;
@@ -746,7 +773,6 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         }),
         `onboard-${channel}`
       );
-      engine.markIdle(sessionKey);
       sendJson(res, 200, { ok: true, member, members: listChannelMembers(home, channel) });
       return true;
     }
@@ -754,7 +780,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/queue-clear') {
       const body = await readJsonBody(req);
       engine.dropQueue(requireString(body.sessionId, 'sessionId'));
-      sendJson(res, 200, { ok: true, delivery: engine.lifecycleStates() });
+      sendJson(res, 200, { ok: true, delivery: await engine.lifecycleStates() });
       return true;
     }
 

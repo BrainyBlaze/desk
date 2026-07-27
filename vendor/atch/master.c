@@ -72,12 +72,31 @@ struct client {
 	uint32_t v3_generation;
 	uint64_t v3_record_seq;
 	uint64_t v3_output_offset;
+	/*
+	** Frame-level tx counter for CONNECTION-LOCAL control frames. Kept apart
+	** from v3_record_seq, which is the durable per-session record order: a
+	** non-durable frame must never consume a record sequence number, or the
+	** journal's total order would gain holes.
+	*/
+	uint64_t v3_tx_seq;
 	atch_v3_reassembler v3_reassembler;
 };
 
 enum {
 	V3_HELLO = 1, V3_ATTACH = 2, V3_ATTACH_ACK = 3, V3_INPUT = 18,
-	V3_RESIZE = 21, V3_OUTPUT = 16
+	V3_RESIZE = 21, V3_OUTPUT = 16,
+	/*
+	** TERMINAL_STATE (master->daemon, connection-local, non-durable): the
+	** child's live ANSI mode state as a blob32 preamble. A controller that
+	** re-attaches to a running master arrives with a FRESH emulator that never
+	** witnessed the child enabling its modes; without this it cannot know, and
+	** the one that bites is bracketed paste (DECSET 2004) — the channels
+	** transport stops wrapping pasted prompts, the agent TUI ingests them line
+	** by line, and the submit Enter is taken as a literal newline, leaving a
+	** delivered message unsent in the composer. Additive and skippable: a peer
+	** that does not know the type ignores it and behaves exactly as before.
+	*/
+	V3_TERMINAL_STATE = 84
 };
 
 static void client_drop(struct client *p)
@@ -154,7 +173,30 @@ static int v3_dispatch(struct client *p, const atch_v3_frame *f)
 		ack[102] = (unsigned char)p->v3_caps; ack[103] = (unsigned char)(p->v3_caps >> 8);
 		ack[104] = (unsigned char)(p->v3_caps >> 16); ack[105] = (unsigned char)(p->v3_caps >> 24);
 		p->attached = 1;
-		v3_send(p, V3_ATTACH_ACK, p->v3_generation, 0, ack, sizeof(ack));
+		/*
+		** Restate the child's terminal modes BEFORE the ACK, so the daemon
+		** has applied them to its fresh emulator by the time the attach
+		** resolves and the first live output can arrive. generation 0 marks
+		** the frame as outside the generation fence: it describes the
+		** connection being established, not a position in the session's
+		** durable stream, so it carries no record_seq and no output_offset
+		** and is sequenced from the connection-local tx counter.
+		*/
+		{
+			unsigned char preamble[1024];
+			unsigned char payload[4 + sizeof(preamble)];
+			size_t plen = tstate_emit_preamble(preamble, sizeof(preamble));
+
+			if (plen > 0) {
+				payload[0] = (unsigned char)plen;
+				payload[1] = (unsigned char)(plen >> 8);
+				payload[2] = (unsigned char)(plen >> 16);
+				payload[3] = (unsigned char)(plen >> 24);
+				memcpy(payload + 4, preamble, plen);
+				v3_send(p, V3_TERMINAL_STATE, 0, ++p->v3_tx_seq, payload, 4 + plen);
+			}
+		}
+		v3_send(p, V3_ATTACH_ACK, p->v3_generation, ++p->v3_tx_seq, ack, sizeof(ack));
 		return 0;
 	}
 	if (f->generation != p->v3_generation || !p->attached)
@@ -844,7 +886,10 @@ static void pty_activity(int s)
 			inner[h++] = (unsigned char)(len >> 16); inner[h++] = (unsigned char)(len >> 24);
 			memcpy(inner + h, buf, (size_t)len); h += (size_t)len;
 			{ uint32_t crc = atch_v3_crc32(inner, h); for (n = 0; n < 4; n++) inner[h++] = (unsigned char)(crc >> (8*n)); }
-			n = atch_v3_encode_header(frame, sizeof(frame), V3_OUTPUT, 0, vp->v3_generation, vp->v3_record_seq, 0, (uint32_t)h);
+			/* Header sequence is the CONNECTION sequence (spec 1.1: per-direction
+			** monotonic); record_seq/generation/output_offset inside the envelope
+			** carry the durable identity. */
+			n = atch_v3_encode_header(frame, sizeof(frame), V3_OUTPUT, 0, vp->v3_generation, ++vp->v3_tx_seq, 0, (uint32_t)h);
 			memcpy(frame + n, inner, h); write_buf_or_fail(vp->fd, frame, n + h);
 			vp->v3_output_offset += (uint64_t)len;
 		}
@@ -972,7 +1017,7 @@ static void control_activity(int s)
 	p->v3_rx_cap = p->v3_rx_len = 0;
 	p->v3_hello = 0;
 	p->v3_caps = p->v3_generation = 0;
-	p->v3_record_seq = p->v3_output_offset = 0;
+	p->v3_record_seq = p->v3_output_offset = p->v3_tx_seq = 0;
 	atch_v3_reassembler_init(&p->v3_reassembler);
 	p->pprev = &clients;
 	p->next = *(p->pprev);

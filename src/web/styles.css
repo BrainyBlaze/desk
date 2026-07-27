@@ -1102,6 +1102,11 @@ select:focus {
    (fading to transparent), not a box-shadow: the agents tree's .treeMain has
    `overflow: hidden`, which clipped a box-shadow glow into a square at the dot's
    edge. Self-contained gradients can't be clipped, so the dots stay round. */
+/* An unreachable journal must not look like a quiet one. */
+.notifEmpty.error {
+  color: var(--desk-error, #ff4d6d);
+}
+
 .statusDot {
   flex: none;
   width: 9px;
@@ -1109,13 +1114,46 @@ select:focus {
   border-radius: 50%;
 }
 
+/* Liveness only — a non-agent session (a shell) has no activity to show. */
 .statusDot.running {
   background: radial-gradient(circle, #c4ffec 0%, #21f7a3 34%, rgba(33, 247, 163, 0.4) 60%, rgba(33, 247, 163, 0) 80%);
   animation: deskDotPulse 2.4s ease-in-out infinite;
 }
 
+/* The agent is generating RIGHT NOW: the one green that moves. */
+.statusDot.working {
+  background: radial-gradient(circle, #c4ffec 0%, #21f7a3 34%, rgba(33, 247, 163, 0.4) 60%, rgba(33, 247, 163, 0) 80%);
+  animation: deskDotPulse 1.6s ease-in-out infinite;
+}
+
+/* A finished turn: alive, at rest. Steady on purpose — a resting agent that
+   pulses is indistinguishable from a working one at a glance. */
+.statusDot.idle {
+  background: radial-gradient(circle, #bfefff 0%, #3fbcd8 40%, rgba(63, 188, 216, 0.35) 65%, rgba(63, 188, 216, 0) 82%);
+}
+
+/* Stopped on someone who is not the operator (a provider retry). Visible,
+   deliberately NOT animated: it must not read as a summons. */
+.statusDot.waiting {
+  background: radial-gradient(circle, #ffe9a8 0%, #d9a441 38%, rgba(217, 164, 65, 0.32) 64%, rgba(217, 164, 65, 0) 82%);
+}
+
+/* No evidence. Hollow rather than coloured: an empty ring reads as "we do not
+   know", where any fill would read as a state we are asserting. */
+.statusDot.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px rgba(190, 205, 215, 0.55);
+}
+
+.statusDot.exited,
 .statusDot.missing {
   background: radial-gradient(circle, #ffc6d2 0%, var(--desk-error, #ff4d6d) 34%, rgba(255, 77, 109, 0.4) 60%, rgba(255, 77, 109, 0) 80%);
+}
+
+/* Health rides alongside the state instead of replacing it: the dot keeps its
+   own colour and gains a ring, so a rate-limited idle session still reads idle. */
+.statusDot.degraded {
+  box-shadow: 0 0 0 1.5px rgba(255, 138, 76, 0.75);
 }
 
 @keyframes deskDotPulse {
@@ -1147,6 +1185,7 @@ select:focus {
 
 @media (prefers-reduced-motion: reduce) {
   .statusDot.running,
+  .statusDot.working,
   .statusDot.attention {
     animation: none;
   }
@@ -5530,13 +5569,35 @@ button.layoutBadge:hover:not(:disabled) {
   opacity: 0.85;
 }
 
-.nativeAgentStatus.state-processing,
-.nativeAgentStatus.state-tool-executing {
+/* Same tone vocabulary as the session dot, so the header and the sidebar row
+   for one session can never read differently. */
+.nativeAgentStatus.state-working {
+  color: var(--desk-ok, #21f7a3);
+}
+
+.nativeAgentStatus.state-idle {
+  color: #3fbcd8;
+}
+
+/* Waiting on someone who is not the operator: readable, not alarming. */
+.nativeAgentStatus.state-waiting {
   color: var(--desk-warn);
 }
 
-.nativeAgentStatus.state-awaiting-permission {
+/* The operator personally has to act — the one status that raises its voice. */
+.nativeAgentStatus.state-attention {
   color: color-mix(in srgb, var(--desk-warn) 55%, var(--desk-error));
+}
+
+/* No evidence. Dimmed rather than coloured: any colour would assert a state. */
+.nativeAgentStatus.state-unknown {
+  color: var(--desk-dim, #8ea3ad);
+  opacity: 0.65;
+}
+
+.nativeAgentStatus.state-degraded {
+  color: color-mix(in srgb, var(--desk-warn) 70%, var(--desk-error));
+  margin-left: 8px;
 }
 
 .nativeAgentStatus.state-error,

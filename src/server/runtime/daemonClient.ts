@@ -6,6 +6,7 @@
 
 import { connect, type Socket } from 'node:net';
 import { decodeResponse, encodeRequest, RpcError, type RpcResponse } from '../../shared/runtime/rpcEnvelope.js';
+import type { SessionStateSnapshot } from '../../shared/controlPlane/index.js';
 
 export class DaemonClient {
   private sock: Socket | null = null;
@@ -78,10 +79,10 @@ export class DaemonClient {
   ensure(sessionId: string, rows: number, cols: number): Promise<{ generation: number; created: boolean }> {
     return this.ok('ensure', { sessionId, rows, cols });
   }
-  list(): Promise<{ sessionId: string; generation: number; state: string; source: string }[]> {
+  list(): Promise<SessionStateSnapshot[]> {
     return this.ok('list');
   }
-  state(sessionId: string): Promise<{ state: string; source: string; generation: number }> {
+  state(sessionId: string): Promise<SessionStateSnapshot> {
     return this.ok('state', { sessionId });
   }
   retire(sessionId: string): Promise<{ retired: boolean }> {

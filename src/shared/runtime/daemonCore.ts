@@ -6,14 +6,26 @@
 // shell added at integration; this is the logic they drive.
 
 import { GenerationLedger } from '../controlPlane/generationLedger.js';
-import { InMemoryIntakeStore, type ControlState, type Source } from '../controlPlane/index.js';
+import {
+  AgentStateAuthority,
+  InMemoryAgentStateIntakeStore,
+  acceptAgentStateEvent,
+  type AgentStateIntakeResult,
+  type AgentStateIntakeStore,
+  type AgentHealthInput,
+  type AgentStateProducerRegistration,
+  type AuthorityMutationResult,
+  type SessionRegistration,
+  type SessionStateSnapshot,
+  type SessionStateTransition,
+} from '../controlPlane/index.js';
 import { InMemoryCmdCache } from '../delivery/index.js';
 import { type BpFrame } from '../browserProtocol/index.js';
 import { type RawFrame } from '../atchWire/codec.js';
 import { type RecordEnvelope } from '../atchWire/messages.js';
 import { WorkerSupervisor } from './workerSupervisor.js';
-import { type EmulatorEvent, type EmulatorFactory } from './emulatorPort.js';
-import { SessionRuntime, type HookInput } from './sessionRuntime.js';
+import { type EmulatorFactory } from './emulatorPort.js';
+import { SessionRuntime } from './sessionRuntime.js';
 import { createLeaseState, claim, release, type ClaimResult, type LeaseState } from '../lease/index.js';
 import { decideStop } from './instanceLock.js';
 
@@ -26,12 +38,20 @@ export interface DaemonCoreDeps {
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
   /** Send a frame to a session's atch master. */
   sendMaster: (sessionId: string, frame: RawFrame) => void;
-  /**
-   * Attention-relevant semantic events from the authoritative emulator (§6.6):
-   * bell + OSC9, the atch-native replacement for the legacy bell poller.
-   * Optional — a daemon without an attention consumer just drops them.
-   */
-  onSemanticEvent?: (sessionId: string, event: EmulatorEvent) => void;
+  workingLeaseMs?: number;
+  openToolLeaseMs?: number;
+  initialAgentHealth?: (
+    subject: Extract<SessionRegistration['subject'], { kind: 'agent' }>
+  ) => AgentHealthInput | undefined;
+  createAgentStateIntakeStore?: (dependencies: {
+    currentGeneration: (sessionId: string) => number;
+    expectedProducer: (
+      sessionId: string,
+      generation: number
+    ) => AgentStateProducerRegistration | undefined;
+    now: () => number;
+  }) => AgentStateIntakeStore;
+  onStateTransition?: (transition: SessionStateTransition) => void;
 }
 
 interface SessionEntry {
@@ -48,11 +68,17 @@ export type RestoreResult =
   | { ok: true; generation: number }
   | { ok: false; reason: 'cap-exceeded' | 'no-generation' | 'already-live' };
 
+export type DaemonAgentStateIntakeResult =
+  | (Extract<AgentStateIntakeResult, { kind: 'accepted' }> & {
+      mutation: AuthorityMutationResult;
+    })
+  | Exclude<AgentStateIntakeResult, { kind: 'accepted' }>;
+
 export class DaemonCore {
   private readonly d: DaemonCoreDeps;
   private readonly sessions = new Map<string, SessionEntry>();
-  /** One shared intake store (keyed by sessionId internally, §6.5 single allocator). */
-  private readonly intakeStore = new InMemoryIntakeStore();
+  private readonly authority: AgentStateAuthority;
+  private readonly agentStateIntakeStore: AgentStateIntakeStore;
   private readonly cmdCache = new InMemoryCmdCache();
   /** Global monotonic channelId allocator (§7.4) — never reused across sessions. */
   private nextChannelId = 1;
@@ -61,6 +87,21 @@ export class DaemonCore {
 
   constructor(deps: DaemonCoreDeps) {
     this.d = deps;
+    this.authority = new AgentStateAuthority({
+      now: deps.now,
+      workingLeaseMs: deps.workingLeaseMs ?? 15_000,
+      openToolLeaseMs: deps.openToolLeaseMs ?? 30 * 60_000,
+      ...(deps.onStateTransition === undefined ? {} : { onTransition: deps.onStateTransition })
+    });
+    const intakeDependencies = {
+      currentGeneration: (sessionId: string) => this.d.ledger.current(sessionId),
+      expectedProducer: (sessionId: string, generation: number) =>
+        this.expectedProducer(sessionId, generation),
+      now: deps.now
+    };
+    this.agentStateIntakeStore =
+      deps.createAgentStateIntakeStore?.(intakeDependencies) ??
+      new InMemoryAgentStateIntakeStore(intakeDependencies);
   }
 
   /**
@@ -69,41 +110,68 @@ export class DaemonCore {
    * durable ledger (§4.8.1) — so a reused sessionId after retire gets a HIGHER
    * generation, never a reset that would defeat the §6.3 fence.
    */
-  ensure(sessionId: string, geometry: { rows: number; cols: number }): EnsureResult {
+  ensure(
+    sessionId: string,
+    geometry: { rows: number; cols: number },
+    subject: SessionRegistration['subject'] = { kind: 'terminal' }
+  ): EnsureResult {
     const existing = this.sessions.get(sessionId);
-    if (existing !== undefined) return { ok: true, generation: existing.generation, created: false };
+    if (existing !== undefined) {
+      this.registerAuthoritySession(sessionId, existing.generation, subject);
+      return { ok: true, generation: existing.generation, created: false };
+    }
 
     const admit = this.d.supervisor.admit(sessionId, this.d.now());
     if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
 
     const generation = this.d.ledger.allocate(sessionId); // durable, fsync-before-spawn
-    this.admitSession(sessionId, geometry, generation);
+    this.admitSession(sessionId, geometry, generation, subject);
     return { ok: true, generation, created: true };
   }
 
   /** Shared session bring-up for ensure (fresh generation) + restore (adopted). */
-  private admitSession(sessionId: string, geometry: { rows: number; cols: number }, generation: number): void {
-    const emulator = this.d.emulatorFactory.create(geometry);
-    // BEL/OSC9 → attention (the legacy bell poller's native replacement).
-    // Filtered here so consumers only ever see attention-relevant kinds; the
-    // subscription dies with the emulator on retire.
-    if (this.d.onSemanticEvent !== undefined) {
-      const forward = this.d.onSemanticEvent;
-      emulator.onEvent((event) => {
-        if (event.kind === 'bell' || (event.kind === 'osc' && event.code === 9)) {
-          forward(sessionId, event);
-        }
-      });
+  private admitSession(
+    sessionId: string,
+    geometry: { rows: number; cols: number },
+    generation: number,
+    subject: SessionRegistration['subject']
+  ): void {
+    this.registerAuthoritySession(sessionId, generation, subject);
+    if (subject.kind === 'agent' && this.d.initialAgentHealth !== undefined) {
+      let health: AgentHealthInput | undefined;
+      try {
+        health = this.d.initialAgentHealth(subject);
+      } catch (error) {
+        // The probe is optional diagnostics and must not block admission.
+        // Authority or transition-journal failures below remain fatal.
+        const detail = (
+          error instanceof Error ? error.message : String(error)
+        ).trim().slice(0, 2_000);
+        health = {
+          status: 'degraded',
+          reason: 'hook-preflight-failed',
+          ...(detail.length === 0 ? {} : { detail })
+        };
+      }
+      if (health !== undefined) {
+        this.assessAgentHealth(sessionId, generation, health);
+      }
     }
+    const emulator = this.d.emulatorFactory.create(geometry);
     const runtime = new SessionRuntime({
       sessionId,
       generation,
       emulator,
-      intakeStore: this.intakeStore,
       cmdCache: this.cmdCache,
       now: this.d.now,
       sendBrowser: (channelId, frame) => this.d.sendBrowser(sessionId, channelId, frame),
-      sendMaster: (frame) => this.d.sendMaster(sessionId, frame)
+      sendMaster: (frame) => this.d.sendMaster(sessionId, frame),
+      onExit: (exit) => {
+        this.authority.markExited(sessionId, generation, {
+          code: exit.code,
+          signal: exit.signal === 0 ? null : String(exit.signal)
+        });
+      }
     });
     this.sessions.set(sessionId, { runtime, lease: createLeaseState(), generation });
   }
@@ -117,7 +185,11 @@ export class DaemonCore {
    * sessionId (an unknown socket is not adoptable — its generation is
    * unknowable) or the session is already live.
    */
-  restore(sessionId: string, geometry: { rows: number; cols: number }): RestoreResult {
+  restore(
+    sessionId: string,
+    geometry: { rows: number; cols: number },
+    subject: SessionRegistration['subject'] = { kind: 'terminal' }
+  ): RestoreResult {
     if (this.sessions.has(sessionId)) return { ok: false, reason: 'already-live' };
     const generation = this.d.ledger.current(sessionId);
     if (generation === 0) return { ok: false, reason: 'no-generation' };
@@ -125,7 +197,7 @@ export class DaemonCore {
     const admit = this.d.supervisor.admit(sessionId, this.d.now());
     if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
 
-    this.admitSession(sessionId, geometry, generation);
+    this.admitSession(sessionId, geometry, generation, subject);
     return { ok: true, generation };
   }
 
@@ -135,6 +207,10 @@ export class DaemonCore {
    * higher generation (§4.8.1).
    */
   retire(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry !== undefined) {
+      this.authority.markExited(sessionId, entry.generation, { code: null, signal: null });
+    }
     this.sessions.delete(sessionId);
     this.d.supervisor.release(sessionId);
     for (const [ch, sid] of this.channelToSession) if (sid === sessionId) this.channelToSession.delete(ch);
@@ -145,22 +221,100 @@ export class DaemonCore {
     return decideStop(this.sessions.size, forced);
   }
 
-  list(): { sessionId: string; generation: number; state: ControlState; source: Source }[] {
-    const out: { sessionId: string; generation: number; state: ControlState; source: Source }[] = [];
-    for (const [sessionId, e] of this.sessions) {
-      const s = e.runtime.currentState();
-      out.push({ sessionId, generation: e.generation, state: s.state, source: s.source });
-    }
-    return out;
+  list(): SessionStateSnapshot[] {
+    return this.authority.list();
   }
 
-  state(sessionId: string): { state: ControlState; source: Source; generation: number } | undefined {
-    return this.sessions.get(sessionId)?.runtime.currentState();
+  state(sessionId: string): SessionStateSnapshot | undefined {
+    return this.authority.snapshot(sessionId);
+  }
+
+  hasLiveSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
+  stateSnapshot(sessionId: string): SessionStateSnapshot | undefined {
+    return this.authority.snapshot(sessionId);
+  }
+
+  stateSnapshots(): { revision: number; snapshots: SessionStateSnapshot[] } {
+    return this.authority.snapshotView();
+  }
+
+  markRunning(sessionId: string, generation: number): AuthorityMutationResult {
+    return this.authority.markRunning(sessionId, generation);
+  }
+
+  assessAgentHealth(
+    sessionId: string,
+    generation: number,
+    health: AgentHealthInput
+  ): AuthorityMutationResult {
+    return this.authority.assessAgentHealth(sessionId, generation, health);
+  }
+
+  ingestAgentState(input: unknown): DaemonAgentStateIntakeResult {
+    const result = acceptAgentStateEvent(input, this.agentStateIntakeStore);
+    if (result.kind !== 'accepted') return result;
+    return {
+      ...result,
+      mutation: this.authority.ingest(result.event)
+    };
+  }
+
+  private expectedProducer(
+    sessionId: string,
+    generation: number
+  ): AgentStateProducerRegistration | undefined {
+    const snapshot = this.authority.snapshot(sessionId);
+    if (
+      snapshot === undefined ||
+      snapshot.generation !== generation ||
+      snapshot.lifecycle === 'exited' ||
+      snapshot.subject.kind !== 'agent'
+    ) {
+      return undefined;
+    }
+    return {
+      provider: snapshot.subject.provider,
+      mode: snapshot.subject.mode,
+      producer: snapshot.subject.producer
+    };
+  }
+
+  private registerAuthoritySession(
+    sessionId: string,
+    generation: number,
+    subject: SessionRegistration['subject']
+  ): void {
+    if (subject.kind === 'terminal') {
+      this.authority.registerSession({
+        sessionId,
+        generation,
+        lifecycle: 'starting',
+        subject
+      });
+      return;
+    }
+    this.authority.registerSession({
+      sessionId,
+      generation,
+      lifecycle: 'starting',
+      subject
+    });
   }
 
   // ---- routing to a session's runtime ---------------------------------------
   onMasterRecord(sessionId: string, rec: RecordEnvelope): void {
     this.sessions.get(sessionId)?.runtime.onMasterRecord(rec);
+  }
+
+  /** Apply non-durable terminal parser state before an attach becomes usable. */
+  async onMasterTerminalState(sessionId: string, preamble: Uint8Array): Promise<boolean> {
+    const runtime = this.sessions.get(sessionId)?.runtime;
+    if (runtime === undefined) return false;
+    await runtime.applyTerminalState(preamble);
+    return true;
   }
 
   /**
@@ -243,10 +397,6 @@ export class DaemonCore {
     if (sessionId === undefined) return false;
     this.sessions.get(sessionId)?.runtime.onBrowserQueryReply(channelId, queryOffset, leaseEpoch, bytes);
     return true;
-  }
-
-  ingestHook(sessionId: string, hook: HookInput): ReturnType<SessionRuntime['ingestHook']> | undefined {
-    return this.sessions.get(sessionId)?.runtime.ingestHook(hook);
   }
 
   // ---- controller lease (§7.9) ----------------------------------------------

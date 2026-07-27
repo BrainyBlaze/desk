@@ -1,6 +1,13 @@
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 import type { DeskLspUiSettings } from '../core/lspSettings.js';
 import type { AgentProfile, ProfileProvider } from '../core/types.js';
+import type {
+  DeskEventClearResponse,
+  DeskEventFeedResponse,
+  DeskEventReadRequest,
+  DeskEventReadResponse,
+  SessionStateSnapshot
+} from '../shared/controlPlane/index.js';
 import { readJson } from './httpJson.js';
 
 interface LayoutPayload {
@@ -97,41 +104,38 @@ export async function deleteAgentProfile(id: string): Promise<AgentProfilesRespo
   );
 }
 
-export type AgentEventKind = 'turn-complete' | 'approval-requested' | 'input-requested' | 'bell' | 'channel';
-
-export interface AgentEvent {
-  id: string;
-  sessionId: string;
-  kind: AgentEventKind;
-  message?: string;
-  at: string;
-  read: boolean;
-  /** channel events: navigation anchor */
-  channel?: string;
-  messageId?: string;
-  thread?: string;
-}
-
-export interface AttentionSnapshot {
-  sessions: Record<string, { attention: true; since: string }>;
-  events: AgentEvent[];
-  unread: number;
+/**
+ * The authority's canonical state for this read.
+ *
+ * `revision` is the authority-wide read revision; an individual snapshot's own
+ * `revision` may be lower (that session simply has not changed since). Every
+ * surface in the tab renders from ONE of these reads, which is what makes it
+ * impossible for the sidebar and the channels footer to disagree.
+ */
+export interface AgentStatesPayload {
+  revision: number;
+  snapshots: SessionStateSnapshot[];
 }
 
 export interface DeskPulse {
   system: SystemSnapshot;
-  attention: AttentionSnapshot;
+  /**
+   * Absent when the authority is unreachable. A partial pulse is deliberate:
+   * telemetry must keep flowing when state cannot be read, and an absent key
+   * renders as `unknown` — which is true — instead of an invented empty state.
+   */
+  agentStates?: AgentStatesPayload;
   /** every live durable session ID — patches run-states without a snapshot fetch */
-  running: string[];
+  running?: string[];
 }
 
-/** One merged request per poll tick: system metrics + attention + liveness. */
+/** One merged request per poll tick: system metrics + canonical state + liveness. */
 export async function fetchPulse(): Promise<DeskPulse> {
   return readJson(fetch('/api/pulse'));
 }
 
-export async function fetchAttention(): Promise<AttentionSnapshot> {
-  return readJson(fetch('/api/attention'));
+export async function fetchAgentStates(): Promise<AgentStatesPayload> {
+  return readJson(fetch('/api/agent-states'));
 }
 
 export type DeskAutosaveMode = 'off' | 'after-delay' | 'on-focus-change';
@@ -225,19 +229,21 @@ export async function fetchDetectedLanguages(
   return readJson(fetch(`/api/lsp/detected-languages?${params.toString()}`));
 }
 
-export async function clearAllEvents(): Promise<void> {
-  await readJson(
-    fetch('/api/attention-read', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clear: true })
-    })
-  );
+/**
+ * The unified event feed. One journal carries both agent transitions and
+ * channel notifications, so the drawer has a single ordering and a single
+ * unread count instead of two feeds racing each other.
+ *
+ * Acknowledgement is journal-only: `read` and `clear` change what the operator
+ * has looked at, never what an agent is doing and never a session lamp.
+ */
+export async function fetchEvents(limit = 200): Promise<DeskEventFeedResponse> {
+  return readJson(fetch(`/api/events?limit=${limit}`));
 }
 
-export async function markEventsRead(payload: { ids?: string[]; all?: boolean; kinds?: AgentEventKind[] }): Promise<void> {
-  await readJson(
-    fetch('/api/attention-read', {
+export async function markEventsRead(payload: DeskEventReadRequest): Promise<DeskEventReadResponse> {
+  return readJson(
+    fetch('/api/events/read', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload)
@@ -245,15 +251,10 @@ export async function markEventsRead(payload: { ids?: string[]; all?: boolean; k
   );
 }
 
-export async function clearAttention(session: string): Promise<void> {
-  await readJson(
-    fetch('/api/attention-clear', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ session })
-    })
-  );
+export async function clearAllEvents(): Promise<DeskEventClearResponse> {
+  return readJson(fetch('/api/events', { method: 'DELETE' }));
 }
+
 
 export async function killAllAgents(): Promise<{ killedSessions: string[]; killedPids: number[]; errors: string[] }> {
   return readJson(

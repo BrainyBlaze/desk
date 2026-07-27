@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt } from '../src/server/channelsEngine.js';
 import { claimDelivering, confirmDelivered, listStuckItems } from '../src/server/channelsDurability.js';
 import { isSeedCommitted } from '../src/server/cutoverStoreMigration.js';
+import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const fsFaults = vi.hoisted(() => ({ failQueueJsonRm: false, failPersistQueueScan: false, queueDirReads: 0 }));
 
@@ -84,6 +85,7 @@ describe('ChannelsEngine restore consume safety', () => {
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 100000,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText: async () => {
         sends += 1;
         return true;
@@ -98,7 +100,7 @@ describe('ChannelsEngine restore consume safety', () => {
     fsFaults.failPersistQueueScan = true;
     const first = new ChannelsEngine(engineOptions);
     await waitFor(() => sends === 1);
-    expect(first.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
+    expect((await first.lifecycleStates()).find((entry) => entry.sessionId === 'tmux-a')?.queueDepth).toBe(0);
     expect(sends).toBe(1);
     expect(fsFaults.queueDirReads).toBeGreaterThanOrEqual(2);
     first.dispose();
@@ -107,7 +109,7 @@ describe('ChannelsEngine restore consume safety', () => {
     fsFaults.failPersistQueueScan = false;
     const second = new ChannelsEngine(engineOptions);
     await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(second.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
+    expect((await second.lifecycleStates()).find((entry) => entry.sessionId === 'tmux-a')?.queueDepth).toBe(0);
     expect(sends).toBe(1);
     second.dispose();
   });
@@ -135,6 +137,7 @@ describe('ChannelsEngine restore consume safety', () => {
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 100000,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText: async () => {
         sends += 1;
         return true;
@@ -146,7 +149,7 @@ describe('ChannelsEngine restore consume safety', () => {
     });
 
     await waitFor(() => sends === 1);
-    expect(restored.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
+    expect((await restored.lifecycleStates()).find((entry) => entry.sessionId === 'tmux-a')?.queueDepth).toBe(0);
     expect(sends).toBe(1);
     restored.dispose();
   });
@@ -175,6 +178,7 @@ describe('ChannelsEngine restore consume safety', () => {
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 100000,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText: async () => {
         sends += 1;
         return true;
@@ -186,7 +190,7 @@ describe('ChannelsEngine restore consume safety', () => {
     });
 
     await waitFor(() => sends === 1);
-    expect(restored.lifecycleStates().find((entry) => entry.sessionId === 'tmux-a')?.queued).toBe(0);
+    expect((await restored.lifecycleStates()).find((entry) => entry.sessionId === 'tmux-a')?.queueDepth).toBe(0);
     expect(sends).toBe(1);
     restored.dispose();
   });

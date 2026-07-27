@@ -138,7 +138,8 @@ export const FRAME_SCHEMA: Partial<Record<FrameType, Field[]>> = {
     f('active_buffer', 'u8')
   ],
   [FrameType.FENCE]: [f('at_offset', 'u64'), f('at_record_seq', 'u64'), f('phase', 'u8')],
-  [FrameType.REDRAW]: [f('method', 'u8'), f('rows', 'u16'), f('cols', 'u16')]
+  [FrameType.REDRAW]: [f('method', 'u8'), f('rows', 'u16'), f('cols', 'u16')],
+  [FrameType.TERMINAL_STATE]: [f('preamble', 'blob32')]
 };
 
 export function encodeBody(type: FrameType, body: Body): Uint8Array {

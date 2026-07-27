@@ -62,7 +62,6 @@ import {
   addProjectGroup,
   addProjectSession,
   addSession,
-  clearAttention,
   deleteProject,
   deleteProjectGroup,
   deleteProjectSession,
@@ -87,7 +86,6 @@ import {
   fetchDetectedLanguages,
   restartProjectSession,
   upDesk,
-  type AgentEvent,
   type DeskAutosaveMode,
   type DeskFetchedUiSettings,
   type DeskUiSettings
@@ -117,7 +115,18 @@ import {
 import { usePersistedCollapse } from './usePersistedCollapse.js';
 import { useSubsystemSidebars } from './useSubsystemSidebars.js';
 import { getMovedSessionId, getProjectDropGroup } from './sidebarMove.js';
-import { usePulse } from './usePulse.js';
+import { usePulse, type SessionStatusMap } from './usePulse.js';
+import { useEventFeed } from './useEventFeed.js';
+import type { DeskEvent } from '../shared/controlPlane/index.js';
+import {
+  EVENT_FILTER_LABELS,
+  EVENT_FILTER_ORDER,
+  deskEventView,
+  filterEvents,
+  type DeskEventView,
+  type EventFilter
+} from './eventFeedModel.js';
+import { actionableSessions, needsOperator, viewFor } from './agentStatusModel.js';
 import { useStableCallbacks } from './stableCallbacks.js';
 import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
@@ -366,9 +375,17 @@ export function App(): JSX.Element {
   const [modalProject, setModalProject] = useState<DeskProjectView | undefined>();
   const [modalGroup, setModalGroup] = useState<DeskGroupView | undefined>();
   const [modalSession, setModalSession] = useState<DeskSessionView | undefined>();
-  const [attention, setAttention] = useState<Record<string, { attention: true; since: string }>>({});
-  const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
-  const [unreadEvents, setUnreadEvents] = useState(0);
+  const [statusViews, setStatusViews] = useState<SessionStatusMap>({});
+  // One journal for agent transitions and channel notifications, with one
+  // ordering and one unread count. Acknowledgement lives here and nowhere else.
+  const {
+    events: agentEvents,
+    unread: unreadEvents,
+    error: eventFeedError,
+    markRead,
+    clearAll,
+    markReadLocally
+  } = useEventFeed();
   // The 2s pulse loop (telemetry + attention/events + snapshot liveness) owns
   // systemSnapshot/systemError/telemetryHistory; it writes the
   // attention/events/snapshot state below through these setters so the coupling
@@ -376,9 +393,7 @@ export function App(): JSX.Element {
   // applying its own optimistic attention/event mutations.
   const { systemSnapshot, systemError, telemetryHistoryRef, invalidateAttentionPulse } = usePulse({
     setSnapshot,
-    setAttention,
-    setAgentEvents,
-    setUnreadEvents
+    setStatusViews
   });
   const [notifOpen, setNotifOpen] = useState(() => localStorage.getItem('desk.notifOpen') === 'true');
   const [notifWidth, setNotifWidth] = useState(() => {
@@ -836,16 +851,16 @@ export function App(): JSX.Element {
         }
       }
     ];
-    if (selectedSessionId && attention[selectedSessionId]) {
+    if (selectedSessionId && needsOperator(statusViews, selectedSessionId)) {
       segments.push({ key: 'attn', icon: <Bell size={11} />, text: 'needs input', tone: 'danger', hint: 'This agent is waiting for you' });
     }
     publishStatus('agents', segments);
-  }, [attention, pushToast, selectedSessionId, snapshot]);
+  }, [statusViews, pushToast, selectedSessionId, snapshot]);
 
   // App-wide signals for the status bar's right side. System metrics live in
   // the topbar; these are the workflow ones: agents waiting on input, unread
   // events/messages, muted sound, and snapshot sync state.
-  const attentionCount = Object.keys(attention).length;
+  const attentionCount = actionableSessions(statusViews).length;
   const statusGlobals = useMemo<StatusSegment[]>(() => {
     const segments: StatusSegment[] = [];
     if (attentionCount > 0) {
@@ -1704,25 +1719,23 @@ export function App(): JSX.Element {
     setSelectedSessionId(group.sessions[0]?.spec.sessionId);
   }
 
-  function openAgentEvent(event: AgentEvent): void {
+  function openAgentEvent(event: DeskEvent): void {
     invalidateAttentionPulse();
-    setAgentEvents((current) => current.map((e) => (e.id === event.id ? { ...e, read: true } : e)));
-    setUnreadEvents((count) => Math.max(0, count - (event.read ? 0 : 1)));
-    fireAndForget(markEventsRead({ ids: [event.id] }), 'mark event read');
-    // Reading an event acknowledges its session's sidebar lamp, even when the
-    // session is gone from the snapshot and cannot be revealed anymore.
-    if (event.sessionId) {
-      touchSession(event.sessionId);
-    }
-    if (event.kind === 'channel') {
-      // Jump to the channels subsystem and reveal the exact message.
+    // Journal acknowledgement ONLY. Reading an entry does not clear the
+    // session's lamp: the lamp reports the authority's current wait, and the
+    // agent is still waiting whether or not the operator read about it.
+    markReadLocally(event.id);
+    markRead({ ids: [event.id] });
+    const target = deskEventView(event).target;
+    if (target?.kind === 'channel') {
       setSubsystem('channels');
-      if (event.channel) {
-        channelsNavigatorRef.current?.(event.channel, event.messageId, event.thread);
-      }
+      channelsNavigatorRef.current?.(target.channel, target.messageId, target.thread);
       return;
     }
-    revealAgentSession(event.sessionId);
+    if (target?.kind === 'session') {
+      recordAgentRecent(target.sessionId);
+      revealAgentSession(target.sessionId);
+    }
   }
 
   /** Jump to the agents subsystem with the given session selected + revealed. */
@@ -1746,13 +1759,10 @@ export function App(): JSX.Element {
   }
 
   function markAllEventsRead(): void {
-    invalidateAttentionPulse();
-    setAgentEvents((current) => current.map((e) => ({ ...e, read: true })));
-    setUnreadEvents(0);
-    // Acknowledging every event acknowledges every sidebar lamp with it
-    // (the server mirrors this; clearing locally avoids the poll lag).
-    setAttention({});
-    fireAndForget(markEventsRead({ all: true }), 'mark all events read');
+    // Reading events does not clear sidebar lamps: a lamp reports the
+    // authority's wait, and marking a notification read does not answer the
+    // agent that is still waiting behind it.
+    markRead({ all: true });
   }
 
   async function confirmKillAll(): Promise<void> {
@@ -1771,42 +1781,20 @@ export function App(): JSX.Element {
   }
 
   function clearAgentEvents(): void {
-    invalidateAttentionPulse();
-    setAgentEvents([]);
-    setUnreadEvents(0);
-    setAttention({});
-    fireAndForget(clearAllEvents(), 'clear all events');
+    clearAll();
   }
 
   function touchSession(sessionId: string): void {
     recordAgentRecent(sessionId);
     invalidateAttentionPulse();
-    setAttention((current) => {
-      if (!current[sessionId]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
-    // The server marks this session's events read on touch; mirror it locally
-    // so the drawer and the unread lamp agree without waiting for the poll.
-    setAgentEvents((current) => {
-      let unreadDelta = 0;
-      const next = current.map((event) => {
-        if (event.sessionId === sessionId && !event.read) {
-          unreadDelta += 1;
-          return { ...event, read: true };
-        }
-        return event;
-      });
-      if (unreadDelta > 0) {
-        setUnreadEvents((count) => Math.max(0, count - unreadDelta));
-        return next;
-      }
-      return current;
-    });
-    fireAndForget(clearAttention(sessionId), 'clear attention');
+    // Touching a session no longer clears its lamp. The lamp now reports the
+    // authority's wait, and a wait is cleared by ANSWERING the agent, not by
+    // looking at it — the old behaviour measured "have you glanced at this"
+    // while presenting itself as "does this need you".
+    // Opening a session no longer marks its notifications read either. The
+    // journal records what happened; looking at the terminal is not an
+    // acknowledgement of every notice about it, and silently consuming them
+    // is how an operator loses the one entry they had not seen yet.
   }
 
   function revealSidebarSession(group: DeskGroupView, sessionId: string): void {
@@ -2120,7 +2108,7 @@ export function App(): JSX.Element {
         <Animator active={booted} combine manager="stagger" duration={{ stagger: 0.12 }}>
           <main className="deskShell" style={themeVars}>
             <BackdropField />
-            <AttentionAnnouncer attention={attention} />
+            <AttentionAnnouncer statusViews={statusViews} />
             <Animated as="section" className="terminalFrame" animated={['fade']}>
               <FrameLines />
               <Animator combine manager="stagger" duration={{ stagger: 0.04 }}>
@@ -2171,7 +2159,7 @@ export function App(): JSX.Element {
                       <aside className="agentTreePanelInner">
                         <AgentsSidebar
                           projects={snapshot?.view.projects ?? []}
-                          attention={attention}
+                          statusViews={statusViews}
                           activeProjectId={activeProject?.id}
                           activeGroupId={activeGroup?.id}
                           activeSessionId={selectedSessionId}
@@ -2201,7 +2189,7 @@ export function App(): JSX.Element {
                             assignments={cellAssignments[mountedGroup.id] ?? EMPTY_CELL_MAP}
                             activeByCell={cellActiveSessions[mountedGroup.id] ?? EMPTY_ACTIVE_MAP}
                             selectedSessionId={selectedSessionId}
-                            attention={attention}
+                            statusViews={statusViews}
                             busy={busy}
                             onDragSession={setDraggedSessionId}
                             terminalRevisions={terminalRevisions}
@@ -2314,6 +2302,7 @@ export function App(): JSX.Element {
                   <ChannelsSubsystem
                     active={subsystem === 'channels'}
                     snapshot={snapshot}
+                    statusViews={statusViews}
                     onError={setError}
                     onInfo={(message) => pushToast(message, 'ok')}
                     onRevealAgent={revealAgentSession}
@@ -2342,6 +2331,7 @@ export function App(): JSX.Element {
                 open={notifOpen}
                 width={notifWidth}
                 events={agentEvents}
+                feedError={eventFeedError}
                 snapshot={snapshot}
                 {...drawerHandlers}
               />
@@ -2350,7 +2340,7 @@ export function App(): JSX.Element {
               {agentPaletteOpen ? (
                 <AgentsPalette
                   projects={snapshot?.view.projects ?? []}
-                  attention={attention}
+                  statusViews={statusViews}
                   onClose={() => setAgentPaletteOpen(false)}
                   onPick={(sessionId) => {
                     setAgentPaletteOpen(false);
@@ -3204,14 +3194,6 @@ function AutosaveSettings({
   );
 }
 
-const EVENT_KIND_META: Record<AgentEvent['kind'], { label: string; tone: string }> = {
-  'turn-complete': { label: 'TURN COMPLETE', tone: 'ok' },
-  'approval-requested': { label: 'APPROVAL NEEDED', tone: 'error' },
-  'input-requested': { label: 'INPUT NEEDED', tone: 'warn' },
-  bell: { label: 'AWAITING INPUT', tone: 'warn' },
-  channel: { label: '@HUMAN PING', tone: 'warn' }
-};
-
 const TOAST_TONE_META: Record<ToastTone, { label: string; icon: ReactNode }> = {
   error: { label: 'ERROR', icon: <Wrench size={13} /> },
   ok: { label: 'DONE', icon: <Zap size={13} /> },
@@ -3283,6 +3265,7 @@ function NotificationDrawerImpl({
   open,
   width,
   events,
+  feedError,
   snapshot,
   onResize,
   onResizeEnd,
@@ -3293,12 +3276,14 @@ function NotificationDrawerImpl({
 }: {
   open: boolean;
   width: number;
-  events: AgentEvent[];
+  events: DeskEvent[];
+  /** Non-null when the journal could not be read; the drawer must say so. */
+  feedError: string | null;
   snapshot: DeskSnapshot | null;
   onResize: (width: number) => void;
   onResizeEnd: (width: number) => void;
   onClose: () => void;
-  onOpenEvent: (event: AgentEvent) => void;
+  onOpenEvent: (event: DeskEvent) => void;
   onMarkAllRead: () => void;
   onClearAll: () => void;
 }): JSX.Element {
@@ -3326,26 +3311,17 @@ function NotificationDrawerImpl({
     return labels;
   }, [snapshot]);
 
-  // Kind filter: 'all' | 'unread' | a specific event kind.
-  const [filter, setFilter] = useState<'all' | 'unread' | AgentEvent['kind']>('all');
-  const visibleEvents = useMemo(() => {
-    if (filter === 'all') {
-      return events;
-    }
-    if (filter === 'unread') {
-      return events.filter((event) => !event.read);
-    }
-    return events.filter((event) => event.kind === filter);
-  }, [events, filter]);
+  const [filter, setFilter] = useState<EventFilter>('all');
+  const visibleEvents = useMemo(() => filterEvents(events, filter), [events, filter]);
   const unreadCount = events.filter((event) => !event.read).length;
-  const filterChips: Array<{ key: typeof filter; label: string; count: number }> = [
-    { key: 'all', label: 'all', count: events.length },
-    { key: 'unread', label: 'unread', count: unreadCount },
-    { key: 'turn-complete', label: 'turns', count: events.filter((e) => e.kind === 'turn-complete').length },
-    { key: 'approval-requested', label: 'approvals', count: events.filter((e) => e.kind === 'approval-requested').length },
-    { key: 'input-requested', label: 'inputs', count: events.filter((e) => e.kind === 'input-requested').length },
-    { key: 'channel', label: 'channels', count: events.filter((e) => e.kind === 'channel').length }
-  ];
+  // One chip per filter, counted through the same predicate that renders the
+  // list — a chip whose count disagrees with what clicking it shows is worse
+  // than no chip.
+  const filterChips = EVENT_FILTER_ORDER.map((key) => ({
+    key,
+    label: EVENT_FILTER_LABELS[key],
+    count: filterEvents(events, key).length
+  }));
 
   return (
     // `root`: detached from the app animator tree — children of an entered parent
@@ -3404,19 +3380,26 @@ function NotificationDrawerImpl({
         </div>
         <div className="notifList">
           {visibleEvents.length === 0 ? (
-            <div className="notifEmpty">
+            <div className={`notifEmpty ${feedError ? 'error' : ''}`}>
               <TextReveal as="span" manager="sequence">
-                {events.length === 0 ? 'No agent events yet.' : 'Nothing matches this filter.'}
+                {/* An unreachable feed is NOT an empty feed. Saying "no events"
+                    when the journal could not be read is the same confident
+                    lie as reporting a silent agent as idle. */}
+                {feedError
+                  ? `Events unavailable — ${feedError}`
+                  : events.length === 0
+                    ? 'No agent events yet.'
+                    : 'Nothing matches this filter.'}
               </TextReveal>
             </div>
           ) : (
             visibleEvents.map((event) => {
-              const meta = EVENT_KIND_META[event.kind];
+              const view = deskEventView(event);
               return (
                 <Animator key={event.id}>
                   <Animated
                     as="button"
-                    className={`notifCard ${meta.tone} ${event.read ? 'read' : 'unread'}`}
+                    className={`notifCard ${view.tone} ${event.read ? 'read' : 'unread'}`}
                     style={{ clipPath: CLIP_OCTAGON_TINY }}
                     animated={['flicker', ['x', 14, 0]]}
                     onMouseEnter={() => bleeps.hover?.play()}
@@ -3424,16 +3407,16 @@ function NotificationDrawerImpl({
                       bleeps.click?.play();
                       onOpenEvent(event);
                     }}
-                    title={event.sessionId}
+                    title={view.sessionId ?? view.label}
                   >
                     <span className="notifCardTop">
                       {/* Always mounted: an unmounting lamp shifted every sibling 14px on read. */}
                       <span className="notifCardLamp" aria-label={event.read ? undefined : 'unread'} aria-hidden={event.read} />
-                      <i className="notifCardKind">{meta.label}</i>
+                      <i className="notifCardKind">{view.label}</i>
                       <small title={new Date(event.at).toLocaleString()}>{shortTimeAgo(event.at)}</small>
                     </span>
-                    <strong>{sessionLabels.get(event.sessionId) ?? event.sessionId}</strong>
-                    {event.message ? <span className="notifCardMessage">{event.message}</span> : null}
+                    <strong>{eventSubject(view, sessionLabels)}</strong>
+                    {view.detail ? <span className="notifCardMessage">{view.detail}</span> : null}
                   </Animated>
                 </Animator>
               );
@@ -3445,13 +3428,30 @@ function NotificationDrawerImpl({
   );
 }
 
+/**
+ * The card's headline. An agent entry names its session; a channel message
+ * names the channel and author, because a channel notification is about a
+ * conversation, not about a session — and several sessions can sit in one.
+ */
+function eventSubject(view: DeskEventView, sessionLabels: Map<string, string>): string {
+  if (view.target?.kind === 'channel') {
+    return `#${view.target.channel}`;
+  }
+  const sessionId = view.sessionId;
+  if (!sessionId) {
+    return view.label;
+  }
+  return sessionLabels.get(sessionId) ?? sessionId;
+}
+
 const NotificationDrawer = memo(NotificationDrawerImpl);
 
-function AttentionAnnouncer({ attention }: { attention: Record<string, { attention: true; since: string }> }): null {
+/** Sounds once when a session newly starts waiting on the OPERATOR. */
+function AttentionAnnouncer({ statusViews }: { statusViews: SessionStatusMap }): null {
   const bleeps = useBleeps<DeskBleepName>();
   const knownRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const next = new Set(Object.keys(attention));
+    const next = new Set(actionableSessions(statusViews));
     let hasNew = false;
     for (const key of next) {
       if (!knownRef.current.has(key)) {
@@ -3462,7 +3462,7 @@ function AttentionAnnouncer({ attention }: { attention: Record<string, { attenti
     if (hasNew) {
       bleeps.attention?.play();
     }
-  }, [attention, bleeps]);
+  }, [statusViews, bleeps]);
   return null;
 }
 
@@ -3495,7 +3495,7 @@ interface MountedMuxProps {
   assignments: Record<string, number>;
   activeByCell: Record<string, string>;
   selectedSessionId?: string;
-  attention: Record<string, { attention: true; since: string }>;
+  statusViews: SessionStatusMap;
   busy: boolean;
   onDragSession: (sessionId: string | null) => void;
   terminalRevisions: Record<string, number>;
@@ -3526,7 +3526,7 @@ function mountedMuxPropsEqual(prev: MountedMuxProps, next: MountedMuxProps): boo
     prev.assignments === next.assignments &&
     prev.activeByCell === next.activeByCell &&
     prev.selectedSessionId === next.selectedSessionId &&
-    prev.attention === next.attention &&
+    prev.statusViews === next.statusViews &&
     prev.busy === next.busy &&
     prev.onDragSession === next.onDragSession &&
     prev.terminalRevisions === next.terminalRevisions &&
@@ -3540,7 +3540,7 @@ const MountedMux = memo(function MountedMuxImpl({
   assignments,
   activeByCell,
   selectedSessionId,
-  attention,
+  statusViews,
   busy,
   onDragSession,
   terminalRevisions,
@@ -3558,7 +3558,7 @@ const MountedMux = memo(function MountedMuxImpl({
           visible={visible}
           cells={cells}
           selectedSessionId={selectedSessionId}
-          attention={attention}
+          statusViews={statusViews}
           busy={busy}
           onDragSession={onDragSession}
           terminalRevisions={terminalRevisions}
@@ -3600,12 +3600,12 @@ interface AgentPaletteEntry {
  */
 function AgentsPalette({
   projects,
-  attention,
+  statusViews,
   onClose,
   onPick
 }: {
   projects: DeskProjectView[];
-  attention: Record<string, { attention: true; since: string }>;
+  statusViews: SessionStatusMap;
   onClose: () => void;
   onPick: (sessionId: string) => void;
 }): JSX.Element {
@@ -3633,8 +3633,8 @@ function AgentsPalette({
       };
       return [...all]
         .sort((a, b) => {
-          const aAttn = attention[a.session.spec.sessionId] ? 0 : 1;
-          const bAttn = attention[b.session.spec.sessionId] ? 0 : 1;
+          const aAttn = needsOperator(statusViews, a.session.spec.sessionId) ? 0 : 1;
+          const bAttn = needsOperator(statusViews, b.session.spec.sessionId) ? 0 : 1;
           if (aAttn !== bAttn) {
             return aAttn - bAttn;
           }
@@ -3664,7 +3664,7 @@ function AgentsPalette({
       .sort((a, b) => a.rank - b.rank)
       .map((scored) => scored.entry)
       .slice(0, 40);
-  }, [attention, projects, query]);
+  }, [statusViews, projects, query]);
   const boundedIndex = Math.min(index, Math.max(0, results.length - 1));
   return (
     <Modal title="Switch session" icon={<TerminalSquare size={13} />} onClose={onClose}>
@@ -3710,10 +3710,7 @@ function AgentsPalette({
                   onPick(entry.session.spec.sessionId);
                 }}
               >
-                <StatusDot
-                  state={entry.session.state}
-                  attention={Boolean(attention[entry.session.spec.sessionId])}
-                />
+                <StatusDot view={viewFor(statusViews, entry.session.spec.sessionId)} />
                 <span className="quickOpenName">{entry.session.spec.name}</span>
                 <small className="quickOpenDir">{entry.project.label} / {entry.group.label}</small>
               </button>

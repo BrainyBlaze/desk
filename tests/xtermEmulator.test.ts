@@ -30,6 +30,17 @@ describe('xterm emulator adapter (§3.3/§7.3)', () => {
     e.dispose();
   });
 
+  it('flush makes restored bracketed-paste state observable', async () => {
+    const e = new XtermEmulator({ rows: 10, cols: 40 });
+    e.write(enc('\x1b[?2004h'));
+    await e.flush();
+    expect(e.bracketedPaste()).toBe(true);
+    e.write(enc('\x1b[?2004l'));
+    await e.flush();
+    expect(e.bracketedPaste()).toBe(false);
+    e.dispose();
+  });
+
   it('serializes a non-empty restorable snapshot that carries the content', async () => {
     const e = new XtermEmulator({ rows: 6, cols: 20 });
     e.write(enc('line1\r\nline2'));
@@ -119,9 +130,7 @@ describe('xterm emulator adapter (§3.3/§7.3)', () => {
   it('the factory creates working emulators', async () => {
     const e = new XtermEmulatorFactory().create({ rows: 5, cols: 10 });
     e.write(enc('hi'));
-    // EmulatorPort has no flush; the daemon reads on a later cycle, but here we
-    // can still read after a microtask.
-    await new Promise((r) => setTimeout(r, 20));
+    await e.flush?.();
     expect(e.readTailText(5).join('\n')).toContain('hi');
     e.dispose();
   });

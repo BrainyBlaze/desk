@@ -16,19 +16,19 @@ const KIND_LABEL: Record<DeliveryEventKind, string> = {
   queued: 'queued',
   released: 'released',
   resumed: 'resumed',
-  dropped: 'dropped',
-  'input-requested': 'input-req',
-  'approval-requested': 'approval-req'
+  dropped: 'dropped'
 };
 
+// Delivery faults only. An agent waiting on the operator is no longer a
+// delivery event at all — it is an activity fact in the authority, surfaced by
+// the session lamp and the event feed. Keeping it here would have shown the
+// same wait twice, in two vocabularies, on two timelines.
 const WARN_KINDS = new Set<DeliveryEventKind>([
   'submit-stuck-paste',
   'submit-stuck-submit',
   'submit-stuck-unobservable',
   'delivery-ack-timeout',
-  'dropped',
-  'input-requested',
-  'approval-requested'
+  'dropped'
 ]);
 
 function clock(at: string): string {

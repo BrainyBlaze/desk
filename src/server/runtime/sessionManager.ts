@@ -12,9 +12,17 @@ import { createConnection } from 'node:net';
 import { GenerationLedger } from '../../shared/controlPlane/generationLedger.js';
 import { WorkerSupervisor } from '../../shared/runtime/workerSupervisor.js';
 import { type EmulatorFactory } from '../../shared/runtime/emulatorPort.js';
-import { DaemonCore, type EnsureResult, type RestoreResult } from '../../shared/runtime/daemonCore.js';
-import { type HookInput } from '../../shared/runtime/sessionRuntime.js';
-import { type ControlState, type IntakeResult, type Source } from '../../shared/controlPlane/index.js';
+import {
+  DaemonCore,
+  type DaemonAgentStateIntakeResult,
+  type DaemonCoreDeps,
+  type EnsureResult,
+  type RestoreResult
+} from '../../shared/runtime/daemonCore.js';
+import {
+  type SessionRegistration,
+  type SessionStateSnapshot
+} from '../../shared/controlPlane/index.js';
 import { type BpFrame } from '../../shared/browserProtocol/index.js';
 import { MasterClient } from './masterClient.js';
 import { SpawnMasterError, spawnMaster } from './spawnMaster.js';
@@ -89,8 +97,11 @@ export interface SessionManagerDeps {
   now: () => number;
   /** Deliver a browser frame to a session's surface (the web-server WS wires this). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
-  /** Attention-relevant emulator events (bell/OSC9) — see DaemonCoreDeps. */
-  onSemanticEvent?: (sessionId: string, event: import('../../shared/runtime/emulatorPort.js').EmulatorEvent) => void;
+  workingLeaseMs?: DaemonCoreDeps['workingLeaseMs'];
+  openToolLeaseMs?: DaemonCoreDeps['openToolLeaseMs'];
+  initialAgentHealth?: DaemonCoreDeps['initialAgentHealth'];
+  createAgentStateIntakeStore?: DaemonCoreDeps['createAgentStateIntakeStore'];
+  onStateTransition?: DaemonCoreDeps['onStateTransition'];
 }
 
 export class SessionManager {
@@ -129,12 +140,26 @@ export class SessionManager {
       sendBrowser: deps.sendBrowser,
       // sendMaster routes to the session's attached master client, if any.
       sendMaster: (sessionId, frame) => this.masters.get(sessionId)?.send(frame),
-      ...(deps.onSemanticEvent !== undefined ? { onSemanticEvent: deps.onSemanticEvent } : {})
+      ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
+      ...(deps.openToolLeaseMs !== undefined
+        ? { openToolLeaseMs: deps.openToolLeaseMs }
+        : {}),
+      ...(deps.initialAgentHealth !== undefined
+        ? { initialAgentHealth: deps.initialAgentHealth }
+        : {}),
+      ...(deps.createAgentStateIntakeStore !== undefined
+        ? { createAgentStateIntakeStore: deps.createAgentStateIntakeStore }
+        : {}),
+      ...(deps.onStateTransition !== undefined ? { onStateTransition: deps.onStateTransition } : {})
     });
   }
 
-  ensure(sessionId: string, geometry: { rows: number; cols: number }): EnsureResult {
-    return this.core.ensure(sessionId, geometry);
+  ensure(
+    sessionId: string,
+    geometry: { rows: number; cols: number },
+    subject: SessionRegistration['subject'] = { kind: 'terminal' }
+  ): EnsureResult {
+    return this.core.ensure(sessionId, geometry, subject);
   }
 
   /**
@@ -153,9 +178,10 @@ export class SessionManager {
       /** The detached-master stop command (e.g. `atch kill -f SOCK`). */
       killSpec: DetachedKillSpec;
       ackTimeoutMs?: number;
+      subject?: SessionRegistration['subject'];
     }
   ): Promise<RestoreResult | { ok: false; reason: 'attach-failed' }> {
-    const restored = this.core.restore(sessionId, opts.geometry);
+    const restored = this.core.restore(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
     if (!restored.ok) return restored;
     const token = Symbol('restore-op');
     this.owners.set(sessionId, token); // stale prior-op callbacks go inert
@@ -204,8 +230,9 @@ export class SessionManager {
     geometry: { rows: number; cols: number },
     opts: { expectGeneration?: number; ackTimeoutMs?: number; stillValid?: () => boolean } = {}
   ): Promise<boolean> {
-    if (this.core.state(sessionId) === undefined) return false;
+    if (!this.core.hasLiveSession(sessionId)) return false;
     let attached = false;
+    let terminalStateReady: Promise<boolean> = Promise.resolve(true);
     let settle: (ok: boolean) => void = () => undefined;
     const acked = new Promise<boolean>((resolve) => {
       let settled = false;
@@ -218,9 +245,18 @@ export class SessionManager {
     });
     const client = new MasterClient(sockPath, {
       onRecord: (rec) => this.core.onMasterRecord(sessionId, rec),
+      onTerminalState: (preamble) => {
+        terminalStateReady = terminalStateReady
+          .then((ready) => (ready ? this.core.onMasterTerminalState(sessionId, preamble) : false))
+          .catch(() => false);
+      },
       onAttachAck: (ack) => {
         const generation = (ack as { generation: number }).generation;
-        settle(opts.expectGeneration === undefined || generation === opts.expectGeneration);
+        const generationMatches = opts.expectGeneration === undefined || generation === opts.expectGeneration;
+        void terminalStateReady.then(
+          (ready) => settle(ready && generationMatches),
+          () => settle(false)
+        );
       },
       onError: () => settle(false),
       onClose: () => {
@@ -246,12 +282,19 @@ export class SessionManager {
     // Re-check AFTER the await: a concurrent retire may have torn the session
     // down while the ACK was in flight — installing the client then would
     // resurrect a retired session with its teardown already consumed.
-    if (!ok || (opts.stillValid !== undefined && !opts.stillValid()) || this.core.state(sessionId) === undefined) {
+    if (!ok || (opts.stillValid !== undefined && !opts.stillValid()) || !this.core.hasLiveSession(sessionId)) {
       client.close();
       return false;
     }
     attached = true;
     this.masters.set(sessionId, client);
+    const snapshot = this.core.stateSnapshot(sessionId);
+    if (snapshot === undefined || this.core.markRunning(sessionId, snapshot.generation).kind === 'rejected') {
+      this.masters.delete(sessionId);
+      attached = false;
+      client.close();
+      return false;
+    }
     return true;
   }
 
@@ -273,6 +316,7 @@ export class SessionManager {
       detached?: boolean;
       /** For a detached master, the command to stop the session on retire (e.g. `atch kill -f NAME`). */
       killSpec?: DetachedKillSpec;
+      subject?: SessionRegistration['subject'];
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
     const pending = this.inflight.get(sessionId);
@@ -296,10 +340,11 @@ export class SessionManager {
       readyTimeoutMs?: number;
       detached?: boolean;
       killSpec?: DetachedKillSpec;
+      subject?: SessionRegistration['subject'];
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
-    if (this.core.state(sessionId) !== undefined && this.masters.has(sessionId)) {
-      return this.ensure(sessionId, opts.geometry); // already provisioned AND attached — idempotent no-op
+    if (this.core.hasLiveSession(sessionId) && this.masters.has(sessionId)) {
+      return this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' }); // already provisioned AND attached — idempotent no-op
     }
     // Foreign-socket preflight BEFORE any durable allocation: ensure() would
     // advance the ledger to N+1 over a surviving generation-N master, fencing
@@ -315,7 +360,7 @@ export class SessionManager {
     if (opts.detached === true && existsSync(opts.sockPath) && (await socketHasListener(opts.sockPath))) {
       return { ok: false, reason: 'spawn-failed' };
     }
-    const ens = this.ensure(sessionId, opts.geometry);
+    const ens = this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
     if (!ens.ok) return ens;
     const token = Symbol('spawn-op');
     this.owners.set(sessionId, token);
@@ -446,10 +491,6 @@ export class SessionManager {
     return this.core.sessionOfChannel(channelId);
   }
 
-  ingestHook(sessionId: string, hook: HookInput): IntakeResult | undefined {
-    return this.core.ingestHook(sessionId, hook);
-  }
-
   /** Control-plane input injection (channels delivery). False if the session is unknown. */
   injectInput(sessionId: string, bytes: Uint8Array, paste = false): boolean {
     return this.core.injectInput(sessionId, bytes, paste);
@@ -464,11 +505,23 @@ export class SessionManager {
     return this.core.historyText(sessionId, rows, offset);
   }
 
-  state(sessionId: string): { state: ControlState; source: Source; generation: number } | undefined {
+  state(sessionId: string): SessionStateSnapshot | undefined {
     return this.core.state(sessionId);
   }
 
-  list(): { sessionId: string; generation: number; state: ControlState; source: Source }[] {
+  stateSnapshot(sessionId: string): SessionStateSnapshot | undefined {
+    return this.core.stateSnapshot(sessionId);
+  }
+
+  stateSnapshots(): { revision: number; snapshots: SessionStateSnapshot[] } {
+    return this.core.stateSnapshots();
+  }
+
+  ingestAgentState(input: unknown): DaemonAgentStateIntakeResult {
+    return this.core.ingestAgentState(input);
+  }
+
+  list(): SessionStateSnapshot[] {
     return this.core.list();
   }
 

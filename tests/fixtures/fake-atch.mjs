@@ -13,7 +13,8 @@ import { writeFileSync } from 'node:fs';
 const sockPath = process.argv[2];
 const genOutFile = process.argv[3];
 const gen = Number.parseInt(process.env.ATCH_GENERATION ?? '0', 10);
-writeFileSync(genOutFile, String(gen));
+const deskGeneration = process.env.DESK_SESSION_GENERATION ?? '';
+writeFileSync(genOutFile, `${gen}:${deskGeneration}`);
 
 const ATTACH_ACK = 3;
 

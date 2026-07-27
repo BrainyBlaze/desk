@@ -33,6 +33,7 @@ import {
   ErrorCode,
   Flag,
   FrameType,
+  ALL_FRAME_TYPES,
   HEADER_LEN,
   MAGIC,
   MAX_PAYLOAD,
@@ -91,7 +92,8 @@ const SAMPLE: Partial<Record<FrameType, Body>> = {
   [FrameType.TERMINAL_REPLY]: { query_id: 77n, generation: 7, lease_epoch: 2, source: 0, query_class: 4, reply: new TextEncoder().encode('\x1b[24;80R') },
   [FrameType.GAP]: { from_offset: 100n, from_record_seq: 10n, to_offset: 200n, to_record_seq: 20n, reason: 1, current_state_exact: 1, restart_recoverable: 0, main_exact: 1, alt_exact: 1, active_buffer: 0 },
   [FrameType.FENCE]: { at_offset: 9999n, at_record_seq: 42n, phase: 0 },
-  [FrameType.REDRAW]: { method: 1, rows: 40, cols: 120 }
+  [FrameType.REDRAW]: { method: 1, rows: 40, cols: 120 },
+  [FrameType.TERMINAL_STATE]: { preamble: new TextEncoder().encode('\x1b[?2004h') }
 };
 
 describe('atch v3 wire — header', () => {
@@ -249,8 +251,9 @@ describe('golden vectors', () => {
     mkdirSync(dir, { recursive: true });
     const valid = Object.entries(SAMPLE).map(([t, body]) => {
       const type = Number(t) as FrameType;
-      const frame = encodeFrame(hdr(type, { payload: encodeBody(type, body) }));
-      return { name: FrameType[type], type, generation: 7, sequence: '3', body: jsonBody(body), frameHex: hex(frame) };
+      const generation = type === FrameType.TERMINAL_STATE ? 0 : 7;
+      const frame = encodeFrame(hdr(type, { generation, payload: encodeBody(type, body) }));
+      return { name: FrameType[type], type, generation, sequence: '3', body: jsonBody(body), frameHex: hex(frame) };
     });
     const oneByteCr: Body = { flags: 0, surface_id: 2, bytes: Uint8Array.of(0x0d) };
     const inputIndex = valid.findIndex((vector) => vector.type === FrameType.INPUT);
@@ -289,8 +292,9 @@ describe('golden vectors', () => {
       expect(code, v.name).toBe(v.expectCode);
     }
     expect(valid.some((vector) => vector.name === 'INPUT_ONE_BYTE_CR')).toBe(true);
+    expect(new Set(valid.map((vector) => vector.type))).toEqual(new Set(ALL_FRAME_TYPES));
+    expect(valid).toHaveLength(ALL_FRAME_TYPES.length + 1);
     writeFileSync(join(dir, 'vectors.json'), JSON.stringify({ contract: 'atch-wire-v3', proto_version: PROTO_VERSION, header_len: HEADER_LEN, valid, invalid }, null, 2) + '\n');
-    expect(valid.length).toBeGreaterThanOrEqual(29);
   });
 });
 

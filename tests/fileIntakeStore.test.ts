@@ -1,70 +1,325 @@
-// Durable intake store conformance (spec §6.5). Exactly-once intake must survive
-// a daemon RESTART: the invocation dedup-set and the sourceSeq allocator persist.
-
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { intake } from '../src/shared/controlPlane/index.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  type AgentStateEnvelope,
+  acceptAgentStateEvent
+} from '../src/shared/controlPlane/index.js';
 import { FileIntakeStore } from '../src/server/runtime/fileIntakeStore.js';
 
-describe('durable intake store — exactly-once survives restart (§6.5)', () => {
+const envelope = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnvelope => ({
+  schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+  sessionId: 's1',
+  generation: 1,
+  provider: 'codex',
+  mode: 'terminal',
+  producer: 'codex-hooks',
+  producerInstanceId: 'instance-a',
+  producerSeq: 1,
+  eventId: 'instance-a:1',
+  invocationId: 'turn-1',
+  occurredAt: 100,
+  observedAt: 200,
+  facts: [{ kind: 'activity', activity: 'working' }],
+  ...overrides
+});
+
+describe('FileIntakeStore canonical acceptance receipts', () => {
   let dir: string;
   let path: string;
-  const gen = () => 1; // fixed current generation for these cases
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'intake-'));
-    path = join(dir, 'intake.log');
+  let generation: number;
+  let now: number;
+  let expectedInstance: string | undefined;
+
+  const dependencies = () => ({
+    currentGeneration: (_sessionId: string) => generation,
+    expectedProducer: (_sessionId: string, _generation: number) => ({
+      provider: 'codex' as const,
+      mode: 'terminal' as const,
+      producer: 'codex-hooks' as const,
+      producerInstanceId: expectedInstance
+    }),
+    now: () => now
   });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'agent-intake-'));
+    path = join(dir, 'acceptance.ndjson');
+    generation = 1;
+    now = 1_000;
+    expectedInstance = 'instance-a';
+  });
+
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('allocates monotonic sourceSeq and dedups a retry in-process', () => {
-    const store = new FileIntakeStore(path, gen);
-    const a = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i1', state: 'working', ts: 1 }, store);
-    const b = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i2', state: 'idle', ts: 2 }, store);
-    expect(a.event.sourceSeq).toBe(1);
-    expect(b.event.sourceSeq).toBe(2);
-    const retry = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i1', state: 'working', ts: 3 }, store);
-    expect(retry.kind).toBe('duplicate');
-    expect(retry.event).toEqual(a.event);
+  it('allocates independent acceptedSeq values and treats invocationId as correlation only', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    const first = acceptAgentStateEvent(envelope(), store);
+    const second = acceptAgentStateEvent(
+      envelope({
+        producerSeq: 2,
+        eventId: 'instance-a:2',
+        invocationId: 'turn-1',
+        facts: [{ kind: 'health', health: { status: 'degraded', reason: 'output-length' } }]
+      }),
+      store
+    );
+
+    expect(first).toMatchObject({
+      kind: 'accepted',
+      event: { acceptedSeq: 1, acceptedAt: 1_000 }
+    });
+    expect(second).toMatchObject({
+      kind: 'accepted',
+      event: { acceptedSeq: 2, envelope: { invocationId: 'turn-1' } }
+    });
     store.close();
   });
 
-  it('THE restart property: a lost-ACK retry after restart returns the SAME event', () => {
-    const s1 = new FileIntakeStore(path, gen);
-    const first = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'dup', state: 'working', ts: 1 }, s1);
-    expect(first.kind).toBe('accepted');
-    s1.close();
+  it('deduplicates exact eventId retries and rejects payload conflicts', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    const first = acceptAgentStateEvent(envelope(), store);
+    now = 9_999;
+    const retry = acceptAgentStateEvent(envelope(), store);
+    const conflict = acceptAgentStateEvent(
+      envelope({ facts: [{ kind: 'activity', activity: 'idle' }] }),
+      store
+    );
 
-    // "daemon restart" — a fresh store replays the durable log:
-    const s2 = new FileIntakeStore(path, gen);
-    const retry = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'dup', state: 'working', ts: 99 }, s2);
-    expect(retry.kind).toBe('duplicate'); // deduped across the restart
-    expect(retry.event.eventId).toBe(first.event.eventId); // SAME eventId, no second sourceSeq
-    s2.close();
+    expect(retry).toEqual({ kind: 'duplicate', event: first.event });
+    expect(conflict).toMatchObject({ kind: 'rejected', reason: 'idempotency-conflict' });
+    store.close();
   });
 
-  it('sourceSeq continues higher after restart (no reuse)', () => {
-    const s1 = new FileIntakeStore(path, gen);
-    intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i1', state: 'working', ts: 1 }, s1); // seq 1
-    intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i2', state: 'working', ts: 2 }, s1); // seq 2
-    s1.close();
-    const s2 = new FileIntakeStore(path, gen);
-    const next = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i3', state: 'working', ts: 3 }, s2);
-    expect(next.event.sourceSeq).toBe(3); // continues, never reuses 1/2
-    s2.close();
+  it('returns the same durable receipt after restart without replaying activity', () => {
+    const firstStore = new FileIntakeStore(path, dependencies());
+    const first = acceptAgentStateEvent(envelope(), firstStore);
+    firstStore.close();
+
+    now = 2_000;
+    const restarted = new FileIntakeStore(path, dependencies());
+    const retry = acceptAgentStateEvent(envelope(), restarted);
+    expect(retry).toEqual({ kind: 'duplicate', event: first.event });
+    expect(restarted).not.toHaveProperty('snapshot');
+    expect(restarted).not.toHaveProperty('restoreActivity');
+    expect(restarted).not.toHaveProperty('replayInto');
+    restarted.close();
   });
 
-  it('a torn final line (crash mid-append) is skipped; the retry re-commits cleanly', () => {
-    const s1 = new FileIntakeStore(path, gen);
-    intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'i1', state: 'working', ts: 1 }, s1); // durable seq 1
-    s1.close();
-    appendFileSync(path, '{"sessionId":"s1","invocationId":"torn"'); // partial line
-    const s2 = new FileIntakeStore(path, gen);
-    // the torn 'torn' invocation is NOT deduped (its append never completed):
-    const r = intake({ sessionId: 's1', carriedGeneration: 1, source: 'typed-hook', invocationId: 'torn', state: 'working', ts: 2 }, s2);
-    expect(r.kind).toBe('accepted');
-    expect(r.event.sourceSeq).toBe(2); // seq 1 recovered, this is the next
-    s2.close();
+  it('rejects reordered or reused producer sequences with different event IDs', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    acceptAgentStateEvent(envelope({ producerSeq: 2, eventId: 'instance-a:2' }), store);
+
+    expect(
+      acceptAgentStateEvent(envelope({ producerSeq: 2, eventId: 'different-event' }), store)
+    ).toMatchObject({ kind: 'rejected', reason: 'producer-order' });
+    expect(
+      acceptAgentStateEvent(envelope({ producerSeq: 1, eventId: 'instance-a:1' }), store)
+    ).toMatchObject({ kind: 'rejected', reason: 'producer-order' });
+    store.close();
+  });
+
+  it('orders push and live-poll observations independently for one producer instance', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    expect(
+      acceptAgentStateEvent(
+        envelope({ producerSeq: 8, eventId: 'instance-a:push:8' }),
+        store
+      )
+    ).toMatchObject({ kind: 'accepted', event: { acceptedSeq: 1 } });
+    expect(
+      acceptAgentStateEvent(
+        envelope({
+          transport: 'poll',
+          producerSeq: 1,
+          eventId: 'instance-a:poll:1',
+          facts: [{ kind: 'activity', activity: 'idle' }]
+        }),
+        store
+      )
+    ).toMatchObject({ kind: 'accepted', event: { acceptedSeq: 2 } });
+    expect(
+      acceptAgentStateEvent(
+        envelope({ producerSeq: 9, eventId: 'instance-a:push:9' }),
+        store
+      )
+    ).toMatchObject({ kind: 'accepted', event: { acceptedSeq: 3 } });
+    expect(store.producerInstance('s1', 1, 'codex-hooks')).toBe('instance-a');
+    store.close();
+  });
+
+  it('durably shares the push watermark with producer endpoint metadata', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    expect(
+      acceptAgentStateEvent(
+        envelope({ producerSeq: 3, eventId: 'instance-a:push:3' }),
+        store
+      )
+    ).toMatchObject({ kind: 'accepted' });
+    expect(
+      store.claimProducerSequence({
+        sessionId: 's1',
+        generation: 1,
+        producer: 'codex-hooks',
+        producerInstanceId: 'instance-a',
+        transport: 'push',
+        producerSeq: 4
+      })
+    ).toEqual({ kind: 'claimed' });
+    expect(
+      acceptAgentStateEvent(
+        envelope({ producerSeq: 4, eventId: 'instance-a:push:4' }),
+        store
+      )
+    ).toMatchObject({ kind: 'rejected', reason: 'producer-order' });
+    expect(
+      acceptAgentStateEvent(
+        envelope({
+          transport: 'poll',
+          producerSeq: 1,
+          eventId: 'instance-a:poll:1'
+        }),
+        store
+      )
+    ).toMatchObject({ kind: 'accepted' });
+    store.close();
+
+    const restarted = new FileIntakeStore(path, dependencies());
+    expect(
+      restarted.claimProducerSequence({
+        sessionId: 's1',
+        generation: 1,
+        producer: 'codex-hooks',
+        producerInstanceId: 'instance-a',
+        transport: 'push',
+        producerSeq: 4
+      })
+    ).toMatchObject({ kind: 'rejected', reason: 'producer-order' });
+    expect(
+      acceptAgentStateEvent(
+        envelope({ producerSeq: 5, eventId: 'instance-a:push:5' }),
+        restarted
+      )
+    ).toMatchObject({ kind: 'accepted' });
+    restarted.close();
+  });
+
+  it('refuses sequence claims from an unbound or different producer instance', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    const claim = {
+      sessionId: 's1',
+      generation: 1,
+      producer: 'codex-hooks' as const,
+      producerInstanceId: 'instance-a',
+      transport: 'push' as const,
+      producerSeq: 1
+    };
+    expect(store.claimProducerSequence(claim)).toMatchObject({
+      kind: 'rejected',
+      reason: 'producer-unregistered'
+    });
+    expect(acceptAgentStateEvent(envelope(), store)).toMatchObject({ kind: 'accepted' });
+    expect(
+      store.claimProducerSequence({
+        ...claim,
+        producerInstanceId: 'instance-b',
+        producerSeq: 2
+      })
+    ).toMatchObject({
+      kind: 'rejected',
+      reason: 'producer-instance-mismatch'
+    });
+    store.close();
+  });
+
+  it('resets producer ordering for a new generation but keeps acceptedSeq monotonic', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    const first = acceptAgentStateEvent(envelope({ producerSeq: 8, eventId: 'instance-a:8' }), store);
+    generation = 2;
+    const second = acceptAgentStateEvent(
+      envelope({ generation: 2, producerSeq: 1, eventId: 'instance-a:g2:1' }),
+      store
+    );
+
+    expect(first).toMatchObject({ kind: 'accepted', event: { acceptedSeq: 1 } });
+    expect(second).toMatchObject({ kind: 'accepted', event: { acceptedSeq: 2 } });
+    store.close();
+  });
+
+  it('rejects producer instance replacement until reconciliation explicitly authorizes it', () => {
+    expectedInstance = undefined;
+    const store = new FileIntakeStore(path, dependencies());
+    acceptAgentStateEvent(envelope(), store);
+    const fromNewInstance = envelope({
+      producerInstanceId: 'instance-b',
+      producerSeq: 1,
+      eventId: 'instance-b:1'
+    });
+
+    expect(acceptAgentStateEvent(fromNewInstance, store)).toMatchObject({
+      kind: 'rejected',
+      reason: 'producer-instance-mismatch'
+    });
+
+    expectedInstance = 'instance-b';
+    store.reconcileProducerInstance('s1', 1, 'codex-hooks', 'instance-b');
+    expect(acceptAgentStateEvent(fromNewInstance, store)).toMatchObject({ kind: 'accepted' });
+    store.close();
+  });
+
+  it('fences generation and the registered producer before durable commit', () => {
+    const store = new FileIntakeStore(path, dependencies());
+    expect(acceptAgentStateEvent(envelope({ generation: 2 }), store)).toMatchObject({
+      kind: 'rejected',
+      reason: 'generation-fence',
+      carried: 2,
+      current: 1
+    });
+    expect(
+      acceptAgentStateEvent(
+        envelope({
+          provider: 'claude',
+          producer: 'claude-hooks',
+          producerInstanceId: 'claude-a',
+          eventId: 'claude-a:1'
+        }),
+        store
+      )
+    ).toMatchObject({ kind: 'rejected', reason: 'producer-mismatch' });
+    expect(readFileSync(path, 'utf8')).toBe('');
+    store.close();
+  });
+
+  it('uses daemon acceptance time rather than producer timestamps', () => {
+    now = 5_000;
+    const store = new FileIntakeStore(path, dependencies());
+    const result = acceptAgentStateEvent(
+      envelope({ occurredAt: 999_999_999, observedAt: 999_999_999 }),
+      store
+    );
+    expect(result).toMatchObject({ kind: 'accepted', event: { acceptedAt: 5_000 } });
+    store.close();
+  });
+
+  it('truncates a torn final record before appending a clean durable retry', () => {
+    const firstStore = new FileIntakeStore(path, dependencies());
+    acceptAgentStateEvent(envelope(), firstStore);
+    firstStore.close();
+    appendFileSync(path, '{"acceptanceId":"torn"');
+
+    const recovered = new FileIntakeStore(path, dependencies());
+    const nextEnvelope = envelope({ producerSeq: 2, eventId: 'instance-a:2' });
+    const next = acceptAgentStateEvent(nextEnvelope, recovered);
+    expect(next).toMatchObject({ kind: 'accepted', event: { acceptedSeq: 2 } });
+    recovered.close();
+
+    const restarted = new FileIntakeStore(path, dependencies());
+    expect(acceptAgentStateEvent(nextEnvelope, restarted)).toEqual({
+      kind: 'duplicate',
+      event: next.event
+    });
+    restarted.close();
   });
 });

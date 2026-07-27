@@ -63,7 +63,12 @@ export async function spawnMaster(opts: SpawnMasterOptions): Promise<{ child: Ch
   }
   const genStr = String(opts.generation >>> 0); // bounded u32 decimal
   const child = spawn(opts.binPath, opts.args, {
-    env: { ...process.env, ...opts.env, ATCH_GENERATION: genStr },
+    env: {
+      ...process.env,
+      ...opts.env,
+      ATCH_GENERATION: genStr,
+      DESK_SESSION_GENERATION: genStr
+    },
     stdio: 'ignore'
   });
   const timeout = opts.readyTimeoutMs ?? 5000;

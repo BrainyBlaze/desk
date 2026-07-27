@@ -1078,9 +1078,17 @@ PY
 }
 
 report_optional_integrations() {
-  local command missing=()
+  local command missing=() agents=()
   for command in codex claude opencode gh nvidia-smi; do have "$command" || missing+=("$command"); done
   [ -z "${missing[*]-}" ] || info "Optional integrations not installed (Desk still works): ${missing[*]}"
+  # Desk learns what an agent is doing from hooks that agent fires. They are
+  # installed by an explicit command, never by this installer: they live in the
+  # agent's own configuration, and a tool that writes there uninvited has taken
+  # something it was not given. Without them every session honestly reports
+  # `unknown` — so say the command out loud rather than leave the operator to
+  # wonder why nothing reports.
+  for command in codex claude opencode; do have "$command" && agents+=("$command"); done
+  [ -z "${agents[*]-}" ] || info "Agent hooks are not installed yet — run 'desk hooks install' so Desk can see when ${agents[*]} are working, blocked, or waiting on you."
 }
 
 validate_uninstall_tree() {
@@ -1134,6 +1142,17 @@ uninstall_desk() {
   rm -rf -- "$DESK_HOME/releases" "$DESK_HOME/toolchains"
   rmdir -- "$DESK_HOME" || die "Desk home contains unidentified paths and was preserved: $DESK_HOME"
   printf '\n\033[32m✓ Desk application uninstalled. User configuration and projects were preserved.\033[0m\n'
+  # Hooks live inside the agents' own configuration, which this installer never
+  # wrote and therefore does not remove. Leaving them silently would make every
+  # later agent session invoke a deleted file — a hook that fails never breaks
+  # the agent, so nobody would ever see it. Name them instead.
+  printf '\nIf you ran '\''desk hooks install'\'', agent hooks remain and now point at removed files:\n'
+  printf '  %s\n' \
+    "$HOME/.local/share/desk/hooks/" \
+    "$HOME/.codex/hooks.json (entries naming desk-agent-event)" \
+    "$HOME/.config/desk/claude/" \
+    "$HOME/.config/opencode/plugin/desk-attention.js"
+  printf 'Remove those entries to stop your agents invoking them.\n'
 }
 
 install_desk() {
@@ -1156,10 +1175,15 @@ install_desk() {
   printf '\n\033[32m✓ Desk %s installed → %s\033[0m\n\n' "$VERSION" "$LAUNCHER_PATH"
   cat <<NEXT
 Next:
+  desk hooks install         # let Desk see what your agents are doing
   desk serve                 # private Bun server on http://127.0.0.1:5173
   desk serve --dev           # Vite development server
 
 Both modes accept --host and --port. Neither mode falls back to the other.
+
+'desk hooks install' writes hook configuration into your agent tools so they
+report when a turn starts, finishes, or needs you. Skip it and Desk still runs;
+sessions simply report their state as unknown.
 NEXT
 }
 

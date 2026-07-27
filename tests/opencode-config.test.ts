@@ -7,29 +7,36 @@ import {
   ensureOpencodeConfigDir,
   opencodePermissionConfigContent
 } from '../src/core/opencodeConfig.js';
+import { buildOpencodeAttentionPlugin } from '../src/core/agentState/opencodeProducer.js';
 
+/** The plugin is generated, so the source under test is the builder's output. */
 function attentionPluginSource(): string {
-  return readFileSync(join(process.cwd(), 'src', 'core', 'opencode', 'desk-attention.js'), 'utf8');
+  return buildOpencodeAttentionPlugin();
 }
 
 describe('desk-attention opencode plugin source', () => {
-  it('is loaded from the real plugin source file in the tree', () => {
+  it('is the generated artifact, marked so nobody edits the installed copy', () => {
     expect(attentionPluginSource()).toContain('id: "desk-attention"');
+    expect(attentionPluginSource()).toContain('GENERATED');
   });
 
-  it('posts typed Desk agent events instead of emitting terminal bytes', () => {
+  it('posts typed observations instead of emitting terminal bytes', () => {
     const plugin = attentionPluginSource();
     expect(plugin).toContain('/api/agent-event');
-    expect(plugin).toContain('schemaVersion: 2');
     expect(plugin).toContain('DESK_SESSION_ID');
     expect(plugin).not.toContain('/dev/tty');
     expect(plugin).not.toContain(']9;');
     expect(plugin).toContain('export default');
     expect(plugin).toContain('id: "desk-attention"');
-    expect(plugin).toContain('session.idle');
-    expect(plugin).toContain('session-idle');
-    expect(plugin).toContain('permission.asked');
-    expect(plugin).toContain('approval-requested');
+    // What each observation MEANS is asserted by driving this file in
+    // tests/agentState/opencodeAdapter.test.ts. Source-text matching cannot
+    // tell a live arm from a dead one, which is how the two arms below
+    // survived: they matched event names absent from the `Event` union the
+    // plugin's hook receives, so they never ran — and this test required them.
+    // Matched as quoted literals so the header comment, which names them as
+    // the trap they are, does not read as a live arm.
+    expect(plugin).not.toContain('"permission.asked"');
+    expect(plugin).not.toContain('"question.asked"');
   });
 
   // Runtime-critical guards (verified end-to-end; a unit test on source text

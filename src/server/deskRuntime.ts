@@ -2,15 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { loadDesk } from '../core/runner.js';
 import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
-import {
-  attemptResumeCaptureForSession,
-  restorePendingResumeCaptures
-} from './resumeCapture.js';
-import {
-  setRaiseListener,
-  startAttentionPolling,
-  stopAttentionPolling
-} from './attention.js';
+import { restorePendingResumeCaptures } from './resumeCapture.js';
 import { disposeChannelsRuntime, initChannelsRuntime } from './channelsApi.js';
 import type { DeskApiHost } from './deskApiTypes.js';
 import type { DeskServices } from './deskServices.js';
@@ -115,17 +107,9 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
     }
   }
 
-  startAttentionPolling();
-  disposers.add(stopAttentionPolling);
   startSystemSampling();
   disposers.add(stopSystemSampling);
   initChannelsRuntime({ agentSurfaceBroker: services.agentSurfaceBroker });
   restorePendingResumeCaptures(loadDesk({}).sessions);
   disposers.add(disposeChannelsRuntime);
-  setRaiseListener((sessionId) => {
-    void attemptResumeCaptureForSession(sessionId, () =>
-      loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId)
-    );
-  });
-  disposers.add(() => setRaiseListener(null));
 }

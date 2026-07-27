@@ -68,6 +68,7 @@ class MockSocket implements WebSocketLike {
 function makeEnv(overrides: Partial<AgentHostEnv> = {}): AgentHostEnv {
   return {
     DESK_SESSION_ID: 'sess-test',
+    DESK_SESSION_GENERATION: 7,
     DESK_AGENT: 'opencode',
     DESK_AGENT_BYPASS: '0',
     DESK_SERVER_URL: 'http://127.0.0.1:5173',
@@ -181,6 +182,7 @@ function makeHost(opts: {
     createSocket: () => socket,
     exit: () => undefined,
     pid: 12345,
+    producerInstanceId: 'native-instance-test',
     now: () => new Date('2026-07-05T16:00:00.000Z'),
     scheduler: {
       setTimeout: () => 0,
@@ -217,14 +219,24 @@ describe('AgentHost hello + hello-ack', () => {
     socket.fireMessage({ type: 'shutdown', requestId: 'r1' });
     await runPromise;
 
-    const hello = sentFrames().find((f) => f.type === 'hello') as { type: string; session: string; agent: string; pid: number; token: string } | undefined;
+    const hello = sentFrames().find((f) => f.type === 'hello') as {
+      type: string;
+      session: string;
+      agent: string;
+      pid: number;
+      token: string;
+      generation: number;
+      producerInstanceId: string;
+    } | undefined;
     expect(hello).toBeDefined();
     expect(hello).toMatchObject({
       type: 'hello',
       session: 'sess-test',
       agent: 'opencode',
       pid: 12345,
-      token: 'token-test'
+      token: 'token-test',
+      generation: 7,
+      producerInstanceId: 'native-instance-test'
     });
   });
 

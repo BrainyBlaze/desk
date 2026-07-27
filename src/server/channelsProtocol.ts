@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { AgentActivity, SessionLifecycle, WaitOwner } from '../shared/controlPlane/index.js';
 
 /**
  * Channels protocol — pure parsing/formatting for the markdown-based
@@ -91,28 +92,26 @@ export interface ChannelMember {
  * consumer (e.g. the EngineConsole label maps) to handle it.
  */
 
-/**
- * The single per-session status the main UI renders — one model, replacing the
- * old busy/idle bit. Derived from CACHED MemberRuntime fields + the effective
- * delivery block (NO live pane probe), so it is safe on the hot /state poll.
- */
-export type LifecycleStatus = 'working' | 'submit-stuck' | 'blocked' | 'awaiting-approval' | 'paused' | 'idle';
+export type DeliveryStatus = 'ready' | 'queued' | 'delivering' | 'submit-stuck' | 'blocked' | 'paused';
 
 /**
- * Per-session delivery lifecycle for the hot /state poll. Supersedes the old
- * MemberDeliveryState (busy/queued only): keeps those fields for back-compat and
- * adds the unified `status` plus the cached lifecycle truth (submitState,
- * effective block, durable stuck count) so the main UI shows working / stuck /
- * blocked DISTINCT from idle without touching the live-probe /engine surface.
+ * One Channels row combines a projection of one canonical authority batch with
+ * Channels-owned delivery transaction state. Agent activity and delivery are
+ * deliberately orthogonal.
  */
 export interface LifecycleState {
   sessionId: string;
-  busy: boolean;
-  awaitingApproval: boolean;
-  queued: number;
+  authorityRevision: number | null;
+  lifecycle: SessionLifecycle | 'unknown';
+  activity: AgentActivity;
+  waitOwner?: WaitOwner;
+  waitKind?: string;
+  waitDetail?: string;
+  actionable: boolean;
+  queueDepth: number;
+  deliveryStatus: DeliveryStatus;
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
-  status: LifecycleStatus;
   submitState?: SubmitState;
   pausedByOperator?: boolean;
   pauseReason?: string;
@@ -145,13 +144,6 @@ export interface ChannelActivityEvent {
   preview: string;
   at: string;
 }
-
-/**
- * Live deliverability of an agent's terminal pane, as the ops console reports it.
- * `empty-capture` is surfaced first-class so the concurrency truncation bug
- * (capture read on `exit` returning '') is visible if it ever regresses.
- */
-export type PaneState = 'ready' | 'busy' | 'not-ready' | 'booting' | 'empty-capture' | 'offline' | 'unobservable';
 
 /**
  * Lifecycle of a single delivery's submit, as the verify cycle observes it.
@@ -194,6 +186,8 @@ export type DeliveryBlockReason =
   | 'empty-capture'
   | 'capture-failed'
   | 'unobservable'
+  | 'operator-blocked'
+  | 'provider-blocked'
   | 'send-failed'
   | 'submit-stuck-paste'
   | 'submit-stuck-submit';
@@ -244,15 +238,19 @@ export interface BlockedItemMeta {
 /** Per-session engine diagnostics for the ops console. */
 export interface SessionDiagnostic {
   sessionId: string;
-  paneState: PaneState;
-  status: LifecycleStatus;
-  busy: boolean;
-  awaitingApproval: boolean;
+  authorityRevision: number | null;
+  lifecycle: SessionLifecycle | 'unknown';
+  activity: AgentActivity;
+  waitOwner?: WaitOwner;
+  waitKind?: string;
+  waitDetail?: string;
+  actionable: boolean;
+  queueDepth: number;
+  deliveryStatus: DeliveryStatus;
   pausedByOperator?: boolean;
   pauseReason?: string;
   pausedAt?: string;
   draining: boolean;
-  queued: number;
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
   /** result of the last delivery's submit verification (undefined = none yet) */

@@ -8,11 +8,12 @@
 import { connect, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { FrameReassembler, encodeFrame, type RawFrame, WireError } from '../../shared/atchWire/codec.js';
-import { Cap, FrameType, Role } from '../../shared/atchWire/frames.js';
+import { Cap, ErrorCode, FrameType, Role } from '../../shared/atchWire/frames.js';
 import { decodeBody, decodeRecord, encodeBody, type Body, type RecordEnvelope } from '../../shared/atchWire/messages.js';
 
 export interface MasterClientHandlers {
   onRecord?: (rec: RecordEnvelope) => void;
+  onTerminalState?: (preamble: Uint8Array) => void;
   onAttachAck?: (ack: Body) => void;
   onError?: (code: number, detail: string) => void;
   onClose?: () => void;
@@ -39,6 +40,7 @@ export class MasterClient {
   private readonly ra = new FrameReassembler();
   private readonly h: MasterClientHandlers;
   private seq = 0n;
+  private terminalStateReceived = false;
   /** Session generation, learned from ATTACH_ACK. Post-attach frames (INPUT/
    *  RESIZE/COMMAND) MUST carry it — the master fences frames whose generation
    *  != its own (spawn-assigned) generation. 0 until ATTACH_ACK (HELLO/ATTACH
@@ -134,6 +136,18 @@ export class MasterClient {
         case FrameType.RECORD:
           this.h.onRecord?.(decodeRecord(f.payload));
           return;
+        case FrameType.TERMINAL_STATE: {
+          if (this.generation !== 0 || this.terminalStateReceived) {
+            throw new WireError(ErrorCode.BAD_SEQUENCE, 'TERMINAL_STATE must occur at most once before ATTACH_ACK');
+          }
+          if (f.generation !== 0) {
+            throw new WireError(ErrorCode.GENERATION_MISMATCH, `TERMINAL_STATE generation ${f.generation}, expected 0`);
+          }
+          const state = decodeBody(FrameType.TERMINAL_STATE, f.payload) as { preamble: Uint8Array };
+          this.terminalStateReceived = true;
+          this.h.onTerminalState?.(state.preamble);
+          return;
+        }
         case FrameType.ATTACH_ACK: {
           if (this.generation !== 0) {
             return; // duplicate post-attach ACK: never re-adopt/mutate the generation

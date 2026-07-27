@@ -13,9 +13,6 @@ const ROUTE_OWNERS = {
     '/api/desk',
     '/api/system',
     '/api/pulse',
-    '/api/attention',
-    '/api/attention-clear',
-    '/api/attention-read',
     '/api/agent-event',
     '/api/kill-all'
   ],

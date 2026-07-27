@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
-import type { SubmitState, LifecycleStatus } from './channelsProtocol.js';
+import type { SubmitState, DeliveryStatus } from './channelsProtocol.js';
 
 /**
  * Channels delivery-history events ring. Engine-internal durable record
@@ -42,15 +42,11 @@ let cachedHome: string | null = null;
  *
  * SINGLE-SOURCE: the stuck terminals, active submit states, and paused status
  * are EXTRACTED from the frozen SubmitState / LifecycleStatus unions so a
- * protocol change automatically flows into the event-log type. The
- * 'approval-requested' / 'input-requested' values match AgentSignalKind
- * (channelsEngine.ts) but are kept local because importing from the engine
- * would create a circular dependency once the engine wires appendDeliveryEvent.
- * If AgentSignalKind is ever promoted to channelsProtocol.ts, derive those too.
+ * protocol change automatically flows into the event-log type.
  */
 type StuckTerminal = Extract<SubmitState, `submit-stuck-${string}`>;
 type SubmitActive = Extract<SubmitState, 'delivering' | 'submitted' | 'delivery-ack-timeout'>;
-type PausedStatus = Extract<LifecycleStatus, 'paused'>;
+type PausedStatus = Extract<DeliveryStatus, 'paused'>;
 
 export type DeliveryEventKind =
   | SubmitActive       // 'delivering' | 'submitted' | 'delivery-ack-timeout' — from SubmitState
@@ -59,9 +55,7 @@ export type DeliveryEventKind =
   | 'queued'           // -specific: item entered the queue
   | 'released'         // -specific: agent released (signal-driven)
   | 'resumed'          // -specific: operator resumed
-  | 'dropped'          // -specific: item dropped (operator or overflow)
-  | 'input-requested'  // matches AgentSignalKind (local to avoid circular import)
-  | 'approval-requested'; // matches AgentSignalKind (local to avoid circular import)
+  | 'dropped';         // -specific: item dropped (operator or overflow)
 
 export interface DeliveryEvent {
   seq: number;

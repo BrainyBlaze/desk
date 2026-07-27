@@ -384,13 +384,13 @@ groups:
     sessions:
       - name: beta
         sessionId: beta
-        command: cd '/workspace/projects/beta' && codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume 'abc'
+        command: cd '/workspace/projects/beta' && codex resume 'abc'
 `);
 
     expect(buildSessionSpecs(manifest, { homeDir: '/workspace' })[0]).toMatchObject({
       name: 'beta',
       cwd: '/workspace',
-      command: "cd '/workspace/projects/beta' && codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume 'abc'"
+      command: "cd '/workspace/projects/beta' && codex resume 'abc'"
     });
   });
 
@@ -431,8 +431,14 @@ projects:
     expect(commands[1]).not.toContain('DESK_TMUX_SESSION');
     expect(commands[1]).not.toContain('tmux display-message');
     expect(commands[1]).toContain("DESK_AGENT='claude' claude");
+    // `--settings` points at DESK'S OWN file, never at the operator's. The
+    // retired form inlined a JSON blob carrying terminal-bell settings and
+    // hooks of a schema the route now rejects; this one names a file Desk
+    // writes and owns, so the operator's ~/.claude/settings.json is never
+    // touched by Desk at all.
     expect(commands[1]).toContain('--settings');
-    expect(commands[1]).toContain('preferredNotifChannel');
+    expect(commands[1]).toContain('/.config/desk/claude/settings.json');
+    expect(commands[1]).not.toContain('preferredNotifChannel');
     expect(commands[1]).toContain("--dangerously-skip-permissions --resume 'abc123'");
     expect(commands[1]).toContain('desk_claude_session="$HOME/.claude/projects/-workspace-projects-sample/abc123.jsonl"');
     expect(commands[1]).not.toContain('grep -q');
@@ -441,8 +447,12 @@ projects:
     expect(commands[1]).toContain('desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics');
     expect(commands[1]).toContain('exec "${SHELL:-/bin/sh}"');
     expect(commands[1]).toContain('--continue');
-    expect(commands[2]).toContain("DESK_SESSION_ID='codex' DESK_AGENT='codex' codex -c tui.notifications=true");
-    expect(commands[2]).toContain('tui.notification_method=bel');
+    expect(commands[2]).toContain("DESK_SESSION_ID='codex' DESK_AGENT='codex' codex");
+    // The BEL launch flags are gone with the rest of the terminal-bell era: a
+    // bell is an edge with no author, and any child ringing it looked
+    // identical to the agent finishing a turn.
+    expect(commands[2]).not.toContain('tui.notification_method=bel');
+    expect(commands[2]).not.toContain('tui.notifications=true');
     expect(commands[2]).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(commands[3]).toContain("cd '/workspace/projects/sample' && ");
     expect(commands[3]).toContain("DESK_SESSION_ID='opencode'");

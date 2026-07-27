@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import type {
   AgentHostClientFrame,
@@ -65,6 +66,8 @@ export interface AgentHostOptions {
   exit?: (code: number) => void;
   /** Override pid (test seam); production uses process.pid. */
   pid?: number;
+  /** Stable for this host process across websocket reconnects. */
+  producerInstanceId?: string;
   /** Override now (test seam); production uses Date.now. */
   now?: () => Date;
   /** Override setTimeout/clearTimeout (test seam). */
@@ -100,6 +103,7 @@ export class AgentHost {
   private readonly createSocketFn: (url: string) => WebSocketLike;
   private readonly exitFn: (code: number) => void;
   private readonly pid: number;
+  private readonly producerInstanceId: string;
   private readonly now: () => Date;
   private readonly scheduler: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
   private readonly signals: NodeJS.Signals[];
@@ -133,6 +137,7 @@ export class AgentHost {
     this.createSocketFn = opts.createSocket ?? ((url) => new WebSocket(url));
     this.exitFn = opts.exit ?? ((code) => process.exit(code));
     this.pid = opts.pid ?? process.pid;
+    this.producerInstanceId = opts.producerInstanceId ?? randomUUID();
     this.now = opts.now ?? (() => new Date());
     this.scheduler = opts.scheduler ?? { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as NodeJS.Timeout) };
     this.signals = opts.signals ?? ['SIGTERM', 'SIGINT'];
@@ -251,7 +256,9 @@ export class AgentHost {
       session: this.env.DESK_SESSION_ID,
       token: this.env.DESK_AGENT_HOST_TOKEN,
       agent: this.env.DESK_AGENT,
-      pid: this.pid
+      pid: this.pid,
+      generation: this.env.DESK_SESSION_GENERATION,
+      producerInstanceId: this.producerInstanceId
     };
     this.sendFrame(frame);
     this.logger.info(`hello sent session=${this.env.DESK_SESSION_ID} agent=${this.env.DESK_AGENT} pid=${this.pid}`);

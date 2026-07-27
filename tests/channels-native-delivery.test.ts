@@ -6,6 +6,7 @@ import { createChannelDeliverySender } from '../src/server/channelsApi.js';
 import { claimDelivering, revertAllDeliveringToJson } from '../src/server/channelsDurability.js';
 import { ChannelsEngine } from '../src/server/channelsEngine.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const READY_PANE = 'ready prompt';
 
@@ -59,6 +60,7 @@ describe('native-mode channel delivery', () => {
       sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText,
       sessionRunning: () => true,
       sessionCreatedAt: async () => 1,
@@ -103,6 +105,7 @@ describe('native-mode channel delivery', () => {
       sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText,
       sessionRunning: () => true,
       sessionCreatedAt: async () => 1,
@@ -160,6 +163,7 @@ describe('native-mode channel delivery', () => {
       sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText: async (session, text) => {
         const ok = await sendText(session, text);
         if (!ok) {
@@ -178,10 +182,10 @@ describe('native-mode channel delivery', () => {
     });
 
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fatal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
-    await waitFor(() => engine.lifecycleStates().some((state) => state.sessionId === 'tmux-a' && state.pausedByOperator));
+    await waitFor(async () => (await engine.lifecycleStates()).some((state) => state.sessionId === 'tmux-a' && state.pausedByOperator));
 
     expect(readdirSync(join(home, '_engine', 'queue', 'tmux-a'))).toEqual(['0000000001.json']);
-    expect(engine.lifecycleStates().find((state) => state.sessionId === 'tmux-a')).toMatchObject({
+    expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({
       pausedByOperator: true,
       pauseReason: 'native channel delivery failed (not-native-session): session deleted'
     });

@@ -3,7 +3,13 @@
 // into a callable daemon — tested with a fake emulator.
 
 import { describe, expect, it } from 'vitest';
-import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  GenerationLedger,
+  InMemoryGenerationLedger,
+  type AgentStateEnvelope,
+  type SessionStateTransition
+} from '../src/shared/controlPlane/index.js';
 import {
   DaemonCore,
   WorkerSupervisor,
@@ -13,8 +19,8 @@ import {
   type EmulatorPort,
   type EmulatorEvent
 } from '../src/shared/runtime/index.js';
-import { type RawFrame } from '../src/shared/atchWire/codec.js';
-import { RecordType } from '../src/shared/atchWire/frames.js';
+import { ByteWriter, type RawFrame } from '../src/shared/atchWire/codec.js';
+import { EventType, RecordType } from '../src/shared/atchWire/frames.js';
 import { type RecordEnvelope } from '../src/shared/atchWire/messages.js';
 
 class FakeEmu implements EmulatorPort {
@@ -38,7 +44,13 @@ class FakeEmu implements EmulatorPort {
   dispose(): void {}
 }
 
-function makeCore(over: Partial<{ maxLiveWorkers: number }> = {}) {
+function makeCore(
+  over: Partial<{
+    maxLiveWorkers: number;
+    initialAgentHealth: NonNullable<DaemonCoreDeps['initialAgentHealth']>;
+    onStateTransition: (transition: SessionStateTransition) => void;
+  }> = {}
+) {
   const browserOut: { sessionId: string; channelId: number; frame: BpFrame }[] = [];
   const masterOut: { sessionId: string; frame: RawFrame }[] = [];
   const clock = { t: 1000 };
@@ -48,7 +60,13 @@ function makeCore(over: Partial<{ maxLiveWorkers: number }> = {}) {
     emulatorFactory: { create: () => new FakeEmu() },
     now: () => clock.t,
     sendBrowser: (sessionId, channelId, frame) => browserOut.push({ sessionId, channelId, frame }),
-    sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame })
+    sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame }),
+    ...(over.initialAgentHealth === undefined
+      ? {}
+      : { initialAgentHealth: over.initialAgentHealth }),
+    ...(over.onStateTransition === undefined
+      ? {}
+      : { onStateTransition: over.onStateTransition })
   };
   return { core: new DaemonCore(deps), browserOut, masterOut, clock };
 }
@@ -61,6 +79,30 @@ const output = (offset: bigint, seq: bigint, text: string): RecordEnvelope => ({
   body: new TextEncoder().encode(text)
 });
 
+const agentSubject = {
+  kind: 'agent',
+  provider: 'codex',
+  mode: 'terminal',
+  producer: 'codex-hooks'
+} as const;
+
+const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnvelope => ({
+  schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+  sessionId: 's1',
+  generation: 1,
+  provider: 'codex',
+  mode: 'terminal',
+  producer: 'codex-hooks',
+  producerInstanceId: 'hooks-a',
+  producerSeq: 1,
+  eventId: 'hooks-a:1',
+  invocationId: 'turn-1',
+  occurredAt: 900,
+  observedAt: 950,
+  facts: [{ kind: 'activity', activity: 'working' }],
+  ...overrides
+});
+
 describe('DaemonCore — ensure / registry (§3.2)', () => {
   it('ensure creates a session at ledger-allocated generation 1, idempotently', () => {
     const { core } = makeCore();
@@ -69,6 +111,60 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
     const b = core.ensure('s1', { rows: 40, cols: 120 });
     expect(b).toEqual({ ok: true, generation: 1, created: false }); // idempotent
     expect(core.sessionCount).toBe(1);
+  });
+
+  it('runs initial health preflight only for a newly admitted agent generation', () => {
+    const preflightSubjects: unknown[] = [];
+    const { core } = makeCore({
+      initialAgentHealth: (subject) => {
+        preflightSubjects.push(subject);
+        return {
+          status: 'degraded',
+          reason: 'hook-not-installed',
+          detail: 'desk hook config is absent'
+        };
+      }
+    });
+
+    core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
+    expect(core.stateSnapshot('s1')).toMatchObject({
+      health: {
+        status: 'degraded',
+        reason: 'hook-not-installed',
+        detail: 'desk hook config is absent'
+      },
+      subject: {
+        kind: 'agent',
+        activity: 'unknown',
+        evidence: null
+      }
+    });
+
+    core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
+    core.ensure('terminal-1', { rows: 1, cols: 1 });
+    expect(preflightSubjects).toEqual([agentSubject]);
+  });
+
+  it('contains a failed health probe without failing session admission', () => {
+    const { core } = makeCore({
+      initialAgentHealth: () => {
+        throw new Error('probe failed');
+      }
+    });
+
+    expect(core.ensure('s1', { rows: 1, cols: 1 }, agentSubject)).toEqual({
+      ok: true,
+      generation: 1,
+      created: true
+    });
+    expect(core.stateSnapshot('s1')).toMatchObject({
+      health: {
+        status: 'degraded',
+        reason: 'hook-preflight-failed',
+        detail: 'probe failed'
+      },
+      subject: { kind: 'agent', activity: 'unknown', evidence: null }
+    });
   });
 
   it('fails closed past the worker cap (§3.3)', () => {
@@ -107,12 +203,68 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     expect(browserOut[0]).toMatchObject({ sessionId: 's1', channelId: ch });
   });
 
-  it('a typed hook drives the session state; list + state reflect it', () => {
+  it('accepts one canonical agent event and never reapplies its duplicate', () => {
     const { core } = makeCore();
-    core.ensure('s1', { rows: 1, cols: 1 }); // generation 1
-    core.ingestHook('s1', { source: 'typed-hook', carriedGeneration: 1, invocationId: 'i1', state: 'working' });
-    expect(core.state('s1')?.state).toBe('working');
-    expect(core.list()).toEqual([{ sessionId: 's1', generation: 1, state: 'working', source: 'typed-hook' }]);
+    core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
+    core.markRunning('s1', 1);
+    expect(core.stateSnapshot('s1')?.subject).toMatchObject({
+      kind: 'agent',
+      activity: 'unknown'
+    });
+
+    const accepted = core.ingestAgentState(agentEvent());
+    expect(accepted).toMatchObject({ kind: 'accepted', mutation: { kind: 'applied' } });
+    expect(core.stateSnapshot('s1')?.subject).toMatchObject({
+      kind: 'agent',
+      activity: 'working'
+    });
+    const view = core.stateSnapshots();
+    expect(view.revision).toBe(view.snapshots[0]?.revision);
+    expect(view.snapshots).toHaveLength(1);
+    const revision = core.stateSnapshot('s1')?.revision;
+
+    const duplicate = core.ingestAgentState(agentEvent());
+    expect(duplicate).toMatchObject({
+      kind: 'duplicate',
+      event: { acceptanceId: accepted.kind === 'accepted' ? accepted.event.acceptanceId : '' }
+    });
+    expect(core.stateSnapshot('s1')?.revision).toBe(revision);
+  });
+
+  it('applies a generation-fenced health assessment without changing agent state', () => {
+    const transitions: SessionStateTransition[] = [];
+    const { core } = makeCore({
+      onStateTransition: (transition) => transitions.push(transition)
+    });
+    core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
+    core.markRunning('s1', 1);
+    core.ingestAgentState(agentEvent());
+    const before = core.stateSnapshot('s1')!;
+
+    expect(
+      core.assessAgentHealth('s1', 0, {
+        status: 'degraded',
+        reason: 'hook-not-installed'
+      })
+    ).toMatchObject({ kind: 'rejected', reason: 'generation-mismatch' });
+    expect(core.stateSnapshot('s1')).toEqual(before);
+
+    expect(
+      core.assessAgentHealth('s1', 1, {
+        status: 'degraded',
+        reason: 'hook-not-installed',
+        detail: 'desk hook config is absent'
+      })
+    ).toMatchObject({ kind: 'applied' });
+    const after = core.stateSnapshot('s1')!;
+    expect(after.subject).toEqual(before.subject);
+    expect(after.lifecycle).toBe(before.lifecycle);
+    expect(after.health).toMatchObject({
+      status: 'degraded',
+      reason: 'hook-not-installed',
+      detail: 'desk hook config is absent'
+    });
+    expect(transitions.at(-1)?.cause).toBe('source-health');
   });
 
   it('routes browser input to the session master', () => {
@@ -122,6 +274,28 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     core.onBrowserInput('s1', ch, false, new TextEncoder().encode('x'));
     expect(masterOut).toHaveLength(1);
     expect(masterOut[0].sessionId).toBe('s1');
+  });
+
+  it('projects process EXIT immediately and clears agent activity evidence', () => {
+    const { core } = makeCore();
+    core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
+    core.markRunning('s1', 1);
+    core.ingestAgentState(agentEvent());
+
+    const body = new ByteWriter().u8(EventType.EXIT).u32(23).u16(15).take();
+    core.onMasterRecord('s1', {
+      record_type: RecordType.EVENT,
+      record_seq: 1n,
+      generation: 1,
+      output_offset: 0n,
+      body
+    });
+
+    expect(core.stateSnapshot('s1')).toMatchObject({
+      lifecycle: 'exited',
+      exit: { code: 23, signal: '15' },
+      subject: { kind: 'agent', activity: 'unknown', evidence: null }
+    });
   });
 });
 
@@ -146,7 +320,7 @@ describe('DaemonCore — lease + stop (§7.9/§11.4)', () => {
   });
 });
 
-describe('DaemonCore — semantic attention events (bell/OSC9 → onSemanticEvent)', () => {
+describe('DaemonCore — terminal output is never agent-state evidence', () => {
   class EmittingEmu extends FakeEmu {
     cb: ((e: EmulatorEvent) => void) | undefined;
     onEvent(cb: (e: EmulatorEvent) => void): () => void {
@@ -157,7 +331,7 @@ describe('DaemonCore — semantic attention events (bell/OSC9 → onSemanticEven
     }
   }
 
-  it('forwards bell + OSC9 (with data) and filters every other event kind', () => {
+  it('does not subscribe to BEL/OSC9 even when a stale caller supplies the retired callback', () => {
     const emu = new EmittingEmu();
     const seen: { sessionId: string; event: EmulatorEvent }[] = [];
     const core = new DaemonCore({
@@ -168,34 +342,15 @@ describe('DaemonCore — semantic attention events (bell/OSC9 → onSemanticEven
       sendBrowser: () => {},
       sendMaster: () => {},
       onSemanticEvent: (sessionId, event) => seen.push({ sessionId, event })
-    });
-    expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
-    expect(emu.cb).toBeDefined();
+    } as DaemonCoreDeps);
+    expect(core.ensure('s1', { rows: 24, cols: 80 }, agentSubject).ok).toBe(true);
+    core.markRunning('s1', 1);
+    core.ingestAgentState(agentEvent({ facts: [{ kind: 'activity', activity: 'idle' }] }));
+    const before = core.stateSnapshot('s1');
 
-    emu.cb?.({ kind: 'bell' });
-    emu.cb?.({ kind: 'osc', code: 9, data: 'Turn complete' });
-    emu.cb?.({ kind: 'osc', code: 0, data: 'a title write' }); // filtered
-    emu.cb?.({ kind: 'title', data: 'ignored' }); // filtered
-    emu.cb?.({ kind: 'link', data: 'ignored' }); // filtered
-
-    expect(seen).toEqual([
-      { sessionId: 's1', event: { kind: 'bell' } },
-      { sessionId: 's1', event: { kind: 'osc', code: 9, data: 'Turn complete' } }
-    ]);
-  });
-
-  it('does not subscribe at all when no consumer is wired', () => {
-    const emu = new EmittingEmu();
-    const core = new DaemonCore({
-      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
-      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
-      emulatorFactory: { create: () => emu },
-      now: () => 1000,
-      sendBrowser: () => {},
-      sendMaster: () => {}
-    });
-    expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
     expect(emu.cb).toBeUndefined();
+    expect(seen).toEqual([]);
+    expect(core.stateSnapshot('s1')).toEqual(before);
   });
 });
 

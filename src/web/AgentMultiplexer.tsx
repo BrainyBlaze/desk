@@ -9,6 +9,8 @@ import { useNarrowViewport } from './sidebarPanel.js';
 import { TerminalSurface } from './TerminalSurface.js';
 import { NativeAgentSurface } from './agentSurface/NativeAgentSurface.js';
 import { StatusDot } from './statusDot.js';
+import { needsOperator, viewFor } from './agentStatusModel.js';
+import type { SessionStatusMap } from './usePulse.js';
 import type { LayoutKind, PanelCell } from './muxLayout.js';
 import type { DeskGroupView, DeskSessionView } from '../ui/model.js';
 
@@ -19,7 +21,7 @@ function AgentMultiplexerImpl({
   visible,
   cells,
   selectedSessionId,
-  attention,
+  statusViews,
   onTouchSession,
   busy,
   onAddCell,
@@ -39,7 +41,7 @@ function AgentMultiplexerImpl({
   visible: boolean;
   cells: PanelCell[];
   selectedSessionId?: string;
-  attention: Record<string, { attention: true; since: string }>;
+  statusViews: SessionStatusMap;
   onTouchSession: (sessionId: string) => void;
   busy: boolean;
   onAddCell: (group: DeskGroupView) => void;
@@ -135,7 +137,7 @@ function AgentMultiplexerImpl({
       cell={cell}
       visible={visible}
       selectedSessionId={selectedSessionId}
-      attention={attention}
+      statusViews={statusViews}
       onTouchSession={onTouchSession}
       revision={cell.activeSession ? terminalRevisions[cell.activeSession.spec.sessionId] ?? 0 : 0}
       onSelectSession={onSelectSession}
@@ -235,7 +237,7 @@ function AgentMultiplexerImpl({
             {cells.map((cell, index) => {
               const session = cell.activeSession;
               const active = index === pageIndex;
-              const hasAttention = Boolean(session && attention[session.spec.sessionId]);
+              const hasAttention = Boolean(session && needsOperator(statusViews, session.spec.sessionId));
               // Inactive cells keep the arwes diamond, tinted by session state
               // (attention pulses); the active one expands into a named pill —
               // 9 anonymous dots told you nothing about who was screaming.
@@ -256,7 +258,7 @@ function AgentMultiplexerImpl({
                   {active ? (
                     <>
                       {session ? (
-                        <StatusDot state={session.state} attention={hasAttention} />
+                        <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                       ) : null}
                       <span className="mobileMuxPillName">{session?.spec.name ?? 'empty'}</span>
                     </>
@@ -331,7 +333,7 @@ function TerminalCellImpl({
   cell,
   visible,
   selectedSessionId,
-  attention,
+  statusViews,
   onTouchSession,
   revision,
   onSelectSession,
@@ -347,7 +349,7 @@ function TerminalCellImpl({
   cell: PanelCell;
   visible: boolean;
   selectedSessionId?: string;
-  attention: Record<string, { attention: true; since: string }>;
+  statusViews: SessionStatusMap;
   onTouchSession: (sessionId: string) => void;
   revision: number;
   onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
@@ -415,7 +417,7 @@ function TerminalCellImpl({
                 }}
                 title={session.spec.sessionId}
               >
-                <StatusDot state={session.state} attention={Boolean(attention[session.spec.sessionId])} />
+                <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                 <span>{session.spec.name}</span>
               </button>
             ))}
@@ -440,6 +442,7 @@ function TerminalCellImpl({
                   <NativeAgentSurface
                     session={cell.activeSession.spec.sessionId}
                     revision={revision}
+                    statusView={viewFor(statusViews, cell.activeSession.spec.sessionId)}
                     visible={visible}
                     focused={cell.activeSession.spec.sessionId === selectedSessionId}
                     onMessageMenu={onSelectionMenu}
@@ -505,7 +508,7 @@ function TerminalCellImpl({
                             onAssignSession(group, cell, session);
                           }}
                         >
-                          <StatusDot state={session.state} attention={Boolean(attention[session.spec.sessionId])} />
+                          <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                           {session.spec.name}
                         </button>
                       ))

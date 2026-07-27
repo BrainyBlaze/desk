@@ -14,6 +14,7 @@ import { daemonControl, toOkResult, type DaemonControlResult } from '../../share
 import { loadDeskCached, runningSessionSet } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { atchCommandFor } from '../../shared/atchCommand.js';
+import { sessionStateSubjectFor } from '../../shared/controlPlane/index.js';
 
 // The atch child command lives in shared/atchCommand — one audited copy for
 // this wrapper and the core runner lifecycle. Re-exported for existing
@@ -31,7 +32,8 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
     daemonControl('/control/provision', {
       sessionId,
       command: atchCommandFor(spec),
-      geometry: { rows: 24, cols: 80 }
+      geometry: { rows: 24, cols: 80 },
+      subject: sessionStateSubjectFor(spec)
     })
   );
 }
@@ -99,37 +101,6 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
     return retired;
   }
   return provisionNativeSession(spec);
-}
-
-export interface NativeAttentionEvent {
-  seq: number;
-  sessionId: string;
-  kind: 'bell' | 'osc9';
-  data?: string;
-}
-
-/**
- * Drain buffered bell/OSC9 events from the daemon (the atch-native replacement
- * for terminal-stream attention). Fails soft to an empty drain with the cursor
- * unmoved — the next poll retries; attention is a lossy-by-design surface and
- * the daemon buffers a bounded ring.
- */
-export async function drainNativeAttentionEvents(
-  since: number
-): Promise<{ events: NativeAttentionEvent[]; lastSeq: number }> {
-  const result = await daemonControl('/control/attention', { since });
-  if (!result.ok) {
-    return { events: [], lastSeq: since };
-  }
-  const events = Array.isArray(result.body?.events) ? (result.body.events as NativeAttentionEvent[]) : [];
-  const lastSeq = typeof result.body?.lastSeq === 'number' ? result.body.lastSeq : since;
-  return {
-    events: events.filter(
-      (event) =>
-        typeof event?.sessionId === 'string' && (event.kind === 'bell' || event.kind === 'osc9') && typeof event.seq === 'number'
-    ),
-    lastSeq
-  };
 }
 
 /**

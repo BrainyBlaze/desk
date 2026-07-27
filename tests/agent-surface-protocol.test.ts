@@ -305,8 +305,24 @@ describe('parseAgentHostServerFrame', () => {
 describe('parseAgentHostClientFrame', () => {
   it('parses every host frame kind including both command-result arms', () => {
     expect(
-      parseAgentHostClientFrame({ type: 'hello', session: 's1', token: 'tok', agent: 'claude', pid: 4242 })
-    ).toEqual({ type: 'hello', session: 's1', token: 'tok', agent: 'claude', pid: 4242 });
+      parseAgentHostClientFrame({
+        type: 'hello',
+        session: 's1',
+        token: 'tok',
+        agent: 'claude',
+        pid: 4242,
+        generation: 7,
+        producerInstanceId: 'native-host-1'
+      })
+    ).toEqual({
+      type: 'hello',
+      session: 's1',
+      token: 'tok',
+      agent: 'claude',
+      pid: 4242,
+      generation: 7,
+      producerInstanceId: 'native-host-1'
+    });
     expect(
       parseAgentHostClientFrame({ type: 'event', event: { ...base, kind: 'status', state: 'idle' } })
     ).toMatchObject({ type: 'event', event: { kind: 'status' } });
@@ -346,6 +362,26 @@ describe('parseAgentHostClientFrame', () => {
     expect(() => parseAgentHostClientFrame({ type: 'hello', session: 's1', agent: 'claude', pid: 1 })).toThrow();
     expect(() => parseAgentHostClientFrame({ type: 'hello', session: 's1', token: 'tok', agent: 'claude', pid: 'one' })).toThrow();
     expect(() => parseAgentHostClientFrame({ type: 'hello', session: 's1', token: 'tok', pid: 1 })).toThrow();
+    expect(() =>
+      parseAgentHostClientFrame({
+        type: 'hello',
+        session: 's1',
+        token: 'tok',
+        agent: 'claude',
+        pid: 1,
+        producerInstanceId: 'native-host-1'
+      })
+    ).toThrow();
+    expect(() =>
+      parseAgentHostClientFrame({
+        type: 'hello',
+        session: 's1',
+        token: 'tok',
+        agent: 'claude',
+        pid: 1,
+        generation: 1
+      })
+    ).toThrow();
     expect(() => parseAgentHostClientFrame({ type: 'event', event: { kind: 'status', state: 'idle' } })).toThrow();
     expect(() => parseAgentHostClientFrame({ type: 'command-result', ok: true })).toThrow();
     expect(() => parseAgentHostClientFrame({ type: 'command-result', requestId: 'req-1', ok: 'yep' })).toThrow();

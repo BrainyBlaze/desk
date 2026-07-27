@@ -5,7 +5,7 @@
 // Ordering (§6.5): apply effect → record receipt (fsync) → advance cursor. A
 // crash re-processes from the cursor; the receipt makes the re-apply a no-op.
 // This is correct for IDEMPOTENT / receipt-guarded effects (the common case:
-// state updates keyed by eventId). A NON-idempotent effect (e.g. posting a
+// state updates keyed by acceptanceId). A NON-idempotent effect (e.g. posting a
 // message) must use the outbox variant — the effect appends its payload as part
 // of the same receipt record so effect+receipt commit atomically; this store's
 // applyAndReceipt gives that atomicity for the receipt write, and the effect
@@ -60,7 +60,7 @@ export class FileConsumerStore implements ConsumerStore {
   }
 
   applyAndReceipt(eventId: string, effect: () => void): void {
-    // eventId must not contain a newline (it is `sid:gen:source:seq` — safe).
+    // Canonical acceptance IDs are bounded nonblank identifiers without newlines.
     effect();
     if (this.fd === null) this.fd = openSync(this.receiptPath, 'a');
     writeSync(this.fd, eventId + '\n');

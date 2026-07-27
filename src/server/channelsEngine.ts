@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -7,9 +8,8 @@ import {
   type ChannelMember,
   type ChannelMessage,
   type LifecycleState,
-  type LifecycleStatus,
+  type DeliveryStatus,
   type ChannelActivityEvent,
-  type PaneState,
   type SessionResumeInfo,
   type SubmitState,
   type DeliveryBlockReason,
@@ -18,13 +18,6 @@ import {
   type BlockedItemMeta,
   type SessionDiagnostic
 } from './channelsProtocol.js';
-import {
-  createSessionProbe,
-  footerHash,
-  tailPaneCapture,
-  type SessionProbe,
-  type SessionProbeSnapshot
-} from './channelsProbe.js';
 import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from './channelsStore.js';
 import {
   classifyQueueFile,
@@ -43,9 +36,13 @@ import {
 import { appendDeliveryEvent, type DeliveryEvent } from './channelsEvents.js';
 import { listPausedSessions } from './channelsPaused.js';
 import { writeFileAtomic } from './fsOps.js';
-import { AgentPresenceModel } from './agentPresence.js';
-import type { AgentEventV2 } from './agentEvents.js';
-import { NativePromptDeliveryStrategy, NotificationDeliveryStrategy, PromptDeliveryStrategy, type NativeDeliveryState } from './channelsDeliveryStrategy.js';
+import {
+  canonicalAgentView,
+  canonicalDeliveryDecision,
+  type AgentStateBatch,
+  type CanonicalAgentView
+} from './channelsDeliveryStrategy.js';
+import { readAgentStatePulse } from './agentStatePulse.js';
 import {
   isSeedCommitted,
   markSeedCommitted,
@@ -65,8 +62,6 @@ import {
  * Queues survive server restarts via _engine/queue/<sessionId>/<seq>.json files.
  */
 
-export type AgentSignalKind = 'turn-complete' | 'approval-requested' | 'input-requested' | 'bell';
-
 // MemberDeliveryState / PaneState / SubmitState / DeliveryBlockReason /
 // QueuedItemMeta / SessionDiagnostic are DEFINED in channelsProtocol.ts now —
 // one source shared with the web client (channelsClient re-exports the same
@@ -74,8 +69,7 @@ export type AgentSignalKind = 'turn-complete' | 'approval-requested' | 'input-re
 // server-side importers keep resolving against the engine module.
 export type {
   LifecycleState,
-  LifecycleStatus,
-  PaneState,
+  DeliveryStatus,
   SubmitState,
   DeliveryBlockReason,
   QueuedItemMeta,
@@ -90,7 +84,8 @@ export interface ChannelsEngineOptions {
   home: string;
   /** push a prompt into a session; resolved implementation is injectable for tests */
   sendText: (sessionId: string, text: string) => Promise<boolean>;
-  sessionRunning: (sessionId: string) => boolean;
+  /** @deprecated State authority replaces process/pane inference. */
+  sessionRunning?: (sessionId: string) => boolean;
   /** capture the tail of a session's pane (injectable for tests); null = capture failed */
   capturePane: (sessionId: string) => Promise<string | null>;
   /** bare Enter keypress for the submit-verification retry (injectable for tests) */
@@ -119,9 +114,9 @@ export interface ChannelsEngineOptions {
   verifyCycles?: number;
   /** number of consecutive queue-head hold cycles before diagnostics flag blocked (default 3) */
   blockedAfterCycles?: number;
-  /** probe cache TTL ms for non-mutating diagnostic reads; 0 = always fresh */
+  /** @deprecated State authority reads are never derived from pane probes. */
   probeTtlMs?: number;
-  /** max ms for non-mutating diagnostic probes before surfacing unobservable and clearing the cache */
+  /** @deprecated State authority reads use their own bounded gateway timeout. */
   probeTimeoutMs?: number;
   /**
    * Fired on every submit-state transition of a delivery, for the on-disk
@@ -139,11 +134,14 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
-  nativeSessionState?: (sessionId: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
-  /** never deliver to a session younger than this (TUIs swallow input while booting) */
+  /** One canonical authority batch per Channels decision. */
+  readAgentStates?: () => Promise<AgentStateBatch>;
+  /** Clock used for working-lease validation and deterministic tests. */
+  now?: () => number;
+  /** @deprecated Lifecycle starting replaces boot-age inference. */
   bootGraceMs?: number;
-  /** epoch-seconds session creation lookup (injectable for tests) */
-  sessionCreatedAt: (sessionId: string) => Promise<number | null>;
+  /** @deprecated Lifecycle comes from the authority snapshot. */
+  sessionCreatedAt?: (sessionId: string) => Promise<number | null>;
   /** current process id (injectable for the single-engine guard tests) */
   pid?: number;
   /** liveness probe for the pid in the lock file (injectable for tests) */
@@ -238,24 +236,15 @@ export function defaultPidStarttimeReader(pid: number): number | null {
   }
 }
 
-/**
- * Hard ceiling for any transport probe the engine awaits. A capture that never
- * settles would leave the awaiting drain/reconcile suspended forever, which
- * permanently wedges that session's queue — every probe MUST settle.
- */
-export const PROBE_SETTLE_TIMEOUT_MS = 4000;
-const DEFAULT_ENGINE_PROBE_TTL_MS = 750;
 const DELIVERY_SEND_TIMEOUT_MS = 30_000;
-const DIAGNOSTIC_PROBE_TIMEOUT_GRACE_MS = 250;
-
-// The pane predicates now live in channelsProbe.ts (one classifier shared by
-// drain, verify, signal-release, and the ops console). Re-exported here so
-// existing importers keep resolving them from the engine module.
-export { isPaneBusy, isPaneReadyForInput, paneFooterRegion, tailPaneCapture } from './channelsProbe.js';
-
+const DELIVERY_CAPTURE_TIMEOUT_MS = 4_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function captureFingerprint(capture: string): string {
+  return createHash('sha256').update(capture.slice(-16_384)).digest('hex');
 }
 
 export function buildTurnPrompt(options: {
@@ -482,8 +471,6 @@ const MAX_UNOBSERVABLE_RETRIES = 5;
 
 interface MemberRuntime {
   sessionId: string;
-  busy: boolean;
-  awaitingApproval: boolean;
   queue: QueuedPrompt[];
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
@@ -502,7 +489,7 @@ interface MemberRuntime {
   unobservableRetries: number;
   /** epoch ms when `draining` was set true (for the wedge watchdog) */
   drainingSince?: number;
-  /** epoch ms of the last delivery (for the stale-busy override) */
+  /** epoch ms of the last delivery */
   lastDeliveryMs?: number;
   /** result of the last delivery's submit verification (drives ack-file renames) */
   submitState?: SubmitState;
@@ -564,7 +551,6 @@ export class ChannelsEngine {
   private queueSeq = 0;
   private disposed = false;
   private readonly sendText: (sessionId: string, text: string) => Promise<boolean>;
-  private readonly sessionRunning: (sessionId: string) => boolean;
   private readonly capturePane: (sessionId: string) => Promise<string | null>;
   private readonly sendEnter: (sessionId: string) => Promise<boolean>;
   private readonly releaseSettleMs: number;
@@ -572,24 +558,16 @@ export class ChannelsEngine {
   private readonly enterVerifyDelayMs: number;
   private readonly verifyCycles: number;
   private readonly blockedAfterCycles: number;
-  private readonly probeTimeoutMs: number;
   private readonly onSubmitStateChange?: (sessionId: string, state: SubmitState, context: { seq: number }) => void;
   private readonly staleAfterMs: number;
   private readonly sessionInfo: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
-  private readonly nativeSessionState?: (sessionId: string) => NativeDeliveryState | Promise<NativeDeliveryState>;
-  private readonly bootGraceMs: number;
-  private readonly sessionCreatedAt: (sessionId: string) => Promise<number | null>;
-  /** single shared pane classifier — drain, verify, signal-release, and the ops console all read it */
-  private readonly probe: SessionProbe;
-  private readonly promptDeliveryStrategy: PromptDeliveryStrategy;
-  private readonly nativePromptDeliveryStrategy?: NativePromptDeliveryStrategy;
-  private readonly notificationDeliveryStrategy = new NotificationDeliveryStrategy();
+  private readonly readAgentStates: () => Promise<AgentStateBatch>;
+  private readonly now: () => number;
   private pumpTimer: NodeJS.Timeout | undefined;
   /** delivered (session:messageId) pairs — dispatch dedupe across all paths */
   private readonly delivered = new Set<string>();
   /** queue metadata retained after delivery shift so async submit-state events can be attributed */
   private readonly deliveryEventContext = new Map<string, DeliveryEventContext>();
-  private readonly presence = new AgentPresenceModel();
   /** true when another live desk process already owns this channels home */
   readonly passive: boolean;
   /** when passive: the pid of the desk process that owns dispatch, used for the operator recovery hint */
@@ -599,7 +577,6 @@ export class ChannelsEngine {
 
   constructor(private readonly options: ChannelsEngineOptions) {
     this.sendText = options.sendText;
-    this.sessionRunning = options.sessionRunning;
     this.capturePane = options.capturePane;
     this.sendEnter = options.sendEnter;
     this.releaseSettleMs = options.releaseSettleMs ?? 800;
@@ -607,30 +584,11 @@ export class ChannelsEngine {
     this.enterVerifyDelayMs = options.enterVerifyDelayMs ?? 1200;
     this.verifyCycles = options.verifyCycles ?? 3;
     this.blockedAfterCycles = options.blockedAfterCycles ?? 3;
-    this.probeTimeoutMs = options.probeTimeoutMs ?? PROBE_SETTLE_TIMEOUT_MS + DIAGNOSTIC_PROBE_TIMEOUT_GRACE_MS;
     this.onSubmitStateChange = options.onSubmitStateChange;
     this.staleAfterMs = options.staleAfterMs ?? 10 * 60 * 1000;
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
-    this.nativeSessionState = options.nativeSessionState;
-    this.bootGraceMs = options.bootGraceMs ?? 15_000;
-    this.sessionCreatedAt = options.sessionCreatedAt;
-    // One classifier for the whole engine: it owns sessionRunning(offline),
-    // bootGrace(booting), capture(unobservable), and pane classification, so
-    // drain/verify/signal/reconcile/inspect share a single source of pane truth.
-    // Non-mutating diagnostics use a short TTL; delivery, signal release, and
-    // submit verification still pass forceFresh because stale ready/menu state
-    // is unsafe for mutating decisions.
-    this.probe = createSessionProbe({
-      sessionRunning: this.sessionRunning,
-      sessionCreatedAt: this.sessionCreatedAt,
-      capturePane: this.capturePane,
-      bootGraceMs: this.bootGraceMs,
-      ttlMs: options.probeTtlMs ?? DEFAULT_ENGINE_PROBE_TTL_MS
-    });
-    this.promptDeliveryStrategy = new PromptDeliveryStrategy(this.probe);
-    this.nativePromptDeliveryStrategy = options.nativeSessionState
-      ? new NativePromptDeliveryStrategy(options.nativeSessionState)
-      : undefined;
+    this.readAgentStates = options.readAgentStates ?? readAgentStatePulse;
+    this.now = options.now ?? Date.now;
     this.passive = !this.acquireEngineLock();
     if (!this.passive) {
       this.restorePausedSessions();
@@ -754,28 +712,59 @@ export class ChannelsEngine {
   // one disposes), so removal would open a window for a second process to
   // steal ownership. The holder pid dying is the release.
 
-  /**
-   * Background pump: turn-release signals are best-effort (an agent that
-   * rings while its bell is already raised produces no fresh edge). The pump
-   * re-attempts every queued delivery; drain() itself decides readiness from
-   * the live pane.
-   */
   private startPump(intervalMs: number): void {
     this.pumpTimer = setInterval(() => {
-      for (const runtime of this.members.values()) {
-        if (runtime.queue.length > 0) {
-          void this.drain(runtime, true);
-        } else {
-          this.resetHold(runtime);
-          // No queued work: keep the status flag honest against the live pane so
-          // an agent working on its own task shows "working…", and a missed
-          // release signal can't strand the flag the other way.
-          void this.reconcileBusy(runtime);
-        }
-      }
-      this.checkSupervisorIdle();
+      void this.runPumpTick();
     }, intervalMs);
     this.pumpTimer.unref?.();
+  }
+
+  private async readStateBatch(): Promise<AgentStateBatch> {
+    try {
+      const batch = await this.readAgentStates();
+      if (!batch.ok || batch.revision === null || !Array.isArray(batch.snapshots)) {
+        return { ok: false, revision: null, snapshots: [] };
+      }
+      return batch;
+    } catch {
+      return { ok: false, revision: null, snapshots: [] };
+    }
+  }
+
+  private async captureDeliveryFingerprint(sessionId: string): Promise<string | null> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const captured = await Promise.race([
+        this.capturePane(sessionId).catch(() => null),
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => resolve(null), DELIVERY_CAPTURE_TIMEOUT_MS);
+          timeout.unref?.();
+        })
+      ]);
+      return captured === null ? null : captureFingerprint(captured);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  private async runPumpTick(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    const batch = await this.readStateBatch();
+    if (this.disposed) {
+      return;
+    }
+    for (const runtime of this.members.values()) {
+      if (runtime.queue.length > 0) {
+        void this.drain(runtime, true, batch);
+      } else {
+        this.resetHold(runtime);
+      }
+    }
+    this.checkSupervisorIdle(batch);
   }
 
   /** Every pump tick: for each channel with a supervisor member, look for
@@ -785,8 +774,8 @@ export class ChannelsEngine {
    *  outside this channel is invisible here (roles live per-channel, so
    *  supervision does too). If there is at least one stuck worker, ping the
    *  supervisor with names so it can nudge by @name instead of @channel. */
-  private checkSupervisorIdle(): void {
-    const now = Date.now();
+  private checkSupervisorIdle(batch: AgentStateBatch): void {
+    const now = this.now();
     for (const [channel, entry] of this.channelWorkerActivity.entries()) {
       if (entry.workers.size === 0) {
         continue; // no channel prompts and no channel posts recorded yet
@@ -829,9 +818,10 @@ export class ChannelsEngine {
         // Give them time before nudging: measure silence since the last prompt.
         const silentForMs = now - workerState.lastPromptAt;
         if (silentForMs < thresholdMs) continue;
-        // Currently busy → they're actively responding to the prompt. Not stuck.
-        const runtime = this.members.get(member.sessionId);
-        if (runtime?.busy === true) continue;
+        // A fresh canonical working lease means the worker is still responding.
+        // Expired leases project as unknown and therefore cannot suppress checks forever.
+        const view = canonicalAgentView(batch, member.sessionId, now);
+        if (view.activity === 'working') continue;
         stuck.push({ name: member.name, stoppedForMinutes: Math.round(silentForMs / 60_000) });
       }
       if (stuck.length === 0) {
@@ -870,98 +860,6 @@ export class ChannelsEngine {
     }
   }
 
-  /**
-   * Refreshes the diagnostic flags (busy + awaitingApproval) against the live
-   * pane for an idle session (no queued work to drain) so the status indicator
-   * stays honest. PROBE-DERIVED: the flags MIRROR the probe — they never gate
-   * (drain gates on its own fresh probe). Uses the cheap cached diagnostic probe
-   * (idle accuracy is non-critical). Replaces the old signal-stale busyOverrideMs
-   * reconcile: no flag is ever clung to past the live pane.
-   */
-  private async reconcileBusy(runtime: MemberRuntime): Promise<void> {
-    if (this.disposed || runtime.pausedByOperator) {
-      return;
-    }
-    if (this.sessionInfo(runtime.sessionId)?.uiMode === 'native' && this.nativeSessionState) {
-      const state = await this.nativeSessionState(runtime.sessionId);
-      runtime.busy = state === 'busy';
-      runtime.awaitingApproval = state === 'approval';
-      return;
-    }
-    const snap = await this.diagnosticProbe(runtime.sessionId);
-    if (snap.paneState === 'unobservable') {
-      return; // can't observe — leave the last-known flags (fail-safe)
-    }
-    runtime.busy = snap.working;
-    runtime.awaitingApproval =
-      snap.paneState === 'blocked' && (snap.blockedReason === 'approval' || snap.blockedReason === 'input-requested');
-  }
-
-  /** Map a probe snapshot to the protocol PaneState vocabulary (working->busy, blocked->not-ready). */
-  private paneStateFromSnapshot(snap: SessionProbeSnapshot): PaneState {
-    switch (snap.paneState) {
-      case 'working':
-        return 'busy';
-      case 'blocked':
-        return 'not-ready';
-      case 'ready':
-        return 'ready';
-      case 'booting':
-        return 'booting';
-      case 'empty-capture':
-        return 'empty-capture';
-      case 'offline':
-        return 'offline';
-      case 'unobservable':
-        return 'unobservable';
-      default:
-        return 'not-ready';
-    }
-  }
-
-  private unobservableProbeSnapshot(sessionId: string): SessionProbeSnapshot {
-    return {
-      sessionId,
-      source: 'inspect',
-      observedAt: new Date().toISOString(),
-      paneState: 'unobservable',
-      ready: false,
-      working: false,
-      blockedReason: 'capture-failed',
-      footerRegion: '',
-      footerHash: footerHash(''),
-      tailPreview: ''
-    };
-  }
-
-  private async diagnosticProbe(sessionId: string): Promise<SessionProbeSnapshot> {
-    let timer: NodeJS.Timeout | undefined;
-    let timedOut = false;
-    const probe = this.probe.probe(sessionId, { source: 'inspect' });
-    const timeout = new Promise<SessionProbeSnapshot>((resolve) => {
-      timer = setTimeout(() => {
-        timedOut = true;
-        this.probe.clear(sessionId);
-        resolve(this.unobservableProbeSnapshot(sessionId));
-      }, this.probeTimeoutMs);
-      timer.unref?.();
-    });
-    try {
-      return await Promise.race([probe, timeout]);
-    } finally {
-      if (timedOut) {
-        void probe
-          .finally(() => {
-            this.probe.clear(sessionId);
-          })
-          .catch(() => {});
-      }
-      if (timer) {
-        clearTimeout(timer);
-      }
-    }
-  }
-
   private queueDir(sessionId?: string): string {
     const base = join(this.options.home, '_engine', 'queue');
     return sessionId ? join(base, sessionId) : base;
@@ -970,7 +868,7 @@ export class ChannelsEngine {
   private runtime(sessionId: string): MemberRuntime {
     let entry = this.members.get(sessionId);
     if (!entry) {
-      entry = { sessionId, busy: false, awaitingApproval: false, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0, unobservableRetries: 0 };
+      entry = { sessionId, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0, unobservableRetries: 0 };
       this.members.set(sessionId, entry);
     }
     return entry;
@@ -1090,7 +988,6 @@ export class ChannelsEngine {
       pending.enterRetries = 0;
       const delivered = await this.sendText(runtime.sessionId, pending.payload);
       if (!delivered) {
-        runtime.busy = false;
         this.clearPendingAck(runtime);
         runtime.submitState = undefined;
         runtime.submitStateSeqs = undefined;
@@ -1102,8 +999,6 @@ export class ChannelsEngine {
       }
       return;
     }
-    runtime.busy = false;
-    this.presence.recordAckFailure(runtime.sessionId, notificationId);
     this.setSubmitState(runtime, 'delivery-ack-timeout', pending.seqs);
     this.clearPendingAck(runtime);
     runtime.submitState = undefined;
@@ -1247,8 +1142,6 @@ export class ChannelsEngine {
     for (const paused of listPausedSessions(this.options.home)) {
       const runtime = this.runtime(paused.sessionId);
       runtime.pausedByOperator = { since: paused.pausedAt, reason: paused.reason };
-      runtime.busy = false;
-      runtime.awaitingApproval = false;
       this.resetHold(runtime);
     }
   }
@@ -1533,97 +1426,11 @@ export class ChannelsEngine {
     void this.drain(runtime, false);
   }
 
-  /**
-   * Agent signal hook (wired to desk's attention events). turn-complete and
-   * bell mean the agent is back at its input prompt — release and drain.
-   */
-  handleAgentSignal(sessionId: string, kind: AgentSignalKind): void {
-    const runtime = this.members.get(sessionId);
-    if (!runtime) {
-      return;
-    }
-    // Signals are best-effort and can be MISSED, so a signal NEVER directly sets
-    // or clears a gate flag (the old signal-authoritative model is what stranded
-    // ready queues behind a stale awaitingApproval). Every kind simply TRIGGERS an
-    // immediate re-probe; the live snapshot then drives the diagnostic flags and a
-    // drain if the pane is ready. (approval/input still logged for the timeline.)
-    if (kind === 'approval-requested' || kind === 'input-requested') {
-      this.pushDeliveryEvent({ kind, sessionId });
-    }
-    void this.probeAndReconcile(runtime);
-  }
-
-  handleAgentEvent(event: AgentEventV2): void {
-    const snapshot = this.presence.apply(event);
-    const runtime = this.runtime(event.session);
-    if ((event.kind === 'prompt-submitted' || event.kind === 'delivery-ack') && event.notificationId) {
-      this.handleDeliveryAck(event.session, event.notificationId);
-    }
-    switch (snapshot.color) {
-      case 'green':
-        runtime.busy = true;
-        runtime.awaitingApproval = snapshot.status === 'blocked';
-        if (event.kind === 'approval-requested' || event.kind === 'input-requested') {
-          this.pushDeliveryEvent({ kind: event.kind, sessionId: event.session });
-        }
-        return;
-      case 'red':
-        runtime.busy = false;
-        runtime.awaitingApproval = false;
-        if (runtime.queue.length > 0) {
-          this.recordHold(runtime, 'offline', false);
-        }
-        return;
-      case 'yellow':
-        runtime.busy = false;
-        runtime.awaitingApproval = false;
-        runtime.lastReleaseAt = new Date().toISOString();
-        if (runtime.queue.length > 0) {
-          void this.drain(runtime, false);
-        }
-        return;
-    }
-  }
-
-  /**
-   * Probe-and-reconcile: read the live pane, re-derive the diagnostic flags from
-   * it, and drain if it is ready. The single path a signal (or the idle pump)
-   * uses to keep the flags honest — the probe is the AUTHORITY, the flags only
-   * mirror it. Replaces the old signal-gated release: a stray bell can no longer
-   * clear a real menu (the probe sees the menu as blocked), and a missed release
-   * can no longer strand a ready queue (the probe sees ready and drains).
-   */
-  private async probeAndReconcile(runtime: MemberRuntime): Promise<void> {
-    if (this.disposed || runtime.pausedByOperator) {
-      return;
-    }
-    const snap = await this.probe.probe(runtime.sessionId, { source: 'signal', forceFresh: true });
-    if (this.disposed || runtime.pausedByOperator) {
-      return;
-    }
-    if (snap.paneState === 'ready') {
-      const wasHeld = runtime.busy || runtime.awaitingApproval;
-      runtime.busy = false;
-      runtime.awaitingApproval = false;
-      if (wasHeld) {
-        runtime.lastReleaseAt = new Date().toISOString();
-        this.pushDeliveryEvent({ kind: 'released', sessionId: runtime.sessionId });
-        this.resetHold(runtime);
-      }
-      if (runtime.queue.length > 0) {
-        setTimeout(() => {
-          void this.drain(runtime, false);
-        }, this.releaseSettleMs);
-      }
-      return;
-    }
-    // Not ready — mirror the live pane into the diagnostic flags (never gates).
-    runtime.busy = snap.working;
-    runtime.awaitingApproval =
-      snap.paneState === 'blocked' && (snap.blockedReason === 'approval' || snap.blockedReason === 'input-requested');
-  }
-
-  private async drain(runtime: MemberRuntime, countHoldCycle = false): Promise<void> {
+  private async drain(
+    runtime: MemberRuntime,
+    countHoldCycle = false,
+    suppliedBatch?: AgentStateBatch
+  ): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -1640,7 +1447,7 @@ export class ChannelsEngine {
       // the queue is never stranded. Falling through bumps drainGeneration below,
       // which makes the wedged coroutine bail at its next await instead of
       // double-delivering (single-flight).
-      if (runtime.deliveryInFlight || Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs) {
+      if (runtime.deliveryInFlight || this.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs) {
         this.recordHold(runtime, 'busy', countHoldCycle);
         return;
       }
@@ -1653,7 +1460,7 @@ export class ChannelsEngine {
     // first await without yielding, so the assignment is atomic.
     const generation = ++runtime.drainGeneration;
     runtime.draining = true;
-    runtime.drainingSince = Date.now();
+    runtime.drainingSince = this.now();
     try {
       const next = runtime.queue[0];
       if (!next) {
@@ -1661,13 +1468,8 @@ export class ChannelsEngine {
         return;
       }
       const headSeq = next.seq;
-      const native = this.sessionInfo(runtime.sessionId)?.uiMode === 'native';
-      const strategy = next.kind !== 'prompt'
-        ? this.notificationDeliveryStrategy
-        : native && this.nativePromptDeliveryStrategy
-          ? this.nativePromptDeliveryStrategy
-          : this.promptDeliveryStrategy;
-      const decision = await strategy.decide(runtime.sessionId);
+      const batch = suppliedBatch ?? await this.readStateBatch();
+      const decision = canonicalDeliveryDecision(batch, runtime.sessionId, this.now());
       if (process.env.DESK_CHANNELS_DEBUG) {
         try {
           appendFileSync(
@@ -1689,18 +1491,15 @@ export class ChannelsEngine {
         return;
       }
       if (!decision.deliver) {
-        runtime.busy = decision.snapshot?.working ?? decision.reason === 'busy';
-        runtime.awaitingApproval =
-          decision.reason === 'approval' ||
-          (decision.snapshot?.paneState === 'blocked' &&
-            (decision.snapshot.blockedReason === 'approval' || decision.snapshot.blockedReason === 'input-requested'));
         this.recordHold(runtime, decision.reason, countHoldCycle);
         return;
       }
-      runtime.busy = false;
-      runtime.awaitingApproval = false;
+      if (runtime.deliveryBlock) {
+        runtime.lastReleaseAt = new Date().toISOString();
+        this.pushDeliveryEvent({ kind: 'released', sessionId: runtime.sessionId });
+      }
       this.resetHold(runtime);
-      await this.deliverNext(runtime, countHoldCycle, undefined, decision.snapshot);
+      await this.deliverNext(runtime, countHoldCycle, undefined, generation);
     } finally {
       if (runtime.drainGeneration === generation) {
         runtime.draining = false;
@@ -1719,7 +1518,7 @@ export class ChannelsEngine {
     runtime: MemberRuntime,
     countHoldCycle = false,
     forceSeq?: number,
-    deliverySnapshot?: SessionProbeSnapshot
+    generation = runtime.drainGeneration
   ): Promise<boolean> {
     // forceSeq targets a specific queue item (operator force-deliver by seq);
     // otherwise the head. A forced single-seq delivery never coalesces — the
@@ -1743,27 +1542,36 @@ export class ChannelsEngine {
     const deliveredSeqs = digest ? digestItems.map((item) => item.seq) : [next.seq];
     const notificationId = digest ? `digest-${deliveredSeqs.join('-')}-${next.messageId}` : next.messageId;
     const native = this.sessionInfo(runtime.sessionId)?.uiMode === 'native';
-    const needsLegacyVerify = next.kind === 'prompt' && !native;
-    runtime.busy = true; // claim before the async push so signals interleave safely
-    // Claim the item(s): the durability slice renames <seq>.json → .delivering on
-    // this synchronous transition, before the paste.
-    this.setSubmitState(runtime, 'delivering', deliveredSeqs);
-    runtime.lastDeliveryMs = Date.now();
+    const needsTerminalVerify = next.kind === 'prompt' && !native;
     // Prompts held a long time (busy agent, dead session, restarts) carry
     // a staleness note so the agent weighs them against newer context.
-    const ageMs = Date.now() - Date.parse(next.queuedAt);
+    const ageMs = this.now() - Date.parse(next.queuedAt);
     const payload = digest
       ? buildDigestPrompt(digestItems, this.options.home, notificationId)
       : Number.isFinite(ageMs) && ageMs > this.staleAfterMs
         ? `(delayed delivery — this message was posted ${Math.round(ageMs / 60000)} minutes ago; read the channel for the current state before acting)\n${next.prompt}`
         : next.prompt;
-    // Standalone prompts (onboarding/operator nudges) are not idempotent
-    // notification items, so keep the legacy pane verifier for them until that
-    // path gets its own explicit ACK contract. Channel notifications are force
-    // delivered: if the terminal accepts the paste, the queue advances immediately.
-    const preSnap = needsLegacyVerify
-      ? deliverySnapshot ?? await this.probe.probe(runtime.sessionId, { source: 'verify', forceFresh: true })
-      : undefined;
+    // Standalone terminal prompts retain delivery-only verification. Raw capture
+    // bytes classify paste/submit failure; they never contribute agent activity.
+    const preFingerprint = needsTerminalVerify
+      ? await this.captureDeliveryFingerprint(runtime.sessionId)
+      : null;
+    const current = forceSeq === undefined
+      ? runtime.queue[0]
+      : runtime.queue.find((item) => item.seq === forceSeq);
+    if (
+      this.disposed ||
+      runtime.drainGeneration !== generation ||
+      !current ||
+      current.seq !== next.seq
+    ) {
+      return false;
+    }
+    // Claim only after every pre-paste await and identity check. The durability
+    // slice still renames <seq>.json -> .delivering before the physical send,
+    // while a stale drain cannot claim or paste an obsolete queue head.
+    this.setSubmitState(runtime, 'delivering', deliveredSeqs);
+    runtime.lastDeliveryMs = this.now();
     runtime.deliveryInFlight = true;
     let delivered: boolean;
     let deliveryTimedOut = false;
@@ -1788,7 +1596,6 @@ export class ChannelsEngine {
       runtime.deliveryInFlight = false;
     }
     if (!delivered) {
-      runtime.busy = false;
       this.clearPendingAck(runtime);
       // The paste failed, so this delivery never reaches verifySubmitted to
       // resolve the 'delivering' claim made above. Clear it here, or the drain
@@ -1827,10 +1634,10 @@ export class ChannelsEngine {
       target: runtime.sessionId,
       preview: payload.split('\n')[0]?.slice(0, 140) ?? ''
     });
-    if (needsLegacyVerify && preSnap) {
+    if (needsTerminalVerify) {
       // Fire-and-forget: verification sleeps between checks and must not
-      // hold the drain lock (a release signal may arrive meanwhile).
-      void this.verifySubmitted(runtime, payload, preSnap.footerHash, deliveredSeqs);
+      // hold the drain lock.
+      void this.verifySubmitted(runtime, preFingerprint, deliveredSeqs);
     } else {
       this.setSubmitState(runtime, 'submitted', deliveredSeqs);
     }
@@ -1900,105 +1707,44 @@ export class ChannelsEngine {
     return revived;
   }
 
-  /**
-   * Confirm a delivery actually ran, and when it does not, classify WHY so the
-   * stall is surfaced instead of leaving a prompt silently wedged in the box.
-   *
-   * The honest success signal is behavioural: a submitted prompt makes the
-   * agent busy within seconds (text-matching the box is unreliable — codex
-   * overdraws spaces, tall prompts scroll their first line away). So each cycle
-   * first checks `isPaneBusy` in the footer region; if the agent is busy,
-   * the prompt reached execution and is `submitted`.
-   *
-   * Recovery is ALWAYS the same safe action: press Enter. A stray Enter on an
-   * idle/empty box is a no-op, but it submits a prompt whose Enter was eaten —
-   * the dominant failure. We deliberately do NOT auto re-paste: a "pane
-   * unchanged" footer is ambiguous (a paste that never landed looks identical
-   * to one that landed, submitted, and completed back to an idle box), so a
-   * re-paste there would risk a double delivery. Auto-replay of a stuck paste
-   * is left to the operator (force-deliver), matching the durability slice's
-   * rule that `.stuck-*` files are never auto-replayed.
-   *
-   * The pre-paste snapshot is used only to CLASSIFY a stall, not to choose the
-   * action — compared in the footer region, where all three agent TUIs render
-   * their input box. After `verifyCycles` pass without the agent going busy:
-   *  - footer never changed → `submit-stuck-paste` (the paste likely never
-   *    reached the box).
-   *  - footer changed       → `submit-stuck-submit` (the prompt is in the box
-   *    but its submit never ran).
-   * `submitState` carries the result to the ops console and to the durability
-   * slice's `.delivering/.delivered/.stuck-*` ack-file renames.
-   */
   private async verifySubmitted(
     runtime: MemberRuntime,
-    _prompt: string,
-    preFooterHash: string,
+    preFingerprint: string | null,
     seqs: number[]
   ): Promise<void> {
-    const recognizedMenu = (reason: SessionProbeSnapshot['blockedReason']): boolean =>
-      reason === 'approval' ||
-      reason === 'input-requested' ||
-      reason === 'trust-menu' ||
-      reason === 'selection-menu' ||
-      reason === 'unknown-menu';
-    let everReady = false;
-    let footerChanged = false;
+    let everObservable = false;
+    let captureChanged = false;
     for (let attempt = 0; attempt < this.verifyCycles; attempt += 1) {
       await delay(this.enterVerifyDelayMs);
       if (this.disposed) {
         return;
       }
-      const snap = await this.probe.probe(runtime.sessionId, { source: 'verify', forceFresh: true });
-      if (snap.working) {
-        runtime.unobservableRetries = 0; // a confirmed delivery resets the auto-retry budget
-        this.setSubmitState(runtime, 'submitted', seqs); // behavioural proof the prompt ran
-        return;
-      }
-      if (snap.paneState === 'blocked' && recognizedMenu(snap.blockedReason)) {
-        // A recognized approval/input/menu after a ready-gated delivery is
-        // positive evidence the paste was accepted and the agent advanced into
-        // an interactive blocker: it submitted. Mark submitted (no replay) and
-        // hard-hold so the next item is not fed into the open menu. NO Enter.
-        runtime.awaitingApproval = true;
-        runtime.unobservableRetries = 0; // a confirmed (menu-advanced) delivery resets the budget
+      const batch = await this.readStateBatch();
+      const view = canonicalAgentView(batch, runtime.sessionId, this.now());
+      if (view.activity === 'working' || view.activity === 'blocked') {
+        runtime.unobservableRetries = 0;
         this.setSubmitState(runtime, 'submitted', seqs);
         return;
       }
-      if (snap.paneState === 'ready') {
-        everReady = true;
-        if (snap.footerHash !== preFooterHash) {
-          footerChanged = true; // the box reflected the paste at some point
+      const fingerprint = await this.captureDeliveryFingerprint(runtime.sessionId);
+      if (fingerprint !== null) {
+        everObservable = true;
+        if (preFingerprint !== null && fingerprint !== preFingerprint) {
+          captureChanged = true;
         }
-        await this.sendEnter(runtime.sessionId); // safe no-op; submits an eaten Enter
-        continue;
       }
-      // unrecognized-shape / unobservable / empty-capture / booting / offline:
-      // no positive evidence, and an Enter would be unsafe — inconclusive cycle.
+      if (view.activity === 'idle') {
+        await this.sendEnter(runtime.sessionId);
+      }
     }
     if (this.disposed) {
       return;
     }
-    if (everReady) {
-      // Saw an idle ready composer but never working/menu: footer changed means
-      // the text sits in the box, Enter eaten (stuck-submit); never changed means
-      // the paste never landed (stuck-paste).
-      this.setSubmitState(runtime, footerChanged ? 'submit-stuck-submit' : 'submit-stuck-paste', seqs);
+    if (everObservable && preFingerprint !== null) {
+      this.setSubmitState(runtime, captureChanged ? 'submit-stuck-submit' : 'submit-stuck-paste', seqs);
     } else {
-      // Never observed a usable pane (only unobservable/unrecognized/boot/offline):
-      // submission unconfirmed. Mark stuck-unobservable, then LIVE-retry: the
-      // 'submit-stuck-unobservable' callback renames the ack-file(s) to
-      // .stuck-unobservable, and reenqueueStuck reverts them to .json and
-      // re-enqueues so the pump re-delivers once the pane is observable again.
-      // Safe under the observability-aware drain (a still-unobservable pane holds, never
-      // blind-delivers); message-id dedupe covers a prompt that had actually
-      // submitted. Restart-time restore is the at-least-once backstop.
       this.setSubmitState(runtime, 'submit-stuck-unobservable', seqs);
-      runtime.busy = false;
       if (runtime.unobservableRetries >= MAX_UNOBSERVABLE_RETRIES) {
-        // Bounded escalation: stop the auto-retry loop on a persistently-
-        // unobservable pane. Leave the item DURABLE as .stuck-unobservable —
-        // surfaced in the ops console blockedItems for operator force-deliver /
-        // drop — instead of an invisible infinite re-deliver.
         return;
       }
       runtime.unobservableRetries += 1;
@@ -2006,18 +1752,14 @@ export class ChannelsEngine {
     }
   }
 
-  /**
-   * Queues a non-message prompt (onboarding briefing, operator nudge) for a
-   * session. Unlike notification-only channel dispatches, these prompts wait
-   * for a fresh ready-pane snapshot before delivery.
-   */
+  /** Queues a non-message prompt for canonical idle-gated delivery. */
   enqueuePrompt(sessionId: string, channel: string, prompt: string, idHint: string): void {
     if (this.disposed || this.passive) {
       return;
     }
     this.enqueue(sessionId, {
       channel,
-      messageId: `${idHint}-${Date.now().toString(36)}`,
+      messageId: `${idHint}-${this.now().toString(36)}`,
       author: 'desk',
       prompt,
       target: sessionId,
@@ -2026,24 +1768,11 @@ export class ChannelsEngine {
     });
   }
 
-  /** A member whose session was just (re)started is at a fresh prompt. */
-  markIdle(sessionId: string): void {
-    const runtime = this.members.get(sessionId);
-    if (runtime) {
-      runtime.busy = false;
-      runtime.awaitingApproval = false;
-      this.resetHold(runtime);
-      void this.drain(runtime, false);
-    }
-  }
-
   /** Operator pause: intentional hold, never counted as blocked/stuck. */
   pauseSession(sessionId: string, reason?: string, pausedAt = new Date().toISOString()): void {
     const runtime = this.runtime(sessionId);
     const cleanReason = reason?.replace(/\s+/g, ' ').trim();
     runtime.pausedByOperator = { since: pausedAt, reason: cleanReason || undefined };
-    runtime.busy = false;
-    runtime.awaitingApproval = false;
     this.resetHold(runtime);
     this.pushDeliveryEvent({ kind: 'paused', sessionId, reason: cleanReason || undefined });
   }
@@ -2055,8 +1784,6 @@ export class ChannelsEngine {
       return;
     }
     runtime.pausedByOperator = undefined;
-    runtime.busy = false;
-    runtime.awaitingApproval = false;
     this.resetHold(runtime);
     this.pushDeliveryEvent({ kind: 'resumed', sessionId });
     void this.drain(runtime, false);
@@ -2119,7 +1846,8 @@ export class ChannelsEngine {
       return false;
     }
     const runtime = this.members.get(sessionId);
-    if (!runtime || !this.sessionRunning(sessionId)) {
+    const batch = await this.readStateBatch();
+    if (!runtime || canonicalAgentView(batch, sessionId, this.now()).lifecycle !== 'running') {
       return false;
     }
     if (seq !== undefined) {
@@ -2150,7 +1878,7 @@ export class ChannelsEngine {
     runtime.drainingSince = Date.now();
     try {
       this.resetHold(runtime);
-      return await this.deliverNext(runtime, false, seq);
+      return await this.deliverNext(runtime, false, seq, generation);
     } finally {
       if (runtime.drainGeneration === generation) {
         runtime.draining = false;
@@ -2190,36 +1918,58 @@ export class ChannelsEngine {
       }));
   }
 
-  /** Live deliverability of a session's pane (drives the ops-console badge). */
-  private async classifyPane(sessionId: string, options: { forceFresh?: boolean } = {}): Promise<PaneState> {
-    const snap = options.forceFresh
-      ? await this.probe.probe(sessionId, { source: 'inspect', forceFresh: true })
-      : await this.diagnosticProbe(sessionId);
-    return this.paneStateFromSnapshot(snap);
+  private canonicalFields(view: CanonicalAgentView): Pick<
+    LifecycleState,
+    'authorityRevision' | 'lifecycle' | 'activity' | 'waitOwner' | 'waitKind' | 'waitDetail' | 'actionable'
+  > {
+    return {
+      authorityRevision: view.authorityRevision,
+      lifecycle: view.lifecycle,
+      activity: view.activity,
+      waitOwner: view.wait?.owner,
+      waitKind: view.wait?.kind,
+      waitDetail: view.wait?.detail,
+      actionable: view.actionable
+    };
   }
 
-  /** Ops console: full per-session diagnostic, including a live pane probe. */
-  async inspectSession(sessionId: string): Promise<SessionDiagnostic> {
-    const runtime = this.members.get(sessionId);
-    const paneState = await this.classifyPane(sessionId);
-    if (runtime && runtime.queue.length > 0 && paneState === 'ready') {
-      this.resetHold(runtime);
+  private deriveDeliveryStatus(
+    runtime: MemberRuntime | undefined,
+    block: Pick<SessionDiagnostic, 'deliveryBlocked'>
+  ): DeliveryStatus {
+    if (!runtime) {
+      return 'ready';
     }
+    if (runtime.pausedByOperator) {
+      return 'paused';
+    }
+    if (runtime.submitState === 'submit-stuck-paste' || runtime.submitState === 'submit-stuck-submit') {
+      return 'submit-stuck';
+    }
+    if (block.deliveryBlocked) {
+      return 'blocked';
+    }
+    if (runtime.deliveryInFlight || runtime.submitState === 'delivering') {
+      return 'delivering';
+    }
+    return runtime.queue.length > 0 ? 'queued' : 'ready';
+  }
+
+  private inspectSessionFromBatch(sessionId: string, batch: AgentStateBatch): SessionDiagnostic {
+    const runtime = this.members.get(sessionId);
     const block = this.runtimeBlock(runtime);
     const stuckItems = this.blockedItems(sessionId);
-    const status = runtime ? this.deriveStatus(runtime, block) : 'idle';
     const pause = runtime?.pausedByOperator;
+    const view = canonicalAgentView(batch, sessionId, this.now());
     return {
       sessionId,
-      paneState,
-      status,
-      busy: runtime?.busy ?? false,
-      awaitingApproval: runtime?.awaitingApproval ?? false,
+      ...this.canonicalFields(view),
+      queueDepth: runtime?.queue.length ?? 0,
+      deliveryStatus: this.deriveDeliveryStatus(runtime, block),
       pausedByOperator: Boolean(pause),
       pauseReason: pause?.reason,
       pausedAt: pause?.since,
       draining: runtime?.draining ?? false,
-      queued: runtime?.queue.length ?? 0,
       lastDeliveryAt: runtime?.lastDeliveryAt,
       lastReleaseAt: runtime?.lastReleaseAt,
       submitState: runtime?.submitState,
@@ -2231,27 +1981,28 @@ export class ChannelsEngine {
     };
   }
 
-  /** Ops console: diagnostics for every tracked session (probes run concurrently). */
-  async inspectAll(): Promise<SessionDiagnostic[]> {
-    return Promise.all([...this.members.keys()].map((sessionId) => this.inspectSession(sessionId)));
+  /** Ops console: full per-session diagnostic from one canonical authority read. */
+  async inspectSession(sessionId: string): Promise<SessionDiagnostic> {
+    return this.inspectSessionFromBatch(sessionId, await this.readStateBatch());
   }
 
-  /**
-   * Ops console: nudge every session whose live pane is `ready` through the
-   * NORMAL gated drain (not a force) — a safe one-click for a backlog that the
-   * release signals missed. Returns the sessions nudged.
-   */
+  /** Ops console: every row shares one authority batch revision. */
+  async inspectAll(): Promise<SessionDiagnostic[]> {
+    const batch = await this.readStateBatch();
+    return [...this.members.keys()].map((sessionId) => this.inspectSessionFromBatch(sessionId, batch));
+  }
+
+  /** Nudge every canonically idle queued session through the normal gate. */
   async drainReady(): Promise<string[]> {
+    const batch = await this.readStateBatch();
     const nudged: string[] = [];
     for (const runtime of this.members.values()) {
       if (runtime.queue.length === 0) {
         continue;
       }
-      if ((await this.classifyPane(runtime.sessionId, { forceFresh: true })) === 'ready') {
-        runtime.busy = false;
-        runtime.awaitingApproval = false;
+      if (canonicalDeliveryDecision(batch, runtime.sessionId, this.now()).deliver) {
         this.resetHold(runtime);
-        void this.drain(runtime, false);
+        void this.drain(runtime, false, batch);
         nudged.push(runtime.sessionId);
       }
     }
@@ -2263,68 +2014,26 @@ export class ChannelsEngine {
     return !this.disposed && this.pumpTimer !== undefined;
   }
 
-  /**
-   * Effective delivery block for a session — the SAME composition inspectSession
-   * uses (the threshold-gated runtime tripwire), MINUS the live pane probe. One
-   * source of effective-block truth shared by the cached /state read-model and
-   * the live-probe /engine diagnostic. Legacy durable .stuck-* files are not a
-   * delivery authority.
-   */
   private effectiveBlock(
-    sessionId: string,
     runtime: MemberRuntime | undefined
   ): Pick<SessionDiagnostic, 'deliveryBlocked' | 'blockedReason' | 'blockedSince' | 'blockedCycles' | 'blockedHeadSeq'> {
-    void sessionId;
     return this.runtimeBlock(runtime);
   }
 
-  /**
-   * Derive the single main-UI status from CACHED state only (no probe). Per the
-   * Lifecycle guard: 'blocked' comes from the EFFECTIVE (threshold/durable-gated)
-   * block, never raw runtime.deliveryBlock, so intentional short holds are not
-   * surfaced and the tripwire threshold is preserved; submit-stuck stays distinct
-   * from generic blocked.
-   */
-  private deriveStatus(
-    runtime: MemberRuntime,
-    block: Pick<SessionDiagnostic, 'deliveryBlocked' | 'blockedReason'>
-  ): LifecycleStatus {
-    if (runtime.pausedByOperator) {
-      return 'paused';
-    }
-    const reason = block.deliveryBlocked ? block.blockedReason : undefined;
-    if (reason === 'submit-stuck-paste' || reason === 'submit-stuck-submit') {
-      return 'submit-stuck';
-    }
-    if (runtime.awaitingApproval || reason === 'approval' || reason === 'input-requested') {
-      return 'awaiting-approval';
-    }
-    if (block.deliveryBlocked) {
-      return 'blocked';
-    }
-    if (runtime.busy) {
-      return 'working';
-    }
-    return 'idle';
-  }
-
-  /**
-   * Cached per-session delivery lifecycle for the hot /state poll — supersedes
-   * deliveryStates(). Reads only MemberRuntime + the effective block + a cheap
-   * stuck-file count; NO live pane probe (that stays on /engine inspectAll).
-   */
-  lifecycleStates(): LifecycleState[] {
+  /** Hot footer projection; every row comes from one authority batch revision. */
+  async lifecycleStates(): Promise<LifecycleState[]> {
+    const batch = await this.readStateBatch();
     return [...this.members.values()].map((runtime) => {
-      const block = this.effectiveBlock(runtime.sessionId, runtime);
+      const block = this.effectiveBlock(runtime);
       const stuckItems = this.blockedItems(runtime.sessionId);
+      const view = canonicalAgentView(batch, runtime.sessionId, this.now());
       return {
         sessionId: runtime.sessionId,
-        busy: runtime.busy,
-        awaitingApproval: runtime.awaitingApproval,
-        queued: runtime.queue.length,
+        ...this.canonicalFields(view),
+        queueDepth: runtime.queue.length,
+        deliveryStatus: this.deriveDeliveryStatus(runtime, block),
         lastDeliveryAt: runtime.lastDeliveryAt,
         lastReleaseAt: runtime.lastReleaseAt,
-        status: this.deriveStatus(runtime, block),
         submitState: runtime.submitState,
         pausedByOperator: Boolean(runtime.pausedByOperator),
         pauseReason: runtime.pausedByOperator?.reason,

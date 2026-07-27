@@ -29,6 +29,7 @@ import {
   X
 } from 'lucide-react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
+import type { SessionStatusMap } from '../usePulse.js';
 import type { PanelImperativeHandle, PanelSize } from 'react-resizable-panels';
 import { publishStatus, type StatusSegment } from '../statusSegments.js';
 import { CLIP_OCTAGON_TINY, Cmd, DeskPanel, DeskSelect, IconButton, Modal, Pill, TextReveal } from '../arwes/primitives.js';
@@ -175,6 +176,7 @@ interface SidebarMenuTarget {
 export function ChannelsSubsystem({
   active,
   snapshot,
+  statusViews,
   onError,
   onInfo,
   onOpenFile,
@@ -187,6 +189,8 @@ export function ChannelsSubsystem({
 }: {
   active: boolean;
   snapshot: DeskSnapshot | null;
+  /** Canonical agent state, the same read every other surface renders from. */
+  statusViews: SessionStatusMap;
   onError: (message: string) => void;
   onInfo: (message: string) => void;
   /** open a file (absolute path) in the editor subsystem */
@@ -1123,7 +1127,7 @@ export function ChannelsSubsystem({
     if (!active) {
       return;
     }
-    void markEventsRead({ kinds: ['channel'] }).catch(report);
+    void markEventsRead({ kinds: ['channel-message'] }).catch(report);
   }, [active, detail, report]);
 
   // Advance a channel's read pointer as the feed reports scroll progress.
@@ -1670,12 +1674,17 @@ export function ChannelsSubsystem({
       : seenMap[selected]?.id ?? null
     : null;
   const newDividerId = useMemo(() => firstUnreadId(detail?.messages ?? [], readPointerId), [detail, readPointerId]);
+  // Who is generating right now comes from the AUTHORITY, not from the
+  // channels engine's own delivery bookkeeping. Delivery answers "did the
+  // message reach the agent"; activity answers "is the agent working" — the
+  // two used to be one field, which is how a delivered-but-idle agent could
+  // read as busy.
   const workingMembers = useMemo(
     () =>
       agentMembers
-        .filter((member) => member.sessionId && deliveryIndex.get(member.sessionId)?.status === 'working')
+        .filter((member) => member.sessionId && statusViews[member.sessionId]?.agent?.tone === 'working')
         .map((member) => member.name),
-    [agentMembers, deliveryIndex]
+    [agentMembers, statusViews]
   );
 
   // jump-to: move the keyboard cursor + scroll/flash a message in the current
@@ -1765,11 +1774,14 @@ export function ChannelsSubsystem({
   // inbox badge: cheap delivery-attention count from the lifecycle state
   // already in hand (mentions are surfaced inside the inbox panel, which
   // self-fetches the activity feed off the hot poll).
+  // Same two-axis rule as buildInboxItems: three delivery faults plus the one
+  // ACTIVITY fault that belongs to this human. Counting the approval from
+  // deliveryStatus would drop it the moment delivery succeeded.
   const inboxAttentionCount = delivery.filter(
     (entry) =>
-      entry.status === 'submit-stuck' ||
-      entry.status === 'blocked' ||
-      entry.status === 'awaiting-approval' ||
+      entry.deliveryStatus === 'submit-stuck' ||
+      entry.deliveryStatus === 'blocked' ||
+      (entry.activity === 'blocked' && entry.actionable && entry.waitOwner === 'operator') ||
       entry.droppedQueueItems > 0
   ).length;
 
@@ -2049,7 +2061,7 @@ export function ChannelsSubsystem({
     onUnreadChange?.(unreadTotal);
   }, [unreadTotal, onUnreadChange]);
 
-  const queueTotal = useMemo(() => delivery.reduce((sum, state) => sum + state.queued, 0), [delivery]);
+  const queueTotal = useMemo(() => delivery.reduce((sum, state) => sum + state.queueDepth, 0), [delivery]);
 
   // Bottom status bar context: active channel, membership, delivery engine.
   useEffect(() => {
@@ -2224,6 +2236,11 @@ export function ChannelsSubsystem({
                           const live = member.sessionId ? sessionIndex.get(member.sessionId) : undefined;
                           const queue = member.sessionId ? deliveryIndex.get(member.sessionId) : undefined;
                           const running = member.type === 'human' ? true : live?.view.state === 'running';
+                          // Activity comes from the authority; the queue below
+                          // stays strictly about DELIVERY. They were one enum,
+                          // which is why "message delivered" and "agent busy"
+                          // could not be told apart on this row.
+                          const memberAgent = member.sessionId ? statusViews[member.sessionId]?.agent : undefined;
                           return (
                             <div
                               key={member.name}
@@ -2240,17 +2257,23 @@ export function ChannelsSubsystem({
                               <Pill tone="muted">
                                 {member.type === 'claude-code' ? 'claude' : member.type === 'codex-cli' ? 'codex' : member.type}
                               </Pill>
-                              {queue && queue.queued > 0 ? <Pill tone="warn" title="queued prompts">{queue.queued}</Pill> : null}
-                              {queue?.status === 'awaiting-approval' ? (
-                                <Pill tone="warn" title="agent is waiting on a human (approval / input)">approval</Pill>
-                              ) : queue?.status === 'submit-stuck' ? (
+                              {queue && queue.queueDepth > 0 ? (
+                                <Pill tone="warn" title="queued prompts">{queue.queueDepth}</Pill>
+                              ) : null}
+                              {memberAgent && memberAgent.tone !== 'idle' ? (
+                                <Pill
+                                  tone={memberAgent.actionable ? 'warn' : memberAgent.tone === 'working' ? undefined : 'muted'}
+                                  title={memberAgent.detail ?? memberAgent.label}
+                                >
+                                  {memberAgent.label}
+                                </Pill>
+                              ) : null}
+                              {queue?.deliveryStatus === 'submit-stuck' ? (
                                 <Pill tone="warn" title="a delivery is stuck — recover from the engine console">stuck</Pill>
-                              ) : queue?.status === 'blocked' ? (
+                              ) : queue?.deliveryStatus === 'blocked' ? (
                                 <Pill tone="warn" title="delivery blocked past the hold threshold">blocked</Pill>
-                              ) : queue?.status === 'paused' ? (
+                              ) : queue?.deliveryStatus === 'paused' ? (
                                 <Pill tone="muted" title="delivery paused by operator — resume from the engine console">paused</Pill>
-                              ) : queue?.status === 'working' ? (
-                                <Pill title="turn in flight">working</Pill>
                               ) : null}
                               {member.type !== 'human' ? (
                                 <span className="gitRowActions">
@@ -3172,7 +3195,7 @@ export function ChannelsSubsystem({
                 <FileText size={11} /> Copy handle
               </button>
               {sidebarMenu.member.sessionId &&
-              (deliveryIndex.get(sidebarMenu.member.sessionId)?.queued ?? 0) > 0 ? (
+              (deliveryIndex.get(sidebarMenu.member.sessionId)?.queueDepth ?? 0) > 0 ? (
                 <button
                   type="button"
                   className="treeMenuItem"

@@ -46,7 +46,8 @@ describe('runPlan atch-native lifecycle', () => {
     expect(control).toHaveBeenCalledWith('/control/provision', {
       sessionId: 'terminal-session',
       command: atchCommandFor(plan[0]!.session),
-      geometry: { rows: 24, cols: 80 }
+      geometry: { rows: 24, cols: 80 },
+      subject: { kind: 'terminal' }
     });
     expect(errors).toEqual([]);
   });

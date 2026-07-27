@@ -6,12 +6,35 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { consume, type JournalEntry } from '../src/shared/controlPlane/index.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  consume,
+  type JournalEntry
+} from '../src/shared/controlPlane/index.js';
 import { FileConsumerStore } from '../src/server/runtime/fileConsumerStore.js';
 
-const entry = (seq: number, eventId: string): JournalEntry => ({
+const entry = (seq: number, acceptanceId: string): JournalEntry => ({
   seq,
-  event: { sessionId: 's1', generation: 1, source: 'typed-hook', sourceSeq: seq, invocationId: `i${seq}`, state: 'working', ts: seq, eventId }
+  event: {
+    acceptanceId,
+    acceptedSeq: seq,
+    acceptedAt: seq,
+    envelope: {
+      schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+      sessionId: 'agent-a',
+      generation: 1,
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks',
+      producerInstanceId: 'hooks-a',
+      producerSeq: seq,
+      eventId: `producer-event-${seq}`,
+      invocationId: `invocation-${seq}`,
+      occurredAt: seq,
+      observedAt: seq,
+      facts: [{ kind: 'activity', activity: 'working' }]
+    }
+  }
 });
 
 describe('durable consumer store — exactly-once survives restart (§6.5)', () => {
@@ -28,7 +51,7 @@ describe('durable consumer store — exactly-once survives restart (§6.5)', () 
   it('applies each entry once and persists receipts + cursor', () => {
     const store = new FileConsumerStore(receiptPath, cursorPath);
     const applied: string[] = [];
-    consume([entry(1, 'e1'), entry(2, 'e2')], store, (e) => applied.push(e.eventId));
+    consume([entry(1, 'e1'), entry(2, 'e2')], store, (e) => applied.push(e.acceptanceId));
     expect(applied).toEqual(['e1', 'e2']);
     expect(store.cursor()).toBe(2);
     store.close();
@@ -37,14 +60,14 @@ describe('durable consumer store — exactly-once survives restart (§6.5)', () 
   it('THE restart property: replay after restart re-applies nothing', () => {
     const s1 = new FileConsumerStore(receiptPath, cursorPath);
     const applied: string[] = [];
-    consume([entry(1, 'e1'), entry(2, 'e2')], s1, (e) => applied.push(e.eventId));
+    consume([entry(1, 'e1'), entry(2, 'e2')], s1, (e) => applied.push(e.acceptanceId));
     s1.close();
 
     // "daemon restart": fresh store replays the durable receipts + cursor.
     const s2 = new FileConsumerStore(receiptPath, cursorPath);
     expect(s2.cursor()).toBe(2); // cursor recovered
     expect(s2.hasReceipt('e1')).toBe(true);
-    const n = consume([entry(1, 'e1'), entry(2, 'e2'), entry(3, 'e3')], s2, (e) => applied.push(e.eventId));
+    const n = consume([entry(1, 'e1'), entry(2, 'e2'), entry(3, 'e3')], s2, (e) => applied.push(e.acceptanceId));
     expect(n).toBe(1); // only the NEW entry e3 applies
     expect(applied).toEqual(['e1', 'e2', 'e3']); // e1/e2 never re-applied
     s2.close();
@@ -59,7 +82,7 @@ describe('durable consumer store — exactly-once survives restart (§6.5)', () 
     const s2 = new FileConsumerStore(receiptPath, cursorPath);
     expect(s2.cursor()).toBe(0); // cursor never advanced
     expect(s2.hasReceipt('e1')).toBe(true); // but the receipt survived
-    const n = consume([entry(1, 'e1'), entry(2, 'e2')], s2, (e) => applied.push(e.eventId));
+    const n = consume([entry(1, 'e1'), entry(2, 'e2')], s2, (e) => applied.push(e.acceptanceId));
     expect(applied).toEqual(['e1', 'e2']); // e1 NOT re-applied
     expect(n).toBe(1);
     s2.close();

@@ -14,14 +14,46 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream';
 import { join } from 'node:path';
 import { ensurePrivateSocketRoot } from '../../shared/atchPaths.js';
-import { GenerationLedger } from '../../shared/controlPlane/index.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  AGENT_PRODUCER_BINDINGS,
+  GenerationLedger,
+  parseChannelMessageDeskEventInput,
+  parseDeskEventReadRequest,
+  type AgentProducer,
+  type AgentStateEnvelope,
+  type ChannelMessageDeskEventInput,
+  type DeskEventFeedResponse,
+  type DeskEventReadRequest,
+  type SessionRegistration,
+  type SessionStateSnapshot
+} from '../../shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../../shared/runtime/index.js';
 import { TerminalWsRouter } from './terminalWsRouter.js';
 import { XtermEmulatorFactory } from './xtermEmulator.js';
 import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
-import type { EnsureResult } from '../../shared/runtime/daemonCore.js';
+import type { DaemonAgentStateIntakeResult, EnsureResult } from '../../shared/runtime/daemonCore.js';
+import {
+  FileIntakeStore,
+  type FileIntakeStoreDependencies
+} from './fileIntakeStore.js';
+import {
+  FileAgentEndpointStore,
+  type AgentEndpointStoreResult
+} from './fileAgentEndpointStore.js';
+import { reconcileOpencodeStatus } from '../../core/agentState/opencodeReconcile.js';
+import {
+  probeHookInstallation,
+  type HookInstallationProbe,
+  type HookProbeProvider
+} from '../../core/agentHooks.js';
+import {
+  FileDeskEventJournal,
+  type AppendChannelDeskEventResult,
+  type DeskEventJournalHealth
+} from './fileDeskEventJournal.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -45,25 +77,46 @@ export interface TerminalDaemonOptions {
    * URL, and a nonce-less 200 would mark the NEW child ready from it.
    */
   healthNonce?: string;
+  /** Injectable daemon clock for deterministic recovery and route tests. */
+  now?: () => number;
+  /** Injectable loopback provider transport for deterministic recovery tests. */
+  fetch?: typeof globalThis.fetch;
+  /** Per-provider recovery request timeout. */
+  agentReconcileTimeoutMs?: number;
+  /** Maximum provider recovery polls in flight. */
+  agentReconcileConcurrency?: number;
+  /** Read-only hook wiring probe; injectable for deterministic composition tests. */
+  hookInstallationProbe?: (
+    provider: HookProbeProvider
+  ) => HookInstallationProbe;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
 export interface TerminalDaemonSessionSpec {
   command: string[];
   geometry: { rows: number; cols: number };
-}
-
-/** A buffered attention event (bell/OSC9) from a session's emulator. */
-export interface DaemonAttentionEvent {
-  seq: number;
-  sessionId: string;
-  kind: 'bell' | 'osc9';
-  /** OSC9 notification body, when present. */
-  data?: string;
+  subject: SessionRegistration['subject'];
 }
 
 /** Provision outcome: ensure result, or the spawn/attach failure that rolled back. */
 export type ProvisionResult = EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' };
+
+export type AgentProviderReconcileResult =
+  | { sessionId: string; kind: 'reconciled' }
+  | {
+      sessionId: string;
+      kind: 'skipped';
+      reason:
+        | 'not-opencode-session'
+        | 'endpoint-unregistered'
+        | 'provider-session-unregistered'
+        | 'producer-unbound'
+         | 'producer-instance-mismatch'
+         | 'poll-failed'
+         | 'no-facts'
+         | 'intake-rejected'
+         | 'recovery-error';
+    };
 
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
@@ -85,51 +138,233 @@ export interface TerminalDaemon {
    * caller where the top is. Undefined when the session is unknown.
    */
   tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
-  /**
-   * Buffered bell/OSC9 events with seq > since (the web's attention poller
-   * drains these — the atch-native replacement for legacy bell flags). A `since`
-   * ahead of the head is a stale cursor from a previous daemon incarnation and
-   * reads as 0 (deliver everything buffered) rather than silently nothing.
-   */
-  attentionEventsSince(since: number): { events: DaemonAttentionEvent[]; lastSeq: number };
+  /** Bind durable provider transport metadata to the canonical producer sequence. */
+  agentEndpoint(input: unknown): AgentEndpointStoreResult;
+  /** Recover present OpenCode state from the exact registered provider session. */
+  reconcileAgentProviders(
+    sessionIds?: readonly string[]
+  ): Promise<AgentProviderReconcileResult[]>;
+  /** Accept one canonical, generation-fenced agent-state observation. */
+  agentEvent(input: unknown): DaemonAgentStateIntakeResult;
+  /** One atomic view shared by every canonical state consumer. */
+  agentStates(): { revision: number; snapshots: SessionStateSnapshot[] };
+  /** Durable unified agent/channel event projection, newest first. */
+  events(limit?: number): DeskEventFeedResponse;
+  /** Append one idempotent channel notification to the daemon-owned journal. */
+  channelEvent(
+    input: ChannelMessageDeskEventInput
+  ): AppendChannelDeskEventResult;
+  /** Acknowledge journal records only; canonical activity is untouched. */
+  readEvents(input: DeskEventReadRequest): number;
+  /** Hide all current journal records only; future events remain unread. */
+  clearEvents(): 0;
   /**
    * Startup completeness: /control/health answers 503 until markReady, so the
    * supervisor's probe cannot report a daemon ready while its startup
    * reconcile is still pending or failed — readiness must not lie.
    */
   isReady(): boolean;
+  /** Recoverable projection-store faults that do not make session IO unavailable. */
+  health(): DeskEventJournalHealth;
   markReady(): void;
   /** Tear down the WS bridge + its timers. */
   dispose(): void;
 }
 
-/** Bounded attention ring — plenty for a 2s poll cadence; oldest events drop first. */
-const ATTENTION_RING_MAX = 512;
-
 /** Assemble the durable terminal daemon + mount its binary WS bridge (additive). */
 export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDaemon {
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
-  const attentionRing: DaemonAttentionEvent[] = [];
-  let attentionSeq = 0;
+  const eventJournal = new FileDeskEventJournal(
+    join(options.homeRoot, '_engine', 'desk-events.ndjson')
+  );
+  let intakeStore: FileIntakeStore | undefined;
+  let intakeDependencies: FileIntakeStoreDependencies | undefined;
+  const now = options.now ?? Date.now;
+  const hookInstallationProbe =
+    options.hookInstallationProbe ?? probeHookInstallation;
   let ready = false;
   const router = new TerminalWsRouter({
     ledger,
     supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
-    now: Date.now,
-    onSemanticEvent: (sessionId, event) => {
-      attentionSeq += 1;
-      attentionRing.push({
-        seq: attentionSeq,
-        sessionId,
-        kind: event.kind === 'bell' ? 'bell' : 'osc9',
-        ...(typeof event.data === 'string' && event.data.length > 0 ? { data: event.data.slice(0, 300) } : {})
-      });
-      if (attentionRing.length > ATTENTION_RING_MAX) {
-        attentionRing.splice(0, attentionRing.length - ATTENTION_RING_MAX);
+    now,
+    initialAgentHealth: (subject) => {
+      if (subject.mode !== 'terminal') return undefined;
+      const probe = hookInstallationProbe(subject.provider);
+      if (!probe.installed) {
+        return {
+          status: 'degraded',
+          reason: 'hook-not-installed',
+          ...(probe.detail === undefined ? {} : { detail: probe.detail })
+        };
       }
+      if (subject.provider === 'codex' && probe.trust === 'absent') {
+        return {
+          status: 'degraded',
+          reason: 'codex-hook-untrusted',
+          detail: 'no Codex trust record names Desk hooks.json'
+        };
+      }
+      return undefined;
+    },
+    onStateTransition: (transition) => {
+      eventJournal.appendTransition(transition);
+    },
+    createAgentStateIntakeStore: (dependencies) => {
+      intakeDependencies = dependencies;
+      intakeStore = new FileIntakeStore(
+        join(options.homeRoot, '_engine', 'agent-state-intake.ndjson'),
+        dependencies
+      );
+      return intakeStore;
     }
   });
+  if (intakeStore === undefined || intakeDependencies === undefined) {
+    throw new Error('terminal daemon did not initialize its agent-state intake');
+  }
+  const canonicalIntakeStore = intakeStore;
+  const canonicalIntakeDependencies = intakeDependencies;
+  const endpointStore = new FileAgentEndpointStore(
+    join(options.homeRoot, '_engine', 'agent-endpoints.json'),
+    {
+      currentGeneration: canonicalIntakeDependencies.currentGeneration,
+      expectedProducer: canonicalIntakeDependencies.expectedProducer,
+      claimProducerSequence: (claim) =>
+        canonicalIntakeStore.claimProducerSequence(claim)
+    }
+  );
+  const providerFetch = options.fetch ?? globalThis.fetch;
+  const reconcileConcurrency = Math.max(
+    1,
+    Math.min(options.agentReconcileConcurrency ?? 8, 64)
+  );
+
+  const reconcileOne = async (
+    sessionId: string
+  ): Promise<AgentProviderReconcileResult> => {
+    const snapshot = router.sessions.stateSnapshot(sessionId);
+    if (
+      snapshot === undefined ||
+      snapshot.lifecycle === 'exited' ||
+      snapshot.subject.kind !== 'agent' ||
+      snapshot.subject.provider !== 'opencode' ||
+      snapshot.subject.mode !== 'terminal' ||
+      snapshot.subject.producer !== 'opencode-terminal'
+    ) {
+      return { sessionId, kind: 'skipped', reason: 'not-opencode-session' };
+    }
+    const registration = endpointStore.get(
+      sessionId,
+      snapshot.generation,
+      'opencode-terminal'
+    );
+    if (registration === undefined) {
+      return { sessionId, kind: 'skipped', reason: 'endpoint-unregistered' };
+    }
+    if (registration.providerSessionId === undefined) {
+      return {
+        sessionId,
+        kind: 'skipped',
+        reason: 'provider-session-unregistered'
+      };
+    }
+    const producerInstanceId = canonicalIntakeStore.producerInstance(
+      sessionId,
+      snapshot.generation,
+      'opencode-terminal'
+    );
+    if (producerInstanceId === undefined) {
+      return { sessionId, kind: 'skipped', reason: 'producer-unbound' };
+    }
+    if (producerInstanceId !== registration.producerInstanceId) {
+      return {
+        sessionId,
+        kind: 'skipped',
+        reason: 'producer-instance-mismatch'
+      };
+    }
+    const reserved = endpointStore.reservePollSequence(
+      sessionId,
+      snapshot.generation,
+      'opencode-terminal'
+    );
+    if (reserved === undefined) {
+      return { sessionId, kind: 'skipped', reason: 'endpoint-unregistered' };
+    }
+    const observation = await reconcileOpencodeStatus(registration.endpoint, {
+      fetch: providerFetch,
+      ...(options.agentReconcileTimeoutMs === undefined
+        ? {}
+        : { timeoutMs: options.agentReconcileTimeoutMs })
+    });
+    if (!observation.ok) {
+      return { sessionId, kind: 'skipped', reason: 'poll-failed' };
+    }
+    const facts = observation.sessions.get(registration.providerSessionId);
+    if (facts === undefined || facts.length === 0) {
+      return { sessionId, kind: 'skipped', reason: 'no-facts' };
+    }
+    const observedAt = now();
+    const envelope: AgentStateEnvelope = {
+      schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+      sessionId,
+      generation: snapshot.generation,
+      provider: 'opencode',
+      mode: 'terminal',
+      producer: 'opencode-terminal',
+      producerInstanceId,
+      transport: 'poll',
+      producerSeq: reserved.pollSeq,
+      eventId: `poll:${reserved.pollSeq}`,
+      invocationId: `poll:${reserved.pollSeq}`,
+      occurredAt: observedAt,
+      observedAt,
+      facts
+    };
+    const result = router.sessions.ingestAgentState(envelope);
+    return result.kind === 'accepted' || result.kind === 'duplicate'
+      ? { sessionId, kind: 'reconciled' }
+      : { sessionId, kind: 'skipped', reason: 'intake-rejected' };
+  };
+
+  const reconcileAgentProviders = async (
+    sessionIds?: readonly string[]
+  ): Promise<AgentProviderReconcileResult[]> => {
+    const candidates = [
+      ...new Set(
+        sessionIds ??
+          router.sessions.stateSnapshots().snapshots.map(
+            (snapshot) => snapshot.sessionId
+          )
+      )
+    ];
+    const results = new Array<AgentProviderReconcileResult>(candidates.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const index = next;
+        next += 1;
+        const sessionId = candidates[index];
+        if (sessionId === undefined) return;
+        try {
+          results[index] = await reconcileOne(sessionId);
+        } catch {
+          results[index] = {
+            sessionId,
+            kind: 'skipped',
+            reason: 'recovery-error'
+          };
+        }
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(reconcileConcurrency, candidates.length) },
+        worker
+      )
+    );
+    return results;
+  };
   const disposeBridge = installTerminalWsBridge(options.httpServer, router, options.wsPath !== undefined ? { path: options.wsPath } : {});
 
   const socketPath = (sessionId: string): string => join(options.atchSocketRoot, `${sessionId}.sock`);
@@ -143,6 +378,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         args: ['start', sockPath, ...spec.command], // CREATE: atch start ABSOLUTE_SOCKET_PATH cmd
         sockPath,
         geometry: spec.geometry,
+        subject: spec.subject,
         detached: true,
         killSpec: {
           binPath: options.atchBinPath,
@@ -160,18 +396,42 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     tail(sessionId, rows, offset = 0) {
       return router.sessions.historyText(sessionId, rows, offset);
     },
-    attentionEventsSince(since) {
-      const cursor = since > attentionSeq ? 0 : since; // stale cursor from a prior daemon incarnation
-      return { events: attentionRing.filter((event) => event.seq > cursor), lastSeq: attentionSeq };
+    agentEndpoint(input) {
+      return endpointStore.register(input);
+    },
+    reconcileAgentProviders,
+    agentEvent(input) {
+      return router.sessions.ingestAgentState(input);
+    },
+    agentStates() {
+      return router.sessions.stateSnapshots();
+    },
+    events(limit) {
+      return eventJournal.snapshot(limit === undefined ? {} : { limit });
+    },
+    channelEvent(input) {
+      return eventJournal.appendChannel(input);
+    },
+    readEvents(input) {
+      return eventJournal.markRead(input);
+    },
+    clearEvents() {
+      return eventJournal.clear();
     },
     isReady() {
       return ready;
+    },
+    health() {
+      return eventJournal.health();
     },
     markReady() {
       ready = true;
     },
     dispose() {
       disposeBridge();
+      intakeStore?.close();
+      intakeStore = undefined;
+      eventJournal.close();
     }
   };
 }
@@ -193,6 +453,38 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string');
 }
 
+function readSessionSubject(value: unknown): SessionRegistration['subject'] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const subject = value as Record<string, unknown>;
+  if (subject.kind === 'terminal') {
+    return Object.keys(subject).length === 1 ? { kind: 'terminal' } : undefined;
+  }
+  if (
+    subject.kind !== 'agent' ||
+    typeof subject.provider !== 'string' ||
+    typeof subject.mode !== 'string' ||
+    typeof subject.producer !== 'string' ||
+    (subject.producerInstanceId !== undefined && typeof subject.producerInstanceId !== 'string')
+  ) {
+    return undefined;
+  }
+  const allowedKeys = new Set(['kind', 'provider', 'mode', 'producer', 'producerInstanceId']);
+  if (Object.keys(subject).some((key) => !allowedKeys.has(key))) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(AGENT_PRODUCER_BINDINGS, subject.producer)) return undefined;
+  const producer = subject.producer as AgentProducer;
+  const binding = AGENT_PRODUCER_BINDINGS[producer];
+  if (binding.provider !== subject.provider || binding.mode !== subject.mode) return undefined;
+  return {
+    kind: 'agent',
+    provider: binding.provider,
+    mode: binding.mode,
+    producer,
+    ...(subject.producerInstanceId === undefined
+      ? {}
+      : { producerInstanceId: subject.producerInstanceId })
+  };
+}
+
 /** Clamp a client-supplied geometry so it can neither zero nor blow up the grid allocation (R4.3). */
 function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
   const geometry = (value ?? {}) as { rows?: unknown; cols?: unknown };
@@ -212,7 +504,22 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
 export function createDaemonControlHandler(
-  daemon: Pick<TerminalDaemon, 'provision' | 'retire' | 'input' | 'tail' | 'attentionEventsSince' | 'isReady'>,
+  daemon: Pick<
+    TerminalDaemon,
+    | 'provision'
+    | 'retire'
+    | 'input'
+    | 'tail'
+    | 'agentEndpoint'
+    | 'agentEvent'
+    | 'agentStates'
+    | 'events'
+    | 'channelEvent'
+    | 'readEvents'
+    | 'clearEvents'
+    | 'isReady'
+    | 'health'
+  >,
   handlerOptions: { healthNonce?: string } = {}
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
@@ -239,9 +546,15 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'command must be a non-empty string[]' });
             return;
           }
+          const subject = readSessionSubject(body.subject);
+          if (subject === undefined) {
+            sendJson(res, 400, { ok: false, error: 'invalid subject' });
+            return;
+          }
           const ens = await daemon.provision(body.sessionId, {
             command: body.command,
-            geometry: readProvisionGeometry(body.geometry)
+            geometry: readProvisionGeometry(body.geometry),
+            subject
           });
           if (ens.ok) {
             sendJson(res, 200, { ok: true });
@@ -304,16 +617,131 @@ export function createDaemonControlHandler(
           sendJson(res, 200, { ok: true, lines: window.lines, totalAvailable: window.totalAvailable });
           return;
         }
-        if (req.method === 'POST' && url.pathname === '/control/attention') {
+        if (req.method === 'POST' && url.pathname === '/control/agent-event') {
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
-          const since = Number(body.since);
-          const drained = daemon.attentionEventsSince(Number.isFinite(since) && since >= 0 ? Math.floor(since) : 0);
-          sendJson(res, 200, { ok: true, ...drained });
+          const result = daemon.agentEvent(body);
+          if (result.kind === 'accepted' || result.kind === 'duplicate') {
+            sendJson(res, 200, {
+              ok: true,
+              kind: result.kind,
+              acceptanceId: result.event.acceptanceId,
+              acceptedSeq: result.event.acceptedSeq
+            });
+            return;
+          }
+          const status = result.reason === 'invalid-envelope'
+            ? 400
+            : result.reason === 'producer-unregistered'
+              ? 404
+              : 409;
+          sendJson(res, status, {
+            ok: false,
+            reason: result.reason,
+            ...(result.carried === undefined ? {} : { carried: result.carried }),
+            ...(result.current === undefined ? {} : { current: result.current })
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/agent-endpoint') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          const result = daemon.agentEndpoint(body);
+          if (result.kind === 'accepted' || result.kind === 'duplicate') {
+            sendJson(res, 200, { ok: true, kind: result.kind });
+            return;
+          }
+          const status =
+            result.reason === 'invalid-registration'
+              ? 400
+              : result.reason === 'producer-unregistered'
+                ? 404
+                : 409;
+          sendJson(res, status, {
+            ok: false,
+            reason: result.reason,
+            ...(result.carried === undefined ? {} : { carried: result.carried }),
+            ...(result.current === undefined ? {} : { current: result.current })
+          });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/control/agent-states') {
+          sendJson(res, 200, { ok: true, ...daemon.agentStates() });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/control/events') {
+          const requested = Number(url.searchParams.get('limit'));
+          const limit =
+            Number.isSafeInteger(requested) && requested > 0
+              ? Math.min(requested, 1_000)
+              : 200;
+          sendJson(res, 200, { ok: true, ...daemon.events(limit) });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/events/channel'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          let input: ChannelMessageDeskEventInput;
+          try {
+            input = parseChannelMessageDeskEventInput(body);
+          } catch {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'invalid channel event'
+            });
+            return;
+          }
+          const result = daemon.channelEvent(input);
+          if (result.kind === 'conflict') {
+            sendJson(res, 409, {
+              ok: false,
+              error: 'channel event idempotency conflict'
+            });
+            return;
+          }
+          sendJson(res, 200, { ok: true, ...result });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/events/read'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          let input: DeskEventReadRequest;
+          try {
+            input = parseDeskEventReadRequest(body);
+          } catch {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'invalid event read request'
+            });
+            return;
+          }
+          sendJson(res, 200, {
+            ok: true,
+            unread: daemon.readEvents(input)
+          });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/events/clear'
+        ) {
+          sendJson(res, 200, {
+            ok: true,
+            unread: daemon.clearEvents()
+          });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/control/health') {
+          const health = daemon.health();
           sendJson(res, 200, {
             ok: true,
+            ...(health.status === 'degraded' ? health : {}),
             ...(handlerOptions.healthNonce !== undefined ? { nonce: handlerOptions.healthNonce } : {})
           });
           return;

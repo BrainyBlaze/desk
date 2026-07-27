@@ -1,107 +1,328 @@
-// Durable intake store (spec §6.5). The fsync'd backing behind the §6.3 fence +
-// §6.5 exactly-once intake — persists every committed event so the invocationId
-// dedup-set AND the per-(session,source) sourceSeq allocator survive a daemon
-// RESTART. A lost-ACK retry after a crash then returns the SAME eventId (never a
-// second sourceSeq / double-count). Node stdlib only.
-//
-// currentGeneration delegates to the durable generation ledger (the single
-// source of truth, §4.8.1) so the fence and the intake agree across restart.
-//
-// Format: newline-delimited JSON, one committed AcceptedEvent per line, appended
-// + fsync'd BEFORE the commit is returned. On startup the log is replayed to
-// rebuild both maps; a torn final line (crash mid-append) is skipped — safe,
-// because a torn append means the commit was not durable, so the event's effect
-// (applied AFTER the durable commit, §6.5 order) never happened, and a retry
-// re-commits the same sourceSeq.
-
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  truncateSync,
+  writeSync
+} from 'node:fs';
 import { dirname } from 'node:path';
-import { type AcceptedEvent, type ControlState, type Source, makeEventId } from '../../shared/controlPlane/model.js';
-import { type IntakeStore } from '../../shared/controlPlane/intake.js';
+import {
+  canonicalAdapterKey,
+  canonicalEventKey,
+  canonicalProducerAdapterKey,
+  canonicalProducerWatermarkKey,
+  canonicalWatermarkKey,
+  makeAcceptanceId,
+  type AgentProducerSequenceClaim,
+  type AgentProducerSequenceClaimResult,
+  type AgentStateIntakeStore,
+  type AgentStateProducerRegistration,
+  type AgentStateStoreCommitResult
+} from '../../shared/controlPlane/intake.js';
+import {
+  type AcceptedAgentStateEvent,
+  type AgentProducer,
+  type AgentStateEnvelope,
+  parseAgentStateEnvelope
+} from '../../shared/controlPlane/contract.js';
 
-export class FileIntakeStore implements IntakeStore {
-  private readonly path: string;
-  private readonly getGeneration: (sessionId: string) => number;
-  /** per-session invocationId → the committed event (durable dedup set). */
-  private readonly invocations = new Map<string, AcceptedEvent>();
-  /** per (session, source) → max allocated sourceSeq. */
-  private readonly seqByKey = new Map<string, number>();
+export interface FileIntakeStoreDependencies {
+  currentGeneration: (sessionId: string) => number;
+  expectedProducer: (
+    sessionId: string,
+    generation: number
+  ) => AgentStateProducerRegistration | undefined;
+  now: () => number;
+}
+
+interface Receipt {
+  event: AcceptedAgentStateEvent;
+  fingerprint: string;
+}
+
+interface BoundInstance {
+  producerInstanceId: string;
+  acceptedSeq: number;
+}
+
+interface ProducerSequenceClaimRecord extends AgentProducerSequenceClaim {
+  recordType: 'producer-sequence-claim';
+}
+
+export class FileIntakeStore implements AgentStateIntakeStore {
+  private readonly receipts = new Map<string, Receipt>();
+  private readonly watermarks = new Map<string, number>();
+  private readonly instances = new Map<string, BoundInstance>();
+  private acceptedSeq = 0;
   private fd: number | null = null;
 
-  constructor(path: string, currentGeneration: (sessionId: string) => number) {
-    this.path = path;
-    this.getGeneration = currentGeneration;
+  constructor(
+    private readonly path: string,
+    private readonly dependencies: FileIntakeStoreDependencies
+  ) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.replay();
-    this.fd = openSync(path, 'a');
-  }
-
-  private invKey(sessionId: string, invocationId: string): string {
-    return `${sessionId}\u0000${invocationId}`;
-  }
-  private seqKey(sessionId: string, source: Source): string {
-    return `${sessionId}\u0000${source}`;
-  }
-
-  private replay(): void {
-    if (!existsSync(this.path)) return;
-    for (const line of readFileSync(this.path, 'utf8').split('\n')) {
-      if (line.length === 0) continue;
-      let ev: AcceptedEvent;
-      try {
-        ev = JSON.parse(line) as AcceptedEvent;
-      } catch {
-        continue; // torn/corrupt line — skip fail-closed
-      }
-      if (typeof ev.sessionId !== 'string' || typeof ev.sourceSeq !== 'number') continue;
-      this.invocations.set(this.invKey(ev.sessionId, ev.invocationId), ev);
-      const sk = this.seqKey(ev.sessionId, ev.source);
-      const prev = this.seqByKey.get(sk) ?? 0;
-      if (ev.sourceSeq > prev) this.seqByKey.set(sk, ev.sourceSeq);
-    }
+    this.replayReceipts();
+    this.fd = openSync(path, 'a', 0o600);
   }
 
   currentGeneration(sessionId: string): number {
-    return this.getGeneration(sessionId);
+    return this.dependencies.currentGeneration(sessionId);
   }
 
-  commit(args: {
-    sessionId: string;
-    generation: number;
-    source: Source;
-    invocationId: string;
-    state: ControlState;
-    ts: number;
-  }): { event: AcceptedEvent; fresh: boolean } {
-    const ik = this.invKey(args.sessionId, args.invocationId);
-    const prior = this.invocations.get(ik);
-    if (prior !== undefined) return { event: prior, fresh: false }; // dedup before allocate
+  expectedProducer(sessionId: string, generation: number): AgentStateProducerRegistration | undefined {
+    return this.dependencies.expectedProducer(sessionId, generation);
+  }
 
-    const sk = this.seqKey(args.sessionId, args.source);
-    const sourceSeq = (this.seqByKey.get(sk) ?? 0) + 1;
-    const event: AcceptedEvent = {
-      sessionId: args.sessionId,
-      generation: args.generation,
-      source: args.source,
-      sourceSeq,
-      invocationId: args.invocationId,
-      state: args.state,
-      ts: args.ts,
-      eventId: makeEventId(args.sessionId, args.generation, args.source, sourceSeq)
+  now(): number {
+    return this.dependencies.now();
+  }
+
+  commitAgentState(envelope: AgentStateEnvelope, acceptedAt: number): AgentStateStoreCommitResult {
+    const eventKey = canonicalEventKey(envelope);
+    const fingerprint = JSON.stringify(envelope);
+    const prior = this.receipts.get(eventKey);
+    if (prior !== undefined) {
+      return prior.fingerprint === fingerprint
+        ? { kind: 'duplicate', event: structuredClone(prior.event) }
+        : { kind: 'rejected', reason: 'idempotency-conflict' };
+    }
+
+    const adapterKey = canonicalAdapterKey(envelope);
+    const bound = this.instances.get(adapterKey);
+    if (bound !== undefined && bound.producerInstanceId !== envelope.producerInstanceId) {
+      return { kind: 'rejected', reason: 'producer-instance-mismatch' };
+    }
+
+    const watermarkKey = canonicalWatermarkKey(envelope);
+    if (envelope.producerSeq <= (this.watermarks.get(watermarkKey) ?? 0)) {
+      return { kind: 'rejected', reason: 'producer-order' };
+    }
+
+    const acceptedSeq = this.acceptedSeq + 1;
+    const event: AcceptedAgentStateEvent = {
+      acceptanceId: makeAcceptanceId(envelope, acceptedSeq),
+      acceptedSeq,
+      acceptedAt,
+      envelope
     };
-    // Durable commit: the append+fsync of this event IS the atomic allocate+record.
-    if (this.fd === null) this.fd = openSync(this.path, 'a');
-    writeSync(this.fd, JSON.stringify(event) + '\n');
-    fsyncSync(this.fd);
-    this.invocations.set(ik, event);
-    this.seqByKey.set(sk, sourceSeq);
-    return { event, fresh: true };
+    this.appendReceipt(event);
+    this.installReceipt(event);
+    return { kind: 'committed', event: structuredClone(event) };
+  }
+
+  claimProducerSequence(
+    claim: AgentProducerSequenceClaim
+  ): AgentProducerSequenceClaimResult {
+    const bound = this.instances.get(canonicalProducerAdapterKey(claim));
+    if (bound === undefined) {
+      return { kind: 'rejected', reason: 'producer-unregistered' };
+    }
+    if (bound.producerInstanceId !== claim.producerInstanceId) {
+      return { kind: 'rejected', reason: 'producer-instance-mismatch' };
+    }
+    const watermarkKey = canonicalProducerWatermarkKey(claim);
+    if (claim.producerSeq <= (this.watermarks.get(watermarkKey) ?? 0)) {
+      return { kind: 'rejected', reason: 'producer-order' };
+    }
+    const record: ProducerSequenceClaimRecord = {
+      recordType: 'producer-sequence-claim',
+      ...claim
+    };
+    this.appendRecord(record);
+    this.installSequenceClaim(record);
+    return { kind: 'claimed' };
+  }
+
+  producerInstance(
+    sessionId: string,
+    generation: number,
+    producer: AgentProducer
+  ): string | undefined {
+    return this.instances.get(`${sessionId}\u0000${generation}\u0000${producer}`)
+      ?.producerInstanceId;
+  }
+
+  reconcileProducerInstance(
+    sessionId: string,
+    generation: number,
+    producer: AgentProducer,
+    producerInstanceId: string
+  ): void {
+    if (
+      sessionId.trim().length === 0 ||
+      !Number.isSafeInteger(generation) ||
+      generation <= 0 ||
+      producerInstanceId.trim().length === 0
+    ) {
+      throw new Error('invalid producer reconciliation');
+    }
+    this.instances.set(`${sessionId}\u0000${generation}\u0000${producer}`, {
+      producerInstanceId,
+      acceptedSeq: this.acceptedSeq
+    });
   }
 
   close(): void {
-    if (this.fd !== null) {
-      closeSync(this.fd);
-      this.fd = null;
+    if (this.fd === null) return;
+    closeSync(this.fd);
+    this.fd = null;
+  }
+
+  private replayReceipts(): void {
+    if (!existsSync(this.path)) return;
+    const contents = readFileSync(this.path, 'utf8');
+    let durableContents = contents;
+    if (contents.length > 0 && !contents.endsWith('\n')) {
+      const finalNewline = contents.lastIndexOf('\n');
+      durableContents = finalNewline < 0 ? '' : contents.slice(0, finalNewline + 1);
+      truncateSync(this.path, Buffer.byteLength(durableContents));
     }
+
+    for (const line of durableContents.split('\n')) {
+      if (line.length === 0) continue;
+      const claim = parseProducerSequenceClaim(line);
+      if (claim !== undefined) {
+        this.installSequenceClaim(claim);
+        continue;
+      }
+      const event = parseAcceptedEvent(line);
+      if (event !== undefined) this.installReceipt(event);
+    }
+  }
+
+  private installSequenceClaim(claim: ProducerSequenceClaimRecord): void {
+    const watermarkKey = canonicalProducerWatermarkKey(claim);
+    this.watermarks.set(
+      watermarkKey,
+      Math.max(this.watermarks.get(watermarkKey) ?? 0, claim.producerSeq)
+    );
+  }
+
+  private installReceipt(event: AcceptedAgentStateEvent): void {
+    const fingerprint = JSON.stringify(event.envelope);
+    const eventKey = canonicalEventKey(event.envelope);
+    const prior = this.receipts.get(eventKey);
+    if (prior !== undefined && prior.fingerprint !== fingerprint) return;
+    this.receipts.set(eventKey, { event: structuredClone(event), fingerprint });
+
+    const watermarkKey = canonicalWatermarkKey(event.envelope);
+    this.watermarks.set(
+      watermarkKey,
+      Math.max(this.watermarks.get(watermarkKey) ?? 0, event.envelope.producerSeq)
+    );
+
+    const adapterKey = canonicalAdapterKey(event.envelope);
+    const bound = this.instances.get(adapterKey);
+    if (bound === undefined || event.acceptedSeq > bound.acceptedSeq) {
+      this.instances.set(adapterKey, {
+        producerInstanceId: event.envelope.producerInstanceId,
+        acceptedSeq: event.acceptedSeq
+      });
+    }
+    this.acceptedSeq = Math.max(this.acceptedSeq, event.acceptedSeq);
+  }
+
+  private appendReceipt(event: AcceptedAgentStateEvent): void {
+    this.appendRecord(event);
+  }
+
+  private appendRecord(record: AcceptedAgentStateEvent | ProducerSequenceClaimRecord): void {
+    if (this.fd === null) this.fd = openSync(this.path, 'a', 0o600);
+    const bytes = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = writeSync(this.fd, bytes, offset, bytes.length - offset);
+      if (written <= 0) throw new Error('durable acceptance append made no progress');
+      offset += written;
+    }
+    fsyncSync(this.fd);
+  }
+}
+
+function parseProducerSequenceClaim(
+  line: string
+): ProducerSequenceClaimRecord | undefined {
+  let input: unknown;
+  try {
+    input = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  if (
+    record.recordType !== 'producer-sequence-claim' ||
+    typeof record.sessionId !== 'string' ||
+    record.sessionId.trim().length === 0 ||
+    !Number.isSafeInteger(record.generation) ||
+    (record.generation as number) <= 0 ||
+    !isAgentProducer(record.producer) ||
+    typeof record.producerInstanceId !== 'string' ||
+    record.producerInstanceId.trim().length === 0 ||
+    (record.transport !== 'push' && record.transport !== 'poll') ||
+    !Number.isSafeInteger(record.producerSeq) ||
+    (record.producerSeq as number) <= 0 ||
+    Object.keys(record).some(
+      (key) =>
+        ![
+          'recordType',
+          'sessionId',
+          'generation',
+          'producer',
+          'producerInstanceId',
+          'transport',
+          'producerSeq'
+        ].includes(key)
+    )
+  ) {
+    return undefined;
+  }
+  return record as unknown as ProducerSequenceClaimRecord;
+}
+
+function isAgentProducer(value: unknown): value is AgentProducer {
+  return (
+    value === 'codex-hooks' ||
+    value === 'codex-native' ||
+    value === 'claude-hooks' ||
+    value === 'claude-native' ||
+    value === 'opencode-terminal' ||
+    value === 'opencode-native'
+  );
+}
+
+function parseAcceptedEvent(line: string): AcceptedAgentStateEvent | undefined {
+  let input: unknown;
+  try {
+    input = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof input !== 'object' || input === null) return undefined;
+  const record = input as Record<string, unknown>;
+  if (
+    typeof record.acceptanceId !== 'string' ||
+    record.acceptanceId.trim().length === 0 ||
+    !Number.isSafeInteger(record.acceptedSeq) ||
+    (record.acceptedSeq as number) <= 0 ||
+    !Number.isSafeInteger(record.acceptedAt) ||
+    (record.acceptedAt as number) < 0
+  ) {
+    return undefined;
+  }
+  try {
+    return {
+      acceptanceId: record.acceptanceId,
+      acceptedSeq: record.acceptedSeq as number,
+      acceptedAt: record.acceptedAt as number,
+      envelope: parseAgentStateEnvelope(record.envelope)
+    };
+  } catch {
+    return undefined;
   }
 }

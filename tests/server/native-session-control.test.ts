@@ -4,7 +4,6 @@ import * as runner from '../../src/core/runner.js';
 import {
   atchCommandFor,
   createNativeChannelsTransport,
-  drainNativeAttentionEvents,
   provisionNativeSession,
   restartSessionNativeAware,
   retireStaleIdentityForEdit,
@@ -72,7 +71,26 @@ describe('provisionNativeSession', () => {
     expect(JSON.parse(init.body)).toEqual({
       sessionId: 'shell',
       command: ['sh', '-c', "cd '/tmp/work' || exit 1\nbash"],
-      geometry: { rows: 24, cols: 80 }
+      geometry: { rows: 24, cols: 80 },
+      subject: { kind: 'terminal' }
+    });
+  });
+
+  it('registers the canonical producer for an agent session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provisionNativeSession({ ...baseSpec, agent: 'claude', uiMode: 'native' });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).subject).toEqual({
+      kind: 'agent',
+      provider: 'claude',
+      mode: 'native',
+      producer: 'claude-native'
     });
   });
 
@@ -331,42 +349,6 @@ describe('createNativeChannelsTransport', () => {
       else process.env.DESK_ATCH_SOCKET_ROOT = savedRoot;
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-
-
-describe('drainNativeAttentionEvents', () => {
-  it('returns validated events + the advanced cursor', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () =>
-        JSON.stringify({
-          ok: true,
-          events: [
-            { seq: 4, sessionId: 'shell', kind: 'bell' },
-            { seq: 5, sessionId: 'shell', kind: 'osc9', data: 'Turn done' },
-            { seq: 6, sessionId: 42, kind: 'bell' }, // invalid → dropped
-            { seq: 7, sessionId: 'shell', kind: 'title' } // invalid kind → dropped
-          ],
-          lastSeq: 7
-        })
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const drained = await drainNativeAttentionEvents(3);
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ since: 3 });
-    expect(drained.events).toEqual([
-      { seq: 4, sessionId: 'shell', kind: 'bell' },
-      { seq: 5, sessionId: 'shell', kind: 'osc9', data: 'Turn done' }
-    ]);
-    expect(drained.lastSeq).toBe(7);
-  });
-
-  it('fails soft to an empty drain with the cursor unmoved when the daemon is unreachable', async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    vi.stubGlobal('fetch', fetchMock);
-    expect(await drainNativeAttentionEvents(9)).toEqual({ events: [], lastSeq: 9 });
   });
 });
 

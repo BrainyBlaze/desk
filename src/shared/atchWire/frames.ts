@@ -1,8 +1,8 @@
 // atch v3 wire — frozen constants, frame-type registry, and enums.
-// Byte-exact transcription of docs/atch-wire-v3.md (FROZEN 2026-07-20, consensus
-// @claude-1 + @codex). This is the single source both the Desk TS codec and the
-// atch C fork implement against; conformance = the golden vectors in
-// tests/fixtures/atch-wire/. Pure module (src/shared): no server/web imports.
+// Byte-exact transcription of docs/atch-wire-v3.md (frozen base 2026-07-20 plus
+// cross-reviewed compatible extensions). This is the single source both the Desk
+// TS codec and the atch C fork implement against; conformance = the golden vectors
+// in tests/fixtures/atch-wire/. Pure module (src/shared): no server/web imports.
 
 /** ASCII "ATV3". */
 export const MAGIC = Uint8Array.of(0x41, 0x54, 0x56, 0x33);
@@ -24,7 +24,7 @@ export const MORE_TIMEOUT_MS = 5000;
 export const LEASE_TTL_MS = 15000;
 export const HEARTBEAT_MS = 5000;
 
-/** Frame types (u16). FROZEN — 30 types. */
+/** Frame types (u16). FROZEN base plus reviewed backward-compatible extensions. */
 export enum FrameType {
   HELLO = 1,
   ATTACH = 2,
@@ -55,10 +55,11 @@ export enum FrameType {
   TERMINAL_REPLY = 70,
   GAP = 80,
   FENCE = 82,
-  REDRAW = 83
+  REDRAW = 83,
+  TERMINAL_STATE = 84
 }
 
-/** The 30 valid frame-type numbers, for validation + exhaustive vector coverage. */
+/** The valid frame-type numbers, for validation + exhaustive vector coverage. */
 export const ALL_FRAME_TYPES: readonly FrameType[] = Object.freeze(
   Object.values(FrameType).filter((v): v is FrameType => typeof v === 'number')
 );

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   daemonControl,
+  daemonControlGet,
   daemonHttpBase,
   toOkResult
 } from '../../src/shared/daemonControlClient.js';
@@ -58,13 +59,65 @@ describe('daemonControl', () => {
     await expect(daemonControl('/control/provision', {}, { baseUrl: 'http://daemon' })).resolves.toEqual({
       ok: false,
       error: 'cap-exceeded',
-      status: 503
+      status: 503,
+      body: { ok: false, error: 'cap-exceeded' }
     });
     await expect(daemonControl('/control/provision', {}, { baseUrl: 'http://daemon' })).resolves.toEqual({
       ok: false,
       error: 'terminal daemon returned an invalid JSON response (HTTP 200)',
       status: 200
     });
+  });
+
+  it('preserves semantic rejection bodies and reasons for route passthrough', async () => {
+    const body = {
+      ok: false,
+      reason: 'generation-fence',
+      carried: 1,
+      current: 2
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 409,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    const result = await daemonControl('/control/agent-event', {}, {
+      baseUrl: 'http://daemon',
+      fetchImpl: fetchMock
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'generation-fence',
+      status: 409,
+      body
+    });
+  });
+
+  it('gets payload-bearing control resources through the shared transport', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, revision: 3, snapshots: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    await expect(
+      daemonControlGet('/control/agent-states', {
+        baseUrl: 'http://daemon',
+        fetchImpl: fetchMock
+      })
+    ).resolves.toEqual({
+      ok: true,
+      status: 200,
+      body: { ok: true, revision: 3, snapshots: [] }
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://daemon/control/agent-states',
+      expect.objectContaining({ method: 'GET' })
+    );
   });
 
   it('aborts a hung request at the configured deadline', async () => {

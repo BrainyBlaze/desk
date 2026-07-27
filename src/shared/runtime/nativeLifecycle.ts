@@ -9,7 +9,8 @@
 // The daemon drives real host processes over the stable socket (§3.6); here we
 // encode the lifecycle rules so they are testable without spawning.
 
-import { type ControlState } from '../controlPlane/model.js';
+import type { AgentSurfaceEventPayload } from '../../core/agentSurfaceProtocol.js';
+import type { AgentSemanticFact, WaitOwner } from '../controlPlane/contract.js';
 
 /** The native host PROCESS lifecycle the daemon supervises. */
 export type NativeHostPhase =
@@ -70,27 +71,130 @@ export function applyNativeEvent(s: NativeHostState, ev: NativeEvent): NativeHos
   }
 }
 
+export type NativeAgentObservation =
+  | AgentSurfaceEventPayload
+  | { kind: 'host-connected' }
+  | { kind: 'host-disconnected'; detail?: string };
+
 /**
- * Project the host lifecycle + last command-result to the control-plane
- * `native-fsm` ControlState (§6.9). `starting` and `crashed`/`exited` are
- * unobservable-as-work → `unknown` (fail-closed, never coerced to idle); a live
- * host's state comes from its last command-result class.
+ * Map one typed native-provider observation to canonical semantic facts.
+ * Conversation events remain conversation transport; only this adapter writes
+ * activity/wait/health, and it never inspects terminal rendering.
  */
-export function nativeControlState(s: NativeHostState, lastResult?: CommandResultClass): ControlState {
-  switch (s.phase) {
-    case 'working':
-      return 'working';
-    case 'ready':
-    case 'idle':
-      // map the last command-result class; a bare ready with no result is idle
-      if (lastResult === 'blocked') return 'blocked';
-      if (lastResult === 'awaiting-approval') return 'awaiting-approval';
-      return 'idle';
-    case 'starting':
-    case 'exited':
-    case 'crashed':
-      return 'unknown';
+export function nativeAgentFactsFor(observation: NativeAgentObservation): AgentSemanticFact[] {
+  switch (observation.kind) {
+    case 'host-connected':
+      return [
+        { kind: 'activity', activity: 'unknown' },
+        { kind: 'health', health: { status: 'healthy' } }
+      ];
+    case 'host-disconnected':
+      return [
+        { kind: 'activity', activity: 'unknown' },
+        {
+          kind: 'health',
+          health: {
+            status: 'degraded',
+            reason: 'native-host-disconnected',
+            ...(observation.detail === undefined ? {} : { detail: observation.detail })
+          }
+        }
+      ];
+    case 'status':
+      switch (observation.state) {
+        case 'processing':
+        case 'tool-executing':
+          return [{ kind: 'activity', activity: 'working' }];
+        case 'idle':
+        case 'interrupted':
+          return [{ kind: 'activity', activity: 'idle' }];
+        case 'awaiting-permission':
+          return [blockedFact('permission', 'operator', observation.detail)];
+        case 'starting':
+          return [
+            { kind: 'activity', activity: 'unknown' },
+            { kind: 'health', health: { status: 'healthy' } }
+          ];
+        case 'error':
+          return degradedUnknown('native-agent-error', observation.detail);
+        case 'exited':
+          return degradedUnknown('native-agent-exited', observation.detail);
+      }
+    case 'user-message':
+    case 'tool-start':
+      return [{ kind: 'activity', activity: 'working' }];
+    case 'assistant-delta':
+    case 'assistant-message':
+    case 'tool-output-delta':
+    case 'tool-end':
+      return [{ kind: 'heartbeat' }];
+    case 'permission-request':
+      return [
+        blockedFact(
+          `permission-${observation.variant}`,
+          'operator',
+          observation.detail ?? observation.title
+        )
+      ];
+    case 'permission-resolved':
+      return [{ kind: 'unblocked' }];
+    case 'turn-complete':
+      return [{ kind: 'activity', activity: 'idle' }];
+    case 'attention-hint':
+      return observation.attention === 'session-status'
+        ? [blockedFact('provider-status', 'provider', observation.detail)]
+        : [
+            blockedFact(
+              observation.attention === 'elicitation' ? 'elicitation' : 'input',
+              'operator',
+              observation.detail
+            )
+          ];
+    case 'agent-error':
+      return degradedUnknown('native-agent-error', observation.message);
+    case 'session-info':
+    case 'history-boundary':
+      return [{ kind: 'health', health: { status: 'healthy' } }];
   }
+}
+
+function blockedFact(
+  kind: string,
+  owner: WaitOwner,
+  detail: string | undefined
+): AgentSemanticFact {
+  const boundedDetail = canonicalDetail(detail);
+  return {
+    kind: 'blocked',
+    wait: {
+      kind,
+      owner,
+      ...(boundedDetail === undefined ? {} : { detail: boundedDetail })
+    }
+  };
+}
+
+function degradedUnknown(reason: string, detail: string | undefined): AgentSemanticFact[] {
+  const boundedDetail = canonicalDetail(detail);
+  return [
+    { kind: 'activity', activity: 'unknown' },
+    {
+      kind: 'health',
+      health: {
+        status: 'degraded',
+        reason,
+        ...(boundedDetail === undefined ? {} : { detail: boundedDetail })
+      }
+    }
+  ];
+}
+
+function canonicalDetail(detail: string | undefined): string | undefined {
+  if (detail === undefined) {
+    return undefined;
+  }
+  const trimmed = detail.trim();
+  return trimmed.length === 0 ? undefined : trimmed.slice(0, 2_000);
 }
 
 export interface NativeRestartPolicy {

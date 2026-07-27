@@ -396,24 +396,39 @@ describe('misc', () => {
 describe('lifecycleStateSignature (lifecycle corrective — the refresh diff key must cover lifecycle fields)', () => {
   const base: LifecycleState = {
     sessionId: 'session-a',
-    busy: false,
-    awaitingApproval: false,
-    queued: 1,
-    status: 'idle',
+    authorityRevision: 4,
+    lifecycle: 'running',
+    activity: 'idle',
+    actionable: false,
+    queueDepth: 1,
+    deliveryStatus: 'queued',
     blockedItemCount: 0,
     droppedQueueItems: 0
   };
 
-  it('CHANGES when only the lifecycle status changes (idle -> blocked, same busy/queued/awaitingApproval)', () => {
-    // The bug: the old deliverySig keyed on busy/queued/awaitingApproval only, so
-    // this transition was bailed and the UI showed stale status. lifecycleStateSignature must
-    // include `status` (and the rest), so the signatures differ and setDelivery fires.
-    const blocked: LifecycleState = { ...base, status: 'blocked', deliveryBlocked: true, blockedReason: 'not-ready' };
+  it('CHANGES when only the delivery status changes, with the queue untouched', () => {
+    // The bug: the old key covered busy/queued only, so this transition was
+    // bailed and the UI showed stale state.
+    const blocked: LifecycleState = { ...base, deliveryStatus: 'blocked', deliveryBlocked: true, blockedReason: 'not-ready' };
     expect(lifecycleStateSignature(base)).not.toBe(lifecycleStateSignature(blocked));
   });
 
-  it('CHANGES on a submit-stuck transition with unchanged busy/queued', () => {
-    const stuck: LifecycleState = { ...base, status: 'submit-stuck', submitState: 'submit-stuck-submit', blockedItemCount: 1 };
+  it('CHANGES when only the AGENT activity changes, with delivery untouched', () => {
+    // The two axes move independently: an agent can start waiting on the
+    // operator while the queue and the delivery state stay exactly as they
+    // were. Keying on delivery alone would hide it.
+    const waiting: LifecycleState = {
+      ...base,
+      activity: 'blocked',
+      actionable: true,
+      waitOwner: 'operator',
+      waitKind: 'approval'
+    };
+    expect(lifecycleStateSignature(base)).not.toBe(lifecycleStateSignature(waiting));
+  });
+
+  it('CHANGES on a submit-stuck transition with an unchanged queue', () => {
+    const stuck: LifecycleState = { ...base, deliveryStatus: 'submit-stuck', submitState: 'submit-stuck-submit', blockedItemCount: 1 };
     expect(lifecycleStateSignature(base)).not.toBe(lifecycleStateSignature(stuck));
   });
 
@@ -422,15 +437,15 @@ describe('lifecycleStateSignature (lifecycle corrective — the refresh diff key
     // so each MUST be in the diff key — otherwise a pause edit (e.g. the operator rewording
     // the hold reason while already paused) is diff-bailed and the inbox/badge go stale, the
     // exact lifecycle staleness class this signature exists to prevent.
-    const paused: LifecycleState = { ...base, status: 'paused', pausedByOperator: true, pausedAt: '2026-06-18T22:00:00.000Z' };
+    const paused: LifecycleState = { ...base, deliveryStatus: 'paused', pausedByOperator: true, pausedAt: '2026-06-18T22:00:00.000Z' };
     expect(lifecycleStateSignature(base)).not.toBe(lifecycleStateSignature(paused));
-    // status + pausedByOperator + pausedAt all identical; ONLY pauseReason differs — isolates that field.
+    // deliveryStatus + pausedByOperator + pausedAt all identical; ONLY pauseReason differs.
     const reworded: LifecycleState = { ...paused, pauseReason: 'operator hold for review' };
     expect(lifecycleStateSignature(paused)).not.toBe(lifecycleStateSignature(reworded));
   });
 
   it('is STABLE when nothing the UI surfaces changed', () => {
-    const working: LifecycleState = { ...base, busy: true, queued: 0, status: 'working' };
+    const working: LifecycleState = { ...base, activity: 'working', queueDepth: 0, deliveryStatus: 'ready' };
     expect(lifecycleStateSignature(working)).toBe(lifecycleStateSignature({ ...working }));
   });
 });
@@ -453,10 +468,12 @@ describe('fuzzyMatch (command palette )', () => {
 describe('buildInboxItems (operator inbox)', () => {
   const session = (sessionId: string, over: Partial<LifecycleState>): LifecycleState => ({
     sessionId,
-    busy: false,
-    awaitingApproval: false,
-    queued: 0,
-    status: 'idle',
+    authorityRevision: 4,
+    lifecycle: 'running',
+    activity: 'idle',
+    actionable: false,
+    queueDepth: 0,
+    deliveryStatus: 'ready',
     blockedItemCount: 0,
     droppedQueueItems: 0,
     ...over
@@ -472,14 +489,23 @@ describe('buildInboxItems (operator inbox)', () => {
     at: '2026-06-18T00:00:00.000Z'
   });
 
-  it('surfaces stuck / blocked / awaiting-approval / dropped from lifecycle states; ignores working/idle', () => {
+  it('surfaces stuck / blocked / awaiting-approval / dropped; ignores working and idle', () => {
+    // Three of these are DELIVERY faults and one is an AGENT fault. The
+    // approval item must come from the activity axis: reading it from
+    // deliveryStatus would drop it exactly when delivery succeeded and the
+    // agent started waiting for this human.
     const items = buildInboxItems(
       [
-        session('session-a', { status: 'submit-stuck', blockedItemCount: 2 }),
-        session('session-b', { status: 'blocked', blockedReason: 'not-ready' }),
-        session('session-c', { status: 'awaiting-approval' }),
-        session('session-d', { status: 'idle', droppedQueueItems: 3 }),
-        session('session-e', { status: 'working' })
+        session('session-a', { deliveryStatus: 'submit-stuck', blockedItemCount: 2 }),
+        session('session-b', { deliveryStatus: 'blocked', blockedReason: 'not-ready' }),
+        session('session-c', {
+          activity: 'blocked',
+          actionable: true,
+          waitOwner: 'operator',
+          waitKind: 'approval'
+        }),
+        session('session-d', { droppedQueueItems: 3 }),
+        session('session-e', { activity: 'working' })
       ],
       []
     );
@@ -516,7 +542,10 @@ describe('buildInboxItems (operator inbox)', () => {
   });
 
   it('surfaces an operator-paused session with its reason', () => {
-    const items = buildInboxItems([session('session-a', { status: 'paused', pausedByOperator: true, pauseReason: 'holding for review' })], []);
+    const items = buildInboxItems(
+      [session('session-a', { deliveryStatus: 'paused', pausedByOperator: true, pauseReason: 'holding for review' })],
+      []
+    );
     expect(items).toHaveLength(1);
     expect(items[0]!.kind).toBe('paused');
     expect(items[0]!.sessionId).toBe('session-a');
@@ -524,7 +553,7 @@ describe('buildInboxItems (operator inbox)', () => {
   });
 
   it('returns nothing when all sessions are idle/working and there are no mentions', () => {
-    expect(buildInboxItems([session('session-a', { status: 'working' })], [])).toEqual([]);
+    expect(buildInboxItems([session('session-a', { activity: 'working' })], [])).toEqual([]);
   });
 });
 

@@ -3,7 +3,7 @@
 // reissued or reset.
 
 import { describe, expect, it } from 'vitest';
-import { GenerationLedger, InMemoryGenerationLedger, intake, InMemoryIntakeStore } from '../src/shared/controlPlane/index.js';
+import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
 
 describe('generation ledger — monotonic allocation (§4.8.1)', () => {
   it('allocates 1 for a fresh sessionId, then increments', () => {
@@ -39,27 +39,5 @@ describe('generation ledger — monotonic allocation (§4.8.1)', () => {
     expect(backing.read('s1')).toBe(5);
     backing.write('s1', 6); // a genuine raise still applies
     expect(backing.read('s1')).toBe(6);
-  });
-});
-
-describe('generation ledger — backs the §6.3 fence end-to-end', () => {
-  it('a delayed old-generation hook is fenced after delete+recreate', () => {
-    // The ledger is the source of truth for the fence's currentGeneration.
-    const led = new GenerationLedger(new InMemoryGenerationLedger());
-    const store = new InMemoryIntakeStore();
-
-    const g1 = led.allocate('s1'); // gen 1
-    store.setGeneration('s1', g1);
-    const accepted = intake({ sessionId: 's1', carriedGeneration: g1, source: 'typed-hook', invocationId: 'i1', state: 'working', ts: 1 }, store);
-    expect(accepted.kind).toBe('accepted');
-
-    // session deleted + recreated — ledger tombstone bumps to gen 2:
-    const g2 = led.allocate('s1');
-    expect(g2).toBe(2);
-    store.setGeneration('s1', g2);
-
-    // a delayed hook from the OLD generation (carrying g1) is fenced:
-    const stale = intake({ sessionId: 's1', carriedGeneration: g1, source: 'typed-hook', invocationId: 'i2', state: 'working', ts: 2 }, store);
-    expect(stale.kind).toBe('rejected');
   });
 });

@@ -12,6 +12,7 @@ import { findOpencodeLaunchResume } from './opencodeResume.js';
 import { upsertPendingResumeCapture } from './resumeCaptureState.js';
 import type { SessionPlanAction, SessionSpec } from './types.js';
 import { shellQuote } from '../shared/shell.js';
+import { sessionStateSubjectFor } from '../shared/controlPlane/index.js';
 
 export { atchCommandFor } from '../shared/atchCommand.js';
 
@@ -151,7 +152,8 @@ async function provisionPreparedSession(
   const result = await controlFor(options)('/control/provision', {
     sessionId: session.sessionId,
     command: buildAtchCommand(session),
-    geometry: { rows: 24, cols: 80 }
+    geometry: { rows: 24, cols: 80 },
+    subject: sessionStateSubjectFor(session)
   });
   return result.ok ? { ok: true } : { ok: false, error: result.error };
 }

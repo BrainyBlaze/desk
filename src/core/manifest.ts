@@ -12,6 +12,7 @@ import type {
   DeskSession,
   SessionSpec
 } from './types.js';
+import { deskClaudeSettingsPath } from './agentHooks.js';
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
 import {
   collectSessions,
@@ -329,41 +330,24 @@ function buildProjectSessionSpec({
   };
 }
 
-/**
- * Turn-complete / approval notifications: agents are launched so their TUIs
- * emit a terminal BEL Desk can capture from the authoritative terminal stream.
- * Applies to newly started/restarted sessions.
+/*
+ * No launcher-injected notification setup lives here any more.
+ *
+ * Two retired paths were removed together:
+ *  - Codex was launched with `tui.notification_method=bel`, and Claude with an
+ *    inline `--settings` payload that set `preferredNotifChannel: terminal_bell`
+ *    and installed curl hooks posting a schema the current route rejects. Both
+ *    were the terminal-bell era, and a bell is an edge with no author: any
+ *    child process ringing it produces the same byte.
+ *  - The inline `--settings` also OVERRODE the managed hooks in the agent's own
+ *    settings file, so the launcher could silently replace the installed
+ *    producer with a retired one.
+ *
+ * Agent state now comes from the typed hooks installed by `desk hooks install`
+ * (see core/agentHooks.ts) and reaches the authority through the provider
+ * adapter. The launcher's job is to start the agent, not to teach it how to
+ * report.
  */
-const CODEX_NOTIFICATION_FLAGS =
-  '-c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always';
-
-/**
- * Claude Code: hooks are the reliable channel (preferredNotifChannel is a
- * config-store key and silently no-ops via --settings). The hook posts the
- * durable Desk identity inherited in DESK_SESSION_ID to /api/agent-event
- * (port overridable via DESK_API in the session env).
- */
-function claudeEventHook(kind: 'turn-complete' | 'approval-requested'): string {
-  return (
-    'payload=$(cat); ' +
-    'sid=$(printf %s "$payload" | grep -o \'"session_id":"[^"]*"\' | head -1 | cut -d\'"\' -f4); ' +
-    's="${DESK_SESSION_ID:-}"; ' +
-    '[ -n "$s" ] && curl -s -m 2 -X POST "${DESK_API:-http://127.0.0.1:5173}/api/agent-event" ' +
-    `-H 'content-type: application/json' --data "{\\"session\\":\\"$s\\",\\"kind\\":\\"${kind}\\",\\"sessionId\\":\\"$sid\\"}" >/dev/null 2>&1; exit 0`
-  );
-}
-
-const CLAUDE_SETTINGS = {
-  preferredNotifChannel: 'terminal_bell',
-  hooks: {
-    Stop: [{ hooks: [{ type: 'command', command: claudeEventHook('turn-complete') }] }],
-    Notification: [
-      { matcher: 'permission_prompt', hooks: [{ type: 'command', command: claudeEventHook('approval-requested') }] }
-    ]
-  }
-};
-
-const CLAUDE_NOTIFICATION_FLAGS = `--settings ${shellQuote(JSON.stringify(CLAUDE_SETTINGS))}`;
 
 export function buildAgentCommand(
   session: DeskSession,
@@ -385,7 +369,10 @@ export function buildAgentCommand(
   // ambient path yields '' so its command is byte-identical to before.
   const env = `${profileCommandPrefix(session, homeDir)}${agentEnvPrefix(session.agent, sessionId)}`;
   if (session.agent === 'claude') {
-    const args = ['claude', CLAUDE_NOTIFICATION_FLAGS];
+    // Desk's own settings file, not the operator's. It carries only the hooks
+    // Desk needs to learn what the agent is doing; the operator's
+    // ~/.claude/settings.json is never written by Desk.
+    const args = ['claude', `--settings ${shellQuote(deskClaudeSettingsPath(homeDir))}`];
     if (agentMcp?.claudeConfigPath) {
       args.push('--mcp-config', shellQuote(agentMcp.claudeConfigPath));
     }
@@ -399,7 +386,7 @@ export function buildAgentCommand(
     return `cd ${shellQuote(cwd)} && ${env} ${baseCommand}`;
   }
   if (session.agent === 'codex') {
-    const args = ['codex', CODEX_NOTIFICATION_FLAGS];
+    const args = ['codex'];
     if (agentMcp) {
       args.push(
         '-c',

@@ -52,13 +52,13 @@ describe('daemon spawn contract — ATCH_GENERATION from the ledger (§4.8.1)', 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('spawns atch with ATCH_GENERATION = the ledger generation, and survives respawn', async () => {
+  it('spawns atch with matching wire and semantic generations, and survives respawn', async () => {
     const sock1 = join(dir, 's1a.sock');
     const gen1 = join(dir, 'gen1.txt');
     const ens1 = await mgr.spawnAndAttach('s1', { binPath: process.execPath, args: [FAKE_ATCH, sock1, gen1], sockPath: sock1, geometry: { rows: 40, cols: 120 }, readyTimeoutMs: 4000 });
     expect(ens1.ok).toBe(true);
     if (ens1.ok) expect(ens1.generation).toBe(1);
-    expect(readFileSync(gen1, 'utf8')).toBe('1'); // ledger generation injected into the master env
+    expect(readFileSync(gen1, 'utf8')).toBe('1:1'); // one ledger value fences wire + semantic producers
 
     // retire + respawn the SAME sessionId → the ledger tombstone gives generation 2,
     // and that (not a reset to 1) is what the daemon injects.
@@ -68,7 +68,7 @@ describe('daemon spawn contract — ATCH_GENERATION from the ledger (§4.8.1)', 
     const ens2 = await mgr.spawnAndAttach('s1', { binPath: process.execPath, args: [FAKE_ATCH, sock2, gen2], sockPath: sock2, geometry: { rows: 40, cols: 120 }, readyTimeoutMs: 4000 });
     expect(ens2.ok).toBe(true);
     if (ens2.ok) expect(ens2.generation).toBe(2);
-    expect(readFileSync(gen2, 'utf8')).toBe('2'); // NOT reset to 1 — the fence stays sound across the join
+    expect(readFileSync(gen2, 'utf8')).toBe('2:2'); // NOT reset to 1 — both fences stay aligned
   });
 
   it('spawnMaster rejects if the binary exits before the socket appears', async () => {

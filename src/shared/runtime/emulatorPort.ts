@@ -8,8 +8,8 @@
 //   write(b)          → terminal.write(b)
 //   resize(r,c)       → terminal.resize(c, r)
 //   readTailText(n)   → iterate terminal.buffer.active.getLine(i).translateToString()
-//                       over the last n rows (PLAIN text for the §6.8 classifier —
-//                       NOT SerializeAddon output, which returns escape sequences)
+//                       over the last n rows (plain text for capture and delivery
+//                       verification, never semantic agent-state inference)
 //   serialize()       → SerializeAddon.serialize() (restorable display string, §7.3)
 //   onBell/onOsc/...  → terminal.onBell / terminal.parser.registerOscHandler(code,…)
 //                       / registerCsiHandler(…) (PUBLIC hooks only, §7.2)
@@ -31,12 +31,14 @@ export interface EmulatorEvent {
 export interface EmulatorPort {
   /** Feed raw output bytes from the master (binary end-to-end, §7.8). */
   write(bytes: Uint8Array): void;
+  /**
+   * Await pending parser work when the adapter parses writes asynchronously.
+   * Attach-time terminal state must drain before input delivery can inspect it.
+   */
+  flush?(): Promise<void>;
   /** Apply a geometry change (rows × cols). */
   resize(rows: number, cols: number): void;
-  /**
-   * The last `rows` on-screen lines as PLAIN text (translateToString), for the
-   * degraded worker-rendered classifier (§6.8). Never escape sequences.
-   */
+  /** The last `rows` on-screen lines as plain text. Never escape sequences. */
   readTailText(rows: number): string[];
   /**
    * Ranged plain-text history (screen + scrollback): `offset` lines back from

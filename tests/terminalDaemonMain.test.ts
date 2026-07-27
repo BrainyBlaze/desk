@@ -8,7 +8,12 @@ import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  GenerationLedger,
+  InMemoryGenerationLedger,
+  type AgentStateEnvelope
+} from '../src/shared/controlPlane/index.js';
 import {
   WorkerSupervisor,
   DEFAULT_SUPERVISOR_CONFIG,
@@ -17,9 +22,18 @@ import {
 } from '../src/shared/runtime/index.js';
 import { SessionManager } from '../src/server/runtime/sessionManager.js';
 import { spawnMaster } from '../src/server/runtime/spawnMaster.js';
-import { startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
+import {
+  startTerminalDaemonServer,
+  type TerminalDaemon
+} from '../src/server/runtime/terminalDaemon.js';
+import { FileIntakeStore } from '../src/server/runtime/fileIntakeStore.js';
 import * as runner from '../src/core/runner.js';
-import { manifestReconcileTargets, reconcileExistingSessions, resolveDaemonConfig } from '../src/server/runtime/terminalDaemonMain.js';
+import {
+  completeDaemonStartup,
+  manifestReconcileTargets,
+  reconcileExistingSessions,
+  resolveDaemonConfig
+} from '../src/server/runtime/terminalDaemonMain.js';
 import { encodeFrame } from '../src/shared/atchWire/codec.js';
 import { FrameType } from '../src/shared/atchWire/frames.js';
 import { encodeBody } from '../src/shared/atchWire/messages.js';
@@ -83,6 +97,23 @@ function makeManager(store = new InMemoryGenerationLedger()) {
   return { manager, ledger, store };
 }
 
+function makeManagerWithIntake(store: InMemoryGenerationLedger, intakePath: string) {
+  const ledger = new GenerationLedger(store);
+  let intakeStore: FileIntakeStore | undefined;
+  const manager = new SessionManager({
+    ledger,
+    supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+    emulatorFactory: { create: () => new FakeEmu() },
+    now: () => 1000,
+    sendBrowser: () => {},
+    createAgentStateIntakeStore: (dependencies) => {
+      intakeStore = new FileIntakeStore(intakePath, dependencies);
+      return intakeStore;
+    }
+  });
+  return { manager, ledger, close: () => intakeStore?.close() };
+}
+
 /** A minimal fake v3 master: on the first handshake bytes, reply ATTACH_ACK at `generation`. */
 function listenAsMaster(sockPath: string, generation: number): Promise<Server> {
   return new Promise((resolve, reject) => {
@@ -110,16 +141,25 @@ describe('manifestReconcileTargets', () => {
   it('targets only manifest sessions whose atch socket is live, keyed by sessionId', () => {
     vi.spyOn(runner, 'loadDesk').mockReturnValue({
       sessions: [
-        { sessionId: 'shell' },
-        { sessionId: 'other' },
-        { sessionId: 'gone' }
+        { sessionId: 'shell', agent: 'claude', uiMode: 'native' },
+        { sessionId: 'other', agent: 'bash', uiMode: 'terminal' },
+        { sessionId: 'gone', agent: 'codex', uiMode: 'terminal' }
       ]
     } as never);
     const live = new Set(['/root/shell.sock', '/root/other.sock']);
     const targets = manifestReconcileTargets('/root', (path) => live.has(path));
     expect(targets).toEqual([
-      { sessionId: 'shell', sockPath: '/root/shell.sock' },
-      { sessionId: 'other', sockPath: '/root/other.sock' }
+      {
+        sessionId: 'shell',
+        sockPath: '/root/shell.sock',
+        subject: {
+          kind: 'agent',
+          provider: 'claude',
+          mode: 'native',
+          producer: 'claude-native'
+        }
+      },
+      { sessionId: 'other', sockPath: '/root/other.sock', subject: { kind: 'terminal' } }
     ]);
   });
 });
@@ -155,6 +195,74 @@ describe('SessionManager.restoreAndAttach', () => {
     }
   });
 
+  it('restores lifecycle but not stale activity, while retaining the original durable duplicate receipt', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-agent-reattach-'));
+    const sockPath = join(dir, 'agent.sock');
+    const intakePath = join(dir, 'agent-state-intake.ndjson');
+    const store = new InMemoryGenerationLedger();
+    const subject = {
+      kind: 'agent',
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks'
+    } as const;
+    const event: AgentStateEnvelope = {
+      schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+      sessionId: 'agent',
+      generation: 1,
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks',
+      producerInstanceId: 'hooks-a',
+      producerSeq: 1,
+      eventId: 'hooks-a:1',
+      invocationId: 'turn-1',
+      occurredAt: 900,
+      observedAt: 950,
+      facts: [{ kind: 'activity', activity: 'working' }]
+    };
+    const first = makeManagerWithIntake(store, intakePath);
+    const ensured = first.manager.ensure('agent', { rows: 24, cols: 80 }, subject);
+    expect(ensured).toEqual({ ok: true, generation: 1, created: true });
+    const accepted = first.manager.ingestAgentState(event);
+    expect(accepted.kind).toBe('accepted');
+    expect(first.manager.stateSnapshot('agent')?.subject).toMatchObject({ activity: 'working' });
+    first.close();
+
+    const server = await listenAsMaster(sockPath, 1);
+    const second = makeManagerWithIntake(store, intakePath);
+    try {
+      const restored = await second.manager.restoreAndAttach('agent', {
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/usr/bin/true', args: [] },
+        subject
+      });
+      expect(restored).toEqual({ ok: true, generation: 1 });
+      expect(second.manager.stateSnapshot('agent')).toMatchObject({
+        lifecycle: 'running',
+        subject: { kind: 'agent', activity: 'unknown', evidence: null }
+      });
+
+      const duplicate = second.manager.ingestAgentState(event);
+      expect(duplicate).toMatchObject({
+        kind: 'duplicate',
+        event: {
+          acceptanceId:
+            accepted.kind === 'accepted' ? accepted.event.acceptanceId : 'unreachable'
+        }
+      });
+      expect(second.manager.stateSnapshot('agent')?.subject).toMatchObject({
+        activity: 'unknown',
+        evidence: null
+      });
+    } finally {
+      second.close();
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed and rolls back when the socket does not accept', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-reattach-'));
     try {
@@ -167,7 +275,7 @@ describe('SessionManager.restoreAndAttach', () => {
         killSpec: { binPath: '/usr/bin/true', args: [] }
       });
       expect(result).toEqual({ ok: false, reason: 'attach-failed' });
-      expect(manager.state('shell')).toBeUndefined(); // rolled back, slot freed
+      expect(manager.state('shell')).toMatchObject({ lifecycle: 'exited' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -190,7 +298,7 @@ describe('SessionManager.restoreAndAttach', () => {
         ackTimeoutMs: 2000
       });
       expect(result).toEqual({ ok: false, reason: 'attach-failed' });
-      expect(manager.state('shell')).toBeUndefined(); // rolled back
+      expect(manager.state('shell')).toMatchObject({ lifecycle: 'exited' });
       await new Promise((r) => setTimeout(r, 150));
       expect(existsSync(marker)).toBe(false); // the healthy-but-mismatched master was NOT killed
     } finally {
@@ -302,7 +410,7 @@ describe('SessionManager.spawnAndAttach (provision rollback)', () => {
         killSpec: { binPath: '/usr/bin/true', args: [] }
       });
       expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
-      expect(manager.state('shell')).toBeUndefined(); // slot rolled back
+      expect(manager.state('shell')).toMatchObject({ lifecycle: 'exited' });
       expect(ledger.current('shell')).toBe(1); // the allocation itself stays durable (tombstone)
       // capacity is actually free again: a fresh ensure succeeds at the next generation
       const again = manager.ensure('shell', { rows: 24, cols: 80 });
@@ -329,7 +437,7 @@ describe('SessionManager.spawnAndAttach (provision rollback)', () => {
       expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
       await new Promise((r) => setTimeout(r, 200));
       expect(existsSync(marker)).toBe(false); // no ownership → no kill
-      expect(manager.state('shell')).toBeUndefined();
+      expect(manager.state('shell')).toMatchObject({ lifecycle: 'exited' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -636,7 +744,7 @@ describe('reconcile liveness (wedged sockets must not stall startup)', () => {
     const healthySock = join(dir, 'healthy.sock');
     const healthyServer = await listenAsMaster(healthySock, 1);
     const silentServers: Server[] = [];
-    const targets = [{ sessionId: 'healthy', sockPath: healthySock }];
+    const targets = [{ sessionId: 'healthy', sockPath: healthySock, subject: { kind: 'terminal' } as const }];
     for (let i = 0; i < 3; i += 1) {
       const sock = join(dir, `silent-${i}.sock`);
       silentServers.push(
@@ -648,7 +756,7 @@ describe('reconcile liveness (wedged sockets must not stall startup)', () => {
           srv.listen(sock, () => resolve(srv));
         })
       );
-      targets.push({ sessionId: `silent-${i}`, sockPath: sock });
+      targets.push({ sessionId: `silent-${i}`, sockPath: sock, subject: { kind: 'terminal' } });
     }
     try {
       const store = new InMemoryGenerationLedger();
@@ -694,7 +802,7 @@ describe('retire vs in-flight provision (sequencing)', () => {
       const [provisioned, retired] = await Promise.all([provision, retire]);
       expect(provisioned.ok).toBe(true); // the provision settled deterministically first
       expect(retired.ok).toBe(true); // then the retire tore it down
-      expect(manager.state('shell')).toBeUndefined(); // final state: retired
+      expect(manager.state('shell')).toMatchObject({ lifecycle: 'exited' });
     } finally {
       if (savedDelay === undefined) delete process.env.FAKE_ATCH_ACK_DELAY_MS;
       else process.env.FAKE_ATCH_ACK_DELAY_MS = savedDelay;
@@ -722,7 +830,7 @@ describe('retire vs in-flight provision (sequencing)', () => {
       manager.retire('shell'); // internal teardown (socket-close semantics)
       const provisioned = await provision;
       expect(provisioned.ok).toBe(false); // never success against a retired core
-      expect(manager.state('shell')).toBeUndefined();
+      expect(manager.state('shell')).toMatchObject({ lifecycle: 'exited' });
     } finally {
       if (savedDelay === undefined) delete process.env.FAKE_ATCH_ACK_DELAY_MS;
       else process.env.FAKE_ATCH_ACK_DELAY_MS = savedDelay;
@@ -761,6 +869,41 @@ describe('nonce plumbing (child identity end to end)', () => {
       await server.close();
       rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+describe('provider recovery readiness gate', () => {
+  it('does not mark ready until provider reconciliation settles', async () => {
+    let releasePoll!: () => void;
+    const pollGate = new Promise<void>((resolve) => {
+      releasePoll = resolve;
+    });
+    const order: string[] = [];
+    const daemon = {
+      router: {} as TerminalDaemon['router'],
+      reconcileAgentProviders: vi.fn(async () => {
+        order.push('poll-start');
+        await pollGate;
+        order.push('poll-end');
+        return [];
+      }),
+      markReady: vi.fn(() => {
+        order.push('ready');
+      })
+    };
+
+    const startup = completeDaemonStartup(daemon, [], '/bin/false');
+    await vi.waitFor(() => {
+      expect(daemon.reconcileAgentProviders).toHaveBeenCalledWith([]);
+    });
+    expect(daemon.markReady).not.toHaveBeenCalled();
+
+    releasePoll();
+    await expect(startup).resolves.toEqual({
+      reconciled: [],
+      providerRecovery: []
+    });
+    expect(order).toEqual(['poll-start', 'poll-end', 'ready']);
   });
 });
 
@@ -1066,9 +1209,18 @@ describe('reconcileExistingSessions', () => {
     const results = await reconcileExistingSessions(
       daemon,
       [
-        { sessionId: 'a', sockPath: '/r/a.sock' },
-        { sessionId: 'b', sockPath: '/r/b.sock' },
-        { sessionId: 'c', sockPath: '/r/c.sock' }
+        {
+          sessionId: 'a',
+          sockPath: '/r/a.sock',
+          subject: {
+            kind: 'agent',
+            provider: 'codex',
+            mode: 'terminal',
+            producer: 'codex-hooks'
+          }
+        },
+        { sessionId: 'b', sockPath: '/r/b.sock', subject: { kind: 'terminal' } },
+        { sessionId: 'c', sockPath: '/r/c.sock', subject: { kind: 'terminal' } }
       ],
       '/opt/atch'
     );
@@ -1082,6 +1234,12 @@ describe('reconcileExistingSessions', () => {
       binPath: '/opt/atch',
       args: ['kill', '-f', '/r/a.sock'],
       staleCleanupSpec: { binPath: '/opt/atch', args: ['rm', '/r/a.sock'] }
+    });
+    expect(restoreAndAttach.mock.calls[0][1].subject).toEqual({
+      kind: 'agent',
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks'
     });
   });
 });

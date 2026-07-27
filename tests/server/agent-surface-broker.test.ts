@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   AgentSurfaceBroker,
   installAgentSurfaceBroker,
-  type AgentSurfaceBrokerOptions,
-  type AttentionSink
+  type AgentSurfaceBrokerOptions
 } from '../../src/server/agentSurfaceBroker';
 import {
   deriveAgentHostToken,
@@ -23,6 +22,7 @@ import type {
   AgentUiClientFrame,
   AgentUiServerFrame
 } from '../../src/core/agentSurfaceProtocol';
+import type { AgentStateEnvelope } from '../../src/shared/controlPlane/contract';
 
 const SECRET = getOrCreateAgentHostSecret();
 
@@ -30,11 +30,7 @@ function tokenFor(session: string, agent: string): string {
   return deriveAgentHostToken(SECRET, session, agent);
 }
 
-const NOOP_ATTENTION: AttentionSink = {
-  pushEvent: () => undefined,
-  notifySignal: () => undefined,
-  raise: () => undefined
-};
+const NOOP_AGENT_STATE_PUBLISHER = (): void => undefined;
 
 /** In-memory WebSocket pair that lets a test act as both broker-side server and a peer. */
 interface TestPeer {
@@ -54,7 +50,11 @@ async function startBroker(
     s.listen(0, '127.0.0.1', () => resolve(s));
   });
   const addr = httpServer.address() as { port: number };
-  const broker = new AgentSurfaceBroker({ ...options, resolveSecret: () => SECRET, attention: NOOP_ATTENTION });
+  const broker = new AgentSurfaceBroker({
+    publishAgentState: NOOP_AGENT_STATE_PUBLISHER,
+    ...options,
+    resolveSecret: () => SECRET
+  });
   const dispose = installAgentSurfaceBroker(httpServer as never, broker, installOptions);
   return {
     broker,
@@ -110,11 +110,39 @@ function event(seq: number, kind: AgentSurfaceEvent['kind'], overrides: Record<s
   } as AgentSurfaceEvent;
 }
 
+function hostHello(
+  session: string,
+  agent: 'claude' | 'codex' | 'opencode',
+  pid = 1,
+  overrides: Partial<Extract<AgentHostClientFrame, { type: 'hello' }>> = {}
+): Extract<AgentHostClientFrame, { type: 'hello' }> {
+  return {
+    type: 'hello',
+    session,
+    agent,
+    token: tokenFor(session, agent),
+    pid,
+    generation: 1,
+    producerInstanceId: `native-${session}-${pid}`,
+    ...overrides
+  };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error('waitUntil timeout');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe('AgentSurfaceBroker — host handshake', () => {
   it('accepts hello with a valid token + sends hello-ack with lastSeq=0 for a fresh session', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 123 });
+    host.send(hostHello('s1', 'opencode', 123));
     const ack = await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     expect(ack).toMatchObject({ type: 'hello-ack', lastSeq: 0 });
     host.close();
@@ -124,7 +152,7 @@ describe('AgentSurfaceBroker — host handshake', () => {
   it('rejects hello with a wrong-token and closes the socket', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: 'wrong', pid: 123 });
+    host.send(hostHello('s1', 'opencode', 123, { token: 'wrong' }));
     const err = await host.waitFor((f) => (f as { type?: string }).type === 'error');
     expect(err).toMatchObject({ type: 'error', code: 'invalid-frame' });
     harness.close();
@@ -163,10 +191,10 @@ describe('AgentSurfaceBroker — surface subscription + snapshot', () => {
     harness.close();
   });
 
-  it('snapshot reflects ring + lastSeq + state when visible subscription arrives', async () => {
+  it('snapshot reflects conversation ring + lastSeq without a second semantic state', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 1 });
+    host.send(hostHello('s1', 'codex'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host.send({ type: 'event', event: event(1, 'status', { state: 'idle' }) });
     host.send({ type: 'event', event: 2, } as never); // placeholder to ensure waitFor race
@@ -180,9 +208,9 @@ describe('AgentSurfaceBroker — surface subscription + snapshot', () => {
       type: 'snapshot',
       session: 's1',
       surfaceId: 'surf-1',
-      state: 'idle',
       lastSeq: 2
     });
+    expect(snapshot).not.toHaveProperty('state');
     if (!(snapshot as { events?: unknown[] }).events) throw new Error('events missing');
     expect((snapshot as { events: { kind: string }[] }).events.map((e) => e.kind)).toContain('assistant-message');
     browser.close();
@@ -195,7 +223,7 @@ describe('AgentSurfaceBroker — surface subscription + snapshot', () => {
     const second = event(2, 'assistant-message', { id: 'm2', turnId: 't2', markdown: 'b'.repeat(256) });
     const harness = await startBroker({ ringSize: 10, ringMaxBytes: Buffer.byteLength(JSON.stringify(second)) + 8 });
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 1 });
+    host.send(hostHello('s1', 'codex'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host.send({ type: 'event', event: first });
     host.send({ type: 'event', event: second });
@@ -218,7 +246,7 @@ describe('AgentSurfaceBroker — surface subscription + snapshot', () => {
     const oversized = event(2, 'assistant-message', { id: 'm2', turnId: 't2', markdown: 'x'.repeat(1024) });
     const harness = await startBroker({ ringSize: 10, ringMaxBytes: Buffer.byteLength(JSON.stringify(retained)) + 8 });
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 1 });
+    host.send(hostHello('s1', 'codex'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host.send({ type: 'event', event: retained });
 
@@ -250,7 +278,7 @@ describe('AgentSurfaceBroker — visibility-gated forwarding', () => {
   it('visible surface receives delta events; hidden does not', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'claude', token: tokenFor('s1', 'claude'), pid: 1 });
+    host.send(hostHello('s1', 'claude'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const visible = await harness.connectBrowser();
@@ -286,7 +314,7 @@ describe('AgentSurfaceBroker — surface → host command routing', () => {
   it('rejects commands from a subscribed but hidden surface', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    host.send(hostHello('s1', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const browser = await harness.connectBrowser();
@@ -322,7 +350,7 @@ describe('AgentSurfaceBroker — surface → host command routing', () => {
   it('rejects permission responses and interrupts from an unsubscribed surface', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    host.send(hostHello('s1', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const browser = await harness.connectBrowser();
@@ -356,7 +384,7 @@ describe('AgentSurfaceBroker — surface → host command routing', () => {
   it('subscribe + send forwards an inject command to the host with a fresh requestId', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    host.send(hostHello('s1', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const browser = await harness.connectBrowser();
@@ -385,7 +413,7 @@ describe('AgentSurfaceBroker — surface → host command routing', () => {
   it('command-result ok:false surfaces a typed error frame to the originating surface', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    host.send(hostHello('s1', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const browser = await harness.connectBrowser();
@@ -433,7 +461,7 @@ describe('AgentSurfaceBroker — host reconnect semantics', () => {
   it('new pid hello resets ring + lastSeq (broker ring reset per spec §4)', async () => {
     const harness = await startBroker();
     const host1 = await harness.connectHost();
-    host1.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 100 });
+    host1.send(hostHello('s1', 'codex', 100));
     await host1.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host1.send({ type: 'event', event: event(1, 'assistant-message', { id: 'm1', turnId: 'm1', markdown: 'old' }) });
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -443,7 +471,7 @@ describe('AgentSurfaceBroker — host reconnect semantics', () => {
 
     // New pid reconnects
     const host2 = await harness.connectHost();
-    host2.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 200 });
+    host2.send(hostHello('s1', 'codex', 200));
     const ack = await host2.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     expect(ack).toMatchObject({ type: 'hello-ack', lastSeq: 0 }); // ring was reset
 
@@ -454,7 +482,7 @@ describe('AgentSurfaceBroker — host reconnect semantics', () => {
   it('same pid reconnect (transient drop) keeps ring + lastSeq', async () => {
     const harness = await startBroker();
     const host1 = await harness.connectHost();
-    host1.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 100 });
+    host1.send(hostHello('s1', 'codex', 100));
     await host1.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host1.send({ type: 'event', event: event(5, 'assistant-message', { id: 'm1', turnId: 'm1', markdown: 'data' }) });
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -462,7 +490,7 @@ describe('AgentSurfaceBroker — host reconnect semantics', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     const host2 = await harness.connectHost();
-    host2.send({ type: 'hello', session: 's1', agent: 'codex', token: tokenFor('s1', 'codex'), pid: 100 });
+    host2.send(hostHello('s1', 'codex', 100));
     const ack = await host2.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     expect(ack).toMatchObject({ type: 'hello-ack', lastSeq: 5 });
 
@@ -471,157 +499,153 @@ describe('AgentSurfaceBroker — host reconnect semantics', () => {
   });
 });
 
-describe('AgentSurfaceBroker — attention synthesis', () => {
-  it('status awaiting-permission raises approval-requested', async () => {
-    const raised: Array<{ session: string; kind: string }> = [];
-    const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer>; connectBrowser: () => Promise<TestPeer> }>((resolve) => {
-      const httpServer = createServer();
-      httpServer.listen(0, '127.0.0.1', () => {
-        const port = (httpServer.address() as { port: number }).port;
-        const broker = new AgentSurfaceBroker({
-          resolveSecret: () => SECRET,
-          attention: {
-            pushEvent: (session, kind) => raised.push({ session, kind }),
-            notifySignal: () => undefined,
-            raise: () => undefined
-          }
-        });
-        const dispose = installAgentSurfaceBroker(httpServer as never, broker);
-        resolve({
-          broker,
-          close: () => { dispose(); httpServer.close(); },
-          port,
-          connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`),
-          connectBrowser: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-ui`)
-        });
-      });
+describe('AgentSurfaceBroker — canonical native observations', () => {
+  it('publishes generation-fenced facts and correlations in producer order', async () => {
+    const published: AgentStateEnvelope[] = [];
+    const observedAt = Date.parse('2026-07-27T15:00:00.000Z');
+    const harness = await startBroker({
+      now: () => observedAt,
+      publishAgentState: (envelope) => {
+        published.push(envelope);
+      }
+    });
+    const host = await harness.connectHost();
+    host.send(
+      hostHello('s1', 'claude', 41, {
+        generation: 7,
+        producerInstanceId: 'native-instance-7'
+      })
+    );
+    await host.waitFor((frame) => (frame as { type?: string }).type === 'hello-ack');
+
+    host.send({
+      type: 'event',
+      event: event(1, 'status', {
+        state: 'processing',
+        ts: '2026-07-27T14:59:58.000Z'
+      })
+    });
+    host.send({
+      type: 'event',
+      event: event(2, 'tool-start', {
+        toolUseId: 'tool-1',
+        name: 'Read',
+        summary: 'reading'
+      })
+    });
+    host.send({
+      type: 'event',
+      event: event(3, 'permission-request', {
+        requestId: 'perm-1',
+        variant: 'file-edit',
+        title: 'Edit file',
+        options: [{ id: 'allow', label: 'Allow', treatment: 'allow' }]
+      })
+    });
+    host.send({
+      type: 'event',
+      event: event(4, 'turn-complete', { turnId: 'turn-1' })
     });
 
-    const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'claude', token: tokenFor('s1', 'claude'), pid: 1 });
-    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
-    host.send({ type: 'event', event: event(1, 'status', { state: 'awaiting-permission' }) });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(raised.some((e) => e.session === 's1' && e.kind === 'approval-requested')).toBe(true);
+    await waitUntil(() => published.length === 5);
+    expect(published.map((envelope) => envelope.producerSeq)).toEqual([1, 2, 3, 4, 5]);
+    expect(published.map((envelope) => envelope.eventId)).toEqual([
+      'native-instance-7:1',
+      'native-instance-7:2',
+      'native-instance-7:3',
+      'native-instance-7:4',
+      'native-instance-7:5'
+    ]);
+    expect(published[0]).toMatchObject({
+      schemaVersion: 3,
+      sessionId: 's1',
+      generation: 7,
+      provider: 'claude',
+      mode: 'native',
+      producer: 'claude-native',
+      producerInstanceId: 'native-instance-7',
+      invocationId: 'native-instance-7:1',
+      occurredAt: observedAt,
+      observedAt,
+      facts: [
+        { kind: 'activity', activity: 'unknown' },
+        { kind: 'health', health: { status: 'healthy' } }
+      ]
+    });
+    expect(published[1]).toMatchObject({
+      occurredAt: Date.parse('2026-07-27T14:59:58.000Z'),
+      facts: [{ kind: 'activity', activity: 'working' }]
+    });
+    expect(published[2]).toMatchObject({
+      facts: [{ kind: 'activity', activity: 'working' }],
+      correlation: { toolUseId: 'tool-1' }
+    });
+    expect(published[3]).toMatchObject({
+      facts: [
+        {
+          kind: 'blocked',
+          wait: { kind: 'permission-file-edit', owner: 'operator', detail: 'Edit file' }
+        }
+      ],
+      correlation: { permissionId: 'perm-1' }
+    });
+    expect(published[4]).toMatchObject({
+      facts: [{ kind: 'activity', activity: 'idle' }],
+      correlation: { turnId: 'turn-1' }
+    });
 
     host.close();
     harness.close();
   });
 
-  it('turn-complete pushes turn-complete event', async () => {
-    const pushed: string[] = [];
-    const signaled: string[] = [];
-    const raised: string[] = [];
-    const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer> }>((resolve) => {
-      const httpServer = createServer();
-      httpServer.listen(0, '127.0.0.1', () => {
-        const port = (httpServer.address() as { port: number }).port;
-        const broker = new AgentSurfaceBroker({
-          resolveSecret: () => SECRET,
-          attention: {
-            pushEvent: (_s, kind) => pushed.push(kind),
-            notifySignal: (_s, kind) => signaled.push(kind),
-            raise: (session) => raised.push(session)
-          }
-        });
-        const dispose = installAgentSurfaceBroker(httpServer as never, broker);
-        resolve({
-          broker,
-          close: () => { dispose(); httpServer.close(); },
-          port,
-          connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
-        });
-      });
+  it('publishes unknown + degraded when the authoritative native host disconnects', async () => {
+    const published: AgentStateEnvelope[] = [];
+    const harness = await startBroker({
+      publishAgentState: (envelope) => {
+        published.push(envelope);
+      }
     });
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'claude', token: tokenFor('s1', 'claude'), pid: 1 });
-    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
-    host.send({ type: 'event', event: event(1, 'turn-complete', { turnId: 't1' }) });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(pushed).toContain('turn-complete');
-    expect(signaled).toContain('turn-complete');
-    expect(raised).toContain('s1');
+    host.send(
+      hostHello('s1', 'opencode', 9, {
+        generation: 3,
+        producerInstanceId: 'native-instance-3'
+      })
+    );
+    await host.waitFor((frame) => (frame as { type?: string }).type === 'hello-ack');
+    await waitUntil(() => published.length === 1);
 
     host.close();
+    await waitUntil(() => published.length === 2);
+    expect(published[1]).toMatchObject({
+      sessionId: 's1',
+      generation: 3,
+      producer: 'opencode-native',
+      producerInstanceId: 'native-instance-3',
+      producerSeq: 2,
+      facts: [
+        { kind: 'activity', activity: 'unknown' },
+        {
+          kind: 'health',
+          health: {
+            status: 'degraded',
+            reason: 'native-host-disconnected'
+          }
+        }
+      ]
+    });
+
     harness.close();
   });
 
-  it('fatal agent-error raises and signals input-requested', async () => {
-    const pushed: string[] = [];
-    const signaled: string[] = [];
-    const raised: string[] = [];
-    const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer> }>((resolve) => {
-      const httpServer = createServer();
-      httpServer.listen(0, '127.0.0.1', () => {
-        const port = (httpServer.address() as { port: number }).port;
-        const broker = new AgentSurfaceBroker({
-          resolveSecret: () => SECRET,
-          attention: {
-            pushEvent: (_s, kind) => pushed.push(kind),
-            notifySignal: (_s, kind) => signaled.push(kind),
-            raise: (session) => raised.push(session)
-          }
-        });
-        const dispose = installAgentSurfaceBroker(httpServer as never, broker);
-        resolve({
-          broker,
-          close: () => { dispose(); httpServer.close(); },
-          port,
-          connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
-        });
-      });
-    });
-    const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'claude', token: tokenFor('s1', 'claude'), pid: 1 });
-    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
-    host.send({ type: 'event', event: event(1, 'agent-error', { fatal: true, message: 'agent needs input' }) });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(pushed).toContain('input-requested');
-    expect(signaled).toContain('input-requested');
-    expect(raised).toContain('s1');
-
-    host.close();
-    harness.close();
-  });
-
-  it('input attention hints raise and signal input-requested while session-status stays drawer-only', async () => {
-    const pushed: string[] = [];
-    const signaled: string[] = [];
-    const raised: string[] = [];
-    const harness = await new Promise<{ broker: AgentSurfaceBroker; close: () => void; port: number; connectHost: () => Promise<TestPeer> }>((resolve) => {
-      const httpServer = createServer();
-      httpServer.listen(0, '127.0.0.1', () => {
-        const port = (httpServer.address() as { port: number }).port;
-        const broker = new AgentSurfaceBroker({
-          resolveSecret: () => SECRET,
-          attention: {
-            pushEvent: (_s, kind) => pushed.push(kind),
-            notifySignal: (_s, kind) => signaled.push(kind),
-            raise: (session) => raised.push(session)
-          }
-        });
-        const dispose = installAgentSurfaceBroker(httpServer as never, broker);
-        resolve({
-          broker,
-          close: () => { dispose(); httpServer.close(); },
-          port,
-          connectHost: () => connectTo(`ws://127.0.0.1:${port}/ws/agent-host`)
-        });
-      });
-    });
-    const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
-    await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
-    host.send({ type: 'event', event: event(1, 'attention-hint', { attention: 'idle-prompt', detail: 'waiting for prompt' }) });
-    host.send({ type: 'event', event: event(2, 'attention-hint', { attention: 'elicitation', detail: 'answer needed' }) });
-    host.send({ type: 'event', event: event(3, 'attention-hint', { attention: 'session-status', detail: 'retrying provider' }) });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(pushed).toEqual(['input-requested', 'input-requested', 'turn-complete']);
-    expect(signaled).toEqual(['input-requested', 'input-requested']);
-    expect(raised).toEqual(['s1', 's1']);
-
-    host.close();
-    harness.close();
+  it('contains no attention synthesis or broker-owned semantic current state', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/server/agentSurfaceBroker.ts'),
+      'utf8'
+    );
+    expect(source).not.toMatch(
+      /AttentionSink|attentionTracker|notifyAgentSignal|synthesizeAttention|currentState/
+    );
   });
 });
 
@@ -637,7 +661,7 @@ describe('AgentSurfaceBroker — server-internal injectUserMessage', () => {
   it('forwards inject to host with source=channel and resolves on command-result ok:true', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: tokenFor('s1', 'opencode'), pid: 1 });
+    host.send(hostHello('s1', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const injectPromise = harness.broker.injectUserMessage('s1', 'channel msg', 'channel');
@@ -654,7 +678,7 @@ describe('AgentSurfaceBroker — server-internal injectUserMessage', () => {
   it('rejects server-internal injectUserMessage with the typed command-result error on ok:false', async () => {
     const harness = await startBroker();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 's1', agent: 'opencode', token: deriveAgentHostToken(SECRET, 's1', 'opencode'), pid: 1 });
+    host.send(hostHello('s1', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const injectPromise = harness.broker.injectUserMessage('s1', 'channel msg', 'channel');
@@ -724,7 +748,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     const port = (httpServer.address() as { port: number }).port;
     const broker = new AgentSurfaceBroker({
       resolveSecret: () => SECRET,
-      attention: NOOP_ATTENTION,
+      publishAgentState: NOOP_AGENT_STATE_PUBLISHER,
       persistResume:
         persistOverride ??
         ((sessionId, resume) => {
@@ -758,7 +782,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
   it('fresh session-info with valid opencode resume id preserves the durable sessionId', async () => {
     const harness = await startBrokerWithResumeSink();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
+    host.send(hostHello('sess-test-resume', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     host.send({
@@ -779,7 +803,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
   it('malformed resume id is NOT persisted (validation gate)', async () => {
     const harness = await startBrokerWithResumeSink();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
+    host.send(hostHello('sess-test-resume', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     host.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: 'not-a-valid-id' }) });
@@ -795,7 +819,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
   it('repeated session-info is idempotent (guard skips after first successful persist)', async () => {
     const harness = await startBrokerWithResumeSink();
     const host = await harness.connectHost();
-    host.send({ type: 'hello', session: 'sess-test-resume', agent: 'opencode', token: tokenFor('sess-test-resume', 'opencode'), pid: 1 });
+    host.send(hostHello('sess-test-resume', 'opencode'));
     await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
 
     const validId = 'ses_def456ghi789jkl012mno345pqr678stu901vwx999abc';
@@ -822,13 +846,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
       return calls.length === 1 ? first : true;
     });
     const host = await harness.connectHost();
-    host.send({
-      type: 'hello',
-      session: 'sess-test-resume',
-      agent: 'opencode',
-      token: tokenFor('sess-test-resume', 'opencode'),
-      pid: 1
-    });
+    host.send(hostHello('sess-test-resume', 'opencode'));
     await host.waitFor((frame) => (frame as { type?: string }).type === 'hello-ack');
 
     const validId = 'ses_async123456789012345678901234567890123456789';
@@ -859,7 +877,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     const port = (httpServer.address() as { port: number }).port;
     const broker = new AgentSurfaceBroker({
       resolveSecret: () => SECRET,
-      attention: NOOP_ATTENTION,
+      publishAgentState: NOOP_AGENT_STATE_PUBLISHER,
       persistResume: (tmuxSession, resume) => {
         persistCalls.push({ tmuxSession, resume });
         return true; // tell the broker the persist succeeded so the guard engages per-call
@@ -876,7 +894,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
     };
 
     const host1 = await harness.connectHost();
-    host1.send({ type: 'hello', session: 'sess-re', agent: 'opencode', token: tokenFor('sess-re', 'opencode'), pid: 1 });
+    host1.send(hostHello('sess-re', 'opencode'));
     await host1.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     const idA = 'ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     host1.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: idA }) });
@@ -887,7 +905,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
 
     // Same-pid reconnect keeps the guard — second session-info does NOT re-attempt.
     const host1b = await harness.connectHost();
-    host1b.send({ type: 'hello', session: 'sess-re', agent: 'opencode', token: tokenFor('sess-re', 'opencode'), pid: 1 });
+    host1b.send(hostHello('sess-re', 'opencode'));
     await host1b.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host1b.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: idA }) });
     await new Promise((resolve) => setTimeout(resolve, 60));
@@ -897,7 +915,7 @@ describe('AgentSurfaceBroker — session-info → persistSessionResume (spec §6
 
     // New pid → guard resets → second session-info (different id) DOES re-attempt.
     const host2 = await harness.connectHost();
-    host2.send({ type: 'hello', session: 'sess-re', agent: 'opencode', token: tokenFor('sess-re', 'opencode'), pid: 2 });
+    host2.send(hostHello('sess-re', 'opencode', 2));
     await host2.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     const idB = 'ses_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     host2.send({ type: 'event', event: event(1, 'session-info', { agentSessionId: idB }) });
@@ -920,7 +938,7 @@ describe('AgentSurfaceBroker — reload snapshot reset (human BUG: duplicated tr
   it('pushes a replace-snapshot to subscribed surfaces when a NEW pid says hello', async () => {
     const harness = await startBroker();
     const host1 = await harness.connectHost();
-    host1.send({ type: 'hello', session: 'sr', agent: 'claude', token: tokenFor('sr', 'claude'), pid: 100 });
+    host1.send(hostHello('sr', 'claude', 100));
     await host1.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
     host1.send({ type: 'event', event: event(1, 'user-message', { id: 'user-1', text: 'hi', source: 'ui' }) });
 
@@ -931,7 +949,7 @@ describe('AgentSurfaceBroker — reload snapshot reset (human BUG: duplicated tr
 
     // Session reload: fresh host process with a NEW pid.
     const host2 = await harness.connectHost();
-    host2.send({ type: 'hello', session: 'sr', agent: 'claude', token: tokenFor('sr', 'claude'), pid: 200 });
+    host2.send(hostHello('sr', 'claude', 200));
     const snap = await browser.waitFor<{ type: string; events: unknown[] }>(
       (f) => (f as { type?: string }).type === 'snapshot'
     );

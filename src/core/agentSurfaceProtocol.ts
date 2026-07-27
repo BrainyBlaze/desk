@@ -83,7 +83,12 @@ export type AgentSurfaceEventPayload =
       }
     | { kind: 'permission-resolved'; requestId: string; optionId: string; via: 'ui' | 'agent' | 'timeout' | 'respawn' }
     | { kind: 'turn-complete'; turnId: string; usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number } }
-    /** Per-agent attention nuances that are not FSM states; broker maps to AgentEventV2 kinds. */
+    /**
+     * Per-agent nuances that are not FSM states. The broker forwards them as
+     * canonical agent-state facts; it does NOT decide what they mean, and
+     * nothing here is a second copy of the session's activity — that lives in
+     * the authority.
+     */
     | { kind: 'attention-hint'; attention: 'idle-prompt' | 'elicitation' | 'session-status'; detail?: string }
     /** Emitted exactly once per spawn, after committed-history backfill and before live events. */
     | { kind: 'history-boundary'; backfillComplete: true }
@@ -113,7 +118,7 @@ export type AgentUiClientFrame =
 /** Server -> browser frames on /ws/agent-ui. */
 export type AgentUiServerFrame =
   | { type: 'ready'; version: 1 }
-  | { type: 'snapshot'; session: string; surfaceId: string; state: AgentSurfaceState; lastSeq: number; events: AgentSurfaceEvent[] }
+  | { type: 'snapshot'; session: string; surfaceId: string; lastSeq: number; events: AgentSurfaceEvent[] }
   | { type: 'event'; session: string; event: AgentSurfaceEvent }
   | { type: 'error'; session?: string; code: AgentUiErrorCode; message: string }
   | { type: 'exit'; session: string; reason: 'killed' | 'crashed' | 'mode-switched' };
@@ -128,7 +133,15 @@ export type AgentHostServerFrame =
 
 /** Adapter-host -> server frames on /ws/agent-host. */
 export type AgentHostClientFrame =
-  | { type: 'hello'; session: string; token: string; agent: DeskAgent; pid: number }
+  | {
+      type: 'hello';
+      session: string;
+      token: string;
+      agent: DeskAgent;
+      pid: number;
+      generation: number;
+      producerInstanceId: string;
+    }
   | { type: 'event'; event: AgentSurfaceEvent }
   | { type: 'command-result'; requestId: string; ok: true }
   | { type: 'command-result'; requestId: string; ok: false; error: { code: AgentUiErrorCode; message: string; retryable: boolean } };
@@ -351,7 +364,9 @@ export function parseAgentHostClientFrame(value: unknown): AgentHostClientFrame 
         session: nonEmptyString(frame.session),
         token: nonEmptyString(frame.token),
         agent: nonEmptyString(frame.agent),
-        pid: nonNegativeInt(frame.pid)
+        pid: nonNegativeInt(frame.pid),
+        generation: positiveInt(frame.generation),
+        producerInstanceId: nonEmptyString(frame.producerInstanceId)
       };
     case 'event':
       return { type: 'event', event: parseAgentSurfaceEvent(frame.event) };
@@ -459,6 +474,14 @@ function nonNegativeInt(value: unknown): number {
     throw invalidFrame();
   }
   return value;
+}
+
+function positiveInt(value: unknown): number {
+  const parsed = nonNegativeInt(value);
+  if (parsed === 0) {
+    throw invalidFrame();
+  }
+  return parsed;
 }
 
 function finiteNumber(value: unknown): number {

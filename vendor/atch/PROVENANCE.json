@@ -183,18 +183,27 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "ad18ce268346dcb10ecc3932ee465a3de1278145a121ee41a4a5d5056773df2d",
+    "digest": "c5548527e713f8cc34e61808413005db9c957e6563b1a964102b519cfcda02ce",
     "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
   },
   "localPatches": [
     {
       "subject": "fix: drop the control client on EOF/error before the v3 magic (fd leak)",
-      "why": "A probe that connected and closed before sending the 4-byte magic left its accepted fd linked forever; a closed socket stays readable, so select() re-entered client_activity endlessly and the descriptors accumulated until the fd_set overran and the master aborted \u2014 observed as agent sessions dying about a minute after boot.",
+      "why": "A probe that connected and closed before sending the 4-byte magic left its accepted fd linked forever; a closed socket stays readable, so select() re-entered client_activity endlessly and the descriptors accumulated until the fd_set overran and the master aborted — observed as agent sessions dying about a minute after boot.",
       "files": [
         "master.c"
       ],
       "alsoIncludes": "defence-in-depth: control_activity refuses an accepted fd >= FD_SETSIZE instead of corrupting the bitmap",
-      "upstreamStatus": "NOT yet in the fork repository \u2014 carry upstream and re-vendor at the next snapshot bump"
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "feat: TERMINAL_STATE frame (84) restates the child's ANSI modes on v3 ATTACH",
+      "why": "The legacy MSG_ATTACH path emitted a mode preamble; v3 ATTACH applied geometry and ACKed but told the controller nothing about terminal state. A controller that restarts builds a FRESH emulator that never witnessed the child enabling DECSET 2004, so bracketed paste is not applied, the agent TUI ingests a pasted prompt line by line, and the submit Enter is taken as a literal newline — the operator-visible symptom was a delivered channel message sitting unsent in the composer until a human pressed Enter.",
+      "files": [
+        "master.c"
+      ],
+      "alsoIncludes": "connection-local, non-durable frame: generation 0 (outside the generation fence), no record_seq and no output_offset, sequenced from a NEW per-connection v3_tx_seq so the durable record order gains no holes. Additive and skippable — a peer that does not know type 84 ignores it. Reviewed backward-compatible v3 extension, agreed with @codex; deliberately NOT capability-gated, because atch_v3_validate_capabilities rejects every bit above bit5 and a new bit would fail the HELLO against already-running masters.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
     }
   ]
 }

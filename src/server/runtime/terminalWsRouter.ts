@@ -13,7 +13,7 @@
 import { GenerationLedger } from '../../shared/controlPlane/generationLedger.js';
 import { WorkerSupervisor } from '../../shared/runtime/workerSupervisor.js';
 import { type EmulatorFactory } from '../../shared/runtime/emulatorPort.js';
-import { SessionManager } from './sessionManager.js';
+import { SessionManager, type SessionManagerDeps } from './sessionManager.js';
 import { BP_CONN_CHANNEL, BpError, BpFrameType, decodeBpFrame, encodeBpFrame, type BpFrame } from '../../shared/browserProtocol/index.js';
 
 /** A browser terminal connection — any object the web server can send bytes to. */
@@ -26,8 +26,11 @@ export interface TerminalWsRouterDeps {
   supervisor: WorkerSupervisor;
   emulatorFactory: EmulatorFactory;
   now: () => number;
-  /** Attention-relevant emulator events (bell/OSC9) — see DaemonCoreDeps. */
-  onSemanticEvent?: (sessionId: string, event: import('../../shared/runtime/emulatorPort.js').EmulatorEvent) => void;
+  workingLeaseMs?: SessionManagerDeps['workingLeaseMs'];
+  openToolLeaseMs?: SessionManagerDeps['openToolLeaseMs'];
+  initialAgentHealth?: SessionManagerDeps['initialAgentHealth'];
+  createAgentStateIntakeStore?: SessionManagerDeps['createAgentStateIntakeStore'];
+  onStateTransition?: SessionManagerDeps['onStateTransition'];
 }
 
 export class TerminalWsRouter {
@@ -44,7 +47,17 @@ export class TerminalWsRouter {
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
       sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame),
-      ...(deps.onSemanticEvent !== undefined ? { onSemanticEvent: deps.onSemanticEvent } : {})
+      ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
+      ...(deps.openToolLeaseMs !== undefined
+        ? { openToolLeaseMs: deps.openToolLeaseMs }
+        : {}),
+      ...(deps.initialAgentHealth !== undefined
+        ? { initialAgentHealth: deps.initialAgentHealth }
+        : {}),
+      ...(deps.createAgentStateIntakeStore !== undefined
+        ? { createAgentStateIntakeStore: deps.createAgentStateIntakeStore }
+        : {}),
+      ...(deps.onStateTransition !== undefined ? { onStateTransition: deps.onStateTransition } : {})
     });
   }
 

@@ -1,6 +1,6 @@
 # atch v3 wire protocol — FROZEN CONTRACT (Phase A interlock)
 
-Authoritative byte-exact contract for the atch↔desk socket. Both the atch C fork (@codex lane) and the Desk TS codec (@claude-1 lane) implement THIS; conformance = the shared golden vectors (`tests/fixtures/atch-wire/`). Frozen 2026-07-20 for Phase A; changes require a cross-reviewed contract-version bump. Resolves the §19 wire open-items (7C#? / 8A–8J) noted inline as `[resolves 8X#n]`.
+Authoritative byte-exact contract for the atch↔desk socket. Both the atch C fork and the Desk TS codec implement THIS; conformance = the shared golden vectors (`tests/fixtures/atch-wire/`). Frozen 2026-07-20 for Phase A. Wire-incompatible changes require a cross-reviewed contract-version bump; an additive frame that old non-STRICT peers can skip may remain v3 only after cross-review and golden-vector coverage. Resolves the §19 wire open-items (7C#? / 8A–8J) noted inline as `[resolves 8X#n]`.
 
 All integers little-endian. All offsets are byte offsets from the field's start.
 
@@ -49,7 +49,7 @@ A logical message spanning MORE frames = the CONTIGUOUS run of same-`type` frame
 ### 1.4 Capability bits (u32, HELLO negotiation) [consensus w/ @codex 2026-07-20]
 `bit0 RECORD` · `bit1 COMMAND` · `bit2 CHECKPOINT` · `bit3 SIGNAL` · `bit4 STATE_UPDATE` · `bit5 REDRAW` · bits 6-31 reserved (must be 0). Negotiated cap = intersection of both HELLOs; a REQUIRED cap the peer lacks → ERROR(CAP_UNSUPPORTED). A frame whose feature bit is not in the negotiated set → ERROR(CAP_UNSUPPORTED).
 
-## 2. Frame types (u16) — FROZEN, 30 types [resolves 8E#1/8G#count; +TERMINAL_REPLY per @codex review]
+## 2. Frame types (u16) — FROZEN base plus reviewed compatible extensions, 31 types
 `dir`: M=master→client, C=client→master, B=both.
 | type | name | dir | §payload |
 |----|----|----|----|
@@ -83,6 +83,7 @@ A logical message spanning MORE frames = the CONTIGUOUS run of same-`type` frame
 |80|GAP|M|§3.24 (2-D bounds + reason + exactness axes) [resolves 8B/8J]|
 |82|FENCE|M|§3.25 (replay→live boundary, 2-D)|
 |83|REDRAW|C|§3.26 (explicit method; NOT retired) [resolves 8E#1]|
+|84|TERMINAL_STATE|M|§3.28 — connection-local parser-mode preamble before ATTACH_ACK|
 Unknown type + valid header ⇒ skip `payload_length`, log once (STRICT ⇒ ERROR(UNKNOWN_TYPE)).
 
 ## 3. Payload layouts
@@ -113,6 +114,7 @@ Unknown type + valid header ⇒ skip `payload_length`, log once (STRICT ⇒ ERRO
 - **3.25 FENCE** `at_offset u64` · `at_record_seq u64` · `phase u8`(0 replay-end→live). Client applies up to `(at_*)` then switches to live RECORD frames.
 - **3.26 REDRAW** `method u8`(0 none/1 ctrl_l/2 winch) · `rows u16` · `cols u16`. Controller-only; asks the master to trigger an app repaint (mirrors the fork's `-r`). RETAINED (consensus).
 - **3.27 TERMINAL_REPLY** `query_id u64`(stable id allocated at query interception; UNIQUE per outstanding query — offset alone is insufficient, 7C#2/8I#6) · `generation u32` · `lease_epoch u32` · `source u8`(0 worker/1 lease-surface) · `query_class u8`(1 DA1/2 DA2/3 DSR/4 CPR/5 DECRQM/6 XTVERSION/7 pixel-geom/8 color/9 focus) · `reply blob32`(bounded ≤ `MAX_TERMINAL_REPLY=256`). EXACT-ONCE grammar binding: the master records the outstanding query `{query_id, expected responder(source), query_class, generation, lease_epoch, allowed grammar per class, max len}`; accepts EXACTLY ONE matching reply, consumes it atomically, and REJECTS unsolicited / duplicate / cross-class / wrong-responder / stale-generation-or-epoch / oversized bytes (→ ERROR(KEY_CONFLICT) or silent drop per class). Prevents the reply path becoming arbitrary PTY injection.
+- **3.28 TERMINAL_STATE** `preamble blob32`. Optional master→client frame sent at most once, immediately before ATTACH_ACK, when the tracked terminal-mode preamble is nonempty. It is connection-local and non-durable: header `generation=0`, `aux=0`, no `record_seq`, no `output_offset`, and it never enters a RECORD envelope. A client that recognizes it feeds the bytes only to its fresh emulator and drains asynchronous parser work before accepting the following ATTACH_ACK; it MUST NOT advance the durable output cursor or fan the preamble out as browser OUTPUT. Old non-STRICT clients skip type 84 by the unknown-type rule. This is a reviewed backward-compatible v3 extension (2026-07-27, @claude-1 + @codex).
 
 ## 4. Typed RECORD envelope (shared by live RECORD frames + journal + JOURNAL_DATA) [resolves 8C#3/8J]
 One layout for a record whether streamed live (frame type 16) or replayed (inside JOURNAL_DATA / on disk):
@@ -132,11 +134,11 @@ Replay = apply by `record_seq` order (offset is a secondary index; RESIZE/EVENT/
 - `payload_digest[32]` (COMMAND): `SHA-256("atch-cmd-v3\0" || txnId || step || payload)` — binds idempotency to exact bytes [resolves 8E#6].
 
 ## 8. Connection state machine + authorization
-`CONNECTING → HELLO⇄ → ATTACH(role) → ATTACH_ACK → ACTIVE → {DETACH | close}`; controller path adds `LEASE_CLAIM → LEASE_GRANT`. Peer-UID (`SO_PEERCRED`/`getpeereid`) checked at accept; mismatch → ERROR(PEER_UID_MISMATCH) [resolves 8C#8: helper addr'd desk-side]. Pre-attach frames carry `generation=0`; any post-ATTACH_ACK frame with `generation != live` → ERROR(GENERATION_MISMATCH).
+`CONNECTING → HELLO⇄ → ATTACH(role) → [TERMINAL_STATE] → ATTACH_ACK → ACTIVE → {DETACH | close}`; controller path adds `LEASE_CLAIM → LEASE_GRANT`. Peer-UID (`SO_PEERCRED`/`getpeereid`) checked at accept; mismatch → ERROR(PEER_UID_MISMATCH) [resolves 8C#8: helper addr'd desk-side]. Pre-attach frames carry `generation=0`; any post-ATTACH_ACK frame with `generation != live` → ERROR(GENERATION_MISMATCH).
 **Authorization** by connection class: observer may send ATTACH/DETACH/OUTPUT_ACK/JOURNAL_READ/CHECKPOINT_GET/HEARTBEAT/HELLO; the lease-OWNING controller adds INPUT/COMMAND/RESIZE/LEASE_RELEASE/SIGNAL_REQUEST/STATE_UPDATE/CHECKPOINT_PUT/REDRAW/TERMINAL replies; an attached-claimant may send LEASE_CLAIM. Disallowed → ERROR(UNKNOWN_ROLE/LEASE_DENIED).
 
 ## 9. Golden vectors (the shared conformance suite) `tests/fixtures/atch-wire/`
 Each vector = `{name, hex_bytes, expect: parsed|error(code)}`. REQUIRED coverage: every frame type at min+boundary field values; MORE reassembly (2-fragment, N-fragment, gap-abort, type-change-abort, timeout); invalid (bad magic, bad version, payload_length=MAX+1, truncated header, truncated payload, unknown type ±STRICT, bad sequence, reserved-flag ±STRICT, role-disallowed, generation mismatch, geometry > MAX_CELLS, str16 len>MAX, blob32 needing MORE); RECORD envelope crc pass/fail; checkpoint-set select present/absent/format-mismatch; every u64 at 0, 1, 2^53-1, 2^53, 2^64-1 (BigInt/decimal-string boundary) [resolves 8C#7]. The atch C encoder/decoder and the Desk TS codec both pass byte-for-byte; a vector mismatch fails CI in both lanes.
 
 ---
-STATUS: **v3 FROZEN** (2026-07-20, consensus @claude-1 + @codex). The three prior sub-decisions are RESOLVED: (a) EVENT_STREAM + durable journal EVENT records BOTH retained, deduped by `(sessionId,generation,event_seq)` (§3.13); (b) REDRAW type 83 RETAINED with explicit method/geometry (§3.26); (c) capability bits assigned (§1.4). TERMINAL_REPLY added as type 70 (§3.27). Golden vectors materialized under `tests/fixtures/atch-wire/` and generated by the reference TS codec (`src/shared/atchWire/`). Contract changes now require a cross-reviewed version bump.
+STATUS: **v3 FROZEN base + reviewed compatible extension** (base 2026-07-20; TERMINAL_STATE type 84 cross-reviewed 2026-07-27 by @claude-1 + @codex). EVENT_STREAM + durable journal EVENT records are both retained and deduped by `(sessionId,generation,event_seq)` (§3.13); REDRAW type 83 is retained (§3.26); capability bits are assigned (§1.4); TERMINAL_REPLY is type 70 (§3.27). Golden vectors live under `tests/fixtures/atch-wire/` and are generated by the reference TS codec (`src/shared/atchWire/`). Further wire-incompatible changes require a cross-reviewed version bump; compatible extensions require the same review and cross-language vectors.

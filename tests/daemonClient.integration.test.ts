@@ -63,7 +63,11 @@ describe('daemon client ↔ server RPC (§3.2/§3.4)', () => {
     const list = await client.list();
     expect(list).toHaveLength(1);
     expect(list[0].sessionId).toBe('web-1');
-    expect((await client.state('web-1')).state).toBe('unknown');
+    expect(list[0]).toMatchObject({
+      lifecycle: 'starting',
+      subject: { kind: 'terminal' }
+    });
+    expect(await client.state('web-1')).toEqual(list[0]);
   });
 
   it('an error envelope throws through the convenience API', async () => {
@@ -79,9 +83,15 @@ describe('daemon client ↔ server RPC (§3.2/§3.4)', () => {
     expect(list).toHaveLength(2);
   });
 
-  it('retire removes a session', async () => {
+  it('retire frees the live session and preserves its canonical exited tombstone', async () => {
     await client.ensure('web-1', 1, 1);
     expect(await client.retire('web-1')).toEqual({ retired: true });
-    expect(await client.list()).toHaveLength(0);
+    expect(await client.list()).toEqual([
+      expect.objectContaining({
+        sessionId: 'web-1',
+        lifecycle: 'exited',
+        exit: expect.objectContaining({ code: null, signal: null })
+      })
+    ]);
   });
 });

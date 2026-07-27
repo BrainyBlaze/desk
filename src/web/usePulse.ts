@@ -1,17 +1,16 @@
 import { useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
-import { fetchPulse, type AgentEvent } from './api.js';
+import { fetchPulse } from './api.js';
+import { sessionStatusView, type SessionStatusView } from './agentStatusModel.js';
 import { patchViewLiveness } from './pulse.js';
 import { emitBridgeRetry } from './terminalHeartbeat.js';
 import { pushSparkSample } from './systemFormat.js';
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 
-type AttentionMap = Record<string, { attention: true; since: string }>;
+export type SessionStatusMap = Record<string, SessionStatusView>;
 
 interface UsePulseParams {
   setSnapshot: Dispatch<SetStateAction<DeskSnapshot | null>>;
-  setAttention: Dispatch<SetStateAction<AttentionMap>>;
-  setAgentEvents: Dispatch<SetStateAction<AgentEvent[]>>;
-  setUnreadEvents: Dispatch<SetStateAction<number>>;
+  setStatusViews: Dispatch<SetStateAction<SessionStatusMap>>;
 }
 
 interface UsePulseResult {
@@ -24,24 +23,21 @@ interface UsePulseResult {
     net: number[];
     disk: number[];
   }>;
-  /** Invalidates attention/events responses already in flight and forces the
-   *  next current pulse to reconcile against the server payload. */
+  /** Forces the next pulse to reconcile against the server payload. */
   invalidateAttentionPulse: () => void;
 }
 
 /**
- * Owns the 2s pulse loop: fetches system telemetry + attention/events and folds
- * live session run-states into the snapshot. Attention/events/snapshot state stays
- * owned by App; this hook receives their setters so the coupling is preserved
- * exactly (the pulse writes them, App invalidates stale responses after its
- * own optimistic mutations).
+ * Owns the 2s pulse loop: system telemetry plus the authority's canonical
+ * session state, folded into the presentation views every surface reads.
+ *
+ * The state half can be absent — the daemon may be unreachable while telemetry
+ * still flows. That case yields NO views rather than empty ones, so a session
+ * Desk cannot currently read renders as `unknown` instead of as a confidently
+ * resting agent. Keeping the last known views instead would show a turn that
+ * may have ended minutes ago as if it were current.
  */
-export function usePulse({
-  setSnapshot,
-  setAttention,
-  setAgentEvents,
-  setUnreadEvents
-}: UsePulseParams): UsePulseResult {
+export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePulseResult {
   const [systemSnapshot, setSystemSnapshot] = useState<SystemSnapshot | null>(null);
   // Telemetry sparkline rings (one sample per poll tick); the snapshot state
   // change is what re-renders the header, so a ref avoids double renders.
@@ -53,12 +49,12 @@ export function usePulse({
     disk: [] as number[]
   });
   const [systemError, setSystemError] = useState<string | null>(null);
-  // Last server payloads (serialized) for the pulse diff-and-bail. Optimistic
-  // local mutations clear these so the next pulse re-syncs unconditionally.
-  const pulseCacheRef = useRef({ attention: '', events: '' });
+  // Last server payload (serialized) for the pulse diff-and-bail. Optimistic
+  // local mutations clear it so the next pulse re-syncs unconditionally.
+  const pulseCacheRef = useRef({ states: '' });
   // Each request captures this generation before fetchPulse(). Optimistic
-  // local mutations advance it so older attention/event payloads cannot undo
-  // the local state after their await resolves.
+  // local mutations advance it so an older payload cannot undo local state
+  // after its await resolves.
   const attentionGenerationRef = useRef(0);
   // Tracks whether the previous pulse failed, so a success transition can wake
   // any terminal cells stranded on the manual Reconnect overlay (self-healing).
@@ -88,38 +84,35 @@ export function usePulse({
           pulseFailingRef.current = false;
           emitBridgeRetry();
         }
-        // Diff-and-bail: attention/events keep their object identity when the
-        // payload didn't change, so the memoized sidebar/multiplexer trees
+        // Diff-and-bail: the view map keeps its object identity when the
+        // payload did not change, so the memoized sidebar/multiplexer trees
         // skip reconciliation entirely on a calm tick.
         if (attentionGeneration === attentionGenerationRef.current) {
-          const attentionJson = JSON.stringify(pulse.attention.sessions);
-          if (attentionJson !== pulseCacheRef.current.attention) {
-            pulseCacheRef.current.attention = attentionJson;
-            setAttention(pulse.attention.sessions);
+          const statesJson = JSON.stringify(pulse.agentStates ?? null);
+          if (statesJson !== pulseCacheRef.current.states) {
+            pulseCacheRef.current.states = statesJson;
+            setStatusViews(viewsFromPulse(pulse.agentStates?.snapshots));
           }
-          const eventsJson = JSON.stringify(pulse.attention.events);
-          if (eventsJson !== pulseCacheRef.current.events) {
-            pulseCacheRef.current.events = eventsJson;
-            setAgentEvents(pulse.attention.events ?? []);
-          }
-          setUnreadEvents(pulse.attention.unread ?? 0);
         }
         // Liveness self-heal: fold the live session-id set into the snapshot.
         // patchViewLiveness preserves identity of untouched sessions so
-        // terminal sockets never churn on a state-only patch.
+        // terminal sockets never churn on a state-only patch. An absent
+        // `running` means the authority could not be read — leave the last
+        // known liveness alone rather than declaring every session dead.
         // Known constraint: pulse patches RUN STATES only. Manifest edits made
         // out-of-band (another client, curl, hand-edit) — including uiMode
         // switches — don't reach an open tab until a mutation response or a
-        // manual Refresh replaces the snapshot. Tracked separately as a
-        // manifest-fingerprint-in-pulse improvement.
-        const running = new Set(pulse.running);
-        setSnapshot((current) => {
-          if (!current) {
-            return current;
-          }
-          const view = patchViewLiveness(current.view, running);
-          return view === current.view ? current : { ...current, view };
-        });
+        // manual Refresh replaces the snapshot.
+        if (pulse.running) {
+          const running = new Set(pulse.running);
+          setSnapshot((current) => {
+            if (!current) {
+              return current;
+            }
+            const view = patchViewLiveness(current.view, running);
+            return view === current.view ? current : { ...current, view };
+          });
+        }
       } catch (err) {
         if (alive) {
           pulseFailingRef.current = true;
@@ -153,8 +146,27 @@ export function usePulse({
 
   function invalidateAttentionPulse(): void {
     attentionGenerationRef.current += 1;
-    pulseCacheRef.current = { attention: '', events: '' };
+    pulseCacheRef.current = { states: '' };
   }
 
   return { systemSnapshot, systemError, telemetryHistoryRef, invalidateAttentionPulse };
+}
+
+/**
+ * Snapshots to views, keyed by sessionId. A session absent from the payload is
+ * absent from the map, and the consumer renders it `unknown` — the map never
+ * carries a fabricated entry for a session the authority did not report.
+ */
+export function viewsFromPulse(snapshots: readonly unknown[] | undefined): SessionStatusMap {
+  if (!snapshots) {
+    return {};
+  }
+  const views: SessionStatusMap = {};
+  for (const snapshot of snapshots) {
+    const typed = snapshot as { sessionId?: unknown };
+    if (typeof typed.sessionId === 'string' && typed.sessionId.length > 0) {
+      views[typed.sessionId] = sessionStatusView(snapshot as Parameters<typeof sessionStatusView>[0]);
+    }
+  }
+  return views;
 }
