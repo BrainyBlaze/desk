@@ -51,6 +51,23 @@ export const CLAUDE_NOTIFICATION_MATCHERS: readonly string[] = Object.freeze([
   'permission_prompt'
 ]);
 
+/**
+ * `SessionStart.source` values that leave the session sitting at its prompt.
+ *
+ * Verified against the Claude Code hook reference, which documents five:
+ * `startup` (new session), `resume` (`--resume`/`--continue`/`/resume`),
+ * `clear` (`/clear`), `compact` (auto or manual compaction) and `fork`
+ * (`--fork-session`, `/fork`, `/branch`). `compact` is deliberately absent from
+ * this list — it fires mid-turn — and everything unlisted is treated the same
+ * way it is.
+ */
+const CLAUDE_START_SOURCES_AT_PROMPT: ReadonlySet<string> = new Set([
+  'startup',
+  'resume',
+  'clear',
+  'fork'
+]);
+
 /** The bounded slice the hook shim posts; hook payloads are not forwarded whole. */
 export interface ClaudeObservation {
   /** The hook event name, verbatim. */
@@ -133,17 +150,24 @@ export function claudeFacts(observation: ClaudeObservation): AgentSemanticFact[]
     // the ordinary state of an idle fleet, and it made the indicator useless
     // exactly when the operator looks at it.
     //
-    // `compact` is the one source that does NOT mean this. Auto-compaction
-    // fires mid-turn, when the agent is demonstrably busy, so it asserts only
-    // liveness. The remaining sources — startup, resume, clear, fork — all
-    // leave the session at its prompt. An absent discriminant is treated as a
-    // genuine start because compaction is the sole way a session can "begin"
-    // mid-turn and it always names itself; Codex additionally narrows its own
-    // subscription to `startup|resume`, so nothing else can arrive from there.
+    // Only the sources DOCUMENTED to return the session to its prompt say it.
+    // The list is an allow-list, not a deny-list on `compact`, because the
+    // failure is asymmetric: `compact` fires mid-turn while the agent is
+    // demonstrably busy, so anything that reads as idle when it is not paints a
+    // working session free and — through the delivery gate — invites a message
+    // into the middle of its turn. A source Desk has never read might behave
+    // the same way, and a mapper cannot know which. So an unrecognised or
+    // absent discriminant asserts liveness only, and the session keeps whatever
+    // the authority already knows.
+    //
+    // The cost of failing closed here is bounded and honest: a provider that
+    // adds a start source, or omits the field, loses `idle` at start and
+    // reports on its first real action instead. The cost of the permissive
+    // default is a lie about a busy agent.
     case 'SessionStart':
-      return observation.matcher === 'compact'
-        ? [{ kind: 'heartbeat' }]
-        : [{ kind: 'activity', activity: 'idle' }];
+      return CLAUDE_START_SOURCES_AT_PROMPT.has(observation.matcher ?? '')
+        ? [{ kind: 'activity', activity: 'idle' }]
+        : [{ kind: 'heartbeat' }];
     // SessionEnd stays silent: the daemon watches the process exit itself, and
     // lifecycle is its axis, not the producer's.
     case 'SessionEnd':

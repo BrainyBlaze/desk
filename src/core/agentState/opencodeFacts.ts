@@ -128,15 +128,6 @@ export function opencodeFacts(observation: OpencodeObservation): AgentSemanticFa
       return sessionStatusFacts(observation);
     case 'session.idle':
       return [{ kind: 'activity', activity: 'idle' }];
-    // The server announcing itself is OpenCode's own start signal, and a server
-    // that has just come up has no turn in flight. Without it a freshly started
-    // OpenCode session reported nothing at all until its operator happened to
-    // send a first message, so the indicator sat on `unknown` for the whole
-    // time the session was simply waiting — the state an idle fleet is in most
-    // of the time. This is the provider saying so, not Desk inferring it from
-    // having spawned a process.
-    case 'server.connected':
-      return [{ kind: 'activity', activity: 'idle' }];
     case 'session.error':
       return sessionErrorFacts(observation);
     case 'permission.updated':

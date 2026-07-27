@@ -89,17 +89,6 @@ describe('opencode plugin reports the events that actually exist', () => {
     expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'idle' }]);
   });
 
-  // Without this the session reported nothing until its operator sent a first
-  // message, so a just-started OpenCode sat on `unknown` for as long as it was
-  // merely waiting. server.connected is OpenCode's own start signal, so this is
-  // the provider saying it, not Desk inferring it from having spawned a
-  // process. It is server-level and carries no session id.
-  it('learns IDLE the moment the server connects, before anyone talks to it', async () => {
-    const hooks = await loadHooks();
-    await hooks.event?.({ event: { type: 'server.connected', properties: {} } });
-    expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'idle' }]);
-  });
-
   it('learns a PROVIDER wait from a retry status', async () => {
     const hooks = await loadHooks();
     await hooks.event?.({
@@ -215,6 +204,20 @@ describe('the plugin stays a dumb, bounded observer', () => {
     await hooks.event?.({ event: { type: 'lsp.updated', properties: {} } });
     await hooks.event?.({ event: { type: 'file.edited', properties: {} } });
     expect(posted).toEqual([]);
+  });
+
+  // server.connected looks like a start signal and is not one. OpenCode
+  // documents it as the FIRST EVENT OF EVERY /event SSE CONNECTION — "First
+  // event is `server.connected`, then bus events" — so it fires again whenever
+  // a client reconnects, including in the middle of a running turn. Mapping it
+  // to idle would overwrite `working` on reconnect and reopen delivery mid-turn.
+  // A session's cold start is OpenCode's to answer through reconciliation, not
+  // something to infer from a transport event.
+  it('stays silent on server.connected — it is a CONNECTION event, not a session start', async () => {
+    const hooks = await loadHooks();
+    await hooks.event?.({ event: { type: 'server.connected', properties: {} } });
+    expect(posted).toEqual([]);
+    expect(learnedFacts()).toEqual([]);
   });
 
   it('never posts without a Desk session identity', async () => {

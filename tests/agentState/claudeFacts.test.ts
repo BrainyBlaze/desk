@@ -27,17 +27,30 @@ describe('claude turn edges', () => {
     }
   );
 
-  it('treats a start with no named source as a genuine start', () => {
-    // Compaction is the only way a session can begin mid-turn, and it always
-    // names itself; anything unnamed is a real start.
-    expect(claudeFacts({ hook: 'SessionStart' })).toEqual([{ kind: 'activity', activity: 'idle' }]);
-  });
-
   // The dangerous case: auto-compaction fires WHILE the agent is working, so
   // calling it idle would paint a busy session as free and, through the
   // delivery gate, invite a message straight into the middle of its turn.
   it('never claims idle on compaction — it asserts only liveness', () => {
     expect(claudeFacts({ hook: 'SessionStart', matcher: 'compact' })).toEqual([{ kind: 'heartbeat' }]);
+  });
+
+  // The list is an ALLOW-list, and these are the cases that prove it. A
+  // deny-list on `compact` passes every test above and still lies the first
+  // time a provider ships a source Desk has not read — which is exactly how a
+  // mid-turn event would slip through as `idle`.
+  it.each([
+    ['a source Desk has never read', 'some-future-source'],
+    ['an empty source', ''],
+    ['a source that merely CONTAINS a known name', 'not-startup']
+  ])('asserts liveness only, never idle, for %s', (_case, source) => {
+    expect(claudeFacts({ hook: 'SessionStart', matcher: source })).toEqual([{ kind: 'heartbeat' }]);
+  });
+
+  it('asserts liveness only when the source field is absent entirely', () => {
+    // A provider that omits the discriminant loses `idle` at start and reports
+    // on its first real action. That is a degradation; claiming idle would be
+    // a lie, and this subsystem prefers the honest loss.
+    expect(claudeFacts({ hook: 'SessionStart' })).toEqual([{ kind: 'heartbeat' }]);
   });
 
   it('says nothing on session end — the daemon watches the process exit', () => {
