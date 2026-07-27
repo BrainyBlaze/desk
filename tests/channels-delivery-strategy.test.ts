@@ -113,11 +113,27 @@ describe('canonical channel delivery decisions', () => {
       wait: null,
       actionable: false
     });
+    // "so it cannot suppress forever" is the whole point: an expired lease is
+    // the absence of evidence, and delivery must resume rather than wait for a
+    // producer that may never speak again.
     expect(canonicalDeliveryDecision(state, 'session-a', NOW)).toMatchObject({
-      deliver: false,
-      reason: 'unobservable',
+      deliver: true,
       view: { activity: 'unknown' }
     });
+  });
+
+  it('DELIVERS when there is no evidence — absence of evidence is not "busy"', () => {
+    // Every session started before hooks existed reads `unknown`, as does any
+    // session on a machine where the operator declined to install them.
+    // Refusing here made the product unusable in its default state: the
+    // operator wrote to their agents and nothing was ever delivered.
+    const noSnapshot: AgentStateBatch = { ok: true, revision: 42, snapshots: [] };
+    expect(canonicalDeliveryDecision(noSnapshot, 'session-a', NOW)).toMatchObject({
+      deliver: true,
+      view: { activity: 'unknown' }
+    });
+    const terminalSubject = batch({ ...agentSnapshot('idle'), subject: { kind: 'terminal' as const } } as never);
+    expect(canonicalDeliveryDecision(terminalSubject, 'session-a', NOW)).toMatchObject({ deliver: true });
   });
 
   it('marks operator waits actionable without treating provider waits as operator work', () => {
@@ -169,13 +185,26 @@ describe('canonical channel delivery decisions', () => {
     expect(misleadingPane).toContain('Working');
   });
 
-  it('fails closed when the authority read itself failed', () => {
+  it('keeps delivering when the authority read itself failed', () => {
+    // A daemon hiccup must not silently sever the operator from every agent.
+    // Blocking on an unreadable authority is the same silent-total failure as
+    // blocking on a session that never reported.
     const failed: AgentStateBatch = { ok: false, revision: null, snapshots: [] };
 
     expect(canonicalDeliveryDecision(failed, 'session-a', NOW)).toMatchObject({
-      deliver: false,
-      reason: 'unobservable',
+      deliver: true,
       view: { authorityRevision: null, lifecycle: 'unknown', activity: 'unknown' }
     });
+  });
+
+  it('still refuses on POSITIVE knowledge that delivery is unsafe', () => {
+    // The rule is not "always deliver" — a live working lease and an open
+    // block are evidence, and they still hold delivery back.
+    expect(
+      canonicalDeliveryDecision(batch(agentSnapshot('working', { leaseExpiresAt: NOW + 60_000 })), 'session-a', NOW)
+    ).toMatchObject({ deliver: false, reason: 'busy' });
+    expect(
+      canonicalDeliveryDecision(batch(agentSnapshot('blocked', { waitKind: 'approval', waitOwner: 'operator' })), 'session-a', NOW)
+    ).toMatchObject({ deliver: false });
   });
 });

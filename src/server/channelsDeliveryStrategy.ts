@@ -97,14 +97,24 @@ export function canonicalDeliveryDecision(
   if (view.lifecycle === 'exited') {
     return { deliver: false, reason: 'offline', view };
   }
+  // Delivery is refused only on POSITIVE knowledge that it is unsafe. `unknown`
+  // is not "busy" — it is "no evidence", and that is the ordinary state of any
+  // session whose producer has not reported yet: every session started before
+  // hooks existed, every session on a machine where the operator declined to
+  // install them, and every session between spawn and its first typed event.
+  //
+  // Refusing there made the product unusable in its default state: messages
+  // queued as `unobservable` forever and the operator's agents simply never
+  // answered. The two failures are not symmetric. Delivering into a session
+  // that turns out to be mid-turn interleaves text — visible and recoverable.
+  // Never delivering is silent and total.
   switch (view.activity) {
     case 'idle':
+    case 'unknown':
       return { deliver: true, view };
     case 'working':
       return { deliver: false, reason: 'busy', view };
     case 'blocked':
       return { deliver: false, reason: blockedReason(view), view };
-    case 'unknown':
-      return { deliver: false, reason: 'unobservable', view };
   }
 }
