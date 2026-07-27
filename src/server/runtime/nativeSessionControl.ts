@@ -154,12 +154,28 @@ export interface NativeChannelsTransport {
 }
 
 export function createNativeChannelsTransport(
-  options: { enterDelayMs?: number; wait?: (ms: number) => Promise<void> } = {}
+  options: {
+    enterDelayMs?: number;
+    wait?: (ms: number) => Promise<void>;
+    confirmDelayMs?: number;
+    enterAttempts?: number;
+    pasteObserveAttempts?: number;
+  } = {}
 ): NativeChannelsTransport {
   const enterDelayMs = options.enterDelayMs ?? 1200;
+  const confirmDelayMs = options.confirmDelayMs ?? 400;
+  // Total Enter presses, including the first. 1 restores the open-loop send.
+  const enterAttempts = Math.max(1, options.enterAttempts ?? 3);
+  const pasteObserveAttempts = Math.max(1, options.pasteObserveAttempts ?? 3);
   const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const capturePane = async (sessionId: string): Promise<string | null> => {
+    const result = await daemonControl('/control/tail', { sessionId, rows: 200 });
+    const lines = result.ok ? result.body?.lines : undefined;
+    return Array.isArray(lines) && lines.every((line) => typeof line === 'string') ? lines.join('\n') : null;
+  };
   return {
     async sendText(sessionId, text) {
+      const prePaste = await capturePane(sessionId);
       // paste:true mirrors legacy paste semantics — the daemon wraps in
       // bracketed-paste codes only when the app enabled the mode.
       const delivered = await daemonControl('/control/input', { sessionId, text, paste: true });
@@ -167,17 +183,60 @@ export function createNativeChannelsTransport(
         return false;
       }
       await wait(enterDelayMs);
-      return (await daemonControl('/control/input', { sessionId, text: '\r' })).ok;
+
+      // The control endpoint acknowledges the socket write, not TUI ingestion.
+      // Under load the first post-paste capture can still equal the pre-paste
+      // screen. Wait boundedly for the composer to move before using a later
+      // screen change as evidence that Enter submitted the prompt.
+      let before = await capturePane(sessionId);
+      if (prePaste !== null && before !== null) {
+        for (let attempt = 1; attempt < pasteObserveAttempts && before === prePaste; attempt += 1) {
+          await wait(confirmDelayMs);
+          before = await capturePane(sessionId);
+          if (before === null) break;
+        }
+        if (before === prePaste) {
+          before = null; // paste staging stayed unobservable: one open-loop Enter only
+        }
+      }
+
+      // The submit is CONFIRMED, not assumed. A fixed delay is an open-loop
+      // guess: a TUI still digesting the paste (or busy rendering) swallows
+      // the Enter, and the message then sits in the composer until a human
+      // presses Enter — the operator-reported symptom. Submitting always
+      // repaints (composer clears, the message renders), so an unchanged
+      // screen across the Enter means the keystroke did nothing and is worth
+      // repeating. Bounded, and a screen we cannot observe falls back to the
+      // single open-loop press rather than hammering Enter blindly.
+      let sent = false;
+      for (let attempt = 0; attempt < enterAttempts; attempt += 1) {
+        const pressed = await daemonControl('/control/input', { sessionId, text: '\r' });
+        if (!pressed.ok) {
+          return false;
+        }
+        sent = true;
+        // Unobservable screen: no oracle, so keep the single open-loop press
+        // instead of spending a confirm round-trip on a guess.
+        if (before === null || attempt + 1 >= enterAttempts) {
+          break;
+        }
+        await wait(confirmDelayMs);
+        const after = await capturePane(sessionId);
+        if (after === null) {
+          break;
+        }
+        if (after !== before) {
+          break; // the screen moved — the submit landed
+        }
+        before = after; // identical across the press: swallowed, try once more
+      }
+      return sent;
     },
     sessionRunning(sessionId) {
       // runningSessionSet is already flag-aware (atch socket probe) and cached.
       return runningSessionSet().has(sessionId);
     },
-    async capturePane(sessionId) {
-      const result = await daemonControl('/control/tail', { sessionId: sessionId, rows: 200 });
-      const lines = result.ok ? result.body?.lines : undefined;
-      return Array.isArray(lines) && lines.every((line) => typeof line === 'string') ? lines.join('\n') : null;
-    },
+    capturePane,
     async sendEnter(sessionId) {
       return (await daemonControl('/control/input', { sessionId: sessionId, text: '\r' })).ok;
     },

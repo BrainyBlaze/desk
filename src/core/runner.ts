@@ -161,6 +161,12 @@ export async function runPlan(
   dryRun: boolean,
   options: RunnerLifecycleOptions = {}
 ): Promise<number> {
+  // One unstartable session must not strand the rest of the fleet: a single
+  // stale cwd used to abort the whole plan, leaving dozens of healthy
+  // sessions down with only the first error reported. Every action is
+  // attempted; failures are collected and reported together, and the exit
+  // code still fails (never a silent partial success).
+  const failures: string[] = [];
   for (const action of plan) {
     printPlanAction(action);
     if (dryRun || action.type === 'preserve') {
@@ -172,23 +178,31 @@ export async function runPlan(
     const nativeError = directNativeStartError(action.session);
     if (nativeError) {
       console.error(nativeError);
-      return 1;
+      failures.push(`${action.session.sessionId}: ${nativeError}`);
+      continue;
     }
 
     const prepared = prepareSessionStart(action.session);
     if (!prepared.ok) {
       console.error(prepared.error);
-      return 1;
+      failures.push(`${action.session.sessionId}: ${prepared.error}`);
+      continue;
     }
     const result = await provisionPreparedSession(action.session, options);
     if (!result.ok) {
-      console.error(result.error ?? `atch provision failed for ${action.session.sessionId}`);
-      return 1;
+      const error = result.error ?? `atch provision failed for ${action.session.sessionId}`;
+      console.error(error);
+      failures.push(`${action.session.sessionId}: ${error}`);
+      continue;
     }
     const pendingCapture = pendingCaptureForLaunch(action.session, action.opencodeLaunchResumeId);
     if (pendingCapture) {
       upsertPendingResumeCapture(pendingCapture);
     }
+  }
+  if (failures.length > 0) {
+    console.error(`${failures.length} session(s) could not start:\n  ${failures.join('\n  ')}`);
+    return 1;
   }
   return 0;
 }

@@ -275,6 +275,32 @@ describe('resolveReleaseRoot + production shape', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('uses the Node executable handed off by the same-release CLI when the checkout has no runtime/node', () => {
+    setEnv('DESK_DAEMON_CMD', undefined);
+    const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    try {
+      writeFileSync(join(root, 'package.json'), '{}');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const daemonNode = join(root, 'toolchain', 'node');
+      mkdirSync(join(root, 'toolchain'), { recursive: true });
+      writeFileSync(daemonNode, '#!/bin/sh\n');
+      chmodSync(daemonNode, 0o755);
+      const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
+
+      expect(
+        resolveDaemonCommand(
+          fromUrl,
+          { ...process.env, DESK_DAEMON_NODE: daemonNode },
+          '/opt/desk/libexec/desk-standalone'
+        )
+      ).toEqual([daemonNode, join(root, 'dist', 'cli', 'main.js'), 'terminal-daemon']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('resolveDaemonCommand', () => {

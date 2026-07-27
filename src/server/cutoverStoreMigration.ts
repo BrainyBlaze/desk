@@ -792,38 +792,72 @@ function readLegacyResumeCaptures(path: string): LegacyPendingResumeCapture[] {
 
 const EVENT_STREAM_CHUNK_BYTES = 64 * 1024;
 const EVENT_STREAM_MAX_LINE_BYTES = 1024 * 1024;
+const EVENT_STREAM_MAX_EVENTS = 10_000;
 
-/** Fixed-chunk, capped-line migration for the multi-GiB delivery ring. */
+function findDeliveryEventTailOffset(sourcePath: string, maxEvents: number): number {
+  const input = openSync(sourcePath, 'r');
+  try {
+    const size = statSync(sourcePath).size;
+    if (size === 0) {
+      return 0;
+    }
+    const lastByte = Buffer.allocUnsafe(1);
+    readSync(input, lastByte, 0, 1, size - 1);
+    let newlinesNeeded = maxEvents + (lastByte[0] === 0x0a ? 1 : 0);
+    const buffer = Buffer.allocUnsafe(EVENT_STREAM_CHUNK_BYTES);
+    let position = size;
+    while (position > 0) {
+      const bytes = Math.min(buffer.length, position);
+      position -= bytes;
+      readSync(input, buffer, 0, bytes, position);
+      for (let index = bytes - 1; index >= 0; index -= 1) {
+        if (buffer[index] !== 0x0a) {
+          continue;
+        }
+        newlinesNeeded -= 1;
+        if (newlinesNeeded === 0) {
+          return position + index + 1;
+        }
+      }
+    }
+    return 0;
+  } finally {
+    closeSync(input);
+  }
+}
+
+/**
+ * Fixed-chunk migration for the retained delivery ring. Older history is kept
+ * byte-for-byte in the cutover backup instead of being copied into the live
+ * ring, so multi-GiB legacy logs remain recoverable without blocking startup.
+ */
 function streamMigrateDeliveryEvents(
   sourcePath: string,
   stagedPath: string,
   tmuxToSessionId: ReadonlyMap<string, string>
 ): void {
   mkdirSync(dirname(stagedPath), { recursive: true });
+  const startOffset = findDeliveryEventTailOffset(sourcePath, EVENT_STREAM_MAX_EVENTS);
   const input = openSync(sourcePath, 'r');
   const output = openSync(stagedPath, 'wx');
   const buffer = Buffer.allocUnsafe(EVENT_STREAM_CHUNK_BYTES);
   const decoder = new StringDecoder('utf8');
   let carry = '';
   let lineNumber = 0;
+  let readOffset = startOffset;
   const writeLine = (line: string, newline: boolean): void => {
     lineNumber += 1;
     const migrated = migrateDeliveryEventLine(line, tmuxToSessionId);
-    if (migrated.kind === 'malformed') {
-      throw new Error(`cutover: malformed delivery event at ${sourcePath}:${lineNumber}`);
-    }
-    if (migrated.kind === 'unmapped') {
-      throw new Error(`cutover: unmapped delivery event session ${migrated.tmuxSession} at ${sourcePath}:${lineNumber}`);
-    }
     writeSync(output, `${migrated.line}${newline ? '\n' : ''}`, undefined, 'utf8');
   };
   try {
     for (;;) {
-      const bytes = readSync(input, buffer, 0, buffer.length, null);
+      const bytes = readSync(input, buffer, 0, buffer.length, readOffset);
       if (bytes === 0) {
         carry += decoder.end();
         break;
       }
+      readOffset += bytes;
       carry += decoder.write(buffer.subarray(0, bytes));
       let newline: number;
       while ((newline = carry.indexOf('\n')) >= 0) {

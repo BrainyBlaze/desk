@@ -190,7 +190,12 @@ describe('serve launch planning', () => {
       command: standaloneEntry,
       args: [],
       cwd: root,
-      env: { KEEP_ME: 'yes', DESK_HOST: '0.0.0.0', DESK_PORT: '6000' }
+      env: {
+        KEEP_ME: 'yes',
+        DESK_HOST: '0.0.0.0',
+        DESK_PORT: '6000',
+        DESK_DAEMON_NODE: '/runtime/node'
+      }
     });
     expectOnlyArtifactLookup(standaloneEntry);
   });

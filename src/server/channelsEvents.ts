@@ -27,6 +27,7 @@ import type { SubmitState, LifecycleStatus } from './channelsProtocol.js';
 
 const EVENTS_FILE = 'events.jsonl';
 const MAX_EVENTS = 10_000;
+const PRUNE_INTERVAL = 1_000;
 const EVENTS_DIR = '_engine';
 const PREVIEW_MAX_BYTES = 200;
 
@@ -109,6 +110,9 @@ export function appendDeliveryEvent(
     : undefined;
   const full: DeliveryEvent = { ...event, seq, at: event.at ?? now.toISOString(), preview };
   appendFileSync(eventsPath(home), `${JSON.stringify(full)}\n`, 'utf8');
+  if (seq > MAX_EVENTS && seq % PRUNE_INTERVAL === 0) {
+    pruneDeliveryEvents(home);
+  }
   return full;
 }
 

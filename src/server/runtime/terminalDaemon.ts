@@ -144,7 +144,11 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         sockPath,
         geometry: spec.geometry,
         detached: true,
-        killSpec: { binPath: options.atchBinPath, args: ['kill', '-f', sockPath] } // KILL contract
+        killSpec: {
+          binPath: options.atchBinPath,
+          args: ['kill', '-f', sockPath],
+          staleCleanupSpec: { binPath: options.atchBinPath, args: ['rm', sockPath] }
+        } // KILL contract
       });
     },
     retire(sessionId) {

@@ -97,6 +97,18 @@ describe('channelsEvents', () => {
     expect(remaining[9]!.seq).toBe(20);
   });
 
+  it('periodically enforces the default ring bound while appending', () => {
+    for (let i = 0; i < 11_000; i += 1) {
+      appendDeliveryEvent(home, { kind: 'queued' });
+    }
+
+    const path = join(home, '_engine', 'events.jsonl');
+    const lines = readFileSync(path, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(10_000);
+    expect(JSON.parse(lines[0]!)).toMatchObject({ seq: 1001 });
+    expect(JSON.parse(lines.at(-1)!)).toMatchObject({ seq: 11_000 });
+  });
+
   it('prune is a no-op when under the cap', () => {
     appendDeliveryEvent(home, { kind: 'queued' });
     appendDeliveryEvent(home, { kind: 'delivering' });

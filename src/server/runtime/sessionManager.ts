@@ -8,6 +8,7 @@
 // Testable against a fake v3 master today; the real atch binary drops in behind
 // the same socket path once its master speaks v3.
 
+import { createConnection } from 'node:net';
 import { GenerationLedger } from '../../shared/controlPlane/generationLedger.js';
 import { WorkerSupervisor } from '../../shared/runtime/workerSupervisor.js';
 import { type EmulatorFactory } from '../../shared/runtime/emulatorPort.js';
@@ -21,12 +22,26 @@ import { Role } from '../../shared/atchWire/frames.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
+interface KillCommandSpec {
+  binPath: string;
+  args: string[];
+}
+
+interface DetachedKillSpec extends KillCommandSpec {
+  staleCleanupSpec?: KillCommandSpec;
+}
+
+interface DetachedKillRecord extends DetachedKillSpec {
+  sockPath: string;
+  mustConfirm?: boolean;
+}
+
 /**
  * Run a detached-master kill command to completion, BOUNDED: spawn error,
  * nonzero exit, or a hang past timeoutMs is a failure — an unbounded kill
  * would let retireAwaited hang before it ever reaches its socket poll.
  */
-function runKillCommand(kill: { binPath: string; args: string[] }, timeoutMs = 5_000): Promise<{ ok: boolean; error?: string }> {
+function runKillCommand(kill: KillCommandSpec, timeoutMs = 5_000): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     let settled = false;
     const settle = (result: { ok: boolean; error?: string }): void => {
@@ -89,7 +104,7 @@ export class SessionManager {
    * disappearance — a retire that returns before the master is gone lets an
    * immediate re-provision adopt the STALE socket at the old generation.
    */
-  private readonly detachedKills = new Map<string, { binPath: string; args: string[]; sockPath: string; mustConfirm?: boolean }>();
+  private readonly detachedKills = new Map<string, DetachedKillRecord>();
   /**
    * Ownership token per session, minted fresh by each spawn/restore operation.
    * Deferred callbacks from an OLD operation (a killed child's late 'exit', a
@@ -136,7 +151,7 @@ export class SessionManager {
       sockPath: string;
       geometry: { rows: number; cols: number };
       /** The detached-master stop command (e.g. `atch kill -f SOCK`). */
-      killSpec: { binPath: string; args: string[] };
+      killSpec: DetachedKillSpec;
       ackTimeoutMs?: number;
     }
   ): Promise<RestoreResult | { ok: false; reason: 'attach-failed' }> {
@@ -257,7 +272,7 @@ export class SessionManager {
       /** The launcher forks a detached master and exits (e.g. `atch start`). */
       detached?: boolean;
       /** For a detached master, the command to stop the session on retire (e.g. `atch kill -f NAME`). */
-      killSpec?: { binPath: string; args: string[] };
+      killSpec?: DetachedKillSpec;
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
     const pending = this.inflight.get(sessionId);
@@ -280,7 +295,7 @@ export class SessionManager {
       geometry: { rows: number; cols: number };
       readyTimeoutMs?: number;
       detached?: boolean;
-      killSpec?: { binPath: string; args: string[] };
+      killSpec?: DetachedKillSpec;
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
     if (this.core.state(sessionId) !== undefined && this.masters.has(sessionId)) {
@@ -290,7 +305,14 @@ export class SessionManager {
     // advance the ledger to N+1 over a surviving generation-N master, fencing
     // it out of every future reconcile even though we never touch it.
     // spawnMaster repeats this check as the race-closing second gate.
-    if (opts.detached === true && existsSync(opts.sockPath)) {
+    //
+    // The test is whether a master is LISTENING, not whether the file exists.
+    // A master that dies leaves its socket node behind, and treating that
+    // leftover as a live owner wedges the session permanently: every later
+    // start refuses until a human deletes the file. Refuse only for a socket
+    // that actually accepts a connection; a refused connect means the owner
+    // is gone and the stale node is ours to replace.
+    if (opts.detached === true && existsSync(opts.sockPath) && (await socketHasListener(opts.sockPath))) {
       return { ok: false, reason: 'spawn-failed' };
     }
     const ens = this.ensure(sessionId, opts.geometry);
@@ -495,7 +517,7 @@ export class SessionManager {
    */
   private async confirmKill(
     sessionId: string,
-    kill: { binPath: string; args: string[]; sockPath: string; mustConfirm?: boolean },
+    kill: DetachedKillRecord,
     timeoutMs: number
   ): Promise<{ ok: boolean; error?: string }> {
     // The socket-absent shortcut applies ONLY to records whose master's fate
@@ -503,12 +525,31 @@ export class SessionManager {
     // record whose prior kill attempt failed) may see the socket ABSENT merely
     // because the master has not surfaced yet — reading that as clean would
     // delete the only teardown record and strand the late master.
-    if (kill.mustConfirm !== true && !existsSync(kill.sockPath)) {
+    const wasUncertain = kill.mustConfirm === true;
+    if (!wasUncertain && !existsSync(kill.sockPath)) {
       this.detachedKills.delete(sessionId); // nothing addressable remains — clean
       return { ok: true };
     }
     const killed = await runKillCommand(kill, timeoutMs); // bounded: a hung kill fails, never blocks forever
     if (!killed.ok) {
+      // A known, previously attached master can die before `atch kill` connects,
+      // leaving a stale socket that makes kill exit 1. `atch rm` is the safe
+      // discriminator here: it removes only a refused/dead socket and refuses a
+      // live listener. Never use it for an already-uncertain half-forked master,
+      // whose socket may not have surfaced yet.
+      if (!wasUncertain) {
+        if (!existsSync(kill.sockPath)) {
+          this.detachedKills.delete(sessionId);
+          return { ok: true };
+        }
+        if (kill.staleCleanupSpec !== undefined) {
+          const cleaned = await runKillCommand(kill.staleCleanupSpec, timeoutMs);
+          if (cleaned.ok && (await waitForSocketGone(kill.sockPath, timeoutMs))) {
+            this.detachedKills.delete(sessionId);
+            return { ok: true };
+          }
+        }
+      }
       kill.mustConfirm = true; // fate now uncertain — no shortcut on later retries
       return killed; // record retained for retry
     }
@@ -526,7 +567,7 @@ export class SessionManager {
    * slot. PEEKS the kill record without consuming it — consumption is the
    * confirming caller's decision.
    */
-  private beginRetire(sessionId: string): { binPath: string; args: string[]; sockPath: string } | undefined {
+  private beginRetire(sessionId: string): DetachedKillRecord | undefined {
     this.owners.delete(sessionId); // any deferred old-operation callback goes stale
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
@@ -540,4 +581,24 @@ export class SessionManager {
   get sessionCount(): number {
     return this.core.sessionCount;
   }
+}
+
+/**
+ * True when a unix socket path has a live listener. A stale node left by a
+ * dead master refuses the connection (ECONNREFUSED); anything else that is
+ * not a successful connect is treated as "no listener" so a permission or
+ * path error can never masquerade as a live foreign owner.
+ */
+async function socketHasListener(path: string, timeoutMs = 250): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ path });
+    const settle = (result: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs, () => settle(false));
+    socket.once('connect', () => settle(true));
+    socket.once('error', () => settle(false));
+  });
 }

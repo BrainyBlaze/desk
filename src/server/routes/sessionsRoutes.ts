@@ -320,6 +320,12 @@ export async function runManagedPlan(
   nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec,
   start: (session: SessionSpec) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }> = startSessionNativeAware
 ): Promise<ManagedPlanResult> {
+  // One unstartable session must not strand the fleet. A stale cwd or a
+  // single attach timeout used to abort the whole plan, leaving every later
+  // session down with only the first error surfaced. Attempt them all,
+  // collect the failures, and still fail the call — a partial start is
+  // reported honestly, never as success.
+  const failures: string[] = [];
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
@@ -328,8 +334,14 @@ export async function runManagedPlan(
     const started = await start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
-      return { exitCode: 1, error: started.error ?? `start failed for ${action.session.sessionId}` };
+      failures.push(`${action.session.sessionId}: ${started.error ?? 'start failed'}`);
     }
+  }
+  if (failures.length > 0) {
+    return {
+      exitCode: 1,
+      error: `${failures.length} session(s) could not start — ${failures.join('; ')}`
+    };
   }
   return { exitCode: 0 };
 }

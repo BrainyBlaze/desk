@@ -126,6 +126,10 @@ export function resolveDaemonCommand(
   if (isExecutableFile(releaseNode)) {
     return [releaseNode, cliEntry, 'terminal-daemon'];
   }
+  const handedOffNode = env.DESK_DAEMON_NODE?.trim();
+  if (handedOffNode !== undefined && looksLikeNodeRuntime(handedOffNode) && isExecutableFile(handedOffNode)) {
+    return [handedOffNode, cliEntry, 'terminal-daemon'];
+  }
   if (looksLikeNodeRuntime(processExecPath)) {
     return [processExecPath, cliEntry, 'terminal-daemon'];
   }

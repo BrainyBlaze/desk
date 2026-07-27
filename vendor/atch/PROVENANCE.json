@@ -183,6 +183,18 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "94c43f96fb9b13128e10e15df88c0c2d14eca827af78f2460337f7364608f234"
-  }
+    "digest": "ad18ce268346dcb10ecc3932ee465a3de1278145a121ee41a4a5d5056773df2d",
+    "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
+  },
+  "localPatches": [
+    {
+      "subject": "fix: drop the control client on EOF/error before the v3 magic (fd leak)",
+      "why": "A probe that connected and closed before sending the 4-byte magic left its accepted fd linked forever; a closed socket stays readable, so select() re-entered client_activity endlessly and the descriptors accumulated until the fd_set overran and the master aborted \u2014 observed as agent sessions dying about a minute after boot.",
+      "files": [
+        "master.c"
+      ],
+      "alsoIncludes": "defence-in-depth: control_activity refuses an accepted fd >= FD_SETSIZE instead of corrupting the bitmap",
+      "upstreamStatus": "NOT yet in the fork repository \u2014 carry upstream and re-vendor at the next snapshot bump"
+    }
+  ]
 }

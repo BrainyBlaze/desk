@@ -18,6 +18,7 @@ const session: SessionSpec = {
   name: 'shell',
   cwd: '/tmp',
   tmuxSession: 'desk-main-shell',
+  sessionId: 'shell',
   command: 'bash',
   uiMode: 'terminal'
 };
@@ -34,8 +35,54 @@ describe('sessions route managed startup', () => {
       () => ({ ok: false, error: 'tmux executable not found' })
     );
 
-    expect(result).toEqual({ exitCode: 1, error: 'tmux executable not found' });
+    expect(result.exitCode).toBe(1);
+    // The reason must survive verbatim — it is what the operator acts on.
+    expect(result.error).toContain('tmux executable not found');
+    expect(result.error).toContain('shell');
     expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * A single unstartable session used to abort the whole plan, so one stale
+   * cwd left an entire fleet down with only the first error surfaced.
+   */
+  it('attempts every session when one fails and names all failures', async () => {
+    const second: SessionSpec = { ...session, name: 'second', sessionId: 'second' };
+    const third: SessionSpec = { ...session, name: 'third', sessionId: 'third' };
+    const plan: SessionPlanAction[] = [
+      { type: 'start', session },
+      { type: 'start', session: second },
+      { type: 'start', session: third }
+    ];
+    const attempted: string[] = [];
+    const result = await runManagedPlan(
+      plan,
+      undefined,
+      { prepare: () => undefined } as never,
+      (spec) => spec,
+      (spec) => {
+        attempted.push(spec.sessionId);
+        return spec.sessionId === 'second' ? { ok: false, error: 'attach-failed' } : { ok: true };
+      }
+    );
+
+    expect(attempted).toEqual(['shell', 'second', 'third']);
+    expect(result.exitCode).toBe(1); // a partial start is never reported as success
+    expect(result.error).toContain('second');
+    expect(result.error).not.toContain('third');
+  });
+
+  it('reports success only when every session starts', async () => {
+    const plan: SessionPlanAction[] = [{ type: 'start', session }, { type: 'preserve', session }];
+    const result = await runManagedPlan(
+      plan,
+      undefined,
+      { prepare: () => undefined } as never,
+      (spec) => spec,
+      () => ({ ok: true })
+    );
+
+    expect(result).toEqual({ exitCode: 0 });
   });
 });
 

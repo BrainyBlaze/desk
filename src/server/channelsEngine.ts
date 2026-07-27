@@ -33,6 +33,7 @@ import {
   EXT_DELIVERING,
   EXT_DELIVERED,
   EXT_QUEUED,
+  EXT_STUCK_SUBMIT,
   EXT_STUCK_UNOBSERVABLE,
   listStuckItems,
   readQueueItem,
@@ -45,6 +46,11 @@ import { writeFileAtomic } from './fsOps.js';
 import { AgentPresenceModel } from './agentPresence.js';
 import type { AgentEventV2 } from './agentEvents.js';
 import { NativePromptDeliveryStrategy, NotificationDeliveryStrategy, PromptDeliveryStrategy, type NativeDeliveryState } from './channelsDeliveryStrategy.js';
+import {
+  isSeedCommitted,
+  markSeedCommitted,
+  readSeedJournalForConsumption
+} from './cutoverStoreMigration.js';
 
 /**
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
@@ -628,6 +634,7 @@ export class ChannelsEngine {
     this.passive = !this.acquireEngineLock();
     if (!this.passive) {
       this.restorePausedSessions();
+      this.restoreMigrationSeed();
       this.restoreQueues();
       this.startPump(options.pumpIntervalMs ?? 2500);
     }
@@ -1113,6 +1120,40 @@ export class ChannelsEngine {
     runtime.unobservableRetries = 0;
     this.setSubmitState(runtime, 'submitted', seqs);
     return true;
+  }
+
+  /**
+   * Materialize the one-time cutover journal into the normal queue lifecycle.
+   * Every target name is deterministic, so a crash before the commit marker can
+   * safely replay the writes; a crash after it leaves restoreQueues to consume
+   * the fully seeded files on the next start.
+   */
+  private restoreMigrationSeed(): void {
+    if (isSeedCommitted(this.options.home)) {
+      return;
+    }
+    const seed = readSeedJournalForConsumption(this.options.home);
+    if (seed === null) {
+      return;
+    }
+    for (const item of seed.items) {
+      const extension =
+        item.phase === 'queued'
+          ? EXT_QUEUED
+          : item.phase === 'semantic-unknown'
+            ? EXT_STUCK_SUBMIT
+            : EXT_DELIVERED;
+      const dir = this.queueDir(item.sessionId);
+      mkdirSync(dir, { recursive: true });
+      writeFileAtomic(
+        join(dir, `${String(item.seq).padStart(10, '0')}.${extension}`),
+        JSON.stringify(item.body)
+      );
+      if (item.phase === 'submit-confirmed') {
+        this.delivered.add(`${item.sessionId}:${item.body.messageId}`);
+      }
+    }
+    markSeedCommitted(this.options.home);
   }
 
   /**

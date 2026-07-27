@@ -125,7 +125,8 @@ export function createServeLaunch(
     env: {
       ...parentEnv,
       DESK_HOST: options.host,
-      DESK_PORT: String(options.port)
+      DESK_PORT: String(options.port),
+      DESK_DAEMON_NODE: nodeExecutable
     },
     label: `desk starting (standalone) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
   };

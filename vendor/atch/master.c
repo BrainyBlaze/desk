@@ -945,6 +945,13 @@ static void control_activity(int s)
 	fd = accept(s, NULL, NULL);
 	if (fd < 0)
 		return;
+	/* Defence in depth: every client fd is later placed in an fd_set, and
+	** FD_SET on a descriptor >= FD_SETSIZE writes past the bitmap. Refuse
+	** the connection instead of corrupting the stack. */
+	else if (fd >= FD_SETSIZE) {
+		close(fd);
+		return;
+	}
 	else if (setnonblocking(fd) < 0) {
 		close(fd);
 		return;
@@ -983,11 +990,30 @@ static void client_activity(struct client *p)
 
 	if (!p->v3) {
 		len = recv(p->fd, magic, sizeof(magic), MSG_PEEK);
+		/* Nothing readable yet: keep waiting for the magic. */
 		if (len < 0 && (errno == EAGAIN || errno == EINTR))
 			return;
-		if (len >= 0 && len < (ssize_t)sizeof(magic))
+		/* Any other receive error is fatal for this client. */
+		if (len < 0) {
+			client_drop(p);
 			return;
-		if (len == (ssize_t)sizeof(magic) && !memcmp(magic, "ATV3", 4))
+		}
+		/* EOF. The peer connected and closed without sending the magic
+		** (a liveness probe does exactly this). Dropping here is what
+		** keeps the accepted fd from leaking: a closed socket stays
+		** readable forever, so returning would re-enter this function
+		** on every select() and never release the descriptor. Leaked
+		** fds accumulated until the fd_set overran and the master
+		** aborted, which surfaced as sessions dying about a minute
+		** after boot. */
+		if (len == 0) {
+			client_drop(p);
+			return;
+		}
+		/* 1..3 bytes: a partial magic is legitimate; wait for the rest. */
+		if (len < (ssize_t)sizeof(magic))
+			return;
+		if (!memcmp(magic, "ATV3", 4))
 			p->v3 = 1;
 	}
 	if (p->v3) {

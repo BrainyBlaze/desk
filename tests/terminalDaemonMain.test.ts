@@ -2,6 +2,7 @@
 // restart RE-ADOPTS surviving atch masters — durable generation, killSpec
 // registration — and never ensures/spawns over them.
 
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -439,6 +440,47 @@ describe('SessionManager.retireAwaited (the restart-race pin)', () => {
     }
   });
 
+  it('cleans a stale socket after a known attached master has already died', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-retire-stale-'));
+    const sockPath = join(dir, 'shell.sock');
+    const genFile = join(dir, 'generation');
+    const fixture = join(process.cwd(), 'tests', 'fixtures', 'fake-atch.mjs');
+    const child = spawn(process.execPath, [fixture, sockPath, genFile], {
+      env: { ...process.env, ATCH_GENERATION: '1' },
+      stdio: 'ignore'
+    });
+    try {
+      await waitFor(() => existsSync(sockPath));
+      const store = new InMemoryGenerationLedger();
+      new GenerationLedger(store).allocate('shell');
+      const { manager } = makeManager(store);
+      const restored = await manager.restoreAndAttach('shell', {
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: {
+          binPath: '/bin/false',
+          args: [],
+          staleCleanupSpec: {
+            binPath: '/bin/sh',
+            args: ['-c', `test -S ${shellQuote(sockPath)} && rm -f ${shellQuote(sockPath)}`]
+          }
+        }
+      });
+      expect(restored.ok).toBe(true);
+
+      child.kill('SIGKILL');
+      await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      expect(existsSync(sockPath)).toBe(true);
+
+      const result = await manager.retireAwaited('shell');
+      expect(result).toEqual({ ok: true });
+      expect(existsSync(sockPath)).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL');
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports an unspawnable kill command (ENOENT) as an error', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-retire-'));
     const sockPath = join(dir, 'shell.sock');
@@ -800,6 +842,7 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-lateuncertain-'));
     const sockPath = join(dir, 'late.sock');
     const attempts = join(dir, 'attempts');
+    const staleCleanupAttempts = join(dir, 'stale-cleanup-attempts');
     try {
       const { manager } = makeManager();
       // Kill semantics like real atch kill -f: succeeds (and removes the
@@ -809,7 +852,11 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
         args: [
           '-c',
           `date +%s%N >> ${shellQuote(attempts)}; if [ -e ${shellQuote(sockPath)} ]; then rm -f ${shellQuote(sockPath)}; exit 0; else exit 1; fi`
-        ]
+        ],
+        staleCleanupSpec: {
+          binPath: '/bin/sh',
+          args: ['-c', `date +%s%N >> ${shellQuote(staleCleanupAttempts)}; rm -f ${shellQuote(sockPath)}`]
+        }
       };
       // ownership-possible spawn timeout: clean launcher exit, no socket yet →
       // the first cleanup kill runs and FAILS (socket absent), record retained.
@@ -831,6 +878,7 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
       const early = await manager.retireAwaited('late', { timeoutMs: 2000 });
       expect(early.ok).toBe(false);
       expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(2); // the kill RAN (and failed)
+      expect(existsSync(staleCleanupAttempts)).toBe(false); // uncertain ownership forbids stale cleanup
 
       // the half-forked master finally surfaces its socket…
       const { writeFileSync: wf } = await import('node:fs');
@@ -843,6 +891,7 @@ describe('failed owned teardown keeps the kill record (retriable)', () => {
       // consumed: a further retire is idempotent, no fourth kill run
       expect(await manager.retireAwaited('late')).toEqual({ ok: true });
       expect(readFileSync(attempts, 'utf8').trim().split('\n')).toHaveLength(3);
+      expect(existsSync(staleCleanupAttempts)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1028,7 +1077,11 @@ describe('reconcileExistingSessions', () => {
       { sessionId: 'b', ok: false, error: 'no-generation' },
       { sessionId: 'c', ok: false, error: 'socket exploded' }
     ]);
-    // the killSpec carries the resolved atch binary + the exact socket path
-    expect(restoreAndAttach.mock.calls[0][1].killSpec).toEqual({ binPath: '/opt/atch', args: ['kill', '-f', '/r/a.sock'] });
+    // Teardown uses the resolved atch binary for both live kill and safe stale cleanup.
+    expect(restoreAndAttach.mock.calls[0][1].killSpec).toEqual({
+      binPath: '/opt/atch',
+      args: ['kill', '-f', '/r/a.sock'],
+      staleCleanupSpec: { binPath: '/opt/atch', args: ['rm', '/r/a.sock'] }
+    });
   });
 });

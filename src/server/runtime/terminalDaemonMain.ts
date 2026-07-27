@@ -90,7 +90,11 @@ export async function reconcileExistingSessions(
         const restored = await daemon.router.sessions.restoreAndAttach(sessionId, {
           sockPath,
           geometry,
-          killSpec: { binPath: atchBinPath, args: ['kill', '-f', sockPath] },
+          killSpec: {
+            binPath: atchBinPath,
+            args: ['kill', '-f', sockPath],
+            staleCleanupSpec: { binPath: atchBinPath, args: ['rm', sockPath] }
+          },
           ackTimeoutMs
         });
         results[index] = restored.ok ? { sessionId, ok: true } : { sessionId, ok: false, error: restored.reason };

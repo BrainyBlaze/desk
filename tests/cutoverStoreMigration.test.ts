@@ -469,6 +469,36 @@ describe('cutover store migration — production first-start gate (§10)', () =>
     expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(true);
   });
 
+  it('keeps the newest delivery-event ring while backing up complete legacy history', () => {
+    const eventsPath = join(channelsRoot, '_engine', 'events.jsonl');
+    const legacyLines = [
+      '{ malformed legacy event',
+      JSON.stringify({ seq: 2, at: 'old', tmuxSession: 'tmux-gone', kind: 'queued' }),
+      ...Array.from({ length: 10_000 }, (_, index) =>
+        JSON.stringify({
+          seq: index + 3,
+          at: 'now',
+          tmuxSession: 'tmux-a',
+          kind: 'queued',
+          channel: 'desk'
+        })
+      )
+    ];
+    const legacyContent = `${legacyLines.join('\n')}\n`;
+    writeFileSync(eventsPath, legacyContent);
+
+    expect(migrate().status).toBe('migrated');
+
+    const liveLines = readFileSync(eventsPath, 'utf8').trim().split('\n');
+    expect(liveLines).toHaveLength(10_000);
+    expect(JSON.parse(liveLines[0]!)).toMatchObject({ seq: 3, sessionId: 'claude' });
+    expect(JSON.parse(liveLines.at(-1)!)).toMatchObject({ seq: 10_002, sessionId: 'claude' });
+    expect(liveLines.every((line) => !line.includes('tmuxSession'))).toBe(true);
+    expect(
+      readFileSync(join(migrationRoot, 'backup', 'channels', '_engine', 'events.jsonl'), 'utf8')
+    ).toBe(legacyContent);
+  });
+
   it('fails before staging when free space cannot hold transformed output', () => {
     expect(() => migrate({ availableBytes: () => 0n })).toThrow(/free space/);
     expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(false);
