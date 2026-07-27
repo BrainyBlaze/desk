@@ -97,10 +97,22 @@ describe('a hook body survives the public route parser', () => {
     expect(envelope.envelope.facts).toEqual([{ kind: 'activity', activity: 'working' }]);
   });
 
-  it('accepts — without error — a hook that asserts nothing', () => {
-    // SessionStart registers the producer and says nothing about activity.
-    // Rejecting it would make a healthy launch look like a failure.
+  it('carries the START of a session all the way to an idle fact', () => {
+    // A started session is at its prompt. This is the path that keeps an idle
+    // fleet off `unknown`, and it has to survive the wire, not just the mapper.
     runHook('SessionStart', JSON.stringify({ source: 'startup' }));
+    const envelope = observationEnvelope(posted()[0], { observedAt: 1_760_000_000_000 });
+    expect(envelope.kind).toBe('envelope');
+    if (envelope.kind !== 'envelope') return;
+    expect(() => parseAgentStateEnvelope(envelope.envelope)).not.toThrow();
+    expect(envelope.envelope.facts).toEqual([{ kind: 'activity', activity: 'idle' }]);
+  });
+
+  it('accepts — without error — a hook that asserts nothing', () => {
+    // SessionEnd retires the producer and says nothing about activity: the
+    // daemon watches the process exit itself. Rejecting it would turn an
+    // ordinary shutdown into a reported failure.
+    runHook('SessionEnd', JSON.stringify({ reason: 'logout' }));
     const result = observationEnvelope(posted()[0], { observedAt: 1 });
     expect(result.kind).toBe('no-facts');
   });

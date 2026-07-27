@@ -63,6 +63,13 @@ function sliceOf(event) {
       return { type: event.type, sessionID: properties.sessionID, permissionTitle: deskBounded(properties.title) };
     case 'permission.replied':
       return { type: event.type, sessionID: properties.sessionID };
+    // The server announcing itself is what lets a just-started session report
+    // before anyone talks to it. It is a SERVER-level event and carries no
+    // session id, so the endpoint registration that follows a post simply does
+    // not fire here — the address is learned from the first session-scoped
+    // event instead.
+    case 'server.connected':
+      return { type: event.type };
     default:
       return undefined;
   }

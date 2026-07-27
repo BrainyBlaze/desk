@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   daemonChildEnv,
   resolveAtchBinPath,
@@ -73,6 +73,24 @@ function setEnv(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];
   else process.env[key] = value;
 }
+/**
+ * These tests resolve the daemon command from the ENVIRONMENT, so an ambient
+ * `DESK_*` variable silently changes their answer. That is not hypothetical:
+ * run the suite from inside a Desk-managed terminal and `DESK_DAEMON_NODE`
+ * points the resolver at the operator's nvm Node, and the two preflight tests
+ * that assert a fail-closed path stop failing closed — a green-to-red flip
+ * caused purely by where the suite was launched.
+ *
+ * Scrubbing the whole prefix rather than the three names known to leak today
+ * is deliberate: it is what keeps the next variable added to the resolver from
+ * reintroducing this. Everything goes through `setEnv`, so `afterEach` puts the
+ * operator's real environment back.
+ */
+beforeEach(() => {
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('DESK_')) setEnv(key, undefined);
+  }
+});
 afterEach(() => {
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];

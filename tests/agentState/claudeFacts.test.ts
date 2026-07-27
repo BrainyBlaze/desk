@@ -15,8 +15,32 @@ describe('claude turn edges', () => {
     expect(claudeFacts({ hook: 'Stop' })).toEqual([{ kind: 'activity', activity: 'idle' }]);
   });
 
-  it('says nothing about lifecycle on session start or end — the daemon owns that', () => {
-    expect(claudeFacts({ hook: 'SessionStart', matcher: 'resume' })).toEqual([]);
+  // A started session is at its prompt with nothing running. Reporting that is
+  // what keeps an idle fleet from reading `unknown` until someone happens to
+  // talk to it — the state most sessions are in most of the time.
+  it.each(['startup', 'resume', 'clear', 'fork'])(
+    'reports IDLE when a session starts via %s',
+    (source) => {
+      expect(claudeFacts({ hook: 'SessionStart', matcher: source })).toEqual([
+        { kind: 'activity', activity: 'idle' }
+      ]);
+    }
+  );
+
+  it('treats a start with no named source as a genuine start', () => {
+    // Compaction is the only way a session can begin mid-turn, and it always
+    // names itself; anything unnamed is a real start.
+    expect(claudeFacts({ hook: 'SessionStart' })).toEqual([{ kind: 'activity', activity: 'idle' }]);
+  });
+
+  // The dangerous case: auto-compaction fires WHILE the agent is working, so
+  // calling it idle would paint a busy session as free and, through the
+  // delivery gate, invite a message straight into the middle of its turn.
+  it('never claims idle on compaction — it asserts only liveness', () => {
+    expect(claudeFacts({ hook: 'SessionStart', matcher: 'compact' })).toEqual([{ kind: 'heartbeat' }]);
+  });
+
+  it('says nothing on session end — the daemon watches the process exit', () => {
     expect(claudeFacts({ hook: 'SessionEnd', matcher: 'logout' })).toEqual([]);
   });
 });

@@ -121,9 +121,31 @@ export function claudeFacts(observation: ClaudeObservation): AgentSemanticFact[]
     // it should close.
     case 'PostToolBatch':
       return [{ kind: 'heartbeat' }];
-    // SessionStart/SessionEnd register and retire the producer; the daemon owns
-    // lifecycle, so neither asserts anything about activity.
+    // A session that has just started is sitting at its prompt with no turn in
+    // flight, and that is FIRST-PARTY knowledge from the agent process — not the
+    // daemon guessing from the fact that it spawned something. The daemon may
+    // not make this call itself: `claude -p "task"` begins working immediately
+    // on startup, so "spawned" and "idle" are not the same statement.
+    //
+    // Without this the subscription was dead weight (R9): Desk paid for a hook
+    // process on every session start and learned nothing, so every freshly
+    // started session read `unknown` until it happened to run a tool. That is
+    // the ordinary state of an idle fleet, and it made the indicator useless
+    // exactly when the operator looks at it.
+    //
+    // `compact` is the one source that does NOT mean this. Auto-compaction
+    // fires mid-turn, when the agent is demonstrably busy, so it asserts only
+    // liveness. The remaining sources — startup, resume, clear, fork — all
+    // leave the session at its prompt. An absent discriminant is treated as a
+    // genuine start because compaction is the sole way a session can "begin"
+    // mid-turn and it always names itself; Codex additionally narrows its own
+    // subscription to `startup|resume`, so nothing else can arrive from there.
     case 'SessionStart':
+      return observation.matcher === 'compact'
+        ? [{ kind: 'heartbeat' }]
+        : [{ kind: 'activity', activity: 'idle' }];
+    // SessionEnd stays silent: the daemon watches the process exit itself, and
+    // lifecycle is its axis, not the producer's.
     case 'SessionEnd':
       return [];
     default:

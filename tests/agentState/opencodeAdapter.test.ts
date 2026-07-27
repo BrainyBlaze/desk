@@ -89,6 +89,17 @@ describe('opencode plugin reports the events that actually exist', () => {
     expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'idle' }]);
   });
 
+  // Without this the session reported nothing until its operator sent a first
+  // message, so a just-started OpenCode sat on `unknown` for as long as it was
+  // merely waiting. server.connected is OpenCode's own start signal, so this is
+  // the provider saying it, not Desk inferring it from having spawned a
+  // process. It is server-level and carries no session id.
+  it('learns IDLE the moment the server connects, before anyone talks to it', async () => {
+    const hooks = await loadHooks();
+    await hooks.event?.({ event: { type: 'server.connected', properties: {} } });
+    expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'idle' }]);
+  });
+
   it('learns a PROVIDER wait from a retry status', async () => {
     const hooks = await loadHooks();
     await hooks.event?.({

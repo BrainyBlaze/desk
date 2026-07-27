@@ -288,7 +288,10 @@ describe('canonical system agent-state routes', () => {
       agentStateGateway,
       'POST',
       '/api/agent-event',
-      producerBody({ observation: { hook: 'SessionStart' } })
+      // SessionEnd is the hook that genuinely asserts nothing: the daemon
+      // watches the process exit itself. (SessionStart does assert — a started
+      // session is idle — so it is no longer an example of silence.)
+      producerBody({ observation: { hook: 'SessionEnd' } })
     );
 
     expect(result).toEqual({
