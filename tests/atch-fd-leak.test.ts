@@ -26,20 +26,49 @@ let master: ChildProcess | undefined;
 let masterPid: number | undefined;
 let socketPath: string;
 
-const openFdCount = (pid: number): number => readdirSync(`/proc/${pid}/fd`).length;
+const openFdCount = (pid: number): number => {
+  try {
+    return readdirSync(`/proc/${pid}/fd`).length;
+  } catch {
+    // A vanished master is the failure this test exists to catch (an fd_set
+    // overrun aborts it). Say that, rather than surfacing a bare ENOENT from
+    // deep inside a helper.
+    throw new Error(`atch master ${pid} is gone — it died while being probed`);
+  }
+};
 
-/** atch `start` daemonizes, so the spawned pid is not the master: find it by socket path. */
-const findMasterPid = (path: string): number | undefined => {
+/**
+ * atch `start` daemonizes, so the spawned pid is not the master: find it by
+ * socket path. The launcher we spawned matches the same cmdline and is still
+ * alive for a moment after the socket appears, so it must be excluded by pid —
+ * picking it yields a pid that exits under us and fails the run as ENOENT.
+ */
+const findMasterPid = (path: string, excludePid?: number): number | undefined => {
   for (const entry of readdirSync('/proc')) {
     if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (pid === excludePid) continue;
     try {
       const cmdline = readFileSync(`/proc/${entry}/cmdline`, 'utf8');
-      if (cmdline.includes(path) && cmdline.includes('atch')) return Number(entry);
+      // Match the binary, not the string "atch" — the socket lives under a
+      // directory named atch-fd-leak-*, so that substring test was vacuous.
+      if (cmdline.includes(path) && cmdline.includes(ATCH_BIN)) return pid;
     } catch {
       // process vanished between readdir and read
     }
   }
   return undefined;
+};
+
+/** Alive now AND still alive a beat later — a daemonizing launcher is not. */
+const settledMasterPid = async (
+  path: string,
+  excludePid?: number
+): Promise<number | undefined> => {
+  const candidate = findMasterPid(path, excludePid);
+  if (candidate === undefined) return undefined;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  return existsSync(`/proc/${candidate}`) ? candidate : undefined;
 };
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 8000): Promise<void> => {
@@ -73,7 +102,11 @@ describe.skipIf(!existsSync(ATCH_BIN) || !existsSync('/proc/self/fd'))('atch con
       detached: true
     });
     await waitFor(() => existsSync(socketPath));
-    await waitFor(() => (masterPid = findMasterPid(socketPath)) !== undefined);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline && masterPid === undefined) {
+      masterPid = await settledMasterPid(socketPath, master?.pid);
+    }
+    expect(masterPid, 'the daemonized atch master must be identifiable').toBeTruthy();
   });
 
   afterAll(() => {
