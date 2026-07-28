@@ -38,6 +38,7 @@
         "icon": "list-checks",
         "pages": [
           "guide-create-agent-fleet",
+          "guide-agent-profiles",
           "guide-multi-agent-layouts",
           "guide-channels-collaboration",
           "guide-cross-team-collaboration",
