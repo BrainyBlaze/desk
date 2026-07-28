@@ -77,7 +77,11 @@ groups:
 });
 
 describe('desk manifest ui mode', () => {
-  it('defaults SDK-backed agent sessions to native ui mode when none is declared', () => {
+  // Terminal is the default for a declared-nothing session, and native is
+  // opt-in. The session form pre-selects terminal for the same reason, and the
+  // two must agree: while they disagreed, an operator editing the manifest by
+  // hand got a different default from one using the UI.
+  it('defaults an undeclared uiMode to terminal, and honours an explicit native', () => {
     const manifest = parseDeskManifest(`
 groups:
   - id: group-1
@@ -93,7 +97,7 @@ groups:
         agent: codex
 `);
     const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
-    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'native']);
+    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'terminal']);
   });
 
   it('honors an explicit terminal uiMode and keeps custom-command sessions terminal', () => {
@@ -284,13 +288,18 @@ groups:
         sessionId: alpha
         cwd: ~/projects/alpha
         agent: codex
+        uiMode: native
         resume: 00000000-0000-7000-8000-000000000001
       - name: project-mu
         sessionId: project-mu
         cwd: ~/projects/project-μ
         agent: codex
+        uiMode: native
         resume: 00000000-0000-7000-8000-000000000002
 `);
+    // `uiMode` is declared because this test is about resume entries becoming
+    // stable specs, not about what an undeclared mode resolves to — that has
+    // its own test, and leaving it implicit here would couple the two.
 
     const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
 
@@ -426,7 +435,7 @@ projects:
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
     expect(commands[0]).toBe("cd '/workspace/projects/sample' && exec bash");
     // Agent launches carry explicit Desk identity for globally installed hooks.
-    expect(commands[1]).toContain("cd '/workspace/projects/sample' && desk_claude_session=");
+    expect(commands[1]).toContain("cd '/workspace/projects/sample' && ");
     expect(commands[1]).toContain("DESK_SESSION_ID='claude'");
     expect(commands[1]).not.toContain('DESK_TMUX_SESSION');
     expect(commands[1]).not.toContain('tmux display-message');
@@ -440,13 +449,10 @@ projects:
     expect(commands[1]).toContain('/.config/desk/claude/settings.json');
     expect(commands[1]).not.toContain('preferredNotifChannel');
     expect(commands[1]).toContain("--dangerously-skip-permissions --resume 'abc123'");
-    expect(commands[1]).toContain('desk_claude_session="$HOME/.claude/projects/-workspace-projects-sample/abc123.jsonl"');
     expect(commands[1]).not.toContain('grep -q');
-    expect(commands[1]).toContain('desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue');
-    expect(commands[1]).toContain('if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi');
-    expect(commands[1]).toContain('desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics');
+    expect(commands[1]).toContain('desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics');
     expect(commands[1]).toContain('exec "${SHELL:-/bin/sh}"');
-    expect(commands[1]).toContain('--continue');
+    expect(commands[1]).not.toContain('--continue');
     expect(commands[2]).toContain("DESK_SESSION_ID='codex' DESK_AGENT='codex' codex");
     // The BEL launch flags are gone with the rest of the terminal-bell era: a
     // bell is an edge with no author, and any child ringing it looked
@@ -470,13 +476,12 @@ projects:
     expect(commands[3]).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"allow"}}\'');
   });
 
-  it('falls back from claude resume to continue when the CLI cannot resume the id', () => {
+  it('never substitutes another Claude conversation when the exact resume id fails', () => {
     const fixture = createClaudeLaunchFixture({
       claudeScript: `#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/claude-args.log"
 case " $* " in
   *" --resume "*) printf '%s\n' "No conversation found for resume" >&2; exit 31 ;;
-  *" --continue"*) printf '%s\n' "continued"; exit 0 ;;
   *) printf '%s\n' "unexpected args: $*" >&2; exit 99 ;;
 esac
 `
@@ -486,35 +491,8 @@ esac
       const result = runGeneratedCommand(command, fixture);
 
       expect(result.status).toBe(0);
-      expect(result.stdout).toContain('continued');
-      expect(result.stderr).toContain('desk: claude --resume failed with exit 31; trying --continue');
-      expect(fixture.readClaudeArgs()).toEqual([
-        expect.stringContaining('--resume abc123'),
-        expect.stringContaining('--continue')
-      ]);
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
-  it('keeps a claude terminal pane alive with diagnostics when resume and continue both fail', () => {
-    const fixture = createClaudeLaunchFixture({
-      claudeScript: `#!/bin/sh
-printf '%s\n' "$*" >> "$HOME/claude-args.log"
-case " $* " in
-  *" --resume "*) printf '%s\n' "resume missing" >&2; exit 31 ;;
-  *" --continue"*) printf '%s\n' "continue missing" >&2; exit 32 ;;
-  *) printf '%s\n' "unexpected args: $*" >&2; exit 99 ;;
-esac
-`
-    });
-    try {
-      const command = buildClaudeResumeSpecCommand(fixture.workspace, 'abc123');
-      const result = runGeneratedCommand(command, fixture);
-
-      expect(result.status).toBe(0);
-      expect(result.stderr).toContain('desk: claude --resume failed with exit 31; trying --continue');
-      expect(result.stderr).toContain('desk: claude --continue failed with exit 32; leaving pane open for diagnostics');
+      expect(result.stderr).toContain('desk: exact claude --resume failed with exit 31; leaving pane open for diagnostics');
+      expect(fixture.readClaudeArgs()).toEqual([expect.stringContaining('--resume abc123')]);
       expect(fixture.readShellLog()).toEqual('shell kept alive\n');
     } finally {
       fixture.cleanup();

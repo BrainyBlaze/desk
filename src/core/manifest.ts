@@ -284,9 +284,25 @@ export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' |
   return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
 }
 
-/** Undeclared uiMode resolves to native where supported; explicit values always win. */
+/**
+ * Undeclared `uiMode` resolves to `terminal`; explicit values always win.
+ *
+ * Terminal is the default because it is the mode that works for every agent
+ * Desk drives: it runs the CLI's own TUI, so anything the CLI can do, the
+ * session can do. Native is a richer surface but a narrower one, and it is
+ * marked experimental in the session form for the same reason.
+ *
+ * This has to agree with the wizard. The two disagreed for a while — the form
+ * pre-selected `terminal` while an omitted field still resolved to `native` —
+ * which gave the product two different answers to "what is the default", one
+ * for an operator using the UI and another for an operator editing the
+ * manifest by hand.
+ */
 export function resolveSessionUiMode(session: Pick<DeskSession, 'agent' | 'command' | 'uiMode'>): 'terminal' | 'native' {
-  return session.uiMode ?? (sessionSupportsNativeUiMode(session) ? 'native' : 'terminal');
+  if (session.uiMode === 'native' && sessionSupportsNativeUiMode(session)) {
+    return 'native';
+  }
+  return 'terminal';
 }
 
 function buildProjectSessionSpec({
