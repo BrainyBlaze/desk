@@ -1,6 +1,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { CLAUDE_NOTIFICATION_MATCHERS } from './agentState/claudeFacts.js';
 import { buildOpencodeAttentionPlugin } from './agentState/opencodeProducer.js';
+import { defaultOpencodeConfigDir } from './opencodeConfig.js';
 import { buildProducerRuntime } from './agentState/producerEmit.js';
 import { shellQuote } from '../shared/shell.js';
 import { writeTextFileAtomic } from '../shared/atomicFile.js';
@@ -254,6 +255,25 @@ export function probeHookInstallation(
 }
 
 /**
+ * Where OpenCode will actually look for the plugin.
+ *
+ * NOT `~/.config/opencode` — that is the operator's own OpenCode config, and
+ * Desk-launched sessions never read it. Desk hands OpenCode its own config root
+ * via `OPENCODE_CONFIG_DIR` (see `buildAgentCommand`), so the installer has
+ * exactly one correct target and it is whatever the launch command says.
+ *
+ * These two halves disagreed once: the installer wrote a current plugin to the
+ * operator's directory while every session loaded a stale one from Desk's, and
+ * `desk hooks install` reported success throughout. Deriving the path from the
+ * same helper the launcher uses is what keeps that from recurring — the
+ * override is honoured for the same reason, since it moves the read side.
+ */
+function opencodePluginPathFor(homeDir: string): string {
+  const configDir = process.env.DESK_OPENCODE_CONFIG_DIR?.trim() || defaultOpencodeConfigDir(homeDir);
+  return join(configDir, 'plugin', 'desk-attention.js');
+}
+
+/**
  * The installed plugin must BE the current one, byte for byte.
  *
  * Presence is not installation: a plugin from an earlier release sits at the
@@ -262,7 +282,7 @@ export function probeHookInstallation(
  * rejected. Desk writes this file whole, so equality is exact and cheap.
  */
 function probeOpencodePlugin(homeDir: string): HookInstallationProbe {
-  const pluginPath = join(homeDir, '.config', 'opencode', 'plugin', 'desk-attention.js');
+  const pluginPath = opencodePluginPathFor(homeDir);
   let contents: string;
   try {
     contents = readFileSync(pluginPath, 'utf8');
@@ -339,7 +359,7 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   const shimPath = options.shimPath ?? defaultAgentEventShimPath(homeDir);
   const codexHooksPath = join(homeDir, '.codex', 'hooks.json');
   const claudeSettingsPath = deskClaudeSettingsPath(homeDir);
-  const opencodePluginPath = join(homeDir, '.config', 'opencode', 'plugin', 'desk-attention.js');
+  const opencodePluginPath = opencodePluginPathFor(homeDir);
 
   writeExecutable(shimPath, buildDeskAgentEventShim());
   removeRetiredShims(homeDir, shimPath);
@@ -404,6 +424,7 @@ process.stdin.on('end', async () => {
     tool: deskBounded(input.tool_name),
     toolUseId: deskBounded(input.tool_use_id),
     turnId: deskBounded(input.turn_id || input.turnId),
+    providerSessionId: deskBounded(input.session_id || input.sessionId),
     notificationId: notificationIdFromPrompt(input.prompt)
   };
   // No throttling. A tool edge is an INTERVAL boundary, not a beat: dropping

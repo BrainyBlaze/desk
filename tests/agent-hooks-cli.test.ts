@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { installAgentHooks } from '../src/core/agentHooks.js';
+import { defaultOpencodeConfigDir } from '../src/core/opencodeConfig.js';
 
 describe('desk hooks install CLI', () => {
   it('installs global agent hooks under the requested home directory', () => {
@@ -24,7 +25,13 @@ describe('desk hooks install CLI', () => {
       // written. It holds their credentials, model, and hooks; installing
       // Desk's reporting by editing it would be taking something not given.
       expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(false);
-      expect(readFileSync(join(home, '.config', 'opencode', 'plugin', 'desk-attention.js'), 'utf8')).toContain('/api/agent-event');
+      // The OpenCode plugin goes in DESK's opencode config root — the one the
+      // launch command hands the CLI — not the operator's `~/.config/opencode`,
+      // which no Desk-launched session ever reads.
+      expect(
+        readFileSync(join(defaultOpencodeConfigDir(home), 'plugin', 'desk-attention.js'), 'utf8')
+      ).toContain('/api/agent-event');
+      expect(existsSync(join(home, '.config', 'opencode', 'plugin', 'desk-attention.js'))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

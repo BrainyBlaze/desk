@@ -98,6 +98,8 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('DESK_SESSION_GENERATION');
     expect(shim).toContain('producerInstanceId');
     expect(shim).toContain('producerSeq');
+    expect(shim).toContain('providerSessionId');
+    expect(shim).toContain('input.session_id');
     expect(shim).toContain('process.exit(0)');
     expect(shim).not.toContain('console.log');
     // Failure diagnostic is present but debug-gated (must not spam an alt-screen TUI).
@@ -359,7 +361,7 @@ describe('the probe checks working configuration, not the presence of a string',
   it('reports OpenCode independently of the shim, and rejects a plugin from another build', () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-probe-oc-'));
     try {
-      installAgentHooks({ homeDir: home });
+      const installed = installAgentHooks({ homeDir: home });
       expect(probeHookInstallation('opencode', home)).toMatchObject({ installed: true });
 
       // The OpenCode plugin never invokes the shim, so a missing shim says
@@ -369,9 +371,13 @@ describe('the probe checks working configuration, not the presence of a string',
       expect(probeHookInstallation('opencode', home)).toMatchObject({ installed: true });
 
       // Presence is not installation: an older plugin sits at the same path,
-      // loads, and speaks a retired schema.
-      const pluginPath = join(home, '.config', 'opencode', 'plugin', 'desk-attention.js');
-      writeFileSync(pluginPath, '// a plugin from an earlier release\nexport default { id: "desk-attention" };\n');
+      // loads, and speaks a retired schema. The path comes from the installer
+      // rather than a literal — a literal here is what let the installer and
+      // the launcher point at different directories without any test noticing.
+      writeFileSync(
+        installed.opencodePluginPath,
+        '// a plugin from an earlier release\nexport default { id: "desk-attention" };\n'
+      );
       expect(probeHookInstallation('opencode', home)).toMatchObject({
         installed: false,
         detail: 'installed opencode plugin is from a different Desk build'
