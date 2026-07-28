@@ -19,8 +19,9 @@ desk --file ./desk.yml status
 
 ## Top-level shape
 
-The manifest has three top-level blocks:
+The manifest has four top-level blocks:
 
+- `profiles`: named provider accounts a session can run under
 - `groups`: root-level agent groups that are not tied to a project
 - `projects`: named work roots with their own groups and sessions
 - `settings`: UI and subsystem state
@@ -170,6 +171,63 @@ Built-in agent values:
 
 For project sessions, `cwd` is optional because the project root is inherited. Root-level groups need `cwd` unless the session uses a command that handles its own directory.
 
+### Agent profiles
+
+A profile is a named provider account. Declare profiles once at the top level
+and point sessions at them with `profileId`:
+
+```yaml
+profiles:
+  - id: work-claude
+    provider: claude
+    label: alice@company.com
+  - id: personal-codex
+    provider: codex
+    label: alice@personal.dev
+
+projects:
+  - id: product
+    cwd: ~/projects/product
+    groups:
+      - id: main
+        sessions:
+          - name: api
+            sessionId: api
+            agent: claude
+            profileId: work-claude
+```
+
+`id` is a lowercase slug; `provider` is `claude` or `codex`; `label` is what
+the UI shows. A session's `profileId` must name a profile whose `provider`
+matches the session's `agent` — a mismatch is a manifest error rather than a
+silent ambient launch, because launching the wrong account is exactly what
+profiles exist to prevent. Omit `profileId` to run under whatever the agent CLI
+is ambiently logged into.
+
+Desk implements a profile by pointing the CLI at its own directory:
+
+```text
+~/.config/desk/profiles/<id>
+```
+
+for `CLAUDE_CONFIG_DIR` (Claude) or `CODEX_HOME` (Codex). The directory is
+created `0700`. Desk also unsets inherited provider credential variables for a
+profiled launch, so an ambient `ANTHROPIC_API_KEY` cannot silently outrank the
+profile's own login.
+
+<Warning>
+Two consequences worth knowing before you use profiles.
+
+**Credentials move.** The CLI authenticates *into* the profile directory, so
+that path holds real credential files. Back it up with the rest of
+`~/.config/desk`, and treat it as sensitively as `~/.claude`.
+
+**Conversation history is per-profile.** Claude Code keeps transcripts inside
+its config directory, so switching a session's profile points it at a different
+history and `--resume` will not find the old conversation. Start a fresh
+conversation, or move the transcript, when you change a live session's profile.
+</Warning>
+
 ### UI mode
 
 `uiMode` selects how a session renders: `native` (the agent chat surface) or
@@ -240,7 +298,9 @@ Custom commands bypass built-in agent launch logic.
 
 Desk runs the command under atch and exposes it through the terminal daemon,
 but it does not provide agent-specific resume, bypass, or attention hooks
-unless the command emits compatible terminal notifications.
+unless the command implements them itself. A custom command has no Desk hooks,
+so its session reports `unknown` activity — Desk says so rather than inferring
+a state from its output.
 
 ## Settings
 

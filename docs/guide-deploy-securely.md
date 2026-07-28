@@ -103,13 +103,19 @@ In the UI, verify:
 - Keep the default `127.0.0.1` bind; never use `0.0.0.0`.
 - Run Desk as the user that owns the intended repositories and atch sessions.
 - Reach a remote box over SSH forwarding, not by exposing the port.
-- Keep agent CLI credentials in their normal tool-managed locations.
+- Let each agent CLI manage its own credentials. Desk never reads or proxies
+  them — but a session bound to an **agent profile** authenticates into
+  `~/.config/desk/profiles/<id>` instead of the CLI's usual home, because Desk
+  sets `CLAUDE_CONFIG_DIR` / `CODEX_HOME` for that launch. Treat that directory
+  with exactly the sensitivity of `~/.claude` or `~/.codex`: it holds real
+  credential files, Desk creates it `0700`, and anything that can read it can
+  act as that account.
 - Use `desk up --dry-run` before starting a large manifest.
 - Use the emergency kill switch only when you intend to stop all matching
   agent processes on the host.
 - Back up `~/.config/desk/desk.yml` before large manifest edits.
-- Treat `~/.config/desk/channels` and `~/.config/desk/notes` as local user
-  data.
+- Treat everything under `~/.config/desk` as local user data — `channels`,
+  `notes`, and `profiles` most of all.
 
 ## Next steps
 

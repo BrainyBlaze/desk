@@ -176,13 +176,30 @@ The terminal probe reads the daemon's xterm emulator through
 Fresh sessions can report the boot-grace `booting` classification until the
 application reaches a recognizable prompt.
 
-### Busy tracking and digests
+### What activity does and does not gate
 
-Delivery marks the target agent **busy**; the agent's own turn-complete signal
-(terminal bell or agent hook) releases the next item. Approval and
-input-request signals do **not** release the queue — injected text would
-answer the dialog. A background pump retries eligible queues every few
-seconds.
+**Nothing about the agent's activity withholds a channel message.** Not
+`working`, not `blocked`, not `unknown`. Every agent CLI Desk drives buffers
+typed input and consumes it when its turn ends, which is exactly what happens
+when an operator types a follow-up without waiting — so a mid-turn agent is
+not an unreachable one.
+
+Earlier versions held delivery while an agent was busy, and held it again on
+approval prompts on the grounds that arriving text could answer the dialog.
+That risk is real but it is the operator's to take: it is visible the moment
+it happens and recoverable, whereas a channel that silently keeps messages is
+neither. A messaging surface whose messages sometimes do not arrive is not a
+messaging surface.
+
+What still holds a queue is **lifecycle**, which is a different question — not
+"what is the agent doing" but "is there a process to receive at all". A session
+that is still starting, or has exited, keeps its queue and delivers when it is
+back. Nothing is dropped. Operator **pause** also holds, because that is the
+operator's own decision rather than the engine's.
+
+Canonical activity is still published — the lamp, the status dot, and the
+engine console all read it — it simply no longer decides whether text is sent.
+A background pump retries eligible queues every few seconds.
 
 If **two or more** channel messages are queued by the time an agent becomes
 deliverable, they are not fed one-by-one (each delivery would re-block the
@@ -221,10 +238,9 @@ header, makes the engine observable and fixable from the UI instead of by hand.
   Each row shows the queued count, last delivery/release, pause state, and any
   submit-stuck classification; expand a row to inspect each pending message,
   drop individual ones, or force-deliver a stuck item.
-- **Fix** — per session: **Deliver now** (deliver the head item immediately —
-  it can land inside a working turn, so it confirms first), **Mark idle**
-  (clear the busy flag and re-drain), **Pause / Resume delivery**,
-  **Drop queue**. Global:
+- **Fix** — per session: **Deliver now** (push the head item ahead of the
+  pump's own schedule), **Mark idle** (clear a stale local flag and re-drain),
+  **Pause / Resume delivery**, **Drop queue**. Global:
   **Drain ready** (nudge every `ready` session) and **Rebuild engine** — tears
   down and re-creates the engine in-process, which re-reads the persisted
   queues and restarts the pump, recovering a wedged engine **without

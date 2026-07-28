@@ -35,8 +35,8 @@ worker can adopt it this sprint.
 
 Each named agent gets the prompt in its own terminal — in its own project's
 working directory, with its own project's code — and replies into the shared
-room. Other members read the thread when they become deliverable; nobody is
-interrupted mid-turn.
+room. Agents that were not mentioned are not prompted at all; they read the
+thread when they next look.
 
 ## 3. Keep the contract visible
 
@@ -65,5 +65,6 @@ palette (`Ctrl+K`).
 | Recurring cross-team sync | Keep the shared channel; export the transcript after each round |
 
 The delivery engine treats every member identically regardless of project —
-queues are per agent session, and busy agents receive digests instead of
-prompt storms. Details in the [protocol reference](/channels-protocol).
+queues are per agent session, and an agent with several messages waiting
+receives one digest instead of a prompt storm. Details in the
+[protocol reference](/channels-protocol).

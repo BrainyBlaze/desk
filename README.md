@@ -69,13 +69,17 @@ once, and let them coordinate — without becoming the message bus yourself.
   and **resumes the same agent conversation** instead of starting over.
 - 💬 **Agents that talk to each other** — Slack-like channels over a plain
   markdown protocol, with @mention dispatch, threads, and file uploads.
-  Delivery is turn-aware: a message *never* interrupts an agent mid-turn, and a
-  backlog arrives as one digest — so ten agents can hand off work without you
-  copy-pasting between terminals ([protocol docs](docs/channels-protocol.md)).
-- 🔔 **You know the moment an agent needs you** — turn-complete and
-  approval-request signals surface as sounds, pulsing session dots, and a
-  click-to-navigate events drawer; no more agents sitting finished and idle,
-  unnoticed.
+  Messages always arrive: an agent mid-turn is not unreachable, because every
+  agent CLI buffers typed input and reads it when the turn ends — the same
+  thing that happens when *you* type a follow-up without waiting. A backlog
+  arrives as one digest, so ten agents hand off work without you copy-pasting
+  between terminals ([protocol docs](docs/channels-protocol.md)).
+- 🔔 **You know the moment an agent needs you** — the agent's own lifecycle
+  hooks report when it starts a turn, finishes one, opens a tool, or asks for
+  a permission; that becomes sounds, pulsing session dots, and a
+  click-to-navigate events drawer. State comes from typed events the agent
+  emits, never from guessing at its screen — so "idle" means idle and unknown
+  says unknown.
 - 🛠️ **A full IDE around the fleet, not bolted beside it** — a Monaco **editor**
   with real **language servers** (diagnostics, go-to-definition, hover) that are
   also exposed to your agents over **MCP**, a VSCode-style **git** client
@@ -233,10 +237,11 @@ protocol in `~/.config/desk/channels` (per channel: `root.md`, `thread-*.md`,
 `_members/`, `_files/`). Messages dispatch by @mention (`@name`, `@channel`,
 everyone by default) into **per-agent prompt queues** that the server drains
 through the native surface for native sessions, or into the terminal for
-terminal sessions — strictly one prompt per turn, released by the agent's own
-turn-complete signal, held during approval prompts, and a backlog that piles up
-while an agent is mid-turn arrives as a **single digest** the agent reads back
-from the channel itself.
+terminal sessions. A channel prompt is a **notification**, not the content —
+it tells the agent that something arrived and how to read it — so delivery is
+never withheld on what the agent is doing. When several messages are waiting at
+once they arrive as a **single digest** the agent reads back from the channel
+itself, rather than one prompt each.
 
 Threads, cross-channel sharing with attributed quotes, mention autocomplete,
 file uploads served back as links, local file paths that open in the editor,
@@ -247,10 +252,16 @@ up by a file watcher. Full format and engine semantics:
 
 ### Notifications
 
-Desk captures each agent's turn-complete / approval signal (native event, hook,
-or terminal bell): a yellow pulsing dot on the session and its tab, a sound, and
-an event card in the events drawer that navigates to the source on click — with
-an unread lamp on the toolbar until you touch the session.
+Each agent reports its own lifecycle through Desk-installed hooks (or, in
+native mode, through the SDK): turn started, turn finished, tool opened, tool
+closed, permission requested. Desk turns those typed events into a yellow
+pulsing dot on the session and its tab, a sound, and an event card in the
+events drawer that navigates to the source on click — with an unread lamp on
+the toolbar until you touch the session.
+
+Nothing here is inferred from terminal output. An agent that has not reported
+reads as **unknown** rather than being guessed at, which is why the lamp can be
+trusted when it does say something.
 
 ## CLI Reference
 

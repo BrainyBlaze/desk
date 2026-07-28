@@ -52,13 +52,22 @@ Desk drops attention markers for sessions that no longer exist, so a dead sessio
 
 ## Attention and events
 
-Desk captures terminal notifications from the terminal daemon's emulator event
-stream, whether or not a browser is attached:
+Agent state is reported by the agents, not inferred from their output. Desk
+installs lifecycle hooks into each supported CLI; those hooks post typed facts
+to the daemon, which keeps one canonical state per session on three
+independent axes:
 
-- OSC 9 messages can become `turn-complete`, `approval-requested`, or `input-requested`
-- bare BEL becomes a generic `bell`
+| Axis | Values | Meaning |
+| --- | --- | --- |
+| `lifecycle` | `starting`, `running`, `exited` | is there a process |
+| `activity` | `working`, `idle`, `blocked`, `unknown` | what is it doing |
+| `health` | `healthy`, `degraded` + reason | can we still believe the above |
 
-When a typed OSC 9 event arrives shortly after a generic bell, Desk upgrades the fresh bell event instead of creating a duplicate card.
+`unknown` is a first-class answer, not a failure: a session whose producer has
+not reported has no evidence behind it, and Desk says so instead of guessing.
+The commonest cause is a session started before `desk hooks install` ran — hook
+configuration is read at launch, so such a session must be restarted before it
+can report.
 
 Touching a terminal acknowledges that session's unread events. The events drawer can also mark individual events, all events, or events by kind as read.
 

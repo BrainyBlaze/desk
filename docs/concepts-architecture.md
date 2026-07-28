@@ -26,6 +26,7 @@ an operator view over that local runtime.
 - projects and working directories
 - groups and cell layouts
 - sessions and agent kinds
+- agent profiles, and which profile each session runs under
 - custom commands
 - permission bypass settings
 - resume identifiers
@@ -92,14 +93,21 @@ notifications.
 | Channels | `~/.config/desk/channels` |
 | Notes | `~/.config/desk/notes` |
 | Resume capture state | `~/.config/desk/resume-captures.json` |
+| Agent profiles (per-account credentials) | `~/.config/desk/profiles/<id>` |
+| Desk's Claude hook settings | `~/.config/desk/claude/settings.json` |
 | OpenCode Desk config | `~/.config/desk/opencode` |
 | Agent event hooks | `~/.local/share/desk/hooks` |
 
 ## What is not centralized
 
-Desk does not copy your repositories, replace GitHub, proxy agent model traffic,
-or store agent credentials. Agent CLIs authenticate through their own
-configuration. GitHub access is whatever the local `gh` command can do.
+Desk does not copy your repositories, replace GitHub, or proxy agent model
+traffic. Agent CLIs authenticate through their own configuration and Desk never
+reads or forwards those credentials — but note that a session bound to an
+[agent profile](/configuration#agent-profiles) authenticates into a directory
+Desk owns (`~/.config/desk/profiles/<id>`), because Desk points the CLI there.
+The CLI still writes and reads its own credential files; Desk only decides
+which directory they live in. GitHub access is whatever the local `gh` command
+can do.
 
 ## Next steps
 

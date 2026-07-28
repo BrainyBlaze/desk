@@ -271,7 +271,20 @@ No. Desk launches local atch sessions on the host where the server runs.
 
 ### Does Desk store my model credentials?
 
-No. Agent CLIs authenticate through their own configuration.
+Desk never reads, transmits, or proxies them — but with **agent profiles** it
+does own the directory they sit in, so the honest answer depends on how the
+session runs.
+
+- **Without a profile**, the agent CLI authenticates into its own normal
+  location (`~/.claude`, `~/.codex`) and Desk touches nothing.
+- **With a profile**, Desk points the CLI at `~/.config/desk/profiles/<id>`
+  by setting `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. The CLI writes its own
+  credential files (`.credentials.json`, `auth.json`) there. Desk creates the
+  directory `0700` and does not parse what the CLI puts in it.
+
+The practical consequences: those files are as sensitive as the ones in your
+home directory, and **they are not covered by a backup of `~/.claude`** — see
+the backup answer below.
 
 ### Can I run multiple browsers?
 
@@ -286,6 +299,19 @@ session's durable `sessionId`, and run `desk status` or reload the UI afterward.
 
 ### What should I back up?
 
-Back up `~/.config/desk/desk.yml`, `~/.config/desk/channels`, and
-`~/.config/desk/notes` if you care about local configuration, conversations,
-and notes.
+Back up the whole of `~/.config/desk` — that is the simplest correct answer,
+because everything Desk owns lives under it:
+
+| Path | Holds |
+| --- | --- |
+| `desk.yml` | the manifest: projects, groups, sessions, profiles |
+| `channels/` | every conversation, thread, upload, and delivery queue |
+| `notes/` | markdown notes |
+| `profiles/` | **agent credentials** for profiled sessions |
+| `claude/settings.json` | the hook settings Desk hands Claude at launch |
+
+<Warning>
+`profiles/` is the one that hurts to lose. A profiled session authenticates
+*into* its profile directory, so a backup that copies only `desk.yml`,
+`channels`, and `notes` restores a workspace whose agents are all logged out.
+</Warning>

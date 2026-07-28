@@ -13,20 +13,26 @@ attention signals.
 
 ## Supported agents
 
-Desk has built-in profiles for:
+Desk has a built-in integration for each of:
 
 - Claude Code
 - OpenAI Codex
 - OpenCode
 - bash (or any custom command)
 
-Each profile prepares the agent-specific launch command, environment, resume
-metadata, and attention-signal integration for that CLI. Sessions for agents
-that support it can be launched with permission bypass enabled from a checkbox
-in the session form. Resume behavior is agent-specific: Claude Code
-conversation ids are harvested from the session and validated before reuse,
-OpenCode sessions are recaptured from the CLI's own session list with a picker
-on restart, and Codex sessions accept an explicit resume id.
+<Note>
+"Integration" here, not "profile". **Profile** means one thing in Desk: a named
+provider *account* a session runs under — see
+[agent profiles](/configuration#agent-profiles).
+</Note>
+
+Each integration prepares that CLI's launch command, environment, resume
+metadata, and state-reporting hooks. Sessions for agents that support it can be
+launched with permission bypass enabled from a checkbox in the session form.
+Resume behavior is agent-specific: Claude Code conversation ids are harvested
+from the session and validated before reuse, OpenCode sessions are recaptured
+from the CLI's own session list with a picker on restart, and Codex sessions
+accept an explicit resume id.
 
 Claude Code, Codex, and OpenCode sessions render as a native chat surface;
 bash and custom-command sessions render as terminals. Each SDK-backed session
@@ -145,21 +151,32 @@ without a click.
 
 ## Attention signals
 
-Desk watches each session for turn-complete, approval-requested, and
-input-needed signals — parsed from OSC 9 terminal notifications when the agent
-emits them, with bare terminal bells as the generic fallback. The terminal
-daemon's emulator event stream covers sessions even when no browser is watching.
-Signals surface as:
+Session state comes from the agent itself. Desk installs lifecycle hooks into
+each supported CLI, and those hooks post typed events — turn opened, turn
+finished, tool started, tool ended, permission requested — to the daemon, which
+owns one canonical state per session. Native-mode sessions report the same
+facts through the SDK. Desk does not read the terminal to work out what an
+agent is doing, and a session whose hooks have not fired reads as **unknown**
+rather than being guessed at.
+
+That state surfaces as:
 
 - a pulsing lamp on the session row and its collapsed ancestors,
 - an entry in the events drawer with kind filters, unread tracking, and
   mark-all-read,
-- an attention sound (respecting the mute toggle),
-- and input to the channels delivery engine, which uses turn-complete signals
-  to pace prompt delivery.
+- an attention sound (respecting the mute toggle).
 
 Typing into a session clears its attention state; acknowledged events stop
 lighting up.
+
+Attention is for the operator, not for the delivery engine: channel messages
+are delivered whatever a session's activity is, because every agent CLI
+buffers typed input until its turn ends.
+
+<Note>
+If a session sits on `unknown`, run `desk hooks install` and restart it — hooks
+are read at launch, so a session started before they existed never reports.
+</Note>
 
 ## Command palette and keyboard
 
