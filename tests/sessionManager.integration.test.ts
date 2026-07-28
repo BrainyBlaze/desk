@@ -151,4 +151,98 @@ describe('SessionManager — full daemon-side pipe against a fake master (§7.1)
       subject: { kind: 'agent', activity: 'unknown' }
     });
   });
+
+  it('binds atch state, readiness, links, and exit to one session generation', () => {
+    const ensured = mgr.ensure('web-1', { rows: 1, cols: 1 }, {
+      kind: 'agent',
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks'
+    });
+    expect(ensured).toMatchObject({ ok: true, generation: 1 });
+
+    expect(mgr.observeAtchEvent('web-1', 1, { ts: 1.1, type: 'ready' })).toMatchObject({
+      ok: true
+    });
+    expect(
+      mgr.observeAtchEvent('web-1', 1, {
+        ts: 1.2,
+        type: 'state',
+        state: 'busy',
+        title: '⠋ desk'
+      })
+    ).toMatchObject({ ok: true });
+    expect(
+      mgr.observeAtchEvent('web-1', 1, {
+        ts: 1.3,
+        type: 'link',
+        uri: 'https://example.test/run'
+      })
+    ).toMatchObject({ ok: true });
+
+    expect(mgr.terminalObservation('web-1')).toEqual({
+      sessionId: 'web-1',
+      generation: 1,
+      ready: true,
+      readyAt: 1_100,
+      activity: 'working',
+      activityAt: 1_200,
+      title: '⠋ desk',
+      link: { uri: 'https://example.test/run', at: 1_300 },
+      exit: null,
+      updatedAt: 1_300
+    });
+    expect(mgr.stateSnapshot('web-1')).toMatchObject({
+      health: { status: 'degraded', reason: 'title-fallback' },
+      subject: {
+        kind: 'agent',
+        activity: 'working',
+        evidence: { source: 'terminal-title', observedAt: 1_200 }
+      }
+    });
+
+    expect(
+      mgr.observeAtchEvent('web-1', 1, { ts: 1.4, type: 'exit', code: 7 })
+    ).toMatchObject({ ok: true });
+    expect(mgr.terminalObservation('web-1')).toMatchObject({
+      exit: { code: 7, at: 1_400 },
+      updatedAt: 1_400
+    });
+    expect(mgr.stateSnapshot('web-1')).toMatchObject({
+      lifecycle: 'exited',
+      exit: { code: 7, signal: null, at: 1_400 }
+    });
+  });
+
+  it('rejects stale-generation and post-exit atch events without mutating observations', () => {
+    mgr.ensure('web-1', { rows: 1, cols: 1 }, {
+      kind: 'agent',
+      provider: 'codex',
+      mode: 'terminal',
+      producer: 'codex-hooks'
+    });
+    const initial = mgr.terminalObservation('web-1');
+
+    expect(
+      mgr.observeAtchEvent('web-1', 2, {
+        ts: 1.1,
+        type: 'state',
+        state: 'busy',
+        title: 'stale'
+      })
+    ).toEqual({ ok: false, reason: 'generation-mismatch' });
+    expect(mgr.terminalObservation('web-1')).toEqual(initial);
+
+    mgr.observeAtchEvent('web-1', 1, { ts: 1.2, type: 'exit', code: 0 });
+    const exited = mgr.terminalObservation('web-1');
+    expect(
+      mgr.observeAtchEvent('web-1', 1, {
+        ts: 1.3,
+        type: 'state',
+        state: 'idle',
+        title: 'late'
+      })
+    ).toEqual({ ok: false, reason: 'lifecycle-exited' });
+    expect(mgr.terminalObservation('web-1')).toEqual(exited);
+  });
 });

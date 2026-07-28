@@ -1,4 +1,5 @@
 #include "atch.h"
+#include "atch_event_sink.h"
 #include "atch_storage.h"
 #include "atch_wire_v3.h"
 
@@ -283,8 +284,8 @@ static size_t log_written;
 static time_t master_start_time;
 size_t log_max_size = LOG_MAX_SIZE;
 
-/* ndjson event sink (opened from tstate_events_path; -1 = disabled). */
-static int tstate_events_fd = -1;
+/* Bounded ndjson event sink (fd -1 = disabled). */
+static struct atch_event_sink tstate_events = { .fd = -1 };
 /* Captured exit code, written into the final `exit` event. Set by code
 ** paths that know their exit code; defaults to 0 for signal-driven and
 ** atexit-only paths. */
@@ -339,117 +340,24 @@ static int open_log(const char *path)
 	return fd;
 }
 
-/* JSON-escape `src` into `dst`. Handles ", \, and control chars (<0x20)
-** which would break ndjson line framing. UTF-8 high bytes are passed
-** through unchanged. Returns bytes written; never overflows dstlen. */
-static size_t json_escape(const char *src, size_t srclen,
-			  char *dst, size_t dstlen)
-{
-	size_t i, o = 0;
-
-	for (i = 0; i < srclen; i++) {
-		unsigned char c = (unsigned char)src[i];
-		if (c == '"' || c == '\\') {
-			if (o + 2 >= dstlen)
-				break;
-			dst[o++] = '\\';
-			dst[o++] = (char)c;
-		} else if (c < 0x20) {
-			int n;
-			if (o + 6 >= dstlen)
-				break;
-			n = snprintf(dst + o, dstlen - o, "\\u%04x", c);
-			if (n < 0 || (size_t)n >= dstlen - o)
-				break;
-			o += (size_t)n;
-		} else {
-			if (o + 1 >= dstlen)
-				break;
-			dst[o++] = (char)c;
-		}
-	}
-	return o;
-}
-
-/* Append one ndjson event to tstate_events_fd, prefixed with a ts field.
-** `body` is the JSON fragment that follows the ts (no leading comma, no
-** outer braces). Best-effort: write failures are swallowed so a missing
-** consumer can never stall the multiplexer. */
-static void emit_event(const char *body)
-{
-	char line[2048];
-	struct timespec ts;
-	int n;
-	ssize_t w;
-
-	if (tstate_events_fd < 0)
-		return;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	n = snprintf(line, sizeof(line),
-		     "{\"ts\":%lld.%03ld,%s}\n",
-		     (long long)ts.tv_sec, ts.tv_nsec / 1000000L, body);
-	if (n < 0)
-		return;
-	if ((size_t)n >= sizeof(line))
-		n = (int)sizeof(line) - 1;
-	w = write(tstate_events_fd, line, (size_t)n);
-	(void)w;
-}
-
 static void emit_ready(void)
 {
-	emit_event("\"type\":\"ready\"");
+	atch_event_sink_emit_ready(&tstate_events);
 }
 
 static void emit_state(int busy)
 {
-	const char *title = tstate_get_title();
-	/* tstate caps title at 256 bytes; json_escape grows worst-case 6x
-	** on control chars but for realistic UTF-8 titles it's ~1x. The
-	** 1024/1100 sizes leave comfortable headroom; if a pathological
-	** title would still overflow, json_escape truncates safely. */
-	char esc[1024];
-	char body[1100];
-	size_t elen;
-	int n;
-
-	elen = json_escape(title, strlen(title), esc, sizeof(esc) - 1);
-	esc[elen] = '\0';
-	n = snprintf(body, sizeof(body),
-		     "\"type\":\"state\",\"state\":\"%s\",\"title\":\"%s\"",
-		     busy ? "busy" : "idle", esc);
-	if (n < 0)
-		return;
-	emit_event(body);
+	atch_event_sink_emit_state(&tstate_events, busy, tstate_get_title());
 }
 
 static void emit_exit(int code)
 {
-	char body[64];
-	int n = snprintf(body, sizeof(body),
-			 "\"type\":\"exit\",\"code\":%d", code);
-	if (n < 0)
-		return;
-	emit_event(body);
+	atch_event_sink_emit_exit(&tstate_events, code);
 }
 
-/* Emit one `link` event for an OSC 8 hyperlink open. URI is tstate-
-** bounded at 1024 bytes, so the body fits in emit_event's 2 KB line. */
 static void emit_link(const char *uri)
 {
-	char esc_uri[1024];
-	char body[1200];
-	size_t ulen;
-	int n;
-
-	ulen = json_escape(uri, strlen(uri), esc_uri, sizeof(esc_uri) - 1);
-	esc_uri[ulen] = '\0';
-
-	n = snprintf(body, sizeof(body),
-		     "\"type\":\"link\",\"uri\":\"%s\"", esc_uri);
-	if (n < 0)
-		return;
-	emit_event(body);
+	atch_event_sink_emit_link(&tstate_events, uri);
 }
 
 /* Write end marker to log, emit final `exit` event, close fds, and
@@ -469,10 +377,10 @@ static void cleanup_session(void)
 		close(log_fd);
 		log_fd = -1;
 	}
-	if (tstate_events_fd >= 0) {
+	if (tstate_events.fd >= 0) {
 		emit_exit(master_exit_code);
-		close(tstate_events_fd);
-		tstate_events_fd = -1;
+		close(tstate_events.fd);
+		tstate_events.fd = -1;
 	}
 	unlink(sockname);
 }
@@ -1316,11 +1224,16 @@ int master_main(char **argv, int waitattach, int dontfork)
 	** hang if the consumer accidentally supplied a FIFO with no reader.
 	** FD_CLOEXEC ensures the agent child does not inherit this fd. */
 	if (tstate_events_path) {
-		tstate_events_fd = open_session_sink(tstate_events_path,
+		int events_fd = open_session_sink(tstate_events_path,
 					O_WRONLY | O_APPEND | O_NONBLOCK, 0600);
-		if (tstate_events_fd < 0) {
+		if (events_fd < 0 ||
+		    atch_event_sink_init(&tstate_events, events_fd,
+					 ATCH_EVENT_SINK_DEFAULT_CAP) < 0) {
+			int saved_errno = errno;
+			if (events_fd >= 0)
+				close(events_fd);
 			printf("%s: -T %s: %s\n", progname,
-			       tstate_events_path, strerror(errno));
+			       tstate_events_path, strerror(saved_errno));
 			close(s);
 			unlink(sockname);
 			if (log_fd >= 0) {
@@ -1330,7 +1243,7 @@ int master_main(char **argv, int waitattach, int dontfork)
 			return 1;
 		}
 #if defined(F_SETFD) && defined(FD_CLOEXEC)
-		fcntl(tstate_events_fd, F_SETFD, FD_CLOEXEC);
+		fcntl(tstate_events.fd, F_SETFD, FD_CLOEXEC);
 #endif
 		tstate_set_state_callback(emit_state);
 		tstate_set_ready_callback(emit_ready);

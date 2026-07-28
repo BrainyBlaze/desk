@@ -1205,7 +1205,11 @@ describe('reconcileExistingSessions', () => {
       .mockResolvedValueOnce({ ok: true, generation: 1 })
       .mockResolvedValueOnce({ ok: false, reason: 'no-generation' })
       .mockRejectedValueOnce(new Error('socket exploded'));
-    const daemon = { router: { sessions: { restoreAndAttach } } } as never;
+    const reconcileAtchEvents = vi.fn();
+    const daemon = {
+      router: { sessions: { restoreAndAttach } },
+      reconcileAtchEvents
+    } as never;
     const results = await reconcileExistingSessions(
       daemon,
       [
@@ -1229,6 +1233,8 @@ describe('reconcileExistingSessions', () => {
       { sessionId: 'b', ok: false, error: 'no-generation' },
       { sessionId: 'c', ok: false, error: 'socket exploded' }
     ]);
+    expect(reconcileAtchEvents).toHaveBeenCalledTimes(1);
+    expect(reconcileAtchEvents).toHaveBeenCalledWith('a', 1);
     // Teardown uses the resolved atch binary for both live kill and safe stale cleanup.
     expect(restoreAndAttach.mock.calls[0][1].killSpec).toEqual({
       binPath: '/opt/atch',

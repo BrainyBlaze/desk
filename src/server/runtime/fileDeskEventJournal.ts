@@ -45,6 +45,7 @@ const TRANSITION_CAUSES: Record<SessionStateTransitionCause, true> = {
   'lifecycle-exited': true,
   'producer-reconciled': true,
   'agent-event': true,
+  'title-fallback': true,
   'source-health': true,
   'working-lease-expired': true,
   delivery: true,

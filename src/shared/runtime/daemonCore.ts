@@ -245,6 +245,24 @@ export class DaemonCore {
     return this.authority.markRunning(sessionId, generation);
   }
 
+  observeTitleActivity(
+    sessionId: string,
+    generation: number,
+    activity: 'working' | 'idle',
+    observedAt: number
+  ): AuthorityMutationResult {
+    return this.authority.observeTitleActivity(sessionId, generation, activity, observedAt);
+  }
+
+  markExited(
+    sessionId: string,
+    generation: number,
+    exit: { code: number | null; signal: string | null },
+    observedAt?: number
+  ): AuthorityMutationResult {
+    return this.authority.markExited(sessionId, generation, exit, observedAt);
+  }
+
   assessAgentHealth(
     sessionId: string,
     generation: number,

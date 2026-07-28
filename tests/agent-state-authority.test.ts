@@ -3,7 +3,8 @@ import {
   AGENT_STATE_SCHEMA_VERSION,
   type AcceptedAgentStateEvent,
   type AgentSemanticFact,
-  type AgentStateEnvelope
+  type AgentStateEnvelope,
+  parseSessionStateSnapshot
 } from '../src/shared/controlPlane/contract.js';
 import { AgentStateAuthority } from '../src/shared/controlPlane/authority.js';
 
@@ -689,5 +690,211 @@ describe('AgentStateAuthority', () => {
 
     authority.ingest(accepted(1, [{ kind: 'activity', activity: 'working' }]));
     expect(authority.snapshot(SESSION_ID)?.revision).toBe(first.snapshot.revision);
+  });
+
+  it('projects an initial title observation as explicitly degraded fallback state', () => {
+    const transitions = vi.fn();
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => 1_000,
+      workingLeaseMs: 50,
+      onTransition: transitions
+    });
+    registerAgent(authority, INSTANCE_ID);
+
+    const result = authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', 1_001);
+    expect(result).toMatchObject({
+      kind: 'applied',
+      snapshot: {
+        health: { status: 'degraded', reason: 'title-fallback', since: 1_001 },
+        subject: {
+          kind: 'agent',
+          activity: 'working',
+          activitySince: 1_001,
+          evidence: { source: 'terminal-title', observedAt: 1_001 }
+        }
+      },
+      transition: { cause: 'title-fallback' }
+    });
+    if (result.kind !== 'applied') throw new Error(`expected applied, got ${result.kind}`);
+    expect(parseSessionStateSnapshot(result.snapshot)).toEqual(result.snapshot);
+    expect(transitions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cause: 'title-fallback' })
+    );
+  });
+
+  it('keeps title-derived working state stable without a semantic lease', () => {
+    let now = 1_000;
+    const transitions = vi.fn();
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => now,
+      workingLeaseMs: 50,
+      onTransition: transitions
+    });
+    registerAgent(authority, INSTANCE_ID);
+    transitions.mockClear();
+    const projected = authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', now);
+    expect(projected.kind).toBe('applied');
+    if (projected.kind !== 'applied') {
+      throw new Error(`expected applied, got ${projected.kind}`);
+    }
+    const projectedRevision = projected.snapshot.revision;
+
+    now = 10_000;
+    const first = authority.snapshot(SESSION_ID);
+    const second = authority.snapshot(SESSION_ID);
+
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({
+      revision: projectedRevision,
+      health: { status: 'degraded', reason: 'title-fallback', since: 1_000 },
+      subject: {
+        kind: 'agent',
+        activity: 'working',
+        activitySince: 1_000,
+        evidence: { source: 'terminal-title', observedAt: 1_000 }
+      }
+    });
+    expect(transitions).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets semantic activity override and suppress later title observations', () => {
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => 1_000,
+      workingLeaseMs: 50
+    });
+    registerAgent(authority, INSTANCE_ID);
+    authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', 1_000);
+    const semantic = applied(
+      authority.ingest(accepted(1, [{ kind: 'activity', activity: 'idle' }], { acceptedAt: 1_010 }))
+    );
+
+    const fallback = authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', 1_020);
+    expect(fallback).toMatchObject({ kind: 'noop' });
+    expect(fallback.snapshot).toEqual(semantic.snapshot);
+    expect(fallback.snapshot).toMatchObject({
+      health: { status: 'healthy' },
+      subject: { kind: 'agent', activity: 'idle', evidence: { acceptanceId: 'accepted:1' } }
+    });
+  });
+
+  it('keeps title fallback active across heartbeat-only producer events', () => {
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => 1_000,
+      workingLeaseMs: 50
+    });
+    registerAgent(authority, INSTANCE_ID);
+    authority.observeTitleActivity(SESSION_ID, GENERATION, 'idle', 1_000);
+
+    const heartbeat = applied(
+      authority.ingest(accepted(1, [{ kind: 'heartbeat' }], { acceptedAt: 1_010 }))
+    );
+    expect(heartbeat.snapshot).toMatchObject({
+      health: { status: 'degraded', reason: 'title-fallback', since: 1_000 },
+      subject: {
+        kind: 'agent',
+        activity: 'idle',
+        activitySince: 1_000,
+        evidence: { source: 'terminal-title', observedAt: 1_000 }
+      }
+    });
+
+    expect(
+      authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', 1_020)
+    ).toMatchObject({
+      kind: 'applied',
+      snapshot: {
+        health: { status: 'degraded', reason: 'title-fallback', since: 1_020 },
+        subject: {
+          kind: 'agent',
+          activity: 'working',
+          activitySince: 1_020,
+          evidence: { source: 'terminal-title', observedAt: 1_020 }
+        }
+      }
+    });
+  });
+
+  it('suppresses title fallback for producer-reported unknown', () => {
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => 1_000,
+      workingLeaseMs: 50
+    });
+    registerAgent(authority, INSTANCE_ID);
+    const semantic = applied(
+      authority.ingest(accepted(1, [{ kind: 'activity', activity: 'unknown' }]))
+    );
+
+    const fallback = authority.observeTitleActivity(SESSION_ID, GENERATION, 'idle', 1_010);
+    expect(fallback).toMatchObject({ kind: 'noop' });
+    expect(fallback.snapshot).toEqual(semantic.snapshot);
+    expect(fallback.snapshot).toMatchObject({
+      health: { status: 'degraded', reason: 'producer-reported-unknown' },
+      subject: { kind: 'agent', activity: 'unknown', evidence: { acceptanceId: 'accepted:1' } }
+    });
+  });
+
+  it('reapplies the latest title fallback after a semantic working lease expires', () => {
+    let now = 1_000;
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => now,
+      workingLeaseMs: 50
+    });
+    registerAgent(authority, INSTANCE_ID);
+    authority.observeTitleActivity(SESSION_ID, GENERATION, 'idle', 1_000);
+    applied(
+      authority.ingest(accepted(1, [{ kind: 'activity', activity: 'working' }], { acceptedAt: 1_010 }))
+    );
+    authority.observeTitleActivity(SESSION_ID, GENERATION, 'idle', 1_020);
+
+    now = 1_061;
+    expect(authority.snapshot(SESSION_ID)).toMatchObject({
+      health: { status: 'degraded', reason: 'title-fallback', since: 1_061 },
+      subject: {
+        kind: 'agent',
+        activity: 'idle',
+        activitySince: 1_061,
+        evidence: { source: 'terminal-title', observedAt: 1_020 }
+      }
+    });
+  });
+
+  it('rejects stale generations and clears fallback state on generation replacement and exit', () => {
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => 1_000,
+      workingLeaseMs: 50
+    });
+    registerAgent(authority, INSTANCE_ID);
+    authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', 1_000);
+
+    expect(
+      authority.observeTitleActivity(SESSION_ID, GENERATION - 1, 'idle', 1_001)
+    ).toMatchObject({ kind: 'rejected', reason: 'generation-mismatch' });
+    authority.markExited(SESSION_ID, GENERATION, { code: 0, signal: null });
+    expect(
+      authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', 1_002)
+    ).toMatchObject({ kind: 'rejected', reason: 'lifecycle-exited' });
+
+    authority.registerSession({
+      sessionId: SESSION_ID,
+      generation: GENERATION + 1,
+      lifecycle: 'running',
+      subject: {
+        kind: 'agent',
+        provider: 'codex',
+        mode: 'terminal',
+        producer: 'codex-hooks'
+      }
+    });
+    expect(authority.snapshot(SESSION_ID)).toMatchObject({
+      generation: GENERATION + 1,
+      subject: { kind: 'agent', activity: 'unknown', evidence: null }
+    });
   });
 });

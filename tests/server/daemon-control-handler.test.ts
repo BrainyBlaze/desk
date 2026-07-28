@@ -19,6 +19,7 @@ interface DaemonMock {
   retire: ReturnType<typeof vi.fn>;
   input: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
+  terminalObservation: ReturnType<typeof vi.fn>;
   agentEndpoint: ReturnType<typeof vi.fn>;
   agentEvent: ReturnType<typeof vi.fn>;
   agentStates: ReturnType<typeof vi.fn>;
@@ -70,6 +71,18 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     retire: vi.fn().mockResolvedValue({ ok: true }),
     input: vi.fn().mockReturnValue(true),
     tail: vi.fn().mockReturnValue({ lines: ['line-a', 'line-b'], totalAvailable: 42 }),
+    terminalObservation: vi.fn().mockReturnValue({
+      sessionId: 'sess-a',
+      generation: 1,
+      ready: true,
+      readyAt: 1000,
+      activity: 'working',
+      activityAt: 1100,
+      title: 'Building',
+      link: null,
+      exit: null,
+      updatedAt: 1100
+    }),
     agentEndpoint: vi.fn().mockReturnValue({
       kind: 'accepted',
       registration: agentEndpoint()
@@ -490,6 +503,42 @@ describe('daemon control handler', () => {
     expect(daemon.tail).toHaveBeenCalledWith('sess-a', 100, 0);
   });
 
+  it('returns the separate terminal observation for a known session', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(
+      daemon,
+      'GET',
+      '/control/terminal-observation?sessionId=sess-a'
+    );
+    expect(result.status).toBe(200);
+    expect(result.body?.observation).toMatchObject({
+      sessionId: 'sess-a',
+      generation: 1,
+      activity: 'working',
+      title: 'Building'
+    });
+    expect(daemon.terminalObservation).toHaveBeenCalledWith('sess-a');
+  });
+
+  it('rejects invalid observation ids and 404s unknown sessions', async () => {
+    const daemon = daemonMock();
+    expect(
+      await invoke(
+        daemon,
+        'GET',
+        '/control/terminal-observation?sessionId=../escape'
+      )
+    ).toMatchObject({ status: 400 });
+    daemon.terminalObservation.mockReturnValueOnce(undefined);
+    expect(
+      await invoke(
+        daemon,
+        'GET',
+        '/control/terminal-observation?sessionId=ghost'
+      )
+    ).toMatchObject({ status: 404 });
+  });
+
   it('503s EVERY route (health included) until startup reconciliation is terminal', async () => {
     const daemon = { ...daemonMock(), isReady: vi.fn().mockReturnValue(false) };
     for (const [method, path, body] of [
@@ -498,6 +547,7 @@ describe('daemon control handler', () => {
       ['POST', '/control/retire', { sessionId: 'sess-a' }],
       ['POST', '/control/input', { sessionId: 'sess-a', text: 'x' }],
       ['POST', '/control/tail', { sessionId: 'sess-a' }],
+      ['GET', '/control/terminal-observation?sessionId=sess-a', undefined],
       ['POST', '/control/agent-endpoint', agentEndpoint()],
       ['POST', '/control/agent-event', agentEvent()],
       ['GET', '/control/agent-states', undefined]

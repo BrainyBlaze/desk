@@ -102,9 +102,10 @@ const char *child_se_preload = NULL;
 
 /* Optional path to an ndjson event sink. When set via `-T <path>`, the
 ** master opens this in append mode (consumer must precreate) and writes
-** one JSON object per line on `ready` / `state` / `exit`. Best-effort —
-** failed open is fatal during start (fast fail), failed writes are
-** silently ignored. atch never creates or unlinks this file. */
+** one JSON object per line on `ready` / `state` / `link` / `exit`.
+** History is compacted to a bounded current-state snapshot at 1 MiB.
+** Failed open is fatal during start; failed writes are best-effort.
+** atch never creates or unlinks this file. */
 const char *tstate_events_path = NULL;
 
 /*
@@ -815,8 +816,8 @@ static void usage(void)
 	       "instead of pty\n"
 	       "  -S <path>\tLoad sanitize_env.so at <path> as child "
 	       "LD_PRELOAD\n"
-	       "  -T <path>\tAppend ndjson events (ready/state/exit) to "
-	       "<path>\n"
+	       "  -T <path>\tBounded ndjson events (ready/state/link/exit) "
+	       "to <path>\n"
 	       "\nURL: " PACKAGE_URL "\n\n",
 	       PACKAGE_VERSION, __DATE__, __TIME__);
 	exit(0);

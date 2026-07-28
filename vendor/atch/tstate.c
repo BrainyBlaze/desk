@@ -1,5 +1,7 @@
 #include "atch.h"
 
+#include <limits.h>
+
 /*
 ** Terminal mode-state tracker (DECSET / kitty-kbd / OSC title).
 **
@@ -36,15 +38,13 @@
 **   - OSC 0 title      ESC ] 0 ; <payload> ( BEL | ESC \ )
 **
 ** Limitations:
-**   - The scanner is per-byte stateless: a sequence split across two
-**     reads is missed. In practice apps emit each CSI/OSC in one
-**     write(), and titles re-emit on every state tick.
 **   - We only track modes from the built-in list. Unknown modes are
 **     ignored — extending the list takes one line in builtin_modes[].
 */
 
 #define MAX_MODES 32
 #define TITLE_MAX 256
+#define SCAN_PENDING_MAX (BUFSIZE * 2)
 
 struct tstate_mode {
 	int mode;		/* DEC private mode number */
@@ -71,6 +71,10 @@ static void (*ready_cb)(void);
 ** (`ESC ] 8 ; <params> ; <URI> ST` with non-empty URI). Closes
 ** (`ESC ] 8 ; ; ST`) are mere terminators and do not fire. */
 static void (*link_cb)(const char *uri);
+
+/* Incomplete CSI/OSC suffix retained across pty read boundaries. */
+static unsigned char scan_pending[SCAN_PENDING_MAX];
+static size_t scan_pending_len;
 
 static const struct {
 	int mode;
@@ -127,6 +131,7 @@ void tstate_reset(void)
 	title_busy = -1;
 	last_title[0] = '\0';
 	xtversion_seen = 0;
+	scan_pending_len = 0;
 	init_defaults();
 }
 
@@ -164,6 +169,16 @@ static void apply_mode(int mode_num, int new_state)
 		m->state = new_state;
 }
 
+static int append_decimal_digit(int *value, unsigned char digit)
+{
+	int numeric = digit - '0';
+
+	if (*value > (INT_MAX - numeric) / 10)
+		return 0;
+	*value = *value * 10 + numeric;
+	return 1;
+}
+
 /* Scan one CSI body of form `?N[;N]*X` where X is 'h'/'l'.
 ** `body` points just after `?`; `body_len` excludes the final letter.
 ** `final` is 'h' or 'l'. */
@@ -175,13 +190,15 @@ static void scan_decset(const unsigned char *body, size_t body_len, char final)
 	while (j < body_len) {
 		int mode_num = 0;
 		int saw_digit = 0;
+		int valid = 1;
 
 		while (j < body_len && body[j] >= '0' && body[j] <= '9') {
-			mode_num = mode_num * 10 + (body[j] - '0');
+			if (valid && !append_decimal_digit(&mode_num, body[j]))
+				valid = 0;
 			j++;
 			saw_digit = 1;
 		}
-		if (saw_digit)
+		if (saw_digit && valid)
 			apply_mode(mode_num, new_state);
 		if (j < body_len && body[j] == ';')
 			j++;
@@ -195,12 +212,15 @@ static void scan_kitty(const unsigned char *body, size_t body_len, char prefix)
 {
 	if (prefix == '>') {
 		int flags = 0;
+		int valid = 1;
 		size_t j = 0;
 		while (j < body_len && body[j] >= '0' && body[j] <= '9') {
-			flags = flags * 10 + (body[j] - '0');
+			if (valid && !append_decimal_digit(&flags, body[j]))
+				valid = 0;
 			j++;
 		}
-		kitty_kbd_state = flags;
+		if (valid)
+			kitty_kbd_state = flags;
 	} else if (prefix == '<') {
 		/* pop: we don't keep a real stack, just clear */
 		kitty_kbd_state = -1;
@@ -271,6 +291,7 @@ static size_t scan_osc(const unsigned char *buf, size_t len, size_t start)
 {
 	size_t i, payload_start;
 	int cmd;
+	int cmd_valid;
 
 	/* Need at least ESC ] 0 ; X TERM = 6 bytes for the shortest match. */
 	if (start + 3 >= len)
@@ -280,13 +301,15 @@ static size_t scan_osc(const unsigned char *buf, size_t len, size_t start)
 
 	/* Parse OSC command number (digits before ';'). */
 	cmd = 0;
+	cmd_valid = 1;
 	i = start + 2;
 	if (i >= len)
 		return 0;
 	if (buf[i] < '0' || buf[i] > '9')
 		return start + 1; /* not numeric — skip */
 	while (i < len && buf[i] >= '0' && buf[i] <= '9') {
-		cmd = cmd * 10 + (buf[i] - '0');
+		if (cmd_valid && !append_decimal_digit(&cmd, buf[i]))
+			cmd_valid = 0;
 		i++;
 	}
 	if (i >= len)
@@ -301,10 +324,10 @@ static size_t scan_osc(const unsigned char *buf, size_t len, size_t start)
 	while (i < len && i - payload_start < BUFSIZE) {
 		unsigned char c = buf[i];
 		if (c == 0x07) {
-			if (cmd == 0)
+			if (cmd_valid && cmd == 0)
 				handle_osc_title(buf + payload_start,
 						 i - payload_start);
-			else if (cmd == 8)
+			else if (cmd_valid && cmd == 8)
 				handle_osc_link(buf + payload_start,
 						i - payload_start);
 			return i + 1;
@@ -313,10 +336,10 @@ static size_t scan_osc(const unsigned char *buf, size_t len, size_t start)
 			if (i + 1 >= len)
 				return 0; /* truncated */
 			if (buf[i + 1] == '\\') {
-				if (cmd == 0)
+				if (cmd_valid && cmd == 0)
 					handle_osc_title(buf + payload_start,
 							 i - payload_start);
-				else if (cmd == 8)
+				else if (cmd_valid && cmd == 8)
 					handle_osc_link(buf + payload_start,
 							i - payload_start);
 				return i + 2;
@@ -333,7 +356,9 @@ static size_t scan_osc(const unsigned char *buf, size_t len, size_t start)
 	return i; /* overflowed cap — give up on this OSC */
 }
 
-void tstate_scan(const unsigned char *buf, size_t len)
+/* Scan a contiguous buffer and return the first incomplete escape-sequence
+** byte, or len when the complete buffer was consumed. */
+static size_t scan_bytes(const unsigned char *buf, size_t len)
 {
 	size_t i = 0;
 
@@ -348,13 +373,13 @@ void tstate_scan(const unsigned char *buf, size_t len)
 			continue;
 		}
 		if (i + 1 >= len)
-			break; /* truncated ESC */
+			return i; /* truncated ESC */
 
 		/* OSC: ESC ] */
 		if (buf[i + 1] == ']') {
 			size_t next = scan_osc(buf, len, i);
 			if (next == 0)
-				break; /* truncated */
+				return i; /* truncated */
 			i = next;
 			continue;
 		}
@@ -365,7 +390,7 @@ void tstate_scan(const unsigned char *buf, size_t len)
 			continue;
 		}
 		if (i + 2 >= len)
-			break;
+			return i;
 		body_start = i + 2;
 
 		if (body_start < len &&
@@ -392,7 +417,7 @@ void tstate_scan(const unsigned char *buf, size_t len)
 			}
 			if (j >= len) {
 				/* incomplete at tail */
-				break;
+				return i;
 			}
 			final = buf[j];
 			if (final >= 0x40 && final <= 0x7E) {
@@ -419,6 +444,56 @@ void tstate_scan(const unsigned char *buf, size_t len)
 			i = i + 1;
 		}
 	}
+	return len;
+}
+
+void tstate_scan(const unsigned char *buf, size_t len)
+{
+	size_t incomplete, suffix_len;
+
+	if (!buf || len == 0)
+		return;
+
+	/* Master reads at most BUFSIZE bytes, but keep the public function bounded
+	** for callers that provide larger buffers. */
+	if (len > BUFSIZE) {
+		tstate_scan(buf, BUFSIZE);
+		tstate_scan(buf + BUFSIZE, len - BUFSIZE);
+		return;
+	}
+
+	if (scan_pending_len > 0) {
+		if (scan_pending_len > SCAN_PENDING_MAX - len) {
+			/* An unterminated sequence exceeded the retention bound. Drop
+			** that sequence and resume from this read so later escapes are
+			** still observable without ever writing past scan_pending. */
+			scan_pending_len = 0;
+			incomplete = scan_bytes(buf, len);
+			if (incomplete == len)
+				return;
+			suffix_len = len - incomplete;
+			memcpy(scan_pending, buf + incomplete, suffix_len);
+			scan_pending_len = suffix_len;
+			return;
+		}
+		memcpy(scan_pending + scan_pending_len, buf, len);
+		len += scan_pending_len;
+		scan_pending_len = 0;
+		incomplete = scan_bytes(scan_pending, len);
+		if (incomplete == len)
+			return;
+		suffix_len = len - incomplete;
+		memmove(scan_pending, scan_pending + incomplete, suffix_len);
+		scan_pending_len = suffix_len;
+		return;
+	}
+
+	incomplete = scan_bytes(buf, len);
+	if (incomplete == len)
+		return;
+	suffix_len = len - incomplete;
+	memcpy(scan_pending, buf + incomplete, suffix_len);
+	scan_pending_len = suffix_len;
 }
 
 /* Materialize the current state snapshot into `out`, in CSI bytes.

@@ -82,7 +82,8 @@ export function manifestReconcileTargets(
  * sessions down with it. Total startup stays near one timeout window.
  */
 export async function reconcileExistingSessions(
-  daemon: Pick<TerminalDaemon, 'router'>,
+  daemon: Pick<TerminalDaemon, 'router'> &
+    Partial<Pick<TerminalDaemon, 'reconcileAtchEvents'>>,
   targets: readonly ReconcileTarget[],
   atchBinPath: string,
   geometry = { rows: 24, cols: 80 },
@@ -110,7 +111,12 @@ export async function reconcileExistingSessions(
           ackTimeoutMs,
           subject
         });
-        results[index] = restored.ok ? { sessionId, ok: true } : { sessionId, ok: false, error: restored.reason };
+        if (restored.ok) {
+          daemon.reconcileAtchEvents?.(sessionId, restored.generation);
+          results[index] = { sessionId, ok: true };
+        } else {
+          results[index] = { sessionId, ok: false, error: restored.reason };
+        }
       } catch (error) {
         results[index] = { sessionId, ok: false, error: error instanceof Error ? error.message : String(error) };
       }
@@ -123,7 +129,7 @@ export async function reconcileExistingSessions(
 export async function completeDaemonStartup(
   daemon: Pick<
     TerminalDaemon,
-    'router' | 'reconcileAgentProviders' | 'markReady'
+    'router' | 'reconcileAtchEvents' | 'reconcileAgentProviders' | 'markReady'
   >,
   targets: readonly ReconcileTarget[],
   atchBinPath: string

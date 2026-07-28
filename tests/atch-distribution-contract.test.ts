@@ -99,7 +99,18 @@ describe('bundled atch distribution contract', () => {
     });
     expect(new Set(provenance.patches.commits.map(({ commit }: { commit: string }) => commit)).size).toBe(41);
 
-    for (const required of ['README.md', 'atch.c', 'atch.h', 'attach.c', 'config.h', 'makefile', 'master.c', 'tstate.c']) {
+    for (const required of [
+      'README.md',
+      'atch.c',
+      'atch.h',
+      'atch_event_sink.c',
+      'atch_event_sink.h',
+      'attach.c',
+      'config.h',
+      'makefile',
+      'master.c',
+      'tstate.c'
+    ]) {
       expect(existsSync(fileURLToPath(new URL(`../vendor/atch/${required}`, import.meta.url))), required).toBe(true);
     }
   });
