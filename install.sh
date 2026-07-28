@@ -1097,7 +1097,10 @@ import json, os, sys
 home,launcher=sys.argv[1:]; uid=os.getuid()
 if not os.path.isdir(home) or os.path.islink(home): raise SystemExit("Desk home is absent or not a directory")
 if os.stat(home).st_uid != uid: raise SystemExit("Desk home is not owned by the invoking user")
-allowed={"releases","toolchains","current",".desk-install"}
+# "hooks" holds the shim written by `desk hooks install`; "producers" holds the
+# per-session producer bindings the running app writes. Both are Desk's own
+# state inside Desk's own home, both are optional, and uninstall removes them.
+allowed={"releases","toolchains","current",".desk-install","hooks","producers"}
 unknown=set(os.listdir(home))-allowed
 if unknown: raise SystemExit("unidentified Desk home entries: "+", ".join(sorted(unknown)))
 with open(os.path.join(home,".desk-install"),encoding="utf-8") as f: install=json.load(f)
@@ -1128,6 +1131,12 @@ for name in os.listdir(toolchains):
         raise SystemExit("invalid toolchain ownership: "+path)
 for root, dirs, files in os.walk(toolchains):
     if os.stat(root).st_uid != uid: raise SystemExit("unowned toolchain path: "+root)
+for name in ("hooks","producers"):
+    path=os.path.join(home,name)
+    if not os.path.exists(path): continue
+    if os.path.islink(path) or not os.path.isdir(path): raise SystemExit("managed runtime path is not a directory: "+path)
+    for root, dirs, files in os.walk(path):
+        if os.stat(root).st_uid != uid: raise SystemExit("unowned runtime path: "+root)
 PY
 }
 
@@ -1139,20 +1148,22 @@ uninstall_desk() {
   validate_uninstall_tree || die "refusing uninstall because managed ownership validation failed."
   remove_launcher_path
   rm -f -- "$DESK_HOME/current" "$DESK_HOME/.desk-install"
-  rm -rf -- "$DESK_HOME/releases" "$DESK_HOME/toolchains"
+  rm -rf -- "$DESK_HOME/releases" "$DESK_HOME/toolchains" "$DESK_HOME/hooks" "$DESK_HOME/producers"
   rmdir -- "$DESK_HOME" || die "Desk home contains unidentified paths and was preserved: $DESK_HOME"
   printf '\n\033[32m✓ Desk application uninstalled. User configuration and projects were preserved.\033[0m\n'
-  # Hooks live inside the agents' own configuration, which this installer never
-  # wrote and therefore does not remove. Leaving them silently would make every
-  # later agent session invoke a deleted file — a hook that fails never breaks
-  # the agent, so nobody would ever see it. Name them instead.
-  printf '\nIf you ran '\''desk hooks install'\'', agent hooks remain and now point at removed files:\n'
+  # `desk hooks install` writes hook configuration into two kinds of place, and
+  # only one of them matters here. Desk-scoped config under ~/.config/desk is
+  # read by an agent only when Desk launches that agent, so once Desk is gone it
+  # is inert; it stays with the rest of the user's configuration. Agent-global
+  # config is read on every run of that CLI, from anywhere, and now names a shim
+  # this uninstall just deleted. A failing hook never breaks the agent, so
+  # nobody would ever notice. Name the global ones explicitly.
+  printf '\nIf you ran '\''desk hooks install'\'', these still run outside Desk and now point at a deleted file:\n'
   printf '  %s\n' \
-    "$HOME/.local/share/desk/hooks/" \
-    "$HOME/.codex/hooks.json (entries naming desk-agent-event)" \
-    "$HOME/.config/desk/claude/" \
-    "$HOME/.config/opencode/plugin/desk-attention.js"
-  printf 'Remove those entries to stop your agents invoking them.\n'
+    "$HOME/.codex/hooks.json — entries naming desk-agent-event" \
+    "$HOME/.config/opencode/plugin/desk-attention.js — only if installed by Desk 0.1.x"
+  printf 'Remove them to stop Codex and OpenCode invoking a shim that no longer exists.\n'
+  printf 'Desk-scoped hook config under %s never runs without Desk and was preserved.\n' "$HOME/.config/desk"
 }
 
 install_desk() {

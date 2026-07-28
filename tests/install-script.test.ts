@@ -241,6 +241,27 @@ describe('installer lifecycle', () => {
     expect(readFileSync(join(value.configDir, 'preserved.txt'), 'utf8')).toBe('keep\n');
   });
 
+  it('uninstalls a home that the running app wrote hooks and producer state into', () => {
+    const value = fixture();
+    const installed = value.run();
+    expect(installed.status, installed.stderr).toBe(0);
+    // `desk hooks install` writes the shim here, and the agent-state runtime
+    // writes one producer binding per session. Both land inside DESK_HOME, so
+    // an allow-list that omits them makes a used install impossible to remove.
+    mkdirSync(join(value.deskHome, 'hooks'), { recursive: true });
+    writeFileSync(join(value.deskHome, 'hooks', 'desk-agent-event.mjs'), 'export {}\n');
+    mkdirSync(join(value.deskHome, 'producers'), { recursive: true });
+    writeFileSync(join(value.deskHome, 'producers', 'claude-1-8.json'), '{}\n');
+
+    const removed = value.run({ args: ['--uninstall'] });
+
+    expect(removed.status, removed.stderr).toBe(0);
+    expect(existsSync(value.deskHome)).toBe(false);
+    // The Codex hooks file is user-global and keeps firing, so uninstall has to
+    // name it rather than silently leave a hook pointing at a deleted shim.
+    expect(removed.stdout).toMatch(/\.codex\/hooks\.json/);
+  });
+
   it('refuses uninstall when an unidentified install-root path is present', () => {
     const value = fixture();
     const installed = value.run();
