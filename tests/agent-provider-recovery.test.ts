@@ -1,10 +1,18 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AGENT_STATE_SCHEMA_VERSION } from '../src/shared/controlPlane/index.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  parseSessionStateSnapshot
+} from '../src/shared/controlPlane/index.js';
+import { FrameReassembler, encodeFrame } from '../src/shared/atchWire/codec.js';
+import { FrameType } from '../src/shared/atchWire/frames.js';
+import { encodeBody, type Body } from '../src/shared/atchWire/messages.js';
+import { prepareAtchEventSink } from '../src/server/runtime/atchEvents.js';
 import {
   createTerminalDaemon,
   type TerminalDaemon
@@ -25,6 +33,73 @@ class FakeUpgradeServer {
 
   off(_event: 'upgrade', listener: UpgradeListener): void {
     this.listeners = this.listeners.filter((candidate) => candidate !== listener);
+  }
+}
+
+const ATTACH_ACK: Body = {
+  generation: 1,
+  retained_start_offset: 0n,
+  retained_start_record_seq: 0n,
+  retained_end_offset: 0n,
+  retained_end_record_seq: 0n,
+  controller_ack_offset: 0n,
+  controller_ack_record_seq: 0n,
+  has_checkpoint: 0,
+  checkpoint_set_id: 0n,
+  checkpoint_offset: 0n,
+  checkpoint_record_seq: 0n,
+  tail_offset: 0n,
+  tail_record_seq: 0n,
+  rows: 24,
+  cols: 80,
+  current_state_exact: 1,
+  restart_recoverable: 1,
+  main_exact: 1,
+  alt_exact: 1,
+  active_buffer: 0,
+  caps: 0x3f
+};
+
+class FakeAtchMaster {
+  private readonly server: Server;
+  private readonly sockets = new Set<Socket>();
+
+  constructor(private readonly path: string) {
+    this.server = createServer((socket) => {
+      this.sockets.add(socket);
+      const frames = new FrameReassembler();
+      socket.on('close', () => this.sockets.delete(socket));
+      socket.on('data', (chunk: Buffer) => {
+        for (const frame of frames.push(
+          new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+        )) {
+          if (frame.type !== FrameType.ATTACH) continue;
+          socket.write(
+            encodeFrame({
+              type: FrameType.ATTACH_ACK,
+              flags: 0,
+              generation: 1,
+              sequence: 0n,
+              aux: 0n,
+              payload: encodeBody(FrameType.ATTACH_ACK, ATTACH_ACK)
+            })
+          );
+        }
+      });
+    });
+  }
+
+  listen(): Promise<void> {
+    return new Promise((resolve) => this.server.listen(this.path, resolve));
+  }
+
+  disconnect(): void {
+    for (const socket of this.sockets) socket.destroy();
+  }
+
+  async close(): Promise<void> {
+    this.disconnect();
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 }
 
@@ -223,5 +298,107 @@ describe('daemon OpenCode recovery', () => {
       kind: 'agent',
       activity: 'unknown'
     });
+  });
+});
+
+describe('daemon atch title recovery', () => {
+  let home: string;
+  let daemon: TerminalDaemon | undefined;
+  let master: FakeAtchMaster | undefined;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'desk-atch-recovery-'));
+    mkdirSync(join(home, '_engine'), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await master?.close();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    daemon?.dispose();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('restores title state without republishing sink history after daemon restart', async () => {
+    const sessionId = 'opencode-a';
+    const sockPath = join(home, `${sessionId}.sock`);
+    const subject = {
+      kind: 'agent' as const,
+      provider: 'opencode' as const,
+      mode: 'terminal' as const,
+      producer: 'opencode-terminal' as const
+    };
+    const diagnostics: string[] = [];
+    const create = () =>
+      createTerminalDaemon({
+        homeRoot: home,
+        atchBinPath: '/bin/false',
+        atchSocketRoot: home,
+        httpServer: new FakeUpgradeServer(),
+        atchEventPollIntervalMs: 5,
+        onAtchEventDiagnostic: ({ diagnostic }) => diagnostics.push(diagnostic.code),
+        hookInstallationProbe: (provider) => ({
+          provider,
+          installed: true,
+          trust: 'not-applicable'
+        })
+      });
+
+    daemon = create();
+    const ensured = daemon.router.sessions.ensure(
+      sessionId,
+      { rows: 24, cols: 80 },
+      subject
+    );
+    expect(ensured).toMatchObject({ ok: true, generation: 1 });
+    const sink = prepareAtchEventSink(home, sessionId, 1);
+    expect(daemon.reconcileAtchEvents(sessionId, 1)).toBe(true);
+    appendFileSync(
+      sink,
+      `${JSON.stringify({
+        ts: 1.25,
+        type: 'state',
+        state: 'idle',
+        title: 'Ready'
+      })}\n`
+    );
+    await vi.waitFor(() => {
+      expect(daemon?.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'idle'
+      });
+    });
+    const firstLatestSeq = daemon.events().latestSeq;
+    expect(firstLatestSeq).toBeGreaterThan(0);
+
+    daemon.dispose();
+    daemon = undefined;
+    master = new FakeAtchMaster(sockPath);
+    await master.listen();
+    daemon = create();
+    const restored = await daemon.router.sessions.restoreAndAttach(sessionId, {
+      sockPath,
+      geometry: { rows: 24, cols: 80 },
+      killSpec: { binPath: '/bin/true', args: [] },
+      subject
+    });
+    expect(restored).toMatchObject({ ok: true, generation: 1 });
+    expect(daemon.reconcileAtchEvents(sessionId, 1)).toBe(true);
+
+    const snapshot = daemon.agentStates().snapshots[0];
+    expect(snapshot).toBeDefined();
+    expect(parseSessionStateSnapshot(snapshot)).toEqual(snapshot);
+    expect(snapshot?.subject).toMatchObject({
+      kind: 'agent',
+      activity: 'idle',
+      evidence: { source: 'terminal-title', observedAt: 1_250 }
+    });
+    expect(daemon.terminalObservation(sessionId)).toMatchObject({
+      generation: 1,
+      activity: 'idle',
+      activityAt: 1_250,
+      title: 'Ready'
+    });
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq);
+    expect(diagnostics).toEqual([]);
   });
 });

@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync, unlinkSync } from 'node:fs';
 import { ensurePrivateSocketRoot } from '../../shared/atchPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -67,6 +68,13 @@ import {
   type AppendChannelDeskEventResult,
   type DeskEventJournalHealth
 } from './fileDeskEventJournal.js';
+import {
+  AtchEventTailer,
+  atchEventPath,
+  prepareAtchEventSink,
+  type AtchEventDiagnostic
+} from './atchEvents.js';
+import type { TerminalObservationSnapshot } from './sessionManager.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -102,6 +110,15 @@ export interface TerminalDaemonOptions {
   hookInstallationProbe?: (
     provider: HookProbeProvider
   ) => HookInstallationProbe;
+  /** Poll cadence for generation-bound atch event sinks. */
+  atchEventPollIntervalMs?: number;
+  /** Injectable structured diagnostic sink for atch event ingestion. */
+  onAtchEventDiagnostic?: (context: {
+    sessionId: string;
+    generation: number;
+    path: string;
+    diagnostic: AtchEventDiagnostic;
+  }) => void;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -151,6 +168,10 @@ export interface TerminalDaemon {
    * caller where the top is. Undefined when the session is unknown.
    */
   tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
+  /** Latest generation-bound terminal observation, independent of semantic authority. */
+  terminalObservation(sessionId: string): TerminalObservationSnapshot | undefined;
+  /** Re-open a surviving generation's event sink after daemon restart. */
+  reconcileAtchEvents(sessionId: string, generation: number): boolean;
   /** Bind durable provider transport metadata to the canonical producer sequence. */
   agentEndpoint(input: unknown): AgentEndpointStoreResult;
   /** Recover present OpenCode state from the exact registered provider session. */
@@ -196,6 +217,13 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   const hookInstallationProbe =
     options.hookInstallationProbe ?? probeHookInstallation;
   let ready = false;
+  let scheduleAtchObserverCleanup = (
+    _sessionId: string,
+    _generation: number
+  ): void => {};
+  const replayingAtchTransitions = new Set<string>();
+  const atchTransitionKey = (sessionId: string, generation: number): string =>
+    `${sessionId}\0${generation}`;
   const router = new TerminalWsRouter({
     ledger,
     supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
@@ -221,7 +249,19 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return undefined;
     },
     onStateTransition: (transition) => {
-      eventJournal.appendTransition(transition);
+      if (
+        !replayingAtchTransitions.has(
+          atchTransitionKey(transition.sessionId, transition.generation)
+        )
+      ) {
+        eventJournal.appendTransition(transition);
+      }
+      if (transition.cause === 'lifecycle-exited') {
+        scheduleAtchObserverCleanup(
+          transition.sessionId,
+          transition.generation
+        );
+      }
     },
     createAgentStateIntakeStore: (dependencies) => {
       intakeDependencies = dependencies;
@@ -381,33 +421,161 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   const disposeBridge = installTerminalWsBridge(options.httpServer, router, options.wsPath !== undefined ? { path: options.wsPath } : {});
 
   const socketPath = (sessionId: string): string => join(options.atchSocketRoot, `${sessionId}.sock`);
+  interface EventObserver {
+    sessionId: string;
+    generation: number;
+    path: string;
+    tailer: AtchEventTailer;
+  }
+  const eventObservers = new Map<string, EventObserver>();
+  const reportAtchDiagnostic = (
+    observer: Pick<EventObserver, 'sessionId' | 'generation' | 'path'>,
+    diagnostic: AtchEventDiagnostic
+  ): void => {
+    if (options.onAtchEventDiagnostic) {
+      options.onAtchEventDiagnostic({ ...observer, diagnostic });
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.error(
+      `[atch-events] ${observer.sessionId}@${observer.generation} ${diagnostic.code}: ${diagnostic.message}`
+    );
+  };
+  const stopEventObserver = (observer: EventObserver, removeSink: boolean): void => {
+    observer.tailer.stop();
+    if (eventObservers.get(observer.sessionId) === observer) {
+      eventObservers.delete(observer.sessionId);
+    }
+    if (removeSink) {
+      try {
+        unlinkSync(observer.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          reportAtchDiagnostic(observer, {
+            code: 'tailer-io',
+            message: `could not remove atch event sink: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          });
+        }
+      }
+    }
+  };
+  const startEventObserver = (
+    sessionId: string,
+    generation: number,
+    path: string
+  ): EventObserver => {
+    const current = eventObservers.get(sessionId);
+    if (current?.generation === generation && current.path === path) return current;
+    let observer: EventObserver;
+    const tailer = new AtchEventTailer({
+      path,
+      ...(options.atchEventPollIntervalMs === undefined
+        ? {}
+        : { pollIntervalMs: options.atchEventPollIntervalMs }),
+      onEvent: (event, context) => {
+        const replayKey = atchTransitionKey(sessionId, generation);
+        if (context.phase === 'replay') replayingAtchTransitions.add(replayKey);
+        try {
+          router.sessions.observeAtchEvent(sessionId, generation, event);
+        } finally {
+          if (context.phase === 'replay') replayingAtchTransitions.delete(replayKey);
+        }
+      },
+      onDiagnostic: (diagnostic) => reportAtchDiagnostic(observer, diagnostic)
+    });
+    observer = { sessionId, generation, path, tailer };
+    if (!tailer.start()) {
+      throw new Error('atch event sink could not be opened securely');
+    }
+    if (current) stopEventObserver(current, false);
+    eventObservers.set(sessionId, observer);
+    return observer;
+  };
+  scheduleAtchObserverCleanup = (sessionId, generation): void => {
+    queueMicrotask(() => {
+      const observer = eventObservers.get(sessionId);
+      if (observer?.generation === generation) {
+        stopEventObserver(observer, true);
+      }
+    });
+  };
 
   return {
     router,
-    provision(sessionId, spec) {
+    async provision(sessionId, spec) {
       const sockPath = socketPath(sessionId);
-      return router.sessions.spawnAndAttach(sessionId, {
-        binPath: options.atchBinPath,
-        args: ['start', sockPath, ...spec.command], // CREATE: atch start ABSOLUTE_SOCKET_PATH cmd
-        sockPath,
-        geometry: spec.geometry,
-        subject: spec.subject,
-        detached: true,
-        killSpec: {
+      let preparedObserver: EventObserver | undefined;
+      try {
+        const result = await router.sessions.spawnAndAttach(sessionId, {
           binPath: options.atchBinPath,
-          args: ['kill', '-f', sockPath],
-          staleCleanupSpec: { binPath: options.atchBinPath, args: ['rm', sockPath] }
-        } // KILL contract
-      });
+          args: ['start', sockPath, ...spec.command],
+          sockPath,
+          geometry: spec.geometry,
+          subject: spec.subject,
+          detached: true,
+          prepareSpawn: ({ generation, args }) => {
+            const path = prepareAtchEventSink(
+              options.atchSocketRoot,
+              sessionId,
+              generation
+            );
+            try {
+              preparedObserver = startEventObserver(sessionId, generation, path);
+            } catch (error) {
+              try {
+                unlinkSync(path);
+              } catch {
+                // Preserve the observer startup error.
+              }
+              throw error;
+            }
+            return { args: [args[0]!, '-T', path, ...args.slice(1)] };
+          },
+          killSpec: {
+            binPath: options.atchBinPath,
+            args: ['kill', '-f', sockPath],
+            staleCleanupSpec: { binPath: options.atchBinPath, args: ['rm', sockPath] }
+          }
+        });
+        if (!result.ok && preparedObserver) stopEventObserver(preparedObserver, true);
+        return result;
+      } catch (error) {
+        if (preparedObserver) stopEventObserver(preparedObserver, true);
+        throw error;
+      }
     },
-    retire(sessionId) {
-      return router.sessions.retireAwaited(sessionId);
+    async retire(sessionId) {
+      const observer = eventObservers.get(sessionId);
+      const result = await router.sessions.retireAwaited(sessionId);
+      if (result.ok && observer) stopEventObserver(observer, true);
+      return result;
     },
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
     tail(sessionId, rows, offset = 0) {
       return router.sessions.historyText(sessionId, rows, offset);
+    },
+    terminalObservation(sessionId) {
+      return router.sessions.terminalObservation(sessionId);
+    },
+    reconcileAtchEvents(sessionId, generation) {
+      const path = atchEventPath(options.atchSocketRoot, sessionId, generation);
+      if (!existsSync(path)) return false;
+      try {
+        startEventObserver(sessionId, generation, path);
+        return true;
+      } catch (error) {
+        reportAtchDiagnostic({ sessionId, generation, path }, {
+          code: 'tailer-io',
+          message: `could not reconcile atch event sink: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        });
+        return false;
+      }
     },
     agentEndpoint(input) {
       const result = endpointStore.register(input);
@@ -445,6 +613,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       ready = true;
     },
     dispose() {
+      for (const observer of [...eventObservers.values()]) {
+        stopEventObserver(observer, false);
+      }
       disposeBridge();
       intakeStore?.close();
       intakeStore = undefined;
@@ -539,6 +710,7 @@ export function createDaemonControlHandler(
     | 'retire'
     | 'input'
     | 'tail'
+    | 'terminalObservation'
     | 'agentEndpoint'
     | 'agentEvent'
     | 'agentStates'
@@ -738,6 +910,20 @@ export function createDaemonControlHandler(
             return;
           }
           sendJson(res, 200, { ok: true, lines: window.lines, totalAvailable: window.totalAvailable });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/control/terminal-observation') {
+          const sessionId = url.searchParams.get('sessionId');
+          if (!isSafeDaemonSessionId(sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          const observation = daemon.terminalObservation(sessionId);
+          if (observation === undefined) {
+            sendJson(res, 404, { ok: false, error: `no such session: ${sessionId}` });
+            return;
+          }
+          sendJson(res, 200, { ok: true, observation });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/agent-event') {

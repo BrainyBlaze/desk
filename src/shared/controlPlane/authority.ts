@@ -43,6 +43,7 @@ export type AuthorityRejectionReason =
   | 'producer-mismatch'
   | 'producer-instance-mismatch'
   | 'producer-order'
+  | 'invalid-observation'
   | 'lifecycle-exited';
 
 export type AuthorityMutationResult =
@@ -67,6 +68,8 @@ interface SessionRecord {
   lastProducerSeq: Record<AgentStateTransport, number>;
   workingLeaseExpiresAt?: number;
   openToolLeaseExpiresAt: Map<string, number>;
+  titleFallback?: { activity: 'working' | 'idle'; observedAt: number };
+  titleProjectionActive: boolean;
 }
 
 export interface AgentStateAuthorityOptions {
@@ -168,7 +171,8 @@ export class AgentStateAuthority {
       producerInstanceId:
         registration.subject.kind === 'agent' ? registration.subject.producerInstanceId : undefined,
       lastProducerSeq: { push: 0, poll: 0 },
-      openToolLeaseExpiresAt: new Map()
+      openToolLeaseExpiresAt: new Map(),
+      titleProjectionActive: false
     };
     this.sessions.set(registration.sessionId, record);
     this.emitTransition(null, record, 'registered', at);
@@ -259,24 +263,87 @@ export class AgentStateAuthority {
     return this.commit(record!, from, 'lifecycle-running', at);
   }
 
-  markExited(
+  observeTitleActivity(
     sessionId: string,
     generation: number,
-    exit: Pick<SessionExit, 'code' | 'signal'>
+    activity: 'working' | 'idle',
+    observedAt: number
   ): AuthorityMutationResult {
     const record = this.sessions.get(sessionId);
     const rejected = this.guardSession(record, generation);
     if (rejected !== undefined) return rejected;
+    if (
+      (activity !== 'working' && activity !== 'idle') ||
+      !Number.isFinite(observedAt) ||
+      observedAt < 0
+    ) {
+      return {
+        kind: 'rejected',
+        reason: 'invalid-observation',
+        snapshot: clone(record!.snapshot)
+      };
+    }
+    if (record!.snapshot.lifecycle === 'exited') {
+      return { kind: 'rejected', reason: 'lifecycle-exited', snapshot: clone(record!.snapshot) };
+    }
+    if (record!.snapshot.subject.kind !== 'agent') {
+      return { kind: 'rejected', reason: 'not-agent', snapshot: clone(record!.snapshot) };
+    }
+
+    const normalizedObservedAt = Math.floor(observedAt);
+    if (
+      record!.titleFallback !== undefined &&
+      normalizedObservedAt < record!.titleFallback.observedAt
+    ) {
+      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+    }
+    record!.titleFallback = { activity, observedAt: normalizedObservedAt };
+    if (!this.canProjectTitle(record!)) {
+      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+    }
+    if (
+      record!.titleProjectionActive &&
+      record!.snapshot.subject.activity === activity
+    ) {
+      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+    }
+
+    const at = Math.max(normalizedObservedAt, record!.snapshot.updatedAt);
+    const from = clone(record!.snapshot);
+    this.applyTitleFallback(record!, record!.titleFallback, at);
+    return this.commit(record!, from, 'title-fallback', at);
+  }
+
+  markExited(
+    sessionId: string,
+    generation: number,
+    exit: Pick<SessionExit, 'code' | 'signal'>,
+    observedAt?: number
+  ): AuthorityMutationResult {
+    const record = this.sessions.get(sessionId);
+    const rejected = this.guardSession(record, generation);
+    if (rejected !== undefined) return rejected;
+    if (
+      observedAt !== undefined &&
+      (!Number.isFinite(observedAt) || observedAt < 0)
+    ) {
+      return { kind: 'rejected', reason: 'invalid-observation' };
+    }
     if (record!.snapshot.lifecycle === 'exited') {
       return { kind: 'noop', snapshot: clone(record!.snapshot) };
     }
-    const at = this.safeNow();
+    const at =
+      observedAt === undefined
+        ? this.safeNow()
+        : Math.max(Math.floor(observedAt), record!.snapshot.updatedAt);
     const from = clone(record!.snapshot);
     record!.snapshot.lifecycle = 'exited';
     record!.snapshot.lifecycleSince = at;
     record!.snapshot.exit = { ...exit, at };
     record!.workingLeaseExpiresAt = undefined;
     record!.openToolLeaseExpiresAt.clear();
+    record!.titleFallback = undefined;
+    record!.titleProjectionActive = false;
     if (record!.snapshot.subject.kind === 'agent') {
       record!.snapshot.subject.activity = 'unknown';
       record!.snapshot.subject.activitySince = at;
@@ -338,6 +405,22 @@ export class AgentStateAuthority {
     const from = clone(record!.snapshot);
     record!.producerInstanceId = envelope.producerInstanceId;
     record!.lastProducerSeq[transport] = envelope.producerSeq;
+    const supersedesTitleProjection = envelope.facts.some(
+      (fact) =>
+        fact.kind === 'activity' ||
+        fact.kind === 'blocked' ||
+        fact.kind === 'unblocked' ||
+        fact.kind === 'tool'
+    );
+    if (record!.titleProjectionActive && supersedesTitleProjection) {
+      record!.snapshot.subject.activity = 'unknown';
+      record!.snapshot.subject.activitySince = at;
+      record!.snapshot.subject.wait = null;
+      record!.snapshot.subject.evidence = null;
+      record!.workingLeaseExpiresAt = undefined;
+      record!.openToolLeaseExpiresAt.clear();
+      record!.titleProjectionActive = false;
+    }
 
     for (const fact of envelope.facts) {
       if (fact.kind === 'health') continue;
@@ -375,6 +458,7 @@ export class AgentStateAuthority {
           record!.openToolLeaseExpiresAt.clear();
           break;
         case 'heartbeat':
+          if (record!.titleProjectionActive) break;
           if (record!.snapshot.subject.activity === 'working') {
             record!.workingLeaseExpiresAt = at + this.options.workingLeaseMs;
           }
@@ -402,6 +486,7 @@ export class AgentStateAuthority {
 
     for (const fact of envelope.facts) {
       if (fact.kind !== 'health') continue;
+      if (record!.titleProjectionActive) continue;
       record!.snapshot.health =
         fact.health.status === 'healthy'
           ? { status: 'healthy', since: at }
@@ -414,20 +499,22 @@ export class AgentStateAuthority {
     }
 
     const leaseExpiresAt = this.effectiveWorkingLeaseExpiresAt(record!);
-    record!.snapshot.subject.evidence = {
-      acceptanceId: event.acceptanceId,
-      acceptedSeq: event.acceptedSeq,
-      acceptedAt: event.acceptedAt,
-      producerInstanceId: envelope.producerInstanceId,
-      transport,
-      producerSeq: envelope.producerSeq,
-      eventId: envelope.eventId,
-      invocationId: envelope.invocationId,
-      factKinds: envelope.facts.map((fact) => fact.kind),
-      occurredAt: envelope.occurredAt,
-      observedAt: envelope.observedAt,
-      ...(leaseExpiresAt === undefined ? {} : { leaseExpiresAt })
-    };
+    if (!record!.titleProjectionActive) {
+      record!.snapshot.subject.evidence = {
+        acceptanceId: event.acceptanceId,
+        acceptedSeq: event.acceptedSeq,
+        acceptedAt: event.acceptedAt,
+        producerInstanceId: envelope.producerInstanceId,
+        transport,
+        producerSeq: envelope.producerSeq,
+        eventId: envelope.eventId,
+        invocationId: envelope.invocationId,
+        factKinds: envelope.facts.map((fact) => fact.kind),
+        occurredAt: envelope.occurredAt,
+        observedAt: envelope.observedAt,
+        ...(leaseExpiresAt === undefined ? {} : { leaseExpiresAt })
+      };
+    }
     return this.commit(record!, from, 'agent-event', at, event.acceptanceId);
   }
 
@@ -499,6 +586,7 @@ export class AgentStateAuthority {
       record.snapshot.lifecycle === 'exited' ||
       record.snapshot.subject.kind !== 'agent' ||
       record.snapshot.subject.activity !== 'working' ||
+      record.titleProjectionActive ||
       (leaseExpiresAt !== undefined && at < leaseExpiresAt)
     ) {
       return;
@@ -510,7 +598,44 @@ export class AgentStateAuthority {
     record.snapshot.health = { status: 'degraded', reason: 'source-stale', since: at };
     record.workingLeaseExpiresAt = undefined;
     record.openToolLeaseExpiresAt.clear();
+    if (record.titleFallback !== undefined) {
+      this.applyTitleFallback(record, record.titleFallback, at);
+    }
     this.commit(record, from, 'working-lease-expired', at);
+  }
+
+  private canProjectTitle(record: SessionRecord): boolean {
+    if (record.titleProjectionActive) return true;
+    if (
+      record.snapshot.subject.kind !== 'agent' ||
+      record.snapshot.subject.activity !== 'unknown'
+    ) {
+      return false;
+    }
+    if (record.snapshot.subject.evidence === null) return true;
+    return (
+      record.snapshot.health.status === 'degraded' &&
+      record.snapshot.health.reason === 'source-stale'
+    );
+  }
+
+  private applyTitleFallback(
+    record: SessionRecord,
+    fallback: NonNullable<SessionRecord['titleFallback']>,
+    at: number
+  ): void {
+    if (record.snapshot.subject.kind !== 'agent') return;
+    record.snapshot.subject.activity = fallback.activity;
+    record.snapshot.subject.activitySince = at;
+    record.snapshot.subject.wait = null;
+    record.snapshot.subject.evidence = {
+      source: 'terminal-title',
+      observedAt: fallback.observedAt
+    };
+    record.snapshot.health = { status: 'degraded', reason: 'title-fallback', since: at };
+    record.workingLeaseExpiresAt = undefined;
+    record.openToolLeaseExpiresAt.clear();
+    record.titleProjectionActive = true;
   }
 
   private effectiveWorkingLeaseExpiresAt(record: SessionRecord): number | undefined {

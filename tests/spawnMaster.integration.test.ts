@@ -5,7 +5,7 @@
 // fake atch (fixtures/fake-atch.mjs) run under node.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +49,7 @@ describe('daemon spawn contract — ATCH_GENERATION from the ledger (§4.8.1)', 
   });
   afterEach(() => {
     mgr.retire('s1');
+    mgr.retire('s-fail');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -75,5 +76,56 @@ describe('daemon spawn contract — ATCH_GENERATION from the ledger (§4.8.1)', 
     await expect(
       spawnMaster({ binPath: process.execPath, args: ['-e', 'process.exit(3)'], sockPath: join(dir, 'never.sock'), generation: 1, readyTimeoutMs: 2000 })
     ).rejects.toThrow(/exited before/);
+  });
+
+  it('runs generation-aware preparation before spawn and uses its args and env', async () => {
+    const sock = join(dir, 'prepared.sock');
+    const genOut = join(dir, 'prepared-generation.txt');
+    const prepOut = join(dir, 'prepared-values.json');
+    let observedGeneration = 0;
+
+    const result = await mgr.spawnAndAttach('s1', {
+      binPath: process.execPath,
+      args: [FAKE_ATCH, sock, genOut],
+      sockPath: sock,
+      geometry: { rows: 24, cols: 80 },
+      readyTimeoutMs: 4_000,
+      prepareSpawn: async ({ generation, args }) => {
+        observedGeneration = generation;
+        expect(mgr.stateSnapshot('s1')?.generation).toBe(generation);
+        expect(existsSync(genOut)).toBe(false);
+        return {
+          args: [...args, 'prepared-arg'],
+          env: { FAKE_ATCH_PREP_OUT: prepOut, PREPARED_MARKER: 'prepared-env' }
+        };
+      }
+    });
+
+    expect(result).toMatchObject({ ok: true, generation: 1 });
+    expect(observedGeneration).toBe(1);
+    expect(JSON.parse(readFileSync(prepOut, 'utf8'))).toEqual({
+      marker: 'prepared-env',
+      extraArg: 'prepared-arg'
+    });
+  });
+
+  it('does not spawn and releases a newly allocated slot when preparation fails', async () => {
+    const sock = join(dir, 'must-not-exist.sock');
+    const genOut = join(dir, 'must-not-exist.txt');
+
+    const result = await mgr.spawnAndAttach('s-fail', {
+      binPath: process.execPath,
+      args: [FAKE_ATCH, sock, genOut],
+      sockPath: sock,
+      geometry: { rows: 24, cols: 80 },
+      prepareSpawn: async () => {
+        throw new Error('sink preparation failed');
+      }
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+    expect(existsSync(sock)).toBe(false);
+    expect(existsSync(genOut)).toBe(false);
+    expect(mgr.sessionCount).toBe(0);
   });
 });

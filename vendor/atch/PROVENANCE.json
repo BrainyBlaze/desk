@@ -183,7 +183,7 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "c5548527e713f8cc34e61808413005db9c957e6563b1a964102b519cfcda02ce",
+    "digest": "f2feb8cb5a57af9e716149fbeb480f68eb1a50723ad665188a3018f3cda99581",
     "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
   },
   "localPatches": [
@@ -203,6 +203,41 @@
         "master.c"
       ],
       "alsoIncludes": "connection-local, non-durable frame: generation 0 (outside the generation fence), no record_seq and no output_offset, sequenced from a NEW per-connection v3_tx_seq so the durable record order gains no holes. Additive and skippable — a peer that does not know type 84 ignores it. Reviewed backward-compatible v3 extension, agreed with @codex; deliberately NOT capability-gated, because atch_v3_validate_capabilities rejects every bit above bit5 and a new bit would fail the HELLO against already-running masters.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "fix: retain incomplete ANSI control sequences across PTY reads",
+      "why": "The terminal-state scanner discarded a trailing partial CSI or OSC at every read boundary. Split title, link, ready, and DECSET sequences were therefore invisible to the event sink and restart preamble, making status fallback and emulator recovery nondeterministic.",
+      "files": [
+        "tstate.c",
+        "tests/test_tstate.c",
+        "makefile"
+      ],
+      "alsoIncludes": "A bounded 2*BUFSIZE carry buffer with overflow recovery, reset cleanup, every-byte split coverage, and a multi-read oversized-CSI regression.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "fix: reject overflowing terminal control numbers",
+      "why": "Unchecked signed decimal accumulation in DECSET, kitty keyboard flags, and OSC command parsing invoked undefined behavior and could wrap attacker-controlled terminal output into a valid tracked command.",
+      "files": [
+        "tstate.c",
+        "tests/test_tstate.c"
+      ],
+      "alsoIncludes": "Deterministic wraparound-alias regressions and a long-number sanitizer regression.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "feat: bound and compact the terminal event recovery sink",
+      "why": "The append-only title/link event stream made daemon recovery O(all historical events) and replayed an ever-growing file after every restart. The master now compacts at 1 MiB to ready plus latest state and link while retaining subsequent live events.",
+      "files": [
+        "atch.c",
+        "atch_event_sink.c",
+        "atch_event_sink.h",
+        "master.c",
+        "tests/test_event_sink.c",
+        "makefile"
+      ],
+      "alsoIncludes": "Oversized startup truncation, hard-cap accounting, complete-write handling, direct compaction tests, and an end-to-end master probe with 1,400 large OSC 8 events.",
       "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
     }
   ]

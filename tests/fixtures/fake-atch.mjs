@@ -15,6 +15,15 @@ const genOutFile = process.argv[3];
 const gen = Number.parseInt(process.env.ATCH_GENERATION ?? '0', 10);
 const deskGeneration = process.env.DESK_SESSION_GENERATION ?? '';
 writeFileSync(genOutFile, `${gen}:${deskGeneration}`);
+if (process.env.FAKE_ATCH_PREP_OUT) {
+  writeFileSync(
+    process.env.FAKE_ATCH_PREP_OUT,
+    JSON.stringify({
+      marker: process.env.PREPARED_MARKER ?? null,
+      extraArg: process.argv[4] ?? null
+    })
+  );
+}
 
 const ATTACH_ACK = 3;
 

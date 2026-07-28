@@ -11,7 +11,7 @@ else
   STATIC_FLAG = -static
 endif
 
-OBJ = attach.o master.o atch.o tstate.o atch_security.o atch_storage.o atch_wire_v3.o
+OBJ = attach.o master.o atch.o tstate.o atch_event_sink.o atch_security.o atch_storage.o atch_wire_v3.o
 SRC = attach.c master.c atch.c tstate.c
 
 IMAGE = atch-builder
@@ -32,7 +32,7 @@ atch.1: atch.1.md
 man: atch.1
 
 clean:
-	rm -f atch $(OBJ) security-storage-test wire-v3-test durable-core-test spawn-test *.1.md *.c~
+	rm -f atch $(OBJ) security-storage-test wire-v3-test durable-core-test spawn-test tstate-test event-sink-test *.1.md *.c~
 
 .PHONY: security-storage-test
 security-storage-test: tests/test_security_storage.c atch_security.c atch_storage.c atch_security.h atch_storage.h
@@ -54,6 +54,16 @@ spawn-test: tests/test_spawn.c atch_spawn.c atch_spawn.h
 	$(CC) $(CFLAGS) -std=c11 -Werror -o $@ tests/test_spawn.c atch_spawn.c
 	./$@
 
+.PHONY: tstate-test
+tstate-test: tests/test_tstate.c tstate.c atch.h config.h
+	$(CC) $(CFLAGS) -std=c11 -Werror -o $@ tests/test_tstate.c tstate.c
+	./$@
+
+.PHONY: event-sink-test
+event-sink-test: tests/test_event_sink.c atch_event_sink.c atch_event_sink.h
+	$(CC) $(CFLAGS) -std=c11 -Werror -o $@ tests/test_event_sink.c atch_event_sink.c
+	./$@
+
 .PHONY: fmt
 fmt:
 	docker run --rm -v "$$PWD":/src -w /src alpine:latest sh -c "apk add --no-cache indent && indent -linux $(SRCS) && indent -linux $(SRCS)"
@@ -69,6 +79,7 @@ master.o: ./master.c ./atch.h config.h
 atch_wire_v3.o: ./atch_wire_v3.c ./atch_wire_v3.h
 atch.o: ./atch.c ./atch.h ./atch_storage.h config.h
 tstate.o: ./tstate.c ./atch.h config.h
+atch_event_sink.o: ./atch_event_sink.c ./atch_event_sink.h
 
 .PHONY: build-image
 build-image:

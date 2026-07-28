@@ -20,6 +20,7 @@ import {
   type RestoreResult
 } from '../../shared/runtime/daemonCore.js';
 import {
+  type AuthorityMutationResult,
   type SessionRegistration,
   type SessionStateSnapshot
 } from '../../shared/controlPlane/index.js';
@@ -29,6 +30,7 @@ import { SpawnMasterError, spawnMaster } from './spawnMaster.js';
 import { Role } from '../../shared/atchWire/frames.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { type AtchEvent } from './atchEvents.js';
 
 interface KillCommandSpec {
   binPath: string;
@@ -43,6 +45,50 @@ interface DetachedKillRecord extends DetachedKillSpec {
   sockPath: string;
   mustConfirm?: boolean;
 }
+
+export interface SessionSpawnPreparation {
+  args?: string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface SessionSpawnPreparationContext {
+  sessionId: string;
+  generation: number;
+  args: readonly string[];
+  env: Readonly<NodeJS.ProcessEnv>;
+}
+
+export type PrepareSessionSpawn = (
+  context: SessionSpawnPreparationContext
+) => SessionSpawnPreparation | Promise<SessionSpawnPreparation>;
+
+export interface TerminalObservationSnapshot {
+  sessionId: string;
+  generation: number;
+  ready: boolean;
+  readyAt: number | null;
+  activity: 'working' | 'idle' | 'unknown';
+  activityAt: number | null;
+  title: string | null;
+  link: { uri: string; at: number } | null;
+  exit: { code: number; at: number } | null;
+  updatedAt: number;
+}
+
+export type AtchObservationResult =
+  | {
+      ok: true;
+      observation: TerminalObservationSnapshot;
+      authority?: AuthorityMutationResult;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'session-not-found'
+        | 'generation-mismatch'
+        | 'lifecycle-exited'
+        | 'invalid-event';
+    };
 
 /**
  * Run a detached-master kill command to completion, BOUNDED: spawn error,
@@ -106,7 +152,9 @@ export interface SessionManagerDeps {
 
 export class SessionManager {
   private readonly core: DaemonCore;
+  private readonly now: () => number;
   private readonly masters = new Map<string, MasterClient>();
+  private readonly terminalObservations = new Map<string, TerminalObservationSnapshot>();
   /** Per-session teardown for a tracked FOREGROUND child (kill it on retire). */
   private readonly cleanups = new Map<string, () => void>();
   /**
@@ -132,6 +180,7 @@ export class SessionManager {
   private readonly inflight = new Map<string, Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }>>();
 
   constructor(deps: SessionManagerDeps) {
+    this.now = deps.now;
     this.core = new DaemonCore({
       ledger: deps.ledger,
       supervisor: deps.supervisor,
@@ -159,7 +208,9 @@ export class SessionManager {
     geometry: { rows: number; cols: number },
     subject: SessionRegistration['subject'] = { kind: 'terminal' }
   ): EnsureResult {
-    return this.core.ensure(sessionId, geometry, subject);
+    const result = this.core.ensure(sessionId, geometry, subject);
+    if (result.ok) this.ensureTerminalObservation(sessionId, result.generation);
+    return result;
   }
 
   /**
@@ -183,6 +234,7 @@ export class SessionManager {
   ): Promise<RestoreResult | { ok: false; reason: 'attach-failed' }> {
     const restored = this.core.restore(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
     if (!restored.ok) return restored;
+    this.ensureTerminalObservation(sessionId, restored.generation);
     const token = Symbol('restore-op');
     this.owners.set(sessionId, token); // stale prior-op callbacks go inert
     // Register the kill command BEFORE the attach so a close that races the
@@ -207,6 +259,7 @@ export class SessionManager {
       // rejecting us). Idempotent against a racing close-retire.
       this.detachedKills.delete(sessionId);
       this.core.retire(sessionId);
+      this.dropTerminalObservation(sessionId, restored.generation);
       return { ok: false, reason: 'attach-failed' };
     }
     return restored;
@@ -309,6 +362,7 @@ export class SessionManager {
     opts: {
       binPath: string;
       args: string[];
+      env?: NodeJS.ProcessEnv;
       sockPath: string;
       geometry: { rows: number; cols: number };
       readyTimeoutMs?: number;
@@ -317,6 +371,7 @@ export class SessionManager {
       /** For a detached master, the command to stop the session on retire (e.g. `atch kill -f NAME`). */
       killSpec?: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
+      prepareSpawn?: PrepareSessionSpawn;
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
     const pending = this.inflight.get(sessionId);
@@ -335,12 +390,14 @@ export class SessionManager {
     opts: {
       binPath: string;
       args: string[];
+      env?: NodeJS.ProcessEnv;
       sockPath: string;
       geometry: { rows: number; cols: number };
       readyTimeoutMs?: number;
       detached?: boolean;
       killSpec?: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
+      prepareSpawn?: PrepareSessionSpawn;
     }
   ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
     if (this.core.hasLiveSession(sessionId) && this.masters.has(sessionId)) {
@@ -364,11 +421,33 @@ export class SessionManager {
     if (!ens.ok) return ens;
     const token = Symbol('spawn-op');
     this.owners.set(sessionId, token);
+    let spawnArgs = opts.args;
+    let spawnEnv = opts.env;
+    if (opts.prepareSpawn !== undefined) {
+      try {
+        const prepared = await opts.prepareSpawn({
+          sessionId,
+          generation: ens.generation,
+          args: [...opts.args],
+          env: { ...opts.env }
+        });
+        spawnArgs = prepared.args ?? spawnArgs;
+        spawnEnv = { ...spawnEnv, ...prepared.env };
+      } catch {
+        if (this.owners.get(sessionId) === token) this.owners.delete(sessionId);
+        if (ens.created) {
+          this.core.retire(sessionId);
+          this.dropTerminalObservation(sessionId, ens.generation);
+        }
+        return { ok: false, reason: 'spawn-failed' };
+      }
+    }
     let child: Awaited<ReturnType<typeof spawnMaster>>['child'];
     try {
       ({ child } = await spawnMaster({
         binPath: opts.binPath,
-        args: opts.args,
+        args: spawnArgs,
+        env: spawnEnv,
         sockPath: opts.sockPath,
         generation: ens.generation,
         readyTimeoutMs: opts.readyTimeoutMs,
@@ -390,7 +469,10 @@ export class SessionManager {
         this.detachedKills.set(sessionId, record);
         await this.confirmKill(sessionId, record, 5_000);
       }
-      if (ens.created) this.core.retire(sessionId);
+      if (ens.created) {
+        this.core.retire(sessionId);
+        this.dropTerminalObservation(sessionId, ens.generation);
+      }
       return { ok: false, reason: 'spawn-failed' };
     }
     if (opts.detached) {
@@ -448,7 +530,11 @@ export class SessionManager {
       kill.mustConfirm = true;
       await this.confirmKill(sessionId, kill, 5_000);
     }
-    if (createdSlot) this.core.retire(sessionId);
+    if (createdSlot) {
+      const generation = this.terminalObservations.get(sessionId)?.generation;
+      this.core.retire(sessionId);
+      if (generation !== undefined) this.dropTerminalObservation(sessionId, generation);
+    }
   }
 
   subscribe(sessionId: string, surfaceId: string, rows: number, cols: number): number | undefined {
@@ -503,6 +589,84 @@ export class SessionManager {
 
   historyText(sessionId: string, rows: number, offset: number): { lines: string[]; totalAvailable: number } | undefined {
     return this.core.historyText(sessionId, rows, offset);
+  }
+
+  observeAtchEvent(
+    sessionId: string,
+    generation: number,
+    event: AtchEvent
+  ): AtchObservationResult {
+    if (!this.core.hasLiveSession(sessionId)) {
+      return { ok: false, reason: 'session-not-found' };
+    }
+    const state = this.core.stateSnapshot(sessionId);
+    if (state === undefined) return { ok: false, reason: 'session-not-found' };
+    if (state.generation !== generation) {
+      return { ok: false, reason: 'generation-mismatch' };
+    }
+    if (state.lifecycle === 'exited') {
+      return { ok: false, reason: 'lifecycle-exited' };
+    }
+    const at = Math.round(event.ts * 1_000);
+    if (!Number.isSafeInteger(at) || at < 0) {
+      return { ok: false, reason: 'invalid-event' };
+    }
+
+    const current = this.ensureTerminalObservation(sessionId, generation);
+    const next = structuredClone(current);
+    let authority: AuthorityMutationResult | undefined;
+
+    switch (event.type) {
+      case 'ready':
+        if (next.readyAt !== null) {
+          return { ok: true, observation: structuredClone(current) };
+        }
+        next.ready = true;
+        next.readyAt = at;
+        break;
+      case 'state':
+        if (next.activityAt !== null && at < next.activityAt) {
+          return { ok: true, observation: structuredClone(current) };
+        }
+        authority = this.core.observeTitleActivity(
+          sessionId,
+          generation,
+          event.state === 'busy' ? 'working' : 'idle',
+          at
+        );
+        next.activity = event.state === 'busy' ? 'working' : 'idle';
+        next.activityAt = at;
+        next.title = event.title;
+        break;
+      case 'link':
+        if (next.link !== null && at < next.link.at) {
+          return { ok: true, observation: structuredClone(current) };
+        }
+        next.link = { uri: event.uri, at };
+        break;
+      case 'exit':
+        authority = this.core.markExited(
+          sessionId,
+          generation,
+          { code: event.code, signal: null },
+          at
+        );
+        next.exit = { code: event.code, at };
+        break;
+    }
+
+    next.updatedAt = Math.max(next.updatedAt, at);
+    this.terminalObservations.set(sessionId, next);
+    return {
+      ok: true,
+      observation: structuredClone(next),
+      ...(authority === undefined ? {} : { authority })
+    };
+  }
+
+  terminalObservation(sessionId: string): TerminalObservationSnapshot | undefined {
+    const observation = this.terminalObservations.get(sessionId);
+    return observation === undefined ? undefined : structuredClone(observation);
   }
 
   state(sessionId: string): SessionStateSnapshot | undefined {
@@ -629,6 +793,34 @@ export class SessionManager {
     this.cleanups.delete(sessionId);
     this.core.retire(sessionId);
     return this.detachedKills.get(sessionId);
+  }
+
+  private ensureTerminalObservation(
+    sessionId: string,
+    generation: number
+  ): TerminalObservationSnapshot {
+    const current = this.terminalObservations.get(sessionId);
+    if (current !== undefined && current.generation === generation) return current;
+    const observation: TerminalObservationSnapshot = {
+      sessionId,
+      generation,
+      ready: false,
+      readyAt: null,
+      activity: 'unknown',
+      activityAt: null,
+      title: null,
+      link: null,
+      exit: null,
+      updatedAt: this.now()
+    };
+    this.terminalObservations.set(sessionId, observation);
+    return observation;
+  }
+
+  private dropTerminalObservation(sessionId: string, generation: number): void {
+    if (this.terminalObservations.get(sessionId)?.generation === generation) {
+      this.terminalObservations.delete(sessionId);
+    }
   }
 
   get sessionCount(): number {

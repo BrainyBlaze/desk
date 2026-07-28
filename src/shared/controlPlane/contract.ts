@@ -183,7 +183,7 @@ const agentWaitSchema = agentWaitInputSchema.extend({
   since: timestampSchema
 });
 
-const evidenceSchema = z.strictObject({
+const producerEvidenceSchema = z.strictObject({
   acceptanceId: identifierSchema,
   acceptedSeq: positiveSequenceSchema,
   acceptedAt: timestampSchema,
@@ -197,6 +197,14 @@ const evidenceSchema = z.strictObject({
   observedAt: timestampSchema,
   leaseExpiresAt: timestampSchema.optional()
 });
+
+const titleEvidenceSchema = z.strictObject({
+  source: z.literal('terminal-title'),
+  observedAt: timestampSchema,
+  leaseExpiresAt: z.undefined().optional()
+});
+
+const evidenceSchema = z.union([producerEvidenceSchema, titleEvidenceSchema]);
 
 const agentSubjectSchema = z
   .strictObject({
@@ -239,11 +247,26 @@ const agentSubjectSchema = z
         message: 'wait must be present exactly when activity is blocked'
       });
     }
-    if (value.activity === 'working' && value.evidence?.leaseExpiresAt === undefined) {
+    const titleEvidence =
+      value.evidence !== null &&
+      'source' in value.evidence &&
+      value.evidence.source === 'terminal-title';
+    if (
+      value.activity === 'working' &&
+      !titleEvidence &&
+      value.evidence?.leaseExpiresAt === undefined
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['evidence', 'leaseExpiresAt'],
         message: 'working activity requires leased evidence'
+      });
+    }
+    if (titleEvidence && value.activity !== 'working' && value.activity !== 'idle') {
+      context.addIssue({
+        code: 'custom',
+        path: ['evidence'],
+        message: 'terminal title evidence requires working or idle activity'
       });
     }
   });
@@ -294,6 +317,21 @@ const snapshotSchema = z
         message: 'exit details must be present exactly when lifecycle is exited'
       });
     }
+    if (value.subject.kind === 'agent') {
+      const titleEvidence =
+        value.subject.evidence !== null &&
+        'source' in value.subject.evidence &&
+        value.subject.evidence.source === 'terminal-title';
+      const titleFallbackHealth =
+        value.health.status === 'degraded' && value.health.reason === 'title-fallback';
+      if (value.lifecycle !== 'exited' && titleEvidence !== titleFallbackHealth) {
+        context.addIssue({
+          code: 'custom',
+          path: titleEvidence ? ['health'] : ['subject', 'evidence'],
+          message: 'terminal title evidence and title-fallback health must appear together'
+        });
+      }
+    }
   });
 
 export type SessionHealth = z.infer<typeof sessionHealthSchema>;
@@ -319,6 +357,7 @@ export type SessionStateTransitionCause =
   | 'lifecycle-exited'
   | 'producer-reconciled'
   | 'agent-event'
+  | 'title-fallback'
   | 'source-health'
   | 'working-lease-expired'
   | 'delivery'
