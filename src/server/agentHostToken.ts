@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 /**
- * Durable adapter-host auth (spec: docs/native-ui-mode-spec.md §4).
+ * Durable adapter-host auth.
  *
  * Tokens must be verifiable after a Desk server restart, so they derive from a
  * persistent secret instead of in-memory state: token = HMAC-SHA256(secret,

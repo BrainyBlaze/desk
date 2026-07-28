@@ -23,7 +23,7 @@ import type { AgentHostEnv } from './types.js';
  * Adapter host runner — the session-hosted process that owns one agent driver and bridges it
  * to the desk server's broker over /ws/agent-host.
  *
- * Lifecycle (spec docs/native-ui-mode-spec.md §5):
+ * Lifecycle:
  *   1. read env (DESK_SESSION_ID, DESK_AGENT, DESK_AGENT_RESUME, DESK_AGENT_BYPASS,
  *      DESK_SERVER_URL, DESK_AGENT_HOST_TOKEN, optional DESK_AGENT_CWD,
  *      DESK_AGENT_HOST_LOG_LEVEL)

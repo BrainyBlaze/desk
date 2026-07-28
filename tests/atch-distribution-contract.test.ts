@@ -179,12 +179,15 @@ describe('bundled atch distribution contract', () => {
   });
 
   it('documents the pinned bundled binary and preserves the override resolution order', () => {
+    // The user-facing set. The internal CLI contract spec used to be checked
+    // here too; it left the repo with the rest of the build-process artifacts,
+    // and its one assertion duplicated the troubleshooting page below — the
+    // page an operator actually reads when atch will not resolve.
     const documentation = [
       'README.md',
       'docs/getting-started.md',
       'docs/distribution-deployment.md',
-      'docs/troubleshooting.md',
-      'docs/desk-cli-install-and-serve-contract-spec.md'
+      'docs/troubleshooting.md'
     ].map(source);
     const combined = documentation.join('\n');
 
@@ -196,9 +199,6 @@ describe('bundled atch distribution contract', () => {
     expect(source('docs/distribution-deployment.md')).toContain('vendor/atch/PROVENANCE.json');
     expect(source('docs/distribution-deployment.md')).toContain('libexec/atch');
     expect(source('docs/troubleshooting.md')).toMatch(
-      /DESK_ATCH_BIN.*same-release.*libexec\/atch.*PATH/is
-    );
-    expect(source('docs/desk-cli-install-and-serve-contract-spec.md')).toMatch(
       /DESK_ATCH_BIN.*same-release.*libexec\/atch.*PATH/is
     );
   });

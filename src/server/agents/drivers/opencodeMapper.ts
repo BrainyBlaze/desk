@@ -19,7 +19,7 @@ import type { DriverEvent, DriverStatusEvent } from '../host/driver.js';
  * is unit-testable without spawning a real `opencode serve` child; only the small SDK-
  * binding surface in `opencodeDriver.ts` needs the live-binary probe.
  *
- * Mapping rules (spec docs/native-ui-mode-spec.md §4):
+ * Mapping rules:
  *  - message.part.updated { delta }        → assistant-delta (transient) AND text-accumulator update
  *  - message.updated (AssistantMessage, completed) → assistant-message (committed, assembled markdown)
  *  - message.updated (UserMessage)         → SWALLOWED live (driver already emitted from inject(); never guessed)

@@ -66,7 +66,6 @@ function currentRuntimeDocs(): ScannedFile[] {
   const rels = [
     'README.md',
     ...pages.map((page) => `docs/${page}.md`),
-    'docs/desk-cli-install-and-serve-contract-spec.md',
     'docs/images/architecture-runtime.svg'
   ];
   return [...new Set(rels)].sort().map((rel) => ({

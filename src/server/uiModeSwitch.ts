@@ -3,7 +3,7 @@ import { editSessionInManifest } from '../core/config.js';
 import type { DeskManifest, DeskSession, DeskSessionUiMode, SessionSpec } from '../core/types.js';
 
 /**
- * Atomic UI-mode switch (spec: docs/native-ui-mode-spec.md §7).
+ * Atomic UI-mode switch.
  *
  * validateUiModeSwitch answers every reject with a typed code BEFORE any
  * mutation; performUiModeSwitch runs manifest-write-then-respawn through

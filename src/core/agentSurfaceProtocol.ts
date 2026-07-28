@@ -6,7 +6,7 @@ export const MAX_AGENT_SURFACE_OPTIONS = 100;
 export const MAX_AGENT_SURFACE_COMMANDS = 500;
 
 /**
- * Native UI mode — normalized agent-surface protocol (spec: docs/native-ui-mode-spec.md §4).
+ * Native UI mode — normalized agent-surface protocol.
  *
  * Three server-side drivers (claude / codex / opencode) produce this one protocol;
  * one broker fans it to browser surfaces. Type definitions are the frozen Phase 0

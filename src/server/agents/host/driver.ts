@@ -1,7 +1,7 @@
 import type { AgentSurfaceCommand, AgentSurfaceEventPayload, AgentUiErrorCode } from '../../../core/agentSurfaceProtocol.js';
 
 /**
- * Native UI mode — adapter-host driver contract (spec: docs/native-ui-mode-spec.md §5).
+ * Native UI mode — adapter-host driver contract.
  *
  * Three server-side drivers implement this interface (claude / codex / opencode); the
  * adapter host (`runner.ts`) loads one based on `DESK_AGENT`, subscribes BEFORE `start()`,
