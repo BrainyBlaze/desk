@@ -64,6 +64,10 @@ still in place.
 In **Add session** or **Edit session**, the Profile row sits directly under the
 agent picker:
 
+<Frame caption="The session form: the Profile picker lists only accounts for the chosen agent, and + creates one without losing the form">
+  <img src="/images/modal-add-session-profile.png" alt="The add session modal with the profile dropdown open, showing the ambient account and two Codex accounts" />
+</Frame>
+
 - **Ambient account** — the default. The CLI uses whatever it is logged into.
 - **A named profile** — the session runs as that account.
 
