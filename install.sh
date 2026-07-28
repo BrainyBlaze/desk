@@ -189,7 +189,7 @@ token=$LOCK_TOKEN
 pid=$$
 host=$host
 started=$now
-installer=0.3.0
+installer=0.3.1
 LOCK
   LOCK_OWNED=1
 }
@@ -693,6 +693,10 @@ PY
 
 probe_node_toolchain() {
   local root="$1"
+  # npm is a Node script behind a `#!/usr/bin/env node` shebang, so it can only
+  # run with a resolvable `node` — prefix the toolchain's own bin (the same way
+  # build_release invokes npm) instead of relying on a host node that a pristine
+  # machine does not have.
   [ "$($root/bin/node --version 2>/dev/null)" = "v$NODE_VERSION" ] &&
     [ "$(PATH="$root/bin:$PATH" "$root/bin/npm" --version 2>/dev/null)" = "$NPM_VERSION" ]
 }
