@@ -157,7 +157,35 @@ describe('ChannelsEngine canonical state consumption', () => {
     engine.dispose();
   });
 
-  it('holds dispatch on canonical working even when screen bytes look idle', async () => {
+  // Canonical state still outranks the screen — but the direction that matters
+  // is the one that HOLDS. A blocked session is sitting on a prompt that will
+  // consume the next input, and a prompt-looking screen must not talk the
+  // engine out of that. Working is not this case: the provider queues input.
+  it('holds dispatch on canonical BLOCKED even when screen bytes look idle', async () => {
+    const sent: string[] = [];
+    const engine = createEngine({
+      readAgentStates: async () => batch('blocked'),
+      sendText: async (_sessionId, text) => {
+        sent.push(text);
+        return true;
+      },
+      capturePane: async () => '❯ '
+    });
+
+    engine.handleMessage({ channel: 'desk', file: 'root.md', message: message('msg-state-2') }, [member()]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(sent).toEqual([]);
+    expect(await engine.lifecycleStates()).toEqual([
+      expect.objectContaining({ activity: 'blocked', queueDepth: 1 })
+    ]);
+    engine.dispose();
+  });
+
+  // The complement, and the regression this pair exists to catch: a mid-turn
+  // agent RECEIVES. Every provider Desk drives buffers typed input, so holding
+  // here only made a busy agent look unreachable.
+  it('DELIVERS to a mid-turn agent instead of queueing behind the lamp', async () => {
     const sent: string[] = [];
     const engine = createEngine({
       readAgentStates: async () => batch('working'),
@@ -171,10 +199,7 @@ describe('ChannelsEngine canonical state consumption', () => {
     engine.handleMessage({ channel: 'desk', file: 'root.md', message: message('msg-state-2') }, [member()]);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(sent).toEqual([]);
-    expect(await engine.lifecycleStates()).toEqual([
-      expect.objectContaining({ activity: 'working', queueDepth: 1 })
-    ]);
+    expect(sent).toHaveLength(1);
     engine.dispose();
   });
 

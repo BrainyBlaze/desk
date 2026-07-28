@@ -96,10 +96,14 @@ describe('canonical channel delivery decisions', () => {
     });
   });
 
-  it('holds a fresh working lease as busy', () => {
+  // A mid-turn agent is not unreachable. Every provider Desk drives buffers
+  // typed input and consumes it when the turn ends — the same thing that
+  // happens when an operator types a follow-up without waiting. Refusing here
+  // made a busy agent look unreachable and forced the operator to watch the
+  // lamp before daring to speak.
+  it('DELIVERS to an agent that is mid-turn — the provider queues the input', () => {
     expect(canonicalDeliveryDecision(batch(agentSnapshot('working')), 'session-a', NOW)).toMatchObject({
-      deliver: false,
-      reason: 'busy',
+      deliver: true,
       view: { activity: 'working', actionable: false }
     });
   });
@@ -197,14 +201,40 @@ describe('canonical channel delivery decisions', () => {
     });
   });
 
-  it('still refuses on POSITIVE knowledge that delivery is unsafe', () => {
-    // The rule is not "always deliver" — a live working lease and an open
-    // block are evidence, and they still hold delivery back.
+  // The rule is not "always deliver". `blocked` is the one activity that still
+  // refuses, and NOT because the agent is unavailable: a blocked session sits
+  // on a prompt that CONSUMES the next input, so a channel message would be
+  // read as the operator's answer — an approval granted by someone who never
+  // saw the question. That is a different hazard from being busy, which is why
+  // `working` now delivers and this does not.
+  it('still refuses while a prompt is waiting to CONSUME the next input', () => {
     expect(
-      canonicalDeliveryDecision(batch(agentSnapshot('working', { leaseExpiresAt: NOW + 60_000 })), 'session-a', NOW)
-    ).toMatchObject({ deliver: false, reason: 'busy' });
-    expect(
-      canonicalDeliveryDecision(batch(agentSnapshot('blocked', { waitKind: 'approval', waitOwner: 'operator' })), 'session-a', NOW)
+      canonicalDeliveryDecision(
+        batch(agentSnapshot('blocked', { waitKind: 'approval', waitOwner: 'operator' })),
+        'session-a',
+        NOW
+      )
     ).toMatchObject({ deliver: false });
+    // A provider-owned wait blocks too — the session is not accepting input
+    // from anyone while it waits on the model.
+    expect(
+      canonicalDeliveryDecision(
+        batch(agentSnapshot('blocked', { waitKind: 'retry', waitOwner: 'provider' })),
+        'session-a',
+        NOW
+      )
+    ).toMatchObject({ deliver: false });
+  });
+
+  // A live working lease no longer suppresses delivery, and this is the test
+  // that would fail if someone reinstated the old `busy` refusal.
+  it('delivers even when the working lease is fresh and far from expiry', () => {
+    expect(
+      canonicalDeliveryDecision(
+        batch(agentSnapshot('working', { leaseExpiresAt: NOW + 60_000 })),
+        'session-a',
+        NOW
+      )
+    ).toMatchObject({ deliver: true, view: { activity: 'working' } });
   });
 });

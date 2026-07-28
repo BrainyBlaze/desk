@@ -882,7 +882,11 @@ button.statusSegment:hover {
 
 .thinForm {
   display: grid;
-  grid-template-columns: 1fr;
+  /* minmax(0, 1fr), not 1fr: a plain `1fr` floors the column at its content's
+     min-content width, so one long value — an account label, a path — pushed
+     the whole form wider than its modal and the right-hand side of every row
+     went off-screen on a narrow viewport. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   margin-top: 4px;
 }
@@ -928,6 +932,42 @@ select:focus {
   box-shadow: 0 0 8px var(--desk-glow);
 }
 
+/* A field that carries an adjacent action, e.g. the profile picker and its
+   "create a profile" button. The control keeps all the free width so the
+   action never squeezes the thing it belongs to. */
+.fieldWithAction {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.fieldAction {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-input-bg);
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+
+.fieldAction:hover {
+  color: var(--desk-text);
+  border-color: var(--desk-line-strong);
+}
+
+.fieldAction:focus-visible {
+  outline: none;
+  border-color: var(--desk-line-strong);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
 .deskSelect {
   position: relative;
   min-width: 0;
@@ -948,6 +988,18 @@ select:focus {
   font-size: 11px;
   text-align: left;
   transition: border-color 140ms ease, box-shadow 140ms ease;
+  min-width: 0;
+}
+
+/* The chosen value must be allowed to ELLIPSIS rather than set the width of
+   everything around it. Account labels are email addresses and cwd values are
+   absolute paths; without this the longest one in the list decides how wide
+   the form is. */
+.deskSelectTrigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .deskSelectTrigger:hover,

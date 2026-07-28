@@ -108,12 +108,24 @@ export function canonicalDeliveryDecision(
   // answered. The two failures are not symmetric. Delivering into a session
   // that turns out to be mid-turn interleaves text — visible and recoverable.
   // Never delivering is silent and total.
+  //
+  // `working` DELIVERS. An agent mid-turn is not unreachable: every provider
+  // Desk drives buffers typed input and consumes it when the turn ends, which
+  // is exactly what an operator does when they type a follow-up without
+  // waiting. Holding messages back there bought no safety and cost the thing
+  // the channel exists for — a busy agent looked unreachable, and the operator
+  // had to watch the lamp before daring to speak.
+  //
+  // `blocked` is the one activity that still refuses, and for a different
+  // reason than "busy": a blocked session is sitting on a prompt that CONSUMES
+  // the next input — an approval dialog answers itself with whatever arrives.
+  // There the refusal prevents a message from being read as a decision the
+  // operator never made.
   switch (view.activity) {
     case 'idle':
     case 'unknown':
-      return { deliver: true, view };
     case 'working':
-      return { deliver: false, reason: 'busy', view };
+      return { deliver: true, view };
     case 'blocked':
       return { deliver: false, reason: blockedReason(view), view };
   }

@@ -242,6 +242,22 @@ describe('agent hook shim runtime (child process)', () => {
     expect(status).toBe(0);
     expect(stderr).not.toContain('agent-event POST failed');
   });
+
+  // The hook command states its provider; the environment merely surrounds the
+  // process. When they disagree — a hook firing under a nested session, a
+  // spawned helper — the argument has to win, or the event is attributed to the
+  // wrong agent. A mislabelled producer is worse than a silent one: it is
+  // accepted as evidence about a session that did nothing.
+  it('lets the --agent ARGUMENT outrank an ambient DESK_AGENT', () => {
+    const { status, stderr } = runShim(
+      { ...process.env, DESK_DEBUG: '1', DESK_AGENT: 'claude' },
+      ['--event', 'Stop', '--agent', 'some-future-cli']
+    );
+    expect(status).toBe(0);
+    // If the env won, the shim would resolve `claude`, bind a producer, and
+    // attempt a POST — which is exactly what this must not do.
+    expect(stderr).not.toContain('agent-event POST failed');
+  });
 });
 
 describe('upgrading over a previous install', () => {

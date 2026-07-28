@@ -262,7 +262,11 @@ const emptySessionForm: SessionForm = {
   initialResume: '',
   bypassPermissions: true,
   command: '',
-  uiMode: 'native',
+  // Terminal is the default because it is the mode that works everywhere: it
+  // drives the agent's own TUI, so anything the CLI can do, the session can do.
+  // Native is a richer surface but a narrower one, and defaulting to it made
+  // the first session an operator creates the least predictable one.
+  uiMode: 'terminal',
   model: ''
 };
 
@@ -365,6 +369,12 @@ export function App(): JSX.Element {
   );
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState<ModalMode>(null);
+  // Where closing the current modal goes back TO. Creating a profile from
+  // inside the session wizard has to be a detour, not an exit: `openAddSession`
+  // resets the form, so sending the operator to Settings and leaving them there
+  // would silently discard everything they had typed. Null means "close", which
+  // is the ordinary case.
+  const [modalReturn, setModalReturn] = useState<ModalMode>(null);
   // Second-stage confirm: true once the server answered resume-not-captured and
   // the user must explicitly accept starting a fresh conversation.
   const [uiModeSwitchDiscard, setUiModeSwitchDiscard] = useState(false);
@@ -2437,8 +2447,13 @@ export function App(): JSX.Element {
                 projects={snapshot?.view.projects ?? []}
                 profiles={agentProfiles}
                 busy={busy}
+                mode="create"
                 onSubmit={submitSession}
                 onFormChange={setSessionForm}
+                onCreateProfile={() => {
+                  setModalReturn('addSession');
+                  setModal('settings');
+                }}
               />
             )
           };
@@ -2508,8 +2523,13 @@ export function App(): JSX.Element {
                 projects={snapshot?.view.projects ?? []}
                 profiles={agentProfiles}
                 busy={busy}
+                mode="edit"
                 onSubmit={submitSessionEdit}
                 onFormChange={setSessionForm}
+                onCreateProfile={() => {
+                  setModalReturn('editSession');
+                  setModal('settings');
+                }}
               />
             )
           };
@@ -2618,7 +2638,16 @@ export function App(): JSX.Element {
     }
     const { body, ...rest } = frame;
     return (
-      <Modal {...rest} onClose={() => setModal(null)}>
+      <Modal
+        {...rest}
+        onClose={() => {
+          // A detour returns; everything else closes. `modalReturn` is null in
+          // the ordinary case, so this is the previous behaviour unchanged.
+          const back = modalReturn;
+          setModalReturn(null);
+          setModal(back);
+        }}
+      >
         {body}
       </Modal>
     );
@@ -3806,15 +3835,20 @@ function SessionFormView({
   projects,
   profiles,
   busy,
+  mode,
   onSubmit,
-  onFormChange
+  onFormChange,
+  onCreateProfile
 }: {
   form: SessionForm;
   projects: DeskProjectView[];
   profiles: AgentProfile[];
   busy: boolean;
+  /** Drives the submit label: the same form both creates and edits. */
+  mode: 'create' | 'edit';
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onFormChange: (form: SessionForm) => void;
+  onCreateProfile: () => void;
 }): JSX.Element {
   const selectedProject = projects.find((project) => project.id === form.projectId) ?? projects[0];
   const groups = selectedProject?.groups ?? [];
@@ -3874,11 +3908,26 @@ function SessionFormView({
       {supportsAgentProfiles(form.agent, form.command.trim() !== '') ? (
         <label>
           <span>Profile</span>
-          <DeskSelect
-            value={form.profileId}
-            options={profileOptions}
-            onChange={(profileId) => onFormChange({ ...form, profileId })}
-          />
+          <div className="fieldWithAction">
+            <DeskSelect
+              value={form.profileId}
+              options={profileOptions}
+              onChange={(profileId) => onFormChange({ ...form, profileId })}
+            />
+            {/* The moment an operator notices they need a profile is while
+                choosing one, so the way to make it belongs here rather than
+                three clicks away in Settings. Closing that panel comes back to
+                this form with what was typed still in it. */}
+            <button
+              type="button"
+              className="fieldAction"
+              title="Create a profile"
+              aria-label="Create a profile"
+              onClick={onCreateProfile}
+            >
+              <Plus size={12} />
+            </button>
+          </div>
         </label>
       ) : null}
       {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
@@ -3888,7 +3937,9 @@ function SessionFormView({
             value={form.uiMode}
             options={[
               { value: 'terminal', label: 'terminal' },
-              { value: 'native', label: 'native' }
+              // Marked in the selector rather than in a tooltip: the operator
+              // picks the mode here, so the caveat has to be where the choice is.
+              { value: 'native', label: 'native (experimental)' }
             ]}
             onChange={(uiMode) => onFormChange({ ...form, uiMode: uiMode === 'native' ? 'native' : 'terminal' })}
           />
@@ -3926,7 +3977,14 @@ function SessionFormView({
           })
         }
       />
-      <CommandButton icon={<Plus size={12} />} label="Store session" disabled={busy} submit />
+      {/* "Store" described the manifest write, not what the operator is doing.
+          Creating and saving are different acts and now read differently. */}
+      <CommandButton
+        icon={<Plus size={12} />}
+        label={mode === 'edit' ? 'Save session' : 'Create session'}
+        disabled={busy}
+        submit
+      />
     </form>
   );
 }

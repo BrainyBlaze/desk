@@ -1636,8 +1636,12 @@ describe('ChannelsEngine delivery gating', () => {
     expect(prompt).toContain('introducing yourself');
   });
 
-  it('enqueuePrompt waits for canonical idle activity', async () => {
-    let activity: 'working' | 'idle' = 'working';
+  // The gate opens on canonical evidence, and `blocked` is what closes it: a
+  // session sitting on a prompt consumes the next input, so an onboarding
+  // message would be read as the operator's answer. `working` deliberately
+  // does NOT close it — the provider queues typed input while it runs.
+  it('enqueuePrompt waits while BLOCKED, then releases on canonical idle', async () => {
+    let activity: 'blocked' | 'idle' = 'blocked';
     const pushed: string[] = [];
     const onboarding = new ChannelsEngine({
       sendEnter: async () => true,

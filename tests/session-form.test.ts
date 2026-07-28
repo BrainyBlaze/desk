@@ -256,9 +256,31 @@ describe('session form modal source contract', () => {
     expect(source).toContain('UI mode');
   });
 
-  it('tracks uiMode in the session form state with a native default', () => {
+  // Terminal is the mode that works for every agent Desk drives, so it is what
+  // a new session starts as. Native is richer but narrower, and defaulting to
+  // it made the operator's first session the least predictable one.
+  it('defaults a new session to TERMINAL ui mode', () => {
     expect(source).toMatch(/uiMode: DeskSessionUiMode/);
-    expect(source).toMatch(/uiMode: 'native',\n  model: ''/);
+    expect(source).toMatch(/uiMode: 'terminal',\n {2}model: ''/);
+  });
+
+  it('marks native as experimental where the mode is CHOSEN, not in a tooltip', () => {
+    expect(source).toMatch(/value: 'native', label: 'native \(experimental\)'/);
+  });
+
+  // "Store" named the manifest write. The operator is creating or saving.
+  it('labels the submit by what the operator is doing', () => {
+    expect(source).toContain("mode === 'edit' ? 'Save session' : 'Create session'");
+    expect(source).not.toContain('Store session');
+  });
+
+  // Creating a profile from inside the wizard is a DETOUR: openAddSession
+  // resets the form, so a plain jump to Settings would discard what was typed.
+  it('returns to the session form after the create-profile detour', () => {
+    expect(source).toContain('onCreateProfile');
+    expect(source).toMatch(/setModalReturn\('addSession'\)/);
+    expect(source).toMatch(/setModalReturn\('editSession'\)/);
+    expect(source).toMatch(/const back = modalReturn;/);
   });
 
   it('prefills the edit command field only for custom-command sessions', () => {
