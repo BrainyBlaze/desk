@@ -10,13 +10,22 @@ import {
   PROFILE_ENV_VAR,
   SCRUBBED_PROVIDER_ENV,
   isValidProfileId,
+  profileEnvPrefix,
   profileLaunchEnv,
   profileRoot,
+  profileScrubPrefix,
   scrubProviderEnv
 } from '../src/shared/agentProfiles.js';
+import { execFileSync } from 'node:child_process';
+import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { DeskManifest, SessionSpec } from '../src/core/types.js';
 
 const HOME = '/home/tester';
+// Injection witness: the quoting test passes only if nothing ever creates it.
+const MARKER = join(tmpdir(), `desk-profile-injection-witness-${process.pid}`);
+rmSync(MARKER, { force: true });
 
 function manifest(overrides: Partial<DeskManifest> = {}): DeskManifest {
   return {
@@ -161,6 +170,26 @@ describe('terminal launch injection', () => {
     expect(spec.command).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.config/desk/profiles/work'`);
     // the scrub precedes the assignment, so nothing inherited can outrank it
     expect(spec.command.indexOf('unset ')).toBeLessThan(spec.command.indexOf('CLAUDE_CONFIG_DIR'));
+  });
+
+  it('survives a home path that tries to break out of the quoting', () => {
+    // The prefix is a shell string, so the credential directory reaches `sh`
+    // as source text. Prove the audited quoter holds by running the real
+    // prefix through a real shell with a home path built to escape it.
+    const hostile = "/home/e'; touch " + MARKER + "; echo '";
+    const prefix = `${profileScrubPrefix()} ${profileEnvPrefix('claude', 'work', hostile)}`;
+    const printed = execFileSync('sh', ['-c', `${prefix} printenv CLAUDE_CONFIG_DIR`], { encoding: 'utf8' });
+    expect(printed.trim()).toBe(`${hostile}/.config/desk/profiles/work`);
+    expect(existsSync(MARKER)).toBe(false);
+  });
+
+  it('scrubs an ambient key out of the child even when a profile is selected', () => {
+    const prefix = `${profileScrubPrefix()} ${profileEnvPrefix('codex', 'work', HOME)}`;
+    const printed = execFileSync('sh', ['-c', `${prefix} printenv ANTHROPIC_API_KEY || echo ABSENT`], {
+      encoding: 'utf8',
+      env: { ...process.env, ANTHROPIC_API_KEY: 'inherited-key' }
+    });
+    expect(printed.trim()).toBe('ABSENT');
   });
 
   it('carries a codex profile through its own variable', () => {
