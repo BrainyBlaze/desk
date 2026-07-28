@@ -173,21 +173,21 @@ export type SubmitState =
   | 'submit-stuck-unobservable';
 
 /** Why a session's queue is currently held (ops-console diagnostic). */
+// `input-requested`, `not-ready`, `operator-blocked` and `provider-blocked`
+// were removed with the activity gate: delivery no longer refuses on what the
+// agent is DOING, so nothing can produce them. A reason nobody emits is a state
+// the console would render and an operator would try to interpret.
 export type DeliveryBlockReason =
   | 'approval'
-  | 'input-requested'
   | 'offline'
   | 'booting'
   | 'busy'
-  | 'not-ready'
   | 'trust-menu'
   | 'selection-menu'
   | 'unknown-menu'
   | 'empty-capture'
   | 'capture-failed'
   | 'unobservable'
-  | 'operator-blocked'
-  | 'provider-blocked'
   | 'send-failed'
   | 'submit-stuck-paste'
   | 'submit-stuck-submit';

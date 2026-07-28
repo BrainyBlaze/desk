@@ -1636,12 +1636,12 @@ describe('ChannelsEngine delivery gating', () => {
     expect(prompt).toContain('introducing yourself');
   });
 
-  // The gate opens on canonical evidence, and `blocked` is what closes it: a
-  // session sitting on a prompt consumes the next input, so an onboarding
-  // message would be read as the operator's answer. `working` deliberately
-  // does NOT close it — the provider queues typed input while it runs.
-  it('enqueuePrompt waits while BLOCKED, then releases on canonical idle', async () => {
-    let activity: 'blocked' | 'idle' = 'blocked';
+  // What still holds the queue is LIFECYCLE, not activity: a session that has
+  // not finished starting has no process to accept the text, so the prompt
+  // waits and is delivered once it is running. Nothing is dropped, which is the
+  // difference between this and the activity gate that was removed.
+  it('enqueuePrompt waits while the session is STARTING, then releases once running', async () => {
+    let lifecycle: 'starting' | 'running' = 'starting';
     const pushed: string[] = [];
     const onboarding = new ChannelsEngine({
       sendEnter: async () => true,
@@ -1653,7 +1653,7 @@ describe('ChannelsEngine delivery gating', () => {
         pushed.push(text);
         return true;
       },
-      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle }),
       sessionRunning: () => true,
       sessionCreatedAt: async () => 1,
       capturePane: async () => 'raw terminal bytes'
@@ -1661,7 +1661,7 @@ describe('ChannelsEngine delivery gating', () => {
     onboarding.enqueuePrompt('tmux-a', 'ops', 'welcome aboard @alpha', 'onboard-ops');
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(pushed).toEqual([]);
-    activity = 'idle';
+    lifecycle = 'running';
     await onboarding.drainReady();
     await waitFor(() => pushed.length === 1);
     expect(pushed).toEqual(['welcome aboard @alpha']);

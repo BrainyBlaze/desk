@@ -73,18 +73,6 @@ export function canonicalAgentView(
   };
 }
 
-function blockedReason(view: CanonicalAgentView): DeliveryBlockReason {
-  if (view.wait?.owner === 'provider') {
-    return 'provider-blocked';
-  }
-  if (view.wait?.owner === 'operator') {
-    return view.wait.kind === 'input' || view.wait.kind.includes('input')
-      ? 'input-requested'
-      : 'operator-blocked';
-  }
-  return 'not-ready';
-}
-
 export function canonicalDeliveryDecision(
   batch: AgentStateBatch,
   sessionId: string,
@@ -109,24 +97,22 @@ export function canonicalDeliveryDecision(
   // that turns out to be mid-turn interleaves text — visible and recoverable.
   // Never delivering is silent and total.
   //
-  // `working` DELIVERS. An agent mid-turn is not unreachable: every provider
-  // Desk drives buffers typed input and consumes it when the turn ends, which
-  // is exactly what an operator does when they type a follow-up without
-  // waiting. Holding messages back there bought no safety and cost the thing
-  // the channel exists for — a busy agent looked unreachable, and the operator
-  // had to watch the lamp before daring to speak.
+  // ACTIVITY NEVER BLOCKS DELIVERY. Not `working`, not `blocked`, not
+  // `unknown`. Every provider Desk drives buffers typed input, so a message
+  // sent mid-turn is read when the turn ends — the same thing that happens
+  // when the operator types a follow-up without waiting.
   //
-  // `blocked` is the one activity that still refuses, and for a different
-  // reason than "busy": a blocked session is sitting on a prompt that CONSUMES
-  // the next input — an approval dialog answers itself with whatever arrives.
-  // There the refusal prevents a message from being read as a decision the
-  // operator never made.
-  switch (view.activity) {
-    case 'idle':
-    case 'unknown':
-    case 'working':
-      return { deliver: true, view };
-    case 'blocked':
-      return { deliver: false, reason: blockedReason(view), view };
-  }
+  // The argument for holding on `blocked` was that a waiting prompt consumes
+  // the next input, so a message could answer a dialog nobody read. That risk
+  // is real and it is the operator's to take: it is visible the moment it
+  // happens and recoverable, while a channel that silently withholds is
+  // neither. A messaging surface whose messages sometimes do not arrive is not
+  // a messaging surface, and every state this switch used to refuse on was a
+  // state the operator could see and reason about themselves.
+  //
+  // What remains below this function is lifecycle, and lifecycle is not a
+  // judgement about the agent — it is whether a process exists to receive at
+  // all. Those cases queue rather than drop, which is the opposite of
+  // withholding.
+  return { deliver: true, view };
 }

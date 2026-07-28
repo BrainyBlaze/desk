@@ -152,14 +152,15 @@ describe('canonical channel delivery decisions', () => {
       NOW
     );
 
+    // `actionable` still separates "the operator has to do something" from
+    // "the provider does" — the lamp and the status dot read it. What it no
+    // longer does is gate delivery: both cases DELIVER.
     expect(operator).toMatchObject({
-      deliver: false,
-      reason: 'input-requested',
+      deliver: true,
       view: { activity: 'blocked', actionable: true, wait: { owner: 'operator' } }
     });
     expect(provider).toMatchObject({
-      deliver: false,
-      reason: 'provider-blocked',
+      deliver: true,
       view: { activity: 'blocked', actionable: false, wait: { owner: 'provider' } }
     });
   });
@@ -201,29 +202,22 @@ describe('canonical channel delivery decisions', () => {
     });
   });
 
-  // The rule is not "always deliver". `blocked` is the one activity that still
-  // refuses, and NOT because the agent is unavailable: a blocked session sits
-  // on a prompt that CONSUMES the next input, so a channel message would be
-  // read as the operator's answer — an approval granted by someone who never
-  // saw the question. That is a different hazard from being busy, which is why
-  // `working` now delivers and this does not.
-  it('still refuses while a prompt is waiting to CONSUME the next input', () => {
+  // NO activity refuses. The operator's rule is that the engine never withholds
+  // a message, and that includes the case with the strongest argument against
+  // it: a session sitting on an approval prompt, where the arriving text can be
+  // read as the answer. That risk is visible when it happens and recoverable;
+  // a channel that silently keeps messages is neither.
+  it.each([
+    ['an approval prompt the operator must answer', 'approval', 'operator'],
+    ['a provider-side wait', 'retry', 'provider']
+  ])('delivers even while blocked on %s', (_case, waitKind, waitOwner) => {
     expect(
       canonicalDeliveryDecision(
-        batch(agentSnapshot('blocked', { waitKind: 'approval', waitOwner: 'operator' })),
+        batch(agentSnapshot('blocked', { waitKind, waitOwner: waitOwner as 'operator' | 'provider' })),
         'session-a',
         NOW
       )
-    ).toMatchObject({ deliver: false });
-    // A provider-owned wait blocks too — the session is not accepting input
-    // from anyone while it waits on the model.
-    expect(
-      canonicalDeliveryDecision(
-        batch(agentSnapshot('blocked', { waitKind: 'retry', waitOwner: 'provider' })),
-        'session-a',
-        NOW
-      )
-    ).toMatchObject({ deliver: false });
+    ).toMatchObject({ deliver: true });
   });
 
   // A live working lease no longer suppresses delivery, and this is the test

@@ -22,22 +22,15 @@ import {
 
 const BLOCK_REASON_LABEL: Record<DeliveryBlockReason, string> = {
   approval: 'approval',
-  'input-requested': 'input requested',
   offline: 'offline',
   booting: 'booting',
   busy: 'working',
-  'not-ready': 'not ready',
   'trust-menu': 'trust menu',
   'selection-menu': 'selection menu',
   'unknown-menu': 'menu',
   'empty-capture': 'empty capture',
   'capture-failed': 'capture failed',
   unobservable: 'no capture',
-  // Delivery held because the AGENT is blocked, split by who has to act:
-  // 'held for you' is something the operator can clear, 'held on provider'
-  // is not. Same distinction the status dot and the lamp use.
-  'operator-blocked': 'held for you',
-  'provider-blocked': 'held on provider',
   'send-failed': 'send failed',
   'submit-stuck-paste': 'paste stuck',
   'submit-stuck-submit': 'submit stuck'

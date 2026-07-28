@@ -157,11 +157,10 @@ describe('ChannelsEngine canonical state consumption', () => {
     engine.dispose();
   });
 
-  // Canonical state still outranks the screen — but the direction that matters
-  // is the one that HOLDS. A blocked session is sitting on a prompt that will
-  // consume the next input, and a prompt-looking screen must not talk the
-  // engine out of that. Working is not this case: the provider queues input.
-  it('holds dispatch on canonical BLOCKED even when screen bytes look idle', async () => {
+  // Canonical state still drives what the operator SEES — the reported activity
+  // is `blocked` — but it no longer drives whether the message goes. Reporting
+  // and gating were one wire; they are now two.
+  it('DELIVERS while canonical activity is blocked, and still reports it', async () => {
     const sent: string[] = [];
     const engine = createEngine({
       readAgentStates: async () => batch('blocked'),
@@ -175,9 +174,9 @@ describe('ChannelsEngine canonical state consumption', () => {
     engine.handleMessage({ channel: 'desk', file: 'root.md', message: message('msg-state-2') }, [member()]);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(sent).toEqual([]);
+    expect(sent).toHaveLength(1);
     expect(await engine.lifecycleStates()).toEqual([
-      expect.objectContaining({ activity: 'blocked', queueDepth: 1 })
+      expect.objectContaining({ activity: 'blocked' })
     ]);
     engine.dispose();
   });
