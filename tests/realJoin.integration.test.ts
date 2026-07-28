@@ -2,8 +2,8 @@
 // daemon spawns a real atch session with ATCH_GENERATION injected, attaches over
 // the v3 socket, and exercises the full protocol: handshake + generation fence,
 // input→output round-trip (single + multi-line), RESIZE, and the SessionManager
-// production detached spawn/kill lifecycle. Skips cleanly when the binary is
-// absent (set ATCH_BIN to run it).
+// production detached spawn/kill lifecycle. Runs against the binary this repo
+// builds; skips cleanly when it is absent (override with ATCH_BIN).
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
@@ -19,7 +19,7 @@ import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type Em
 import { XtermEmulatorFactory } from '../src/server/runtime/xtermEmulator.js';
 import { BpFrameType } from '../src/shared/browserProtocol/index.js';
 
-const ATCH_BIN = process.env.ATCH_BIN ?? '/home/dev/.config/superpowers/worktrees/atch/phase-a-implementation/atch';
+const ATCH_BIN = process.env.ATCH_BIN ?? join(__dirname, '..', 'libexec', 'atch');
 // Real-binary tests spawn multiple live PTY sessions and are timing-sensitive, so
 // they are OPT-IN (RUN_REAL_JOIN=1) — the default suite stays deterministic with
 // the fake-master tests. Run explicitly to verify the join against real atch:

@@ -20,7 +20,7 @@ import { TerminalWsRouter } from '../src/server/runtime/terminalWsRouter.js';
 import { installTerminalWsBridge } from '../src/server/terminalWsBridge.js';
 import { BinaryTerminalBrokerClient, type BinaryBrokerSocket } from '../src/web/binaryTerminalBrokerClient.js';
 
-const ATCH_BIN = process.env.ATCH_BIN ?? '/home/dev/.config/superpowers/worktrees/atch/phase-a-implementation/atch';
+const ATCH_BIN = process.env.ATCH_BIN ?? join(__dirname, '..', 'libexec', 'atch');
 const AVAILABLE = existsSync(ATCH_BIN) && process.env.RUN_REAL_JOIN === '1';
 const UID = typeof process.getuid === 'function' ? process.getuid() : 1000;
 const SOCK_DIR = `/tmp/.atch-${UID}`;
