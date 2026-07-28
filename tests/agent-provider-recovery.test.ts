@@ -1,4 +1,10 @@
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  truncateSync
+} from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -318,7 +324,7 @@ describe('daemon atch title recovery', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('restores title state without republishing sink history after daemon restart', async () => {
+  it('keeps restart history silent but publishes title changes after sink truncation', async () => {
     const sessionId = 'opencode-a';
     const sockPath = join(home, `${sessionId}.sock`);
     const subject = {
@@ -399,6 +405,42 @@ describe('daemon atch title recovery', () => {
       title: 'Ready'
     });
     expect(daemon.events().latestSeq).toBe(firstLatestSeq);
+    expect(diagnostics).toEqual([]);
+
+    appendFileSync(
+      sink,
+      `${JSON.stringify({
+        ts: 2,
+        type: 'state',
+        state: 'busy',
+        title: '\u280b x'
+      })}\n`
+    );
+    await vi.waitFor(() => {
+      expect(daemon?.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'working'
+      });
+    });
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq);
+
+    truncateSync(sink, 0);
+    appendFileSync(
+      sink,
+      `${JSON.stringify({
+        ts: 3,
+        type: 'state',
+        state: 'idle',
+        title: 'Ready'
+      })}\n`
+    );
+    await vi.waitFor(() => {
+      expect(daemon?.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'idle'
+      });
+    });
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq + 1);
     expect(diagnostics).toEqual([]);
   });
 });

@@ -188,7 +188,7 @@ describe('AtchEventTailer', () => {
     tailer.stop();
   });
 
-  it('distinguishes startup and truncation replay from live appends', () => {
+  it('distinguishes startup replay, live appends, and truncation resync', () => {
     const received: { event: unknown; phase: string }[] = [];
     appendFileSync(path, JSON.stringify(records[0]) + '\n');
     const tailer = new AtchEventTailer({
@@ -206,7 +206,7 @@ describe('AtchEventTailer', () => {
     expect(received).toEqual([
       { event: records[0], phase: 'replay' },
       { event: records[1], phase: 'live' },
-      { event: records[2], phase: 'replay' }
+      { event: records[2], phase: 'resync' }
     ]);
     tailer.stop();
   });

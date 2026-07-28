@@ -247,7 +247,7 @@ export interface AtchEventTailerOptions {
 }
 
 export interface AtchEventDeliveryContext {
-  phase: 'replay' | 'live';
+  phase: 'replay' | 'resync' | 'live';
 }
 
 const TAILER_READ_BYTES = 64 * 1024;
@@ -296,7 +296,7 @@ export class AtchEventTailer {
       if (stat.size < this.offset) {
         this.offset = 0;
         this.decoder.reset();
-        phase = 'replay';
+        phase = 'resync';
       }
 
       const buffer = Buffer.allocUnsafe(TAILER_READ_BYTES);
