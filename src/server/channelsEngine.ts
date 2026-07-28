@@ -1472,8 +1472,15 @@ export class ChannelsEngine {
       const decision = canonicalDeliveryDecision(batch, runtime.sessionId, this.now());
       if (process.env.DESK_CHANNELS_DEBUG) {
         try {
+          // Not /tmp: a fixed name in a world-writable directory is a symlink
+          // another local user can plant before Desk starts, which would make
+          // this append write through to whatever they aimed it at. The trace
+          // also names sessions. The engine's own state directory is already
+          // private to the operator, so keep the trace beside the queues.
+          const debugDir = join(this.options.home, '_engine');
+          mkdirSync(debugDir, { recursive: true, mode: 0o700 });
           appendFileSync(
-            '/tmp/chan-engine-debug.log',
+            join(debugDir, 'debug.log'),
             `${new Date().toISOString()} drain ${runtime.sessionId} kind=${next.kind ?? 'message'} deliver=${decision.deliver} queued=${runtime.queue.length}\n`
           );
         } catch {
