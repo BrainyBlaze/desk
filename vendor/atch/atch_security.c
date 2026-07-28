@@ -6,14 +6,25 @@
 #include <locale.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 int atch_security_peer_uid(int fd, uid_t expected)
 {
+	uid_t peer_uid;
+#if defined(__linux__)
 	struct ucred cred;
 	socklen_t len = sizeof(cred);
 	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
 		return -1;
-	if (cred.uid != expected) {
+	peer_uid = cred.uid;
+#elif defined(__APPLE__)
+	gid_t peer_gid;
+	if (getpeereid(fd, &peer_uid, &peer_gid) < 0)
+		return -1;
+#else
+#error "atch requires a supported peer credential API"
+#endif
+	if (peer_uid != expected) {
 		errno = EPERM;
 		return -1;
 	}

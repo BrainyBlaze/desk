@@ -91,6 +91,7 @@ jobs:
       - name: Build and probe bundled atch
         run: |
           npm run build:atch
+          make -C vendor/atch CC=cc STATIC_FLAG= security-storage-test
           file libexec/atch
           file libexec/atch | grep -F "${{ matrix.arch }}"
           ./libexec/atch --version | grep -F 'atch - version 1.6-bb1,'

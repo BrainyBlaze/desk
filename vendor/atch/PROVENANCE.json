@@ -183,7 +183,7 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "f2feb8cb5a57af9e716149fbeb480f68eb1a50723ad665188a3018f3cda99581",
+    "digest": "973e5347fed4d8463f86e032160b5193406a71b19823b8dcd7eeac62b1cb100a",
     "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
   },
   "localPatches": [
@@ -238,6 +238,15 @@
         "makefile"
       ],
       "alsoIncludes": "Oversized startup truncation, hard-cap accounting, complete-write handling, direct compaction tests, and an end-to-end master probe with 1,400 large OSC 8 events.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "fix: use native peer credentials on macOS",
+      "why": "The bundled security layer used Linux-only struct ucred and SO_PEERCRED, so the pinned atch snapshot could not compile on either macOS runner architecture.",
+      "files": [
+        "atch_security.c"
+      ],
+      "alsoIncludes": "Include unistd.h for getdtablesize, close, and getpeereid declarations; macOS installer CI runs security-storage-test to verify matching and mismatched peer UIDs.",
       "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
     }
   ]

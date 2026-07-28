@@ -183,6 +183,9 @@ describe('bundled atch distribution contract', () => {
     expect(installerWorkflow).toContain('macos-15');
     expect(installerWorkflow).toContain('macos-15-intel');
     expect(installerWorkflow).toContain('npm run build:atch');
+    expect(installerWorkflow).toContain(
+      'make -C vendor/atch CC=cc STATIC_FLAG= security-storage-test'
+    );
     expect(installerWorkflow).toContain('file libexec/atch');
     expect(installerWorkflow).toContain('./libexec/atch --version');
     expect(releaseWorkflow).toContain("'scripts/build-atch.mjs'");
