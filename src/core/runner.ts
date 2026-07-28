@@ -6,13 +6,17 @@ import { daemonControl, type DaemonControlResult } from '../shared/daemonControl
 import { atchCommandFor as buildAtchCommand } from '../shared/atchCommand.js';
 import { resolveAtchBinPath, resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { readManifestFile, resolveManifestPath } from './config.js';
-import { buildSessionSpecs, resolveSessionUiMode } from './manifest.js';
+import { buildSessionSpecs } from './manifest.js';
 import { ensureOpencodeConfigDir } from './opencodeConfig.js';
 import { findOpencodeLaunchResume } from './opencodeResume.js';
 import { upsertPendingResumeCapture } from './resumeCaptureState.js';
 import type { SessionPlanAction, SessionSpec } from './types.js';
 import { shellQuote } from '../shared/shell.js';
 import { sessionStateSubjectFor } from '../shared/controlPlane/index.js';
+import {
+  claudeContinuityDescriptorFor,
+  claudeProfileMemoryDescriptorFor
+} from '../shared/claudeContinuityDescriptor.js';
 
 export { atchCommandFor } from '../shared/atchCommand.js';
 
@@ -136,7 +140,7 @@ function controlFor(options: RunnerLifecycleOptions): RunnerControl {
 }
 
 function directNativeStartError(session: SessionSpec): string | undefined {
-  if (resolveSessionUiMode(session) !== 'native') {
+  if (session.uiMode !== 'native') {
     return undefined;
   }
   return (
@@ -149,11 +153,15 @@ async function provisionPreparedSession(
   session: SessionSpec,
   options: RunnerLifecycleOptions
 ): Promise<{ ok: boolean; error?: string }> {
+  const continuity = claudeContinuityDescriptorFor(session);
+  const claudeMemory = claudeProfileMemoryDescriptorFor(session);
   const result = await controlFor(options)('/control/provision', {
     sessionId: session.sessionId,
     command: buildAtchCommand(session),
     geometry: { rows: 24, cols: 80 },
-    subject: sessionStateSubjectFor(session)
+    subject: sessionStateSubjectFor(session),
+    ...(continuity ? { continuity } : {}),
+    ...(claudeMemory ? { claudeMemory } : {})
   });
   return result.ok ? { ok: true } : { ok: false, error: result.error };
 }

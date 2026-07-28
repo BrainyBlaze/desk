@@ -1,4 +1,4 @@
-import { statSync, type Stats } from 'node:fs';
+import { readFileSync, statSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import {
   addGroupToProjectManifest,
@@ -52,6 +52,11 @@ import { ApiValidationError, readBoundedInteger, readOptionalString, readRequire
 import { isValidProfileId } from '../../shared/agentProfiles.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
+import {
+  executeClaudeProfileHandoff,
+  isClaudeProfileChange,
+  requiresClaudeProfileHandoff
+} from '../claudeProfileContinuity.js';
 import { shouldRespawnAfterEdit } from '../editRespawn.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
 import type { DeskRoute } from '../plugin.js';
@@ -86,6 +91,21 @@ interface DeleteTargetsOptions {
 type StatReader = (path: string) => Stats | undefined;
 
 const uiModeSwitchGuard = createInFlightGuard();
+
+export async function commitManifestIfUnchanged(
+  manifestPath: string,
+  expectedSource: string,
+  next: DeskManifest
+): Promise<void> {
+  await withManifestFileLock(manifestPath, () => {
+    if (readFileSync(manifestPath, 'utf8') !== expectedSource) {
+      throw new Error(
+        'manifest-changed-concurrently: Desk configuration changed while the profile handoff was prepared'
+      );
+    }
+    writeManifestFile(manifestPath, next);
+  });
+}
 
 function scheduleAgentResumeCapture(session: SessionSpec): void {
   scheduleCodexResumeCapture(session);
@@ -588,6 +608,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const findSpec = (specs: SessionSpec[], name: string): SessionSpec | undefined =>
         specs.find((candidate) => candidate.projectId === projectId && candidate.groupId === groupId && candidate.name === name);
       const result = await withManifestFileLock(manifestPath, async () => {
+        const manifestSource = readFileSync(manifestPath, 'utf8');
         const manifest = readManifestFile(manifestPath);
         const oldSpec = findSpec(buildSessionSpecs(manifest, { homeDir: homedir() }), currentName);
         const next = editSessionInManifest(manifest, {
@@ -599,21 +620,39 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           session
         });
         const newSpec = findSpec(buildSessionSpecs(next, { homeDir: homedir() }), session.name);
+        if (
+          oldSpec &&
+          newSpec &&
+          isClaudeProfileChange(oldSpec, newSpec) &&
+          !newSpec.resume &&
+          sessionBody?.clearResume !== true
+        ) {
+          return {
+            updated: null,
+            respawnError:
+              'session edit aborted: continuity-no-resume-id: Claude profile changes require a captured resume id or an explicit fresh start'
+          };
+        }
+        if (oldSpec && newSpec && requiresClaudeProfileHandoff(oldSpec, newSpec)) {
+          return {
+            updated: null,
+            respawnError: undefined,
+            handoff: { manifestSource, manifest, next, oldSpec, newSpec }
+          };
+        }
         // Fail closed (R2.1): a native edit that changes the session's identity
         // (possible for a legacy entry without a persisted sessionId) must retire
         // the master under its OLD identity, BEFORE the manifest edit commits. If
         // it can't be retired (e.g. daemon down), abort — neither orphan the old
-        // atch master nor desync the manifest against a still-running master. The
-        // user retries once the daemon is reachable.
+        // atch master nor desync the manifest against a still-running master.
         const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
         if (!staleGuard.ok) {
           return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };
         }
+        const wasRunning = oldSpec ? runningSessionSet().has(oldSpec.sessionId) : false;
         writeManifestFile(manifestPath, next);
         if (
-          shouldRespawnAfterEdit(oldSpec, newSpec, (target) =>
-            runningSessionSet().has(target)
-          ) &&
+          shouldRespawnAfterEdit(oldSpec, newSpec, () => wasRunning) &&
           newSpec
         ) {
           managedAgentLsp.cleanup(newSpec.sessionId);
@@ -627,8 +666,56 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         }
         return { updated: next, respawnError: undefined };
       });
-      if (result.respawnError) {
-        sendJson(res, 500, { error: result.respawnError });
+      let completed = result;
+      if (result.handoff) {
+        const { manifestSource, manifest, next, oldSpec, newSpec } = result.handoff;
+        const wasRunning = runningSessionSet().has(oldSpec.sessionId);
+        let targetLaunch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
+        let sourceLaunch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
+        const handoff = await executeClaudeProfileHandoff({
+          oldSpec,
+          newSpec,
+          homeDir: homedir(),
+          wasRunning,
+          retire: () => retireNativeSession(oldSpec.sessionId),
+          commit: () =>
+            commitManifestIfUnchanged(manifestPath, manifestSource, next),
+          startTarget: async () => {
+            managedAgentLsp.cleanup(newSpec.sessionId);
+            targetLaunch = managedAgentLsp.prepare(newSpec, next.settings);
+            const started = await startSessionNativeAware(
+              nativeAgentLaunch(
+                targetLaunch?.session ?? newSpec,
+                targetLaunch?.envFilePath
+              )
+            );
+            if (!started.ok) targetLaunch?.cleanup();
+            return started;
+          },
+          restoreSource: async () => {
+            sourceLaunch = managedAgentLsp.prepare(oldSpec, manifest.settings);
+            const restored = await startSessionNativeAware(
+              nativeAgentLaunch(
+                sourceLaunch?.session ?? oldSpec,
+                sourceLaunch?.envFilePath
+              )
+            );
+            if (!restored.ok) sourceLaunch?.cleanup();
+            return restored;
+          }
+        });
+        completed = handoff.ok
+          ? { updated: next, respawnError: undefined }
+          : {
+              updated: handoff.committed ? next : null,
+              respawnError: handoff.committed
+                ? `session edit saved but profile handoff start failed: ${handoff.error}`
+                : `session edit aborted: ${handoff.error}`
+            };
+        if (handoff.ok && wasRunning) scheduleAgentResumeCapture(newSpec);
+      }
+      if (completed.respawnError) {
+        sendJson(res, 500, { error: completed.respawnError });
         return true;
       }
       sendJson(res, 200, buildDeskSnapshot());

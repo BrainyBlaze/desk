@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { readManifestFile, resolveManifestPath } from '../core/config.js';
 import { buildSessionSpecs, parseDeskManifest } from '../core/manifest.js';
+import {
+  readClaudeContinuityStatus,
+  type ClaudeContinuityStatus
+} from './claudeContinuityStatus.js';
 
 import { buildDeskViewModel } from '../ui/model.js';
 import type { DeskGroupSeed, DeskProjectSeed, DeskViewModel } from '../ui/model.js';
@@ -29,19 +33,22 @@ export interface BuildDeskSnapshotOptions {
 export interface DeskSnapshot {
   configPath: string;
   view: DeskViewModel;
+  continuity: ClaudeContinuityStatus;
   generatedAt: string;
 }
 
 export function buildDeskSnapshot(options: BuildDeskSnapshotOptions = {}): DeskSnapshot {
   const manifestPath = resolveManifestPath(options.manifestPath);
   const manifest = readManifestFile(manifestPath);
+  const homeDir = options.homeDir ?? homedir();
   const sessions = buildSessionSpecs(manifest, {
-    homeDir: options.homeDir ?? homedir(),
+    homeDir
   });
 
   return {
     configPath: manifestPath,
     view: buildDeskViewModel(sessions, runningSessionsFor(sessions), buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    continuity: readClaudeContinuityStatus(sessions, { homeDir }),
     generatedAt: new Date().toISOString()
   };
 }
@@ -53,13 +60,15 @@ export function buildDeskSnapshotFromManifest(
 ): DeskSnapshot {
   const manifestPath = resolveManifestPath(options.manifestPath);
   const manifest = parseDeskManifest(source);
+  const homeDir = options.homeDir ?? homedir();
   const sessions = buildSessionSpecs(manifest, {
-    homeDir: options.homeDir ?? homedir(),
+    homeDir
   });
 
   return {
     configPath: manifestPath,
     view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    continuity: readClaudeContinuityStatus(sessions, { homeDir }),
     generatedAt: new Date().toISOString()
   };
 }

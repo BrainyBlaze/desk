@@ -35,9 +35,10 @@ function invoke(
   method: string,
   url: string,
   body?: unknown,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  handlerOptions?: Parameters<typeof createDaemonControlHandler>[1]
 ): Promise<Captured> {
-  const handler = createDaemonControlHandler(daemon);
+  const handler = createDaemonControlHandler(daemon, handlerOptions);
   const req = new PassThrough() as unknown as IncomingMessage & PassThrough;
   req.method = method;
   req.url = url;
@@ -175,6 +176,140 @@ describe('daemon control handler', () => {
       geometry: { rows: 10, cols: 20 },
       subject: agentSubject
     });
+  });
+
+  it('runs Claude continuity preflight before provisioning', async () => {
+    const daemon = daemonMock();
+    const prepareClaudeSessionStart = vi.fn();
+    const continuity = {
+      schemaVersion: 1,
+      provider: 'claude',
+      providerSessionId: '11111111-2222-4333-8444-555555555555',
+      cwd: '/tmp/work',
+      profileId: 'work'
+    } as const;
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provision',
+      {
+        sessionId: 'spawntest',
+        command: ['sh', '-c', 'bash'],
+        subject: agentSubject,
+        continuity
+      },
+      undefined,
+      { prepareClaudeSessionStart }
+    );
+
+    expect(result.status).toBe(200);
+    expect(prepareClaudeSessionStart).toHaveBeenCalledWith(continuity, 'spawntest');
+    expect(prepareClaudeSessionStart.mock.invocationCallOrder[0]).toBeLessThan(
+      daemon.provision.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('does not provision when Claude continuity preflight fails', async () => {
+    const daemon = daemonMock();
+    const prepareClaudeSessionStart = vi.fn(() => {
+      throw Object.assign(new Error('target transcript differs'), {
+        code: 'continuity-session-conflict'
+      });
+    });
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provision',
+      {
+        sessionId: 'spawntest',
+        command: ['sh', '-c', 'bash'],
+        subject: agentSubject,
+        continuity: {
+          schemaVersion: 1,
+          provider: 'claude',
+          providerSessionId: '11111111-2222-4333-8444-555555555555',
+          cwd: '/tmp/work',
+          profileId: 'work'
+        }
+      },
+      undefined,
+      { prepareClaudeSessionStart }
+    );
+
+    expect(result).toEqual({
+      status: 409,
+      body: {
+        ok: false,
+        error: 'continuity-session-conflict: target transcript differs'
+      }
+    });
+    expect(daemon.provision).not.toHaveBeenCalled();
+  });
+
+  it('synchronizes Claude profile memory before provisioning a fresh session', async () => {
+    const daemon = daemonMock();
+    const syncClaudeProfileMemory = vi.fn().mockReturnValue({
+      profileId: 'work',
+      projectSlug: '-tmp-work',
+      conflicts: []
+    });
+    const claudeMemory = {
+      schemaVersion: 1,
+      provider: 'claude',
+      cwd: '/tmp/work',
+      profileId: 'work'
+    } as const;
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provision',
+      {
+        sessionId: 'spawntest',
+        command: ['claude'],
+        subject: agentSubject,
+        claudeMemory
+      },
+      undefined,
+      { syncClaudeProfileMemory }
+    );
+
+    expect(result.status).toBe(200);
+    expect(syncClaudeProfileMemory).toHaveBeenCalledWith(claudeMemory, 'spawntest');
+    expect(syncClaudeProfileMemory.mock.invocationCallOrder[0]).toBeLessThan(
+      daemon.provision.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('does not block Claude startup when profile memory synchronization fails', async () => {
+    const daemon = daemonMock();
+    const syncClaudeProfileMemory = vi.fn(() => {
+      throw new Error('memory store unavailable');
+    });
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provision',
+      {
+        sessionId: 'spawntest',
+        command: ['claude'],
+        subject: agentSubject,
+        claudeMemory: {
+          schemaVersion: 1,
+          provider: 'claude',
+          cwd: '/tmp/work',
+          profileId: 'work'
+        }
+      },
+      undefined,
+      { syncClaudeProfileMemory }
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.provision).toHaveBeenCalledOnce();
   });
 
   it('defaults geometry when absent', async () => {

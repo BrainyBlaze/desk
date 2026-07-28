@@ -94,6 +94,60 @@ describe('provisionNativeSession', () => {
     });
   });
 
+  it('sends an exact Claude continuity descriptor to the daemon before provision', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provisionNativeSession({
+      ...baseSpec,
+      agent: 'claude',
+      resume: '11111111-2222-4333-8444-555555555555',
+      profileId: 'work'
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).continuity).toEqual({
+      schemaVersion: 1,
+      provider: 'claude',
+      providerSessionId: '11111111-2222-4333-8444-555555555555',
+      cwd: '/tmp/work',
+      profileId: 'work'
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).claudeMemory).toEqual({
+      schemaVersion: 1,
+      provider: 'claude',
+      cwd: '/tmp/work',
+      profileId: 'work'
+    });
+  });
+
+  it('sends Claude profile memory ownership without a resume id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provisionNativeSession({
+      ...baseSpec,
+      agent: 'claude',
+      profileId: 'work'
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.claudeMemory).toEqual({
+      schemaVersion: 1,
+      provider: 'claude',
+      cwd: '/tmp/work',
+      profileId: 'work'
+    });
+    expect(body.continuity).toBeUndefined();
+  });
+
 
   it('surfaces a non-2xx daemon response as an error, not a silent ok', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => JSON.stringify({ ok: false, error: 'atch provision refused: cap-exceeded' }) });

@@ -52,6 +52,61 @@ describe('runPlan atch-native lifecycle', () => {
     expect(errors).toEqual([]);
   });
 
+  it('passes Claude continuity ownership through the CLI provision path', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const control = vi.fn().mockResolvedValue({ ok: true });
+    const spec = {
+      ...terminalPlan()[0]!.session,
+      agent: 'claude' as const,
+      resume: '11111111-2222-4333-8444-555555555555',
+      profileId: 'work'
+    };
+
+    await expect(runPlan([{ type: 'start', session: spec }], false, { control })).resolves.toBe(0);
+
+    expect(control).toHaveBeenCalledWith(
+      '/control/provision',
+      expect.objectContaining({
+        continuity: {
+          schemaVersion: 1,
+          provider: 'claude',
+          providerSessionId: spec.resume,
+          cwd: spec.cwd,
+          profileId: 'work'
+        },
+        claudeMemory: {
+          schemaVersion: 1,
+          provider: 'claude',
+          cwd: spec.cwd,
+          profileId: 'work'
+        }
+      })
+    );
+  });
+
+  it('passes Claude profile memory ownership without requiring a resume id', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const control = vi.fn().mockResolvedValue({ ok: true });
+    const spec = {
+      ...terminalPlan()[0]!.session,
+      agent: 'claude' as const,
+      profileId: 'work'
+    };
+
+    await expect(runPlan([{ type: 'start', session: spec }], false, { control })).resolves.toBe(0);
+
+    const payload = control.mock.calls[0]?.[1];
+    expect(payload).toMatchObject({
+      claudeMemory: {
+        schemaVersion: 1,
+        provider: 'claude',
+        cwd: spec.cwd,
+        profileId: 'work'
+      }
+    });
+    expect(payload).not.toHaveProperty('continuity');
+  });
+
   it('fails honestly when the daemon cannot provision the session', async () => {
     errors = [];
     vi.spyOn(console, 'log').mockImplementation(() => {});

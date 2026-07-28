@@ -15,6 +15,10 @@ import { loadDeskCached, runningSessionSet } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { atchCommandFor } from '../../shared/atchCommand.js';
 import { sessionStateSubjectFor } from '../../shared/controlPlane/index.js';
+import {
+  claudeContinuityDescriptorFor,
+  claudeProfileMemoryDescriptorFor
+} from '../../shared/claudeContinuityDescriptor.js';
 
 // The atch child command lives in shared/atchCommand — one audited copy for
 // this wrapper and the core runner lifecycle. Re-exported for existing
@@ -28,12 +32,16 @@ export { atchCommandFor };
 /** Provision (spawn + attach) a session's atch master via the daemon. */
 export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
   const sessionId = spec.sessionId;
+  const continuity = claudeContinuityDescriptorFor(spec);
+  const claudeMemory = claudeProfileMemoryDescriptorFor(spec);
   return toOkResult(
     daemonControl('/control/provision', {
       sessionId,
       command: atchCommandFor(spec),
       geometry: { rows: 24, cols: 80 },
-      subject: sessionStateSubjectFor(spec)
+      subject: sessionStateSubjectFor(spec),
+      ...(continuity ? { continuity } : {}),
+      ...(claudeMemory ? { claudeMemory } : {})
     })
   );
 }

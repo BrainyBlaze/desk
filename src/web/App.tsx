@@ -46,6 +46,7 @@ import {
   SquareTerminal,
   StickyNote,
   TerminalSquare,
+  TriangleAlert,
   Trash2,
   Users,
   Volume2,
@@ -871,8 +872,23 @@ export function App(): JSX.Element {
   // the topbar; these are the workflow ones: agents waiting on input, unread
   // events/messages, muted sound, and snapshot sync state.
   const attentionCount = actionableSessions(statusViews).length;
+  const continuityIssues = snapshot?.continuity.issues ?? [];
   const statusGlobals = useMemo<StatusSegment[]>(() => {
     const segments: StatusSegment[] = [];
+    if (continuityIssues.length > 0) {
+      segments.push({
+        key: 'continuity',
+        icon: <TriangleAlert size={11} />,
+        text: `${continuityIssues.length} continuity issue${
+          continuityIssues.length === 1 ? '' : 's'
+        }`,
+        tone: 'danger',
+        hint: continuityIssues
+          .map((issue) => `${issue.sessionId}: ${issue.message}`)
+          .join('\n'),
+        onClick: () => setSubsystem('agents')
+      });
+    }
     if (attentionCount > 0) {
       segments.push({
         key: 'attention',
@@ -924,7 +940,14 @@ export function App(): JSX.Element {
     });
     return segments;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attentionCount, busy, channelsUnread, muted, unreadEvents]);
+  }, [
+    attentionCount,
+    busy,
+    channelsUnread,
+    continuityIssues,
+    muted,
+    unreadEvents
+  ]);
 
   useEffect(() => {
     localStorage.setItem('desk.subsystem', subsystem);

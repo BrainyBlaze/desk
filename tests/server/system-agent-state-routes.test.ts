@@ -12,7 +12,8 @@ import {
   createSystemRoutes,
   type AgentEndpointGateway,
   type AgentStateGateway,
-  type DeskEventGateway
+  type DeskEventGateway,
+  type SystemRoutesOptions
 } from '../../src/server/routes/systemRoutes.js';
 
 interface Captured {
@@ -192,14 +193,16 @@ async function invoke(
   path: string,
   body?: unknown,
   deskEventGateway: DeskEventGateway = eventGateway(),
-  agentEndpointGateway: AgentEndpointGateway = endpointGateway()
+  agentEndpointGateway: AgentEndpointGateway = endpointGateway(),
+  options: Partial<SystemRoutesOptions> = {}
 ): Promise<Captured> {
   const managedAgentLsp = { reconcile: vi.fn(), cleanupAll: vi.fn() };
   const route = createSystemRoutes(managedAgentLsp, {
     agentStateGateway,
     deskEventGateway,
     agentEndpointGateway,
-    now: () => 950
+    now: () => 950,
+    ...options
   });
   const req = new PassThrough() as unknown as IncomingMessage & PassThrough;
   req.method = method;
@@ -251,6 +254,79 @@ describe('canonical system agent-state routes', () => {
         acceptedSeq: 9
       }
     });
+  });
+
+  it('confirms an exact Claude provider session before forwarding SessionStart facts', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn().mockReturnValue({
+      ok: true,
+      generationId: 'generation-a'
+    });
+    const body = producerBody({
+      provider: 'claude',
+      producer: 'claude-hooks',
+      observation: {
+        hook: 'SessionStart',
+        matcher: 'resume',
+        providerSessionId: '11111111-2222-4333-8444-555555555555'
+      }
+    });
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      body,
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart }
+    );
+
+    expect(confirmClaudeSessionStart).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      providerSessionId: '11111111-2222-4333-8444-555555555555'
+    });
+    expect(agentStateGateway.submitEvent).toHaveBeenCalledOnce();
+    expect(result.status).toBe(200);
+  });
+
+  it('rejects a mismatched Claude provider SessionStart before forwarding facts', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn().mockReturnValue({
+      ok: false,
+      code: 'continuity-resume-unconfirmed',
+      error: 'expected one provider session and observed another'
+    });
+    const body = producerBody({
+      provider: 'claude',
+      producer: 'claude-hooks',
+      observation: {
+        hook: 'SessionStart',
+        matcher: 'resume',
+        providerSessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+      }
+    });
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      body,
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart }
+    );
+
+    expect(result).toEqual({
+      handled: true,
+      status: 409,
+      body: {
+        ok: false,
+        code: 'continuity-resume-unconfirmed',
+        error: 'expected one provider session and observed another'
+      }
+    });
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
   });
 
   it.each([400, 404, 409, 503])(

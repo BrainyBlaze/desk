@@ -12,6 +12,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ensurePrivateSocketRoot } from '../../shared/atchPaths.js';
 import {
@@ -44,6 +45,18 @@ import {
   type AgentEndpointStoreResult
 } from './fileAgentEndpointStore.js';
 import { reconcileOpencodeStatus } from '../../core/agentState/opencodeReconcile.js';
+import {
+  readClaudeContinuityDescriptor,
+  readClaudeProfileMemoryDescriptor,
+  type ClaudeContinuityDescriptor,
+  type ClaudeProfileMemoryDescriptor
+} from '../../shared/claudeContinuityDescriptor.js';
+import { prepareClaudeSessionStart as prepareClaudeSessionStartDefault } from '../claudeProfileContinuity.js';
+import {
+  recordClaudeProfileMemorySyncFailure,
+  syncClaudeProfileMemory as syncClaudeProfileMemoryDefault,
+  type SyncClaudeProfileMemoryResult
+} from '../claudeProfileMemory.js';
 import {
   probeHookInstallation,
   type HookInstallationProbe,
@@ -507,6 +520,18 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
  * separate `upgrade` event, so the two never collide. Bodies read through the
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
  */
+export interface DaemonControlHandlerOptions {
+  healthNonce?: string;
+  prepareClaudeSessionStart?: (
+    descriptor: ClaudeContinuityDescriptor,
+    deskSessionId: string
+  ) => unknown;
+  syncClaudeProfileMemory?: (
+    descriptor: ClaudeProfileMemoryDescriptor,
+    deskSessionId: string
+  ) => SyncClaudeProfileMemoryResult;
+}
+
 export function createDaemonControlHandler(
   daemon: Pick<
     TerminalDaemon,
@@ -524,7 +549,7 @@ export function createDaemonControlHandler(
     | 'isReady'
     | 'health'
   >,
-  handlerOptions: { healthNonce?: string } = {}
+  handlerOptions: DaemonControlHandlerOptions = {}
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
@@ -555,13 +580,107 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'invalid subject' });
             return;
           }
+          let claudeMemory: ClaudeProfileMemoryDescriptor | undefined;
+          try {
+            claudeMemory = readClaudeProfileMemoryDescriptor(body.claudeMemory);
+          } catch (error) {
+            sendJson(res, 400, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error)
+            });
+            return;
+          }
+          let continuity: ClaudeContinuityDescriptor | undefined;
+          try {
+            continuity = readClaudeContinuityDescriptor(body.continuity);
+          } catch (error) {
+            sendJson(res, 400, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error)
+            });
+            return;
+          }
+          let memoryAttention:
+            | {
+                code: 'claude-memory-conflicts' | 'claude-memory-sync-failed';
+                count?: number;
+                error?: string;
+              }
+            | undefined;
+          if (claudeMemory) {
+            try {
+              const syncMemory =
+                handlerOptions.syncClaudeProfileMemory ??
+                ((descriptor: ClaudeProfileMemoryDescriptor) =>
+                  syncClaudeProfileMemoryDefault({
+                    homeDir: homedir(),
+                    cwd: descriptor.cwd,
+                    profileId: descriptor.profileId
+                  }));
+              const result = syncMemory(claudeMemory, body.sessionId);
+              if (result.conflicts.length > 0) {
+                memoryAttention = {
+                  code: 'claude-memory-conflicts',
+                  count: result.conflicts.length
+                };
+              }
+            } catch (error) {
+              if (handlerOptions.syncClaudeProfileMemory === undefined) {
+                try {
+                  recordClaudeProfileMemorySyncFailure(
+                    {
+                      homeDir: homedir(),
+                      cwd: claudeMemory.cwd,
+                      profileId: claudeMemory.profileId
+                    },
+                    error
+                  );
+                } catch {
+                  // Provision remains available even when diagnostics cannot persist.
+                }
+              }
+              memoryAttention = {
+                code: 'claude-memory-sync-failed',
+                error: error instanceof Error ? error.message : String(error)
+              };
+            }
+          }
+          if (continuity) {
+            try {
+              const prepare =
+                handlerOptions.prepareClaudeSessionStart ??
+                ((descriptor: ClaudeContinuityDescriptor, deskSessionId: string) =>
+                  prepareClaudeSessionStartDefault({
+                    homeDir: homedir(),
+                    cwd: descriptor.cwd,
+                    providerSessionId: descriptor.providerSessionId,
+                    profileId: descriptor.profileId ?? undefined,
+                    deskSessionId
+                  }));
+              prepare(continuity, body.sessionId);
+            } catch (error) {
+              const code = (error as { code?: unknown } | undefined)?.code;
+              const message = error instanceof Error ? error.message : String(error);
+              sendJson(res, 409, {
+                ok: false,
+                error:
+                  typeof code === 'string' && code.startsWith('continuity-')
+                    ? `${code}: ${message}`
+                    : message
+              });
+              return;
+            }
+          }
           const ens = await daemon.provision(body.sessionId, {
             command: body.command,
             geometry: readProvisionGeometry(body.geometry),
             subject
           });
           if (ens.ok) {
-            sendJson(res, 200, { ok: true });
+            sendJson(res, 200, {
+              ok: true,
+              ...(memoryAttention === undefined ? {} : { memoryAttention })
+            });
           } else {
             sendJson(res, 503, { ok: false, error: `atch provision refused: ${ens.reason}` });
           }

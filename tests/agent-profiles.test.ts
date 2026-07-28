@@ -176,6 +176,31 @@ describe('terminal launch injection', () => {
     });
     expect(specFor('work-codex', m).command).toContain(`CODEX_HOME='${HOME}/.config/desk/profiles/personal'`);
   });
+
+  it('uses exact Claude resume without falling back to another conversation in a profile', () => {
+    const m = manifest({
+      groups: [
+        {
+          id: 'main',
+          sessions: [
+            {
+              name: 'work-resume',
+              sessionId: 'work-resume',
+              agent: 'claude',
+              cwd: '~/p',
+              uiMode: 'terminal',
+              profileId: 'work',
+              resume: '11111111-2222-4333-8444-555555555555'
+            }
+          ]
+        }
+      ]
+    });
+
+    const command = specFor('work-resume', m).command;
+    expect(command).toContain("--resume '11111111-2222-4333-8444-555555555555'");
+    expect(command).not.toContain('--continue');
+  });
 });
 
 describe('native launch injection', () => {

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveManifestPath } from '../../core/config.js';
 import { loadDesk } from '../../core/runner.js';
@@ -21,6 +22,10 @@ import {
   type DaemonControlResult
 } from '../../shared/daemonControlClient.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
+import {
+  confirmClaudeSessionStart as confirmClaudeSessionStartDefault,
+  type ConfirmClaudeSessionStartResult
+} from '../claudeProfileContinuity.js';
 import { executeKillSwitch } from '../killSwitch.js';
 import type { DeskRoute } from '../plugin.js';
 import { buildDeskSnapshot } from '../snapshot.js';
@@ -50,7 +55,15 @@ export interface SystemRoutesOptions {
   agentStateGateway?: AgentStateGateway;
   agentEndpointGateway?: AgentEndpointGateway;
   deskEventGateway?: DeskEventGateway;
+  confirmClaudeSessionStart?: (
+    input: ClaudeSessionStartIdentity
+  ) => ConfirmClaudeSessionStartResult;
   now?: () => number;
+}
+
+export interface ClaudeSessionStartIdentity {
+  deskSessionId: string;
+  providerSessionId: string;
 }
 
 interface AgentStateView {
@@ -78,6 +91,45 @@ const defaultDeskEventGateway: DeskEventGateway = {
   markEventsRead: (input) => daemonControl('/control/events/read', input),
   clearEvents: () => daemonControl('/control/events/clear', {})
 };
+
+function claudeSessionStartIdentity(
+  input: unknown
+):
+  | { kind: 'none' }
+  | { kind: 'invalid'; error: string }
+  | { kind: 'identity'; value: ClaudeSessionStartIdentity } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { kind: 'none' };
+  }
+  const body = input as Record<string, unknown>;
+  if (body.provider !== 'claude' || body.producer !== 'claude-hooks') {
+    return { kind: 'none' };
+  }
+  const observation = body.observation;
+  if (!observation || typeof observation !== 'object' || Array.isArray(observation)) {
+    return { kind: 'none' };
+  }
+  const fields = observation as Record<string, unknown>;
+  if (fields.hook !== 'SessionStart') {
+    return { kind: 'none' };
+  }
+  if (
+    typeof fields.providerSessionId !== 'string' ||
+    fields.providerSessionId.trim().length === 0
+  ) {
+    return {
+      kind: 'invalid',
+      error: 'Claude SessionStart did not include a provider session id'
+    };
+  }
+  return {
+    kind: 'identity',
+    value: {
+      deskSessionId: body.sessionId as string,
+      providerSessionId: fields.providerSessionId.trim()
+    }
+  };
+}
 
 function gatewayFailure(result: DaemonControlResult): Extract<AgentStateRead, { ok: false }> {
   const status =
@@ -201,6 +253,13 @@ export function createSystemRoutes(
   const agentEndpointGateway =
     options.agentEndpointGateway ?? defaultAgentEndpointGateway;
   const deskEventGateway = options.deskEventGateway ?? defaultDeskEventGateway;
+  const confirmClaudeSessionStart =
+    options.confirmClaudeSessionStart ??
+    ((input: ClaudeSessionStartIdentity) =>
+      confirmClaudeSessionStartDefault({
+        homeDir: homedir(),
+        ...input
+      }));
   const now = options.now ?? Date.now;
   return async (req, res, url) => {
     if (req.method === 'GET' && url.pathname === '/api/desk') {
@@ -263,6 +322,31 @@ export function createSystemRoutes(
           reason: adapted.reason
         });
         return true;
+      }
+      const sessionStart = claudeSessionStartIdentity(body);
+      if (sessionStart.kind === 'invalid') {
+        sendJson(res, 409, {
+          ok: false,
+          code: 'continuity-resume-unconfirmed',
+          error: sessionStart.error
+        });
+        return true;
+      }
+      if (sessionStart.kind === 'identity') {
+        let confirmation: ConfirmClaudeSessionStartResult;
+        try {
+          confirmation = confirmClaudeSessionStart(sessionStart.value);
+        } catch (error) {
+          confirmation = {
+            ok: false,
+            code: 'continuity-store-corrupt',
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+        if (!confirmation.ok) {
+          sendJson(res, 409, confirmation);
+          return true;
+        }
       }
       if (adapted.kind === 'no-facts') {
         sendJson(res, 200, { ok: true, kind: 'no-facts' });

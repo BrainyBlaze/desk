@@ -1,12 +1,18 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionPlanAction, SessionSpec } from '../../src/core/types.js';
+import { parseDeskManifest } from '../../src/core/manifest.js';
 import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
-import { createSessionsRoutes, readDeskSessionBody, runManagedPlan } from '../../src/server/routes/sessionsRoutes.js';
+import {
+  commitManifestIfUnchanged,
+  createSessionsRoutes,
+  readDeskSessionBody,
+  runManagedPlan
+} from '../../src/server/routes/sessionsRoutes.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -213,6 +219,204 @@ describe('sessions route native edit identity', () => {
       if (savedEnv.DESK_DAEMON_URL === undefined) delete process.env.DESK_DAEMON_URL;
       else process.env.DESK_DAEMON_URL = savedEnv.DESK_DAEMON_URL;
       vi.unstubAllGlobals();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sessions route Claude profile continuity', () => {
+  it('rejects a prepared profile edit when the manifest changed concurrently', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-profile-edit-cas-'));
+    const manifestPath = join(root, 'desk.yml');
+    const original = 'groups: []\n';
+    const concurrent = 'groups: []\nsettings:\n  theme: dark\n';
+    try {
+      writeFileSync(manifestPath, original);
+      writeFileSync(manifestPath, concurrent);
+
+      await expect(
+        commitManifestIfUnchanged(
+          manifestPath,
+          original,
+          parseDeskManifest('groups: []\n')
+        )
+      ).rejects.toThrow('manifest-changed-concurrently');
+      expect(readFileSync(manifestPath, 'utf8')).toBe(concurrent);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a Claude profile change without a resume id before committing the manifest', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-profile-edit-home-'));
+    const work = mkdtempSync(join(tmpdir(), 'desk-profile-edit-work-'));
+    const previousHome = process.env.HOME;
+    try {
+      mkdirSync(join(home, '.config', 'desk'), { recursive: true });
+      const manifestPath = join(home, '.config', 'desk', 'desk.yml');
+      writeFileSync(
+        manifestPath,
+        [
+          'profiles:',
+          '  - id: source',
+          '    provider: claude',
+          '    label: Source',
+          '  - id: target',
+          '    provider: claude',
+          '    label: Target',
+          'projects:',
+          '  - id: proj',
+          '    label: Proj',
+          `    cwd: ${work}`,
+          '    groups:',
+          '      - id: g',
+          '        label: G',
+          '        sessions:',
+          '          - name: chat',
+          '            agent: claude',
+          '            sessionId: desk-chat',
+          '            profileId: source',
+          '            uiMode: terminal'
+        ].join('\n') + '\n'
+      );
+      process.env.HOME = home;
+
+      const req = Object.assign(new PassThrough(), {
+        method: 'POST',
+        url: '/api/edit-project-session',
+        headers: { 'content-type': 'application/json' }
+      }) as unknown as IncomingMessage;
+      req.end(
+        JSON.stringify({
+          projectId: 'proj',
+          groupId: 'g',
+          currentName: 'chat',
+          session: { name: 'chat', agent: 'claude', profileId: 'target' }
+        })
+      );
+      const chunks: string[] = [];
+      const res = {
+        statusCode: 0,
+        setHeader: () => undefined,
+        end: (payload?: unknown) => {
+          if (payload !== undefined) chunks.push(String(payload));
+        }
+      } as unknown as ServerResponse;
+      const route = createSessionsRoutes({
+        managedAgentLsp: { prepare: vi.fn(), cleanup: vi.fn() } as never,
+        nativeAgentLaunch: (spec) => spec,
+        agentSurfaceBroker: { disposeSession: vi.fn() }
+      });
+
+      await createDeskApiMiddleware([route])(req, res, vi.fn());
+
+      expect(res.statusCode).toBe(500);
+      expect(chunks.join('')).toContain('continuity-no-resume-id');
+      const persisted = readFileSync(manifestPath, 'utf8');
+      expect(persisted).toContain('profileId: source');
+      expect(persisted).not.toContain('profileId: target');
+    } finally {
+      process.env.HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('materializes a stopped session in the target profile before committing the profile edit', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-profile-edit-home-'));
+    const work = mkdtempSync(join(tmpdir(), 'desk-profile-edit-work-'));
+    const previousHome = process.env.HOME;
+    try {
+      mkdirSync(join(home, '.config', 'desk'), { recursive: true });
+      const manifestPath = join(home, '.config', 'desk', 'desk.yml');
+      const providerSessionId = '11111111-2222-4333-8444-555555555555';
+      writeFileSync(
+        manifestPath,
+        [
+          'profiles:',
+          '  - id: source',
+          '    provider: claude',
+          '    label: Source',
+          '  - id: target',
+          '    provider: claude',
+          '    label: Target',
+          'projects:',
+          '  - id: proj',
+          '    label: Proj',
+          `    cwd: ${work}`,
+          '    groups:',
+          '      - id: g',
+          '        label: G',
+          '        sessions:',
+          '          - name: chat',
+          '            agent: claude',
+          '            sessionId: desk-chat',
+          `            resume: ${providerSessionId}`,
+          '            profileId: source',
+          '            uiMode: terminal'
+        ].join('\n') + '\n'
+      );
+      const projectSlug = work.replace(/[^A-Za-z0-9._-]/g, '-');
+      const sourceTranscript = join(
+        home,
+        '.config',
+        'desk',
+        'profiles',
+        'source',
+        'projects',
+        projectSlug,
+        `${providerSessionId}.jsonl`
+      );
+      mkdirSync(join(sourceTranscript, '..'), { recursive: true });
+      writeFileSync(sourceTranscript, 'conversation');
+      process.env.HOME = home;
+
+      const req = Object.assign(new PassThrough(), {
+        method: 'POST',
+        url: '/api/edit-project-session',
+        headers: { 'content-type': 'application/json' }
+      }) as unknown as IncomingMessage;
+      req.end(
+        JSON.stringify({
+          projectId: 'proj',
+          groupId: 'g',
+          currentName: 'chat',
+          session: { name: 'chat', agent: 'claude', profileId: 'target' }
+        })
+      );
+      const chunks: string[] = [];
+      const res = {
+        statusCode: 0,
+        setHeader: () => undefined,
+        end: (payload?: unknown) => {
+          if (payload !== undefined) chunks.push(String(payload));
+        }
+      } as unknown as ServerResponse;
+      const route = createSessionsRoutes({
+        managedAgentLsp: { prepare: vi.fn(), cleanup: vi.fn() } as never,
+        nativeAgentLaunch: (spec) => spec,
+        agentSurfaceBroker: { disposeSession: vi.fn() }
+      });
+
+      await createDeskApiMiddleware([route])(req, res, vi.fn());
+
+      expect(res.statusCode, chunks.join('')).toBe(200);
+      const targetTranscript = join(
+        home,
+        '.config',
+        'desk',
+        'profiles',
+        'target',
+        'projects',
+        projectSlug,
+        `${providerSessionId}.jsonl`
+      );
+      expect(readFileSync(targetTranscript, 'utf8')).toBe('conversation');
+      expect(statSync(targetTranscript).ino).toBe(statSync(sourceTranscript).ino);
+      expect(readFileSync(manifestPath, 'utf8')).toContain('profileId: target');
+    } finally {
+      process.env.HOME = previousHome;
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }

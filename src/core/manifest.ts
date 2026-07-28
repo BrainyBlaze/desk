@@ -397,7 +397,7 @@ export function buildAgentCommand(
     }
     const baseCommand = args.join(' ');
     if (session.resume) {
-      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume, cwd)}`;
+      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume)}`;
     }
     return `cd ${shellQuote(cwd)} && ${env} ${baseCommand}`;
   }
@@ -470,23 +470,13 @@ function profileCommandPrefix(session: DeskSession, homeDir: string): string {
   return `${profileScrubPrefix()} ${profileEnvPrefix(session.agent, profileId, homeDir)} `;
 }
 
-function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {
-  const sdkTranscript = shellDoubleQuoteHomePath(`/.claude/projects/${claudeProjectDirName(cwd)}/${resume}.jsonl`);
+function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string): string {
   const resumeArg = shellQuote(resume);
   return [
-    `desk_claude_session=${sdkTranscript}`,
     `${env} ${baseCommand} --resume ${resumeArg}`,
     'desk_claude_resume_status=$?',
-    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue" >&2; if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi; ${env} ${baseCommand} --continue; desk_claude_continue_status=$?; if [ "$desk_claude_continue_status" -ne 0 ]; then printf '%s\\n' "desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi; fi`
+    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi`
   ].join('; ');
-}
-
-function claudeProjectDirName(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9._-]/g, '-');
-}
-
-function shellDoubleQuoteHomePath(pathAfterHome: string): string {
-  return `"$HOME${pathAfterHome.replace(/(["\\`$])/g, '\\$1')}"`;
 }
 
 // shellQuote now lives in ../shared/shell.ts (single audited copy).
