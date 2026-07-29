@@ -183,7 +183,7 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "76033f4ce128687dd7b737c0104d1b1f7d0ea9421cb81ab73a7cbcfb99a642be",
+    "digest": "db2e63a2d4cce7712f7f1ec63f706aaa3effb821f10010ed062d91b731fff7bc",
     "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
   },
   "localPatches": [
@@ -266,6 +266,15 @@
         "tests/test_wire_v3.c"
       ],
       "alsoIncludes": "A regression that completes two schema-valid fragmented messages through one reassembler and verifies the second payload contains only its own bytes.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "fix: accumulate fragmented legacy control packets",
+      "why": "The nonblocking control path treated every short legacy read as a fatal packet, so a valid fixed-size packet split by the stream transport disconnected the client and dropped its command.",
+      "files": [
+        "master.c"
+      ],
+      "alsoIncludes": "The protocol discriminator is consumed into per-client state, allowing legacy packet continuation, preserving the v3 magic for framed parsing, and releasing peers that close after a one-to-three-byte prefix instead of leaking their descriptors.",
       "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
     }
   ]

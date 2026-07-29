@@ -66,6 +66,9 @@ struct client {
 	/* Scrollback replay state: physical ring index and bytes remaining. */
 	size_t replay_head;
 	size_t replay_remaining;
+	int protocol_known;
+	struct packet legacy_rx;
+	size_t legacy_rx_len;
 	int v3;
 	unsigned char *v3_rx;
 	size_t v3_rx_cap;
@@ -992,6 +995,8 @@ static void control_activity(int s)
 	p->attached = 0;
 	p->replay_head = 0;
 	p->replay_remaining = 0;
+	p->protocol_known = 0;
+	p->legacy_rx_len = 0;
 	p->v3 = 0;
 	p->v3_rx = NULL;
 	p->v3_rx_cap = p->v3_rx_len = 0;
@@ -1013,35 +1018,37 @@ static void client_activity(struct client *p)
 {
 	ssize_t len;
 	struct packet pkt;
-	unsigned char magic[4];
+	unsigned char *legacy_rx = (unsigned char *)&p->legacy_rx;
 
-	if (!p->v3) {
-		len = recv(p->fd, magic, sizeof(magic), MSG_PEEK);
-		/* Nothing readable yet: keep waiting for the magic. */
+	if (!p->protocol_known) {
+		/*
+		** Consume the four-byte discriminator instead of peeking forever.
+		** Besides making a 1..3-byte EOF releasable, this lets a legacy
+		** packet retain the prefix while the rest arrives in later reads.
+		*/
+		len = read(p->fd, legacy_rx + p->legacy_rx_len,
+			4 - p->legacy_rx_len);
 		if (len < 0 && (errno == EAGAIN || errno == EINTR))
 			return;
-		/* Any other receive error is fatal for this client. */
-		if (len < 0) {
+		if (len <= 0) {
 			client_drop(p);
 			return;
 		}
-		/* EOF. The peer connected and closed without sending the magic
-		** (a liveness probe does exactly this). Dropping here is what
-		** keeps the accepted fd from leaking: a closed socket stays
-		** readable forever, so returning would re-enter this function
-		** on every select() and never release the descriptor. Leaked
-		** fds accumulated until the fd_set overran and the master
-		** aborted, which surfaced as sessions dying about a minute
-		** after boot. */
-		if (len == 0) {
-			client_drop(p);
+		p->legacy_rx_len += (size_t)len;
+		if (p->legacy_rx_len < 4)
 			return;
-		}
-		/* 1..3 bytes: a partial magic is legitimate; wait for the rest. */
-		if (len < (ssize_t)sizeof(magic))
-			return;
-		if (!memcmp(magic, "ATV3", 4))
+		p->protocol_known = 1;
+		if (!memcmp(legacy_rx, "ATV3", 4)) {
 			p->v3 = 1;
+			p->v3_rx = malloc(4);
+			if (!p->v3_rx) {
+				client_drop(p);
+				return;
+			}
+			memcpy(p->v3_rx, legacy_rx, 4);
+			p->v3_rx_cap = p->v3_rx_len = 4;
+			p->legacy_rx_len = 0;
+		}
 	}
 	if (p->v3) {
 		if (client_activity_v3(p) < 0)
@@ -1049,16 +1056,21 @@ static void client_activity(struct client *p)
 		return;
 	}
 
-	/* Read the activity. */
-	len = read(p->fd, &pkt, sizeof(struct packet));
+	/* Accumulate one complete fixed-size legacy packet across short reads. */
+	len = read(p->fd, legacy_rx + p->legacy_rx_len,
+		sizeof(struct packet) - p->legacy_rx_len);
 	if (len < 0 && (errno == EAGAIN || errno == EINTR))
 		return;
 
-	/* Close the client on an error. */
-	if (len != sizeof(struct packet)) {
+	if (len <= 0) {
 		client_drop(p);
 		return;
 	}
+	p->legacy_rx_len += (size_t)len;
+	if (p->legacy_rx_len < sizeof(struct packet))
+		return;
+	memcpy(&pkt, &p->legacy_rx, sizeof(pkt));
+	p->legacy_rx_len = 0;
 
 	/* Push out data to the program. */
 	if (pkt.type == MSG_PUSH) {
