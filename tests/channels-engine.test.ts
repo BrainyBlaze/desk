@@ -13,6 +13,7 @@ import {
 } from '../src/server/channelsDurability.js';
 import { readDeliveryEvents } from '../src/server/channelsEvents.js';
 import { pauseSession as persistPausedSession } from '../src/server/channelsPaused.js';
+import { DELIVERY_BLOCK_REASONS } from '../src/server/channelsProtocol.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
 import {
   appendMessage,
@@ -93,15 +94,22 @@ describe('ChannelsEngine delivery gating', () => {
       verifyCycles: 1,
       sendText: async (session, text) => {
         sent.push({ session, text });
-        const notificationId = text.match(/notificationId:([A-Za-z0-9_.:-]+)/)?.[1];
-        if (notificationId) {
-          queueMicrotask(() => engine.handleDeliveryAck(session, notificationId));
-        }
         return true;
       },
       sessionRunning: (session) => running.has(session),
       capturePane: async () => pane
     });
+  });
+
+  it('defines exactly the live delivery block reasons', () => {
+    expect(DELIVERY_BLOCK_REASONS).toEqual([
+      'offline',
+      'booting',
+      'draining',
+      'send-failed',
+      'submit-stuck-paste',
+      'submit-stuck-submit'
+    ]);
   });
 
   afterEach(() => {
@@ -570,7 +578,6 @@ describe('ChannelsEngine delivery gating', () => {
       members
     );
     await waitFor(() => readDeliveryEvents(home).some((event) => event.kind === 'delivering'));
-    historical.handleDeliveryAck('tmux-a', 'msg-history-1');
     await waitFor(() => readDeliveryEvents(home).some((event) => event.kind === 'submitted'));
 
     const events = readDeliveryEvents(home);
@@ -670,7 +677,6 @@ describe('ChannelsEngine delivery gating', () => {
     // alter the activity projection.
     paused.resumeSession('tmux-a');
     await waitFor(() => pushed.length === 1, 1000);
-    paused.handleDeliveryAck('tmux-a', 'msg-paused-1');
     const released = await paused.inspectSession('tmux-a');
     expect(released.activity).toBe('idle');
     expect(released.deliveryStatus).toBe('ready');
@@ -802,7 +808,6 @@ describe('ChannelsEngine delivery gating', () => {
     });
     recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-aaaa', 'human', '@alpha one') }, members);
     await waitFor(() => pushed.length === 1, 1000);
-    recovering.handleDeliveryAck('tmux-a', 'msg-10-aaaa');
     pane = WORKING_PANE; // agent picks up msg-1 and works
     recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-bbbb', 'human', '@alpha two') }, members);
     await waitFor(() => pushed.length === 2, 1500);
@@ -810,7 +815,7 @@ describe('ChannelsEngine delivery gating', () => {
     recovering.dispose();
   });
 
-  it('a failed paste clears the delivering claim so the queue is not stuck forever', async () => {
+  it('reports send-failed and clears the delivering claim so the queue can retry', async () => {
     // Regression for the probe-authoritative refactor: deliverNext sets
     // submitState='delivering' BEFORE the paste. A failed paste never reaches
     // verifySubmitted to resolve that claim — and the drain double-feed guard
@@ -823,7 +828,8 @@ describe('ChannelsEngine delivery gating', () => {
       sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
-      pumpIntervalMs: 20,
+      pumpIntervalMs: 1000,
+      blockedAfterCycles: 0,
       enterVerifyDelayMs: 5,
       verifyCycles: 1,
       sendText: async (_session, text) => {
@@ -838,8 +844,11 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => READY_PANE
     });
     flaky.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fail-aaaa', 'human', '@alpha retry me') }, members);
+    await waitFor(async () => (await flaky.inspectSession('tmux-a')).blockedReason === 'send-failed');
+    expect((await flaky.inspectSession('tmux-a')).blockedReason).toBe('send-failed');
     // The first paste fails; the pump must RETRY and the second paste succeeds.
     // It would never retry if submitState stayed 'delivering' (the guard).
+    await flaky.drainReady();
     await waitFor(() => pushed.length === 1, 2000);
     expect(pushed[0]).toContain('msg-fail-aaaa');
     flaky.dispose();
@@ -881,7 +890,7 @@ describe('ChannelsEngine delivery gating', () => {
     verifying.dispose();
   });
 
-  it('successful notification paste confirms delivery without footer-hash or hook ACK', async () => {
+  it('successful notification paste transitions directly to submitted', async () => {
     const sent: string[] = [];
     const enters: string[] = [];
     const states: string[] = [];
@@ -915,7 +924,7 @@ describe('ChannelsEngine delivery gating', () => {
     acked.dispose();
   });
 
-  it('missing hook ACK cannot strand notifications in delivering state', async () => {
+  it('notification delivery cannot remain stranded in delivering state', async () => {
     const sent: string[] = [];
     const enters: string[] = [];
     const events: Array<{ state: string; seq: number }> = [];
@@ -983,7 +992,11 @@ describe('ChannelsEngine delivery gating', () => {
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pastes).toBe(1); // delivered once; NEVER re-pasted (no double delivery)
     expect(enters).toEqual(['tmux-a', 'tmux-a', 'tmux-a']); // safe Enter each cycle
-    expect((await stuck.inspectSession('tmux-a')).submitState).toBe('submit-stuck-paste');
+    expect(await stuck.inspectSession('tmux-a')).toMatchObject({
+      submitState: 'submit-stuck-paste',
+      deliveryBlocked: true,
+      blockedReason: 'submit-stuck-paste'
+    });
     stuck.dispose();
   });
 
@@ -1015,7 +1028,11 @@ describe('ChannelsEngine delivery gating', () => {
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pastes).toBe(1); // delivered once; never re-pasted (the box did change)
     expect(enters).toEqual(['tmux-a', 'tmux-a', 'tmux-a']); // Enter retried each cycle
-    expect((await stuck.inspectSession('tmux-a')).submitState).toBe('submit-stuck-submit');
+    expect(await stuck.inspectSession('tmux-a')).toMatchObject({
+      submitState: 'submit-stuck-submit',
+      deliveryBlocked: true,
+      blockedReason: 'submit-stuck-submit'
+    });
     stuck.dispose();
   });
 
@@ -1070,17 +1087,13 @@ describe('ChannelsEngine delivery gating', () => {
   it('fires onSubmitStateChange once per coalesced seq for a digest delivery', async () => {
     let activity: 'idle' | 'working' = 'idle';
     const events: Array<{ state: string; seq: number }> = [];
-    let cb: ChannelsEngine;
-    cb = new ChannelsEngine({
+    const cb = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
       enterVerifyDelayMs: 25,
       verifyCycles: 1,
-      sendText: async (_session, text) => {
+      sendText: async () => {
         activity = 'working';
-        if (text.includes('notificationId:msg-16-aaaa')) {
-          queueMicrotask(() => cb.handleDeliveryAck('tmux-a', 'msg-16-aaaa'));
-        }
         return true;
       },
       sendEnter: async () => true,
@@ -1609,6 +1622,7 @@ describe('ChannelsEngine delivery gating', () => {
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
+      blockedAfterCycles: 1,
       enterVerifyDelayMs: 1,
       sendText: async (_s, text) => {
         pushed.push(text);
@@ -1621,6 +1635,7 @@ describe('ChannelsEngine delivery gating', () => {
     onboarding.enqueuePrompt('tmux-a', 'ops', 'welcome aboard @alpha', 'onboard-ops');
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(pushed).toEqual([]);
+    expect((await onboarding.inspectSession('tmux-a')).blockedReason).toBe('booting');
     lifecycle = 'running';
     await onboarding.drainReady();
     await waitFor(() => pushed.length === 1);
@@ -1628,7 +1643,30 @@ describe('ChannelsEngine delivery gating', () => {
     onboarding.dispose();
   });
 
-  it('acknowledges native prompts from broker injection without tmux verification', async () => {
+  it('reports offline while an exited session cannot receive queued prompts', async () => {
+    const pushed: string[] = [];
+    const offline = new ChannelsEngine({
+      sendEnter: async () => true,
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 10,
+      blockedAfterCycles: 1,
+      sendText: async (_session, text) => {
+        pushed.push(text);
+        return true;
+      },
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'exited' }),
+      sessionRunning: () => false,
+      capturePane: async () => 'raw terminal bytes'
+    });
+    offline.enqueuePrompt('tmux-a', 'ops', 'wait for restart', 'offline-prompt');
+    await waitFor(async () => (await offline.inspectSession('tmux-a')).blockedReason === 'offline');
+    expect((await offline.inspectSession('tmux-a')).blockedReason).toBe('offline');
+    expect(pushed).toEqual([]);
+    offline.dispose();
+  });
+
+  it('marks native prompts submitted after broker injection without tmux verification', async () => {
     const pushed: string[] = [];
     const native = new ChannelsEngine({
       sendEnter: async () => true,
@@ -1924,6 +1962,8 @@ describe('engine drain race safety', () => {
       sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
+      pumpIntervalMs: 5,
+      blockedAfterCycles: 1,
       drainWatchdogMs: 10,
       sendText: async (_session, text) => {
         sent.push(text);
@@ -1939,6 +1979,12 @@ describe('engine drain race safety', () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-watchdog', 'human', '@alpha go') }, members);
     await flush();
     await new Promise((resolve) => setTimeout(resolve, 20));
+    let observedBlockReason: string | undefined;
+    await waitFor(async () => {
+      observedBlockReason = (await engine.inspectSession('tmux-a')).blockedReason;
+      return observedBlockReason !== undefined;
+    });
+    expect(observedBlockReason).toBe('draining');
     await engine.drainReady();
     await flush();
     expect(sent).toHaveLength(1);
@@ -2171,10 +2217,6 @@ describe('ChannelsEngine digest coalescing', () => {
       verifyCycles: 1,
       sendText: async (session, text) => {
         sent.push({ session, text });
-        const notificationId = text.match(/notificationId:([A-Za-z0-9_.:-]+)/)?.[1];
-        if (notificationId) {
-          queueMicrotask(() => engine.handleDeliveryAck(session, notificationId));
-        }
         return true;
       },
       sessionRunning: () => true,
@@ -2192,7 +2234,6 @@ describe('ChannelsEngine digest coalescing', () => {
   it('coalesces a multi-message backlog into one digest delivery', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
-    engine.handleDeliveryAck('tmux-a', 'msg-1-aaaa');
     engine.pauseSession('tmux-a', 'accumulate digest backlog');
 
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'beta', '@alpha two') }, members);
@@ -2222,7 +2263,6 @@ describe('ChannelsEngine digest coalescing', () => {
   it('a single queued message drains as a notification-only turn prompt', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
-    engine.handleDeliveryAck('tmux-a', 'msg-1-aaaa');
     engine.pauseSession('tmux-a', 'accumulate single item');
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha only one waiting') }, members);
     await flush();

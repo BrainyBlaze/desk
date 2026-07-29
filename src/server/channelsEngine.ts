@@ -491,15 +491,6 @@ interface MemberRuntime {
   submitState?: SubmitState;
   /** seqs covered by the current submitState, for ops diagnostics after queue shift */
   submitStateSeqs?: number[];
-  /** notification delivery awaiting UserPromptSubmit/delivery-ack confirmation */
-  pendingAck?: {
-    notificationId: string;
-    seqs: number[];
-    payload: string;
-    enterRetries: number;
-    replays: number;
-    timer?: NodeJS.Timeout;
-  };
   /** consecutive drain holds for the current queue head */
   deliveryBlock?: {
     reason: DeliveryBlockReason;
@@ -510,7 +501,7 @@ interface MemberRuntime {
   };
   /** prompts dropped by the queue cap since this runtime was created */
   droppedQueueItems?: number;
-  /** intentional operator hold; distinct from busy/stuck and does not count hold cycles */
+  /** intentional operator hold; distinct from draining/stuck and does not count hold cycles */
   pausedByOperator?: {
     reason?: string;
     since: string;
@@ -927,92 +918,6 @@ export class ChannelsEngine {
     };
   }
 
-  private clearPendingAck(runtime: MemberRuntime): void {
-    if (runtime.pendingAck?.timer) {
-      clearTimeout(runtime.pendingAck.timer);
-    }
-    runtime.pendingAck = undefined;
-  }
-
-  private startPendingAck(
-    runtime: MemberRuntime,
-    notificationId: string,
-    seqs: number[],
-    payload: string,
-    schedule = true
-  ): void {
-    this.clearPendingAck(runtime);
-    runtime.pendingAck = {
-      notificationId,
-      seqs: [...seqs],
-      payload,
-      enterRetries: 0,
-      replays: 0
-    };
-    if (schedule) {
-      this.scheduleAckCheck(runtime);
-    }
-  }
-
-  private scheduleAckCheck(runtime: MemberRuntime): void {
-    const pending = runtime.pendingAck;
-    if (!pending || this.disposed) {
-      return;
-    }
-    pending.timer = setTimeout(() => {
-      void this.handleAckTimeout(runtime, pending.notificationId);
-    }, this.enterVerifyDelayMs);
-    pending.timer.unref?.();
-  }
-
-  private async handleAckTimeout(runtime: MemberRuntime, notificationId: string): Promise<void> {
-    const pending = runtime.pendingAck;
-    if (!pending || pending.notificationId !== notificationId || this.disposed) {
-      return;
-    }
-    pending.timer = undefined;
-    if (pending.enterRetries < this.verifyCycles) {
-      pending.enterRetries += 1;
-      await this.sendEnter(runtime.sessionId);
-      if (runtime.pendingAck?.notificationId === notificationId) {
-        this.scheduleAckCheck(runtime);
-      }
-      return;
-    }
-    if (pending.replays < 1) {
-      pending.replays += 1;
-      pending.enterRetries = 0;
-      const delivered = await this.sendText(runtime.sessionId, pending.payload);
-      if (!delivered) {
-        this.clearPendingAck(runtime);
-        runtime.submitState = undefined;
-        runtime.submitStateSeqs = undefined;
-        this.recordHold(runtime, 'send-failed', false);
-        return;
-      }
-      if (runtime.pendingAck?.notificationId === notificationId) {
-        this.scheduleAckCheck(runtime);
-      }
-      return;
-    }
-    this.setSubmitState(runtime, 'delivery-ack-timeout', pending.seqs);
-    this.clearPendingAck(runtime);
-    runtime.submitState = undefined;
-    runtime.submitStateSeqs = undefined;
-  }
-
-  handleDeliveryAck(sessionId: string, notificationId: string): boolean {
-    const runtime = this.members.get(sessionId);
-    if (!runtime?.pendingAck || runtime.pendingAck.notificationId !== notificationId) {
-      return false;
-    }
-    const seqs = [...runtime.pendingAck.seqs];
-    this.clearPendingAck(runtime);
-    runtime.unobservableRetries = 0;
-    this.setSubmitState(runtime, 'submitted', seqs);
-    return true;
-  }
-
   /**
    * Materialize the one-time cutover journal into the normal queue lifecycle.
    * Every target name is deterministic, so a crash before the commit marker can
@@ -1236,9 +1141,6 @@ export class ChannelsEngine {
    */
   dispose(): void {
     this.disposed = true;
-    for (const runtime of this.members.values()) {
-      this.clearPendingAck(runtime);
-    }
     this.members.clear();
     if (this.pumpTimer) {
       clearInterval(this.pumpTimer);
@@ -1444,7 +1346,7 @@ export class ChannelsEngine {
       // which makes the wedged coroutine bail at its next await instead of
       // double-delivering (single-flight).
       if (runtime.deliveryInFlight || this.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs) {
-        this.recordHold(runtime, 'busy', countHoldCycle);
+        this.recordHold(runtime, 'draining', countHoldCycle);
         return;
       }
       runtime.draining = false; // reclaim the wedged lock
@@ -1599,7 +1501,6 @@ export class ChannelsEngine {
       runtime.deliveryInFlight = false;
     }
     if (!delivered) {
-      this.clearPendingAck(runtime);
       // The paste failed, so this delivery never reaches verifySubmitted to
       // resolve the 'delivering' claim made above. Clear it here, or the drain
       // double-feed guard (submitState==='delivering') would hold the queue

@@ -158,9 +158,9 @@ export interface ChannelActivityEvent {
  *  - `submit-stuck-unobservable` — no positive observation across N cycles
  *    (capture null/failed throughout); submission unconfirmed, so at-least-once
  *    replay (the message-id embedded in the prompt makes the replay safe).
- *  - `delivery-ack-timeout` — notification-only delivery exhausted its ACK
- *    budget without a UserPromptSubmit/delivery-ack event. This is degraded
- *    hook/liveness evidence, not a durable stuck-submit class.
+ *  - `delivery-ack-timeout` — legacy persisted/historical state retained for
+ *    fail-closed repair and event timelines. The live runtime no longer emits
+ *    delivery ACK outcomes.
  * The on-disk ack-file durability layer keys its `.delivering/.delivered/
  * .stuck-*` renames on these transitions.
  */
@@ -173,24 +173,20 @@ export type SubmitState =
   | 'submit-stuck-unobservable';
 
 /** Why a session's queue is currently held (ops-console diagnostic). */
-// `input-requested`, `not-ready`, `operator-blocked` and `provider-blocked`
-// were removed with the activity gate: delivery no longer refuses on what the
-// agent is DOING, so nothing can produce them. A reason nobody emits is a state
-// the console would render and an operator would try to interpret.
-export type DeliveryBlockReason =
-  | 'approval'
-  | 'offline'
-  | 'booting'
-  | 'busy'
-  | 'trust-menu'
-  | 'selection-menu'
-  | 'unknown-menu'
-  | 'empty-capture'
-  | 'capture-failed'
-  | 'unobservable'
-  | 'send-failed'
-  | 'submit-stuck-paste'
-  | 'submit-stuck-submit';
+// This runtime list is deliberately exhaustive: lifecycle refusal, drain
+// single-flight ownership, transport failure, and the two observable terminal
+// submit failures are the only production paths that can populate
+// SessionDiagnostic.blockedReason.
+export const DELIVERY_BLOCK_REASONS = [
+  'offline',
+  'booting',
+  'draining',
+  'send-failed',
+  'submit-stuck-paste',
+  'submit-stuck-submit'
+] as const;
+
+export type DeliveryBlockReason = (typeof DELIVERY_BLOCK_REASONS)[number];
 
 /** Durable queue item shared by the delivery engine and persistence layer. */
 export interface QueuedPrompt {

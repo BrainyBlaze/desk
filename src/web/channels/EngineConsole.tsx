@@ -21,16 +21,9 @@ import {
  */
 
 const BLOCK_REASON_LABEL: Record<DeliveryBlockReason, string> = {
-  approval: 'approval',
   offline: 'offline',
   booting: 'booting',
-  busy: 'working',
-  'trust-menu': 'trust menu',
-  'selection-menu': 'selection menu',
-  'unknown-menu': 'menu',
-  'empty-capture': 'empty capture',
-  'capture-failed': 'capture failed',
-  unobservable: 'no capture',
+  draining: 'engine drain in progress',
   'send-failed': 'send failed',
   'submit-stuck-paste': 'paste stuck',
   'submit-stuck-submit': 'submit stuck'
