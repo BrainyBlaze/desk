@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import { fetchPulse } from './api.js';
-import { sessionStatusView, type SessionStatusView } from './agentStatusModel.js';
+import { UNKNOWN_AGENT, sessionStatusView, type SessionStatusView } from './agentStatusModel.js';
 import { patchViewLiveness } from './pulse.js';
 import { emitBridgeRetry } from './terminalHeartbeat.js';
 import { pushSparkSample } from './systemFormat.js';
@@ -117,6 +117,10 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
         if (alive) {
           pulseFailingRef.current = true;
           setSystemError(err instanceof Error ? err.message : String(err));
+          // We could not read the authority, so we no longer know what any
+          // agent is doing. Say so instead of holding the last answer.
+          pulseCacheRef.current.states = '';
+          setStatusViews((current) => viewsWithoutAgentEvidence(current));
         }
       }
     }
@@ -157,6 +161,25 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
  * absent from the map, and the consumer renders it `unknown` — the map never
  * carries a fabricated entry for a session the authority did not report.
  */
+/**
+ * Drop the agent evidence from every view while KEEPING lifecycle.
+ *
+ * Used when the pulse cannot be read: we no longer know what any agent is
+ * doing, and holding the last answer keeps the sidebar confidently claiming
+ * "working" or "needs approval" for as long as the bridge is down — the
+ * confident wrong answer this whole state model exists to avoid. Liveness is
+ * deliberately preserved: an unreadable authority is not evidence a session
+ * died, and blanking it too would flip every row to `starting`. Non-agent
+ * sessions have no activity axis and are returned untouched.
+ */
+export function viewsWithoutAgentEvidence(views: SessionStatusMap): SessionStatusMap {
+  const next: SessionStatusMap = {};
+  for (const [sessionId, view] of Object.entries(views)) {
+    next[sessionId] = view.agent === null ? view : { ...view, agent: UNKNOWN_AGENT };
+  }
+  return next;
+}
+
 export function viewsFromPulse(snapshots: readonly unknown[] | undefined): SessionStatusMap {
   if (!snapshots) {
     return {};

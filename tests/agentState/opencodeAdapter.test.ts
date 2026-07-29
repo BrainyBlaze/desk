@@ -252,6 +252,29 @@ describe('opencode plugin reports the events that actually exist', () => {
     expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'idle' }]);
   });
 
+  it('keeps a long session error reportable instead of dropping the degraded fact', async () => {
+    // The contract caps health.reason and REJECTS anything longer, so a
+    // producer that trimmed to the looser detail cap emitted an envelope the
+    // authority refused — losing the very degradation it was reporting.
+    const hooks = await loadHooks();
+    await hooks.event?.({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'ses_1',
+          error: { name: 'SomeUnmappedError', data: { message: 'x'.repeat(180) } }
+        }
+      }
+    });
+    const facts = learnedFacts();
+    expect(facts).toHaveLength(1);
+    expect(facts[0].kind).toBe('health');
+    if (facts[0].kind === 'health' && facts[0].health.status === 'degraded') {
+      expect(facts[0].health.reason.length).toBeLessThanOrEqual(128);
+      expect(facts[0].health.reason.length).toBeGreaterThan(0);
+    }
+  });
+
   it('routes a retryable API error to the provider, keeping the lamp dark', async () => {
     const hooks = await loadHooks();
     await hooks.event?.({
