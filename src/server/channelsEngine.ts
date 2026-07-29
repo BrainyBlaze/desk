@@ -53,11 +53,11 @@ import {
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
  *
  * Every finalised channel message is resolved to its @mention targets; each
- * target gets a notification queued under its session. Notification-only
- * items are idempotent and force-delivered without pane gating. Standalone
- * prompts, such as onboarding, require a fresh ready-pane snapshot so injected
- * text cannot answer an approval dialog or interrupt a running turn. Explicit
- * operator force-delivery bypasses that prompt gate.
+ * target gets a notification queued under its session. Every item uses the same
+ * release eligibility regardless of kind: an explicit operator pause or a
+ * canonical `starting`/`exited` lifecycle holds the queue, while agent activity
+ * never does. Item kind controls batching and post-send submit verification,
+ * not release eligibility.
  *
  * Queues survive server restarts via _engine/queue/<sessionId>/<seq>.json files.
  */
