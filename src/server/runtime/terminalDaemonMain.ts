@@ -13,7 +13,7 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
+import { resolveAtchBinPath, resolveAtchSocketRoot } from '../../shared/atchPaths.js';
 import {
   sessionStateSubjectFor,
   type SessionRegistration
@@ -41,7 +41,12 @@ export function resolveDaemonConfig(env: NodeJS.ProcessEnv = process.env): Termi
   const home = env.DESK_DAEMON_HOME ?? join(homedir(), '.config', 'desk');
   return {
     homeRoot: home,
-    atchBinPath: env.DESK_ATCH_BIN ?? 'atch',
+    // Resolve through the one audited resolver rather than reading the variable
+    // raw. It preflights DESK_ATCH_BIN as an executable regular file, falls back
+    // to the same-release libexec/atch, and yields an ABSOLUTE path from PATH —
+    // never the bare name "atch", which would hand the daemon's exec to whatever
+    // PATH happens to resolve and defer the failure to the first provision.
+    atchBinPath: resolveAtchBinPath(import.meta.url, env),
     atchSocketRoot: resolveAtchSocketRoot(env),
     host: env.DESK_DAEMON_HOST ?? '127.0.0.1',
     port: Number(env.DESK_DAEMON_PORT ?? 5178),

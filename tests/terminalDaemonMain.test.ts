@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -836,6 +836,37 @@ describe('retire vs in-flight provision (sequencing)', () => {
       else process.env.FAKE_ATCH_ACK_DELAY_MS = savedDelay;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the daemon resolves its atch binary instead of trusting the variable', () => {
+  it('refuses a DESK_ATCH_BIN that is not an executable file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-atchbin-'));
+    const notExecutable = join(dir, 'atch');
+    writeFileSync(notExecutable, '#!/bin/sh\n', { mode: 0o644 });
+
+    expect(() => resolveDaemonConfig({ DESK_ATCH_BIN: notExecutable } as NodeJS.ProcessEnv)).toThrow(
+      /not an executable file/
+    );
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('never yields the bare name "atch" for the daemon to exec', () => {
+    // Reading the variable raw used to fall back to "atch", which hands the
+    // exec to whatever PATH resolves first and defers the failure to the first
+    // provision. Whatever the environment, the daemon must get an absolute path.
+    const resolved = resolveDaemonConfig({} as NodeJS.ProcessEnv).atchBinPath;
+    expect(resolved).not.toBe('atch');
+    expect(isAbsolute(resolved)).toBe(true);
+  });
+
+  it('accepts an executable override and passes it through', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-atchbin-'));
+    const executable = join(dir, 'atch');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+    expect(resolveDaemonConfig({ DESK_ATCH_BIN: executable } as NodeJS.ProcessEnv).atchBinPath).toBe(executable);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
