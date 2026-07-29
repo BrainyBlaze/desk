@@ -991,6 +991,8 @@ export class ChannelsEngine {
       }
       const sessionDirPath = join(base, sessionDir.name);
       const runtime = this.runtime(sessionDir.name);
+      /** Sources whose item is in the queue but not yet in a durable snapshot. */
+      const consumedPaths: string[] = [];
       // Sweep stale .delivered files first so the dir doesn't carry dead weight
       // into the new process. Cheap: stat per .delivered file only.
       sweepDeliveredTtl(this.options.home, sessionDir.name);
@@ -1026,15 +1028,14 @@ export class ChannelsEngine {
               this.delivered.add(dedupeKey);
             }
           }
-          // Remove the source file; persistQueue (below) rewrites the queue
-          // snapshot as .json with the new seq. The .delivering extension is
-          // thus consumed — the next drain fires a fresh 'delivering' callback
-          // which re-claims under the new seq.
-          try {
-            rmSync(consumedPath, { force: true });
-          } catch {
-            // raced — best-effort
-          }
+          // Defer removing the source: persistQueue (below) rewrites the
+          // snapshot as .json with the new seq, and deleting first would leave
+          // a crash window in which the item exists in neither file. The
+          // .delivering extension is consumed once the snapshot is durable —
+          // the next drain fires a fresh 'delivering' callback which re-claims
+          // under the new seq. A .consumed file surviving a crash is re-read
+          // by the next restore, so the deferral cannot lose it either.
+          consumedPaths.push(consumedPath);
         } else if (ext === EXT_DELIVERED) {
           // Already-confirmed delivery. Leave on disk for the dedupe window;
           // the TTL sweep above will reclaim it once it ages out.
@@ -1046,6 +1047,14 @@ export class ChannelsEngine {
         }
       }
       this.persistQueue(runtime);
+      // The snapshot is durable now, so the sources it superseded can go.
+      for (const consumedPath of consumedPaths) {
+        try {
+          rmSync(consumedPath, { force: true });
+        } catch {
+          // raced — best-effort; a survivor is re-read by the next restore
+        }
+      }
       if (runtime.queue.length > 0) {
         this.background('queue drain', () => this.drain(runtime, false));
       }
