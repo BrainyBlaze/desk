@@ -163,18 +163,22 @@ redraws in a way readiness heuristics cannot classify.
 ### Standalone prompts: verified delivery
 
 Onboarding briefings and other standalone prompts have no channel file backing
-them, so they wait for a fresh ready-state snapshot before delivery. For
+them. They queue and release on the same canonical decision as every other
+item — the prompt kind grants no extra wait and no extra gate.
+
+What the kind does change is the evidence collected afterwards. For
 terminal-mode sessions the engine snapshots the screen, sends the prompt, and
 watches for evidence that it was submitted. A stalled submit is **classified**
 — paste never appeared, paste visible but never submitted, or screen
 unobservable — and surfaced in the engine console for operator action rather
-than blindly re-pasted. Native-mode prompts use the agent surface's delivery
-state. Per-item ack files make delivery state crash-durable.
+than blindly re-pasted. Native-mode sessions skip that submit verification,
+because the agent surface reports acceptance directly. Per-item ack files make
+delivery state crash-durable.
 
 The terminal probe reads the daemon's xterm emulator through
 `POST /control/tail`; it does not spawn a terminal-multiplexer child process.
-Fresh sessions can report the boot-grace `booting` classification until the
-application reaches a recognizable prompt.
+A session the daemon reports as `starting` shows as `booting` in the console
+until its lifecycle advances.
 
 ### What activity does and does not gate
 

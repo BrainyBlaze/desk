@@ -151,10 +151,11 @@ single digest rather than one prompt each. The full mechanics — including what
 The **engine console** (gauge icon in the header) is the diagnostics-and-repair
 surface:
 
-- **Analyze** classifies every tracked session — ready, busy, booting,
-  offline, empty-capture, or unobservable — and shows queue depth, last
-  delivery and release, and any stuck or blocked items, so you can see *why* a
-  prompt has not landed.
+- **Analyze** shows each tracked session on the axes the daemon actually
+  reports — lifecycle, activity, and what the session is waiting on — beside
+  its delivery status: ready, queued, delivering, submit-stuck, blocked, or
+  paused. With queue depth, last delivery and release, and any stuck items,
+  that is enough to see *why* a prompt has not landed.
 - **Fix** offers per-session levers: deliver now (pushes the head item ahead of
   the pump's schedule), mark idle, pause or resume delivery, drop the queue,
   and per-item drop or force-deliver.

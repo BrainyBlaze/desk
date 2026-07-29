@@ -123,7 +123,6 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
       pumpIntervalMs: 1_000_000, // effectively off — no pump side effects during the test
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -154,7 +153,6 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -216,7 +214,6 @@ describe('durability restore: engine classifies per-item extensions on restart',
       readAgentStates: async () => canonicalAgentStateBatch([tmux]),
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -241,7 +238,6 @@ describe('durability restore: engine classifies per-item extensions on restart',
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -266,7 +262,6 @@ describe('durability restore: engine classifies per-item extensions on restart',
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 

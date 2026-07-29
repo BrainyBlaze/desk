@@ -100,7 +100,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: (session) => running.has(session),
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
   });
@@ -246,7 +245,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         captureStarted = true;
         // The pane stays wedged until the test flips explicit state. Any
@@ -286,7 +284,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     await flush();
@@ -312,8 +309,7 @@ describe('ChannelsEngine delivery gating', () => {
           return true;
         },
         sessionRunning: (session) => running.has(session),
-        sessionCreatedAt: async () => 1,
-        capturePane: async () => '❯ ',
+          capturePane: async () => '❯ ',
         ...overrides
       });
 
@@ -498,7 +494,6 @@ describe('ChannelsEngine delivery gating', () => {
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       onChannelMessage: (channel, file, msg, pingsHuman) => notified.push({ channel, file, author: msg.author, pingsHuman })
     });
@@ -535,7 +530,6 @@ describe('ChannelsEngine delivery gating', () => {
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
 
@@ -568,7 +562,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
 
@@ -608,7 +601,6 @@ describe('ChannelsEngine delivery gating', () => {
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
 
@@ -656,7 +648,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       // Deterministic transition (no timing race): the pane reads WORKING the
       // instant the prompt is pushed (the agent picked it up), so the resume
       // delivery verifies as 'submitted' and the status reads 'working'.
@@ -699,7 +690,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
     seed.pauseSession('tmux-a', 'restart hold');
@@ -719,7 +709,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
 
@@ -746,7 +735,6 @@ describe('ChannelsEngine delivery gating', () => {
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       sessionInfo: (sessionId) =>
         sessionId === 'tmux-a'
@@ -785,7 +773,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     gated.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-9-aaaa', 'human', '@alpha now') }, members);
@@ -811,7 +798,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-aaaa', 'human', '@alpha one') }, members);
@@ -849,7 +835,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => READY_PANE
     });
     flaky.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fail-aaaa', 'human', '@alpha retry me') }, members);
@@ -886,7 +871,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     verifying.enqueuePrompt('tmux-a', 'ops', '@alpha stuck test', 'prompt-11-aaaa');
@@ -915,7 +899,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       onSubmitStateChange: (_session, state) => states.push(state)
     });
@@ -950,7 +933,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       onSubmitStateChange: (_session, state, context) => events.push({ state, seq: context.seq })
     });
@@ -995,7 +977,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ' // idle, unchanged, forever
     });
     stuck.enqueuePrompt('tmux-a', 'ops', '@alpha paste stuck', 'prompt-12-aaaa');
@@ -1028,7 +1009,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true; // Enter eaten every time
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     stuck.enqueuePrompt('tmux-a', 'ops', '@alpha submit stuck', 'prompt-13-aaaa');
@@ -1053,7 +1033,6 @@ describe('ChannelsEngine delivery gating', () => {
       sendEnter: async () => true,
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'raw terminal bytes'
     });
     ok.enqueuePrompt('tmux-a', 'ops', '@alpha clean submit', 'prompt-14-aaaa');
@@ -1077,7 +1056,6 @@ describe('ChannelsEngine delivery gating', () => {
       sendEnter: async () => true,
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'raw terminal bytes',
       onSubmitStateChange: (session, state, ctx) => events.push({ session, state, seq: ctx.seq })
     });
@@ -1108,7 +1086,6 @@ describe('ChannelsEngine delivery gating', () => {
       sendEnter: async () => true,
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'raw terminal bytes',
       onSubmitStateChange: (_session, state, ctx) => events.push({ state, seq: ctx.seq })
     });
@@ -1138,7 +1115,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d9-aaaa', 'human', 'hi @alpha') }, members);
@@ -1164,7 +1140,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'Allow command rm -rf /tmp/x?\n› Yes\n  No'
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d1-aaaa', 'human', 'run it @alpha') }, members);
@@ -1192,7 +1167,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane,
       onSubmitStateChange: (_session, state) => states.push(state)
     });
@@ -1227,7 +1201,6 @@ describe('ChannelsEngine delivery gating', () => {
           waitKind: 'approval'
         }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'Allow command?\n› Yes\n  No',
       onSubmitStateChange: (_session, state) => states.push(state)
     });
@@ -1270,7 +1243,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane,
       // wire the real ack-file lifecycle (mirrors channelsApi) so the live re-enqueue
       // operates on a genuine .delivering -> .stuck-unobservable -> .json transition
@@ -1318,7 +1290,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     // The stuck file is NOT in the runtime queue (restore preserves .stuck-submit).
@@ -1352,7 +1323,6 @@ describe('ChannelsEngine delivery gating', () => {
       sendEnter: async () => true,
       home,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const diag = await eng.inspectSession('tmux-a');
@@ -1392,7 +1362,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     // restoreQueues (constructor) re-enqueues .stuck-unobservable like .delivering.
@@ -1430,7 +1399,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     // Force the NON-head stuck item (seq 8; the head stuck is seq 2).
@@ -1453,7 +1421,6 @@ describe('ChannelsEngine delivery gating', () => {
       home,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const ls = (await eng.lifecycleStates()).find((s) => s.sessionId === 'tmux-a');
@@ -1473,7 +1440,6 @@ describe('ChannelsEngine delivery gating', () => {
       sendText: async () => true,
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '' // empty-capture -> drain holds, never ready
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-grd-aaaa', 'human', 'hi @alpha') }, members);
@@ -1503,7 +1469,6 @@ describe('ChannelsEngine delivery gating', () => {
       pidAlive: () => true,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const intruderSent: string[] = [];
@@ -1517,7 +1482,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     expect(owner.passive).toBe(false);
@@ -1534,7 +1498,6 @@ describe('ChannelsEngine delivery gating', () => {
       pidAlive: () => false,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     expect(successor.passive).toBe(false);
@@ -1557,7 +1520,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
 
@@ -1584,7 +1546,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     stale.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-14-aaaa', 'human', '@alpha old news') }, members);
@@ -1655,7 +1616,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'raw terminal bytes'
     });
     onboarding.enqueuePrompt('tmux-a', 'ops', 'welcome aboard @alpha', 'onboard-ops');
@@ -1680,9 +1640,7 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionInfo: () => ({ uiMode: 'native' }),
-      nativeSessionState: () => 'ready',
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         throw new Error('native delivery must not inspect tmux');
       }
@@ -1904,7 +1862,6 @@ describe('channels store', () => {
       sendText: async () => true,
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity: 'working' }),
       sessionRunning: () => false, // nothing ever delivers — queue only grows
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     for (let index = 0; index < 60; index += 1) {
@@ -1943,7 +1900,6 @@ describe('engine drain race safety', () => {
           resolvePush = () => resolve(true);
         }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
@@ -1977,7 +1933,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
@@ -2013,7 +1968,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
@@ -2055,7 +2009,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         captureCalls += 1;
         if (captureCalls === 1) {
@@ -2115,7 +2068,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         captureCalls += 1;
         if (captureCalls === 1) {
@@ -2172,7 +2124,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         if (!firstCapture) {
           return '❯ ';
@@ -2227,7 +2178,6 @@ describe('ChannelsEngine digest coalescing', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
   });

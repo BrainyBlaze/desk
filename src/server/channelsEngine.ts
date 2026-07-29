@@ -138,10 +138,6 @@ export interface ChannelsEngineOptions {
   readAgentStates?: () => Promise<AgentStateBatch>;
   /** Clock used for working-lease validation and deterministic tests. */
   now?: () => number;
-  /** @deprecated Lifecycle starting replaces boot-age inference. */
-  bootGraceMs?: number;
-  /** @deprecated Lifecycle comes from the authority snapshot. */
-  sessionCreatedAt?: (sessionId: string) => Promise<number | null>;
   /** current process id (injectable for the single-engine guard tests) */
   pid?: number;
   /** liveness probe for the pid in the lock file (injectable for tests) */
@@ -1759,7 +1755,11 @@ export class ChannelsEngine {
     }
   }
 
-  /** Queues a non-message prompt for canonical idle-gated delivery. */
+  /**
+   * Queues a non-message prompt. It releases on the same canonical decision as
+   * any other item — the kind buys no wait — and differs only afterwards, in
+   * whether the submit is verified against the terminal.
+   */
   enqueuePrompt(sessionId: string, channel: string, prompt: string, idHint: string): void {
     if (this.disposed || this.passive) {
       return;

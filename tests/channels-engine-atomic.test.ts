@@ -48,7 +48,6 @@ describe('ChannelsEngine atomic queue snapshots', () => {
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
     const queueDir = join(home, '_engine', 'queue', 'tmux-a');

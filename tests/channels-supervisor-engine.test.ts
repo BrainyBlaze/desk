@@ -230,7 +230,6 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
         ]
       }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
   });

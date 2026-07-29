@@ -91,7 +91,6 @@ describe('ChannelsEngine restore consume safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)',
       ...durabilityCallback(home)
     };
@@ -143,7 +142,6 @@ describe('ChannelsEngine restore consume safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)',
       ...durabilityCallback(home)
     });
@@ -184,7 +182,6 @@ describe('ChannelsEngine restore consume safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)',
       ...durabilityCallback(home)
     });
@@ -232,7 +229,6 @@ describe('ChannelsEngine restore consume safety', () => {
       pumpIntervalMs: 100000,
       sendText: async () => false,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => null,
       capturePane: async () => null
     };
 

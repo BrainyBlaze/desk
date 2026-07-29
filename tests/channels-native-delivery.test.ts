@@ -63,7 +63,6 @@ describe('native-mode channel delivery', () => {
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => READY_PANE
     });
 
@@ -108,7 +107,6 @@ describe('native-mode channel delivery', () => {
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
       sendText,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => READY_PANE
     });
 
@@ -177,7 +175,6 @@ describe('native-mode channel delivery', () => {
         }
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => READY_PANE
     });
 

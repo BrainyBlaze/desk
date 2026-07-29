@@ -118,7 +118,6 @@ function createEngine(options: {
     sendEnter: async () => true,
     capturePane: options.capturePane ?? (async () => 'raw terminal bytes'),
     sessionRunning: () => true,
-    sessionCreatedAt: async () => 1
   });
 }
 
