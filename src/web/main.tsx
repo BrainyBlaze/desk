@@ -3,6 +3,7 @@ import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { App } from './App.js';
 import { initPerfTelemetry } from './editor/lsp/perfTelemetry.js';
+import { bootDesk } from './boot.js';
 import { migrateBrowserSessionIdentity } from './sessionIdentityStorageMigration.js';
 
 // Opt-in LSP perf telemetry. No-op unless globalThis.DESK_LSP_PERF is set; installs nothing
@@ -19,12 +20,12 @@ function requireRoot(): HTMLElement {
 
 const root = requireRoot();
 
-async function start(): Promise<void> {
-  await migrateBrowserSessionIdentity();
-  createRoot(root).render(<App />);
-}
-
-void start().catch((error: unknown) => {
-  console.error('Desk startup failed', error);
-  root.textContent = 'Desk could not migrate saved session state. Check the server migration and reload.';
+void bootDesk({
+  migrate: migrateBrowserSessionIdentity,
+  render: () => createRoot(root).render(<App />),
+  onMigrationError: (error: unknown) => {
+    // Visible, but never fatal: stale local keys are recoverable on the next
+    // boot, a page that never rendered is not.
+    console.error('Desk: saved session state could not be migrated; continuing without it', error);
+  }
 });
