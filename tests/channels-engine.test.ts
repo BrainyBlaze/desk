@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildDigestPrompt, buildOnboardingPrompt, buildTurnPrompt, ChannelsEngine } from '../src/server/channelsEngine.js';
+import {
+  buildDigestPrompt,
+  buildOnboardingPrompt,
+  buildTurnPrompt,
+  ChannelsEngine,
+  type ChannelsEngineOptions
+} from '../src/server/channelsEngine.js';
 import {
   claimDelivering,
   confirmDelivered,
@@ -14,7 +20,7 @@ import {
 import { readDeliveryEvents } from '../src/server/channelsEvents.js';
 import { pauseSession as persistPausedSession } from '../src/server/channelsPaused.js';
 import { DELIVERY_BLOCK_REASONS } from '../src/server/channelsProtocol.js';
-import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import type { ChannelMember, ChannelMessage, DeliveryBlockReason } from '../src/server/channelsProtocol.js';
 import {
   appendMessage,
   ChannelsWatcher,
@@ -101,15 +107,106 @@ describe('ChannelsEngine delivery gating', () => {
     });
   });
 
-  it('defines exactly the live delivery block reasons', () => {
-    expect(DELIVERY_BLOCK_REASONS).toEqual([
-      'offline',
-      'booting',
-      'draining',
-      'send-failed',
-      'submit-stuck-paste',
-      'submit-stuck-submit'
-    ]);
+  it('observes every declared live delivery block reason through production paths', async () => {
+    type ReachabilityOptions = Partial<Omit<ChannelsEngineOptions, 'home'>>;
+
+    const observed = new Set<DeliveryBlockReason>();
+    const liveEngines: ChannelsEngine[] = [];
+    let releaseDraining: (() => void) | undefined;
+
+    const makeEngine = (reason: DeliveryBlockReason, options: ReachabilityOptions): ChannelsEngine => {
+      const engineHome = join(home, `reach-${reason}`);
+      mkdirSync(engineHome, { recursive: true });
+      const candidate = new ChannelsEngine({
+        home: engineHome,
+        sendEnter: async () => true,
+        sendText: async () => true,
+        capturePane: async () => READY_PANE,
+        releaseSettleMs: 0,
+        pumpIntervalMs: 60_000,
+        blockedAfterCycles: 1,
+        ...options
+      });
+      liveEngines.push(candidate);
+      return candidate;
+    };
+
+    const exercise = async (
+      expected: DeliveryBlockReason,
+      options: ReachabilityOptions,
+      trigger: (candidate: ChannelsEngine) => void | Promise<void> = (candidate) => {
+        candidate.enqueuePrompt('tmux-a', 'ops', `exercise ${expected}`, `reach-${expected}`);
+      }
+    ): Promise<void> => {
+      const candidate = makeEngine(expected, options);
+      await trigger(candidate);
+      await waitFor(async () => (await candidate.inspectSession('tmux-a')).blockedReason === expected);
+      const reason = (await candidate.inspectSession('tmux-a')).blockedReason;
+      expect(reason).toBe(expected);
+      if (reason) {
+        observed.add(reason);
+      }
+    };
+
+    try {
+      await exercise('offline', {
+        blockedAfterCycles: 0,
+        readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'exited' })
+      });
+
+      await exercise('booting', {
+        blockedAfterCycles: 0,
+        readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'starting' })
+      });
+
+      await exercise('send-failed', {
+        blockedAfterCycles: 0,
+        sendText: async () => false
+      });
+
+      await exercise('submit-stuck-paste', {
+        enterVerifyDelayMs: 1,
+        verifyCycles: 1
+      });
+
+      let submitPane = READY_PANE;
+      await exercise('submit-stuck-submit', {
+        enterVerifyDelayMs: 1,
+        verifyCycles: 1,
+        sendText: async () => {
+          submitPane = '❯ wedged prompt';
+          return true;
+        },
+        capturePane: async () => submitPane
+      });
+
+      let pasteStarted = false;
+      await exercise(
+        'draining',
+        {
+          blockedAfterCycles: 0,
+          sendText: async () => {
+            pasteStarted = true;
+            await new Promise<boolean>((resolve) => {
+              releaseDraining = () => resolve(true);
+            });
+            return true;
+          }
+        },
+        async (candidate) => {
+          candidate.enqueuePrompt('tmux-a', 'ops', 'exercise draining', 'reach-draining');
+          await waitFor(() => pasteStarted);
+          await candidate.drainReady();
+        }
+      );
+    } finally {
+      releaseDraining?.();
+      for (const candidate of liveEngines) {
+        candidate.dispose();
+      }
+    }
+
+    expect(observed).toEqual(new Set(DELIVERY_BLOCK_REASONS));
   });
 
   afterEach(() => {
