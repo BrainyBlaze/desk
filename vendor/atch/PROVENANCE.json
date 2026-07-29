@@ -183,7 +183,7 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "973e5347fed4d8463f86e032160b5193406a71b19823b8dcd7eeac62b1cb100a",
+    "digest": "8c389d76bdb521e66517ab5dfb96bfd0c530f56432ff4eb846aff53ed21b1f69",
     "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
   },
   "localPatches": [
@@ -247,6 +247,15 @@
         "atch_security.c"
       ],
       "alsoIncludes": "Include unistd.h for getdtablesize, close, and getpeereid declarations; macOS installer CI runs security-storage-test to verify matching and mismatched peer UIDs.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "fix: isolate v3 controller backpressure from the atch master",
+      "why": "Accepted controller sockets are nonblocking, but v3 writes used the process-fatal write helper. A slow controller could therefore return EAGAIN during an output burst and terminate the master and child session.",
+      "files": [
+        "master.c"
+      ],
+      "alsoIncludes": "A bounded ordered per-client transmit queue, writable-select draining, and client-local teardown on fatal write, allocation failure, or queue overflow.",
       "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
     }
   ]

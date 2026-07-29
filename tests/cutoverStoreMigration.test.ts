@@ -4,7 +4,7 @@
 // input fails closed.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -467,6 +467,40 @@ describe('cutover store migration — production first-start gate (§10)', () =>
     expect(existsSync(join(migrationRoot, 'backup', 'resume-captures.json'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'backup', 'tool-journal', 'tmux-a.jsonl'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(true);
+  });
+
+  it('reconstructs an unpinned v0.3.1 tmux identity before re-keying production stores', () => {
+    const legacyTmuxSession = 'agentdesk-main-claude-3786bf33';
+    writeFileSync(
+      manifestPath,
+      `groups:\n  - id: main\n    sessions:\n      - name: Claude\n        cwd: /workspace\n        agent: claude\n`
+    );
+    renameSync(
+      join(channelsRoot, '_engine', 'queue', 'tmux-a'),
+      join(channelsRoot, '_engine', 'queue', legacyTmuxSession)
+    );
+    renameSync(
+      join(root, '.config', 'desk', 'tool-journal', 'tmux-a.jsonl'),
+      join(root, '.config', 'desk', 'tool-journal', `${legacyTmuxSession}.jsonl`)
+    );
+    for (const path of [
+      join(channelsRoot, '_engine', 'paused.json'),
+      join(channelsRoot, '_engine', 'events.jsonl'),
+      join(channelsRoot, 'desk', '_members', 'claude.md'),
+      join(root, '.config', 'desk', 'resume-captures.json')
+    ]) {
+      writeFileSync(path, readFileSync(path, 'utf8').replaceAll('tmux-a', legacyTmuxSession));
+    }
+
+    expect(migrate().status).toBe('migrated');
+    expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'paused.json'), 'utf8')).items[0]).toMatchObject({
+      sessionId: 'claude'
+    });
+    expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'migration', 'seed-journal.json'), 'utf8')).items[0]).toMatchObject({
+      sessionId: 'claude'
+    });
+    expect(existsSync(join(migrationRoot, 'backup', 'channels', '_engine', 'queue', legacyTmuxSession, '0000000001.json'))).toBe(true);
+    expect(existsSync(join(migrationRoot, 'backup', 'tool-journal', `${legacyTmuxSession}.jsonl`))).toBe(true);
   });
 
   it('keeps the newest delivery-event ring while backing up complete legacy history', () => {

@@ -39,7 +39,48 @@ describe('sessionIdentity — manifest glue (§10)', () => {
       { name: 'Claude', tmuxSession: 'tmux-claude' },
       { name: 'Server', tmuxSession: 'tmux-server' },
       { name: 'Claude', tmuxSession: 'tmux-claude-2' },
-      { name: 'Fresh Session' }
+      { name: 'Fresh Session', tmuxSession: 'agentdesk-p1-pg1-fresh-session-da839517' }
+    ]);
+  });
+
+  it('reconstructs the exact v0.3.1 root and project tmux identities', () => {
+    const legacy = {
+      groups: [
+        {
+          id: 'Main Team',
+          sessions: [
+            {
+              name: 'Claude C',
+              cwd: '~/work',
+              agent: 'claude' as const,
+              bypassPermissions: false
+            }
+          ]
+        }
+      ],
+      projects: [
+        {
+          id: 'Proj One',
+          cwd: '~/project',
+          groups: [
+            {
+              id: 'Ops',
+              sessions: [{ name: 'Runner', command: 'npm run dev' }]
+            }
+          ]
+        }
+      ]
+    };
+
+    expect(deskManifestToEntries(legacy, { homeDir: '/home/test' })).toEqual([
+      {
+        name: 'Claude C',
+        tmuxSession: 'agentdesk-main-team-claude-c-be2f98ad'
+      },
+      {
+        name: 'Runner',
+        tmuxSession: 'agentdesk-proj-one-ops-runner-53fab8cb'
+      }
     ]);
   });
 
@@ -49,7 +90,7 @@ describe('sessionIdentity — manifest glue (§10)', () => {
     for (const e of m.entries) expect(isValidSessionId(e.sessionId)).toBe(true);
     expect(validateManifestMigration(deskManifestToEntries(manifest()), m).ok).toBe(true);
     expect(m.tmuxToSessionId.get('tmux-claude-2')).toBe('claude-2');
-    expect(m.tmuxToSessionId.size).toBe(3);
+    expect(m.tmuxToSessionId.size).toBe(4);
   });
 
   it('preserves persisted sessionIds across rename and traversal reorder', () => {

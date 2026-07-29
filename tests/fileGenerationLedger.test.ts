@@ -2,7 +2,7 @@
 // property must survive a daemon RESTART, not just a delete+recreate in memory.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GenerationLedger } from '../src/shared/controlPlane/index.js';
@@ -51,16 +51,49 @@ describe('durable generation ledger — survives restart (§4.8.1)', () => {
     s2.close();
   });
 
-  it('a torn final line (crash mid-append) is skipped on replay', () => {
+  it('repairs a torn final line before append so a second restart cannot reissue', () => {
     const s1 = new FileGenerationLedgerStore(path);
     new GenerationLedger(s1).allocate('s1'); // gen 1 (durable)
     s1.close();
     // simulate a crash that left a partial JSON line at the tail:
     appendFileSync(path, '{"s":"s1","g":2'); // no closing brace / newline
     const s2 = new FileGenerationLedgerStore(path);
-    // the torn line is ignored → recovered max is still 1, next allocate is 2:
+    // The torn line is ignored and removed before the next append.
     expect(new GenerationLedger(s2).current('s1')).toBe(1);
     expect(new GenerationLedger(s2).allocate('s1')).toBe(2);
+    s2.close();
+
+    const s3 = new FileGenerationLedgerStore(path);
+    expect(new GenerationLedger(s3).allocate('s1')).toBe(3);
+    s3.close();
+    for (const line of readFileSync(path, 'utf8').trim().split('\n')) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+  });
+
+  it('fails closed on malformed interior records instead of understating the fence', () => {
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ s: 's1', g: 1 }),
+        '{"s":"s1","g":',
+        JSON.stringify({ s: 's1', g: 5 }),
+        ''
+      ].join('\n')
+    );
+
+    expect(() => new FileGenerationLedgerStore(path)).toThrow(/corrupt generation ledger/);
+  });
+
+  it('preserves a complete final record that is missing only its newline', () => {
+    writeFileSync(path, JSON.stringify({ s: 's1', g: 4 }));
+
+    const s1 = new FileGenerationLedgerStore(path);
+    expect(new GenerationLedger(s1).allocate('s1')).toBe(5);
+    s1.close();
+
+    const s2 = new FileGenerationLedgerStore(path);
+    expect(new GenerationLedger(s2).allocate('s1')).toBe(6);
     s2.close();
   });
 

@@ -37,6 +37,8 @@ struct pty {
 static struct pty the_pty;
 static uint32_t v3_master_generation = 1;
 
+#define V3_TX_MAX (4u << 20)
+
 static void load_v3_generation(void)
 {
 	const char *value = getenv("ATCH_GENERATION");
@@ -80,6 +82,10 @@ struct client {
 	** journal's total order would gain holes.
 	*/
 	uint64_t v3_tx_seq;
+	unsigned char *v3_tx;
+	size_t v3_tx_cap;
+	size_t v3_tx_len;
+	size_t v3_tx_off;
 	atch_v3_reassembler v3_reassembler;
 };
 
@@ -108,23 +114,85 @@ static void client_drop(struct client *p)
 	*(p->pprev) = p->next;
 	atch_v3_reassembler_free(&p->v3_reassembler);
 	free(p->v3_rx);
+	free(p->v3_tx);
 	free(p);
 }
 
-static void v3_send(struct client *p, uint16_t type, uint32_t generation,
+static size_t v3_tx_pending(const struct client *p)
+{
+	return p->v3_tx_len - p->v3_tx_off;
+}
+
+static int v3_flush(struct client *p)
+{
+	while (p->v3_tx_off < p->v3_tx_len) {
+		ssize_t n = write(p->fd, p->v3_tx + p->v3_tx_off,
+			p->v3_tx_len - p->v3_tx_off);
+
+		if (n > 0) {
+			p->v3_tx_off += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			return 0;
+		return -1;
+	}
+	p->v3_tx_off = 0;
+	p->v3_tx_len = 0;
+	return 0;
+}
+
+static int v3_enqueue(struct client *p, const unsigned char *data, size_t length)
+{
+	unsigned char *grown;
+	size_t pending = v3_tx_pending(p);
+	size_t required;
+	size_t cap;
+
+	if (length > V3_TX_MAX || pending > V3_TX_MAX - length)
+		return -1;
+	required = pending + length;
+	if (p->v3_tx_off > 0 && p->v3_tx_cap - p->v3_tx_len < length) {
+		memmove(p->v3_tx, p->v3_tx + p->v3_tx_off, pending);
+		p->v3_tx_off = 0;
+		p->v3_tx_len = pending;
+	}
+	if (p->v3_tx_cap - p->v3_tx_len < length) {
+		cap = p->v3_tx_cap ? p->v3_tx_cap : 4096;
+		while (cap < required) {
+			if (cap > V3_TX_MAX / 2) {
+				cap = V3_TX_MAX;
+				break;
+			}
+			cap *= 2;
+		}
+		grown = realloc(p->v3_tx, cap);
+		if (!grown)
+			return -1;
+		p->v3_tx = grown;
+		p->v3_tx_cap = cap;
+	}
+	memcpy(p->v3_tx + p->v3_tx_len, data, length);
+	p->v3_tx_len += length;
+	return v3_flush(p);
+}
+
+static int v3_send(struct client *p, uint16_t type, uint32_t generation,
 	uint64_t sequence, const unsigned char *payload, size_t length)
 {
 	unsigned char frame[ATCH_V3_HEADER_LEN + ATCH_V3_MAX_PAYLOAD];
 	size_t header;
 
 	if (length > ATCH_V3_MAX_PAYLOAD)
-		return;
+		return -1;
 	header = atch_v3_encode_header(frame, sizeof(frame), type, 0,
 		generation, sequence, 0, (uint32_t)length);
 	if (!header)
-		return;
+		return -1;
 	memcpy(frame + header, payload, length);
-	write_buf_or_fail(p->fd, frame, header + length);
+	return v3_enqueue(p, frame, header + length);
 }
 
 static int v3_dispatch(struct client *p, const atch_v3_frame *f)
@@ -194,10 +262,14 @@ static int v3_dispatch(struct client *p, const atch_v3_frame *f)
 				payload[2] = (unsigned char)(plen >> 16);
 				payload[3] = (unsigned char)(plen >> 24);
 				memcpy(payload + 4, preamble, plen);
-				v3_send(p, V3_TERMINAL_STATE, 0, ++p->v3_tx_seq, payload, 4 + plen);
+				if (v3_send(p, V3_TERMINAL_STATE, 0,
+					++p->v3_tx_seq, payload, 4 + plen) < 0)
+					return -1;
 			}
 		}
-		v3_send(p, V3_ATTACH_ACK, p->v3_generation, ++p->v3_tx_seq, ack, sizeof(ack));
+		if (v3_send(p, V3_ATTACH_ACK, p->v3_generation,
+			++p->v3_tx_seq, ack, sizeof(ack)) < 0)
+			return -1;
 		return 0;
 	}
 	if (f->generation != p->v3_generation || !p->attached)
@@ -774,10 +846,11 @@ static void pty_activity(int s)
 	scrollback_append(buf, (size_t)len);
 	/* v3 clients receive the same PTY bytes as RECORD(OUTPUT) envelopes. */
 	{
-		struct client *vp;
-		for (vp = clients; vp; vp = vp->next) {
-			unsigned char inner[ATCH_V3_MAX_PAYLOAD], frame[ATCH_V3_HEADER_LEN + ATCH_V3_MAX_PAYLOAD];
+		struct client *vp, *vnext;
+		for (vp = clients; vp; vp = vnext) {
+			unsigned char inner[ATCH_V3_MAX_PAYLOAD];
 			size_t n, h;
+			vnext = vp->next;
 			if (!vp->v3 || !vp->attached)
 				continue;
 			if ((size_t)len > sizeof(inner) - 33)
@@ -797,8 +870,11 @@ static void pty_activity(int s)
 			/* Header sequence is the CONNECTION sequence (spec 1.1: per-direction
 			** monotonic); record_seq/generation/output_offset inside the envelope
 			** carry the durable identity. */
-			n = atch_v3_encode_header(frame, sizeof(frame), V3_OUTPUT, 0, vp->v3_generation, ++vp->v3_tx_seq, 0, (uint32_t)h);
-			memcpy(frame + n, inner, h); write_buf_or_fail(vp->fd, frame, n + h);
+			if (v3_send(vp, V3_OUTPUT, vp->v3_generation,
+				++vp->v3_tx_seq, inner, h) < 0) {
+				client_drop(vp);
+				continue;
+			}
 			vp->v3_output_offset += (uint64_t)len;
 		}
 	}
@@ -875,11 +951,7 @@ static void pty_activity(int s)
 			nclients++;
 		} else if (errno != EAGAIN) {
 			/* Write error: drop this client */
-			close(p->fd);
-			if (next)
-				next->pprev = p->pprev;
-			*(p->pprev) = next;
-			free(p);
+			client_drop(p);
 		}
 	}
 
@@ -926,6 +998,8 @@ static void control_activity(int s)
 	p->v3_hello = 0;
 	p->v3_caps = p->v3_generation = 0;
 	p->v3_record_seq = p->v3_output_offset = p->v3_tx_seq = 0;
+	p->v3_tx = NULL;
+	p->v3_tx_cap = p->v3_tx_len = p->v3_tx_off = 0;
 	atch_v3_reassembler_init(&p->v3_reassembler);
 	p->pprev = &clients;
 	p->next = *(p->pprev);
@@ -1141,7 +1215,7 @@ static void master_process(int s, char **argv, int waitattach, int statusfd)
 			if (p->attached)
 				new_has_attached_client = 1;
 
-			if (p->replay_remaining > 0) {
+			if (p->replay_remaining > 0 || v3_tx_pending(p) > 0) {
 				FD_SET(p->fd, &writefds);
 				if (p->fd > highest_fd)
 					highest_fd = p->fd;
@@ -1171,10 +1245,14 @@ static void master_process(int s, char **argv, int waitattach, int statusfd)
 			if (FD_ISSET(p->fd, &readfds))
 				client_activity(p);
 		}
-		/* Drain pending scrollback replay for writable clients. */
+		/* Drain pending replay and queued v3 frames for writable clients. */
 		for (p = clients; p; p = next) {
 			next = p->next;
-			if (p->replay_remaining > 0
+			if (p->v3 && v3_tx_pending(p) > 0
+			    && FD_ISSET(p->fd, &writefds)
+			    && v3_flush(p) < 0)
+				client_drop(p);
+			else if (!p->v3 && p->replay_remaining > 0
 			    && FD_ISSET(p->fd, &writefds))
 				replay_drain(p);
 		}

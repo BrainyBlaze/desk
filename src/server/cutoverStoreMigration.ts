@@ -29,7 +29,14 @@ import { dirname, join, relative } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
 import { readManifestFile, writeManifestFile } from '../core/config.js';
 import { parseLegacyDeskManifest } from '../core/manifest.js';
-import { applyMigratedSessionIds, buildManifestMigration, collectSessions, deskManifestToEntries, type LegacyDeskManifest } from '../core/sessionIdentity.js';
+import {
+  applyMigratedSessionIds,
+  buildManifestMigration,
+  collectSessions,
+  deskManifestToEntries,
+  type LegacyDeskManifest,
+  type LegacyIdentityOptions
+} from '../core/sessionIdentity.js';
 import { withFileLockSync } from '../shared/fileLock.js';
 import { migrateResumeCaptureStore, type LegacyPendingResumeCapture } from '../core/resumeCaptureState.js';
 import { migrateDeliveryEventLine } from './channelsEvents.js';
@@ -95,9 +102,13 @@ export interface ManifestMigrationReport {
  * persisting a manifest that silently lost identities. sessionId is the eventual
  * durable identity source, so future loads/edits preserve the assigned ids.
  */
-export function migrateManifestToCanary(sourceManifestPath: string, targetManifestPath: string): ManifestMigrationReport {
+export function migrateManifestToCanary(
+  sourceManifestPath: string,
+  targetManifestPath: string,
+  identityOptions: LegacyIdentityOptions = {}
+): ManifestMigrationReport {
   const manifest = readLegacyManifestFile(sourceManifestPath); // read-only
-  const migration = buildManifestMigration(manifest);
+  const migration = buildManifestMigration(manifest, identityOptions);
   const migrated = applyMigratedSessionIds(manifest, migration);
   writeManifestFile(targetManifestPath, migrated); // atomic (temp + rename)
 
@@ -343,6 +354,8 @@ export interface CanaryMigrationOptions {
   targetManifestPath: string;
   /** Immutable backup destination (rollback safety). */
   backupRoot: string;
+  /** Legacy runtime home used to reconstruct implicit v0.3.1 tmux identities. */
+  homeDir?: string;
   acknowledgeDropped?: boolean;
   acknowledgeUnreadable?: boolean;
 }
@@ -423,8 +436,16 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
     backupSource(options);
     phase = advance(phase); // → transform
 
-    const map = buildManifestMigration(readLegacyManifestFile(options.sourceManifestPath)).tmuxToSessionId;
-    partial.manifest = migrateManifestToCanary(options.sourceManifestPath, options.targetManifestPath);
+    const identityOptions = { homeDir: options.homeDir ?? process.env.HOME ?? '' };
+    const map = buildManifestMigration(
+      readLegacyManifestFile(options.sourceManifestPath),
+      identityOptions
+    ).tmuxToSessionId;
+    partial.manifest = migrateManifestToCanary(
+      options.sourceManifestPath,
+      options.targetManifestPath,
+      identityOptions
+    );
     partial.paused = migratePausedStoreFile(options.sourceRoot, options.targetRoot, map);
     const plan = planDurabilityMigration(options.sourceRoot, map);
     partial.durability = writeDurabilitySeedJournal(plan, options.targetRoot, {
@@ -435,7 +456,11 @@ export function runCanaryMigration(options: CanaryMigrationOptions): CanaryMigra
 
     // Validate before commit: reverify the identity mint is collision-free.
     const source = readLegacyManifestFile(options.sourceManifestPath);
-    const check = validateManifestMigration(deskManifestToEntries(source), buildManifestMigration(source));
+    const sourceEntries = deskManifestToEntries(source, identityOptions);
+    const check = validateManifestMigration(
+      sourceEntries,
+      buildManifestMigration(source, identityOptions)
+    );
     if (!check.ok) {
       throw new Error(`cutover: canary validation failed (${check.reason}: ${check.value})`);
     }
@@ -581,12 +606,20 @@ export function ensureProductionCutoverMigration(
       const stageManifestPath = join(stageRoot, 'manifest', 'desk.yml');
       const stageChannelsRoot = join(stageRoot, 'channels');
       const legacyManifest = readLegacyManifestFile(manifestPath);
-      const migration = buildManifestMigration(legacyManifest);
-      const identityCheck = validateManifestMigration(deskManifestToEntries(legacyManifest), migration);
+      const identityOptions = { homeDir };
+      const migration = buildManifestMigration(legacyManifest, identityOptions);
+      const identityCheck = validateManifestMigration(
+        deskManifestToEntries(legacyManifest, identityOptions),
+        migration
+      );
       if (!identityCheck.ok) {
         throw new Error(`cutover: identity validation failed (${identityCheck.reason}: ${identityCheck.value})`);
       }
-      const manifestReport = migrateManifestToCanary(manifestPath, stageManifestPath);
+      const manifestReport = migrateManifestToCanary(
+        manifestPath,
+        stageManifestPath,
+        identityOptions
+      );
       const pausedReport = migratePausedStoreFile(channelsRoot, stageChannelsRoot, migration.tmuxToSessionId);
       if (pausedReport.dropped.length > 0) {
         throw new Error(`cutover: ${pausedReport.dropped.length} paused sessions are unmapped; refusing partial migration`);

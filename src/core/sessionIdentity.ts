@@ -12,6 +12,15 @@
 import type { AgentProfile, DeskGroup, DeskManifest, DeskProject, DeskSession, DeskSettings } from './types.js';
 import { migrateManifestSessions, type LegacySessionEntry, type ManifestMigration } from '../shared/migration/index.js';
 
+const LEGACY_DEFAULT_NAMESPACE = 'agentdesk';
+
+export interface LegacyIdentityOptions {
+  /** Home directory used by the v0.3.1 `~` expansion and root-session fallback. */
+  homeDir?: string;
+  /** v0.3.1 runtime namespace. Desk's shipped/default namespace was `agentdesk`. */
+  namespace?: string;
+}
+
 export type LegacyDeskSession = Omit<DeskSession, 'sessionId'> & {
   sessionId?: string;
   /** Migration-only source key; runtime manifests reject it. */
@@ -48,22 +57,97 @@ export function collectSessions(manifest: LegacyDeskManifest): LegacyDeskSession
 }
 
 /** Flatten the manifest's sessions to the migration transform's structural entries. */
-export function deskManifestToEntries(manifest: LegacyDeskManifest): LegacySessionEntry[] {
-  return collectSessions(manifest).map((session) => {
+export function deskManifestToEntries(
+  manifest: LegacyDeskManifest,
+  options: LegacyIdentityOptions = {}
+): LegacySessionEntry[] {
+  const namespace = options.namespace ?? LEGACY_DEFAULT_NAMESPACE;
+  const homeDir = options.homeDir ?? '';
+  const entries: LegacySessionEntry[] = [];
+  const append = (
+    session: LegacyDeskSession,
+    pathParts: readonly string[],
+    inheritedCwd: string
+  ): void => {
+    const cwd = expandLegacyHome(session.cwd ?? inheritedCwd, homeDir);
     const entry: LegacySessionEntry = { name: session.name };
     if (session.sessionId !== undefined) {
       entry.sessionId = session.sessionId;
     }
-    if (session.tmuxSession !== undefined) {
-      entry.tmuxSession = session.tmuxSession;
+    entry.tmuxSession =
+      session.tmuxSession ??
+      [
+        namespace,
+        ...pathParts.map(slugPart),
+        slugPart(session.name),
+        session.resume
+          ? session.resume.slice(0, 8)
+          : shortHash(legacySessionHashSeed(session, cwd))
+      ]
+        .filter(Boolean)
+        .join('-');
+    entries.push(entry);
+  };
+
+  for (const group of manifest.groups) {
+    for (const session of group.sessions) {
+      append(session, [group.id], homeDir);
     }
-    return entry;
-  });
+  }
+  for (const project of manifest.projects ?? []) {
+    for (const group of project.groups) {
+      for (const session of group.sessions) {
+        append(session, [project.id, group.id], project.cwd);
+      }
+    }
+  }
+  return entries;
 }
 
 /** Preserve or mint §10 identities, yielding ids + the tmux→sessionId map. */
-export function buildManifestMigration(manifest: LegacyDeskManifest): ManifestMigration {
-  return migrateManifestSessions(deskManifestToEntries(manifest));
+export function buildManifestMigration(
+  manifest: LegacyDeskManifest,
+  options: LegacyIdentityOptions = {}
+): ManifestMigration {
+  return migrateManifestSessions(deskManifestToEntries(manifest, options));
+}
+
+function expandLegacyHome(path: string, homeDir: string): string {
+  if (path === '~') {
+    return homeDir;
+  }
+  if (path.startsWith('~/')) {
+    return `${homeDir}${path.slice(1)}`;
+  }
+  return path;
+}
+
+function legacySessionHashSeed(session: LegacyDeskSession, cwd: string): string {
+  if (session.command) {
+    return session.command;
+  }
+  return [
+    session.agent ?? 'command',
+    session.name,
+    cwd,
+    session.bypassPermissions === false ? 'ask' : 'allow'
+  ].join('|');
+}
+
+function slugPart(value: string): string {
+  return value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function shortHash(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0').slice(0, 8);
 }
 
 /**
