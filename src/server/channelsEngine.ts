@@ -456,15 +456,6 @@ export function buildOnboardingPrompt(options: {
   return lines.join('\n');
 }
 
-/**
- * Bounded escalation for the probe-timeout / unobservable cascade: after this
- * many CONSECUTIVE auto-retries of a delivered-but-unverifiable item (the pane
- * went unobservable during verify, repeatedly), stop auto-retrying and leave the
- * durable .stuck-unobservable for explicit operator action — instead of looping
- * (re-pasting) forever against a hung pane. Reset on any observed delivery success.
- */
-const MAX_UNOBSERVABLE_RETRIES = 5;
-
 interface MemberRuntime {
   sessionId: string;
   queue: QueuedPrompt[];
@@ -481,8 +472,6 @@ interface MemberRuntime {
    * running a SECOND deliverNext in parallel (the double-paste window).
    */
   drainGeneration: number;
-  /** consecutive auto-retries of an unobservable delivery (bounded by MAX_UNOBSERVABLE_RETRIES) */
-  unobservableRetries: number;
   /** epoch ms when `draining` was set true (for the wedge watchdog) */
   drainingSince?: number;
   /** epoch ms of the last delivery */
@@ -699,9 +688,34 @@ export class ChannelsEngine {
   // one disposes), so removal would open a window for a second process to
   // steal ownership. The holder pid dying is the release.
 
+  /**
+   * Dispatch work nobody awaits — timer ticks, drains kicked off from a
+   * callback, post-delivery verification. Node terminates the process on an
+   * unhandled rejection, so a rejecting transport or a full disk inside one of
+   * these would take the whole server down from a tick no caller can catch.
+   * Every background dispatch goes through here (R8.4: one guard, not seven).
+   * R1: the failure is logged, never dropped blind.
+   */
+  private background(what: string, run: () => Promise<unknown>): void {
+    try {
+      void run().catch((error: unknown) => {
+        this.reportBackgroundFailure(what, error);
+      });
+    } catch (error) {
+      // A synchronous throw before the promise is even created.
+      this.reportBackgroundFailure(what, error);
+    }
+  }
+
+  private reportBackgroundFailure(what: string, error: unknown): void {
+    console.warn(
+      `[desk-channels] background ${what} failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
   private startPump(intervalMs: number): void {
     this.pumpTimer = setInterval(() => {
-      void this.runPumpTick();
+      this.background('pump tick', () => this.runPumpTick());
     }, intervalMs);
     this.pumpTimer.unref?.();
   }
@@ -746,7 +760,7 @@ export class ChannelsEngine {
     }
     for (const runtime of this.members.values()) {
       if (runtime.queue.length > 0) {
-        void this.drain(runtime, true, batch);
+        this.background('queue drain', () => this.drain(runtime, true, batch));
       } else {
         this.resetHold(runtime);
       }
@@ -855,7 +869,7 @@ export class ChannelsEngine {
   private runtime(sessionId: string): MemberRuntime {
     let entry = this.members.get(sessionId);
     if (!entry) {
-      entry = { sessionId, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0, unobservableRetries: 0 };
+      entry = { sessionId, queue: [], draining: false, deliveryInFlight: false, drainGeneration: 0 };
       this.members.set(sessionId, entry);
     }
     return entry;
@@ -1033,7 +1047,7 @@ export class ChannelsEngine {
       }
       this.persistQueue(runtime);
       if (runtime.queue.length > 0) {
-        void this.drain(runtime, false);
+        this.background('queue drain', () => this.drain(runtime, false));
       }
     }
   }
@@ -1321,7 +1335,7 @@ export class ChannelsEngine {
       this.resetHold(runtime);
     }
     this.persistQueue(runtime);
-    void this.drain(runtime, false);
+    this.background('queue drain', () => this.drain(runtime, false));
   }
 
   private async drain(
@@ -1541,7 +1555,7 @@ export class ChannelsEngine {
     if (needsTerminalVerify) {
       // Fire-and-forget: verification sleeps between checks and must not
       // hold the drain lock.
-      void this.verifySubmitted(runtime, preFingerprint, deliveredSeqs);
+      this.background('submit verification', () => this.verifySubmitted(runtime, preFingerprint, deliveredSeqs));
     } else {
       this.setSubmitState(runtime, 'submitted', deliveredSeqs);
     }
@@ -1586,10 +1600,10 @@ export class ChannelsEngine {
 
   /**
    * Revert each given .stuck-* ack-file back to .json (retryStuckItem) and push
-   * the item onto the runtime queue so the gated drain re-delivers it. Used by
-   * the live unobservable auto-retry (verifySubmitted) and operator force-deliver
-   * over a durable stuck item. Safe under the observability-aware drain: a still-unobservable pane
-   * holds and never blind-delivers, so the re-enqueue cannot loop into a paste.
+   * the item onto the runtime queue so the drain re-delivers it. This is an
+   * OPERATOR action now (force-deliver over a durable stuck item): delivery is
+   * no longer gated on observability, so an automatic re-enqueue would paste
+   * again with no evidence the first paste missed.
    */
   private reenqueueStuck(runtime: MemberRuntime, seqs: number[]): boolean {
     const dir = this.queueDir(runtime.sessionId);
@@ -1626,7 +1640,6 @@ export class ChannelsEngine {
       const batch = await this.readStateBatch();
       const view = canonicalAgentView(batch, runtime.sessionId, this.now());
       if (view.activity === 'working' || view.activity === 'blocked') {
-        runtime.unobservableRetries = 0;
         this.setSubmitState(runtime, 'submitted', seqs);
         return;
       }
@@ -1647,12 +1660,18 @@ export class ChannelsEngine {
     if (everObservable && preFingerprint !== null) {
       this.setSubmitState(runtime, captureChanged ? 'submit-stuck-submit' : 'submit-stuck-paste', seqs);
     } else {
+      // We never read the pane during the whole verify window, so we have NO
+      // evidence either way: the paste may have landed and been invisible, or
+      // never landed at all. Re-pasting on that is a coin flip that duplicates
+      // the prompt into the agent's context when it lands on the wrong side.
+      //
+      // This used to be safe because the drain held an unobservable session,
+      // so a re-enqueued item waited until the pane could be read again. That
+      // hold is gone — activity and observability no longer gate delivery —
+      // so a re-enqueue here delivers immediately and blind, up to the retry
+      // cap. Leave the durable .stuck-unobservable for the operator instead:
+      // force-deliver is a deliberate act with a human deciding the risk.
       this.setSubmitState(runtime, 'submit-stuck-unobservable', seqs);
-      if (runtime.unobservableRetries >= MAX_UNOBSERVABLE_RETRIES) {
-        return;
-      }
-      runtime.unobservableRetries += 1;
-      this.reenqueueStuck(runtime, seqs);
     }
   }
 
@@ -1694,7 +1713,7 @@ export class ChannelsEngine {
     runtime.pausedByOperator = undefined;
     this.resetHold(runtime);
     this.pushDeliveryEvent({ kind: 'resumed', sessionId });
-    void this.drain(runtime, false);
+    this.background('queue drain', () => this.drain(runtime, false));
   }
 
   dropQueue(sessionId: string): void {
@@ -1910,7 +1929,7 @@ export class ChannelsEngine {
       }
       if (canonicalDeliveryDecision(batch, runtime.sessionId, this.now()).deliver) {
         this.resetHold(runtime);
-        void this.drain(runtime, false, batch);
+        this.background('queue drain', () => this.drain(runtime, false, batch));
         nudged.push(runtime.sessionId);
       }
     }
