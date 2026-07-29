@@ -186,4 +186,3 @@ export function actionableSessions(views: Record<string, SessionStatusView>): st
     .map(([sessionId]) => sessionId)
     .sort();
 }
-

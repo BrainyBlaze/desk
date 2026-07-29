@@ -157,11 +157,6 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
 }
 
 /**
- * Snapshots to views, keyed by sessionId. A session absent from the payload is
- * absent from the map, and the consumer renders it `unknown` — the map never
- * carries a fabricated entry for a session the authority did not report.
- */
-/**
  * Drop the agent evidence from every view while KEEPING lifecycle.
  *
  * Used when the pulse cannot be read: we no longer know what any agent is
@@ -180,6 +175,11 @@ export function viewsWithoutAgentEvidence(views: SessionStatusMap): SessionStatu
   return next;
 }
 
+/**
+ * Snapshots to views, keyed by sessionId. A session absent from the payload is
+ * absent from the map, and the consumer renders it `unknown` — the map never
+ * carries a fabricated entry for a session the authority did not report.
+ */
 export function viewsFromPulse(snapshots: readonly unknown[] | undefined): SessionStatusMap {
   if (!snapshots) {
     return {};
