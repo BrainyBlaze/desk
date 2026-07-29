@@ -27,7 +27,11 @@ import { opencodeFacts, type OpencodeObservation } from './opencodeFacts.js';
 const MAX_FACTS_PER_ENVELOPE = 8;
 
 export type ObservationEnvelopeResult =
-  | { kind: 'envelope'; envelope: AgentStateEnvelope }
+  | {
+      kind: 'envelope';
+      envelope: AgentStateEnvelope;
+      scope?: AgentObservationScope;
+    }
   /**
    * A well-formed observation that asserts nothing — SessionStart, an event
    * this build does not act on. Accepted and dropped: rejecting it would make
@@ -36,6 +40,14 @@ export type ObservationEnvelopeResult =
    */
   | { kind: 'no-facts' }
   | { kind: 'invalid'; reason: string };
+
+/**
+ * Provider-internal identity travels beside the canonical envelope. It is
+ * transport scope, not a semantic fact.
+ */
+export type AgentObservationScope =
+  | { kind: 'producer-bootstrap' }
+  | { kind: 'provider-session'; providerSessionId: string };
 
 export interface ObservationEnvelopeOptions {
   /** Server receive time. The producer cannot know when Desk saw the event. */
@@ -72,6 +84,10 @@ export function observationEnvelope(
   if (facts.length > MAX_FACTS_PER_ENVELOPE) {
     return { kind: 'invalid', reason: 'observation produced more facts than the envelope allows' };
   }
+  const scope = observationScope(body.value);
+  if ('reason' in scope) {
+    return { kind: 'invalid', reason: scope.reason };
+  }
 
   // A tool edge is meaningless without the id that pairs it with its partner:
   // the authority closes an interval by ID, and an unpaired edge would either
@@ -100,13 +116,39 @@ export function observationEnvelope(
   try {
     // Parsed here so the adapter can never hand the route something the route
     // would reject — the failure surfaces at the boundary that built it.
-    return { kind: 'envelope', envelope: parseAgentStateEnvelope(candidate) };
+    return {
+      kind: 'envelope',
+      envelope: parseAgentStateEnvelope(candidate),
+      ...(scope.value === undefined ? {} : { scope: scope.value })
+    };
   } catch (error) {
     return {
       kind: 'invalid',
       reason: `adapter produced an invalid envelope: ${error instanceof Error ? error.message : String(error)}`
     };
   }
+}
+
+function observationScope(
+  body: ProducerBody
+):
+  | { value: AgentObservationScope | undefined }
+  | { reason: string } {
+  if (body.producer !== 'opencode-terminal') {
+    return { value: undefined };
+  }
+  if (body.observation.type === 'hook:plugin.loaded') {
+    return { value: { kind: 'producer-bootstrap' } };
+  }
+  const providerSessionId = readOptionalIdentifier(body.observation.sessionID);
+  if (providerSessionId === undefined) {
+    return {
+      reason: 'an OpenCode observation that asserts facts requires a sessionID'
+    };
+  }
+  return {
+    value: { kind: 'provider-session', providerSessionId }
+  };
 }
 
 /**

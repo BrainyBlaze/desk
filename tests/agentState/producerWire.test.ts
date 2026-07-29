@@ -161,7 +161,9 @@ describe('the OpenCode plugin body survives the same parser', () => {
       recorderPath,
       `import { appendFileSync } from 'node:fs';
 globalThis.fetch = async (url, init) => {
-  appendFileSync(${JSON.stringify(capture)}, init.body + '\\n');
+  if (String(url).endsWith('/api/agent-event')) {
+    appendFileSync(${JSON.stringify(capture)}, init.body + '\\n');
+  }
   return { ok: true, status: 200 };
 };
 `
@@ -170,7 +172,7 @@ globalThis.fetch = async (url, init) => {
     writeFileSync(
       driverPath,
       `const mod = await import(${JSON.stringify(pluginPath)});
-const hooks = await mod.default.server({});
+const hooks = await mod.default.server({ serverUrl: new URL('http://127.0.0.1:4096/') });
 await hooks.event({
   event: { type: 'session.status', properties: { sessionID: 'ses_1', status: { type: 'busy' } } }
 });
@@ -183,7 +185,8 @@ await hooks.event({
         DESK_SESSION_ID: 'work-opencode',
         DESK_AGENT: 'opencode',
         DESK_SESSION_GENERATION: '5',
-        DESK_PRODUCER_STATE_DIR: join(home, 'producers')
+        DESK_PRODUCER_STATE_DIR: join(home, 'producers'),
+        DESK_OPENCODE_SESSION_ID: 'ses_1'
       },
       encoding: 'utf8',
       timeout: 15_000
@@ -258,7 +261,8 @@ await hooks.event({
         DESK_SESSION_ID: 'work-opencode',
         DESK_AGENT: 'opencode',
         DESK_SESSION_GENERATION: '5',
-        DESK_PRODUCER_STATE_DIR: join(home, 'producers')
+        DESK_PRODUCER_STATE_DIR: join(home, 'producers'),
+        DESK_OPENCODE_SESSION_ID: 'ses_alpha'
       },
       encoding: 'utf8',
       timeout: 15_000

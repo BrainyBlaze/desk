@@ -10,7 +10,10 @@
 // `opencodeFacts`, on the server, under test — never here, inside the agent
 // process where no Desk test can reach.
 
-import { buildProducerRuntime } from './producerEmit.js';
+import {
+  buildProducerRuntime,
+  OPENCODE_PROVIDER_SESSION_ENV_VAR
+} from './producerEmit.js';
 
 /**
  * Source of `plugin/desk-attention.js` in the Desk-owned OpenCode config dir.
@@ -79,6 +82,28 @@ export default {
     // possible at all — without an address there is nobody to ask, and the
     // session would stay unknown until its agent happened to act again.
     const deskServerUrl = input && input.serverUrl ? String(input.serverUrl) : undefined;
+    let deskTrackedProviderSession =
+      typeof process.env.${OPENCODE_PROVIDER_SESSION_ENV_VAR} === 'string' &&
+      process.env.${OPENCODE_PROVIDER_SESSION_ENV_VAR}.trim()
+        ? process.env.${OPENCODE_PROVIDER_SESSION_ENV_VAR}.trim()
+        : undefined;
+    let deskBootstrapAccepted = false;
+    let deskBootstrapInFlight;
+
+    const deskEnsureBound = async () => {
+      if (deskBootstrapAccepted) return true;
+      if (!deskBootstrapInFlight) {
+        deskBootstrapInFlight = deskPost({ type: 'hook:plugin.loaded' })
+          .then((accepted) => {
+            deskBootstrapAccepted = accepted;
+            return accepted;
+          })
+          .finally(() => {
+            deskBootstrapInFlight = undefined;
+          });
+      }
+      return deskBootstrapInFlight;
+    };
 
     /**
      * Registration happens AFTER the first accepted observation, never before.
@@ -90,8 +115,19 @@ export default {
      * failed registration is silent by design.
      */
     const deskTrack = async (sessionID) => {
-      if (sessionID) await deskRegisterEndpoint(deskServerUrl, String(sessionID));
+      const candidate =
+        typeof sessionID === 'string' && sessionID.trim()
+          ? sessionID.trim()
+          : undefined;
+      if (!candidate) return false;
+      if (!(await deskEnsureBound())) return false;
+      if (!(await deskRegisterEndpoint(deskServerUrl, candidate))) return false;
+      deskTrackedProviderSession = candidate;
+      return true;
     };
+    const deskMatchesTrackedSession = (sessionID) =>
+      typeof sessionID === 'string' &&
+      sessionID === deskTrackedProviderSession;
 
     // Announce the plugin the moment it comes up, so the producer is BOUND
     // before anyone talks to this OpenCode. Binding is the precondition for
@@ -102,48 +138,74 @@ export default {
     // A beat, never an activity claim: the plugin can load while a turn is
     // running, and calling that idle would paint a busy agent free. deskPost is
     // best effort, so a Desk that is down cannot stop OpenCode from starting.
-    await deskPost({ type: 'hook:plugin.loaded' });
+    await deskEnsureBound();
+    if (deskTrackedProviderSession) {
+      await deskTrack(deskTrackedProviderSession);
+    }
 
     return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== 'string') return;
+      const eventSessionID = event.properties && event.properties.sessionID;
       // Streaming progress is a liveness beat, not a transition: it must never
       // promote a session that is blocked on an approval back to working.
       if (event.type === 'message.updated' || event.type === 'message.part.updated') {
-        await deskThrottledPost({ type: event.type, sessionID: event.properties && event.properties.sessionID });
+        if (
+          !deskMatchesTrackedSession(eventSessionID) ||
+          !(await deskTrack(eventSessionID))
+        ) return;
+        await deskThrottledPost({ type: event.type, sessionID: eventSessionID });
         return;
       }
-      await deskPost(sliceOf(event));
-      // Bind first, address second.
-      await deskTrack(event.properties && event.properties.sessionID);
+      const observation = sliceOf(event);
+      if (
+        !observation ||
+        !deskMatchesTrackedSession(eventSessionID) ||
+        !(await deskTrack(eventSessionID))
+      ) return;
+      await deskPost(observation);
     },
     // OpenCode publishes no "prompt submitted" event; this hook is the typed
     // equivalent and is what opens a turn.
     "chat.message": async (hookInput) => {
+      if (!(await deskTrack(hookInput && hookInput.sessionID))) return;
       await deskPost({ type: 'hook:chat.message', sessionID: hookInput && hookInput.sessionID });
-      await deskTrack(hookInput && hookInput.sessionID);
     },
     "permission.ask": async (hookInput) => {
+      const sessionID = hookInput && hookInput.sessionID;
+      if (
+        !deskMatchesTrackedSession(sessionID) ||
+        !(await deskTrack(sessionID))
+      ) return;
       await deskPost({
         type: 'hook:permission.ask',
-        sessionID: hookInput && hookInput.sessionID,
+        sessionID,
         permissionTitle: deskBounded(hookInput && hookInput.title)
       });
-      await deskTrack(hookInput && hookInput.sessionID);
     },
     // Tool edges are INTERVAL boundaries, never throttled: a dropped edge
     // leaves an interval open or closes nothing. callID is what pairs them.
     "tool.execute.before": async (hookInput) => {
+      const sessionID = hookInput && hookInput.sessionID;
+      if (
+        !deskMatchesTrackedSession(sessionID) ||
+        !(await deskTrack(sessionID))
+      ) return;
       await deskPost({
         type: 'hook:tool.execute.before',
-        sessionID: hookInput && hookInput.sessionID,
+        sessionID,
         toolUseId: hookInput && hookInput.callID
       });
     },
     "tool.execute.after": async (hookInput) => {
+      const sessionID = hookInput && hookInput.sessionID;
+      if (
+        !deskMatchesTrackedSession(sessionID) ||
+        !(await deskTrack(sessionID))
+      ) return;
       await deskPost({
         type: 'hook:tool.execute.after',
-        sessionID: hookInput && hookInput.sessionID,
+        sessionID,
         toolUseId: hookInput && hookInput.callID
       });
     }

@@ -3,7 +3,10 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveManifestPath } from '../../core/config.js';
 import { loadDesk } from '../../core/runner.js';
-import { observationEnvelope } from '../../core/agentState/providerAdapter.js';
+import {
+  observationEnvelope,
+  type AgentObservationScope
+} from '../../core/agentState/providerAdapter.js';
 import {
   adaptAgentEndpointRegistration,
   parseDeskEventClearResponse,
@@ -37,7 +40,10 @@ interface ManagedAgentLifecycle {
 }
 
 export interface AgentStateGateway {
-  submitEvent(envelope: AgentStateEnvelope): Promise<DaemonControlResult>;
+  submitEvent(
+    envelope: AgentStateEnvelope,
+    scope?: AgentObservationScope
+  ): Promise<DaemonControlResult>;
   readStates(): Promise<DaemonControlResult>;
 }
 
@@ -76,7 +82,11 @@ type AgentStateRead =
   | { ok: false; status: number; body: Record<string, unknown> };
 
 const defaultAgentStateGateway: AgentStateGateway = {
-  submitEvent: (envelope) => daemonControl('/control/agent-event', envelope),
+  submitEvent: (envelope, scope) =>
+    daemonControl(
+      '/control/agent-event',
+      scope === undefined ? envelope : { envelope, scope }
+    ),
   readStates: () => daemonControlGet('/control/agent-states')
 };
 
@@ -356,7 +366,10 @@ export function createSystemRoutes(
 
       let result: DaemonControlResult;
       try {
-        result = await agentStateGateway.submitEvent(envelope);
+        result =
+          adapted.scope === undefined
+            ? await agentStateGateway.submitEvent(envelope)
+            : await agentStateGateway.submitEvent(envelope, adapted.scope);
       } catch (error) {
         result = {
           ok: false,

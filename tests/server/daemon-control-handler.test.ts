@@ -571,6 +571,27 @@ describe('daemon control handler', () => {
     expect(daemon.agentEvent).toHaveBeenCalledWith(envelope);
   });
 
+  it('unwraps provider-session scope before forwarding a canonical event', async () => {
+    const daemon = daemonMock();
+    const envelope = agentEvent({
+      provider: 'opencode',
+      producer: 'opencode-terminal',
+      producerInstanceId: 'plugin-a'
+    });
+    const scope = {
+      kind: 'provider-session' as const,
+      providerSessionId: 'provider-session-a'
+    };
+
+    const result = await invoke(daemon, 'POST', '/control/agent-event', {
+      envelope,
+      scope
+    });
+
+    expect(result.status).toBe(200);
+    expect(daemon.agentEvent).toHaveBeenCalledWith(envelope, scope);
+  });
+
   it('returns the original receipt for a duplicate canonical event', async () => {
     const daemon = {
       ...daemonMock(),

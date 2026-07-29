@@ -166,7 +166,7 @@ describe('daemon OpenCode recovery', () => {
         occurredAt: 900,
         observedAt: 950,
         facts: [{ kind: 'heartbeat' }]
-      })
+      }, { kind: 'producer-bootstrap' })
     ).toMatchObject({ kind: 'accepted' });
     expect(
       daemon.agentEndpoint({
@@ -227,6 +227,63 @@ describe('daemon OpenCode recovery', () => {
         transport: 'poll',
         producerSeq: 2
       }
+    });
+  });
+
+  it('rejects a push fact from a different provider session without mutating state', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockRejectedValue(new Error('poll intentionally unavailable'));
+    const running = start(fetch);
+
+    expect(
+      running.agentEvent(
+        {
+          schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+          sessionId: 'opencode-a',
+          generation: 1,
+          provider: 'opencode',
+          mode: 'terminal',
+          producer: 'opencode-terminal',
+          producerInstanceId: 'plugin-a',
+          producerSeq: 3,
+          eventId: 'plugin-a:push:3',
+          invocationId: 'turn-3',
+          occurredAt: 1_000,
+          observedAt: 1_000,
+          facts: [{ kind: 'activity', activity: 'working' }]
+        },
+        { kind: 'provider-session', providerSessionId: 'provider-a' }
+      )
+    ).toMatchObject({ kind: 'accepted' });
+
+    expect(
+      running.agentEvent(
+        {
+          schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+          sessionId: 'opencode-a',
+          generation: 1,
+          provider: 'opencode',
+          mode: 'terminal',
+          producer: 'opencode-terminal',
+          producerInstanceId: 'plugin-a',
+          producerSeq: 4,
+          eventId: 'plugin-a:push:4',
+          invocationId: 'turn-4',
+          occurredAt: 1_010,
+          observedAt: 1_010,
+          facts: [{ kind: 'activity', activity: 'idle' }]
+        },
+        { kind: 'provider-session', providerSessionId: 'provider-b' }
+      )
+    ).toEqual({
+      kind: 'rejected',
+      reason: 'provider-session-mismatch'
+    });
+
+    expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
+      kind: 'agent',
+      activity: 'working'
     });
   });
 
