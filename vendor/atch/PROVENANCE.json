@@ -183,7 +183,7 @@
   "snapshot": {
     "algorithm": "sha256",
     "format": "git-path-mode-content-v1",
-    "digest": "8c389d76bdb521e66517ab5dfb96bfd0c530f56432ff4eb846aff53ed21b1f69",
+    "digest": "76033f4ce128687dd7b737c0104d1b1f7d0ea9421cb81ab73a7cbcfb99a642be",
     "note": "Digest covers the pinned fork commit PLUS the localPatches listed above; it is not the bare upstream tree."
   },
   "localPatches": [
@@ -256,6 +256,16 @@
         "master.c"
       ],
       "alsoIncludes": "A bounded ordered per-client transmit queue, writable-select draining, and client-local teardown on fatal write, allocation failure, or queue overflow.",
+      "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
+    },
+    {
+      "subject": "fix: reset v3 fragmented-message state after successful reassembly",
+      "why": "The reassembler cleared its active flag after a completed fragmented message but retained the payload length. A second fragmented message on the same connection appended to the first payload and exposed cross-message corruption.",
+      "files": [
+        "atch_wire_v3.c",
+        "tests/test_wire_v3.c"
+      ],
+      "alsoIncludes": "A regression that completes two schema-valid fragmented messages through one reassembler and verifies the second payload contains only its own bytes.",
       "upstreamStatus": "NOT yet in the fork repository — carry upstream and re-vendor at the next snapshot bump"
     }
   ]

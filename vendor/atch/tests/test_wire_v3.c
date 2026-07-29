@@ -45,7 +45,9 @@ static void bounds_and_u64(void) {
     b[6]=6; b[8]=0x10; assert(atch_v3_decode_frame(b,36,&f)==ATCH_V3_OK); assert(atch_v3_decode_frame_ex(b,36,&f,1)==ATCH_V3_BAD_FLAGS);
     b[8]=0x20; assert(atch_v3_decode_frame_ex(b,36,&f,1)==ATCH_V3_BAD_FLAGS);
     atch_v3_reassembler_init(&r); n=atch_v3_encode_header(b,64,48,4,0,9,0,12); memset(b+n,1,12); assert(atch_v3_reassembler_push(&r,b,n+12,&f)==ATCH_V3_TRUNCATED);
-    n=atch_v3_encode_header(b,64,48,0,0,10,0,13); memset(b+n,2,13); assert(atch_v3_reassembler_push(&r,b,n+13,&f)==ATCH_V3_OK); assert(f.payload_length==25 && f.payload[0]==1 && f.payload[24]==2); atch_v3_reassembler_free(&r);
+    n=atch_v3_encode_header(b,64,48,0,0,10,0,13); memset(b+n,2,13); assert(atch_v3_reassembler_push(&r,b,n+13,&f)==ATCH_V3_OK); assert(f.payload_length==25 && f.payload[0]==1 && f.payload[24]==2);
+    n=atch_v3_encode_header(b,64,48,4,0,20,0,12); memset(b+n,3,12); assert(atch_v3_reassembler_push(&r,b,n+12,&f)==ATCH_V3_TRUNCATED);
+    n=atch_v3_encode_header(b,64,48,0,0,21,0,13); memset(b+n,4,13); assert(atch_v3_reassembler_push(&r,b,n+13,&f)==ATCH_V3_OK); assert(f.payload_length==25 && f.payload[0]==3 && f.payload[24]==4); atch_v3_reassembler_free(&r);
     atch_v3_reassembler_init(&r); n=atch_v3_encode_header(b,64,48,4,0,9,0,25); memset(b+n,1,25); assert(atch_v3_reassembler_push(&r,b,n+25,&f)==ATCH_V3_TRUNCATED); n=atch_v3_encode_header(b,64,17,0,0,10,0,16); memset(b+n,2,16); assert(atch_v3_reassembler_push(&r,b,n+16,&f)==ATCH_V3_TRUNCATED); assert(!r.active); n=atch_v3_encode_header(b,64,17,0,0,10,0,16); memset(b+n,2,16); assert(atch_v3_reassembler_push(&r,b,n+16,&f)==ATCH_V3_OK); atch_v3_reassembler_free(&r);
     atch_v3_reassembler_init(&r); n=atch_v3_encode_header(b,64,48,4,0,9,0,25); memset(b+n,1,25); assert(atch_v3_reassembler_push(&r,b,n+25,&f)==ATCH_V3_TRUNCATED); n=atch_v3_encode_header(b,64,48,0,0,11,0,25); memset(b+n,2,25); assert(atch_v3_reassembler_push(&r,b,n+25,&f)==ATCH_V3_BAD_SEQUENCE); assert(!r.active); n=atch_v3_encode_header(b,64,48,0,0,11,0,25); memset(b+n,2,25); assert(atch_v3_reassembler_push(&r,b,n+25,&f)==ATCH_V3_OK); atch_v3_reassembler_free(&r);
 }

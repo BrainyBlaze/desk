@@ -71,6 +71,7 @@ import {
 } from './fileDeskEventJournal.js';
 import {
   AtchEventTailer,
+  atchEventCursorPath,
   atchEventPath,
   prepareAtchEventSink,
   type AtchEventDiagnostic
@@ -442,6 +443,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     sessionId: string;
     generation: number;
     path: string;
+    cursorPath: string;
     tailer: AtchEventTailer;
   }
   const eventObservers = new Map<string, EventObserver>();
@@ -464,16 +466,21 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       eventObservers.delete(observer.sessionId);
     }
     if (removeSink) {
-      try {
-        unlinkSync(observer.path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          reportAtchDiagnostic(observer, {
-            code: 'tailer-io',
-            message: `could not remove atch event sink: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          });
+      for (const [path, label] of [
+        [observer.path, 'sink'],
+        [observer.cursorPath, 'cursor']
+      ] as const) {
+        try {
+          unlinkSync(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            reportAtchDiagnostic(observer, {
+              code: 'tailer-io',
+              message: `could not remove atch event ${label}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            });
+          }
         }
       }
     }
@@ -485,9 +492,15 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   ): EventObserver => {
     const current = eventObservers.get(sessionId);
     if (current?.generation === generation && current.path === path) return current;
-    let observer: EventObserver;
+    const cursorPath = atchEventCursorPath(
+      options.atchSocketRoot,
+      sessionId,
+      generation
+    );
+    const diagnosticIdentity = { sessionId, generation, path };
     const tailer = new AtchEventTailer({
       path,
+      cursorPath,
       ...(options.atchEventPollIntervalMs === undefined
         ? {}
         : { pollIntervalMs: options.atchEventPollIntervalMs }),
@@ -500,9 +513,10 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           if (context.phase === 'replay') replayingAtchTransitions.delete(replayKey);
         }
       },
-      onDiagnostic: (diagnostic) => reportAtchDiagnostic(observer, diagnostic)
+      onDiagnostic: (diagnostic) =>
+        reportAtchDiagnostic(diagnosticIdentity, diagnostic)
     });
-    observer = { sessionId, generation, path, tailer };
+    const observer = { sessionId, generation, path, cursorPath, tailer };
     if (!tailer.start()) {
       throw new Error('atch event sink could not be opened securely');
     }
@@ -541,10 +555,19 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
             try {
               preparedObserver = startEventObserver(sessionId, generation, path);
             } catch (error) {
-              try {
-                unlinkSync(path);
-              } catch {
-                // Preserve the observer startup error.
+              for (const cleanupPath of [
+                path,
+                atchEventCursorPath(
+                  options.atchSocketRoot,
+                  sessionId,
+                  generation
+                )
+              ]) {
+                try {
+                  unlinkSync(cleanupPath);
+                } catch {
+                  // Preserve the observer startup error.
+                }
               }
               throw error;
             }

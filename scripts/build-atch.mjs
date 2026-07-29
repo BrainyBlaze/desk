@@ -29,7 +29,7 @@ const EXPECTED_UPSTREAM_REPOSITORY = 'https://github.com/mobydeck/atch.git';
 const EXPECTED_UPSTREAM_BASE = '15e0d3a0912618c08f7a74f85e41cca673b313f0';
 const EXPECTED_PATCH_RANGE = `${EXPECTED_UPSTREAM_BASE}..${EXPECTED_COMMIT}`;
 const EXPECTED_PATCH_COUNT = 41;
-const EXPECTED_SNAPSHOT_DIGEST = '8c389d76bdb521e66517ab5dfb96bfd0c530f56432ff4eb846aff53ed21b1f69';
+const EXPECTED_SNAPSHOT_DIGEST = '76033f4ce128687dd7b737c0104d1b1f7d0ea9421cb81ab73a7cbcfb99a642be';
 
 function snapshotDigest(root) {
   const files = [];

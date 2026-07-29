@@ -211,6 +211,86 @@ describe('AtchEventTailer', () => {
     tailer.stop();
   });
 
+  it('resumes after restart from a durable cursor and delivers downtime records as live', () => {
+    const cursorPath = `${path}.offset`;
+    const firstReceived: { event: unknown; phase: string }[] = [];
+    appendFileSync(path, JSON.stringify(records[0]) + '\n');
+    const firstTailer = new AtchEventTailer({
+      path,
+      cursorPath,
+      onEvent: (event, context) =>
+        firstReceived.push({ event, phase: context.phase })
+    });
+
+    firstTailer.pollNow();
+    firstTailer.stop();
+    appendFileSync(path, JSON.stringify(records[1]) + '\n');
+
+    const secondReceived: { event: unknown; phase: string }[] = [];
+    const secondTailer = new AtchEventTailer({
+      path,
+      cursorPath,
+      onEvent: (event, context) =>
+        secondReceived.push({ event, phase: context.phase })
+    });
+    secondTailer.pollNow();
+
+    expect(firstReceived).toEqual([{ event: records[0], phase: 'replay' }]);
+    expect(secondReceived).toEqual([{ event: records[1], phase: 'live' }]);
+    secondTailer.stop();
+  });
+
+  it('persists an empty baseline so the first downtime record is live after restart', () => {
+    const cursorPath = `${path}.offset`;
+    const firstTailer = new AtchEventTailer({
+      path,
+      cursorPath,
+      onEvent: vi.fn()
+    });
+    firstTailer.pollNow();
+    firstTailer.stop();
+
+    appendFileSync(path, JSON.stringify(records[0]) + '\n');
+    const received: { event: unknown; phase: string }[] = [];
+    const secondTailer = new AtchEventTailer({
+      path,
+      cursorPath,
+      onEvent: (event, context) => received.push({ event, phase: context.phase })
+    });
+    secondTailer.pollNow();
+
+    expect(received).toEqual([{ event: records[0], phase: 'live' }]);
+    secondTailer.stop();
+  });
+
+  it('persists only complete record boundaries across a restart', () => {
+    const cursorPath = `${path}.offset`;
+    const secondLine = JSON.stringify(records[1]) + '\n';
+    appendFileSync(
+      path,
+      JSON.stringify(records[0]) + '\n' + secondLine.slice(0, 12)
+    );
+    const firstTailer = new AtchEventTailer({
+      path,
+      cursorPath,
+      onEvent: vi.fn()
+    });
+    firstTailer.pollNow();
+    firstTailer.stop();
+
+    appendFileSync(path, secondLine.slice(12));
+    const received: { event: unknown; phase: string }[] = [];
+    const secondTailer = new AtchEventTailer({
+      path,
+      cursorPath,
+      onEvent: (event, context) => received.push({ event, phase: context.phase })
+    });
+    secondTailer.pollNow();
+
+    expect(received).toEqual([{ event: records[1], phase: 'live' }]);
+    secondTailer.stop();
+  });
+
   it('reports open failures without throwing from the polling loop', () => {
     const diagnostic = vi.fn();
     rmSync(path);
