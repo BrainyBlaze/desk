@@ -9,6 +9,8 @@ import { useNarrowViewport } from './sidebarPanel.js';
 import { TerminalSurface } from './TerminalSurface.js';
 import { NativeAgentSurface } from './agentSurface/NativeAgentSurface.js';
 import { StatusDot } from './statusDot.js';
+import { needsOperator, viewFor } from './agentStatusModel.js';
+import type { SessionStatusMap } from './usePulse.js';
 import type { LayoutKind, PanelCell } from './muxLayout.js';
 import type { DeskGroupView, DeskSessionView } from '../ui/model.js';
 
@@ -18,8 +20,8 @@ function AgentMultiplexerImpl({
   group,
   visible,
   cells,
-  selectedTmux,
-  attention,
+  selectedSessionId,
+  statusViews,
   onTouchSession,
   busy,
   onAddCell,
@@ -38,14 +40,14 @@ function AgentMultiplexerImpl({
   group: DeskGroupView;
   visible: boolean;
   cells: PanelCell[];
-  selectedTmux?: string;
-  attention: Record<string, { attention: true; since: string }>;
-  onTouchSession: (tmuxSession: string) => void;
+  selectedSessionId?: string;
+  statusViews: SessionStatusMap;
+  onTouchSession: (sessionId: string) => void;
   busy: boolean;
   onAddCell: (group: DeskGroupView) => void;
   onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
   onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
-  onDragSession: (tmuxSession: string | null) => void;
+  onDragSession: (sessionId: string | null) => void;
   onDropSession: (group: DeskGroupView, cell: PanelCell) => void;
   onAssignSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
   onBootSession: (session: DeskSessionView) => void;
@@ -134,10 +136,10 @@ function AgentMultiplexerImpl({
       group={group}
       cell={cell}
       visible={visible}
-      selectedTmux={selectedTmux}
-      attention={attention}
+      selectedSessionId={selectedSessionId}
+      statusViews={statusViews}
       onTouchSession={onTouchSession}
-      revision={cell.activeSession ? terminalRevisions[cell.activeSession.spec.tmuxSession] ?? 0 : 0}
+      revision={cell.activeSession ? terminalRevisions[cell.activeSession.spec.sessionId] ?? 0 : 0}
       onSelectSession={onSelectSession}
       onDragSession={onDragSession}
       onDropSession={onDropSession}
@@ -235,7 +237,7 @@ function AgentMultiplexerImpl({
             {cells.map((cell, index) => {
               const session = cell.activeSession;
               const active = index === pageIndex;
-              const hasAttention = Boolean(session && attention[session.spec.tmuxSession]);
+              const hasAttention = Boolean(session && needsOperator(statusViews, session.spec.sessionId));
               // Inactive cells keep the arwes diamond, tinted by session state
               // (attention pulses); the active one expands into a named pill —
               // 9 anonymous dots told you nothing about who was screaming.
@@ -256,7 +258,7 @@ function AgentMultiplexerImpl({
                   {active ? (
                     <>
                       {session ? (
-                        <StatusDot state={session.state} attention={hasAttention} />
+                        <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                       ) : null}
                       <span className="mobileMuxPillName">{session?.spec.name ?? 'empty'}</span>
                     </>
@@ -330,8 +332,8 @@ function TerminalCellImpl({
   group,
   cell,
   visible,
-  selectedTmux,
-  attention,
+  selectedSessionId,
+  statusViews,
   onTouchSession,
   revision,
   onSelectSession,
@@ -346,12 +348,12 @@ function TerminalCellImpl({
   group: DeskGroupView;
   cell: PanelCell;
   visible: boolean;
-  selectedTmux?: string;
-  attention: Record<string, { attention: true; since: string }>;
-  onTouchSession: (tmuxSession: string) => void;
+  selectedSessionId?: string;
+  statusViews: SessionStatusMap;
+  onTouchSession: (sessionId: string) => void;
   revision: number;
   onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
-  onDragSession: (tmuxSession: string | null) => void;
+  onDragSession: (sessionId: string | null) => void;
   onDropSession: (group: DeskGroupView, cell: PanelCell) => void;
   onAssignSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
   onBootSession: (session: DeskSessionView) => void;
@@ -375,8 +377,8 @@ function TerminalCellImpl({
           if (!active) {
             return;
           }
-          onTouchSession(active.spec.tmuxSession);
-          if (active.spec.tmuxSession !== selectedTmux) {
+          onTouchSession(active.spec.sessionId);
+          if (active.spec.sessionId !== selectedSessionId) {
             // Clicking anywhere in the terminal selects it, like a sidebar click.
             bleeps.click?.play();
             onSelectSession(group, cell, active);
@@ -385,7 +387,7 @@ function TerminalCellImpl({
         onDragOver={(event: DragEvent<HTMLElement>) => event.preventDefault()}
         onDrop={() => onDropSession(group, cell)}
       >
-        <CellChrome focused={Boolean(cell.activeSession && cell.activeSession.spec.tmuxSession === selectedTmux)}>
+        <CellChrome focused={Boolean(cell.activeSession && cell.activeSession.spec.sessionId === selectedSessionId)}>
           <div
             className="cellTabs"
             draggable={Boolean(cell.activeSession)}
@@ -398,24 +400,24 @@ function TerminalCellImpl({
                 const rect = activeTab.getBoundingClientRect();
                 event.dataTransfer.setDragImage(activeTab, event.clientX - rect.left, event.clientY - rect.top);
               }
-              onDragSession(cell.activeSession.spec.tmuxSession);
+              onDragSession(cell.activeSession.spec.sessionId);
             }}
             onDragEnd={() => onDragSession(null)}
           >
             {cell.sessions.map((session) => (
               <button
-                key={session.spec.tmuxSession}
-                className={`cellTab ${session.spec.tmuxSession === cell.activeSession?.spec.tmuxSession ? 'selected' : ''} ${
-                  session.spec.tmuxSession === selectedTmux ? 'globalSelected' : ''
+                key={session.spec.sessionId}
+                className={`cellTab ${session.spec.sessionId === cell.activeSession?.spec.sessionId ? 'selected' : ''} ${
+                  session.spec.sessionId === selectedSessionId ? 'globalSelected' : ''
                 }`}
                 onMouseEnter={() => bleeps.hover?.play()}
                 onClick={() => {
                   bleeps.click?.play();
                   onSelectSession(group, cell, session);
                 }}
-                title={session.spec.tmuxSession}
+                title={session.spec.sessionId}
               >
-                <StatusDot state={session.state} attention={Boolean(attention[session.spec.tmuxSession])} />
+                <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                 <span>{session.spec.name}</span>
               </button>
             ))}
@@ -438,10 +440,11 @@ function TerminalCellImpl({
               <>
                 {cell.activeSession.spec.uiMode === 'native' ? (
                   <NativeAgentSurface
-                    session={cell.activeSession.spec.tmuxSession}
+                    session={cell.activeSession.spec.sessionId}
                     revision={revision}
+                    statusView={viewFor(statusViews, cell.activeSession.spec.sessionId)}
                     visible={visible}
-                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                    focused={cell.activeSession.spec.sessionId === selectedSessionId}
                     onMessageMenu={onSelectionMenu}
                     onCreateNote={onCreateNoteFromText}
                   />
@@ -449,14 +452,14 @@ function TerminalCellImpl({
                   <TerminalSurface
                     session={cell.activeSession}
                     revision={revision}
-                    focused={cell.activeSession.spec.tmuxSession === selectedTmux}
+                    focused={cell.activeSession.spec.sessionId === selectedSessionId}
                     onSelectionMenu={onSelectionMenu}
                   />
                 )}
                 {cell.activeSession.state !== 'running' ? (
                   <div className="cellMissingOverlay">
                     <span className="cellMissingTitle">SESSION MISSING</span>
-                    <small className="cellMissingMeta">{cell.activeSession.spec.tmuxSession}</small>
+                    <small className="cellMissingMeta">{cell.activeSession.spec.sessionId}</small>
                     <button
                       type="button"
                       className="cellMissingBoot"
@@ -493,7 +496,7 @@ function TerminalCellImpl({
                     ) : (
                       group.sessions.map((session) => (
                         <button
-                          key={session.spec.tmuxSession}
+                          key={session.spec.sessionId}
                           type="button"
                           role="menuitem"
                           className="treeMenuItem"
@@ -505,7 +508,7 @@ function TerminalCellImpl({
                             onAssignSession(group, cell, session);
                           }}
                         >
-                          <StatusDot state={session.state} attention={Boolean(attention[session.spec.tmuxSession])} />
+                          <StatusDot view={viewFor(statusViews, session.spec.sessionId)} />
                           {session.spec.name}
                         </button>
                       ))

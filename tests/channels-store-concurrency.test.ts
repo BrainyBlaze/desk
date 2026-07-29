@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendMessage } from '../src/server/channelsStore.js';
 import { formatChannelPreamble, parseConversation } from '../src/server/channelsProtocol.js';
 import { ChannelsEngine } from '../src/server/channelsEngine.js';
+import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const STORE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/server/channelsStore.ts')).href;
 
@@ -112,6 +113,7 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
     writeFileSync(join(home, '_engine', 'engine.pid'), `${process.pid}\n99999\n`);
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       pid: process.pid + 1,
       pidAlive: () => true, // holder reports alive — pre-fix code trusted this alone
@@ -121,7 +123,6 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
       pumpIntervalMs: 1_000_000, // effectively off — no pump side effects during the test
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -143,6 +144,7 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
     writeFileSync(join(home, '_engine', 'engine.pid'), `${process.pid}\n42\n`);
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       pid: process.pid + 1,
       pidAlive: () => true,
@@ -151,7 +153,6 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -191,13 +192,13 @@ describe('durability restore: engine classifies per-item extensions on restart',
     member: 'alpha'
   });
 
-  const writeQueueFile = (tmuxSession: string, seq: number, ext: string, body = sample(seq)): void => {
-    const dir = join(home, '_engine', 'queue', tmuxSession);
+  const writeQueueFile = (sessionId: string, seq: number, ext: string, body = sample(seq)): void => {
+    const dir = join(home, '_engine', 'queue', sessionId);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, seqFile(seq, ext)), JSON.stringify({ ...body, seq }));
   };
 
-  it('re-enqueues .json AND .delivering items (.delivering = at-least-once re-send)', () => {
+  it('re-enqueues .json AND .delivering items (.delivering = at-least-once re-send)', async () => {
     const tmux = 'tmux-a';
     writeQueueFile(tmux, 1, 'json');
     writeQueueFile(tmux, 2, 'delivering');
@@ -206,19 +207,20 @@ describe('durability restore: engine classifies per-item extensions on restart',
     writeQueueFile(tmux, 5, 'stuck-submit'); // ditto
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,
+      readAgentStates: async () => canonicalAgentStateBatch([tmux]),
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
     try {
-      const states = engine.lifecycleStates();
-      const state = states.find((s) => s.tmuxSession === tmux);
-      expect(state?.queued).toBe(2); // seqs 1 + 2 enqueued; 3/4/5 NOT
+      const states = await engine.lifecycleStates();
+      const state = states.find((s) => s.sessionId === tmux);
+      expect(state?.queueDepth).toBe(2); // seqs 1 + 2 enqueued; 3/4/5 NOT
     } finally {
       engine.dispose();
     }
@@ -230,12 +232,12 @@ describe('durability restore: engine classifies per-item extensions on restart',
     writeQueueFile(tmux, 8, 'stuck-submit');
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 
@@ -254,12 +256,12 @@ describe('durability restore: engine classifies per-item extensions on restart',
     writeQueueFile(tmux, 99, 'delivering');
 
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,
       sessionRunning: () => false,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
 

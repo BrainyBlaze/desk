@@ -9,6 +9,7 @@ REPO="BrainyBlaze/desk"
 NODE_VERSION="22.23.1"
 NPM_VERSION="10.9.8"
 BUN_VERSION="1.3.14"
+ATCH_VERSION="1.6-bb1"
 PYTHON_MIN_VERSION="3.6"
 LOCK_TOKEN=""
 LOCK_OWNED=0
@@ -267,13 +268,6 @@ probe_sha256() {
   fi
 }
 
-probe_tmux() {
-  local value
-  have tmux || return 1
-  value="$(tmux -V 2>/dev/null | awk '{print $2}')"
-  [ -n "$value" ] && version_ge "$value" "3.2"
-}
-
 probe_git() {
   local value
   have git || return 1
@@ -291,7 +285,6 @@ probe_bootstrap_capabilities() {
 probe_host_capabilities() {
   MISSING_CAPABILITIES=()
   probe_bootstrap_capabilities
-  probe_tmux || MISSING_CAPABILITIES+=("tmux>=3.2")
   probe_git || MISSING_CAPABILITIES+=("git>=2.30")
   probe_python || MISSING_CAPABILITIES+=("python>=${PYTHON_MIN_VERSION}")
   have make || MISSING_CAPABILITIES+=("make")
@@ -344,28 +337,28 @@ install_missing_packages() {
   case "$PACKAGE_MANAGER" in
     brew)
       ensure_macos_tooling
-      packages=(tmux git python coreutils gnu-tar)
+      packages=(git python coreutils gnu-tar)
       brew install "${packages[@]}"
       ;;
     apt-get)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make g++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make g++)
       run_privileged apt-get update
       run_privileged apt-get install -y "${packages[@]}"
       ;;
     dnf|yum)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc-c++)
       run_privileged "$PACKAGE_MANAGER" install -y "${packages[@]}"
       ;;
     pacman)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python make gcc)
+      packages=(ca-certificates curl tar gzip coreutils git python make gcc)
       run_privileged pacman -Sy --needed --noconfirm "${packages[@]}"
       ;;
     zypper)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make gcc gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++)
       run_privileged zypper --non-interactive install "${packages[@]}"
       ;;
     apk)
-      packages=(ca-certificates curl tar gzip coreutils tmux git python3 make build-base)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make build-base)
       run_privileged apk add "${packages[@]}"
       ;;
     *) die "unsupported package manager: $PACKAGE_MANAGER" ;;
@@ -771,7 +764,7 @@ ensure_bun_toolchain() {
 }
 
 build_release() {
-  local archive extract source_root install_id version_dir final runtime_path
+  local archive extract source_root install_id version_dir final runtime_path atch_output
   archive="$WORK_DIR/$SOURCE_ASSET"
   download_and_verify_asset "$RELEASE_BASE/$SOURCE_ASSET" "$archive" "$SOURCE_SHA" "$SOURCE_ASSET"
   extract="$WORK_DIR/source-extract"
@@ -791,6 +784,14 @@ build_release() {
   )
   [ -x "$STAGED_RELEASE/dist/cli/main.js" ] || die "distribution build did not produce dist/cli/main.js."
   [ -x "$STAGED_RELEASE/libexec/desk-standalone" ] || die "distribution build did not produce libexec/desk-standalone."
+  [ -x "$STAGED_RELEASE/libexec/atch" ] || die "distribution build did not produce bundled atch."
+  if ! atch_output="$("$STAGED_RELEASE/libexec/atch" --version 2>/dev/null)"; then
+    die "bundled atch failed its version probe."
+  fi
+  case "$atch_output" in
+    "atch - version $ATCH_VERSION,"*) ;;
+    *) die "bundled atch returned an unexpected version probe: $atch_output" ;;
+  esac
   mkdir -p -- "$STAGED_RELEASE/runtime"
   runtime_path="$NODE_ROOT/bin/node"
   ln -s -- "$runtime_path" "$STAGED_RELEASE/runtime/node"
@@ -1081,9 +1082,17 @@ PY
 }
 
 report_optional_integrations() {
-  local command missing=()
+  local command missing=() agents=()
   for command in codex claude opencode gh nvidia-smi; do have "$command" || missing+=("$command"); done
   [ -z "${missing[*]-}" ] || info "Optional integrations not installed (Desk still works): ${missing[*]}"
+  # Desk learns what an agent is doing from hooks that agent fires. They are
+  # installed by an explicit command, never by this installer: they live in the
+  # agent's own configuration, and a tool that writes there uninvited has taken
+  # something it was not given. Without them every session honestly reports
+  # `unknown` — so say the command out loud rather than leave the operator to
+  # wonder why nothing reports.
+  for command in codex claude opencode; do have "$command" && agents+=("$command"); done
+  [ -z "${agents[*]-}" ] || info "Agent hooks are not installed yet — run 'desk hooks install' so Desk can see when ${agents[*]} are working, blocked, or waiting on you."
 }
 
 validate_uninstall_tree() {
@@ -1092,7 +1101,10 @@ import json, os, sys
 home,launcher=sys.argv[1:]; uid=os.getuid()
 if not os.path.isdir(home) or os.path.islink(home): raise SystemExit("Desk home is absent or not a directory")
 if os.stat(home).st_uid != uid: raise SystemExit("Desk home is not owned by the invoking user")
-allowed={"releases","toolchains","current",".desk-install"}
+# "hooks" holds the shim written by `desk hooks install`; "producers" holds the
+# per-session producer bindings the running app writes. Both are Desk's own
+# state inside Desk's own home, both are optional, and uninstall removes them.
+allowed={"releases","toolchains","current",".desk-install","hooks","producers"}
 unknown=set(os.listdir(home))-allowed
 if unknown: raise SystemExit("unidentified Desk home entries: "+", ".join(sorted(unknown)))
 with open(os.path.join(home,".desk-install"),encoding="utf-8") as f: install=json.load(f)
@@ -1123,6 +1135,12 @@ for name in os.listdir(toolchains):
         raise SystemExit("invalid toolchain ownership: "+path)
 for root, dirs, files in os.walk(toolchains):
     if os.stat(root).st_uid != uid: raise SystemExit("unowned toolchain path: "+root)
+for name in ("hooks","producers"):
+    path=os.path.join(home,name)
+    if not os.path.exists(path): continue
+    if os.path.islink(path) or not os.path.isdir(path): raise SystemExit("managed runtime path is not a directory: "+path)
+    for root, dirs, files in os.walk(path):
+        if os.stat(root).st_uid != uid: raise SystemExit("unowned runtime path: "+root)
 PY
 }
 
@@ -1134,9 +1152,22 @@ uninstall_desk() {
   validate_uninstall_tree || die "refusing uninstall because managed ownership validation failed."
   remove_launcher_path
   rm -f -- "$DESK_HOME/current" "$DESK_HOME/.desk-install"
-  rm -rf -- "$DESK_HOME/releases" "$DESK_HOME/toolchains"
+  rm -rf -- "$DESK_HOME/releases" "$DESK_HOME/toolchains" "$DESK_HOME/hooks" "$DESK_HOME/producers"
   rmdir -- "$DESK_HOME" || die "Desk home contains unidentified paths and was preserved: $DESK_HOME"
   printf '\n\033[32m✓ Desk application uninstalled. User configuration and projects were preserved.\033[0m\n'
+  # `desk hooks install` writes hook configuration into two kinds of place, and
+  # only one of them matters here. Desk-scoped config under ~/.config/desk is
+  # read by an agent only when Desk launches that agent, so once Desk is gone it
+  # is inert; it stays with the rest of the user's configuration. Agent-global
+  # config is read on every run of that CLI, from anywhere, and now names a shim
+  # this uninstall just deleted. A failing hook never breaks the agent, so
+  # nobody would ever notice. Name the global ones explicitly.
+  printf '\nIf you ran '\''desk hooks install'\'', these still run outside Desk and now point at a deleted file:\n'
+  printf '  %s\n' \
+    "$HOME/.codex/hooks.json — entries naming desk-agent-event" \
+    "$HOME/.config/opencode/plugin/desk-attention.js — only if installed by Desk 0.1.x"
+  printf 'Remove them to stop Codex and OpenCode invoking a shim that no longer exists.\n'
+  printf 'Desk-scoped hook config under %s never runs without Desk and was preserved.\n' "$HOME/.config/desk"
 }
 
 install_desk() {
@@ -1159,10 +1190,15 @@ install_desk() {
   printf '\n\033[32m✓ Desk %s installed → %s\033[0m\n\n' "$VERSION" "$LAUNCHER_PATH"
   cat <<NEXT
 Next:
+  desk hooks install         # let Desk see what your agents are doing
   desk serve                 # private Bun server on http://127.0.0.1:5173
   desk serve --dev           # Vite development server
 
 Both modes accept --host and --port. Neither mode falls back to the other.
+
+'desk hooks install' writes hook configuration into your agent tools so they
+report when a turn starts, finishes, or needs you. Skip it and Desk still runs;
+sessions simply report their state as unknown.
 NEXT
 }
 

@@ -51,9 +51,9 @@ explicitly mentioned — `@channel` is intentionally inert inside threads.
 
 - **Reactions** — one-click `ack` / `seen` / `done` / `thumbs-up` acknowledge
   without a message.
-- **Digest delivery** — when several messages queue up while an agent is
-  mid-turn, it receives one digest summarizing them instead of a prompt per
-  message, so it catches up in a single turn.
+- **Digest delivery** — when several messages are waiting at once, the agent
+  receives one digest summarizing them instead of a prompt per message, so it
+  catches up in a single turn.
 - **Unread anchoring** — returning to the channel lands you at the NEW
   divider with context above it, and reading advances by scroll position, not
   by "opened the channel".

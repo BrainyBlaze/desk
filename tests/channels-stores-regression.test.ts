@@ -169,7 +169,7 @@ describe('channelsPaused', () => {
     expect(isSessionPaused(home, 'tmux-a')).toBe(true);
     const sessions = listPausedSessions(home);
     expect(sessions).toHaveLength(1);
-    expect(sessions[0]).toMatchObject({ tmuxSession: 'tmux-a', reason: 'sensitive ops' });
+    expect(sessions[0]).toMatchObject({ sessionId: 'tmux-a', reason: 'sensitive ops' });
   });
 
   it('getPausedSession returns the record with reason + pausedAt', () => {

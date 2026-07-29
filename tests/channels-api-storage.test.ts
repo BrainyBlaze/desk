@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   handleChannelsRequest,
   initChannelsRuntime,
@@ -42,11 +42,16 @@ describe('channels storage API endpoints', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'desk-api-storage-'));
+    vi.stubEnv('HOME', home);
+    const manifestDir = join(home, '.config', 'desk');
+    mkdirSync(manifestDir, { recursive: true });
+    writeFileSync(join(manifestDir, 'desk.yml'), 'groups: []\n');
     initChannelsRuntime({ home });
   });
 
   afterEach(() => {
     resetChannelsRuntime();
+    vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -113,33 +118,33 @@ describe('channels storage API endpoints', () => {
   it('persists pause/resume actions through both the paused endpoint and engine action endpoint', async () => {
     const paused = await callChannelsApi('POST', '/api/channels/paused', {
       action: 'pause',
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       reason: ' operator hold '
     });
     expect(paused.status).toBe(200);
     expect(paused.body.items).toHaveLength(1);
-    expect(paused.body.items[0]).toMatchObject({ tmuxSession: 'tmux-a', reason: 'operator hold' });
-    expect(listPausedSessions(home).map((item) => item.tmuxSession)).toEqual(['tmux-a']);
+    expect(paused.body.items[0]).toMatchObject({ sessionId: 'tmux-a', reason: 'operator hold' });
+    expect(listPausedSessions(home).map((item) => item.sessionId)).toEqual(['tmux-a']);
 
     const listed = await callChannelsApi('GET', '/api/channels/paused');
-    expect(listed.body.items.map((item: { tmuxSession: string }) => item.tmuxSession)).toEqual(['tmux-a']);
+    expect(listed.body.items.map((item: { sessionId: string }) => item.sessionId)).toEqual(['tmux-a']);
 
     const resumed = await callChannelsApi('POST', '/api/channels/engine/action', {
       action: 'resume-session',
-      tmuxSession: 'tmux-a'
+      sessionId: 'tmux-a'
     });
     expect(resumed.status).toBe(200);
     expect(listPausedSessions(home)).toEqual([]);
 
     const pausedViaEngine = await callChannelsApi('POST', '/api/channels/engine/action', {
       action: 'pause-session',
-      tmuxSession: 'tmux-b',
+      sessionId: 'tmux-b',
       reason: 'api action'
     });
     expect(pausedViaEngine.status).toBe(200);
-    expect(listPausedSessions(home).map((item) => item.tmuxSession)).toEqual(['tmux-b']);
+    expect(listPausedSessions(home).map((item) => item.sessionId)).toEqual(['tmux-b']);
 
-    await callChannelsApi('POST', '/api/channels/paused', { action: 'resume', tmuxSession: 'tmux-b' });
+    await callChannelsApi('POST', '/api/channels/paused', { action: 'resume', sessionId: 'tmux-b' });
     expect(listPausedSessions(home)).toEqual([]);
   });
 });

@@ -3,24 +3,101 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildSessionSpecs, ManifestValidationError, parseDeskManifest } from '../src/core/manifest';
+import {
+  buildSessionSpecs,
+  ManifestValidationError,
+  parseDeskManifest,
+  parseLegacyDeskManifest
+} from '../src/core/manifest';
+
+describe('desk manifest native identity boundary', () => {
+  it('rejects a legacy session at the runtime parser boundary', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: legacy
+        cwd: /workspace
+        command: bash
+        tmuxSession: agentdesk-main-legacy
+`)
+    ).toThrow(/sessionId/);
+  });
+
+  it('accepts legacy identity only through the migration parser', () => {
+    const legacy = parseLegacyDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: legacy
+        cwd: /workspace
+        command: bash
+        tmuxSession: agentdesk-main-legacy
+`);
+    expect(legacy.groups[0].sessions[0]).toMatchObject({
+      name: 'legacy',
+      tmuxSession: 'agentdesk-main-legacy'
+    });
+  });
+
+  it('rejects duplicate runtime sessionIds before building specs', () => {
+    expect(() =>
+      parseDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: one
+        sessionId: same-id
+        cwd: /workspace
+        command: bash
+      - name: two
+        sessionId: same-id
+        cwd: /workspace
+        command: bash
+`)
+    ).toThrow(/duplicate sessionId/);
+  });
+
+  it('builds runtime specs with sessionId as the only lifecycle identity', () => {
+    const manifest = parseDeskManifest(`
+groups:
+  - id: main
+    sessions:
+      - name: alpha
+        sessionId: alpha
+        cwd: /workspace
+        command: bash
+`);
+
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
+    expect(spec.sessionId).toBe('alpha');
+    expect(spec).not.toHaveProperty('tmuxSession');
+  });
+});
 
 describe('desk manifest ui mode', () => {
-  it('defaults SDK-backed agent sessions to native ui mode when none is declared', () => {
+  // Terminal is the default for a declared-nothing session, and native is
+  // opt-in. The session form pre-selects terminal for the same reason, and the
+  // two must agree: while they disagreed, an operator editing the manifest by
+  // hand got a different default from one using the UI.
+  it('defaults an undeclared uiMode to terminal, and honours an explicit native', () => {
     const manifest = parseDeskManifest(`
 groups:
   - id: group-1
     sessions:
       - name: chat
+        sessionId: chat
         cwd: ~/projects/alpha
         agent: claude
         uiMode: native
       - name: plain
+        sessionId: plain
         cwd: ~/projects/alpha
         agent: codex
 `);
-    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
-    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'native']);
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
+    expect(specs.map((spec) => spec.uiMode)).toEqual(['native', 'terminal']);
   });
 
   it('honors an explicit terminal uiMode and keeps custom-command sessions terminal', () => {
@@ -29,14 +106,16 @@ groups:
   - id: group-1
     sessions:
       - name: old-school
+        sessionId: old-school
         cwd: ~/projects/alpha
         agent: claude
         uiMode: terminal
       - name: scripted
+        sessionId: scripted
         cwd: ~/projects/alpha
         command: htop
 `);
-    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(specs.map((spec) => spec.uiMode)).toEqual(['terminal', 'terminal']);
   });
 
@@ -46,12 +125,13 @@ groups:
   - id: group-1
     sessions:
       - name: chat
+        sessionId: chat
         cwd: ~/projects/alpha
         agent: opencode
         uiMode: native
         model: zai-coding-plan/glm-5.2
 `);
-    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(spec.model).toBe('zai-coding-plan/glm-5.2');
   });
 
@@ -61,11 +141,12 @@ groups:
   - id: group-1
     sessions:
       - name: chat
+        sessionId: chat
         cwd: ~/projects/alpha
         agent: claude
         uiMode: native
 `);
-    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace', namespace: 'agentdesk' });
+    const [spec] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
     expect(spec.command).toBe("cd '/workspace/projects/alpha' && exec desk agent-host");
   });
 
@@ -131,6 +212,7 @@ groups:
   - id: group-1
     sessions:
       - name: claude
+        sessionId: claude
         cwd: ${cwd}
         agent: claude
         resume: ${resume}
@@ -203,19 +285,23 @@ groups:
     label: Research
     sessions:
       - name: alpha
+        sessionId: alpha
         cwd: ~/projects/alpha
         agent: codex
+        uiMode: native
         resume: 00000000-0000-7000-8000-000000000001
       - name: project-mu
+        sessionId: project-mu
         cwd: ~/projects/project-μ
         agent: codex
+        uiMode: native
         resume: 00000000-0000-7000-8000-000000000002
 `);
+    // `uiMode` is declared because this test is about resume entries becoming
+    // stable specs, not about what an undeclared mode resolves to — that has
+    // its own test, and leaving it implicit here would couple the two.
 
-    const specs = buildSessionSpecs(manifest, {
-      homeDir: '/workspace',
-      namespace: 'agentdesk'
-    });
+    const specs = buildSessionSpecs(manifest, { homeDir: '/workspace' });
 
     expect(specs).toEqual([
       {
@@ -229,7 +315,7 @@ groups:
         groupLayout: undefined,
         groupOrder: undefined,
         order: undefined,
-        tmuxSession: 'agentdesk-group-1-alpha-00000000',
+        sessionId: 'alpha',
         command: "cd '/workspace/projects/alpha' && exec desk agent-host",
         uiMode: 'native'
       },
@@ -244,11 +330,47 @@ groups:
         groupLayout: undefined,
         groupOrder: undefined,
         order: undefined,
-        tmuxSession: 'agentdesk-group-1-project-mu-00000000',
+        sessionId: 'project-mu',
         command: "cd '/workspace/projects/project-μ' && exec desk agent-host",
         uiMode: 'native'
       }
     ]);
+  });
+
+  it('fails closed on invalid or duplicate persisted sessionIds', () => {
+    expect(() => parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: unsafe
+        cwd: /workspace
+        command: bash
+        sessionId: bad/id
+`)).toThrow(/sessionId/);
+
+    expect(() => parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: unsafe-type
+        cwd: /workspace
+        command: bash
+        sessionId: true
+`)).toThrow(/sessionId/);
+
+    expect(() => parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: one
+        cwd: /workspace
+        command: bash
+        sessionId: same-id
+      - name: two
+        cwd: /workspace
+        command: bash
+        sessionId: same-id
+`)).toThrow(/duplicate sessionId "same-id"/);
   });
 
   it('requires session cwd and either a command or a supported agent', () => {
@@ -270,13 +392,14 @@ groups:
   - id: group-1
     sessions:
       - name: beta
-        command: cd '/workspace/projects/beta' && codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume 'abc'
+        sessionId: beta
+        command: cd '/workspace/projects/beta' && codex resume 'abc'
 `);
 
     expect(buildSessionSpecs(manifest, { homeDir: '/workspace' })[0]).toMatchObject({
       name: 'beta',
       cwd: '/workspace',
-      command: "cd '/workspace/projects/beta' && codex -c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always resume 'abc'"
+      command: "cd '/workspace/projects/beta' && codex resume 'abc'"
     });
   });
 
@@ -289,17 +412,21 @@ projects:
       - id: main
         sessions:
           - name: bash
+            sessionId: bash-x
             agent: bash
           - name: claude
+            sessionId: claude
             agent: claude
             bypassPermissions: true
             resume: abc123
             uiMode: terminal
           - name: codex
+            sessionId: codex
             agent: codex
             bypassPermissions: true
             uiMode: terminal
           - name: opencode
+            sessionId: opencode
             agent: opencode
             resume: ses_12a31855dffeHTCs6tcfOmsddP
             uiMode: terminal
@@ -308,24 +435,34 @@ projects:
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
     expect(commands[0]).toBe("cd '/workspace/projects/sample' && exec bash");
     // Agent launches carry explicit Desk identity for globally installed hooks.
-    expect(commands[1]).toContain("cd '/workspace/projects/sample' && desk_claude_session=");
-    expect(commands[1]).toContain("DESK_TMUX_SESSION='agentdesk-sample-main-claude-");
+    expect(commands[1]).toContain("cd '/workspace/projects/sample' && ");
+    expect(commands[1]).toContain("DESK_SESSION_ID='claude'");
+    expect(commands[1]).not.toContain('DESK_TMUX_SESSION');
+    expect(commands[1]).not.toContain('tmux display-message');
     expect(commands[1]).toContain("DESK_AGENT='claude' claude");
+    // `--settings` points at DESK'S OWN file, never at the operator's. The
+    // retired form inlined a JSON blob carrying terminal-bell settings and
+    // hooks of a schema the route now rejects; this one names a file Desk
+    // writes and owns, so the operator's ~/.claude/settings.json is never
+    // touched by Desk at all.
     expect(commands[1]).toContain('--settings');
-    expect(commands[1]).toContain('preferredNotifChannel');
+    expect(commands[1]).toContain('/.config/desk/claude/settings.json');
+    expect(commands[1]).not.toContain('preferredNotifChannel');
     expect(commands[1]).toContain("--dangerously-skip-permissions --resume 'abc123'");
-    expect(commands[1]).toContain('desk_claude_session="$HOME/.claude/projects/-workspace-projects-sample/abc123.jsonl"');
     expect(commands[1]).not.toContain('grep -q');
-    expect(commands[1]).toContain('desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue');
-    expect(commands[1]).toContain('if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi');
-    expect(commands[1]).toContain('desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics');
+    expect(commands[1]).toContain('desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics');
     expect(commands[1]).toContain('exec "${SHELL:-/bin/sh}"');
-    expect(commands[1]).toContain('--continue');
-    expect(commands[2]).toContain("DESK_AGENT='codex' codex -c tui.notifications=true");
-    expect(commands[2]).toContain('tui.notification_method=bel');
+    expect(commands[1]).not.toContain('--continue');
+    expect(commands[2]).toContain("DESK_SESSION_ID='codex' DESK_AGENT='codex' codex");
+    // The BEL launch flags are gone with the rest of the terminal-bell era: a
+    // bell is an edge with no author, and any child ringing it looked
+    // identical to the agent finishing a turn.
+    expect(commands[2]).not.toContain('tui.notification_method=bel');
+    expect(commands[2]).not.toContain('tui.notifications=true');
     expect(commands[2]).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(commands[3]).toContain("cd '/workspace/projects/sample' && ");
-    expect(commands[3]).toContain("DESK_TMUX_SESSION='agentdesk-sample-main-opencode-");
+    expect(commands[3]).toContain("DESK_SESSION_ID='opencode'");
+    expect(commands[3]).not.toContain('DESK_TMUX_SESSION');
     expect(commands[3]).toContain("DESK_AGENT='opencode'");
     expect(commands[3]).toContain('desk_opencode="${DESK_OPENCODE_BIN:-$(command -v opencode 2>/dev/null || true)}"');
     expect(commands[3]).toContain('desk_opencode="$HOME/.opencode/bin/opencode"');
@@ -339,13 +476,12 @@ projects:
     expect(commands[3]).toContain('OPENCODE_CONFIG_CONTENT=\'{"permission":{"*":"allow"}}\'');
   });
 
-  it('falls back from claude resume to continue when the CLI cannot resume the id', () => {
+  it('never substitutes another Claude conversation when the exact resume id fails', () => {
     const fixture = createClaudeLaunchFixture({
       claudeScript: `#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/claude-args.log"
 case " $* " in
   *" --resume "*) printf '%s\n' "No conversation found for resume" >&2; exit 31 ;;
-  *" --continue"*) printf '%s\n' "continued"; exit 0 ;;
   *) printf '%s\n' "unexpected args: $*" >&2; exit 99 ;;
 esac
 `
@@ -355,35 +491,8 @@ esac
       const result = runGeneratedCommand(command, fixture);
 
       expect(result.status).toBe(0);
-      expect(result.stdout).toContain('continued');
-      expect(result.stderr).toContain('desk: claude --resume failed with exit 31; trying --continue');
-      expect(fixture.readClaudeArgs()).toEqual([
-        expect.stringContaining('--resume abc123'),
-        expect.stringContaining('--continue')
-      ]);
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
-  it('keeps a claude terminal pane alive with diagnostics when resume and continue both fail', () => {
-    const fixture = createClaudeLaunchFixture({
-      claudeScript: `#!/bin/sh
-printf '%s\n' "$*" >> "$HOME/claude-args.log"
-case " $* " in
-  *" --resume "*) printf '%s\n' "resume missing" >&2; exit 31 ;;
-  *" --continue"*) printf '%s\n' "continue missing" >&2; exit 32 ;;
-  *) printf '%s\n' "unexpected args: $*" >&2; exit 99 ;;
-esac
-`
-    });
-    try {
-      const command = buildClaudeResumeSpecCommand(fixture.workspace, 'abc123');
-      const result = runGeneratedCommand(command, fixture);
-
-      expect(result.status).toBe(0);
-      expect(result.stderr).toContain('desk: claude --resume failed with exit 31; trying --continue');
-      expect(result.stderr).toContain('desk: claude --continue failed with exit 32; leaving pane open for diagnostics');
+      expect(result.stderr).toContain('desk: exact claude --resume failed with exit 31; leaving pane open for diagnostics');
+      expect(fixture.readClaudeArgs()).toEqual([expect.stringContaining('--resume abc123')]);
       expect(fixture.readShellLog()).toEqual('shell kept alive\n');
     } finally {
       fixture.cleanup();
@@ -401,6 +510,7 @@ projects:
       - id: main
         sessions:
           - name: oc-yolo
+            sessionId: oc-yolo
             agent: opencode
             uiMode: terminal
             bypassPermissions: true
@@ -417,6 +527,7 @@ projects:
       - id: main
         sessions:
           - name: oc-gated
+            sessionId: oc-gated
             agent: opencode
             uiMode: terminal
             bypassPermissions: false
@@ -438,6 +549,7 @@ projects:
       - id: main
         sessions:
           - name: opencode
+            sessionId: opencode
             agent: opencode
             uiMode: terminal
 `),
@@ -455,10 +567,12 @@ groups:
   - id: group-1
     sessions:
       - name: claude
+        sessionId: claude
         cwd: ~/projects/sample
         agent: claude
         uiMode: terminal
       - name: codex
+        sessionId: codex
         cwd: ~/projects/sample
         agent: codex
         resume: abc123
@@ -496,6 +610,7 @@ projects:
       - id: main
         sessions:
           - name: claude
+            sessionId: claude
             agent: claude
             bypassPermissions: true
             resume: 'a$(id)b'

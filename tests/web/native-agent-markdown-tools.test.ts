@@ -33,10 +33,14 @@ describe('native agent thinking indicator', () => {
     expect(source).toMatch(/const \[awaitingResponse, setAwaitingResponse\] = useState\(false\)/);
     expect(source).toMatch(/agentSurfaceClient\.send\(surfaceId, session, text\);[\s\S]*setAwaitingResponse\(true\);/);
     expect(source).toMatch(/if \(event\.kind !== 'session-info'\) \{[\s\S]*setAwaitingResponse\(false\);[\s\S]*\}/);
-    expect(source).toMatch(/onSnapshot: \(\{ state, lastSeq, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
+    expect(source).toMatch(/onSnapshot: \(\{ lastSeq, events \}\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onError: \(_code, message\) => \{[\s\S]*setAwaitingResponse\(false\);/);
     expect(source).toMatch(/onExit: \(\) => \{[\s\S]*setAwaitingResponse\(false\);/);
-    expect(source).toMatch(/const showAgentThinking =\s*awaitingResponse \|\| model\.status === 'processing' \|\| model\.status === 'tool-executing';/);
+    // The indicator reads the AUTHORITY, not a broker-side status FSM: a second
+    // semantic state here is what let the header and the sidebar disagree.
+    // `awaitingResponse` only covers the gap between our send and the first
+    // frame back, which the authority cannot know about yet.
+    expect(source).toMatch(/const showAgentThinking = awaitingResponse \|\| statusView\.agent\?\.tone === 'working';/);
     // The indicator must NOT be gated on pending assistant text: a tool call
     // that runs after a partial assistant message left the transcript dead-still
     // for the whole tool duration (the operator's 15:41/15:51 report).

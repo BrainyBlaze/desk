@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { buildOpencodeAttentionPlugin } from './agentState/opencodeProducer.js';
 import { writeTextFileAtomic } from '../shared/atomicFile.js';
 
 /**
@@ -19,7 +19,6 @@ import { writeTextFileAtomic } from '../shared/atomicFile.js';
  * not fire the server hooks; the attention hooks are server hooks, not TUI
  * hooks.
  */
-const DESK_ATTENTION_PLUGIN_SOURCE_PATH = fileURLToPath(new URL('./opencode/desk-attention.js', import.meta.url));
 
 /**
  * Desk-managed opencode.json. Intentionally carries NO permission block: the
@@ -76,7 +75,7 @@ export function ensureOpencodeConfigDir(dir: string = defaultOpencodeConfigDir()
   const pluginDir = join(dir, 'plugin');
   mkdirSync(pluginDir, { recursive: true });
   writeIfChanged(join(dir, 'opencode.json'), OPENCODE_CONFIG_JSON);
-  writeIfChanged(join(pluginDir, 'desk-attention.js'), readFileSync(DESK_ATTENTION_PLUGIN_SOURCE_PATH, 'utf8'));
+  writeIfChanged(join(pluginDir, 'desk-attention.js'), buildOpencodeAttentionPlugin());
   removeStaleTuiRegistration(dir);
   return dir;
 }

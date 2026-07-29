@@ -46,7 +46,9 @@ import {
   SquareTerminal,
   StickyNote,
   TerminalSquare,
+  TriangleAlert,
   Trash2,
+  Users,
   Volume2,
   VolumeX,
   Wrench,
@@ -61,7 +63,6 @@ import {
   addProjectGroup,
   addProjectSession,
   addSession,
-  clearAttention,
   deleteProject,
   deleteProjectGroup,
   deleteProjectSession,
@@ -70,6 +71,7 @@ import {
   editProjectSession,
   setSessionUiMode,
   ApiCodeError,
+  fetchAgentProfiles,
   fetchDeskSnapshot,
   killAllAgents,
   fetchSettings,
@@ -85,7 +87,6 @@ import {
   fetchDetectedLanguages,
   restartProjectSession,
   upDesk,
-  type AgentEvent,
   type DeskAutosaveMode,
   type DeskFetchedUiSettings,
   type DeskUiSettings
@@ -114,15 +115,32 @@ import {
 } from './sidebarPanel.js';
 import { usePersistedCollapse } from './usePersistedCollapse.js';
 import { useSubsystemSidebars } from './useSubsystemSidebars.js';
-import { getMovedSessionTmux, getProjectDropGroup } from './sidebarMove.js';
-import { usePulse } from './usePulse.js';
+import { getMovedSessionId, getProjectDropGroup } from './sidebarMove.js';
+import { usePulse, type SessionStatusMap } from './usePulse.js';
+import { useEventFeed } from './useEventFeed.js';
+import type { DeskEvent } from '../shared/controlPlane/index.js';
+import {
+  EVENT_FILTER_LABELS,
+  EVENT_FILTER_ORDER,
+  deskEventView,
+  filterEvents,
+  type DeskEventView,
+  type EventFilter
+} from './eventFeedModel.js';
+import { actionableSessions, needsOperator, viewFor } from './agentStatusModel.js';
 import { useStableCallbacks } from './stableCallbacks.js';
 import { useClampedMenu } from './menuPosition.js';
 import { shortTimeAgo } from './git/gitStatusMeta.js';
 import { buildSessionPayload } from './sessionFormPayload.js';
-import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } from './sessionAgentOptions.js';
-import type { DeskSessionUiMode } from '../core/types.js';
+import {
+  SESSION_AGENT_OPTIONS,
+  supportsAgentProfiles,
+  supportsBypassPermissions,
+  supportsNativeUi
+} from './sessionAgentOptions.js';
+import type { AgentProfile, DeskSessionUiMode } from '../core/types.js';
 import { CommandButton } from './headerPrimitives.js';
+import { AgentProfilesSettings } from './AgentProfilesSettings.js';
 import { WorkspaceHeader } from './WorkspaceHeader.js';
 import { AgentsSidebar } from './AgentsSidebar.js';
 import { AgentMultiplexer } from './AgentMultiplexer.js';
@@ -211,6 +229,7 @@ interface SessionForm {
   name: string;
   cwd: string;
   agent: string;
+  profileId: string;
   resume: string;
   initialResume: string;
   bypassPermissions: boolean;
@@ -239,11 +258,16 @@ const emptySessionForm: SessionForm = {
   name: '',
   cwd: '',
   agent: 'codex',
+  profileId: '',
   resume: '',
   initialResume: '',
   bypassPermissions: true,
   command: '',
-  uiMode: 'native',
+  // Terminal is the default because it is the mode that works everywhere: it
+  // drives the agent's own TUI, so anything the CLI can do, the session can do.
+  // Native is a richer surface but a narrower one, and defaulting to it made
+  // the first session an operator creates the least predictable one.
+  uiMode: 'terminal',
   model: ''
 };
 
@@ -254,7 +278,7 @@ export function App(): JSX.Element {
   const [subsystem, setSubsystem] = useState<Subsystem>(() => readStoredSubsystem(localStorage.getItem('desk.subsystem')));
   // Keep-alive multiplexer mounts: the active group plus the most recently
   // visited ones stay mounted hidden, so switching back reuses live
-  // terminals — no socket/PTY churn, no WebGL context churn, no tmux resize
+  // terminals — no socket/PTY churn, no WebGL context churn, no daemon resize
   // storm. The agents subsystem itself is also display-gated now instead of
   // unmounting on subsystem switches (every other subsystem already worked
   // that way), which retired the fresh-group-id remount trick the panel
@@ -266,7 +290,7 @@ export function App(): JSX.Element {
   const [activeGroupId, setActiveGroupId] = useState<string | undefined>(
     () => localStorage.getItem('desk.activeGroup') ?? undefined
   );
-  const [selectedTmux, setSelectedTmux] = useState<string | undefined>(
+  const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(
     () => localStorage.getItem('desk.activeSession') ?? undefined
   );
   const [cellAssignments, setCellAssignments] = useState<Record<string, Record<string, number>>>(() =>
@@ -306,7 +330,7 @@ export function App(): JSX.Element {
   const pendingEditorRevealRef = useRef<string | null>(null);
   const gitNavigatorRef = useRef<((target: GitNavigateTarget) => void) | null>(null);
   const pendingGitNavRef = useRef<GitNavigateTarget | null>(null);
-  const [draggedTmux, setDraggedTmux] = useState<string | null>(null);
+  const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null);
   const agentSidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringAgentSidebarRef = useRef(false);
   // Persisted agents-sidebar width: localStorage cache, desk.yml as truth.
@@ -346,18 +370,33 @@ export function App(): JSX.Element {
   );
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState<ModalMode>(null);
+  // Where closing the current modal goes back TO. Creating a profile from
+  // inside the session wizard has to be a detour, not an exit: `openAddSession`
+  // resets the form, so sending the operator to Settings and leaving them there
+  // would silently discard everything they had typed. Null means "close", which
+  // is the ordinary case.
+  const [modalReturn, setModalReturn] = useState<ModalMode>(null);
   // Second-stage confirm: true once the server answered resume-not-captured and
   // the user must explicitly accept starting a fresh conversation.
   const [uiModeSwitchDiscard, setUiModeSwitchDiscard] = useState(false);
   const [projectForm, setProjectForm] = useState<ProjectForm>(emptyProjectForm);
   const [groupForm, setGroupForm] = useState<GroupForm>(emptyGroupForm);
   const [sessionForm, setSessionForm] = useState<SessionForm>(emptySessionForm);
+  const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
   const [modalProject, setModalProject] = useState<DeskProjectView | undefined>();
   const [modalGroup, setModalGroup] = useState<DeskGroupView | undefined>();
   const [modalSession, setModalSession] = useState<DeskSessionView | undefined>();
-  const [attention, setAttention] = useState<Record<string, { attention: true; since: string }>>({});
-  const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
-  const [unreadEvents, setUnreadEvents] = useState(0);
+  const [statusViews, setStatusViews] = useState<SessionStatusMap>({});
+  // One journal for agent transitions and channel notifications, with one
+  // ordering and one unread count. Acknowledgement lives here and nowhere else.
+  const {
+    events: agentEvents,
+    unread: unreadEvents,
+    error: eventFeedError,
+    markRead,
+    clearAll,
+    markReadLocally
+  } = useEventFeed();
   // The 2s pulse loop (telemetry + attention/events + snapshot liveness) owns
   // systemSnapshot/systemError/telemetryHistory; it writes the
   // attention/events/snapshot state below through these setters so the coupling
@@ -365,9 +404,7 @@ export function App(): JSX.Element {
   // applying its own optimistic attention/event mutations.
   const { systemSnapshot, systemError, telemetryHistoryRef, invalidateAttentionPulse } = usePulse({
     setSnapshot,
-    setAttention,
-    setAgentEvents,
-    setUnreadEvents
+    setStatusViews
   });
   const [notifOpen, setNotifOpen] = useState(() => localStorage.getItem('desk.notifOpen') === 'true');
   const [notifWidth, setNotifWidth] = useState(() => {
@@ -739,20 +776,20 @@ export function App(): JSX.Element {
     return buildWorkspaceState(snapshot.view, {
       projectId: activeProjectId,
       groupId: activeGroupId,
-      tmuxSession: selectedTmux
+      sessionId: selectedSessionId
     });
-  }, [activeGroupId, activeProjectId, selectedTmux, snapshot]);
+  }, [activeGroupId, activeProjectId, selectedSessionId, snapshot]);
 
   const activeProject = workspace?.activeProject ?? snapshot?.view.projects.find((project) => project.id === activeProjectId) ?? snapshot?.view.projects[0];
   const activeGroup = workspace?.activeGroup;
   // Keep-alive warm budget: the active group leads; recently visited groups stay
   // mounted hidden so switching back is a pure show/hide — no remount, no socket
   // churn. This was a fixed LRU of 3 groups, which made most switches in a
-  // 14-group workspace cold-remount. With the terminal broker delivering output
-  // ONLY to visible surfaces, a hidden warm cell parses nothing, so we can keep
+  // 14-group workspace cold-remount. With the binary terminal client delivering
+  // output ONLY to visible surfaces, a hidden warm cell parses nothing, so we can keep
   // many groups warm cheaply. The cap is a session-count budget (not a group
   // count) so a few large grids and many solos both behave, and it stays at/under
-  // the server's warm-PTY ceiling. The active group is always kept even if it
+  // the browser's mounted-session budget. The active group is always kept even if it
   // alone exceeds the budget. Groups removed from the manifest fall out.
   const maxWarmSessions = narrowViewport ? 16 : 40;
   const mountedMuxGroups = useMemo(() => {
@@ -785,13 +822,13 @@ export function App(): JSX.Element {
 
   // Agents status-bar context: identity of the selected session. Project and
   // group already live in the topbar scope cell — the bar adds what is
-  // missing: which session, which agent, its liveness, and a copyable tmux
-  // target for `tmux attach -t`.
+  // missing: which session, which agent, its liveness, and its copyable
+  // durable identity.
   useEffect(() => {
     const session = snapshot?.view.projects
       .flatMap((project) => project.groups)
       .flatMap((group) => group.sessions)
-      .find((candidate) => candidate.spec.tmuxSession === selectedTmux);
+      .find((candidate) => candidate.spec.sessionId === selectedSessionId);
     if (!session) {
       publishStatus('agents', [
         { key: 'session', icon: <TerminalSquare size={11} />, text: 'no session selected', hint: 'Select a session in the sidebar' }
@@ -809,15 +846,15 @@ export function App(): JSX.Element {
       { key: 'agent', icon: <Bot size={11} />, text: session.spec.agent ?? 'shell', hint: 'Agent kind' },
       { key: 'cwd', icon: <Folder size={11} />, text: session.spec.cwd, hint: `Working directory: ${session.spec.cwd}` },
       {
-        key: 'tmux',
+        key: 'session-id',
         icon: <Copy size={11} />,
-        text: session.spec.tmuxSession,
-        hint: `Copy tmux target — tmux attach -t ${session.spec.tmuxSession}`,
+        text: session.spec.sessionId,
+        hint: `Copy session ID: ${session.spec.sessionId}`,
         onClick: () => {
-          const copied = navigator.clipboard?.writeText(session.spec.tmuxSession);
+          const copied = navigator.clipboard?.writeText(session.spec.sessionId);
           if (copied) {
             void copied
-              .then(() => pushToast(`Copied ${session.spec.tmuxSession}`, 'ok'))
+              .then(() => pushToast(`Copied ${session.spec.sessionId}`, 'ok'))
               .catch(() => pushToast('Copy failed', 'error'));
           } else {
             pushToast('Copy failed', 'error');
@@ -825,18 +862,33 @@ export function App(): JSX.Element {
         }
       }
     ];
-    if (selectedTmux && attention[selectedTmux]) {
+    if (selectedSessionId && needsOperator(statusViews, selectedSessionId)) {
       segments.push({ key: 'attn', icon: <Bell size={11} />, text: 'needs input', tone: 'danger', hint: 'This agent is waiting for you' });
     }
     publishStatus('agents', segments);
-  }, [attention, pushToast, selectedTmux, snapshot]);
+  }, [statusViews, pushToast, selectedSessionId, snapshot]);
 
   // App-wide signals for the status bar's right side. System metrics live in
   // the topbar; these are the workflow ones: agents waiting on input, unread
   // events/messages, muted sound, and snapshot sync state.
-  const attentionCount = Object.keys(attention).length;
+  const attentionCount = actionableSessions(statusViews).length;
+  const continuityIssues = snapshot?.continuity.issues ?? [];
   const statusGlobals = useMemo<StatusSegment[]>(() => {
     const segments: StatusSegment[] = [];
+    if (continuityIssues.length > 0) {
+      segments.push({
+        key: 'continuity',
+        icon: <TriangleAlert size={11} />,
+        text: `${continuityIssues.length} continuity issue${
+          continuityIssues.length === 1 ? '' : 's'
+        }`,
+        tone: 'danger',
+        hint: continuityIssues
+          .map((issue) => `${issue.sessionId}: ${issue.message}`)
+          .join('\n'),
+        onClick: () => setSubsystem('agents')
+      });
+    }
     if (attentionCount > 0) {
       segments.push({
         key: 'attention',
@@ -888,7 +940,14 @@ export function App(): JSX.Element {
     });
     return segments;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attentionCount, busy, channelsUnread, muted, unreadEvents]);
+  }, [
+    attentionCount,
+    busy,
+    channelsUnread,
+    continuityIssues,
+    muted,
+    unreadEvents
+  ]);
 
   useEffect(() => {
     localStorage.setItem('desk.subsystem', subsystem);
@@ -986,7 +1045,7 @@ export function App(): JSX.Element {
           activeGroup,
           cellAssignments[activeGroup.id] ?? {},
           cellActiveSessions[activeGroup.id] ?? {},
-          selectedTmux
+          selectedSessionId
         );
         const cell = cells[Number(key) - 1];
         const target = cell?.activeSession ?? cell?.sessions[0];
@@ -1004,19 +1063,19 @@ export function App(): JSX.Element {
         if (all.length === 0) {
           return;
         }
-        const index = all.findIndex((session) => session.spec.tmuxSession === selectedTmux);
+        const index = all.findIndex((session) => session.spec.sessionId === selectedSessionId);
         const step = key === 'ArrowRight' ? 1 : -1;
         const next = index === -1 ? all[0] : all[(index + step + all.length) % all.length];
         event.preventDefault();
         event.stopPropagation();
-        revealAgentSession(next.spec.tmuxSession);
+        revealAgentSession(next.spec.sessionId);
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
     // selectCellSession/revealAgentSession are per-render closures over the same state
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroup, cellActiveSessions, cellAssignments, selectedTmux, snapshot, subsystem, modal]);
+  }, [activeGroup, cellActiveSessions, cellAssignments, selectedSessionId, snapshot, subsystem, modal]);
 
   useEffect(() => {
     // The agents group REMOUNTS on subsystem switches and gets its width from
@@ -1045,13 +1104,14 @@ export function App(): JSX.Element {
     localStorage.setItem('desk.activeProject', workspace.activeProject.id);
     localStorage.setItem('desk.activeGroup', workspace.activeGroup.id);
     if (workspace.activeSession) {
-      setSelectedTmux(workspace.activeSession.spec.tmuxSession);
-      localStorage.setItem('desk.activeSession', workspace.activeSession.spec.tmuxSession);
+      setSelectedSessionId(workspace.activeSession.spec.sessionId);
+      localStorage.setItem('desk.activeSession', workspace.activeSession.spec.sessionId);
     }
-  }, [workspace?.activeProject.id, workspace?.activeGroup.id, workspace?.activeSession?.spec.tmuxSession]);
+  }, [workspace?.activeProject.id, workspace?.activeGroup.id, workspace?.activeSession?.spec.sessionId]);
 
   useEffect(() => {
     void refresh();
+    void refreshAgentProfiles();
   }, []);
 
   async function refresh(): Promise<void> {
@@ -1064,6 +1124,14 @@ export function App(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function refreshAgentProfiles(): Promise<void> {
+    try {
+      setAgentProfiles(await fetchAgentProfiles());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -1114,7 +1182,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(groupForm.projectId || activeProjectId);
       setActiveGroupId(groupForm.projectId ? `${groupForm.projectId}:${groupForm.groupId}` : groupForm.groupId);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setGroupForm(emptyGroupForm);
       setModal(null);
       setError(null);
@@ -1250,7 +1318,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(undefined);
       setActiveGroupId(undefined);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setModal(null);
       setError(null);
     } catch (err) {
@@ -1273,7 +1341,7 @@ export function App(): JSX.Element {
       });
       setSnapshot(next);
       setActiveGroupId(undefined);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setModal(null);
       setError(null);
     } catch (err) {
@@ -1294,10 +1362,10 @@ export function App(): JSX.Element {
         groupId: modalGroup.groupId,
         sessionName: modalSession.spec.name,
         projectCwd: modalGroup.projectCwd,
-        tmuxSession: modalSession.spec.tmuxSession
+        sessionId: modalSession.spec.sessionId
       });
       setSnapshot(next);
-      setSelectedTmux(undefined);
+      setSelectedSessionId(undefined);
       setModal(null);
       setError(null);
     } catch (err) {
@@ -1327,14 +1395,14 @@ export function App(): JSX.Element {
         });
       }
       const next = await setSessionUiMode({
-        tmuxSession: modalSession.spec.tmuxSession,
+        sessionId: modalSession.spec.sessionId,
         uiMode: sessionForm.uiMode,
         confirmDiscard: uiModeSwitchDiscard
       });
       setSnapshot(next);
       setTerminalRevisions((current) => ({
         ...current,
-        [modalSession.spec.tmuxSession]: (current[modalSession.spec.tmuxSession] ?? 0) + 1
+        [modalSession.spec.sessionId]: (current[modalSession.spec.sessionId] ?? 0) + 1
       }));
       setUiModeSwitchDiscard(false);
       setModal(null);
@@ -1361,15 +1429,15 @@ export function App(): JSX.Element {
     try {
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setSelectedTmux(session.spec.tmuxSession);
-      const next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
+      setSelectedSessionId(session.spec.sessionId);
+      const next = await restartProjectSession({ sessionId: session.spec.sessionId });
       setSnapshot(next);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setSelectedTmux(session.spec.tmuxSession);
+      setSelectedSessionId(session.spec.sessionId);
       setTerminalRevisions((current) => ({
         ...current,
-        [session.spec.tmuxSession]: (current[session.spec.tmuxSession] ?? 0) + 1
+        [session.spec.sessionId]: (current[session.spec.sessionId] ?? 0) + 1
       }));
       setModal(null);
       setError(null);
@@ -1423,8 +1491,8 @@ export function App(): JSX.Element {
       setCellAssignments((current) => {
         const currentGroup = current[group.id] ?? {};
         const reassigned = Object.fromEntries(
-          Object.entries(currentGroup).map(([tmuxSession, index]) => [
-            tmuxSession,
+          Object.entries(currentGroup).map(([sessionId, index]) => [
+            sessionId,
             index === cell.index ? 0 : Math.min(index, group.layout.cellCount - 2)
           ])
         );
@@ -1445,11 +1513,11 @@ export function App(): JSX.Element {
     draggedSidebarSessionRef.current = value;
   }
 
-  function resolveSidebarDrag(tmuxSession?: string): { session: DeskSessionView; group: DeskGroupView } | null {
-    if (tmuxSession && snapshot) {
+  function resolveSidebarDrag(sessionId?: string): { session: DeskSessionView; group: DeskGroupView } | null {
+    if (sessionId && snapshot) {
       for (const project of snapshot.view.projects) {
         for (const group of project.groups) {
-          const session = group.sessions.find((candidate) => candidate.spec.tmuxSession === tmuxSession);
+          const session = group.sessions.find((candidate) => candidate.spec.sessionId === sessionId);
           if (session) {
             return { session, group };
           }
@@ -1459,8 +1527,8 @@ export function App(): JSX.Element {
     return draggedSidebarSessionRef.current;
   }
 
-  async function moveSidebarSession(targetGroup: DeskGroupView, tmuxSession?: string): Promise<void> {
-    const draggedSession = resolveSidebarDrag(tmuxSession);
+  async function moveSidebarSession(targetGroup: DeskGroupView, sessionId?: string): Promise<void> {
+    const draggedSession = resolveSidebarDrag(sessionId);
     if (!draggedSession || draggedSession.group.id === targetGroup.id) {
       setDraggedSidebarSession(null);
       return;
@@ -1479,7 +1547,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(targetGroup.projectId);
       setActiveGroupId(targetGroup.id);
-      setSelectedTmux(getMovedSessionTmux(next, targetGroup.id, draggedSession.session.spec.name));
+      setSelectedSessionId(getMovedSessionId(next, targetGroup.id, draggedSession.session.spec.name));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1649,7 +1717,7 @@ export function App(): JSX.Element {
   }
 
   function openSessionModal(mode: ModalMode, session: DeskSessionView, group?: DeskGroupView): void {
-    setSelectedTmux(session.spec.tmuxSession);
+    setSelectedSessionId(session.spec.sessionId);
     setModalSession(session);
     setModalGroup(group ?? activeGroup);
     setSessionForm({
@@ -1658,6 +1726,7 @@ export function App(): JSX.Element {
       name: session.spec.name,
       cwd: session.spec.cwd,
       agent: session.spec.agent ?? 'codex',
+      profileId: session.spec.profileId ?? '',
       resume: session.spec.resume ?? '',
       initialResume: session.spec.resume ?? '',
       bypassPermissions: session.spec.bypassPermissions ?? true,
@@ -1674,50 +1743,48 @@ export function App(): JSX.Element {
     setActiveProjectId(project.id);
     const firstGroup = project.groups[0];
     setActiveGroupId(firstGroup?.id);
-    setSelectedTmux(firstGroup?.sessions[0]?.spec.tmuxSession);
+    setSelectedSessionId(firstGroup?.sessions[0]?.spec.sessionId);
   }
 
   function selectGroup(group: DeskGroupView): void {
     setActiveProjectId(group.projectId);
     setActiveGroupId(group.id);
-    setSelectedTmux(group.sessions[0]?.spec.tmuxSession);
+    setSelectedSessionId(group.sessions[0]?.spec.sessionId);
   }
 
-  function openAgentEvent(event: AgentEvent): void {
+  function openAgentEvent(event: DeskEvent): void {
     invalidateAttentionPulse();
-    setAgentEvents((current) => current.map((e) => (e.id === event.id ? { ...e, read: true } : e)));
-    setUnreadEvents((count) => Math.max(0, count - (event.read ? 0 : 1)));
-    fireAndForget(markEventsRead({ ids: [event.id] }), 'mark event read');
-    // Reading an event acknowledges its session's sidebar lamp, even when the
-    // session is gone from the snapshot and cannot be revealed anymore.
-    if (event.tmuxSession) {
-      touchSession(event.tmuxSession);
-    }
-    if (event.kind === 'channel') {
-      // Jump to the channels subsystem and reveal the exact message.
+    // Journal acknowledgement ONLY. Reading an entry does not clear the
+    // session's lamp: the lamp reports the authority's current wait, and the
+    // agent is still waiting whether or not the operator read about it.
+    markReadLocally(event.id);
+    markRead({ ids: [event.id] });
+    const target = deskEventView(event).target;
+    if (target?.kind === 'channel') {
       setSubsystem('channels');
-      if (event.channel) {
-        channelsNavigatorRef.current?.(event.channel, event.messageId, event.thread);
-      }
+      channelsNavigatorRef.current?.(target.channel, target.messageId, target.thread);
       return;
     }
-    revealAgentSession(event.tmuxSession);
+    if (target?.kind === 'session') {
+      recordAgentRecent(target.sessionId);
+      revealAgentSession(target.sessionId);
+    }
   }
 
   /** Jump to the agents subsystem with the given session selected + revealed. */
-  function revealAgentSession(tmuxSession: string): void {
+  function revealAgentSession(sessionId: string): void {
     for (const project of snapshot?.view.projects ?? []) {
       for (const group of project.groups) {
-        const session = group.sessions.find((candidate) => candidate.spec.tmuxSession === tmuxSession);
+        const session = group.sessions.find((candidate) => candidate.spec.sessionId === sessionId);
         if (session) {
           // Jump to agents first so the sidebar/terminal exist when the
           // reveal scroll fires (deferred 80ms).
           setSubsystem('agents');
-          touchSession(session.spec.tmuxSession);
+          touchSession(session.spec.sessionId);
           setActiveProjectId(group.projectId);
           setActiveGroupId(group.id);
-          setSelectedTmux(session.spec.tmuxSession);
-          revealSidebarSession(group, session.spec.tmuxSession);
+          setSelectedSessionId(session.spec.sessionId);
+          revealSidebarSession(group, session.spec.sessionId);
           return;
         }
       }
@@ -1725,13 +1792,10 @@ export function App(): JSX.Element {
   }
 
   function markAllEventsRead(): void {
-    invalidateAttentionPulse();
-    setAgentEvents((current) => current.map((e) => ({ ...e, read: true })));
-    setUnreadEvents(0);
-    // Acknowledging every event acknowledges every sidebar lamp with it
-    // (the server mirrors this; clearing locally avoids the poll lag).
-    setAttention({});
-    fireAndForget(markEventsRead({ all: true }), 'mark all events read');
+    // Reading events does not clear sidebar lamps: a lamp reports the
+    // authority's wait, and marking a notification read does not answer the
+    // agent that is still waiting behind it.
+    markRead({ all: true });
   }
 
   async function confirmKillAll(): Promise<void> {
@@ -1750,88 +1814,66 @@ export function App(): JSX.Element {
   }
 
   function clearAgentEvents(): void {
-    invalidateAttentionPulse();
-    setAgentEvents([]);
-    setUnreadEvents(0);
-    setAttention({});
-    fireAndForget(clearAllEvents(), 'clear all events');
+    clearAll();
   }
 
-  function touchSession(tmuxSession: string): void {
-    recordAgentRecent(tmuxSession);
+  function touchSession(sessionId: string): void {
+    recordAgentRecent(sessionId);
     invalidateAttentionPulse();
-    setAttention((current) => {
-      if (!current[tmuxSession]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[tmuxSession];
-      return next;
-    });
-    // The server marks this session's events read on touch; mirror it locally
-    // so the drawer and the unread lamp agree without waiting for the poll.
-    setAgentEvents((current) => {
-      let unreadDelta = 0;
-      const next = current.map((event) => {
-        if (event.tmuxSession === tmuxSession && !event.read) {
-          unreadDelta += 1;
-          return { ...event, read: true };
-        }
-        return event;
-      });
-      if (unreadDelta > 0) {
-        setUnreadEvents((count) => Math.max(0, count - unreadDelta));
-        return next;
-      }
-      return current;
-    });
-    fireAndForget(clearAttention(tmuxSession), 'clear attention');
+    // Touching a session no longer clears its lamp. The lamp now reports the
+    // authority's wait, and a wait is cleared by ANSWERING the agent, not by
+    // looking at it — the old behaviour measured "have you glanced at this"
+    // while presenting itself as "does this need you".
+    // Opening a session no longer marks its notifications read either. The
+    // journal records what happened; looking at the terminal is not an
+    // acknowledgement of every notice about it, and silently consuming them
+    // is how an operator loses the one entry they had not seen yet.
   }
 
-  function revealSidebarSession(group: DeskGroupView, tmuxSession: string): void {
+  function revealSidebarSession(group: DeskGroupView, sessionId: string): void {
     setCollapsedProjects((current) => (group.projectId && current[group.projectId] ? { ...current, [group.projectId]: false } : current));
     setCollapsedGroups((current) => (current[group.id] ? { ...current, [group.id]: false } : current));
     window.setTimeout(() => {
       document
-        .querySelector(`[data-sidebar-session="true"][data-tmux-session="${CSS.escape(tmuxSession)}"]`)
+        .querySelector(`[data-sidebar-session="true"][data-session-id="${CSS.escape(sessionId)}"]`)
         ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }, 80);
   }
 
   function selectCellSession(group: DeskGroupView, cell: PanelCell, session: DeskSessionView): void {
-    touchSession(session.spec.tmuxSession);
+    touchSession(session.spec.sessionId);
     setActiveProjectId(group.projectId);
     setActiveGroupId(group.id);
-    setSelectedTmux(session.spec.tmuxSession);
-    revealSidebarSession(group, session.spec.tmuxSession);
+    setSelectedSessionId(session.spec.sessionId);
+    revealSidebarSession(group, session.spec.sessionId);
     setCellActiveSessions((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [cell.id]: session.spec.tmuxSession
+        [cell.id]: session.spec.sessionId
       }
     }));
   }
 
   function assignDraggedSession(group: DeskGroupView, cell: PanelCell): void {
-    if (!draggedTmux) {
+    if (!draggedSessionId) {
       return;
     }
     setCellAssignments((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [draggedTmux]: cell.index
+        [draggedSessionId]: cell.index
       }
     }));
     setCellActiveSessions((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [cell.id]: draggedTmux
+        [cell.id]: draggedSessionId
       }
     }));
-    setDraggedTmux(null);
+    setDraggedSessionId(null);
   }
 
   /** Tap-to-assign for empty cells — the DnD path without the drag. */
@@ -1840,24 +1882,24 @@ export function App(): JSX.Element {
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [session.spec.tmuxSession]: cell.index
+        [session.spec.sessionId]: cell.index
       }
     }));
     setCellActiveSessions((current) => ({
       ...current,
       [group.id]: {
         ...(current[group.id] ?? {}),
-        [cell.id]: session.spec.tmuxSession
+        [cell.id]: session.spec.sessionId
       }
     }));
-    setSelectedTmux(session.spec.tmuxSession);
+    setSelectedSessionId(session.spec.sessionId);
   }
 
   /** Boot one missing session straight from its cell. */
   async function bootSession(session: DeskSessionView): Promise<void> {
     setBusy(true);
     try {
-      const next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
+      const next = await restartProjectSession({ sessionId: session.spec.sessionId });
       setSnapshot(next);
       pushToast(`Booted ${session.spec.name}`, 'ok');
     } catch (err) {
@@ -1877,7 +1919,7 @@ export function App(): JSX.Element {
     try {
       let next: DeskSnapshot | null = null;
       for (const session of missing) {
-        next = await restartProjectSession({ tmuxSession: session.spec.tmuxSession });
+        next = await restartProjectSession({ sessionId: session.spec.sessionId });
       }
       if (next) {
         setSnapshot(next);
@@ -1995,14 +2037,14 @@ export function App(): JSX.Element {
     onGroupBoot: bootGroupMissing,
     onDragSession: setDraggedSidebarSession,
     onDropSession: moveSidebarSession,
-    onDropSessionToProject: (project: DeskProjectView, tmuxSession?: string) => {
+    onDropSessionToProject: (project: DeskProjectView, sessionId?: string) => {
       const targetGroup = getProjectDropGroup(project);
       if (!targetGroup) {
         setError(`project ${project.label} has no groups`);
         setDraggedSidebarSession(null);
         return;
       }
-      void moveSidebarSession(targetGroup, tmuxSession);
+      void moveSidebarSession(targetGroup, sessionId);
     },
     onReorderProjects: reorderProjectsList,
     onReorderGroups: reorderGroupsList,
@@ -2010,10 +2052,10 @@ export function App(): JSX.Element {
     onSelectProject: selectProject,
     onSelectGroup: selectGroup,
     onSelectSession: (session: DeskSessionView, group: DeskGroupView) => {
-      touchSession(session.spec.tmuxSession);
+      touchSession(session.spec.sessionId);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setSelectedTmux(session.spec.tmuxSession);
+      setSelectedSessionId(session.spec.sessionId);
       if (isNarrowViewport() && !agentSidebarCollapsed) {
         // drawer behavior: picking a session reveals it
         collapseAgentSidebar();
@@ -2099,7 +2141,7 @@ export function App(): JSX.Element {
         <Animator active={booted} combine manager="stagger" duration={{ stagger: 0.12 }}>
           <main className="deskShell" style={themeVars}>
             <BackdropField />
-            <AttentionAnnouncer attention={attention} />
+            <AttentionAnnouncer statusViews={statusViews} />
             <Animated as="section" className="terminalFrame" animated={['fade']}>
               <FrameLines />
               <Animator combine manager="stagger" duration={{ stagger: 0.04 }}>
@@ -2150,10 +2192,10 @@ export function App(): JSX.Element {
                       <aside className="agentTreePanelInner">
                         <AgentsSidebar
                           projects={snapshot?.view.projects ?? []}
-                          attention={attention}
+                          statusViews={statusViews}
                           activeProjectId={activeProject?.id}
                           activeGroupId={activeGroup?.id}
-                          activeTmux={selectedTmux}
+                          activeSessionId={selectedSessionId}
                           collapsedProjects={collapsedProjects}
                           collapsedGroups={collapsedGroups}
                           {...sidebarHandlers}
@@ -2179,10 +2221,10 @@ export function App(): JSX.Element {
                             visible={subsystem === 'agents' && Boolean(activeGroup) && mountedGroup.id === activeGroup?.id}
                             assignments={cellAssignments[mountedGroup.id] ?? EMPTY_CELL_MAP}
                             activeByCell={cellActiveSessions[mountedGroup.id] ?? EMPTY_ACTIVE_MAP}
-                            selectedTmux={selectedTmux}
-                            attention={attention}
+                            selectedSessionId={selectedSessionId}
+                            statusViews={statusViews}
                             busy={busy}
-                            onDragSession={setDraggedTmux}
+                            onDragSession={setDraggedSessionId}
                             terminalRevisions={terminalRevisions}
                             handlers={muxHandlers}
                           />
@@ -2293,6 +2335,7 @@ export function App(): JSX.Element {
                   <ChannelsSubsystem
                     active={subsystem === 'channels'}
                     snapshot={snapshot}
+                    statusViews={statusViews}
                     onError={setError}
                     onInfo={(message) => pushToast(message, 'ok')}
                     onRevealAgent={revealAgentSession}
@@ -2321,6 +2364,7 @@ export function App(): JSX.Element {
                 open={notifOpen}
                 width={notifWidth}
                 events={agentEvents}
+                feedError={eventFeedError}
                 snapshot={snapshot}
                 {...drawerHandlers}
               />
@@ -2329,11 +2373,11 @@ export function App(): JSX.Element {
               {agentPaletteOpen ? (
                 <AgentsPalette
                   projects={snapshot?.view.projects ?? []}
-                  attention={attention}
+                  statusViews={statusViews}
                   onClose={() => setAgentPaletteOpen(false)}
-                  onPick={(tmuxSession) => {
+                  onPick={(sessionId) => {
                     setAgentPaletteOpen(false);
-                    revealAgentSession(tmuxSession);
+                    revealAgentSession(sessionId);
                   }}
                 />
               ) : null}
@@ -2412,7 +2456,7 @@ export function App(): JSX.Element {
             icon: <Plus size={13} />,
             help: (
               <>
-                <div>Terminals are tmux sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
+                <div>Terminals are durable sessions where agents execute commands and interact with your codebase. Each session is an independent environment with its own state. Create sessions to run multiple agents in parallel or organize work by task. Sessions persist their state across reloads and can be restarted or repaired if they encounter issues.</div>
                 <div style={{ marginTop: '8px' }}>
                   <a href="https://docs.desk.cloud/guide-create-agent-fleet/#3-add-agent-sessions" target="_blank" rel="noopener noreferrer" style={{ color: '#4dd9ff', textDecoration: 'underline', cursor: 'pointer' }}>
                     Learn more →
@@ -2424,9 +2468,15 @@ export function App(): JSX.Element {
               <SessionFormView
                 form={sessionForm}
                 projects={snapshot?.view.projects ?? []}
+                profiles={agentProfiles}
                 busy={busy}
+                mode="create"
                 onSubmit={submitSession}
                 onFormChange={setSessionForm}
+                onCreateProfile={() => {
+                  setModalReturn('addSession');
+                  setModal('settings');
+                }}
               />
             )
           };
@@ -2449,7 +2499,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Delete ${modalProject?.label ?? 'project'}`}
-                detail="This kills the project's tmux sessions and removes the project from config. For legacy mixed groups, only sessions under this project CWD are removed."
+                detail="This stops the project's sessions and removes the project from config. For mixed groups, only sessions under this project CWD are removed."
                 busy={busy}
                 onConfirm={confirmDeleteProject}
               />
@@ -2474,7 +2524,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Delete ${modalGroup?.label ?? 'group'}`}
-                detail="This kills the group's tmux sessions and removes the group from config. For legacy mixed groups, only sessions under this project CWD are removed."
+                detail="This stops the group's sessions and removes the group from config. For mixed groups, only sessions under this project CWD are removed."
                 busy={busy}
                 onConfirm={confirmDeleteGroup}
               />
@@ -2494,9 +2544,15 @@ export function App(): JSX.Element {
               <SessionFormView
                 form={sessionForm}
                 projects={snapshot?.view.projects ?? []}
+                profiles={agentProfiles}
                 busy={busy}
+                mode="edit"
                 onSubmit={submitSessionEdit}
                 onFormChange={setSessionForm}
+                onCreateProfile={() => {
+                  setModalReturn('editSession');
+                  setModal('settings');
+                }}
               />
             )
           };
@@ -2515,6 +2571,8 @@ export function App(): JSX.Element {
             wide: true,
             body: (
               <SettingsView
+                profiles={agentProfiles}
+                onProfilesChange={setAgentProfiles}
                 themeName={themeName}
                 onThemeChange={handleThemeNameChange}
                 autosaveMode={autosaveMode}
@@ -2544,7 +2602,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Delete ${modalSession?.spec.name ?? 'session'}`}
-                detail="This kills the tmux session process and removes the session from config."
+                detail="This stops the session process and removes the session from config."
                 busy={busy}
                 onConfirm={confirmDeleteSession}
               />
@@ -2557,7 +2615,7 @@ export function App(): JSX.Element {
             body: (
               <ConfirmAction
                 label={`Restart ${modalSession?.spec.name ?? 'session'}`}
-                detail="This kills the running tmux session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
+                detail="This stops the running session and starts it fresh. Whatever the agent is doing right now is interrupted; unsent context is lost."
                 busy={busy}
                 confirmLabel="Restart session"
                 confirmIcon={<RotateCw size={12} />}
@@ -2583,7 +2641,7 @@ export function App(): JSX.Element {
                 detail={
                   uiModeSwitchDiscard
                     ? 'No resume id has been captured for this session yet, so the switch cannot rejoin the conversation. Confirming starts a FRESH conversation in the new mode; the current one stays only in the agent-native history.'
-                    : 'This respawns the session in the selected UI mode: the running tmux session is killed and relaunched resuming the same conversation by its captured id. In-flight work is interrupted.'
+                    : 'This respawns the session in the selected UI mode: the running session is stopped and relaunched, resuming the same conversation by its captured id. In-flight work is interrupted.'
                 }
                 busy={busy}
                 confirmLabel={uiModeSwitchDiscard ? 'Switch UI mode (start fresh)' : 'Switch UI mode'}
@@ -2603,7 +2661,16 @@ export function App(): JSX.Element {
     }
     const { body, ...rest } = frame;
     return (
-      <Modal {...rest} onClose={() => setModal(null)}>
+      <Modal
+        {...rest}
+        onClose={() => {
+          // A detour returns; everything else closes. `modalReturn` is null in
+          // the ordinary case, so this is the previous behaviour unchanged.
+          const back = modalReturn;
+          setModalReturn(null);
+          setModal(back);
+        }}
+      >
         {body}
       </Modal>
     );
@@ -2783,7 +2850,7 @@ function KillConfirm({
       <div className="confirmCopy">
         <strong>Terminate ALL agents?</strong>
         <span>
-          This kills every Codex and Claude CLI process and its tmux session — including agents not managed by Desk.
+          This stops every Codex and Claude CLI process and its session, including agents not managed by Desk.
           Sessions with a stored resume id can be restarted; in-progress turns are lost.
         </span>
       </div>
@@ -2847,9 +2914,10 @@ function ThemeSettings({
   );
 }
 
-type SettingsSection = 'theme' | 'editor' | 'sound' | 'lsp';
+type SettingsSection = 'profiles' | 'theme' | 'editor' | 'sound' | 'lsp';
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: ReactNode }> = [
+  { id: 'profiles', label: 'Profiles', icon: <Users size={13} /> },
   { id: 'theme', label: 'Theme', icon: <Palette size={13} /> },
   { id: 'editor', label: 'Editor', icon: <FileCode size={13} /> },
   { id: 'sound', label: 'Sound', icon: <Volume2 size={13} /> },
@@ -2857,6 +2925,8 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string; icon: React
 ];
 
 function SettingsView({
+  profiles,
+  onProfilesChange,
   themeName,
   onThemeChange,
   autosaveMode,
@@ -2877,6 +2947,8 @@ function SettingsView({
   onLspLanguageToggle,
   onLspRefresh
 }: {
+  profiles: AgentProfile[];
+  onProfilesChange: (profiles: AgentProfile[]) => void;
   themeName: DeskThemeName;
   onThemeChange: (name: DeskThemeName) => void;
   autosaveMode: DeskAutosaveMode;
@@ -2898,7 +2970,7 @@ function SettingsView({
   onLspRefresh: () => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
-  const [section, setSection] = useState<SettingsSection>('theme');
+  const [section, setSection] = useState<SettingsSection>('profiles');
   return (
     <div className="settingsLayout">
       <nav className="settingsTabs" aria-label="Settings sections">
@@ -2929,6 +3001,9 @@ function SettingsView({
           zero duration and Arwes rejects the transition */}
       <Animator key={section} duration={{ enter: 0.2 }}>
         <Animated className="settingsContent" animated={['fade', ['y', 8, 0]]}>
+          {section === 'profiles' ? (
+            <AgentProfilesSettings profiles={profiles} onProfilesChange={onProfilesChange} />
+          ) : null}
           {section === 'theme' ? <ThemeSettings current={themeName} onSelect={onThemeChange} /> : null}
           {section === 'editor' ? (
             <AutosaveSettings
@@ -3171,14 +3246,6 @@ function AutosaveSettings({
   );
 }
 
-const EVENT_KIND_META: Record<AgentEvent['kind'], { label: string; tone: string }> = {
-  'turn-complete': { label: 'TURN COMPLETE', tone: 'ok' },
-  'approval-requested': { label: 'APPROVAL NEEDED', tone: 'error' },
-  'input-requested': { label: 'INPUT NEEDED', tone: 'warn' },
-  bell: { label: 'AWAITING INPUT', tone: 'warn' },
-  channel: { label: '@HUMAN PING', tone: 'warn' }
-};
-
 const TOAST_TONE_META: Record<ToastTone, { label: string; icon: ReactNode }> = {
   error: { label: 'ERROR', icon: <Wrench size={13} /> },
   ok: { label: 'DONE', icon: <Zap size={13} /> },
@@ -3250,6 +3317,7 @@ function NotificationDrawerImpl({
   open,
   width,
   events,
+  feedError,
   snapshot,
   onResize,
   onResizeEnd,
@@ -3260,12 +3328,14 @@ function NotificationDrawerImpl({
 }: {
   open: boolean;
   width: number;
-  events: AgentEvent[];
+  events: DeskEvent[];
+  /** Non-null when the journal could not be read; the drawer must say so. */
+  feedError: string | null;
   snapshot: DeskSnapshot | null;
   onResize: (width: number) => void;
   onResizeEnd: (width: number) => void;
   onClose: () => void;
-  onOpenEvent: (event: AgentEvent) => void;
+  onOpenEvent: (event: DeskEvent) => void;
   onMarkAllRead: () => void;
   onClearAll: () => void;
 }): JSX.Element {
@@ -3286,33 +3356,24 @@ function NotificationDrawerImpl({
     for (const project of snapshot?.view.projects ?? []) {
       for (const group of project.groups) {
         for (const session of group.sessions) {
-          labels.set(session.spec.tmuxSession, `${project.label} / ${session.spec.name}`);
+          labels.set(session.spec.sessionId, `${project.label} / ${session.spec.name}`);
         }
       }
     }
     return labels;
   }, [snapshot]);
 
-  // Kind filter: 'all' | 'unread' | a specific event kind.
-  const [filter, setFilter] = useState<'all' | 'unread' | AgentEvent['kind']>('all');
-  const visibleEvents = useMemo(() => {
-    if (filter === 'all') {
-      return events;
-    }
-    if (filter === 'unread') {
-      return events.filter((event) => !event.read);
-    }
-    return events.filter((event) => event.kind === filter);
-  }, [events, filter]);
+  const [filter, setFilter] = useState<EventFilter>('all');
+  const visibleEvents = useMemo(() => filterEvents(events, filter), [events, filter]);
   const unreadCount = events.filter((event) => !event.read).length;
-  const filterChips: Array<{ key: typeof filter; label: string; count: number }> = [
-    { key: 'all', label: 'all', count: events.length },
-    { key: 'unread', label: 'unread', count: unreadCount },
-    { key: 'turn-complete', label: 'turns', count: events.filter((e) => e.kind === 'turn-complete').length },
-    { key: 'approval-requested', label: 'approvals', count: events.filter((e) => e.kind === 'approval-requested').length },
-    { key: 'input-requested', label: 'inputs', count: events.filter((e) => e.kind === 'input-requested').length },
-    { key: 'channel', label: 'channels', count: events.filter((e) => e.kind === 'channel').length }
-  ];
+  // One chip per filter, counted through the same predicate that renders the
+  // list — a chip whose count disagrees with what clicking it shows is worse
+  // than no chip.
+  const filterChips = EVENT_FILTER_ORDER.map((key) => ({
+    key,
+    label: EVENT_FILTER_LABELS[key],
+    count: filterEvents(events, key).length
+  }));
 
   return (
     // `root`: detached from the app animator tree — children of an entered parent
@@ -3371,19 +3432,26 @@ function NotificationDrawerImpl({
         </div>
         <div className="notifList">
           {visibleEvents.length === 0 ? (
-            <div className="notifEmpty">
+            <div className={`notifEmpty ${feedError ? 'error' : ''}`}>
               <TextReveal as="span" manager="sequence">
-                {events.length === 0 ? 'No agent events yet.' : 'Nothing matches this filter.'}
+                {/* An unreachable feed is NOT an empty feed. Saying "no events"
+                    when the journal could not be read is the same confident
+                    lie as reporting a silent agent as idle. */}
+                {feedError
+                  ? `Events unavailable — ${feedError}`
+                  : events.length === 0
+                    ? 'No agent events yet.'
+                    : 'Nothing matches this filter.'}
               </TextReveal>
             </div>
           ) : (
             visibleEvents.map((event) => {
-              const meta = EVENT_KIND_META[event.kind];
+              const view = deskEventView(event);
               return (
                 <Animator key={event.id}>
                   <Animated
                     as="button"
-                    className={`notifCard ${meta.tone} ${event.read ? 'read' : 'unread'}`}
+                    className={`notifCard ${view.tone} ${event.read ? 'read' : 'unread'}`}
                     style={{ clipPath: CLIP_OCTAGON_TINY }}
                     animated={['flicker', ['x', 14, 0]]}
                     onMouseEnter={() => bleeps.hover?.play()}
@@ -3391,16 +3459,16 @@ function NotificationDrawerImpl({
                       bleeps.click?.play();
                       onOpenEvent(event);
                     }}
-                    title={event.tmuxSession}
+                    title={view.sessionId ?? view.label}
                   >
                     <span className="notifCardTop">
                       {/* Always mounted: an unmounting lamp shifted every sibling 14px on read. */}
                       <span className="notifCardLamp" aria-label={event.read ? undefined : 'unread'} aria-hidden={event.read} />
-                      <i className="notifCardKind">{meta.label}</i>
+                      <i className="notifCardKind">{view.label}</i>
                       <small title={new Date(event.at).toLocaleString()}>{shortTimeAgo(event.at)}</small>
                     </span>
-                    <strong>{sessionLabels.get(event.tmuxSession) ?? event.tmuxSession}</strong>
-                    {event.message ? <span className="notifCardMessage">{event.message}</span> : null}
+                    <strong>{eventSubject(view, sessionLabels)}</strong>
+                    {view.detail ? <span className="notifCardMessage">{view.detail}</span> : null}
                   </Animated>
                 </Animator>
               );
@@ -3412,13 +3480,30 @@ function NotificationDrawerImpl({
   );
 }
 
+/**
+ * The card's headline. An agent entry names its session; a channel message
+ * names the channel and author, because a channel notification is about a
+ * conversation, not about a session — and several sessions can sit in one.
+ */
+function eventSubject(view: DeskEventView, sessionLabels: Map<string, string>): string {
+  if (view.target?.kind === 'channel') {
+    return `#${view.target.channel}`;
+  }
+  const sessionId = view.sessionId;
+  if (!sessionId) {
+    return view.label;
+  }
+  return sessionLabels.get(sessionId) ?? sessionId;
+}
+
 const NotificationDrawer = memo(NotificationDrawerImpl);
 
-function AttentionAnnouncer({ attention }: { attention: Record<string, { attention: true; since: string }> }): null {
+/** Sounds once when a session newly starts waiting on the OPERATOR. */
+function AttentionAnnouncer({ statusViews }: { statusViews: SessionStatusMap }): null {
   const bleeps = useBleeps<DeskBleepName>();
   const knownRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const next = new Set(Object.keys(attention));
+    const next = new Set(actionableSessions(statusViews));
     let hasNew = false;
     for (const key of next) {
       if (!knownRef.current.has(key)) {
@@ -3429,7 +3514,7 @@ function AttentionAnnouncer({ attention }: { attention: Record<string, { attenti
     if (hasNew) {
       bleeps.attention?.play();
     }
-  }, [attention, bleeps]);
+  }, [statusViews, bleeps]);
   return null;
 }
 
@@ -3438,7 +3523,7 @@ const EMPTY_CELL_MAP: Record<string, number> = {};
 const EMPTY_ACTIVE_MAP: Record<string, string> = {};
 
 interface MuxHandlers {
-  onTouchSession: (tmuxSession: string) => void;
+  onTouchSession: (sessionId: string) => void;
   onAddCell: (group: DeskGroupView) => void;
   onRemoveCell: (group: DeskGroupView, cell: PanelCell) => void;
   onSelectSession: (group: DeskGroupView, cell: PanelCell, session: DeskSessionView) => void;
@@ -3461,17 +3546,17 @@ interface MountedMuxProps {
   visible: boolean;
   assignments: Record<string, number>;
   activeByCell: Record<string, string>;
-  selectedTmux?: string;
-  attention: Record<string, { attention: true; since: string }>;
+  selectedSessionId?: string;
+  statusViews: SessionStatusMap;
   busy: boolean;
-  onDragSession: (tmuxSession: string | null) => void;
+  onDragSession: (sessionId: string | null) => void;
   terminalRevisions: Record<string, number>;
   handlers: MuxHandlers;
 }
 
 // Keep-alive can hold many groups mounted-hidden. Those hidden groups have
 // nothing on screen, so they must NOT re-render when global volatile props
-// churn — selection (selectedTmux), the 2s attention pulse, busy, or terminal
+// churn — selection (selectedSessionId), the 2s attention pulse, busy, or terminal
 // revisions. Without this, every selection change and every pulse tick
 // re-rendered ALL warm groups, not just the visible one. A hidden-staying-hidden
 // group re-renders only when its OWN structure changes (group identity / cell
@@ -3492,8 +3577,8 @@ function mountedMuxPropsEqual(prev: MountedMuxProps, next: MountedMuxProps): boo
     prev.visible === next.visible &&
     prev.assignments === next.assignments &&
     prev.activeByCell === next.activeByCell &&
-    prev.selectedTmux === next.selectedTmux &&
-    prev.attention === next.attention &&
+    prev.selectedSessionId === next.selectedSessionId &&
+    prev.statusViews === next.statusViews &&
     prev.busy === next.busy &&
     prev.onDragSession === next.onDragSession &&
     prev.terminalRevisions === next.terminalRevisions &&
@@ -3506,16 +3591,16 @@ const MountedMux = memo(function MountedMuxImpl({
   visible,
   assignments,
   activeByCell,
-  selectedTmux,
-  attention,
+  selectedSessionId,
+  statusViews,
   busy,
   onDragSession,
   terminalRevisions,
   handlers
 }: MountedMuxProps): JSX.Element {
   const cells = useMemo(
-    () => buildPanelCells(group, assignments, activeByCell, selectedTmux),
-    [activeByCell, assignments, group, selectedTmux]
+    () => buildPanelCells(group, assignments, activeByCell, selectedSessionId),
+    [activeByCell, assignments, group, selectedSessionId]
   );
   return (
     <div className="muxMount" style={{ display: visible ? 'flex' : 'none' }} aria-hidden={!visible}>
@@ -3524,8 +3609,8 @@ const MountedMux = memo(function MountedMuxImpl({
           group={group}
           visible={visible}
           cells={cells}
-          selectedTmux={selectedTmux}
-          attention={attention}
+          selectedSessionId={selectedSessionId}
+          statusViews={statusViews}
           busy={busy}
           onDragSession={onDragSession}
           terminalRevisions={terminalRevisions}
@@ -3548,8 +3633,8 @@ function readAgentRecents(): string[] {
   }
 }
 
-function recordAgentRecent(tmuxSession: string): void {
-  const next = [tmuxSession, ...readAgentRecents().filter((value) => value !== tmuxSession)].slice(0, 12);
+function recordAgentRecent(sessionId: string): void {
+  const next = [sessionId, ...readAgentRecents().filter((value) => value !== sessionId)].slice(0, 12);
   localStorage.setItem(AGENT_RECENTS_KEY, JSON.stringify(next));
 }
 
@@ -3567,14 +3652,14 @@ interface AgentPaletteEntry {
  */
 function AgentsPalette({
   projects,
-  attention,
+  statusViews,
   onClose,
   onPick
 }: {
   projects: DeskProjectView[];
-  attention: Record<string, { attention: true; since: string }>;
+  statusViews: SessionStatusMap;
   onClose: () => void;
-  onPick: (tmuxSession: string) => void;
+  onPick: (sessionId: string) => void;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [query, setQuery] = useState('');
@@ -3594,18 +3679,18 @@ function AgentsPalette({
     const text = query.trim().toLowerCase();
     if (text === '') {
       const recents = readAgentRecents();
-      const recentRank = (tmuxSession: string): number => {
-        const at = recents.indexOf(tmuxSession);
+      const recentRank = (sessionId: string): number => {
+        const at = recents.indexOf(sessionId);
         return at === -1 ? Number.MAX_SAFE_INTEGER : at;
       };
       return [...all]
         .sort((a, b) => {
-          const aAttn = attention[a.session.spec.tmuxSession] ? 0 : 1;
-          const bAttn = attention[b.session.spec.tmuxSession] ? 0 : 1;
+          const aAttn = needsOperator(statusViews, a.session.spec.sessionId) ? 0 : 1;
+          const bAttn = needsOperator(statusViews, b.session.spec.sessionId) ? 0 : 1;
           if (aAttn !== bAttn) {
             return aAttn - bAttn;
           }
-          return recentRank(a.session.spec.tmuxSession) - recentRank(b.session.spec.tmuxSession);
+          return recentRank(a.session.spec.sessionId) - recentRank(b.session.spec.sessionId);
         })
         .slice(0, 40);
     }
@@ -3615,7 +3700,7 @@ function AgentsPalette({
         name,
         entry.group.label.toLowerCase(),
         entry.project.label.toLowerCase(),
-        entry.session.spec.tmuxSession.toLowerCase()
+        entry.session.spec.sessionId.toLowerCase()
       ];
       for (let field = 0; field < haystacks.length; field += 1) {
         const at = haystacks[field].indexOf(text);
@@ -3631,7 +3716,7 @@ function AgentsPalette({
       .sort((a, b) => a.rank - b.rank)
       .map((scored) => scored.entry)
       .slice(0, 40);
-  }, [attention, projects, query]);
+  }, [statusViews, projects, query]);
   const boundedIndex = Math.min(index, Math.max(0, results.length - 1));
   return (
     <Modal title="Switch session" icon={<TerminalSquare size={13} />} onClose={onClose}>
@@ -3656,7 +3741,7 @@ function AgentsPalette({
             } else if (event.key === 'Enter') {
               const target = results[boundedIndex];
               if (target) {
-                onPick(target.session.spec.tmuxSession);
+                onPick(target.session.spec.sessionId);
               }
             }
           }}
@@ -3667,20 +3752,17 @@ function AgentsPalette({
           ) : (
             results.map((entry, rowIndex) => (
               <button
-                key={entry.session.spec.tmuxSession}
+                key={entry.session.spec.sessionId}
                 type="button"
                 className={`quickOpenRow ${rowIndex === boundedIndex ? 'selected' : ''}`}
-                title={entry.session.spec.tmuxSession}
+                title={entry.session.spec.sessionId}
                 onMouseEnter={() => setIndex(rowIndex)}
                 onClick={() => {
                   bleeps.click?.play();
-                  onPick(entry.session.spec.tmuxSession);
+                  onPick(entry.session.spec.sessionId);
                 }}
               >
-                <StatusDot
-                  state={entry.session.state}
-                  attention={Boolean(attention[entry.session.spec.tmuxSession])}
-                />
+                <StatusDot view={viewFor(statusViews, entry.session.spec.sessionId)} />
                 <span className="quickOpenName">{entry.session.spec.name}</span>
                 <small className="quickOpenDir">{entry.project.label} / {entry.group.label}</small>
               </button>
@@ -3774,18 +3856,31 @@ function GroupFormView({
 function SessionFormView({
   form,
   projects,
+  profiles,
   busy,
+  mode,
   onSubmit,
-  onFormChange
+  onFormChange,
+  onCreateProfile
 }: {
   form: SessionForm;
   projects: DeskProjectView[];
+  profiles: AgentProfile[];
   busy: boolean;
+  /** Drives the submit label: the same form both creates and edits. */
+  mode: 'create' | 'edit';
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onFormChange: (form: SessionForm) => void;
+  onCreateProfile: () => void;
 }): JSX.Element {
   const selectedProject = projects.find((project) => project.id === form.projectId) ?? projects[0];
   const groups = selectedProject?.groups ?? [];
+  const profileOptions = [
+    { value: '', label: 'Ambient account' },
+    ...profiles
+      .filter((profile) => profile.provider === form.agent)
+      .map((profile) => ({ value: profile.id, label: profile.label }))
+  ];
   return (
     <form className="thinForm modalForm" onSubmit={onSubmit}>
       <label>
@@ -3817,16 +3912,47 @@ function SessionFormView({
         <DeskSelect
           value={form.agent}
           options={SESSION_AGENT_OPTIONS}
-          onChange={(agent) =>
+          onChange={(agent) => {
+            const profileMatchesAgent =
+              supportsAgentProfiles(agent, form.command.trim() !== '') &&
+              profiles.some((profile) => profile.id === form.profileId && profile.provider === agent)
+                ? form.profileId
+                : '';
             onFormChange({
               ...form,
               agent,
+              profileId: profileMatchesAgent,
               bypassPermissions: supportsBypassPermissions(agent) ? form.bypassPermissions : false,
               uiMode: supportsNativeUi(agent, form.command.trim() !== '') ? form.uiMode : 'terminal'
-            })
-          }
+            });
+          }}
         />
       </label>
+      {supportsAgentProfiles(form.agent, form.command.trim() !== '') ? (
+        <label>
+          <span>Profile</span>
+          <div className="fieldWithAction">
+            <DeskSelect
+              value={form.profileId}
+              options={profileOptions}
+              onChange={(profileId) => onFormChange({ ...form, profileId })}
+            />
+            {/* The moment an operator notices they need a profile is while
+                choosing one, so the way to make it belongs here rather than
+                three clicks away in Settings. Closing that panel comes back to
+                this form with what was typed still in it. */}
+            <button
+              type="button"
+              className="fieldAction"
+              title="Create a profile"
+              aria-label="Create a profile"
+              onClick={onCreateProfile}
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        </label>
+      ) : null}
       {supportsNativeUi(form.agent, form.command.trim() !== '') ? (
         <label>
           <span>UI mode</span>
@@ -3834,7 +3960,9 @@ function SessionFormView({
             value={form.uiMode}
             options={[
               { value: 'terminal', label: 'terminal' },
-              { value: 'native', label: 'native' }
+              // Marked in the selector rather than in a tooltip: the operator
+              // picks the mode here, so the caveat has to be where the choice is.
+              { value: 'native', label: 'native (experimental)' }
             ]}
             onChange={(uiMode) => onFormChange({ ...form, uiMode: uiMode === 'native' ? 'native' : 'terminal' })}
           />
@@ -3867,11 +3995,19 @@ function SessionFormView({
           onFormChange({
             ...form,
             command,
+            profileId: command.trim() === '' ? form.profileId : '',
             uiMode: supportsNativeUi(form.agent, command.trim() !== '') ? form.uiMode : 'terminal'
           })
         }
       />
-      <CommandButton icon={<Plus size={12} />} label="Store session" disabled={busy} submit />
+      {/* "Store" described the manifest write, not what the operator is doing.
+          Creating and saving are different acts and now read differently. */}
+      <CommandButton
+        icon={<Plus size={12} />}
+        label={mode === 'edit' ? 'Save session' : 'Create session'}
+        disabled={busy}
+        submit
+      />
     </form>
   );
 }
@@ -3932,8 +4068,8 @@ function SessionInfo({ session }: { session?: DeskSessionView }): JSX.Element {
       <dd>{session?.state ?? '-'}</dd>
       <dt>CWD</dt>
       <dd>{session?.spec.cwd ?? '-'}</dd>
-      <dt>TMUX</dt>
-      <dd>{session?.spec.tmuxSession ?? '-'}</dd>
+      <dt>Session ID</dt>
+      <dd>{session?.spec.sessionId ?? '-'}</dd>
       <dt>Command</dt>
       <dd>{session?.spec.command ?? '-'}</dd>
     </dl>
@@ -4026,7 +4162,7 @@ function buildPanelCells(
   group: DeskGroupView,
   assignments: Record<string, number>,
   activeByCell: Record<string, string>,
-  selectedTmux?: string
+  selectedSessionId?: string
 ): PanelCell[] {
   const cells = Array.from({ length: group.layout.cellCount }, (_, index) => ({
     id: `${group.id}:cell-${index + 1}`,
@@ -4037,14 +4173,14 @@ function buildPanelCells(
   }));
 
   for (const [index, session] of group.sessions.entries()) {
-    const assignedIndex = clamp(assignments[session.spec.tmuxSession] ?? index % cells.length, 0, cells.length - 1);
+    const assignedIndex = clamp(assignments[session.spec.sessionId] ?? index % cells.length, 0, cells.length - 1);
     cells[assignedIndex]!.sessions.push(session);
   }
 
   for (const cell of cells) {
     cell.activeSession =
-      cell.sessions.find((session) => session.spec.tmuxSession === selectedTmux) ??
-      cell.sessions.find((session) => session.spec.tmuxSession === activeByCell[cell.id]) ??
+      cell.sessions.find((session) => session.spec.sessionId === selectedSessionId) ??
+      cell.sessions.find((session) => session.spec.sessionId === activeByCell[cell.id]) ??
       cell.sessions[0];
   }
 

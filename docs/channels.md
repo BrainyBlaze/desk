@@ -141,21 +141,24 @@ remove them.
 ## Delivery status and diagnostics
 
 Messages destined for an agent are queued per agent and typed into its
-terminal as a prompt. When several messages pile up while an agent is busy,
-they are delivered as a single digest instead of one blocking prompt per
-message. The full mechanics — including what "delivered" means and why a
-prompt can be held — are in the [protocol reference](/channels-protocol).
+terminal as a prompt. Delivery does not wait for the agent to be free: every
+agent CLI buffers typed input and reads it when its turn ends, so a busy agent
+still receives. When several messages are waiting at once they arrive as a
+single digest rather than one prompt each. The full mechanics — including what
+"delivered" means and the only two cases that still hold a queue — are in the
+[protocol reference](/channels-protocol).
 
 The **engine console** (gauge icon in the header) is the diagnostics-and-repair
 surface:
 
-- **Analyze** classifies every tracked session — ready, busy, booting,
-  offline, empty-capture, or unobservable — and shows queue depth, last
-  delivery and release, and any stuck or blocked items, so you can see *why* a
-  prompt has not landed.
-- **Fix** offers per-session levers: deliver now (forces the head item
-  immediately; confirms first because it can land mid-turn), mark idle, pause
-  or resume delivery, drop the queue, and per-item drop or force-deliver.
+- **Analyze** shows each tracked session on the axes the daemon actually
+  reports — lifecycle, activity, and what the session is waiting on — beside
+  its delivery status: ready, queued, delivering, submit-stuck, blocked, or
+  paused. With queue depth, last delivery and release, and any stuck items,
+  that is enough to see *why* a prompt has not landed.
+- **Fix** offers per-session levers: deliver now (pushes the head item ahead of
+  the pump's schedule), mark idle, pause or resume delivery, drop the queue,
+  and per-item drop or force-deliver.
   Global levers: drain all ready sessions and **rebuild engine**, which
   re-creates the delivery engine in-process — re-reading persisted queues —
   without restarting the server.

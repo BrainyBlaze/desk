@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -11,22 +10,21 @@ import {
   writeManifestFile
 } from '../core/config.js';
 import { installAgentHooks } from '../core/agentHooks.js';
-import { createAttachArgv } from '../core/tmux.js';
 import {
+  attachSession,
   captureSession,
   findSession,
   loadDesk,
   planDeskUp,
   printStatus,
-  runPlan,
-  tmuxSpawnError
+  runPlan
 } from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
 import { createServeLaunch, findPackageRoot, parseServeOptions, runServeLaunch } from './serveCommand.js';
 import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
-import type { DeskSession } from '../core/types.js';
+import type { DeskSessionDraft } from '../core/types.js';
 
 const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
 
@@ -40,10 +38,12 @@ Usage: desk <command> [options]
   status                                    Show which sessions exist
   init                                      Create an empty user config
   add --group G --name N --cwd DIR ...      Add a session to the config
-  attach <name|tmux|resume>                 Attach a terminal to a session
-  capture <name|tmux|resume> [--lines N]    Print recent output of a session
+  attach <name|sessionId|resume>            Attach a terminal to a session
+  capture <name|sessionId|resume> [--lines N]
+                                            Print recent output of a session
   hooks install [--home DIR]                 Install global agent event hooks
   agent-host                                Run the native UI adapter host (spawned by desk; not user-facing)
+  terminal-daemon                           Run the atch terminal daemon (spawned by desk serve; not user-facing)
   channels <list|read|post> …               Agent messaging channels (desk channels help)
   config                                    Print the active config path
   help                                      Show this help
@@ -92,7 +92,7 @@ const COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
 
 async function runCli(argv: string[]): Promise<number> {
   if ((argv[0] ?? 'help') !== 'serve') {
-    return main(argv);
+    return await main(argv);
   }
 
   try {
@@ -106,7 +106,7 @@ async function runCli(argv: string[]): Promise<number> {
   }
 }
 
-export function main(argv: string[]): number {
+export async function main(argv: string[]): Promise<number> {
   try {
     const args = parseArgs(argv);
 
@@ -174,30 +174,26 @@ export function main(argv: string[]): number {
     }
 
     if (args.command === 'up') {
-      return runPlan(planDeskUp(desk.sessions), args.dryRun);
+      if (args.manifestPath) {
+        return await runPlan(planDeskUp(desk.sessions), args.dryRun);
+      }
+      return await requestDeskUp(args.dryRun);
     }
 
     if (args.command === 'attach') {
       if (!args.target) {
-        throw new Error('attach requires a session name, tmux id, or resume id');
+        throw new Error('attach requires a session name, sessionId, or resume id');
       }
       const session = findSession(desk.sessions, args.target);
-      const result = spawnSync('tmux', createAttachArgv(session.tmuxSession), {
-        stdio: 'inherit'
-      });
-      const spawnError = tmuxSpawnError(result);
-      if (spawnError) {
-        throw new Error(spawnError);
-      }
-      return result.status ?? 1;
+      return await attachSession(session, { fromUrl: import.meta.url });
     }
 
     if (args.command === 'capture') {
       if (!args.target) {
-        throw new Error('capture requires a session name, tmux id, or resume id');
+        throw new Error('capture requires a session name, sessionId, or resume id');
       }
       const session = findSession(desk.sessions, args.target);
-      return captureSession(session, args.lines);
+      return await captureSession(session, args.lines);
     }
 
     throw new Error(`unknown command ${args.command}`);
@@ -205,6 +201,31 @@ export function main(argv: string[]): number {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
   }
+}
+
+async function requestDeskUp(dryRun: boolean, env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  const baseUrl = env.DESK_API ?? env.DESK_SERVER_URL ?? 'http://127.0.0.1:5173';
+  const url = new URL('/api/up', baseUrl).toString();
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dryRun }),
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch (error) {
+    throw new Error(
+      `desk server unreachable at ${url}; start it with \`desk serve\`: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const body = (await response.json().catch(() => ({}))) as { exitCode?: unknown; error?: unknown };
+  if (!response.ok || typeof body.exitCode !== 'number') {
+    throw new Error(
+      typeof body.error === 'string' ? body.error : `desk server returned HTTP ${response.status} for session start`
+    );
+  }
+  return body.exitCode;
 }
 
 function runHooksCommand(target: string | undefined, options: Map<string, string>): number {
@@ -273,8 +294,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, manifestPath, dryRun, force, target, lines, options };
 }
 
-function readSessionOptions(options: Map<string, string>): DeskSession {
-  const session: DeskSession = {
+function readSessionOptions(options: Map<string, string>): DeskSessionDraft {
+  const session: DeskSessionDraft = {
     name: requireOption(options, 'name'),
     cwd: requireOption(options, 'cwd')
   };
@@ -327,6 +348,19 @@ if (isCliEntry) {
   const cliArgs = process.argv.slice(2);
   if (cliArgs[0] === 'channels') {
     process.exitCode = await runChannelsCli(cliArgs.slice(1));
+  } else if (cliArgs[0] === 'terminal-daemon') {
+    // The atch terminal daemon: spawned + supervised by `desk serve`
+    // (daemonSupervisor). Runs until SIGINT/SIGTERM; a fatal
+    // start error exits non-zero so the supervisor's bounded restart sees it.
+    try {
+      const { runTerminalDaemonMain } = await import('../server/runtime/terminalDaemonMain.js');
+      await new Promise<void>((_resolve, reject) => {
+        runTerminalDaemonMain().catch(reject);
+      });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
   } else if (cliArgs[0] === 'agent-host') {
     const argument = cliArgs[1];
     if (argument !== undefined) {

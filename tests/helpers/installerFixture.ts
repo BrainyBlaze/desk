@@ -108,7 +108,22 @@ if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build:distribution" ]; then
   mkdir -p dist/cli libexec
   printf '%s\\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'case "\${1:-help}" in' '  help) printf "Desk fixture help\\n" ;;' '  *) printf "Desk fixture command: %s\\n" "\${1:-}" ;;' 'esac' > dist/cli/main.js
   printf '%s\\n' '#!/usr/bin/env bash' 'exit 0' > libexec/desk-standalone
+  case "\${DESK_INSTALLER_FIXTURE_ATCH_MODE:-valid}" in
+    valid)
+      printf '%s\\n' '#!/usr/bin/env bash' 'if [ "\${1:-}" = "--version" ]; then printf "atch - version 1.6-bb1, fixture.\\n"; exit 0; fi' 'exit 64' > libexec/atch
+      ;;
+    broken)
+      printf '%s\\n' '#!/usr/bin/env bash' 'exit 73' > libexec/atch
+      ;;
+    missing)
+      rm -f libexec/atch
+      ;;
+    *)
+      exit 93
+      ;;
+  esac
   chmod +x dist/cli/main.js libexec/desk-standalone
+  [ ! -e libexec/atch ] || chmod +x libexec/atch
   exit 0
 fi
 printf 'unexpected fake npm invocation: %s\\n' "$*" >&2

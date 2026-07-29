@@ -10,16 +10,26 @@ input, and what happened in channels while you looked away.
 
 ## The attention pipeline
 
-Agents emit signals as they work — turn-complete, approval-requested,
-input-needed — parsed from terminal notifications, with plain bells as the
-fallback (a poller covers sessions no browser is watching). Each signal
-becomes:
+Each agent reports its own lifecycle through hooks Desk installs into the CLI
+(and, for native-mode sessions, through the SDK): a turn started, a turn
+finished, a tool opened or closed, a permission requested. Desk reads those
+typed events — it does not watch the terminal and guess. Each becomes:
 
 - a pulsing lamp on the session row, bubbling up to collapsed groups and
   projects,
 - an event card in the drawer,
-- an attention sound that follows the mute setting,
-- and a release signal for the channels delivery engine.
+- and an attention sound that follows the mute setting.
+
+<Note>
+An agent that has not reported reads as **unknown**, not as idle. That is the
+point: the lamp is worth looking at precisely because it never invents a state
+it was not told about. Run `desk hooks install` and restart a session if one
+stays unknown — see [Troubleshooting](/troubleshooting).
+</Note>
+
+Attention drives what *you* see. It does not gate channel delivery: a message
+reaches an agent whatever its lamp says, because the agent's own CLI buffers
+the input until its turn ends.
 
 <Frame caption="The events drawer: kind filters, unread lamps, per-card navigation">
   <img src="/images/events-drawer.png" alt="Events drawer with unread event cards" />

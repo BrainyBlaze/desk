@@ -1,5 +1,13 @@
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 import type { DeskLspUiSettings } from '../core/lspSettings.js';
+import type { AgentProfile, ProfileProvider } from '../core/types.js';
+import type {
+  DeskEventClearResponse,
+  DeskEventFeedResponse,
+  DeskEventReadRequest,
+  DeskEventReadResponse,
+  SessionStateSnapshot
+} from '../shared/controlPlane/index.js';
 import { readJson } from './httpJson.js';
 
 interface LayoutPayload {
@@ -11,6 +19,7 @@ interface SessionPayload {
   name: string;
   cwd?: string;
   agent?: string;
+  profileId?: string;
   resume?: string;
   clearResume?: boolean;
   bypassPermissions?: boolean;
@@ -26,41 +35,107 @@ export async function fetchSystemSnapshot(): Promise<SystemSnapshot> {
   return readJson(fetch('/api/system'));
 }
 
-export type AgentEventKind = 'turn-complete' | 'approval-requested' | 'input-requested' | 'bell' | 'channel';
-
-export interface AgentEvent {
-  id: string;
-  tmuxSession: string;
-  kind: AgentEventKind;
-  message?: string;
-  at: string;
-  read: boolean;
-  /** channel events: navigation anchor */
-  channel?: string;
-  messageId?: string;
-  thread?: string;
+export interface AgentProfilesResponse {
+  profile?: AgentProfile;
+  profiles: AgentProfile[];
+  ok?: true;
 }
 
-export interface AttentionSnapshot {
-  sessions: Record<string, { attention: true; since: string }>;
-  events: AgentEvent[];
-  unread: number;
+export class AgentProfileApiError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+    readonly sessions?: string[]
+  ) {
+    super(message);
+    this.name = 'AgentProfileApiError';
+  }
+}
+
+function readAgentProfilesResponse(request: Promise<Response>): Promise<AgentProfilesResponse> {
+  return readJson(request, ({ status, body }) => {
+    const message = typeof body?.error === 'string' ? body.error : `request failed (${status})`;
+    const code = typeof body?.code === 'string' ? body.code : undefined;
+    const sessions = Array.isArray(body?.sessions)
+      ? body.sessions.filter((session): session is string => typeof session === 'string')
+      : undefined;
+    return new AgentProfileApiError(message, code, sessions);
+  });
+}
+
+export async function fetchAgentProfiles(): Promise<AgentProfile[]> {
+  const response = await readAgentProfilesResponse(fetch('/api/profiles'));
+  return response.profiles;
+}
+
+export async function createAgentProfile(payload: {
+  provider: ProfileProvider;
+  label: string;
+}): Promise<AgentProfilesResponse> {
+  return readAgentProfilesResponse(
+    fetch('/api/profiles', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+  );
+}
+
+export async function updateAgentProfile(payload: {
+  id: string;
+  label: string;
+}): Promise<AgentProfilesResponse> {
+  return readAgentProfilesResponse(
+    fetch('/api/profiles/rename', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+  );
+}
+
+export async function deleteAgentProfile(id: string): Promise<AgentProfilesResponse> {
+  return readAgentProfilesResponse(
+    fetch('/api/profiles/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id })
+    })
+  );
+}
+
+/**
+ * The authority's canonical state for this read.
+ *
+ * `revision` is the authority-wide read revision; an individual snapshot's own
+ * `revision` may be lower (that session simply has not changed since). Every
+ * surface in the tab renders from ONE of these reads, which is what makes it
+ * impossible for the sidebar and the channels footer to disagree.
+ */
+export interface AgentStatesPayload {
+  revision: number;
+  snapshots: SessionStateSnapshot[];
 }
 
 export interface DeskPulse {
   system: SystemSnapshot;
-  attention: AttentionSnapshot;
-  /** every live tmux session name — patches run-states without a snapshot fetch */
-  running: string[];
+  /**
+   * Absent when the authority is unreachable. A partial pulse is deliberate:
+   * telemetry must keep flowing when state cannot be read, and an absent key
+   * renders as `unknown` — which is true — instead of an invented empty state.
+   */
+  agentStates?: AgentStatesPayload;
+  /** every live durable session ID — patches run-states without a snapshot fetch */
+  running?: string[];
 }
 
-/** One merged request per poll tick: system metrics + attention + liveness. */
+/** One merged request per poll tick: system metrics + canonical state + liveness. */
 export async function fetchPulse(): Promise<DeskPulse> {
   return readJson(fetch('/api/pulse'));
 }
 
-export async function fetchAttention(): Promise<AttentionSnapshot> {
-  return readJson(fetch('/api/attention'));
+export async function fetchAgentStates(): Promise<AgentStatesPayload> {
+  return readJson(fetch('/api/agent-states'));
 }
 
 export type DeskAutosaveMode = 'off' | 'after-delay' | 'on-focus-change';
@@ -154,19 +229,21 @@ export async function fetchDetectedLanguages(
   return readJson(fetch(`/api/lsp/detected-languages?${params.toString()}`));
 }
 
-export async function clearAllEvents(): Promise<void> {
-  await readJson(
-    fetch('/api/attention-read', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clear: true })
-    })
-  );
+/**
+ * The unified event feed. One journal carries both agent transitions and
+ * channel notifications, so the drawer has a single ordering and a single
+ * unread count instead of two feeds racing each other.
+ *
+ * Acknowledgement is journal-only: `read` and `clear` change what the operator
+ * has looked at, never what an agent is doing and never a session lamp.
+ */
+export async function fetchEvents(limit = 200): Promise<DeskEventFeedResponse> {
+  return readJson(fetch(`/api/events?limit=${limit}`));
 }
 
-export async function markEventsRead(payload: { ids?: string[]; all?: boolean; kinds?: AgentEventKind[] }): Promise<void> {
-  await readJson(
-    fetch('/api/attention-read', {
+export async function markEventsRead(payload: DeskEventReadRequest): Promise<DeskEventReadResponse> {
+  return readJson(
+    fetch('/api/events/read', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload)
@@ -174,15 +251,10 @@ export async function markEventsRead(payload: { ids?: string[]; all?: boolean; k
   );
 }
 
-export async function clearAttention(session: string): Promise<void> {
-  await readJson(
-    fetch('/api/attention-clear', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ session })
-    })
-  );
+export async function clearAllEvents(): Promise<DeskEventClearResponse> {
+  return readJson(fetch('/api/events', { method: 'DELETE' }));
 }
+
 
 export async function killAllAgents(): Promise<{ killedSessions: string[]; killedPids: number[]; errors: string[] }> {
   return readJson(
@@ -280,12 +352,12 @@ export async function deleteProjectSession(payload: {
   groupId: string;
   sessionName: string;
   projectCwd?: string;
-  tmuxSession?: string;
+  sessionId?: string;
 }): Promise<DeskSnapshot> {
   return postSnapshot('/api/delete-project-session', payload);
 }
 
-export async function restartProjectSession(payload: { tmuxSession: string }): Promise<DeskSnapshot> {
+export async function restartProjectSession(payload: { sessionId: string }): Promise<DeskSnapshot> {
   return postSnapshot('/api/restart-project-session', payload);
 }
 
@@ -300,7 +372,7 @@ export class ApiCodeError extends Error {
 }
 
 export async function setSessionUiMode(payload: {
-  tmuxSession: string;
+  sessionId: string;
   uiMode: 'terminal' | 'native';
   confirmDiscard?: boolean;
 }): Promise<DeskSnapshot> {
@@ -362,38 +434,11 @@ export async function saveGroupLayoutSizes(payload: {
   );
 }
 
-export async function resizeTerminal(payload: { session: string; cols: number; rows: number }): Promise<void> {
-  await readJson(
-    fetch('/api/terminal-resize', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
-}
-
-/** Server-side stabilize: tmux repaints the window at its true size (deduped per session). */
-export async function repaintTerminal(payload: { session: string }): Promise<void> {
-  await readJson(
-    fetch('/api/terminal-repaint', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
-}
-
-export async function scrollTerminal(payload: { session: string; lines: number; exitCopyMode?: boolean }): Promise<void> {
-  await readJson(
-    fetch('/api/terminal-scroll', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-  );
-}
-
-export async function captureTerminal(payload: { session: string; rows: number; offset: number }): Promise<{ lines: string[] }> {
+export async function captureTerminal(payload: {
+  sessionId: string;
+  rows: number;
+  offset: number;
+}): Promise<{ lines: string[]; totalAvailable?: number }> {
   return readJson(
     fetch('/api/terminal-capture', {
       method: 'POST',

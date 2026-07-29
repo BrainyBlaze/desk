@@ -11,6 +11,7 @@ import {
   type SurfaceHandlers
 } from './agentSurfaceClient.js';
 import { resolveFocusAnchorIndex } from './scrollAnchor.js';
+import type { SessionStatusView } from '../agentStatusModel.js';
 import {
   appendPendingAssistant,
   applyEvent as applyEventToModel,
@@ -74,7 +75,7 @@ const composerDrafts = new Map<string, string>();
 
 /**
  * Both per-session Maps below live for the tab's lifetime and are keyed by
- * tmux session name — without a cap they grow one entry per session ever
+ * durable session id - without a cap they grow one entry per session ever
  * visited. 200 sessions of drafts/counts is far beyond any real wall; evict
  * the least-recently-touched entry past that.
  */
@@ -97,6 +98,7 @@ const lastSeenRowCounts = new Map<string, number>();
 export function NativeAgentSurface({
   session,
   revision,
+  statusView,
   visible = true,
   focused = false,
   onMessageMenu,
@@ -120,6 +122,10 @@ export function NativeAgentSurface({
   };
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [awaitingResponse, setAwaitingResponse] = useState(false);
+  // Transport fact: this surface has been subscribed at least once. Used to
+  // tell "still connecting" apart from "the connection dropped" without
+  // consulting the agent's semantic state for something it cannot answer.
+  const everLiveRef = useRef(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [manualInputHeight, setManualInputHeight] = useState<number | null>(null);
@@ -143,13 +149,14 @@ export function NativeAgentSurface({
     setAwaitingResponse(false);
 
     const handlers: SurfaceHandlers = {
-      onSnapshot: ({ state, lastSeq, events }) => {
+      onSnapshot: ({ lastSeq, events }) => {
         if (disposed) return;
         setAwaitingResponse(false);
         setPipelineLive(true);
+        everLiveRef.current = true;
         // Seed the replay watermark from the broker's lastSeq (>= max retained
         // event seq after eviction / transient-only tails), not from the events.
-        setModel(rowsFromSnapshot(events, state, lastSeq));
+        setModel(rowsFromSnapshot(events, undefined, lastSeq));
         // A replace-snapshot supersedes mid-stream accumulation: clear pending
         // assistant text so an abandoned pre-reconnect turn cannot linger.
         setPendingAssistant(new Map());
@@ -440,14 +447,16 @@ export function NativeAgentSurface({
     }
   }, [visible, session, absoluteRowCount]);
 
-  const canSend = pipelineLive && model.status === 'idle' && input.trim().length > 0;
-  const sendLabel = !pipelineLive
-    ? 'Connecting...'
-    : model.status === 'starting'
-      ? 'Starting...'
-      : model.status === 'idle'
-        ? 'Send'
-        : 'Wait...';
+  // The send affordance is gated on TRANSPORT only: is this surface
+  // subscribed, and is a send of ours already in flight. It deliberately does
+  // NOT consult the agent's semantic state — that state lives in the
+  // authority, and re-deriving "is it busy" here would rebuild the duplicate
+  // FSM this refactor removes. A prompt sent while the agent is busy is
+  // rejected by the host with a typed result, which is a real answer rather
+  // than a guess made before asking.
+  const sendInFlight = awaitingResponse;
+  const canSend = pipelineLive && !sendInFlight && input.trim().length > 0;
+  const sendLabel = !pipelineLive ? 'Connecting...' : sendInFlight ? 'Sending...' : 'Send';
   const filteredAgentCommands = useMemo(
     () =>
       input.startsWith('/') && !input.includes(' ')
@@ -571,13 +580,25 @@ export function NativeAgentSurface({
   // Deliberately NOT gated on pendingAssistantEntries: a tool call that runs
   // after a partial assistant message would otherwise leave the transcript
   // dead-still for the whole tool duration.
-  const showAgentThinking =
-    awaitingResponse || model.status === 'processing' || model.status === 'tool-executing';
+  // What the operator is told the agent is doing comes from the authority.
+  // `awaitingResponse` only covers the gap between our send and the first
+  // frame back, which the authority cannot know about yet.
+  const showAgentThinking = awaitingResponse || statusView.agent?.tone === 'working';
 
   return (
     <div className="nativeAgentSurface">
       <div className="nativeAgentHeader">
-        <span className={`nativeAgentStatus state-${model.status}`}>{model.status}</span>
+        <span
+          className={`nativeAgentStatus state-${statusView.agent?.tone ?? 'unknown'}`}
+          title={statusView.agent?.detail ?? statusView.agent?.label ?? 'unknown'}
+        >
+          {statusView.agent?.label ?? 'unknown'}
+        </span>
+        {statusView.degradedReason ? (
+          <span className="nativeAgentStatus state-degraded" title={statusView.degradedReason}>
+            {statusView.degradedReason}
+          </span>
+        ) : null}
         {agentModel ? <span className="nativeAgentModelBadge">{agentModel}</span> : null}
         {/* Stop moved to the composer action slot (UX item 5); header keeps status only. */}
       </div>
@@ -628,7 +649,7 @@ export function NativeAgentSurface({
           </div>
         ) : null}
         {errorMsg ? <div className="nativeAgentError">{errorMsg}</div> : null}
-        {!pipelineLive && model.status !== 'starting' ? (
+        {!pipelineLive && everLiveRef.current ? (
           <div className="nativeAgentBridgeDown">
             broker connection lost; reconnecting…
             <button type="button" className="nativeAgentRetryButton" onClick={handleForceReconnect}>
@@ -802,7 +823,7 @@ export function NativeAgentSurface({
                 }
               }}
             />
-            {model.status === 'processing' || model.status === 'tool-executing' ? (
+            {showAgentThinking ? (
               // UX item 5: while a turn runs, the composer's action slot IS the Stop
               // control — the user's cursor and attention live here, not the header.
               <button
@@ -876,10 +897,17 @@ function shouldShowUnreadMarkerBeforeItem(
 }
 
 export interface NativeAgentSurfaceProps {
-  /** Tmux session name (broker key). */
+  /** Durable session id (broker key). */
   session: string;
   /** Bumped by the parent when restart/switch happens so we resubscribe fresh. */
   revision: number;
+  /**
+   * The operator-facing state, from the authority — the same read the sidebar
+   * uses. The broker's own FSM below stays a TRANSPORT concern (is the pipe
+   * ready to take input); it must not double as a second answer to "what is
+   * this agent doing", which is how the two used to drift apart.
+   */
+  statusView: SessionStatusView;
   /** The containing warm group is physically visible, not display:none. */
   visible?: boolean;
   /** This cell holds the global selection. */

@@ -77,17 +77,28 @@ export interface DeskSettings {
   lsp?: DeskLspSettings;
   /** sidebar widths in px, keyed by subsystem (agents/editor/git/notes/…) */
   sidebars?: Record<string, number>;
-  /** desk-owned tmux session options applied at launch */
-  tmux?: {
-    /** 'off' drops tmux's status line in desk-launched sessions (the cell tab already names the session). YAML parses a bare off as false — both forms count. */
-    statusLine?: 'on' | 'off' | boolean;
-  };
 }
 
 export interface DeskManifest {
   settings?: DeskSettings;
+  /** Agent profiles: isolated provider credential directories, one per account. */
+  profiles?: AgentProfile[];
   groups: DeskGroup[];
   projects?: DeskProject[];
+}
+
+/** Providers that support an isolated credential directory today. */
+export type ProfileProvider = 'claude' | 'codex';
+
+/**
+ * One named provider account. `id` is immutable and keys the credential
+ * directory; `label` is operator-facing and may change freely. Desk stores no
+ * credentials — only this pointer; the provider CLI writes its own files.
+ */
+export interface AgentProfile {
+  id: string;
+  provider: ProfileProvider;
+  label: string;
 }
 
 export interface DeskProject {
@@ -114,12 +125,21 @@ export interface DeskSession {
   resume?: string;
   bypassPermissions?: boolean;
   command?: string;
-  tmuxSession?: string;
+  /** Durable session identity (§10), globally unique per user. */
+  sessionId: string;
   order?: number;
   uiMode?: DeskSessionUiMode;
   /** Runtime model override (provider/model string, driver-interpreted). NOT part of session identity. */
   model?: string;
+  /**
+   * Optional agent profile (isolated provider credential directory). Absent =
+   * the ambient account, exactly as before profiles existed.
+   */
+  profileId?: string;
 }
+
+/** Create/edit payload. The config boundary allocates or preserves sessionId. */
+export type DeskSessionDraft = Omit<DeskSession, 'sessionId'> & { sessionId?: string };
 
 export interface SessionSpec {
   groupId: string;
@@ -137,7 +157,10 @@ export interface SessionSpec {
   resume?: string;
   bypassPermissions?: boolean;
   customCommand?: boolean;
-  tmuxSession: string;
+  /** Durable lifecycle identity and atch socket key (§10). */
+  sessionId: string;
+  /** Selected agent profile, or absent for the ambient account. */
+  profileId?: string;
   command: string;
   uiMode: DeskSessionUiMode;
   model?: string;
@@ -150,15 +173,13 @@ export interface AgentMcpLaunchConfig {
 
 export interface BuildSessionOptions {
   homeDir: string;
-  namespace?: string;
   agentMcp?: (session: DeskSession, cwd: string) => AgentMcpLaunchConfig | undefined;
 }
 
-export type TmuxPlanActionType = 'start' | 'preserve';
+export type SessionPlanActionType = 'start' | 'preserve';
 
-export interface TmuxPlanAction {
-  type: TmuxPlanActionType;
+export interface SessionPlanAction {
+  type: SessionPlanActionType;
   session: SessionSpec;
-  argv: string[];
   opencodeLaunchResumeId?: string;
 }

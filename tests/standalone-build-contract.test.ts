@@ -60,13 +60,19 @@ describe('standalone build dependency contract', () => {
     expect(text).not.toContain(`resolve(root, 'desk-${'server'}')`);
   });
 
-  it('isolates smoke tmux state and never kills an unverified descendant pid', () => {
+  it('uses bundled atch while isolating daemon state and never kills an unverified descendant pid', () => {
     const text = readFileSync(SMOKE_SERVE_MODES, 'utf8');
 
-    expect(text).toContain('TMUX_TMPDIR');
     expect(text).toContain('HOME: smokeHome');
-    expect(text).toContain('delete childEnvironment.TMUX');
+    expect(text).toContain("DESK_ATCH_SOCKET_ROOT: join(smokeHome, 'atch')");
+    expect(text).toContain('DESK_DAEMON_URL: `ws://127.0.0.1:${daemonPort}`');
+    expect(text).toContain('delete childEnvironment.DESK_ATCH_BIN');
+    expect(text).not.toContain('atch-smoke-stub');
+    expect(text).toContain('delete childEnvironment.DESK_DAEMON_CMD');
+    expect(text).toContain('delete childEnvironment.DESK_DAEMON_EXTERNAL');
     expect(text).toContain('delete childEnvironment.DESK_PLUGINS');
+    expect(text).toContain("writeFileSync(runtimePath, '#!/bin/sh\\nexit 37;\\n'");
+    expect(text).not.toMatch(/tmux/i);
     expect(text).not.toContain("process.kill(pid, 'SIGKILL')");
   });
 });

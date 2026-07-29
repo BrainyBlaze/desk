@@ -1,8 +1,10 @@
 import YAML from 'yaml';
+import { checkGlobalUniqueness, isValidSessionId } from '../shared/migration/index.js';
 import { shellQuote } from '../shared/shell.js';
 import { isSupportedAgent } from './types.js';
 import type {
   AgentMcpLaunchConfig,
+  AgentProfile,
   BuildSessionOptions,
   DeskGroup,
   DeskManifest,
@@ -10,10 +12,22 @@ import type {
   DeskSession,
   SessionSpec
 } from './types.js';
+import { deskClaudeSettingsPath } from './agentHooks.js';
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
+import {
+  collectSessions,
+  type LegacyDeskGroup,
+  type LegacyDeskManifest,
+  type LegacyDeskSession
+} from './sessionIdentity.js';
+import {
+  isProfileProvider,
+  isValidProfileId,
+  profileEnvPrefix,
+  profileScrubPrefix
+} from '../shared/agentProfiles.js';
 
-const DEFAULT_NAMESPACE = 'agentdesk';
-const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'groups', 'projects']);
+const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'profiles', 'groups', 'projects']);
 
 export class ManifestValidationError extends Error {
   readonly code = 'manifest-invalid';
@@ -25,6 +39,16 @@ export class ManifestValidationError extends Error {
 }
 
 export function parseDeskManifest(source: string): DeskManifest {
+  const manifest = parseLegacyDeskManifest(source);
+  validateRuntimeSessionIdentities(manifest);
+  return manifest;
+}
+
+/**
+ * Migration-only parser for the pre-cutover manifest schema. Runtime callers
+ * must use parseDeskManifest, which rejects missing ids and the legacy key.
+ */
+export function parseLegacyDeskManifest(source: string): LegacyDeskManifest {
   const parsed = YAML.parse(source) as unknown;
 
   if (!isRecord(parsed)) {
@@ -40,15 +64,18 @@ export function parseDeskManifest(source: string): DeskManifest {
   const manifest = {
     // UI settings live in the manifest so they survive reboots and browsers;
     // every write path spreads the manifest, so parse must carry them through.
-    settings: isRecord(parsed.settings) ? (parsed.settings as DeskManifest['settings']) : undefined,
+    settings: isRecord(parsed.settings) ? (parsed.settings as LegacyDeskManifest['settings']) : undefined,
     // Present-but-not-a-list is a mistake (e.g. an indentation slip turning
     // `groups:` into a scalar), NOT an empty config. Silently coercing it to []
     // dropped every project/session with zero diagnostics, and the next write
     // spread the empty manifest back to disk — permanent data loss. Throw
     // instead; an ABSENT key still means "none".
-    groups: (requireManifestListOrAbsent(parsed.groups, 'groups') ?? []) as DeskManifest['groups'],
-    projects: requireManifestListOrAbsent(parsed.projects, 'projects') as DeskManifest['projects']
-  } as unknown as DeskManifest;
+    // Same rule as groups/projects: absent means none, present-but-not-a-list
+    // is a mistake worth throwing rather than silently dropping every profile.
+    profiles: requireManifestListOrAbsent(parsed.profiles, 'profiles') as DeskManifest['profiles'],
+    groups: (requireManifestListOrAbsent(parsed.groups, 'groups') ?? []) as LegacyDeskManifest['groups'],
+    projects: requireManifestListOrAbsent(parsed.projects, 'projects') as LegacyDeskManifest['projects']
+  } as LegacyDeskManifest;
 
   for (const group of manifest.groups) {
     validateGroup(group);
@@ -78,6 +105,67 @@ export function parseDeskManifest(source: string): DeskManifest {
   return manifest;
 }
 
+function validateRuntimeSessionIdentities(manifest: LegacyDeskManifest): asserts manifest is DeskManifest {
+  const sessions = collectSessions(manifest);
+  for (const session of sessions) {
+    if (!isValidSessionId(session.sessionId)) {
+      const value = session.sessionId === undefined ? 'missing' : JSON.stringify(session.sessionId);
+      throw new ManifestValidationError(`session ${session.name} has ${value} sessionId`);
+    }
+    if ('tmuxSession' in session) {
+      throw new ManifestValidationError(`session ${session.name} uses legacy tmuxSession; run the sessionId migration`);
+    }
+  }
+  const unique = checkGlobalUniqueness(sessions.map((session) => session.sessionId!));
+  if (!unique.ok) {
+    throw new ManifestValidationError(`duplicate sessionId "${unique.duplicate}"`);
+  }
+  validateAgentProfiles(manifest as DeskManifest, sessions as DeskSession[]);
+}
+
+/**
+ * Profiles fail CLOSED (R2): an unknown id, a provider that does not match the
+ * session's agent, or a profile on a session that has no provider credential
+ * store is a manifest error — never a silent fall back to the ambient account,
+ * which is exactly the wrong-account outcome profiles exist to prevent.
+ */
+function validateAgentProfiles(manifest: DeskManifest, sessions: DeskSession[]): void {
+  const byId = new Map<string, AgentProfile>();
+  for (const profile of manifest.profiles ?? []) {
+    if (!isValidProfileId(profile.id)) {
+      throw new ManifestValidationError(`profile has an invalid id: ${JSON.stringify(profile.id)}`);
+    }
+    if (!isProfileProvider(profile.provider)) {
+      throw new ManifestValidationError(`profile ${profile.id} has an unsupported provider: ${JSON.stringify(profile.provider)}`);
+    }
+    if (typeof profile.label !== 'string' || profile.label.trim() === '') {
+      throw new ManifestValidationError(`profile ${profile.id} has an empty label`);
+    }
+    if (byId.has(profile.id)) {
+      throw new ManifestValidationError(`duplicate profile id "${profile.id}"`);
+    }
+    byId.set(profile.id, profile);
+  }
+  for (const session of sessions) {
+    const profileId = session.profileId;
+    if (profileId === undefined) {
+      continue; // ambient — unchanged behavior
+    }
+    const profile = byId.get(profileId);
+    if (!profile) {
+      throw new ManifestValidationError(`session ${session.name} references unknown profile "${profileId}"`);
+    }
+    if (session.command !== undefined) {
+      throw new ManifestValidationError(`session ${session.name} is a custom command and cannot use a profile`);
+    }
+    if (session.agent !== profile.provider) {
+      throw new ManifestValidationError(
+        `session ${session.name} uses agent ${session.agent ?? 'none'} but profile ${profileId} is for ${profile.provider}`
+      );
+    }
+  }
+}
+
 /** A manifest top-level list (`groups`/`projects`) may be absent (→ undefined,
  *  meaning "none") but if PRESENT must be a list. A present scalar/map is a
  *  hand-edit mistake and throws rather than silently dropping the data. */
@@ -95,24 +183,12 @@ export function buildSessionSpecs(
   manifest: DeskManifest,
   options: BuildSessionOptions
 ): SessionSpec[] {
-  const namespace = options.namespace ?? DEFAULT_NAMESPACE;
-
   const rootSpecs = manifest.groups.flatMap((group) =>
     group.sessions.map((session) => {
       const cwd = expandHome(session.cwd ?? options.homeDir, options.homeDir);
-      const tmuxSession =
-        session.tmuxSession ??
-        [
-          namespace,
-          slugPart(group.id),
-          slugPart(session.name),
-          session.resume ? session.resume.slice(0, 8) : shortHash(sessionHashSeed(session, cwd))
-        ]
-          .filter(Boolean)
-          .join('-');
       const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
       const command =
-        session.command ?? buildAgentCommand(session, cwd, options.homeDir, tmuxSession, options.agentMcp?.(session, cwd));
+        session.command ?? buildAgentCommand(session, cwd, options.homeDir, session.sessionId, options.agentMcp?.(session, cwd));
 
       return {
         groupId: group.id,
@@ -126,7 +202,8 @@ export function buildSessionSpecs(
         resume: session.resume,
         bypassPermissions: session.bypassPermissions,
         ...(hasCustomCommand ? { customCommand: true } : {}),
-        tmuxSession,
+        sessionId: session.sessionId,
+        ...(session.profileId ? { profileId: session.profileId } : {}),
         command,
         uiMode: resolveSessionUiMode(session),
         ...(session.model ? { model: session.model } : {})
@@ -138,7 +215,6 @@ export function buildSessionSpecs(
     project.groups.flatMap((group) =>
       group.sessions.map((session) =>
         buildProjectSessionSpec({
-          namespace,
           project,
           group,
           session,
@@ -162,7 +238,7 @@ export function expandHome(path: string, homeDir: string): string {
   return path;
 }
 
-function validateGroup(group: DeskGroup): void {
+function validateGroup(group: LegacyDeskGroup): void {
   if (!group || typeof group.id !== 'string' || group.id.trim() === '') {
     throw new ManifestValidationError('each group requires an id');
   }
@@ -171,7 +247,7 @@ function validateGroup(group: DeskGroup): void {
   }
 }
 
-function validateSession(groupId: string, session: DeskSession, inheritedCwd?: string): void {
+function validateSession(groupId: string, session: LegacyDeskSession, inheritedCwd?: string): void {
   if (!session || typeof session.name !== 'string' || session.name.trim() === '') {
     throw new ManifestValidationError(`group ${groupId} has a session without a name`);
   }
@@ -188,7 +264,7 @@ function validateSession(groupId: string, session: DeskSession, inheritedCwd?: s
   throw new ManifestValidationError(`session ${session.name} requires a supported agent or command`);
 }
 
-function validateSessionUiMode(session: DeskSession): void {
+function validateSessionUiMode(session: Pick<DeskSession, 'name' | 'agent' | 'command' | 'uiMode'>): void {
   if (session.uiMode === undefined || session.uiMode === 'terminal') {
     return;
   }
@@ -208,20 +284,34 @@ export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' |
   return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
 }
 
-/** Undeclared uiMode resolves to native where supported; explicit values always win. */
+/**
+ * Undeclared `uiMode` resolves to `terminal`; explicit values always win.
+ *
+ * Terminal is the default because it is the mode that works for every agent
+ * Desk drives: it runs the CLI's own TUI, so anything the CLI can do, the
+ * session can do. Native is a richer surface but a narrower one, and it is
+ * marked experimental in the session form for the same reason.
+ *
+ * This has to agree with the wizard. The two disagreed for a while — the form
+ * pre-selected `terminal` while an omitted field still resolved to `native` —
+ * which gave the product two different answers to "what is the default", one
+ * for an operator using the UI and another for an operator editing the
+ * manifest by hand.
+ */
 export function resolveSessionUiMode(session: Pick<DeskSession, 'agent' | 'command' | 'uiMode'>): 'terminal' | 'native' {
-  return session.uiMode ?? (sessionSupportsNativeUiMode(session) ? 'native' : 'terminal');
+  if (session.uiMode === 'native' && sessionSupportsNativeUiMode(session)) {
+    return 'native';
+  }
+  return 'terminal';
 }
 
 function buildProjectSessionSpec({
-  namespace,
   project,
   group,
   session,
   homeDir,
   agentMcp
 }: {
-  namespace: string;
   project: DeskProject;
   group: DeskGroup;
   session: DeskSession;
@@ -229,19 +319,8 @@ function buildProjectSessionSpec({
   agentMcp?: (session: DeskSession, cwd: string) => AgentMcpLaunchConfig | undefined;
 }): SessionSpec {
   const cwd = expandHome(session.cwd ?? project.cwd, homeDir);
-  const tmuxSession =
-    session.tmuxSession ??
-    [
-      namespace,
-      slugPart(project.id),
-      slugPart(group.id),
-      slugPart(session.name),
-      session.resume ? session.resume.slice(0, 8) : shortHash(sessionHashSeed(session, cwd))
-    ]
-      .filter(Boolean)
-      .join('-');
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  const command = session.command ?? buildAgentCommand(session, cwd, homeDir, tmuxSession, agentMcp?.(session, cwd));
+  const command = session.command ?? buildAgentCommand(session, cwd, homeDir, session.sessionId, agentMcp?.(session, cwd));
 
   return {
     projectId: project.id,
@@ -259,56 +338,38 @@ function buildProjectSessionSpec({
     resume: session.resume,
     bypassPermissions: session.bypassPermissions,
     ...(hasCustomCommand ? { customCommand: true } : {}),
-    tmuxSession,
+    sessionId: session.sessionId,
+    ...(session.profileId ? { profileId: session.profileId } : {}),
     command,
     uiMode: resolveSessionUiMode(session),
     ...(session.model ? { model: session.model } : {})
   };
 }
 
-/**
- * Turn-complete / approval notifications: agents are launched so their TUIs
- * emit a terminal BEL Desk can capture both attached (PTY sniff) and
- * unattached (tmux bell-flag latch). BEL is chosen over OSC 9 because tmux
- * passthrough only delivers to attached clients — background sessions would
- * be silent. Applies to newly started/restarted sessions.
+/*
+ * No launcher-injected notification setup lives here any more.
+ *
+ * Two retired paths were removed together:
+ *  - Codex was launched with `tui.notification_method=bel`, and Claude with an
+ *    inline `--settings` payload that set `preferredNotifChannel: terminal_bell`
+ *    and installed curl hooks posting a schema the current route rejects. Both
+ *    were the terminal-bell era, and a bell is an edge with no author: any
+ *    child process ringing it produces the same byte.
+ *  - The inline `--settings` also OVERRODE the managed hooks in the agent's own
+ *    settings file, so the launcher could silently replace the installed
+ *    producer with a retired one.
+ *
+ * Agent state now comes from the typed hooks installed by `desk hooks install`
+ * (see core/agentHooks.ts) and reaches the authority through the provider
+ * adapter. The launcher's job is to start the agent, not to teach it how to
+ * report.
  */
-const CODEX_NOTIFICATION_FLAGS =
-  '-c tui.notifications=true -c tui.notification_method=bel -c tui.notification_condition=always';
-
-/**
- * Claude Code: hooks are the reliable channel (preferredNotifChannel is a
- * config-store key and silently no-ops via --settings). The hook resolves its
- * own tmux session from the inherited TMUX_PANE and POSTs a typed event to
- * Desk's /api/agent-event (port overridable via DESK_API in the session env).
- */
-function claudeEventHook(kind: 'turn-complete' | 'approval-requested'): string {
-  return (
-    'payload=$(cat); ' +
-    'sid=$(printf %s "$payload" | grep -o \'"session_id":"[^"]*"\' | head -1 | cut -d\'"\' -f4); ' +
-    's=$(tmux display-message -p -t "$TMUX_PANE" \'#{session_name}\' 2>/dev/null); ' +
-    '[ -n "$s" ] && curl -s -m 2 -X POST "${DESK_API:-http://127.0.0.1:5173}/api/agent-event" ' +
-    `-H 'content-type: application/json' --data "{\\"session\\":\\"$s\\",\\"kind\\":\\"${kind}\\",\\"sessionId\\":\\"$sid\\"}" >/dev/null 2>&1; exit 0`
-  );
-}
-
-const CLAUDE_SETTINGS = {
-  preferredNotifChannel: 'terminal_bell',
-  hooks: {
-    Stop: [{ hooks: [{ type: 'command', command: claudeEventHook('turn-complete') }] }],
-    Notification: [
-      { matcher: 'permission_prompt', hooks: [{ type: 'command', command: claudeEventHook('approval-requested') }] }
-    ]
-  }
-};
-
-const CLAUDE_NOTIFICATION_FLAGS = `--settings ${shellQuote(JSON.stringify(CLAUDE_SETTINGS))}`;
 
 export function buildAgentCommand(
   session: DeskSession,
   cwd: string,
   homeDir: string,
-  tmuxSession: string,
+  sessionId: string,
   agentMcp?: AgentMcpLaunchConfig
 ): string {
   if (resolveSessionUiMode(session) === 'native') {
@@ -320,9 +381,14 @@ export function buildAgentCommand(
   if (session.agent === 'bash') {
     return `cd ${shellQuote(cwd)} && exec bash`;
   }
-  const env = agentEnvPrefix(session.agent, tmuxSession);
+  // Profiles prepend a scrub + the provider's credential-dir assignment; the
+  // ambient path yields '' so its command is byte-identical to before.
+  const env = `${profileCommandPrefix(session, homeDir)}${agentEnvPrefix(session.agent, sessionId)}`;
   if (session.agent === 'claude') {
-    const args = ['claude', CLAUDE_NOTIFICATION_FLAGS];
+    // Desk's own settings file, not the operator's. It carries only the hooks
+    // Desk needs to learn what the agent is doing; the operator's
+    // ~/.claude/settings.json is never written by Desk.
+    const args = ['claude', `--settings ${shellQuote(deskClaudeSettingsPath(homeDir))}`];
     if (agentMcp?.claudeConfigPath) {
       args.push('--mcp-config', shellQuote(agentMcp.claudeConfigPath));
     }
@@ -331,12 +397,12 @@ export function buildAgentCommand(
     }
     const baseCommand = args.join(' ');
     if (session.resume) {
-      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume, cwd)}`;
+      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume)}`;
     }
     return `cd ${shellQuote(cwd)} && ${env} ${baseCommand}`;
   }
   if (session.agent === 'codex') {
-    const args = ['codex', CODEX_NOTIFICATION_FLAGS];
+    const args = ['codex'];
     if (agentMcp) {
       args.push(
         '-c',
@@ -356,12 +422,12 @@ export function buildAgentCommand(
     return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
   }
   if (session.agent === 'opencode') {
-    return buildOpencodeCommand(session, cwd, homeDir, tmuxSession);
+    return buildOpencodeCommand(session, cwd, homeDir, sessionId);
   }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }
 
-function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string, tmuxSession: string): string {
+function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string, sessionId: string): string {
   const args = ['"$desk_opencode"'];
   const defaultConfigDir = defaultOpencodeConfigDir(homeDir);
   if (session.resume) {
@@ -372,7 +438,7 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
   // dangerous flag). Default is yolo (only an explicit unchecked box -> ask).
   const bypass = session.bypassPermissions !== false;
   const permissionContent = opencodePermissionConfigContent(bypass);
-  const envPrefix = `${agentEnvPrefix(session.agent, tmuxSession)} OPENCODE_CONFIG_DIR="$desk_opencode_config" OPENCODE_CONFIG_CONTENT=${shellQuote(permissionContent)} OPENCODE_DISABLE_MOUSE=1`;
+  const envPrefix = `${agentEnvPrefix(session.agent, sessionId)} OPENCODE_CONFIG_DIR="$desk_opencode_config" OPENCODE_CONFIG_CONTENT=${shellQuote(permissionContent)} OPENCODE_DISABLE_MOUSE=1`;
   const launch = session.resume
     ? `${envPrefix} exec ${args.join(' ')}`
     : `if [ -n "\${DESK_OPENCODE_RESUME_ID:-}" ]; then ${envPrefix} exec "$desk_opencode" --session "$DESK_OPENCODE_RESUME_ID"; else ${envPrefix} exec "$desk_opencode"; fi`;
@@ -387,53 +453,33 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
   ].join(' && ');
 }
 
-function agentEnvPrefix(agent: string | undefined, tmuxSession: string): string {
-  return `DESK_TMUX_SESSION=${shellQuote(tmuxSession)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
+function agentEnvPrefix(agent: string | undefined, sessionId: string): string {
+  return `DESK_SESSION_ID=${shellQuote(sessionId)} DESK_AGENT=${shellQuote(agent ?? 'unknown')}`;
 }
 
-function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string, cwd: string): string {
-  const sdkTranscript = shellDoubleQuoteHomePath(`/.claude/projects/${claudeProjectDirName(cwd)}/${resume}.jsonl`);
+/**
+ * The profile contribution to a terminal launch: scrub inherited provider
+ * credentials, then point the CLI at the profile's own directory. Empty for an
+ * ambient session, so its command stays byte-identical to pre-profile Desk.
+ */
+function profileCommandPrefix(session: DeskSession, homeDir: string): string {
+  const profileId = session.profileId;
+  if (profileId === undefined || !isProfileProvider(session.agent)) {
+    return '';
+  }
+  return `${profileScrubPrefix()} ${profileEnvPrefix(session.agent, profileId, homeDir)} `;
+}
+
+function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string): string {
   const resumeArg = shellQuote(resume);
   return [
-    `desk_claude_session=${sdkTranscript}`,
     `${env} ${baseCommand} --resume ${resumeArg}`,
     'desk_claude_resume_status=$?',
-    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: claude --resume failed with exit $desk_claude_resume_status; trying --continue" >&2; if [ -f "$desk_claude_session" ]; then touch "$desk_claude_session"; fi; ${env} ${baseCommand} --continue; desk_claude_continue_status=$?; if [ "$desk_claude_continue_status" -ne 0 ]; then printf '%s\\n' "desk: claude --continue failed with exit $desk_claude_continue_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi; fi`
+    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi`
   ].join('; ');
 }
 
-function claudeProjectDirName(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9._-]/g, '-');
-}
-
-function shellDoubleQuoteHomePath(pathAfterHome: string): string {
-  return `"$HOME${pathAfterHome.replace(/(["\\`$])/g, '\\$1')}"`;
-}
-
-function sessionHashSeed(session: DeskSession, cwd: string): string {
-  if (session.command) {
-    return session.command;
-  }
-  return [session.agent ?? 'command', session.name, cwd, session.bypassPermissions === false ? 'ask' : 'allow'].join('|');
-}
-
 // shellQuote now lives in ../shared/shell.ts (single audited copy).
-
-function slugPart(value: string): string {
-  return value
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function shortHash(value: string): string {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0').slice(0, 8);
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

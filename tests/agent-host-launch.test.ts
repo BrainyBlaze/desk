@@ -12,6 +12,7 @@ function spec(overrides: Partial<SessionSpec> = {}): SessionSpec {
     resume: 'sess-uuid-1',
     bypassPermissions: false,
     tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+    sessionId: 'chat',
     command: "cd '/home/dev/projects/my app' && exec desk agent-host",
     uiMode: 'native',
     ...overrides
@@ -30,7 +31,7 @@ describe('rewriteNativeLaunchCommand', () => {
     const rewritten = rewriteNativeLaunchCommand(spec(), ctx);
     expect(rewritten.command).toBe(
       "cd '/home/dev/projects/my app' && " +
-        "DESK_TMUX_SESSION='agentdesk-alpha-main-chat-00000000' " +
+        "DESK_SESSION_ID='chat' " +
         "DESK_AGENT='claude' " +
         "DESK_AGENT_RESUME='sess-uuid-1' " +
         "DESK_AGENT_BYPASS='0' " +

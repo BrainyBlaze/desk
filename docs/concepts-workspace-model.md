@@ -1,6 +1,6 @@
 ---
 title: "Workspace model"
-description: "Understand projects, groups, sessions, layouts, tmux names, resume ids, and startup behavior."
+description: "Understand projects, groups, sessions, layouts, session ids, resume ids, and startup behavior."
 ---
 
 Desk's workspace model is intentionally small. A manifest contains projects;
@@ -29,7 +29,7 @@ persists layout changes to the manifest.
 
 ## Sessions
 
-A session describes one tmux-backed process. It can be:
+A session describes one atch-backed process. It can be:
 
 - a managed Codex session
 - a managed Claude session
@@ -41,22 +41,20 @@ Managed agent sessions get Desk launch flags, permission handling, resume
 capture, attention hooks, and optional LSP MCP wiring. Custom commands run as
 the command you provide.
 
-## tmux session names
+## Session ids
 
-Desk computes deterministic tmux names from:
+Every session has a durable `sessionId`. Desk preserves an existing id or mints
+one from the session name when you add or migrate a session. The id is the
+shared key for:
 
-- the namespace
-- project id
-- group id
-- session name
-- resume id prefix, or a hash when no resume id exists
-
-You can set `tmuxSession` explicitly when you need a stable legacy name. Avoid
-renaming tmux sessions outside Desk unless you also update the manifest.
+- the atch master socket
+- terminal generation and snapshot state
+- channels membership and delivery queues
+- attention, resume capture, and agent event routing
 
 ## Resume ids
 
-Resume ids belong to the agent CLI, not to tmux. Desk stores known resume ids in
+Resume ids belong to the agent CLI, not to atch. Desk stores known resume ids in
 the manifest and can also harvest them after a first turn for managed agents.
 
 Use resume ids when you want a restarted agent CLI to reconnect to the same
@@ -64,16 +62,16 @@ conversation. Bash and custom command sessions do not use agent resume ids.
 
 ## Startup behavior
 
-`desk up` reads the manifest, checks for matching tmux sessions, and starts only
-the missing sessions. It does not replace running sessions.
+`desk up` reads the manifest, checks the configured atch master sockets, and
+starts only the missing sessions. It does not replace running sessions.
 
 Use `desk up --dry-run` before changing a large fleet.
 
 ## Browser state
 
 The browser stores selected views, open editor tabs, panel sizes, and UI
-preferences separately from tmux process lifetime. If you reload the browser,
-Desk reconnects to the running sessions through the broker.
+preferences separately from atch process lifetime. If you reload the browser,
+Desk reconnects to the running sessions through the binary terminal transport.
 
 ## Next steps
 

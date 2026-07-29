@@ -7,7 +7,6 @@ import {
   type DeliveryBlockReason,
   type EngineActionName,
   type EngineDiagnostics,
-  type PaneState,
   type SessionDiagnostic,
   type SubmitState
 } from './channelsClient.js';
@@ -15,46 +14,16 @@ import {
 /**
  * Channels engine ops console — a drawer toggled from the channels header that
  * surfaces live per-session delivery diagnostics (why each queue is held) and
- * the recovery levers: mark-idle, drop, force-deliver (gate-bypassing), drain
+ * the recovery levers: drop, force-deliver (gate-bypassing), drain
  * all ready sessions, and an in-process engine rebuild. The pane probe is the
  * point: it turns "queued: 20" into "held because the agent is mid-turn" vs
  * "held because capture came back empty".
  */
 
-const PANE_LABEL: Record<PaneState, string> = {
-  ready: 'ready',
-  busy: 'working',
-  'not-ready': 'not ready',
-  booting: 'booting',
-  'empty-capture': 'empty capture',
-  offline: 'offline',
-  unobservable: 'no capture'
-};
-
-/** ok = deliverable, muted = legitimately occupied, warn = needs attention. */
-const PANE_TONE: Record<PaneState, 'ok' | 'muted' | 'warn'> = {
-  ready: 'ok',
-  busy: 'muted',
-  'not-ready': 'warn',
-  booting: 'muted',
-  'empty-capture': 'warn',
-  offline: 'warn',
-  unobservable: 'warn'
-};
-
 const BLOCK_REASON_LABEL: Record<DeliveryBlockReason, string> = {
-  approval: 'approval',
-  'input-requested': 'input requested',
   offline: 'offline',
   booting: 'booting',
-  busy: 'working',
-  'not-ready': 'not ready',
-  'trust-menu': 'trust menu',
-  'selection-menu': 'selection menu',
-  'unknown-menu': 'menu',
-  'empty-capture': 'empty capture',
-  'capture-failed': 'capture failed',
-  unobservable: 'no capture',
+  draining: 'engine drain in progress',
   'send-failed': 'send failed',
   'submit-stuck-paste': 'paste stuck',
   'submit-stuck-submit': 'submit stuck'
@@ -126,13 +95,13 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
   }, [open, refresh]);
 
   const act = useCallback(
-    async (action: EngineActionName, opts?: { tmuxSession?: string; seq?: number }) => {
+    async (action: EngineActionName, opts?: { sessionId?: string; seq?: number }) => {
       setBusyAction(true);
       try {
         const res = await channelsEngineAction(action, opts ?? {});
         setDiag((prev) =>
           prev
-            ? { ...prev, sessions: res.sessions, totalQueued: res.sessions.reduce((sum, s) => sum + s.queued, 0) }
+            ? { ...prev, sessions: res.sessions, totalQueued: res.sessions.reduce((sum, s) => sum + s.queueDepth, 0) }
             : prev
         );
         setError(null);
@@ -150,7 +119,7 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
     return null;
   }
 
-  const sessions = (diag?.sessions ?? []).slice().sort((a, b) => b.queued - a.queued);
+  const sessions = (diag?.sessions ?? []).slice().sort((a, b) => b.queueDepth - a.queueDepth);
   // A stale snapshot (last poll failed) must not drive the live pills — render
   // them as unknown so they never assert minutes-old health beside the error.
   const live = stale ? null : diag;
@@ -199,38 +168,37 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
         <div className="chanEngineSessions">
           {sessions.map((s) => (
             <SessionRow
-              key={s.tmuxSession}
+              key={s.sessionId}
               session={s}
-              expanded={expanded.has(s.tmuxSession)}
+              expanded={expanded.has(s.sessionId)}
               busy={busyAction}
               onToggle={() =>
                 setExpanded((prev) => {
                   const next = new Set(prev);
-                  if (next.has(s.tmuxSession)) {
-                    next.delete(s.tmuxSession);
+                  if (next.has(s.sessionId)) {
+                    next.delete(s.sessionId);
                   } else {
-                    next.add(s.tmuxSession);
+                    next.add(s.sessionId);
                   }
                   return next;
                 })
               }
-              onMarkIdle={() => void act('mark-idle', { tmuxSession: s.tmuxSession })}
-              onDropQueue={() => void act('drop-queue', { tmuxSession: s.tmuxSession })}
-              onDropMessage={(seq) => void act('drop-message', { tmuxSession: s.tmuxSession, seq })}
+              onDropQueue={() => void act('drop-queue', { sessionId: s.sessionId })}
+              onDropMessage={(seq) => void act('drop-message', { sessionId: s.sessionId, seq })}
               onForce={() =>
                 setConfirm({
-                  label: `Force-deliver to ${s.tmuxSession} now? This bypasses the busy/ready gate and can land inside a working agent's turn.`,
-                  run: () => act('force-deliver', { tmuxSession: s.tmuxSession })
+                  label: `Force-deliver to ${s.sessionId} now? This bypasses the busy/ready gate and can land inside a working agent's turn.`,
+                  run: () => act('force-deliver', { sessionId: s.sessionId })
                 })
               }
               onForceItem={(seq) =>
                 setConfirm({
-                  label: `Force-deliver stuck message ${seq} to ${s.tmuxSession} now? This reverts the stuck item to queued and delivers it, bypassing the busy/ready gate.`,
-                  run: () => act('force-deliver', { tmuxSession: s.tmuxSession, seq })
+                  label: `Force-deliver stuck message ${seq} to ${s.sessionId} now? This reverts the stuck item to queued and delivers it, bypassing the busy/ready gate.`,
+                  run: () => act('force-deliver', { sessionId: s.sessionId, seq })
                 })
               }
-              onPause={() => void act('pause-session', { tmuxSession: s.tmuxSession })}
-              onResume={() => void act('resume-session', { tmuxSession: s.tmuxSession })}
+              onPause={() => void act('pause-session', { sessionId: s.sessionId })}
+              onResume={() => void act('resume-session', { sessionId: s.sessionId })}
             />
           ))}
           {diag && sessions.length === 0 ? <div className="chanEngineEmpty">No tracked sessions.</div> : null}
@@ -267,7 +235,6 @@ function SessionRow({
   expanded,
   busy,
   onToggle,
-  onMarkIdle,
   onDropQueue,
   onDropMessage,
   onForce,
@@ -279,7 +246,6 @@ function SessionRow({
   expanded: boolean;
   busy: boolean;
   onToggle: () => void;
-  onMarkIdle: () => void;
   onDropQueue: () => void;
   onDropMessage: (seq: number) => void;
   onForce: () => void;
@@ -287,9 +253,14 @@ function SessionRow({
   onPause: () => void;
   onResume: () => void;
 }): JSX.Element {
+  // Activity comes from the authority, and the wait names WHO must act. The
+  // removed `paneState` chip reported a state read out of the terminal pane —
+  // there is no honest replacement for it, so it is gone rather than relabelled.
   const flags = [
-    session.awaitingApproval ? 'approval' : null,
-    session.busy ? 'busy-flag' : null,
+    session.actionable && session.waitOwner === 'operator' ? `needs you: ${session.waitKind ?? 'input'}` : null,
+    session.activity === 'blocked' && session.waitOwner === 'provider' ? `waiting: ${session.waitKind ?? 'provider'}` : null,
+    session.activity === 'working' ? 'working' : null,
+    session.activity === 'unknown' ? 'state unknown' : null,
     session.draining ? 'draining' : null
   ].filter(Boolean);
   const blockedLabel =
@@ -299,10 +270,10 @@ function SessionRow({
   const submitTone = session.submitState?.startsWith('submit-stuck') ? 'warn' : 'muted';
   const droppedQueueItems = session.droppedQueueItems ?? 0;
   const blockedItems = session.blockedItems ?? [];
-  const hasExpandable = session.queued > 0 || blockedItems.length > 0;
+  const hasExpandable = session.queueDepth > 0 || blockedItems.length > 0;
   // Deliver/Drop stay live when there are durable stuck items even with an empty
   // runtime queue — the operator acts on .stuck-* via the per-seq backend path.
-  const idleActionsDisabled = busy || (session.queued === 0 && blockedItems.length === 0);
+  const idleActionsDisabled = busy || (session.queueDepth === 0 && blockedItems.length === 0);
   return (
     <div className="chanEngineSession">
       <div className="chanEngineSessionTop">
@@ -319,14 +290,13 @@ function SessionRow({
             {blockedLabel}
           </span>
         ) : null}
-        <span className={`chanEnginePane ${PANE_TONE[session.paneState]}`}>{PANE_LABEL[session.paneState]}</span>
         {session.submitState ? (
           <span className={`chanEnginePill ${submitTone}`}>{SUBMIT_STATE_LABEL[session.submitState]}</span>
         ) : null}
-        <span className="chanEngineSessionName" title={session.tmuxSession}>
-          {session.tmuxSession}
+        <span className="chanEngineSessionName" title={session.sessionId}>
+          {session.sessionId}
         </span>
-        <span className="chanEngineQueued">{session.queued}</span>
+        <span className="chanEngineQueued">{session.queueDepth}</span>
         {droppedQueueItems > 0 ? (
           <span className="chanEnginePill warn">{droppedQueueItems} dropped</span>
         ) : null}
@@ -344,9 +314,6 @@ function SessionRow({
       <div className="chanEngineSessionActions">
         <button className="chanEngineBtn" onClick={onForce} disabled={idleActionsDisabled}>
           Deliver now
-        </button>
-        <button className="chanEngineBtn" onClick={onMarkIdle} disabled={busy}>
-          Mark idle
         </button>
         <button className="chanEngineBtn" onClick={onDropQueue} disabled={idleActionsDisabled}>
           Drop queue

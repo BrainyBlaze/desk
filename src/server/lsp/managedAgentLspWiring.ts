@@ -33,8 +33,8 @@ export function createManagedAgentLspWiring(options: ManagedAgentLspWiringOption
     if (!apiBaseUrl) {
       throw new Error('Desk API URL unavailable for managed agent LSP wiring');
     }
-    cleanup(session.tmuxSession);
-    const dir = join(runtimeRoot, safePathPart(session.tmuxSession));
+    cleanup(session.sessionId);
+    const dir = join(runtimeRoot, safePathPart(session.sessionId));
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(runtimeRoot, 0o700);
     chmodSync(dir, 0o700);
@@ -59,12 +59,12 @@ export function createManagedAgentLspWiring(options: ManagedAgentLspWiringOption
         session.agent === 'claude'
           ? writeClaudeConfig(dir, envFilePath)
           : { envFilePath };
-      const command = buildAgentCommand(session, session.cwd, homedir(), session.tmuxSession, launchConfig);
-      tracked.set(session.tmuxSession, { token: binding.token, dir });
+      const command = buildAgentCommand(session, session.cwd, homedir(), session.sessionId, launchConfig);
+      tracked.set(session.sessionId, { token: binding.token, dir });
       return {
         session: { ...session, command },
         envFilePath,
-        cleanup: () => cleanup(session.tmuxSession)
+        cleanup: () => cleanup(session.sessionId)
       };
     } catch (error) {
       if (token) {
@@ -75,26 +75,27 @@ export function createManagedAgentLspWiring(options: ManagedAgentLspWiringOption
     }
   }
 
-  function cleanup(tmuxSession: string): void {
-    const entry = tracked.get(tmuxSession);
+  function cleanup(sessionId: string): void {
+    const entry = tracked.get(sessionId);
     if (!entry) {
       return;
     }
-    tracked.delete(tmuxSession);
+    tracked.delete(sessionId);
     options.tokenRegistry.revoke(entry.token);
     rmSync(entry.dir, { recursive: true, force: true });
   }
 
   function cleanupAll(): void {
-    for (const tmuxSession of [...tracked.keys()]) {
-      cleanup(tmuxSession);
+    for (const sessionId of [...tracked.keys()]) {
+      cleanup(sessionId);
     }
   }
 
+  /** Drops wiring for sessions no longer running. `runningSessions` carries sessionIds. */
   function reconcile(runningSessions: Set<string>): void {
-    for (const tmuxSession of [...tracked.keys()]) {
-      if (!runningSessions.has(tmuxSession)) {
-        cleanup(tmuxSession);
+    for (const sessionId of [...tracked.keys()]) {
+      if (!runningSessions.has(sessionId)) {
+        cleanup(sessionId);
       }
     }
   }

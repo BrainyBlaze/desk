@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
-import { terminalBroker } from './terminalBrokerClient.js';
+import { binaryTerminalBroker } from './binaryTerminalBrokerClient.js';
+import { ReplySuppressionAddon } from './replySuppressionAddon.js';
+import { BpError } from '../shared/browserProtocol/index.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
@@ -11,7 +13,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import type { DeskSessionView } from './types.js';
 import { MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from '../core/terminalSizing.js';
-import { captureTerminal, repaintTerminal } from './api.js';
+import { captureTerminal } from './api.js';
 import {
   applicationScrollProfileForAgent,
   chooseScrollStrategy,
@@ -58,7 +60,7 @@ let webglActiveCount = 0;
 /**
  * On reveal, a freshly-shown group's cells each create a WebGL context +
  * compile shaders synchronously — measured as the dominant cost of an otherwise
- * "warm" (0-socket, 0-tmux) group switch (hundreds of ms to seconds under
+ * "warm" (0-socket, 0-stream) group switch (hundreds of ms to seconds under
  * software GL). We keep the switch off the GL critical path: paint immediately
  * with xterm's DOM renderer, then upgrade visible cells to WebGL shortly after
  * the switch settles. A small random spread avoids all visible cells compiling
@@ -165,6 +167,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     terminal.loadAddon(serializeAddon);
     terminal.loadAddon(unicode11Addon);
     terminal.loadAddon(webLinksAddon);
+    // Suppress the browser terminal's built-in DA/DSR/CPR/DECRQM/geometry/focus/
+    // color-query auto-replies (§7.7): exactly one responder answers each query
+    // over the wire, never a stray browser reply racing the worker/lease owner.
+    terminal.loadAddon(new ReplySuppressionAddon());
     terminal.unicode.activeVersion = '11';
 
     // Budgeted WebGL with event-driven recovery: acquire when visible and
@@ -273,7 +279,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       const hostNode = hostRef.current;
       if (!hostNode || hostNode.clientWidth === 0 || hostNode.clientHeight === 0) {
         // Hidden keep-alive mount: a fit here would shrink the terminal to
-        // nothing and resize tmux with it. Yield the WebGL context to the
+        // nothing and resize the session with it. Yield the WebGL context to the
         // visible cells; the ResizeObserver fires again on reveal. Tell the
         // broker we are hidden so it stops streaming live output to this cell.
         if (cellVisibleRef.current) {
@@ -291,7 +297,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       updateScrollRail();
       if (wasHidden) {
         // Reveal: the broker replies with a self-contained snapshot, then resumes
-        // live output. No client-side reconnect or tmux repaint needed.
+        // live output. No client-side reconnect or transport repaint needed.
         brokerVisibilityRef.current(true);
       }
     };
@@ -337,7 +343,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       const requestId = captureRequestRef.current + 1;
       captureRequestRef.current = requestId;
       void captureTerminal({
-        session: activeSession.spec.tmuxSession,
+        sessionId: activeSession.spec.sessionId,
         rows: SCROLLBACK_FETCH_ROWS,
         offset: 0
       })
@@ -493,7 +499,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
           applicationScrollProfileForAgent(activeSession?.spec.agent)
         );
         if (input) {
-          terminalBroker.sendInput(surfaceIdRef.current, input);
+          binaryTerminalBroker.sendInput(surfaceIdRef.current, input);
         }
         return;
       }
@@ -535,7 +541,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       event.stopPropagation();
       const activeSession = sessionRef.current;
       if (activeSession?.state === 'running' && terminal.buffer.active.baseY <= 0) {
-        // Live tmux view has no local scrollback: any rail interaction enters frozen scrollback,
+        // The live broker view has no local scrollback: any rail interaction enters frozen scrollback,
         // where the overlay's native scrollbar takes over.
         enterScrollback(terminal.rows * 3);
         return;
@@ -755,18 +761,18 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       return;
     }
 
-    const resizeTmuxWindow = (cols: number, rows: number): void => {
+    const resizeSession = (cols: number, rows: number): void => {
       if (!session || session.state !== 'running') {
         return;
       }
-      // Never drive tmux below a usable size: a fit() against a collapsing or
+      // Never drive the PTY below a usable size: a fit() against a collapsing or
       // mid-transition host can momentarily report tiny dimensions, and the
       // server pins whatever it receives as manual window-size. Dropping these
       // keeps the last good size instead of corrupting the window to 12x6.
       if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) {
         return;
       }
-      const key = `${session.spec.tmuxSession}:${cols}:${rows}`;
+      const key = `${session.spec.sessionId}:${cols}:${rows}`;
       if (lastResizeRef.current === key) {
         return;
       }
@@ -775,17 +781,17 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       resizeTimerRef.current = window.setTimeout(() => {
         // Resize travels as a broker frame through the server's min-size-guarded
         // resize path. Only a visible surface may resize.
-        terminalBroker.sendResize(surfaceIdRef.current, cols, rows);
+        binaryTerminalBroker.sendResize(surfaceIdRef.current, cols, rows);
       }, 80);
     };
 
-    notifyResizeRef.current = resizeTmuxWindow;
+    notifyResizeRef.current = resizeSession;
     // Hidden keep-alive mounts skip the fit/resize: fit() against a 0-size
-    // host would collapse the terminal, and tmux must not follow a cell the
+    // host would collapse the terminal, and the PTY must not follow a cell the
     // user cannot see. The reveal refit covers it.
     if (hostRef.current && hostRef.current.clientWidth > 0) {
       fitRef.current?.fit();
-      resizeTmuxWindow(terminal.cols, terminal.rows);
+      resizeSession(terminal.cols, terminal.rows);
     }
     scrollbackActiveRef.current = false;
     captureRequestRef.current += 1;
@@ -808,32 +814,26 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       terminal.clear();
       terminal.writeln(`\x1b[36m${session.spec.name}\x1b[0m  \x1b[33mMISSING\x1b[0m`);
       terminal.writeln(`cwd      ${session.spec.cwd}`);
-      terminal.writeln(`tmux     ${session.spec.tmuxSession}`);
+      terminal.writeln(`session  ${session.spec.sessionId}`);
       terminal.writeln('');
       terminal.writeln('Boot it from this cell, or Up in the header starts all missing sessions.');
       return;
     }
 
     terminal.clear();
-    terminal.writeln(`\x1b[36mDESK LIVE ATTACH\x1b[0m ${session.spec.tmuxSession}`);
+    terminal.writeln(`\x1b[36mDESK LIVE ATTACH\x1b[0m ${session.spec.sessionId}`);
     terminal.writeln(`cwd ${session.spec.cwd}`);
     terminal.writeln('');
 
-    const tmuxTarget = session.spec.tmuxSession;
+    const daemonSessionId = session.spec.sessionId;
     const surfaceId = surfaceIdRef.current;
     let disposed = false;
     let stabilizeTimer: number | undefined;
 
-    // A freshly attached tmux window can be painted for stale dimensions (a
-    // redraw that raced the resize). Stabilize repairs that ONCE, after the
-    // layout settles — but only when the settled size actually differs from
-    // what attach already established. Previously it unconditionally posted a
-    // direct resize + repaint on every cold mount (the 2nd resize + the repaint
-    // measured as 18 resizes / 9 repaints for a 9-cell cold switch); with the
-    // bridge attaching via ignore-size the window is already correct, so the
-    // common path is now a no-op. The min-size guard keeps a transient tiny fit
-    // from pinning the window. The repaint still chains after the resize so it
-    // paints at the corrected size.
+    // A fresh snapshot can race the first layout pass. Stabilize repairs the
+    // authoritative daemon size once after layout settles, but only when it
+    // differs from the dimensions already sent. The min-size guard keeps a
+    // transient tiny fit from pinning the PTY.
     const stabilize = (): void => {
       window.clearTimeout(stabilizeTimer);
       stabilizeTimer = window.setTimeout(() => {
@@ -845,16 +845,15 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         if (rows < 3) {
           return;
         }
-        const key = `${tmuxTarget}:${cols}:${rows}`;
+        const key = `${daemonSessionId}:${cols}:${rows}`;
         if (lastResizeRef.current === key) {
-          return; // already the right size — no redundant resize/repaint
+          return; // already the right size
         }
         if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) {
           return; // never pin a degenerate size
         }
         lastResizeRef.current = key;
-        terminalBroker.sendResize(surfaceId, cols, rows);
-        void repaintTerminal({ session: tmuxTarget }).catch(() => undefined);
+        binaryTerminalBroker.sendResize(surfaceId, cols, rows);
       }, 450);
     };
 
@@ -863,23 +862,24 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     // at least one surface is visible; a hidden surface receives nothing, so a
     // warm-but-hidden keep-alive cell costs no parse/render. On reveal the broker
     // sends a self-contained snapshot, which we apply after a reset.
-    terminalBroker.subscribe(surfaceId, tmuxTarget, cellVisibleRef.current, {
-      onOutput: (data) => {
-        terminal.write(data);
+    binaryTerminalBroker.subscribe(surfaceId, daemonSessionId, terminal.rows, terminal.cols, cellVisibleRef.current, {
+      onOutput: (bytes) => {
+        // Raw output bytes, written binary end-to-end (no premature string decode).
+        terminal.write(bytes);
       },
       onSnapshot: (data) => {
         terminal.reset();
         terminal.options.theme = { ...builtThemeRef.current.terminal };
         terminal.write(data);
-        // The snapshot is the current screen; repair tmux size once if the
-        // settled cell size differs from what the window currently has.
+        // Repair the PTY size once if the settled cell differs from the daemon.
         stabilize();
       },
-      onExit: () => {
-        terminal.writeln('\r\n\x1b[33m[session exited]\x1b[0m');
+      onExit: (code, signal) => {
+        const how = signal ? `signal ${signal}` : `code ${code}`;
+        terminal.writeln(`\r\n\x1b[33m[session exited ${how}]\x1b[0m`);
       },
-      onError: (message) => {
-        terminal.writeln(`\r\n\x1b[31m${message}\x1b[0m`);
+      onError: (code) => {
+        terminal.writeln(`\r\n\x1b[31m${describeBpError(code)}\x1b[0m`);
       },
       onConnectionChange: (up) => {
         if (disposed) {
@@ -893,13 +893,18 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     });
     // Let the mount effect's reveal/hide detection drive broker visibility, and
     // route the manual Reconnect button to the shared connection.
-    brokerVisibilityRef.current = (visible) => terminalBroker.setVisibility(surfaceId, visible);
-    reconnectRef.current = () => terminalBroker.forceReconnect();
+    brokerVisibilityRef.current = (visible) => binaryTerminalBroker.setVisibility(surfaceId, visible);
+    reconnectRef.current = () => binaryTerminalBroker.forceReconnect();
 
-    // Keystrokes flow back through the broker; the server only accepts input
-    // from a visible, subscribed surface.
+    // Two-input (§7.6): onData carries UTF-8 keystrokes, onBinary carries raw
+    // bytes (e.g. a paste or a mouse/paste sequence xterm emits binary). Both
+    // flow back through the broker; the server accepts input only from a
+    // visible, subscribed surface.
     const onDataDisposable = terminal.onData((data) => {
-      terminalBroker.sendInput(surfaceId, data);
+      binaryTerminalBroker.sendInput(surfaceId, data);
+    });
+    const onBinaryDisposable = terminal.onBinary((data) => {
+      binaryTerminalBroker.sendBinary(surfaceId, latin1ToBytes(data));
     });
 
     return () => {
@@ -910,9 +915,11 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       window.clearTimeout(resizeTimerRef.current);
       window.clearTimeout(stabilizeTimer);
       onDataDisposable.dispose();
-      terminalBroker.unsubscribe(surfaceId);
+      onBinaryDisposable.dispose();
+      binaryTerminalBroker.unsubscribe(surfaceId);
     };
-    // Keyed on the STABLE session identity (tmux target, state, name, cwd), not
+    // Keyed on the stable session identity (plus the temporary REST transport
+    // alias, state, name, and cwd), not
     // the session object: a mutation elsewhere ships a fresh snapshot whose
     // session objects have new identities but identical content, and re-running
     // this effect then would clear/resubscribe/reflash every mounted terminal
@@ -921,9 +928,9 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     //
     // `revision` is NOT a global mutation counter — it is this session's entry in
     // the per-session terminalRevisions map (AgentMultiplexer passes
-    // terminalRevisions[tmuxSession]), bumped ONLY by restartExistingSession and
+    // terminalRevisions[sessionId]), bumped ONLY by restartExistingSession and
     // confirmUiModeSwitch for THAT session (App.tsx). Those genuinely replace the
-    // tmux target/mode, so re-attaching this one terminal is required and correct;
+    // terminal target/mode, so re-attaching this one terminal is required and correct;
     // an unrelated boot/layout/reorder never changes it. Keep it in the deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terminalSessionKey(session), revision]);
@@ -1106,4 +1113,33 @@ function detectAcceleratedWebgl2(): boolean {
 
 function getSelectedText(terminal: Terminal): string {
   return terminal.getSelection() || window.getSelection()?.toString() || '';
+}
+
+/**
+ * xterm's onBinary emits a string whose code units are raw byte values (0–255),
+ * so decode it latin1-style rather than UTF-8 encoding it (which would corrupt
+ * bytes ≥ 0x80). This is the raw-bytes half of the §7.6 two-input path.
+ */
+function latin1ToBytes(data: string): Uint8Array {
+  const bytes = new Uint8Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    bytes[i] = data.charCodeAt(i) & 0xff;
+  }
+  return bytes;
+}
+
+/** Human-readable text for a browser-protocol error code (§7.4 ERROR frame). */
+function describeBpError(code: number): string {
+  switch (code) {
+    case BpError.BAD_CHANNEL:
+      return 'terminal channel is no longer valid';
+    case BpError.STALE_GENERATION:
+      return 'session was recreated; reattaching';
+    case BpError.STALE_LEASE:
+      return 'another surface holds the input lease';
+    case BpError.PAYLOAD_TOO_LARGE:
+      return 'terminal frame too large';
+    default:
+      return `terminal error ${code}`;
+  }
 }

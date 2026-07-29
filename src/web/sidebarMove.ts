@@ -1,7 +1,7 @@
 export interface SidebarMoveSessionLike {
   spec: {
     name: string;
-    tmuxSession: string;
+    sessionId: string;
   };
 }
 
@@ -31,7 +31,7 @@ export function getProjectDropGroup<TGroup extends SidebarMoveGroupLike>(project
   return project.groups[0];
 }
 
-export function getMovedSessionTmux(
+export function getMovedSessionId(
   snapshot: SidebarMoveSnapshotLike,
   targetGroupId: string,
   sessionName: string
@@ -40,13 +40,13 @@ export function getMovedSessionTmux(
     const group = project.groups.find((candidate) => candidate.id === targetGroupId);
     const session = group?.sessions.find((candidate) => candidate.spec.name === sessionName);
     if (session) {
-      return session.spec.tmuxSession;
+      return session.spec.sessionId;
     }
   }
   return undefined;
 }
 
-export function getSidebarDropSessionTmux(dataTransfer: SidebarDropDataLike | null | undefined): string | undefined {
+export function getSidebarDropSessionId(dataTransfer: SidebarDropDataLike | null | undefined): string | undefined {
   if (!dataTransfer) {
     return undefined;
   }

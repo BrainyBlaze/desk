@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { AgentActivity, SessionLifecycle, WaitOwner } from '../shared/controlPlane/index.js';
 
 /**
  * Channels protocol — pure parsing/formatting for the markdown-based
@@ -68,8 +69,8 @@ export interface ChannelMember {
   type: string;
   status: string;
   joined: string;
-  /** desk extension: tmux session backing this member */
-  tmuxSession?: string;
+  /** desk extension: durable session identity backing this member */
+  sessionId?: string;
   /** agent role in this channel */
   role?: string;
   /** agent functions/responsibilities in this channel */
@@ -91,28 +92,26 @@ export interface ChannelMember {
  * consumer (e.g. the EngineConsole label maps) to handle it.
  */
 
-/**
- * The single per-session status the main UI renders — one model, replacing the
- * old busy/idle bit. Derived from CACHED MemberRuntime fields + the effective
- * delivery block (NO live pane probe), so it is safe on the hot /state poll.
- */
-export type LifecycleStatus = 'working' | 'submit-stuck' | 'blocked' | 'awaiting-approval' | 'paused' | 'idle';
+export type DeliveryStatus = 'ready' | 'queued' | 'delivering' | 'submit-stuck' | 'blocked' | 'paused';
 
 /**
- * Per-session delivery lifecycle for the hot /state poll. Supersedes the old
- * MemberDeliveryState (busy/queued only): keeps those fields for back-compat and
- * adds the unified `status` plus the cached lifecycle truth (submitState,
- * effective block, durable stuck count) so the main UI shows working / stuck /
- * blocked DISTINCT from idle without touching the live-probe /engine surface.
+ * One Channels row combines a projection of one canonical authority batch with
+ * Channels-owned delivery transaction state. Agent activity and delivery are
+ * deliberately orthogonal.
  */
 export interface LifecycleState {
-  tmuxSession: string;
-  busy: boolean;
-  awaitingApproval: boolean;
-  queued: number;
+  sessionId: string;
+  authorityRevision: number | null;
+  lifecycle: SessionLifecycle | 'unknown';
+  activity: AgentActivity;
+  waitOwner?: WaitOwner;
+  waitKind?: string;
+  waitDetail?: string;
+  actionable: boolean;
+  queueDepth: number;
+  deliveryStatus: DeliveryStatus;
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
-  status: LifecycleStatus;
   submitState?: SubmitState;
   pausedByOperator?: boolean;
   pauseReason?: string;
@@ -147,13 +146,6 @@ export interface ChannelActivityEvent {
 }
 
 /**
- * Live deliverability of an agent's tmux pane, as the ops console reports it.
- * `empty-capture` is surfaced first-class so the concurrency truncation bug
- * (capture read on `exit` returning '') is visible if it ever regresses.
- */
-export type PaneState = 'ready' | 'busy' | 'not-ready' | 'booting' | 'empty-capture' | 'offline' | 'unobservable';
-
-/**
  * Lifecycle of a single delivery's submit, as the verify cycle observes it.
  * `delivering` is set the instant the paste is pushed; the verify cycle resolves
  * it to `submitted` (positive evidence the prompt was accepted — the agent went
@@ -166,9 +158,9 @@ export type PaneState = 'ready' | 'busy' | 'not-ready' | 'booting' | 'empty-capt
  *  - `submit-stuck-unobservable` — no positive observation across N cycles
  *    (capture null/failed throughout); submission unconfirmed, so at-least-once
  *    replay (the message-id embedded in the prompt makes the replay safe).
- *  - `delivery-ack-timeout` — notification-only delivery exhausted its ACK
- *    budget without a UserPromptSubmit/delivery-ack event. This is degraded
- *    hook/liveness evidence, not a durable stuck-submit class.
+ *  - `delivery-ack-timeout` — legacy persisted/historical state retained for
+ *    fail-closed repair and event timelines. The live runtime no longer emits
+ *    delivery ACK outcomes.
  * The on-disk ack-file durability layer keys its `.delivering/.delivered/
  * .stuck-*` renames on these transitions.
  */
@@ -181,22 +173,20 @@ export type SubmitState =
   | 'submit-stuck-unobservable';
 
 /** Why a session's queue is currently held (ops-console diagnostic). */
-export type DeliveryBlockReason =
-  | 'approval'
-  | 'input-requested'
-  | 'offline'
-  | 'booting'
-  | 'busy'
-  | 'not-ready'
-  | 'trust-menu'
-  | 'selection-menu'
-  | 'unknown-menu'
-  | 'empty-capture'
-  | 'capture-failed'
-  | 'unobservable'
-  | 'send-failed'
-  | 'submit-stuck-paste'
-  | 'submit-stuck-submit';
+// This runtime list is deliberately exhaustive: lifecycle refusal, drain
+// single-flight ownership, transport failure, and the two observable terminal
+// submit failures are the only production paths that can populate
+// SessionDiagnostic.blockedReason.
+export const DELIVERY_BLOCK_REASONS = [
+  'offline',
+  'booting',
+  'draining',
+  'send-failed',
+  'submit-stuck-paste',
+  'submit-stuck-submit'
+] as const;
+
+export type DeliveryBlockReason = (typeof DELIVERY_BLOCK_REASONS)[number];
 
 /** Durable queue item shared by the delivery engine and persistence layer. */
 export interface QueuedPrompt {
@@ -243,16 +233,20 @@ export interface BlockedItemMeta {
 
 /** Per-session engine diagnostics for the ops console. */
 export interface SessionDiagnostic {
-  tmuxSession: string;
-  paneState: PaneState;
-  status: LifecycleStatus;
-  busy: boolean;
-  awaitingApproval: boolean;
+  sessionId: string;
+  authorityRevision: number | null;
+  lifecycle: SessionLifecycle | 'unknown';
+  activity: AgentActivity;
+  waitOwner?: WaitOwner;
+  waitKind?: string;
+  waitDetail?: string;
+  actionable: boolean;
+  queueDepth: number;
+  deliveryStatus: DeliveryStatus;
   pausedByOperator?: boolean;
   pauseReason?: string;
   pausedAt?: string;
   draining: boolean;
-  queued: number;
   lastDeliveryAt?: string;
   lastReleaseAt?: string;
   /** result of the last delivery's submit verification (undefined = none yet) */
@@ -510,7 +504,7 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
     type: fields.type ?? 'human',
     status: fields.status ?? 'active',
     joined: fields.joined ?? '',
-    tmuxSession: fields.tmux || undefined,
+    sessionId: fields.session || undefined,
     role: fields.role || undefined,
     functions: fields.functions || undefined,
     supervisor,
@@ -522,7 +516,7 @@ export interface MemberManifestOptions {
   name: string;
   type: string;
   joined: string;
-  tmuxSession?: string;
+  sessionId?: string;
   agentLabel?: string;
   role?: string;
   functions?: string;
@@ -538,8 +532,8 @@ export function formatMemberManifest(options: MemberManifestOptions): string {
     'status: active',
     `joined: ${options.joined}`
   ];
-  if (options.tmuxSession) {
-    lines.push(`tmux: ${options.tmuxSession}`);
+  if (options.sessionId) {
+    lines.push(`session: ${options.sessionId}`);
   }
   if (options.role) {
     lines.push(`role: ${options.role}`);
@@ -655,4 +649,42 @@ export function qualifiedMemberHandle(options: {
   }
   // No project to qualify with — fall back to the group.
   return qualify(options.groupLabel, options.sessionName) || base;
+}
+
+/**
+ * §10 store transform (cutover 3a): member-manifest content re-keyed from the
+ * legacy `tmux:` field line to `session: <sessionId>`. Textual and
+ * line-preserving — everything except the identity line stays byte-identical
+ * (roles/functions/supervisor blocks untouched). The migration gate owns the
+ * file IO and the unmapped policy; the 3b parser flip reads `session:` into
+ * the member's sessionId.
+ */
+export interface MemberManifestMigration {
+  content: string;
+  /** True when at least one tmux: line was re-keyed. */
+  migrated: boolean;
+  /** tmux: values with no sessionId (session gone from the manifest) — left in place, reported. */
+  unmapped: string[];
+}
+
+export function migrateMemberManifestContent(
+  content: string,
+  tmuxToSessionId: ReadonlyMap<string, string>
+): MemberManifestMigration {
+  const unmapped: string[] = [];
+  let migrated = false;
+  const lines = content.split('\n').map((line) => {
+    const match = /^tmux:\s*(.+?)\s*$/.exec(line);
+    if (match === null) {
+      return line;
+    }
+    const sessionId = tmuxToSessionId.get(match[1]);
+    if (sessionId === undefined) {
+      unmapped.push(match[1]);
+      return line;
+    }
+    migrated = true;
+    return `session: ${sessionId}`;
+  });
+  return { content: lines.join('\n'), migrated, unmapped };
 }

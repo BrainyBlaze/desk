@@ -9,7 +9,7 @@ import {
 } from '../host/driver.js';
 
 /**
- * Claude Code driver (spec: docs/native-ui-mode-spec.md §5).
+ * Claude Code driver.
  *
  * Drives a persistent Claude Code session through the Claude Agent SDK in
  * streaming-input mode with the claude_code system-prompt preset and default

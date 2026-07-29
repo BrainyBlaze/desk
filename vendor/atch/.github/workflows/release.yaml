@@ -1,0 +1,80 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build static musl binary
+        run: |
+          make build-image arch=${{ matrix.arch }}
+          make build-docker arch=${{ matrix.arch }} VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Run integration tests
+        run: |
+          docker run --rm -v "$PWD":/src --platform linux/${{ matrix.arch }} \
+            atch-builder:${{ matrix.arch }} sh /src/tests/test.sh /src/build/atch
+
+      - name: Package
+        run: |
+          mkdir -p release
+          tar -czf release/atch-linux-${{ matrix.arch }}.tgz README.md -C ./build atch
+          (cd release && sha256sum atch-linux-${{ matrix.arch }}.tgz > atch-linux-${{ matrix.arch }}.tgz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atch-${{ matrix.arch }}
+          path: release/
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release/
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -la release/
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --notes "Automated release for $tag."
+          gh release upload "$tag" release/atch-linux-*.tgz release/atch-linux-*.tgz.sha256 --clobber

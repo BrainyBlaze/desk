@@ -9,6 +9,11 @@ import {
 } from '../src/server/channelsEngine.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
 import { addMember, createChannel, updateMemberSupervisor } from '../src/server/channelsStore.js';
+import {
+  AGENT_STATE_SCHEMA_VERSION,
+  type AgentActivity,
+  type SessionStateSnapshot
+} from '../src/shared/controlPlane/index.js';
 
 const message = (id: string, author: string, body: string): ChannelMessage => ({
   id,
@@ -18,12 +23,12 @@ const message = (id: string, author: string, body: string): ChannelMessage => ({
   hasEndTurn: true
 });
 
-const member = (name: string, tmuxSession: string, type = 'claude-code'): ChannelMember => ({
+const member = (name: string, sessionId: string, type = 'claude-code'): ChannelMember => ({
   name,
   type,
   status: 'active',
   joined: '2026-06-11 12:00:00',
-  tmuxSession
+  sessionId
 });
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 2000): Promise<void> => {
@@ -40,6 +45,52 @@ type WorkerState = { lastPromptAt: number; lastPostAt: number };
 type ChannelEntry = { workers: Map<string, WorkerState>; lastCheckInAt: number };
 const activityMap = (engine: ChannelsEngine): Map<string, ChannelEntry> =>
   (engine as unknown as { channelWorkerActivity: Map<string, ChannelEntry> }).channelWorkerActivity;
+
+function agentSnapshot(
+  sessionId: string,
+  activity: AgentActivity,
+  leaseExpiresAt?: number
+): SessionStateSnapshot {
+  const now = Date.now();
+  return {
+    schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+    revision: 1,
+    sessionId,
+    generation: 1,
+    lifecycle: 'running',
+    lifecycleSince: now - 10_000,
+    exit: null,
+    health: { status: 'healthy', since: now - 10_000 },
+    delivery: null,
+    policy: { paused: false, since: now - 10_000 },
+    subject: {
+      kind: 'agent',
+      provider: 'claude',
+      mode: 'terminal',
+      producer: 'claude-hooks',
+      activity,
+      activitySince: now - 5_000,
+      wait: null,
+      evidence:
+        activity === 'unknown'
+          ? null
+          : {
+              acceptanceId: `${sessionId}-accept`,
+              acceptedSeq: 1,
+              acceptedAt: now - 5_000,
+              producerInstanceId: `${sessionId}-producer`,
+              producerSeq: 1,
+              eventId: `${sessionId}-event`,
+              invocationId: `${sessionId}-invocation`,
+              factKinds: ['activity'],
+              occurredAt: now - 5_000,
+              observedAt: now - 5_000,
+              ...(activity === 'working' ? { leaseExpiresAt: leaseExpiresAt ?? now + 60_000 } : {})
+            }
+    },
+    updatedAt: now - 5_000
+  };
+}
 
 describe('buildTurnPrompt supervisor branch', () => {
   it('injects supervisor duties and the stuck-detection window into the prompt', () => {
@@ -147,15 +198,20 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   let home: string;
   let sent: Array<{ session: string; text: string }>;
   let engine: ChannelsEngine;
+  let workerActivity: AgentActivity;
+  let workerLeaseExpiresAt: number | undefined;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'desk-supe-engine-'));
     createChannel(home, 'ops', 'goal');
-    addMember(home, 'ops', { name: 'supe', type: 'claude-code', tmuxSession: 'tmux-supe' });
-    addMember(home, 'ops', { name: 'agent-a', type: 'claude-code', tmuxSession: 'tmux-a' });
+    addMember(home, 'ops', { name: 'supe', type: 'claude-code', sessionId: 'tmux-supe' });
+    addMember(home, 'ops', { name: 'agent-a', type: 'claude-code', sessionId: 'tmux-a' });
     updateMemberSupervisor(home, 'ops', 'supe', true, 1);
     sent = [];
+    workerActivity = 'idle';
+    workerLeaseExpiresAt = undefined;
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       pumpIntervalMs: 25,
       releaseSettleMs: 0,
@@ -163,14 +219,17 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       verifyCycles: 1,
       sendText: async (session, text) => {
         sent.push({ session, text });
-        const notificationId = text.match(/notificationId:([A-Za-z0-9_.:-]+)/)?.[1];
-        if (notificationId) {
-          queueMicrotask(() => engine.handleDeliveryAck(session, notificationId));
-        }
         return true;
       },
+      readAgentStates: async () => ({
+        ok: true,
+        revision: 17,
+        snapshots: [
+          agentSnapshot('tmux-a', workerActivity, workerLeaseExpiresAt),
+          agentSnapshot('tmux-supe', 'idle')
+        ]
+      }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
   });
@@ -183,7 +242,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   const membersFixture = (): ChannelMember[] => [
     member('agent-a', 'tmux-a'),
     { ...member('supe', 'tmux-supe'), supervisor: true, supervisorMaxIdleMinutes: 1 },
-    { ...member('human', '', 'human'), tmuxSession: undefined }
+    { ...member('human', '', 'human'), sessionId: undefined }
   ];
 
   it('does NOT fire a check-in when this channel never handed the worker a prompt', async () => {
@@ -243,16 +302,30 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do it') },
       membersFixture()
     );
-    // Back-date so the threshold is exceeded, but mark the worker busy.
-    // pausedByOperator=true tells the engine's reconcileBusy to skip this
-    // runtime, so our manual `busy: true` stays put through the pump ticks.
+    // Back-date so the threshold is exceeded, but supply a fresh canonical
+    // working lease for the worker.
     const entry = activityMap(engine).get('ops')!;
     entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
     entry.lastCheckInAt = 0;
-    const membersMap = (engine as unknown as { members: Map<string, { tmuxSession: string; busy: boolean; queue: unknown[]; pausedByOperator: boolean }> }).members;
-    membersMap.set('tmux-a', { tmuxSession: 'tmux-a', busy: true, queue: [], pausedByOperator: true });
+    workerActivity = 'working';
+    workerLeaseExpiresAt = Date.now() + 60_000;
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(0);
+  });
+
+  it('does fire after a working lease expires because stale working projects as unknown', async () => {
+    engine.handleMessage(
+      { channel: 'ops', file: 'root.md', message: message('msg-expired-1', 'human', '@agent-a do it') },
+      membersFixture()
+    );
+    const entry = activityMap(engine).get('ops')!;
+    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
+    entry.lastCheckInAt = 0;
+    workerActivity = 'working';
+    workerLeaseExpiresAt = Date.now() - 1;
+
+    await waitFor(() => sent.some((item) => item.text.includes('Supervisor check-in')));
+    expect(sent.filter((item) => item.text.includes('Supervisor check-in'))).toHaveLength(1);
   });
 
   it("a supervisor's OWN message does NOT open a new check-in window", async () => {

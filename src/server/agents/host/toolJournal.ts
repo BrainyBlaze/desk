@@ -35,13 +35,13 @@ export interface ToolJournal {
 
 const DEFAULT_CAP = 500;
 
-export function toolJournalPath(tmuxSession: string, homeDir: string = homedir()): string {
-  return join(homeDir, '.config', 'desk', 'tool-journal', `${tmuxSession}.jsonl`);
+export function toolJournalPath(sessionId: string, homeDir: string = homedir()): string {
+  return join(homeDir, '.config', 'desk', 'tool-journal', `${sessionId}.jsonl`);
 }
 
 /** Delete a session's journal — same hygiene as broker.disposeSession (BUG-7 class). */
-export function deleteToolJournal(tmuxSession: string, homeDir: string = homedir()): void {
-  rmSync(toolJournalPath(tmuxSession, homeDir), { force: true });
+export function deleteToolJournal(sessionId: string, homeDir: string = homedir()): void {
+  rmSync(toolJournalPath(sessionId, homeDir), { force: true });
 }
 
 export function createToolJournal(opts: { path: string; cap?: number }): ToolJournal {

@@ -882,7 +882,11 @@ button.statusSegment:hover {
 
 .thinForm {
   display: grid;
-  grid-template-columns: 1fr;
+  /* minmax(0, 1fr), not 1fr: a plain `1fr` floors the column at its content's
+     min-content width, so one long value — an account label, a path — pushed
+     the whole form wider than its modal and the right-hand side of every row
+     went off-screen on a narrow viewport. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   margin-top: 4px;
 }
@@ -928,6 +932,42 @@ select:focus {
   box-shadow: 0 0 8px var(--desk-glow);
 }
 
+/* A field that carries an adjacent action, e.g. the profile picker and its
+   "create a profile" button. The control keeps all the free width so the
+   action never squeezes the thing it belongs to. */
+.fieldWithAction {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.fieldAction {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-input-bg);
+  color: var(--desk-text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+
+.fieldAction:hover {
+  color: var(--desk-text);
+  border-color: var(--desk-line-strong);
+}
+
+.fieldAction:focus-visible {
+  outline: none;
+  border-color: var(--desk-line-strong);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
 .deskSelect {
   position: relative;
   min-width: 0;
@@ -948,6 +988,18 @@ select:focus {
   font-size: 11px;
   text-align: left;
   transition: border-color 140ms ease, box-shadow 140ms ease;
+  min-width: 0;
+}
+
+/* The chosen value must be allowed to ELLIPSIS rather than set the width of
+   everything around it. Account labels are email addresses and cwd values are
+   absolute paths; without this the longest one in the list decides how wide
+   the form is. */
+.deskSelectTrigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .deskSelectTrigger:hover,
@@ -1102,6 +1154,11 @@ select:focus {
    (fading to transparent), not a box-shadow: the agents tree's .treeMain has
    `overflow: hidden`, which clipped a box-shadow glow into a square at the dot's
    edge. Self-contained gradients can't be clipped, so the dots stay round. */
+/* An unreachable journal must not look like a quiet one. */
+.notifEmpty.error {
+  color: var(--desk-error, #ff4d6d);
+}
+
 .statusDot {
   flex: none;
   width: 9px;
@@ -1109,13 +1166,46 @@ select:focus {
   border-radius: 50%;
 }
 
+/* Liveness only — a non-agent session (a shell) has no activity to show. */
 .statusDot.running {
   background: radial-gradient(circle, #c4ffec 0%, #21f7a3 34%, rgba(33, 247, 163, 0.4) 60%, rgba(33, 247, 163, 0) 80%);
   animation: deskDotPulse 2.4s ease-in-out infinite;
 }
 
+/* The agent is generating RIGHT NOW: the one green that moves. */
+.statusDot.working {
+  background: radial-gradient(circle, #c4ffec 0%, #21f7a3 34%, rgba(33, 247, 163, 0.4) 60%, rgba(33, 247, 163, 0) 80%);
+  animation: deskDotPulse 1.6s ease-in-out infinite;
+}
+
+/* A finished turn: alive, at rest. Steady on purpose — a resting agent that
+   pulses is indistinguishable from a working one at a glance. */
+.statusDot.idle {
+  background: radial-gradient(circle, #bfefff 0%, #3fbcd8 40%, rgba(63, 188, 216, 0.35) 65%, rgba(63, 188, 216, 0) 82%);
+}
+
+/* Stopped on someone who is not the operator (a provider retry). Visible,
+   deliberately NOT animated: it must not read as a summons. */
+.statusDot.waiting {
+  background: radial-gradient(circle, #ffe9a8 0%, #d9a441 38%, rgba(217, 164, 65, 0.32) 64%, rgba(217, 164, 65, 0) 82%);
+}
+
+/* No evidence. Hollow rather than coloured: an empty ring reads as "we do not
+   know", where any fill would read as a state we are asserting. */
+.statusDot.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px rgba(190, 205, 215, 0.55);
+}
+
+.statusDot.exited,
 .statusDot.missing {
   background: radial-gradient(circle, #ffc6d2 0%, var(--desk-error, #ff4d6d) 34%, rgba(255, 77, 109, 0.4) 60%, rgba(255, 77, 109, 0) 80%);
+}
+
+/* Health rides alongside the state instead of replacing it: the dot keeps its
+   own colour and gains a ring, so a rate-limited idle session still reads idle. */
+.statusDot.degraded {
+  box-shadow: 0 0 0 1.5px rgba(255, 138, 76, 0.75);
 }
 
 @keyframes deskDotPulse {
@@ -1147,6 +1237,7 @@ select:focus {
 
 @media (prefers-reduced-motion: reduce) {
   .statusDot.running,
+  .statusDot.working,
   .statusDot.attention {
     animation: none;
   }
@@ -1200,6 +1291,19 @@ select:focus {
   height: 100% !important;
   scrollbar-color: rgba(95, 247, 255, 0.45) rgba(0, 11, 13, 0.96);
   scrollbar-width: thin;
+}
+
+/* xterm 6 ships its own hover-overlay scrollbar (.xterm-scrollable-element >
+   .scrollbar). On live cells the custom terminalScrollRail is the ONLY
+   position indicator — showing both duplicates the scrollbar on hover. The
+   scrollback overlay keeps the built-in one: that mode's scrolling is
+   xterm-owned and the rail is hidden there. */
+.terminalSurface .xterm .xterm-scrollable-element > .scrollbar {
+  display: none;
+}
+
+.terminalScrollbackOverlay .xterm .xterm-scrollable-element > .scrollbar {
+  display: block;
 }
 
 .terminalScrollbackOverlay {
@@ -2576,6 +2680,156 @@ select {
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
+}
+
+/* ---------- Settings: agent profiles ---------- */
+.agentProfilesSettings {
+  display: grid;
+  gap: 14px;
+}
+
+.profileCreateForm {
+  grid-template-columns: 120px minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin: 0;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+.profileCreateForm .deskCmd {
+  min-width: 116px;
+}
+
+.profileSettingsError {
+  padding: 7px 9px;
+  border-left: 2px solid var(--desk-error);
+  background: color-mix(in srgb, var(--desk-error) 10%, transparent);
+  color: var(--desk-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.profileList {
+  display: grid;
+}
+
+.profileRow {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+.profileProvider {
+  color: var(--desk-accent);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.profileIdentity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.profileIdentity strong {
+  color: var(--desk-text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.profileIdentity input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--desk-line);
+  border-radius: 2px;
+  background: var(--desk-input-bg);
+  color: var(--desk-text);
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.profileIdentity input:focus {
+  outline: none;
+  border-color: var(--desk-line-strong);
+  box-shadow: 0 0 8px var(--desk-glow);
+}
+
+.profileIdentity small,
+.profileId {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.profileId {
+  font-family: var(--desk-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.profileActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 64px;
+}
+
+.profileDeletePrompt,
+.profileEmpty {
+  color: var(--desk-text-dim);
+  font-size: 10px;
+}
+
+.profileEmpty {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--desk-line);
+}
+
+@media (max-width: 640px) {
+  .settingsLayout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .settingsTabs {
+    flex-direction: row;
+    gap: 2px;
+    overflow-x: auto;
+    padding-right: 0;
+    padding-bottom: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--desk-line);
+  }
+
+  .settingsTab {
+    flex: 0 0 auto;
+    padding: 6px 8px;
+    white-space: nowrap;
+  }
+
+  .profileCreateForm {
+    grid-template-columns: 1fr;
+  }
+
+  .profileCreateForm .deskCmd {
+    justify-self: start;
+  }
+
+  .profileRow {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .profileActions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
 }
 
 /* ---------- Editor subsystem: viewers (image / pdf / markdown) ---------- */
@@ -5367,13 +5621,35 @@ button.layoutBadge:hover:not(:disabled) {
   opacity: 0.85;
 }
 
-.nativeAgentStatus.state-processing,
-.nativeAgentStatus.state-tool-executing {
+/* Same tone vocabulary as the session dot, so the header and the sidebar row
+   for one session can never read differently. */
+.nativeAgentStatus.state-working {
+  color: var(--desk-ok, #21f7a3);
+}
+
+.nativeAgentStatus.state-idle {
+  color: #3fbcd8;
+}
+
+/* Waiting on someone who is not the operator: readable, not alarming. */
+.nativeAgentStatus.state-waiting {
   color: var(--desk-warn);
 }
 
-.nativeAgentStatus.state-awaiting-permission {
+/* The operator personally has to act — the one status that raises its voice. */
+.nativeAgentStatus.state-attention {
   color: color-mix(in srgb, var(--desk-warn) 55%, var(--desk-error));
+}
+
+/* No evidence. Dimmed rather than coloured: any colour would assert a state. */
+.nativeAgentStatus.state-unknown {
+  color: var(--desk-dim, #8ea3ad);
+  opacity: 0.65;
+}
+
+.nativeAgentStatus.state-degraded {
+  color: color-mix(in srgb, var(--desk-warn) 70%, var(--desk-error));
+  margin-left: 8px;
 }
 
 .nativeAgentStatus.state-error,

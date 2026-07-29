@@ -10,7 +10,7 @@ function spec(overrides: Partial<SessionSpec> = {}): SessionSpec {
     name: 'g',
     cwd: '/tmp/ws',
     agent: 'opencode',
-    tmuxSession: 'agentdesk-validation-val-g-0f4ac21b',
+    sessionId: 'agentdesk-validation-val-g-0f4ac21b',
     command: 'cd /tmp/ws && exec desk agent-host',
     uiMode: 'native',
     ...overrides
@@ -37,11 +37,11 @@ describe('shouldRespawnAfterEdit', () => {
     expect(shouldRespawnAfterEdit(spec(), spec({ model: 'zai-coding-plan/glm-5.2' }), stopped)).toBe(false);
   });
 
-  it('does not respawn on identity change (tmux name differs — missing-session reconcile owns it)', () => {
+  it('does not respawn on identity change (sessionId differs — missing-session reconcile owns it)', () => {
     expect(
       shouldRespawnAfterEdit(
         spec(),
-        spec({ tmuxSession: 'agentdesk-validation-val-g2-deadbeef', model: 'x/y' }),
+        spec({ sessionId: 'agentdesk-validation-val-g2-deadbeef', model: 'x/y' }),
         running
       )
     ).toBe(false);

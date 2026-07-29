@@ -7,11 +7,7 @@ import {
   buildOnboardingPrompt,
   buildTurnPrompt,
   ChannelsEngine,
-  isPaneBusy,
-  isPaneReadyForInput,
-  sendTextToTmux,
-  spawnTmuxSettled,
-  tailPaneCapture
+  type ChannelsEngineOptions
 } from '../src/server/channelsEngine.js';
 import {
   claimDelivering,
@@ -23,7 +19,8 @@ import {
 } from '../src/server/channelsDurability.js';
 import { readDeliveryEvents } from '../src/server/channelsEvents.js';
 import { pauseSession as persistPausedSession } from '../src/server/channelsPaused.js';
-import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import { DELIVERY_BLOCK_REASONS } from '../src/server/channelsProtocol.js';
+import type { ChannelMember, ChannelMessage, DeliveryBlockReason } from '../src/server/channelsProtocol.js';
 import {
   appendMessage,
   ChannelsWatcher,
@@ -37,6 +34,15 @@ import {
   readThread,
   sliceMessages
 } from '../src/server/channelsStore.js';
+import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
+
+vi.mock('../src/server/agentStatePulse.js', async () => {
+  const { canonicalAgentStateBatch } = await import('./helpers/canonicalAgentState.js');
+  const sessions = Array.from({ length: 26 }, (_, index) => `tmux-${String.fromCharCode(97 + index)}`);
+  return {
+    readAgentStatePulse: async () => canonicalAgentStateBatch(sessions)
+  };
+});
 
 const message = (id: string, author: string, body: string): ChannelMessage => ({
   id,
@@ -46,23 +52,15 @@ const message = (id: string, author: string, body: string): ChannelMessage => ({
   hasEndTurn: true
 });
 
-const member = (name: string, tmuxSession: string, type = 'claude-code'): ChannelMember => ({
+const member = (name: string, sessionId: string, type = 'claude-code'): ChannelMember => ({
   name,
   type,
   status: 'active',
   joined: '2026-06-11 12:00:00',
-  tmuxSession
+  sessionId
 });
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
-
-// Real opencode 1.17.7 pane captures (left-rail composer), saved verbatim from a
-// live chanx sample — NOT synthetic shapes. A green test on a hand-built TUI is a
-// false green (it is what hid the broken closed-box matcher); predicate samples
-// must be real captured bytes. tailPaneCapture mirrors what the engine feeds the
-// predicate.
-const opencodeSample = (name: string): string =>
-  tailPaneCapture(readFileSync(new URL(`./samples/${name}`, import.meta.url), 'utf8'));
 
 /** Polls until a condition holds (pump/reconcile are async + interval-driven, so
  *  a fixed sleep flakes under load). */
@@ -93,6 +91,7 @@ describe('ChannelsEngine delivery gating', () => {
     running = new Set(['tmux-a', 'tmux-b']);
     pane = READY_PANE;
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       // fast verify so a delivery's submitState resolves within the test window
@@ -101,16 +100,113 @@ describe('ChannelsEngine delivery gating', () => {
       verifyCycles: 1,
       sendText: async (session, text) => {
         sent.push({ session, text });
-        const notificationId = text.match(/notificationId:([A-Za-z0-9_.:-]+)/)?.[1];
-        if (notificationId) {
-          queueMicrotask(() => engine.handleDeliveryAck(session, notificationId));
-        }
         return true;
       },
       sessionRunning: (session) => running.has(session),
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
+  });
+
+  it('observes every declared live delivery block reason through production paths', async () => {
+    type ReachabilityOptions = Partial<Omit<ChannelsEngineOptions, 'home'>>;
+
+    const observed = new Set<DeliveryBlockReason>();
+    const liveEngines: ChannelsEngine[] = [];
+    let releaseDraining: (() => void) | undefined;
+
+    const makeEngine = (reason: DeliveryBlockReason, options: ReachabilityOptions): ChannelsEngine => {
+      const engineHome = join(home, `reach-${reason}`);
+      mkdirSync(engineHome, { recursive: true });
+      const candidate = new ChannelsEngine({
+        home: engineHome,
+        sendEnter: async () => true,
+        sendText: async () => true,
+        capturePane: async () => READY_PANE,
+        releaseSettleMs: 0,
+        pumpIntervalMs: 60_000,
+        blockedAfterCycles: 1,
+        ...options
+      });
+      liveEngines.push(candidate);
+      return candidate;
+    };
+
+    const exercise = async (
+      expected: DeliveryBlockReason,
+      options: ReachabilityOptions,
+      trigger: (candidate: ChannelsEngine) => void | Promise<void> = (candidate) => {
+        candidate.enqueuePrompt('tmux-a', 'ops', `exercise ${expected}`, `reach-${expected}`);
+      }
+    ): Promise<void> => {
+      const candidate = makeEngine(expected, options);
+      await trigger(candidate);
+      await waitFor(async () => (await candidate.inspectSession('tmux-a')).blockedReason === expected);
+      const reason = (await candidate.inspectSession('tmux-a')).blockedReason;
+      expect(reason).toBe(expected);
+      if (reason) {
+        observed.add(reason);
+      }
+    };
+
+    try {
+      await exercise('offline', {
+        blockedAfterCycles: 0,
+        readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'exited' })
+      });
+
+      await exercise('booting', {
+        blockedAfterCycles: 0,
+        readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'starting' })
+      });
+
+      await exercise('send-failed', {
+        blockedAfterCycles: 0,
+        sendText: async () => false
+      });
+
+      await exercise('submit-stuck-paste', {
+        enterVerifyDelayMs: 1,
+        verifyCycles: 1
+      });
+
+      let submitPane = READY_PANE;
+      await exercise('submit-stuck-submit', {
+        enterVerifyDelayMs: 1,
+        verifyCycles: 1,
+        sendText: async () => {
+          submitPane = '❯ wedged prompt';
+          return true;
+        },
+        capturePane: async () => submitPane
+      });
+
+      let pasteStarted = false;
+      await exercise(
+        'draining',
+        {
+          blockedAfterCycles: 0,
+          sendText: async () => {
+            pasteStarted = true;
+            await new Promise<boolean>((resolve) => {
+              releaseDraining = () => resolve(true);
+            });
+            return true;
+          }
+        },
+        async (candidate) => {
+          candidate.enqueuePrompt('tmux-a', 'ops', 'exercise draining', 'reach-draining');
+          await waitFor(() => pasteStarted);
+          await candidate.drainReady();
+        }
+      );
+    } finally {
+      releaseDraining?.();
+      for (const candidate of liveEngines) {
+        candidate.dispose();
+      }
+    }
+
+    expect(observed).toEqual(new Set(DELIVERY_BLOCK_REASONS));
   });
 
   afterEach(() => {
@@ -118,73 +214,44 @@ describe('ChannelsEngine delivery gating', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), tmuxSession: undefined }];
+  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), sessionId: undefined }];
   const multiMembers = [
     member('alpha', 'tmux-a'),
     member('beta', 'tmux-b'),
-    { ...member('human', '', 'human'), tmuxSession: undefined }
+    { ...member('human', '', 'human'), sessionId: undefined }
   ];
 
-  it('force-delivers subsequent notifications even while the pane looks working', async () => {
+  it('uses canonical idle even when raw terminal bytes look working', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', 'hi @alpha') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0].session).toBe('tmux-a');
     expect(sent[0].text).toContain('msg-1-aaaa');
 
-    // The agent picks up the prompt: the pane now shows a working spinner. The
-    // operator contract is still to inject notification-only prompts immediately.
+    // Raw terminal text is delivery evidence only. It cannot override the
+    // canonical idle snapshot supplied by the authority fixture.
     pane = WORKING_PANE;
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha again') }, members);
     await waitFor(() => sent.length === 2);
     expect(sent[1].text).toContain('msg-2-bbbb');
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({ queued: 0 });
+    expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({
+      activity: 'idle',
+      queueDepth: 0
+    });
   });
 
-  it('force-delivers notifications even while diagnostics see an approval menu', async () => {
+  it('does not infer an approval wait from raw terminal menu text', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha one') }, members);
     await waitFor(() => sent.length === 1);
-    // The agent opens an approval dialog. This affects diagnostics, not delivery
-    // authority for notification-only prompts.
+    // Without a typed blocked observation, menu-looking bytes are not semantic
+    // evidence and cannot create a wait or hold.
     pane = APPROVAL_PANE;
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha two') }, members);
-    engine.handleAgentSignal('tmux-a', 'approval-requested');
     await waitFor(() => sent.length === 2);
     expect(sent[1].text).toContain('msg-2-bbbb');
-    await waitFor(() => engine.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.awaitingApproval === true);
-  });
-
-  it('does not use hook presence as a regular delivery gate', async () => {
-    engine.handleAgentEvent({
-      schemaVersion: 2,
-      kind: 'session-start',
-      session: 'tmux-a',
-      agent: 'codex',
-      ts: '2026-06-19T15:00:00.000Z'
+    expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({
+      activity: 'idle',
+      actionable: false
     });
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-pres-1', 'human', '@alpha first') }, members);
-    await waitFor(() => sent.length === 1);
-    engine.handleAgentEvent({
-      schemaVersion: 2,
-      kind: 'prompt-submitted',
-      session: 'tmux-a',
-      agent: 'codex',
-      notificationId: 'msg-pres-1',
-      ts: '2026-06-19T15:00:01.000Z'
-    });
-    pane = READY_PANE;
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-pres-2', 'human', '@alpha second') }, members);
-    await waitFor(() => sent.length === 2);
-    expect(sent[1].text).toContain('notificationId:msg-pres-2');
-
-    engine.handleAgentEvent({
-      schemaVersion: 2,
-      kind: 'stop',
-      session: 'tmux-a',
-      agent: 'codex',
-      ts: '2026-06-19T15:00:02.000Z'
-    });
-    await flush();
-    expect(sent).toHaveLength(2);
   });
 
   it('fans out to all agents except the author; author session never self-delivers', async () => {
@@ -272,6 +339,7 @@ describe('ChannelsEngine delivery gating', () => {
     let pane: 'wedged' | 'ready' = 'wedged';
     let captureStarted = false;
     const wedged = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 15,
@@ -282,7 +350,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         captureStarted = true;
         // The pane stays wedged until the test flips explicit state. Any
@@ -314,6 +381,7 @@ describe('ChannelsEngine delivery gating', () => {
 
     const sentAfterRestart: Array<{ session: string; text: string }> = [];
     const revived = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async (session, text) => {
@@ -321,14 +389,13 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     await flush();
     expect(sentAfterRestart).toHaveLength(0);
-    expect(revived.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({
-      status: 'paused',
-      queued: 1
+    expect((await revived.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({
+      deliveryStatus: 'paused',
+      queueDepth: 1
     });
     revived.resumeSession('tmux-a');
     await waitFor(() => sentAfterRestart.length === 1);
@@ -338,6 +405,7 @@ describe('ChannelsEngine delivery gating', () => {
   describe('ops console', () => {
     const opsEngine = (overrides: Record<string, unknown>): ChannelsEngine =>
       new ChannelsEngine({
+      sendEnter: async () => true,
         home,
         releaseSettleMs: 0,
         pumpIntervalMs: 100000, // effectively off — drive delivery explicitly in these tests
@@ -346,77 +414,9 @@ describe('ChannelsEngine delivery gating', () => {
           return true;
         },
         sessionRunning: (session) => running.has(session),
-        sessionCreatedAt: async () => 1,
-        capturePane: async () => '❯ ',
+          capturePane: async () => '❯ ',
         ...overrides
       });
-
-    it('inspectSession classifies the live pane: offline / empty-capture / busy / ready / not-ready', async () => {
-      const eng = opsEngine({ capturePane: async () => '❯ ' });
-      running.delete('tmux-b');
-      expect((await eng.inspectSession('tmux-b')).paneState).toBe('offline');
-      running.add('tmux-b');
-
-      const empty = opsEngine({ capturePane: async () => '   \n  \n' });
-      expect((await empty.inspectSession('tmux-a')).paneState).toBe('empty-capture');
-
-      const busy = opsEngine({ capturePane: async () => 'building… (esc to interrupt)' });
-      expect((await busy.inspectSession('tmux-a')).paneState).toBe('busy');
-
-      const ready = opsEngine({ capturePane: async () => '❯ ' });
-      expect((await ready.inspectSession('tmux-a')).paneState).toBe('ready');
-
-      const notReady = opsEngine({ capturePane: async () => '⚠ MCP startup incomplete\nwaiting for auth handshake' });
-      expect((await notReady.inspectSession('tmux-a')).paneState).toBe('not-ready');
-
-      const booting = opsEngine({ sessionCreatedAt: async () => Math.floor(Date.now() / 1000) });
-      expect((await booting.inspectSession('tmux-a')).paneState).toBe('booting');
-    });
-
-    it('inspectSession reuses a short-lived diagnostic probe cache', async () => {
-      let captures = 0;
-      const eng = opsEngine({
-        capturePane: async () => {
-          captures += 1;
-          return '❯ ';
-        }
-      });
-
-      expect((await eng.inspectSession('tmux-a')).paneState).toBe('ready');
-      expect((await eng.inspectSession('tmux-a')).paneState).toBe('ready');
-
-      expect(captures).toBe(1);
-      eng.dispose();
-    });
-
-    it('cached inspect probes time out and clear a hung in-flight capture', async () => {
-      let pane: 'hung' | 'ready' = 'hung';
-      let captures = 0;
-      const eng = opsEngine({
-        probeTtlMs: 10_000,
-        probeTimeoutMs: 25,
-        capturePane: async () => {
-          captures += 1;
-          if (pane === 'hung') {
-            return new Promise<string>(() => {});
-          }
-          return '❯ ';
-        }
-      });
-
-      const first = eng.inspectSession('tmux-a');
-      await waitFor(() => captures === 1, 500);
-      pane = 'ready';
-
-      const firstPaneState = await Promise.race([
-        first.then((diag) => diag.paneState),
-        new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 250))
-      ]);
-      expect(firstPaneState).toBe('unobservable');
-      expect((await eng.inspectSession('tmux-a')).paneState).toBe('ready');
-      expect(captures).toBe(2);
-      eng.dispose();
-    });
 
     it('inspectSession reports queued item metadata', async () => {
       const eng = opsEngine({ capturePane: async () => 'working (esc to interrupt)' });
@@ -424,7 +424,7 @@ describe('ChannelsEngine delivery gating', () => {
       eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-q-1', 'human', '@alpha hello there') }, members);
       await flush();
       const diag = await eng.inspectSession('tmux-a');
-      expect(diag.queued).toBe(1);
+      expect(diag.queueDepth).toBe(1);
       expect(diag.items[0]).toMatchObject({ messageId: 'msg-q-1', author: 'human', channel: 'ops' });
       expect(diag.items[0].preview.length).toBeGreaterThan(0);
     });
@@ -442,14 +442,14 @@ describe('ChannelsEngine delivery gating', () => {
       const diag = await eng.inspectSession('tmux-a');
       expect(diag).toMatchObject({
         deliveryBlocked: false,
-        queued: 0
+        queueDepth: 0
       });
 
       pane = '❯ ';
       const cleared = await eng.inspectSession('tmux-a');
       expect(cleared.deliveryBlocked).toBe(false);
       expect(cleared.blockedReason).toBeUndefined();
-      expect(cleared.queued).toBe(0);
+      expect(cleared.queueDepth).toBe(0);
       eng.dispose();
     });
 
@@ -485,7 +485,7 @@ describe('ChannelsEngine delivery gating', () => {
         const diag = await eng.inspectSession('tmux-a');
         expect(diag).toMatchObject({
           deliveryBlocked: false,
-          queued: 0
+          queueDepth: 0
         });
         eng.dispose();
       }
@@ -509,9 +509,10 @@ describe('ChannelsEngine delivery gating', () => {
       const eng = opsEngine({ blockedAfterCycles: 2 });
       const diag = await eng.inspectSession('tmux-a');
       expect(diag).toMatchObject({
-        status: 'idle',
+        activity: 'idle',
+        deliveryStatus: 'ready',
         deliveryBlocked: false,
-        queued: 0
+        queueDepth: 0
       });
       expect(diag.blockedItems).toEqual([]);
       eng.dispose();
@@ -535,9 +536,10 @@ describe('ChannelsEngine delivery gating', () => {
       );
       const diag = await eng.inspectSession('tmux-a');
       expect(diag).toMatchObject({
-        status: 'idle',
+        activity: 'idle',
+        deliveryStatus: 'ready',
         deliveryBlocked: false,
-        queued: 0
+        queueDepth: 0
       });
       expect(diag.blockedItems).toEqual([
         {
@@ -551,7 +553,7 @@ describe('ChannelsEngine delivery gating', () => {
         }
       ]);
       eng.pauseSession('tmux-a');
-      expect(eng.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.blockedItemCount).toBe(1);
+      expect((await eng.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')?.blockedItemCount).toBe(1);
       eng.dispose();
     });
 
@@ -563,7 +565,7 @@ describe('ChannelsEngine delivery gating', () => {
       expect(sent[0].text).toContain('notificationId:msg-f-1');
       expect(sent[0].text).toContain('desk channels read ops');
       expect(sent[0].text).not.toContain('@alpha urgent');
-      expect((await eng.inspectSession('tmux-a')).queued).toBe(0);
+      expect((await eng.inspectSession('tmux-a')).queueDepth).toBe(0);
     });
 
     it('dropMessage removes a single queued item, dropQueue clears all', async () => {
@@ -575,10 +577,10 @@ describe('ChannelsEngine delivery gating', () => {
       const items = (await eng.inspectSession('tmux-a')).items;
       expect(items).toHaveLength(2);
       expect(eng.dropMessage('tmux-a', items[0].seq)).toBe(true);
-      expect((await eng.inspectSession('tmux-a')).queued).toBe(1);
+      expect((await eng.inspectSession('tmux-a')).queueDepth).toBe(1);
       expect(eng.dropMessage('tmux-a', 999999)).toBe(false); // unknown seq
       eng.dropQueue('tmux-a');
-      expect((await eng.inspectSession('tmux-a')).queued).toBe(0);
+      expect((await eng.inspectSession('tmux-a')).queueDepth).toBe(0);
     });
 
     it('pumpAlive is true while running and false after dispose', () => {
@@ -592,11 +594,11 @@ describe('ChannelsEngine delivery gating', () => {
   it('records message/delivery/human-mention activity and notifies every message', async () => {
     const notified: Array<{ channel: string; file: string; author: string; pingsHuman: boolean }> = [];
     const noticing = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       onChannelMessage: (channel, file, msg, pingsHuman) => notified.push({ channel, file, author: msg.author, pingsHuman })
     });
@@ -628,11 +630,11 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('records a queued activity event when a prompt is accepted into the engine queue', async () => {
     const queued = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
 
@@ -665,7 +667,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
 
@@ -674,37 +675,36 @@ describe('ChannelsEngine delivery gating', () => {
       members
     );
     await waitFor(() => readDeliveryEvents(home).some((event) => event.kind === 'delivering'));
-    historical.handleDeliveryAck('tmux-a', 'msg-history-1');
     await waitFor(() => readDeliveryEvents(home).some((event) => event.kind === 'submitted'));
 
     const events = readDeliveryEvents(home);
     expect(events.map((event) => event.kind)).toEqual(expect.arrayContaining(['queued', 'delivering', 'submitted']));
     expect(events.find((event) => event.kind === 'queued')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-1',
       preview: '@alpha history'
     });
     expect(events.find((event) => event.kind === 'delivering')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-1'
     });
     expect(events.find((event) => event.kind === 'submitted')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-1'
     });
     historical.dispose();
   });
 
-  it('writes pause/resume/drop and approval/input events to the delivery-history ring', async () => {
+  it('writes pause/resume/drop events to the delivery-history ring', async () => {
     const historical = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
 
@@ -717,19 +717,17 @@ describe('ChannelsEngine delivery gating', () => {
     const seq = historical.queuedItems('tmux-a')[0]!.seq;
     expect(historical.dropMessage('tmux-a', seq)).toBe(true);
     historical.resumeSession('tmux-a');
-    historical.handleAgentSignal('tmux-a', 'approval-requested');
-    historical.handleAgentSignal('tmux-a', 'input-requested');
 
     const events = readDeliveryEvents(home);
     expect(events.map((event) => event.kind)).toEqual(
-      expect.arrayContaining(['paused', 'resumed', 'queued', 'dropped', 'approval-requested', 'input-requested'])
+      expect.arrayContaining(['paused', 'resumed', 'queued', 'dropped'])
     );
     expect(events.find((event) => event.kind === 'paused')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       reason: 'operator review'
     });
     expect(events.find((event) => event.kind === 'dropped')).toMatchObject({
-      tmuxSession: 'tmux-a',
+      sessionId: 'tmux-a',
       channel: 'ops',
       messageId: 'msg-history-2'
     });
@@ -740,6 +738,7 @@ describe('ChannelsEngine delivery gating', () => {
     const pushed: string[] = [];
     let pane = READY_PANE;
     const paused = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -753,7 +752,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       // Deterministic transition (no timing race): the pane reads WORKING the
       // instant the prompt is pushed (the agent picked it up), so the resume
       // delivery verifies as 'submitted' and the status reads 'working'.
@@ -766,20 +764,19 @@ describe('ChannelsEngine delivery gating', () => {
 
     const held = await paused.inspectSession('tmux-a');
     expect(pushed).toEqual([]);
-    expect(held.status).toBe('paused');
+    expect(held.deliveryStatus).toBe('paused');
     expect(held.pausedByOperator).toBe(true);
     expect(held.pauseReason).toBe('operator review');
     expect(held.deliveryBlocked).toBe(false);
     expect(held.blockedCycles).toBeUndefined();
 
-    // resume drains against a ready pane; the agent then picks the prompt up and
-    // shows a working spinner, so the (probe-derived) status reads 'working'.
+    // Resume drains against the canonical idle snapshot. Raw pane bytes do not
+    // alter the activity projection.
     paused.resumeSession('tmux-a');
     await waitFor(() => pushed.length === 1, 1000);
-    paused.handleDeliveryAck('tmux-a', 'msg-paused-1');
-    await waitFor(async () => (await paused.inspectSession('tmux-a')).status === 'working', 1000);
     const released = await paused.inspectSession('tmux-a');
-    expect(released.status).toBe('working');
+    expect(released.activity).toBe('idle');
+    expect(released.deliveryStatus).toBe('ready');
     expect(released.pausedByOperator).toBe(false);
     paused.dispose();
   });
@@ -787,6 +784,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('restores a persisted manual pause before draining restored queues after restart', async () => {
     const pushed: string[] = [];
     const seed = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -795,7 +793,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
     seed.pauseSession('tmux-a', 'restart hold');
@@ -806,6 +803,7 @@ describe('ChannelsEngine delivery gating', () => {
 
     persistPausedSession(home, 'tmux-a', 'restart hold', new Date('2026-06-18T20:00:00.000Z'));
     const restored = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -814,19 +812,18 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
 
     await new Promise((resolve) => setTimeout(resolve, 80));
-    const state = restored.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a');
+    const state = (await restored.lifecycleStates()).find((entry) => entry.sessionId === 'tmux-a');
     expect(pushed).toEqual([]);
     expect(state).toMatchObject({
-      status: 'paused',
+      deliveryStatus: 'paused',
       pausedByOperator: true,
       pauseReason: 'restart hold',
       pausedAt: '2026-06-18T20:00:00.000Z',
-      queued: 1
+      queueDepth: 1
     });
 
     restored.resumeSession('tmux-a');
@@ -836,14 +833,14 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('inspectSession surfaces manifest resume metadata for the resume inspector', async () => {
     const inspected = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
-      sessionInfo: (tmuxSession) =>
-        tmuxSession === 'tmux-a'
+      sessionInfo: (sessionId) =>
+        sessionId === 'tmux-a'
           ? {
               sessionName: 'alpha',
               agent: 'opencode',
@@ -870,6 +867,7 @@ describe('ChannelsEngine delivery gating', () => {
     let pane = '✻ Working… (esc to interrupt)';
     const pushed: string[] = [];
     const gated = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -878,7 +876,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     gated.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-9-aaaa', 'human', '@alpha now') }, members);
@@ -893,6 +890,7 @@ describe('ChannelsEngine delivery gating', () => {
     const pushed: string[] = [];
     let pane = READY_PANE;
     const recovering = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 25,
@@ -903,12 +901,10 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-aaaa', 'human', '@alpha one') }, members);
     await waitFor(() => pushed.length === 1, 1000);
-    recovering.handleDeliveryAck('tmux-a', 'msg-10-aaaa');
     pane = WORKING_PANE; // agent picks up msg-1 and works
     recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-bbbb', 'human', '@alpha two') }, members);
     await waitFor(() => pushed.length === 2, 1500);
@@ -916,7 +912,7 @@ describe('ChannelsEngine delivery gating', () => {
     recovering.dispose();
   });
 
-  it('a failed paste clears the delivering claim so the queue is not stuck forever', async () => {
+  it('reports send-failed and clears the delivering claim so the queue can retry', async () => {
     // Regression for the probe-authoritative refactor: deliverNext sets
     // submitState='delivering' BEFORE the paste. A failed paste never reaches
     // verifySubmitted to resolve that claim — and the drain double-feed guard
@@ -926,9 +922,11 @@ describe('ChannelsEngine delivery gating', () => {
     const pushed: string[] = [];
     let failNext = true;
     const flaky = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
-      pumpIntervalMs: 20,
+      pumpIntervalMs: 1000,
+      blockedAfterCycles: 0,
       enterVerifyDelayMs: 5,
       verifyCycles: 1,
       sendText: async (_session, text) => {
@@ -940,12 +938,14 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => READY_PANE
     });
     flaky.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fail-aaaa', 'human', '@alpha retry me') }, members);
+    await waitFor(async () => (await flaky.inspectSession('tmux-a')).blockedReason === 'send-failed');
+    expect((await flaky.inspectSession('tmux-a')).blockedReason).toBe('send-failed');
     // The first paste fails; the pump must RETRY and the second paste succeeds.
     // It would never retry if submitState stayed 'delivering' (the guard).
+    await flaky.drainReady();
     await waitFor(() => pushed.length === 1, 2000);
     expect(pushed[0]).toContain('msg-fail-aaaa');
     flaky.dispose();
@@ -956,6 +956,7 @@ describe('ChannelsEngine delivery gating', () => {
     // the footer changes), but the submit Enter was swallowed, so the agent
     // stays idle. The verify cycle must press Enter — NOT re-paste — until it runs.
     let pane = '❯ ';
+    let activity: 'idle' | 'working' = 'idle';
     const enters: string[] = [];
     let pastes = 0;
     const verifying = new ChannelsEngine({
@@ -970,12 +971,12 @@ describe('ChannelsEngine delivery gating', () => {
       sendEnter: async (session) => {
         enters.push(session);
         if (enters.length === 2) {
-          pane = '✻ Working… (esc to interrupt)'; // second Enter finally submitted
+          activity = 'working';
         }
         return true;
       },
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     verifying.enqueuePrompt('tmux-a', 'ops', '@alpha stuck test', 'prompt-11-aaaa');
@@ -986,7 +987,7 @@ describe('ChannelsEngine delivery gating', () => {
     verifying.dispose();
   });
 
-  it('successful notification paste confirms delivery without footer-hash or hook ACK', async () => {
+  it('successful notification paste transitions directly to submitted', async () => {
     const sent: string[] = [];
     const enters: string[] = [];
     const states: string[] = [];
@@ -1004,7 +1005,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       onSubmitStateChange: (_session, state) => states.push(state)
     });
@@ -1021,7 +1021,7 @@ describe('ChannelsEngine delivery gating', () => {
     acked.dispose();
   });
 
-  it('missing hook ACK cannot strand notifications in delivering state', async () => {
+  it('notification delivery cannot remain stranded in delivering state', async () => {
     const sent: string[] = [];
     const enters: string[] = [];
     const events: Array<{ state: string; seq: number }> = [];
@@ -1039,7 +1039,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ',
       onSubmitStateChange: (_session, state, context) => events.push({ state, seq: context.seq })
     });
@@ -1084,14 +1083,17 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ ' // idle, unchanged, forever
     });
     stuck.enqueuePrompt('tmux-a', 'ops', '@alpha paste stuck', 'prompt-12-aaaa');
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pastes).toBe(1); // delivered once; NEVER re-pasted (no double delivery)
     expect(enters).toEqual(['tmux-a', 'tmux-a', 'tmux-a']); // safe Enter each cycle
-    expect((await stuck.inspectSession('tmux-a')).submitState).toBe('submit-stuck-paste');
+    expect(await stuck.inspectSession('tmux-a')).toMatchObject({
+      submitState: 'submit-stuck-paste',
+      deliveryBlocked: true,
+      blockedReason: 'submit-stuck-paste'
+    });
     stuck.dispose();
   });
 
@@ -1117,32 +1119,35 @@ describe('ChannelsEngine delivery gating', () => {
         return true; // Enter eaten every time
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
     stuck.enqueuePrompt('tmux-a', 'ops', '@alpha submit stuck', 'prompt-13-aaaa');
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pastes).toBe(1); // delivered once; never re-pasted (the box did change)
     expect(enters).toEqual(['tmux-a', 'tmux-a', 'tmux-a']); // Enter retried each cycle
-    expect((await stuck.inspectSession('tmux-a')).submitState).toBe('submit-stuck-submit');
+    expect(await stuck.inspectSession('tmux-a')).toMatchObject({
+      submitState: 'submit-stuck-submit',
+      deliveryBlocked: true,
+      blockedReason: 'submit-stuck-submit'
+    });
     stuck.dispose();
   });
 
   it('marks submitState submitted as soon as the agent goes busy', async () => {
-    let pane = '❯ ';
+    let activity: 'idle' | 'working' = 'idle';
     const ok = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
       enterVerifyDelayMs: 1,
       verifyCycles: 3,
       sendText: async () => {
-        pane = '✻ Working… (esc to interrupt)'; // submits cleanly
+        activity = 'working';
         return true;
       },
       sendEnter: async () => true,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane
+      capturePane: async () => 'raw terminal bytes'
     });
     ok.enqueuePrompt('tmux-a', 'ops', '@alpha clean submit', 'prompt-14-aaaa');
     await new Promise((resolve) => setTimeout(resolve, 60));
@@ -1151,7 +1156,7 @@ describe('ChannelsEngine delivery gating', () => {
   });
 
   it('fires onSubmitStateChange through delivering then submitted with the item seq', async () => {
-    let pane = '❯ ';
+    let activity: 'idle' | 'working' = 'idle';
     const events: Array<{ session: string; state: string; seq: number }> = [];
     const cb = new ChannelsEngine({
       home,
@@ -1159,13 +1164,13 @@ describe('ChannelsEngine delivery gating', () => {
       enterVerifyDelayMs: 1,
       verifyCycles: 3,
       sendText: async () => {
-        pane = '✻ Working… (esc to interrupt)'; // submits cleanly
+        activity = 'working';
         return true;
       },
       sendEnter: async () => true,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane,
+      capturePane: async () => 'raw terminal bytes',
       onSubmitStateChange: (session, state, ctx) => events.push({ session, state, seq: ctx.seq })
     });
     cb.enqueuePrompt('tmux-a', 'ops', '@alpha cb test', 'prompt-15-aaaa');
@@ -1177,25 +1182,21 @@ describe('ChannelsEngine delivery gating', () => {
   });
 
   it('fires onSubmitStateChange once per coalesced seq for a digest delivery', async () => {
-    let pane = '❯ ';
+    let activity: 'idle' | 'working' = 'idle';
     const events: Array<{ state: string; seq: number }> = [];
-    let cb: ChannelsEngine;
-    cb = new ChannelsEngine({
+    const cb = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
       enterVerifyDelayMs: 25,
       verifyCycles: 1,
-      sendText: async (_session, text) => {
-        pane = '✻ Working… (esc to interrupt)';
-        if (text.includes('notificationId:msg-16-aaaa')) {
-          queueMicrotask(() => cb.handleDeliveryAck('tmux-a', 'msg-16-aaaa'));
-        }
+      sendText: async () => {
+        activity = 'working';
         return true;
       },
       sendEnter: async () => true,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane,
+      capturePane: async () => 'raw terminal bytes',
       onSubmitStateChange: (_session, state, ctx) => events.push({ state, seq: ctx.seq })
     });
     cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-aaaa', 'human', '@alpha one') }, members);
@@ -1203,8 +1204,8 @@ describe('ChannelsEngine delivery gating', () => {
     cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-bbbb', 'human', '@alpha two') }, members);
     cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-cccc', 'human', '@alpha three') }, members);
     await flush();
-    pane = '❯ ';
-    cb.handleAgentSignal('tmux-a', 'turn-complete'); // release -> the two queued coalesce into a digest
+    activity = 'idle';
+    await cb.drainReady();
     await waitFor(() => events.filter((e) => e.state === 'delivering').length >= 3);
     const deliveringSeqs = events.filter((e) => e.state === 'delivering').map((e) => e.seq);
     expect(deliveringSeqs.length).toBe(3); // first verbatim delivery + 2 coalesced in the digest
@@ -1224,13 +1225,12 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => null
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d9-aaaa', 'human', 'hi @alpha') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0]).toContain('msg-d9-aaaa');
-    expect((await eng.inspectSession('tmux-a')).paneState).toBe('unobservable');
+    expect(await eng.inspectSession('tmux-a')).toMatchObject({ activity: 'idle', deliveryStatus: 'ready' });
     eng.dispose();
   });
 
@@ -1250,14 +1250,13 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => 'Allow command rm -rf /tmp/x?\n› Yes\n  No'
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d1-aaaa', 'human', 'run it @alpha') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0]).toContain('notificationId:msg-d1-aaaa');
     expect(enters).toEqual([]);
-    expect((await eng.inspectSession('tmux-a')).paneState).toBe('not-ready');
+    expect(await eng.inspectSession('tmux-a')).toMatchObject({ activity: 'idle', actionable: false });
     eng.dispose();
   });
 
@@ -1278,7 +1277,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane,
       onSubmitStateChange: (_session, state) => states.push(state)
     });
@@ -1289,11 +1287,8 @@ describe('ChannelsEngine delivery gating', () => {
     eng.dispose();
   });
 
-  it('verify: a recognized menu after delivery is submitted (no Enter) and hard-holds the queue', async () => {
-    // Delivery happens from a ready pane; then an approval menu appears during
-    // verify -> positive evidence the prompt was accepted (no replay), set
-    // awaitingApproval so the next item is not fed into the menu, and NO Enter.
-    let pane = '❯ ';
+  it('verify: canonical operator wait confirms submission without pressing Enter', async () => {
+    let activity: 'idle' | 'blocked' = 'idle';
     const enters: string[] = [];
     const states: string[] = [];
     const eng = new ChannelsEngine({
@@ -1302,47 +1297,33 @@ describe('ChannelsEngine delivery gating', () => {
       enterVerifyDelayMs: 1,
       verifyCycles: 3,
       sendText: async () => {
-        pane = 'Allow command?\n› Yes\n  No';
+        activity = 'blocked';
         return true;
       },
       sendEnter: async (session) => {
         enters.push(session);
         return true;
       },
+      readAgentStates: async () =>
+        canonicalAgentStateBatch(['tmux-a'], {
+          activity,
+          waitOwner: 'operator',
+          waitKind: 'approval'
+        }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane,
+      capturePane: async () => 'Allow command?\n› Yes\n  No',
       onSubmitStateChange: (_session, state) => states.push(state)
     });
     eng.enqueuePrompt('tmux-a', 'ops', 'go @alpha', 'prompt-menu-aaaa');
     await waitFor(() => states.includes('submitted'));
-    expect(states).toContain('submitted'); // recognized menu = accepted
-    expect(enters).toEqual([]); // never pressed Enter into the menu during verification
-    expect((await eng.inspectSession('tmux-a')).awaitingApproval).toBe(true); // hard-hold
-    eng.dispose();
-  });
-
-  it('signal: approval/bell events do not gate notification delivery', async () => {
-    const sent: string[] = [];
-    const eng = new ChannelsEngine({
-      home,
-      releaseSettleMs: 0,
-      sendText: async (_session, text) => {
-        sent.push(text);
-        return true;
-      },
-      sendEnter: async () => true,
-      sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => 'Allow command?\n› Yes\n  No'
+    expect(states).toContain('submitted');
+    expect(enters).toEqual([]);
+    expect(await eng.inspectSession('tmux-a')).toMatchObject({
+      activity: 'blocked',
+      actionable: true,
+      waitOwner: 'operator',
+      waitKind: 'approval'
     });
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-bell-aaaa', 'human', 'go @alpha') }, members);
-    await waitFor(() => sent.length === 1);
-    eng.handleAgentSignal('tmux-a', 'approval-requested');
-    eng.handleAgentSignal('tmux-a', 'bell');
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(sent).toHaveLength(1);
-    expect((await eng.inspectSession('tmux-a')).deliveryBlocked).toBe(false);
     eng.dispose();
   });
 
@@ -1372,7 +1353,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane,
       // wire the real ack-file lifecycle (mirrors channelsApi) so the live re-enqueue
       // operates on a genuine .delivering -> .stuck-unobservable -> .json transition
@@ -1420,7 +1400,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     // The stuck file is NOT in the runtime queue (restore preserves .stuck-submit).
@@ -1450,9 +1429,10 @@ describe('ChannelsEngine delivery gating', () => {
     mk(2, 'stuck-paste');
     mk(5, 'stuck-submit');
     const eng = new ChannelsEngine({
+      sendText: async () => true,
+      sendEnter: async () => true,
       home,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const diag = await eng.inspectSession('tmux-a');
@@ -1492,7 +1472,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     // restoreQueues (constructor) re-enqueues .stuck-unobservable like .delivering.
@@ -1530,7 +1509,6 @@ describe('ChannelsEngine delivery gating', () => {
       },
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     // Force the NON-head stuck item (seq 8; the head stuck is seq 2).
@@ -1542,45 +1520,22 @@ describe('ChannelsEngine delivery gating', () => {
     eng.dispose();
   });
 
-  it('Lifecycle: lifecycleStates derives working / awaiting-approval from the LIVE probe', async () => {
-    let pane = READY_PANE;
-    const eng = new ChannelsEngine({
-      home,
-      releaseSettleMs: 0,
-      enterVerifyDelayMs: 5000, // keep the verify cycle from reclassifying within the test window
-      sendText: async () => true,
-      sendEnter: async () => true,
-      sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane
-    });
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-life-aaaa', 'human', 'hi @alpha') }, members);
-    await flush();
-    expect(eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.status).toBe('working'); // busy after the delivery claim
-    // An approval MENU on the live pane -> probe-derived awaiting-approval. A bare
-    // signal no longer sets the flag; the re-probe it triggers reads the menu.
-    pane = APPROVAL_PANE;
-    eng.handleAgentSignal('tmux-a', 'approval-requested');
-    await waitFor(() => eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.status === 'awaiting-approval', 1000);
-    expect(eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.status).toBe('awaiting-approval');
-    eng.dispose();
-  });
-
-  it('Lifecycle: lifecycleStates ignores legacy durable stuck files for delivery status', () => {
+  it('Lifecycle: lifecycleStates ignores legacy durable stuck files for delivery status', async () => {
     ensureQueueDir(home, 'tmux-a');
     writeFileSync(
       join(home, '_engine', 'queue', 'tmux-a', `${String(3).padStart(10, '0')}.stuck-submit`),
       JSON.stringify({ seq: 3, channel: 'ops', messageId: 'm3', author: 'human', prompt: 'p', queuedAt: '2026-06-18T00:00:00.000Z', kind: 'message', file: 'root.md' })
     );
     const eng = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
-    const ls = eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a');
-    expect(ls?.status).toBe('idle');
+    const ls = (await eng.lifecycleStates()).find((s) => s.sessionId === 'tmux-a');
+    expect(ls?.activity).toBe('idle');
+    expect(ls?.deliveryStatus).toBe('ready');
     expect(ls?.deliveryBlocked).toBe(false);
     expect(ls?.blockedItemCount).toBe(0);
     eng.dispose();
@@ -1595,95 +1550,14 @@ describe('ChannelsEngine delivery gating', () => {
       sendText: async () => true,
       sendEnter: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '' // empty-capture -> drain holds, never ready
     });
     eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-grd-aaaa', 'human', 'hi @alpha') }, members);
-    await waitFor(() => eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.queued === 0);
-    const early = eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a');
+    await waitFor(async () => (await eng.lifecycleStates()).find((s) => s.sessionId === 'tmux-a')?.queueDepth === 0);
+    const early = (await eng.lifecycleStates()).find((s) => s.sessionId === 'tmux-a');
     expect(early?.deliveryBlocked).toBe(false);
-    expect(early?.status).not.toBe('blocked');
+    expect(early?.activity).toBe('idle');
     eng.dispose();
-  });
-
-  it('isPaneBusy recognises agent working states', () => {
-    expect(isPaneBusy('✻ Sautéed for 1m 43s (esc to interrupt)')).toBe(true);
-    expect(isPaneBusy('Esc to interrupt · working')).toBe(true);
-    expect(isPaneBusy(opencodeSample('opencode-working.txt'))).toBe(true); // real opencode working: "esc interrupt" in footer
-    expect(isPaneBusy(opencodeSample('opencode-glm-working.txt'))).toBe(true); // context-rich working (glm capture)
-    expect(isPaneBusy(opencodeSample('opencode-glm-working-2.txt'))).toBe(true); // context-rich working (glm capture)
-    expect(isPaneBusy('❯ \n─────\n  user@host:~/projects [Fable 5]')).toBe(false);
-    expect(isPaneBusy(opencodeSample('opencode-idle.txt'))).toBe(false); // real in-session idle
-    expect(isPaneBusy(opencodeSample('opencode-splash-idle.txt'))).toBe(false); // real fresh-splash idle
-    // Footer-only probe: opencode-glm-idle.txt is a real IDLE pane whose scrollback BODY contains a
-    // message whose prose literally says the interrupt-affordance phrase. The marker
-    // must be matched only in the live FOOTER region, so this idle pane is NOT busy.
-    expect(isPaneBusy(opencodeSample('opencode-glm-idle.txt'))).toBe(false);
-  });
-
-  it('isPaneReadyForInput requires a visible prompt marker, not just "not busy"', () => {
-    expect(isPaneReadyForInput('❯ ')).toBe(true); // claude prompt
-    expect(isPaneReadyForInput('› Explain this codebase\n  gpt-5.5 xhigh · Context 58% used')).toBe(true); // codex
-    expect(isPaneReadyForInput('user@host:/tmp/projects/alpha$')).toBe(true); // shell
-    expect(isPaneReadyForInput('✻ Working… (esc to interrupt)')).toBe(false); // mid-turn
-    expect(isPaneReadyForInput(opencodeSample('opencode-working.txt'))).toBe(false); // real working -> not ready
-    expect(isPaneReadyForInput(opencodeSample('opencode-idle.txt'))).toBe(true); // real in-session idle -> ready (THE FIX)
-    expect(isPaneReadyForInput(opencodeSample('opencode-splash-idle.txt'))).toBe(true); // real fresh idle -> ready
-    // booting CLI: warnings on screen, no input prompt yet — NOT ready
-    expect(isPaneReadyForInput('⚠ MCP client for `lean-lsp` failed to start\n⚠ MCP startup incomplete')).toBe(false);
-    // Footer-only regression: a real context-rich IDLE opencode pane whose BODY prose contains
-    // the interrupt-affordance phrase must read READY — the marker is footer-anchored,
-    // not a whole-pane substring. (Was the body-text false-busy that wedged idle agents.)
-    expect(isPaneReadyForInput(opencodeSample('opencode-glm-idle.txt'))).toBe(true);
-  });
-
-  it('working-affordance in body/scrollback does not read busy; only the footer region counts', () => {
-    // Real capture: glm-idle's scrollback holds a message whose prose says the
-    // affordance phrase, but the live footer is idle. The phrase IS present, yet the
-    // pane must NOT read busy — the marker is matched only in the footer region.
-    const idle = opencodeSample('opencode-glm-idle.txt');
-    expect(/esc\s+interrupt/i.test(idle)).toBe(true); // the phrase is present (in the body)
-    expect(isPaneBusy(idle)).toBe(false); // ...but not in the footer region
-    expect(isPaneReadyForInput(idle)).toBe(true);
-  });
-
-  it('square spinner family fires as a working marker, independent of the affordance text', () => {
-    // The real opencode spinner is the square glyph family (U+25A0 / U+2B1D ...), NOT
-    // braille. Strip the affordance text from a real working capture: the spinner run
-    // alone must still read busy, so a future opencode that drops/rewords the
-    // affordance word cannot read idle and get delivered mid-turn.
-    const workingNoAffordance = opencodeSample('opencode-glm-working.txt').replace(/esc\s+(?:to\s+)?interrupt/gi, '');
-    expect(workingNoAffordance).not.toMatch(/esc\s+interrupt/i); // affordance text removed
-    expect(isPaneBusy(workingNoAffordance)).toBe(true); // spinner family still fires
-  });
-
-  it('boot grace gates standalone prompts until the session is old enough', async () => {
-    let createdAt = Math.floor(Date.now() / 1000); // just started
-    const pushed: string[] = [];
-    const graced = new ChannelsEngine({
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 10,
-      // session_created is epoch SECONDS — the grace must exceed the flooring
-      // error (<1s) for the young-session check to be meaningful
-      bootGraceMs: 5000,
-      sendText: async (_s, text) => {
-        pushed.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      sessionCreatedAt: async () => createdAt,
-      capturePane: async () => '❯ '
-    });
-    graced.enqueuePrompt('tmux-a', 'ops', 'onboarding for a freshly started agent', 'onboard-ops');
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(pushed).toEqual([]);
-    expect((await graced.inspectSession('tmux-a')).paneState).toBe('booting');
-    createdAt = Math.floor(Date.now() / 1000) - 3600;
-    graced.handleAgentSignal('tmux-a', 'turn-complete');
-    await waitFor(() => pushed.length === 1);
-    expect(pushed[0]).toContain('onboarding for a freshly started agent');
-    graced.dispose();
   });
 
   it('dispatch dedupe: re-discovered messages never enqueue or deliver twice', async () => {
@@ -1691,25 +1565,25 @@ describe('ChannelsEngine delivery gating', () => {
     engine.handleMessage(incoming, members);
     engine.handleMessage(incoming, members); // watcher rescan / second path
     await flush();
-    engine.handleAgentSignal('tmux-a', 'turn-complete');
-    await flush();
+    await engine.drainReady();
     expect(sent).toHaveLength(1);
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.queued).toBe(0);
+    expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')?.queueDepth).toBe(0);
   });
 
   it('single-engine guard: a second engine for the same home goes passive', async () => {
     const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-'));
     const owner = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 100,
       pidAlive: () => true,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const intruderSent: string[] = [];
     const intruder = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 200,
       pidAlive: (pid) => pid === 100, // owner alive
@@ -1718,7 +1592,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     expect(owner.passive).toBe(false);
@@ -1729,12 +1602,12 @@ describe('ChannelsEngine delivery gating', () => {
 
     // Dead owner: the next engine takes over.
     const successor = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 300,
       pidAlive: () => false,
       sendText: async () => true,
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     expect(successor.passive).toBe(false);
@@ -1749,6 +1622,7 @@ describe('ChannelsEngine delivery gating', () => {
     mkdirSync(join(lockedHome, '_engine', 'engine.pid'), { recursive: true });
     const pushed: string[] = [];
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home: lockedHome,
       pid: 400,
       sendText: async (_session, text) => {
@@ -1756,7 +1630,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
 
@@ -1773,6 +1646,7 @@ describe('ChannelsEngine delivery gating', () => {
   it('annotates prompts that sat in the queue past the staleness window', async () => {
     const pushed: string[] = [];
     const stale = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       staleAfterMs: -1, // everything counts as stale (age 0 included)
@@ -1782,7 +1656,6 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     stale.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-14-aaaa', 'human', '@alpha old news') }, members);
@@ -1819,7 +1692,7 @@ describe('ChannelsEngine delivery gating', () => {
       channel: 'ops',
       goal: 'keep the ship flying',
       handle: 'beta',
-      members: [member('alpha', 'tmux-a'), member('beta', 'tmux-b'), { ...member('human', '', 'human'), tmuxSession: undefined }],
+      members: [member('alpha', 'tmux-a'), member('beta', 'tmux-b'), { ...member('human', '', 'human'), sessionId: undefined }],
       messageCount: 7,
       home: '/home/x/.config/desk/channels'
     });
@@ -1834,35 +1707,66 @@ describe('ChannelsEngine delivery gating', () => {
     expect(prompt).toContain('introducing yourself');
   });
 
-  it('enqueuePrompt waits for a ready pane while notifications remain force-delivered', async () => {
-    let pane = '✻ Working… (esc to interrupt)';
+  // What still holds the queue is LIFECYCLE, not activity: a session that has
+  // not finished starting has no process to accept the text, so the prompt
+  // waits and is delivered once it is running. Nothing is dropped, which is the
+  // difference between this and the activity gate that was removed.
+  it('enqueuePrompt waits while the session is STARTING, then releases once running', async () => {
+    let lifecycle: 'starting' | 'running' = 'starting';
     const pushed: string[] = [];
     const onboarding = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
+      blockedAfterCycles: 1,
       enterVerifyDelayMs: 1,
       sendText: async (_s, text) => {
         pushed.push(text);
         return true;
       },
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane
+      capturePane: async () => 'raw terminal bytes'
     });
     onboarding.enqueuePrompt('tmux-a', 'ops', 'welcome aboard @alpha', 'onboard-ops');
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(pushed).toEqual([]);
-    pane = '❯ ';
-    onboarding.handleAgentSignal('tmux-a', 'turn-complete');
+    expect((await onboarding.inspectSession('tmux-a')).blockedReason).toBe('booting');
+    lifecycle = 'running';
+    await onboarding.drainReady();
     await waitFor(() => pushed.length === 1);
     expect(pushed).toEqual(['welcome aboard @alpha']);
     onboarding.dispose();
   });
 
-  it('acknowledges native prompts from broker injection without tmux verification', async () => {
+  it('reports offline while an exited session cannot receive queued prompts', async () => {
+    const pushed: string[] = [];
+    const offline = new ChannelsEngine({
+      sendEnter: async () => true,
+      home,
+      releaseSettleMs: 0,
+      pumpIntervalMs: 10,
+      blockedAfterCycles: 1,
+      sendText: async (_session, text) => {
+        pushed.push(text);
+        return true;
+      },
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'exited' }),
+      sessionRunning: () => false,
+      capturePane: async () => 'raw terminal bytes'
+    });
+    offline.enqueuePrompt('tmux-a', 'ops', 'wait for restart', 'offline-prompt');
+    await waitFor(async () => (await offline.inspectSession('tmux-a')).blockedReason === 'offline');
+    expect((await offline.inspectSession('tmux-a')).blockedReason).toBe('offline');
+    expect(pushed).toEqual([]);
+    offline.dispose();
+  });
+
+  it('marks native prompts submitted after broker injection without tmux verification', async () => {
     const pushed: string[] = [];
     const native = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 10,
@@ -1871,101 +1775,18 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionInfo: () => ({ uiMode: 'native' }),
-      nativeSessionState: () => 'ready',
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         throw new Error('native delivery must not inspect tmux');
       }
     });
     native.enqueuePrompt('tmux-a', 'ops', 'native onboarding', 'native-onboard');
     await waitFor(() => pushed.length === 1);
-    await waitFor(() => native.lifecycleStates()[0]?.submitState === 'submitted');
+    await waitFor(async () => (await native.lifecycleStates())[0]?.submitState === 'submitted');
     expect(pushed).toEqual(['native onboarding']);
     native.dispose();
   });
 
-  it('clears a stale busy flag when an idle agent never sent its release signal', async () => {
-    const pane = '❯ '; // idle prompt the whole time
-    let busyAtSend: boolean | undefined;
-    let reconciling!: ChannelsEngine;
-    reconciling = new ChannelsEngine({
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 10,
-      enterVerifyDelayMs: 1,
-      sendText: async () => {
-        busyAtSend = reconciling.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')?.busy;
-        return true;
-      },
-      sendEnter: async () => true,
-      sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane
-    });
-    const busyOf = () => reconciling.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy;
-    try {
-      reconciling.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-r-aaaa', 'human', '@alpha go') }, members);
-      await waitFor(() => busyAtSend !== undefined);
-      expect(busyAtSend).toBe(true); // delivery claims busy before the async paste
-      // No release signal arrives; the pane is idle → the pump must clear the flag.
-      await waitFor(() => busyOf() === false);
-      expect(busyOf()).toBe(false);
-    } finally {
-      reconciling.dispose();
-    }
-  });
-
-  it('keeps the busy flag while the pane still shows a running turn', async () => {
-    let pane = '❯ ';
-    const working = new ChannelsEngine({
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 10,
-      busyOverrideMs: 0,
-      // This test isolates busy-override behavior; diagnostic TTL lag is covered above.
-      probeTtlMs: 0,
-      enterVerifyDelayMs: 1,
-      sendText: async () => true,
-      sendEnter: async () => true,
-      sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane
-    });
-    working.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-w-aaaa', 'human', '@alpha go') }, members);
-    await flush();
-    pane = '✻ Working… (esc to interrupt)'; // genuinely mid-turn now (set before any pump tick)
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(working.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy).toBe(true);
-    working.dispose();
-  });
-
-  it('shows busy when an idle agent starts its own task, even with no queued message', async () => {
-    let pane = '❯ ';
-    const eng = new ChannelsEngine({
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 10,
-      busyOverrideMs: 0,
-      enterVerifyDelayMs: 1,
-      sendText: async () => true,
-      sendEnter: async () => true,
-      sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
-      capturePane: async () => pane
-    });
-    const busyOf = () => eng.lifecycleStates().find((s) => s.tmuxSession === 'tmux-a')?.busy;
-    // Deliver then release → a runtime that is idle with an empty queue.
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-o-aaaa', 'human', '@alpha go') }, members);
-    await flush();
-    eng.handleAgentSignal('tmux-a', 'turn-complete');
-    await flush();
-    // The agent now works on its OWN task (pane busy); no channel message queued.
-    pane = '✻ Working… (esc to interrupt)';
-    await waitFor(() => busyOf() === true);
-    expect(busyOf()).toBe(true); // status reflects the live pane, not just deliveries
-    eng.dispose();
-  });
 });
 
 describe('channels store', () => {
@@ -2170,11 +1991,12 @@ describe('channels store', () => {
   it('caps a session queue at 50, dropping the oldest prompts', async () => {
     const capMembers = [member('alpha', 'tmux-a')];
     const blocked = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity: 'working' }),
       sessionRunning: () => false, // nothing ever delivers — queue only grows
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     for (let index = 0; index < 60; index += 1) {
@@ -2184,8 +2006,8 @@ describe('channels store', () => {
       );
     }
     await flush();
-    const state = blocked.lifecycleStates().find((entry) => entry.tmuxSession === 'tmux-a');
-    expect(state?.queued).toBe(50);
+    const state = (await blocked.lifecycleStates()).find((entry) => entry.sessionId === 'tmux-a');
+    expect(state?.queueDepth).toBe(50);
     expect((await blocked.inspectSession('tmux-a')).droppedQueueItems).toBe(10);
     blocked.dispose();
   });
@@ -2204,6 +2026,7 @@ describe('engine drain race safety', () => {
     const sent: string[] = [];
     let resolvePush: (() => void) | null = null;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       sendText: (session, text) =>
@@ -2212,15 +2035,14 @@ describe('engine drain race safety', () => {
           resolvePush = () => resolve(true);
         }),
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha go') }, members);
     await flush();
-    // Signal storms while the push is still in flight must not re-enter drain.
-    engine.handleAgentSignal('tmux-a', 'bell');
-    engine.handleAgentSignal('tmux-a', 'turn-complete');
+    // Concurrent drain nudges while the push is still in flight must not re-enter.
+    await engine.drainReady();
+    await engine.drainReady();
     await flush();
     expect(sent).toHaveLength(1);
     resolvePush?.();
@@ -2234,8 +2056,11 @@ describe('engine drain race safety', () => {
     const sent: string[] = [];
     let resolvePush: (() => void) | null = null;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
+      pumpIntervalMs: 5,
+      blockedAfterCycles: 1,
       drainWatchdogMs: 10,
       sendText: async (_session, text) => {
         sent.push(text);
@@ -2245,14 +2070,19 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-watchdog', 'human', '@alpha go') }, members);
     await flush();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    engine.handleAgentSignal('tmux-a', 'bell');
+    let observedBlockReason: string | undefined;
+    await waitFor(async () => {
+      observedBlockReason = (await engine.inspectSession('tmux-a')).blockedReason;
+      return observedBlockReason !== undefined;
+    });
+    expect(observedBlockReason).toBe('draining');
+    await engine.drainReady();
     await flush();
     expect(sent).toHaveLength(1);
     resolvePush?.();
@@ -2267,6 +2097,7 @@ describe('engine drain race safety', () => {
     const sent: string[] = [];
     let resolvePush: (() => void) | undefined;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       drainWatchdogMs: 10,
@@ -2280,7 +2111,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
@@ -2312,6 +2142,7 @@ describe('engine drain race safety', () => {
       markFirstCaptureStarted = resolve;
     });
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
@@ -2321,7 +2152,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         captureCalls += 1;
         if (captureCalls === 1) {
@@ -2366,6 +2196,7 @@ describe('engine drain race safety', () => {
       markFirstCaptureStarted = resolve;
     });
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
@@ -2380,7 +2211,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         captureCalls += 1;
         if (captureCalls === 1) {
@@ -2428,6 +2258,7 @@ describe('engine drain race safety', () => {
     });
     let firstCapture = true;
     const engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
@@ -2436,7 +2267,6 @@ describe('engine drain race safety', () => {
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => {
         if (!firstCapture) {
           return '❯ ';
@@ -2458,7 +2288,7 @@ describe('engine drain race safety', () => {
     await flush();
 
     expect(sent).toEqual([]);
-    engine.handleAgentSignal('tmux-a', 'turn-complete');
+    await engine.drainReady();
     await waitFor(() => sent.length === 1);
     expect(sent).toEqual(['replacement head']);
     engine.dispose();
@@ -2477,20 +2307,16 @@ describe('ChannelsEngine digest coalescing', () => {
     sent = [];
     pane = READY_PANE;
     engine = new ChannelsEngine({
+      sendEnter: async () => true,
       home,
       releaseSettleMs: 0,
       enterVerifyDelayMs: 100,
       verifyCycles: 1,
       sendText: async (session, text) => {
         sent.push({ session, text });
-        const notificationId = text.match(/notificationId:([A-Za-z0-9_.:-]+)/)?.[1];
-        if (notificationId) {
-          queueMicrotask(() => engine.handleDeliveryAck(session, notificationId));
-        }
         return true;
       },
       sessionRunning: () => true,
-      sessionCreatedAt: async () => 1,
       capturePane: async () => pane
     });
   });
@@ -2500,12 +2326,11 @@ describe('ChannelsEngine digest coalescing', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), tmuxSession: undefined }];
+  const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), sessionId: undefined }];
 
   it('coalesces a multi-message backlog into one digest delivery', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
-    engine.handleDeliveryAck('tmux-a', 'msg-1-aaaa');
     engine.pauseSession('tmux-a', 'accumulate digest backlog');
 
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'beta', '@alpha two') }, members);
@@ -2513,7 +2338,7 @@ describe('ChannelsEngine digest coalescing', () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha four') }, members);
     await flush();
     expect(sent).toHaveLength(1);
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({ queued: 3 });
+    expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({ queueDepth: 3 });
 
     engine.resumeSession('tmux-a');
     await waitFor(() => sent.length === 2); // ONE digest, not three deliveries
@@ -2525,18 +2350,16 @@ describe('ChannelsEngine digest coalescing', () => {
     expect(digest).toContain('1 from @human');
     expect(digest).toContain('--as alpha');
     expect(digest).not.toContain('@alpha two'); // bodies are NOT inlined — agent reads the channel
-    expect(engine.lifecycleStates().find((state) => state.tmuxSession === 'tmux-a')).toMatchObject({ queued: 0 });
+    expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({ queueDepth: 0 });
 
     // nothing further to deliver on the next release
-    engine.handleAgentSignal('tmux-a', 'turn-complete');
-    await flush();
+    await engine.drainReady();
     expect(sent).toHaveLength(2);
   });
 
   it('a single queued message drains as a notification-only turn prompt', async () => {
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
-    engine.handleDeliveryAck('tmux-a', 'msg-1-aaaa');
     engine.pauseSession('tmux-a', 'accumulate single item');
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha only one waiting') }, members);
     await flush();
@@ -2569,7 +2392,7 @@ describe('ChannelsEngine digest coalescing', () => {
     pane = WORKING_PANE;
     await new Promise((resolve) => setTimeout(resolve, 130));
     pane = READY_PANE;
-    engine.handleAgentSignal('tmux-a', 'turn-complete');
+    await engine.drainReady();
     await waitFor(() => sent.length === 3);
     expect(sent[2].text).toContain('2 messages arrived while you were working'); // remaining backlog digested
   });
@@ -2588,83 +2411,6 @@ describe('ChannelsEngine digest coalescing', () => {
     expect(digest).toContain('--as alpha ');
     expect(digest).toContain('--as alpha-2 ');
     expect(digest).toContain('2 from @gamma');
-  });
-});
-
-describe('tailPaneCapture', () => {
-  it('keeps a top-anchored prompt visible by dropping trailing blank rows', () => {
-    const pane = `dev@host:/work$\n${'\n'.repeat(45)}`;
-    const tail = tailPaneCapture(pane);
-    expect(tail).toContain('dev@host:/work$');
-    expect(isPaneReadyForInput(tail)).toBe(true);
-  });
-
-  it('still bounds a tall busy pane to its last 30 lines', () => {
-    const lines = Array.from({ length: 80 }, (_, i) => `output line ${i}`);
-    lines.push('esc to interrupt');
-    const tail = tailPaneCapture(lines.join('\n'));
-    expect(tail.split('\n').length).toBeLessThanOrEqual(30);
-    expect(tail).toContain('esc to interrupt');
-    expect(isPaneReadyForInput(tail)).toBe(false);
-  });
-});
-
-describe('sendTextToTmux (bracketed-paste injection)', () => {
-  it('stages the body in a buffer, injects it as a bracketed paste, then submits with a separate Enter', async () => {
-    const calls: string[][] = [];
-    const ok = await sendTextToTmux('agentdesk-x', 'line one\nline two', 0, async (args) => {
-      calls.push(args);
-      return true;
-    });
-    expect(ok).toBe(true);
-    expect(calls).toHaveLength(3);
-    // 1) the multi-line body is staged verbatim in a named buffer (-- guards a leading dash)
-    expect(calls[0][0]).toBe('set-buffer');
-    expect(calls[0]).toContain('--');
-    expect(calls[0][calls[0].length - 1]).toBe('line one\nline two');
-    const buffer = calls[0][calls[0].indexOf('-b') + 1];
-    // 2) bracketed paste (-p) of that same buffer into the pane, auto-deleted (-d)
-    expect(calls[1][0]).toBe('paste-buffer');
-    expect(calls[1]).toContain('-p');
-    expect(calls[1]).toContain('-d');
-    expect(calls[1][calls[1].indexOf('-b') + 1]).toBe(buffer);
-    expect(calls[1][calls[1].indexOf('-t') + 1]).toBe('agentdesk-x:');
-    // 3) the submit Enter is its OWN call — never in the same burst as the paste
-    expect(calls[2]).toEqual(['send-keys', '-t', 'agentdesk-x:', 'Enter']);
-  });
-
-  it('aborts (no paste, no Enter) when staging the buffer fails', async () => {
-    const calls: string[][] = [];
-    const ok = await sendTextToTmux('s', 'x', 0, async (args) => {
-      calls.push(args);
-      return false;
-    });
-    expect(ok).toBe(false);
-    expect(calls.map((c) => c[0])).toEqual(['set-buffer']);
-  });
-
-  it('cleans up the buffer and does not submit when the paste fails', async () => {
-    const calls: string[][] = [];
-    const ok = await sendTextToTmux('s', 'x', 0, async (args) => {
-      calls.push(args);
-      return args[0] !== 'paste-buffer';
-    });
-    expect(ok).toBe(false);
-    expect(calls.map((c) => c[0])).toEqual(['set-buffer', 'paste-buffer', 'delete-buffer']);
-    expect(calls.some((c) => c[0] === 'send-keys')).toBe(false);
-  });
-
-  it('uses a distinct buffer per call so concurrent deliveries cannot clobber each other', async () => {
-    const buffers: string[] = [];
-    const capture = async (args: string[]): Promise<boolean> => {
-      if (args[0] === 'set-buffer') {
-        buffers.push(args[args.indexOf('-b') + 1]);
-      }
-      return true;
-    };
-    await sendTextToTmux('sess', 'a', 0, capture);
-    await sendTextToTmux('sess', 'b', 0, capture);
-    expect(buffers[0]).not.toBe(buffers[1]);
   });
 });
 
@@ -2738,59 +2484,5 @@ describe('sliceMessages (lazy-load windowing)', () => {
       hasOlder: true,
       hasNewer: false
     });
-  });
-});
-
-describe('spawnTmuxSettled', () => {
-  it('always settles: kills a child that outlives the timeout and reports failure', async () => {
-    const start = Date.now();
-    const result = await spawnTmuxSettled(['wait-for', `desk-test-never-${Date.now()}`], {
-      capture: false,
-      timeoutMs: 80
-    });
-    expect(result.ok).toBe(false);
-    // resolved on the timeout, not after the wait is signaled
-    expect(Date.now() - start).toBeLessThan(2000);
-  });
-
-  it('captures stdout and reports success on a clean exit', async () => {
-    const result = await spawnTmuxSettled(['-V'], { capture: true, timeoutMs: 2000 });
-    expect(result.ok).toBe(true);
-    expect(result.stdout).toMatch(/^tmux /);
-  });
-
-  it('reports failure (no stdout) when the command exits non-zero', async () => {
-    const result = await spawnTmuxSettled(['has-session', '-t', `desk-test-missing-${Date.now()}`], {
-      capture: true,
-      timeoutMs: 2000
-    });
-    expect(result).toMatchObject({ ok: false, stdout: null });
-  });
-
-  it('captures full stdout under concurrency (no truncation race on large output)', async () => {
-    // Reading stdout on `exit` truncates large output to empty under concurrent
-    // load — the bug that stranded channel queues. Many concurrent large-output
-    // tmux spawns must each return their FULL payload.
-    const size = 10_000;
-    const payload = 'x'.repeat(size);
-    const session = `desk-test-spawn-${process.pid}-${Date.now()}`;
-    const started = await spawnTmuxSettled(['new-session', '-d', '-s', session, 'sleep 30'], {
-      capture: false,
-      timeoutMs: 2000
-    });
-    expect(started.ok).toBe(true);
-    try {
-      const results = await Promise.all(
-        Array.from({ length: 12 }, () =>
-          spawnTmuxSettled(['display-message', '-p', '-t', `${session}:`, payload], { capture: true, timeoutMs: 4000 })
-        )
-      );
-      for (const result of results) {
-        expect(result.ok).toBe(true);
-        expect(result.stdout).toBe(`${payload}\n`);
-      }
-    } finally {
-      await spawnTmuxSettled(['kill-session', '-t', session], { capture: false, timeoutMs: 2000 });
-    }
   });
 });

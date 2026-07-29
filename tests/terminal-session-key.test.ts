@@ -9,6 +9,7 @@ function view(overrides: Partial<SessionSpec> = {}, state: 'running' | 'missing'
     cwd: '/repo',
     groupId: 'g',
     groupLabel: 'G',
+    sessionId: 'session-web',
     tmuxSession: 'proj-g-web',
     ...overrides
   } as SessionSpec;
@@ -26,9 +27,15 @@ describe('terminalSessionKey', () => {
     expect(terminalSessionKey(a)).toBe(terminalSessionKey(b));
   });
 
-  it('changes when the tmux target changes (rename → resubscribe)', () => {
-    expect(terminalSessionKey(view({ tmuxSession: 'proj-g-web' }))).not.toBe(
-      terminalSessionKey(view({ tmuxSession: 'proj-g-api' }))
+  it('ignores the retired terminal transport alias', () => {
+    expect(terminalSessionKey(view({ tmuxSession: 'legacy-web' }))).toBe(
+      terminalSessionKey(view({ tmuxSession: 'legacy-api' }))
+    );
+  });
+
+  it('changes with the durable terminal session identity', () => {
+    expect(terminalSessionKey(view({ sessionId: 'session-web' }))).not.toBe(
+      terminalSessionKey(view({ sessionId: 'session-api' }))
     );
   });
 

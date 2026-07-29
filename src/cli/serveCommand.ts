@@ -90,24 +90,9 @@ export function parseServeOptions(
   return { mode, host, port };
 }
 
-export function findPackageRoot(fromUrl: string): string {
-  let directory = dirname(fileURLToPath(fromUrl));
-  for (let depth = 0; depth < 8; depth += 1) {
-    if (
-      existsSync(join(directory, 'package.json')) &&
-      (existsSync(join(directory, 'vite.config.ts')) || existsSync(join(directory, 'dist', 'cli', 'main.js')))
-    ) {
-      return directory;
-    }
-
-    const parent = dirname(directory);
-    if (parent === directory) {
-      break;
-    }
-    directory = parent;
-  }
-  throw new Error('cannot locate the desk package root (reinstall desk)');
-}
+// Root resolution lives in shared (the daemon supervisor spawns the
+// same-release CLI entry from it too); re-exported here for CLI callers.
+export { findPackageRoot } from '../shared/packageRoot.js';
 
 export function createServeLaunch(
   root: string,
@@ -140,7 +125,8 @@ export function createServeLaunch(
     env: {
       ...parentEnv,
       DESK_HOST: options.host,
-      DESK_PORT: String(options.port)
+      DESK_PORT: String(options.port),
+      DESK_DAEMON_NODE: nodeExecutable
     },
     label: `desk starting (standalone) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
   };

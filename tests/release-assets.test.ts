@@ -34,11 +34,15 @@ function createRepository(): string {
   mkdirSync(join(root, 'node_modules', 'fixture'), { recursive: true });
   mkdirSync(join(root, 'dist'), { recursive: true });
   mkdirSync(join(root, 'libexec'), { recursive: true });
+  mkdirSync(join(root, 'vendor', 'atch'), { recursive: true });
   writeFileSync(join(root, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
   writeFileSync(join(root, 'README.md'), 'fixture\n');
   writeFileSync(join(root, 'node_modules', 'fixture', 'tracked.txt'), 'exclude\n');
   writeFileSync(join(root, 'dist', 'tracked.txt'), 'exclude\n');
   writeFileSync(join(root, 'libexec', 'desk-standalone'), 'exclude\n');
+  writeFileSync(join(root, 'libexec', 'atch'), 'exclude\n');
+  writeFileSync(join(root, 'vendor', 'atch', 'PROVENANCE.json'), '{}\n');
+  writeFileSync(join(root, 'vendor', 'atch', 'atch.c'), '/* vendored source */\n');
   writeFileSync(
     join(root, 'scripts', 'distribution', 'toolchains.json'),
     readFileSync(new URL('../scripts/distribution/toolchains.json', import.meta.url))
@@ -117,6 +121,8 @@ describe('release asset generation', () => {
 
     const listing = run('tar', ['-tzf', join(first, 'desk-v0.3.0-source.tar.gz')], root);
     expect(listing).toContain('desk-v0.3.0/README.md');
+    expect(listing).toContain('desk-v0.3.0/vendor/atch/PROVENANCE.json');
+    expect(listing).toContain('desk-v0.3.0/vendor/atch/atch.c');
     expect(listing).not.toMatch(/(?:^|\/)(?:\.git|node_modules|dist|libexec)(?:\/|$)/m);
   });
 

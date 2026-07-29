@@ -1,5 +1,5 @@
 /**
- * Pulse-driven liveness patching. The 2s pulse carries the live tmux session
+ * Pulse-driven liveness patching. The 2s pulse carries the live session ID
  * set; this folds it into the existing snapshot WITHOUT replacing object
  * identities that did not change — TerminalSurface keys its socket lifecycle
  * on session identity, so an over-eager rebuild would reconnect every
@@ -15,7 +15,7 @@ export function patchViewLiveness(view: DeskViewModel, running: ReadonlySet<stri
   for (const group of view.groups) {
     let groupChanged = false;
     const sessions = group.sessions.map((session) => {
-      const state: 'running' | 'missing' = running.has(session.spec.tmuxSession) ? 'running' : 'missing';
+      const state: 'running' | 'missing' = running.has(session.spec.sessionId) ? 'running' : 'missing';
       if (state === session.state) {
         return session;
       }

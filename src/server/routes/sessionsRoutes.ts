@@ -1,4 +1,4 @@
-import { statSync, type Stats } from 'node:fs';
+import { readFileSync, statSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import {
   addGroupToProjectManifest,
@@ -27,26 +27,36 @@ import {
 import { buildSessionSpecs, expandHome, sessionSupportsNativeUiMode } from '../../core/manifest.js';
 import {
   killSession,
-  listTmuxSessions,
   loadDesk,
   planDeskUp,
-  restartSession,
-  runPlan,
-  startSession
+  runningSessionSet,
+  runPlan
 } from '../../core/runner.js';
+import {
+  restartSessionNativeAware,
+  retireNativeSession,
+  retireStaleIdentityForEdit,
+  startSessionNativeAware
+} from '../runtime/nativeSessionControl.js';
 import type {
   DeskGroupLayout,
   DeskLayoutKind,
   DeskLayoutSizes,
   DeskManifest,
-  DeskSession,
+  DeskSessionDraft,
   DeskSettings,
   SessionSpec,
-  TmuxPlanAction
+  SessionPlanAction
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
+import { isValidProfileId } from '../../shared/agentProfiles.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
+import {
+  executeClaudeProfileHandoff,
+  isClaudeProfileChange,
+  requiresClaudeProfileHandoff
+} from '../claudeProfileContinuity.js';
 import { shouldRespawnAfterEdit } from '../editRespawn.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
 import type { DeskRoute } from '../plugin.js';
@@ -82,19 +92,36 @@ type StatReader = (path: string) => Stats | undefined;
 
 const uiModeSwitchGuard = createInFlightGuard();
 
+export async function commitManifestIfUnchanged(
+  manifestPath: string,
+  expectedSource: string,
+  next: DeskManifest
+): Promise<void> {
+  await withManifestFileLock(manifestPath, () => {
+    if (readFileSync(manifestPath, 'utf8') !== expectedSource) {
+      throw new Error(
+        'manifest-changed-concurrently: Desk configuration changed while the profile handoff was prepared'
+      );
+    }
+    writeManifestFile(manifestPath, next);
+  });
+}
+
 function scheduleAgentResumeCapture(session: SessionSpec): void {
   scheduleCodexResumeCapture(session);
   scheduleOpencodeResumeCapture(session);
 }
 
-export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSession {
+export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSessionDraft {
   if (!value || typeof value !== 'object') {
     throw new ApiValidationError('session body is required');
   }
   const record = value as Record<string, unknown>;
   const command = readOptionalString(record.command);
   const cwd = options.cwdRequired === false ? readOptionalString(record.cwd) : readRequiredString(record.cwd, 'session.cwd');
-  const session: DeskSession = {
+  // A DRAFT, deliberately without identity: the API body never carries a
+  // sessionId — config is the single allocator/preserver of durable identity.
+  const session: DeskSessionDraft = {
     name: readRequiredString(record.name, 'session.name')
   };
   if (cwd) {
@@ -112,8 +139,21 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
   if (record.bypassPermissions !== undefined) {
     session.bypassPermissions = Boolean(record.bypassPermissions);
   }
+  // Profile selection: validated here so a malformed id never reaches the
+  // manifest, and cross-checked against the agent by manifest validation.
+  // Absent (or an explicit null from "ambient" in the dropdown) means ambient.
+  const profileId = readOptionalString(record.profileId);
+  if (profileId !== undefined) {
+    if (!isValidProfileId(profileId)) {
+      throw new ApiValidationError('session.profileId is not a valid profile id');
+    }
+    session.profileId = profileId;
+  }
 
   if (command) {
+    if (session.profileId !== undefined) {
+      throw new ApiValidationError('session.profileId is not supported for custom-command sessions');
+    }
     if (record.uiMode === 'native') {
       throw new ApiValidationError('session.uiMode native is not supported for custom-command sessions');
     }
@@ -226,12 +266,15 @@ function cwdMatchesResolved(left: string, right: string): boolean {
   return left.replace(/\/+$/, '') === right.replace(/\/+$/, '');
 }
 
-function killSessionTargets(targets: Array<SessionSpec | string>): { ok: boolean; error?: string } {
-  const tmuxSessions = targets.map((target) => (typeof target === 'string' ? target : target.tmuxSession));
-  for (const tmuxSession of [...new Set(tmuxSessions)]) {
-    const killed = killSession(tmuxSession);
-    if (!killed.ok) {
-      return killed;
+export async function killSessionTargets(targets: Array<SessionSpec | string>): Promise<{ ok: boolean; error?: string }> {
+  // A session's atch master is keyed by sessionId; retire via the daemon so a
+  // delete leaves no orphan master. A bare-string target retires best-effort;
+  // retire is idempotent, so an unknown session is a harmless no-op.
+  const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId)))];
+  for (const sessionId of ids) {
+    const retired = await retireNativeSession(sessionId);
+    if (!retired.ok) {
+      return retired;
     }
   }
   return { ok: true };
@@ -290,23 +333,35 @@ export interface ManagedPlanResult {
   error?: string;
 }
 
-export function runManagedPlan(
-  plan: TmuxPlanAction[],
+export async function runManagedPlan(
+  plan: SessionPlanAction[],
   settings: DeskSettings | undefined,
   managedAgentLsp: ManagedAgentLsp,
   nativeAgentLaunch: (spec: SessionSpec, lspEnvFilePath?: string) => SessionSpec,
-  start: typeof startSession = startSession
-): ManagedPlanResult {
+  start: (session: SessionSpec) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }> = startSessionNativeAware
+): Promise<ManagedPlanResult> {
+  // One unstartable session must not strand the fleet. A stale cwd or a
+  // single attach timeout used to abort the whole plan, leaving every later
+  // session down with only the first error surfaced. Attempt them all,
+  // collect the failures, and still fail the call — a partial start is
+  // reported honestly, never as success.
+  const failures: string[] = [];
   for (const action of plan) {
     if (action.type === 'preserve') {
       continue;
     }
     const launch = managedAgentLsp.prepare(action.session, settings);
-    const started = start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
+    const started = await start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
       launch?.cleanup();
-      return { exitCode: 1, error: started.error ?? `tmux start failed for ${action.session.tmuxSession}` };
+      failures.push(`${action.session.sessionId}: ${started.error ?? 'start failed'}`);
     }
+  }
+  if (failures.length > 0) {
+    return {
+      exitCode: 1,
+      error: `${failures.length} session(s) could not start — ${failures.join('; ')}`
+    };
   }
   return { exitCode: 0 };
 }
@@ -321,8 +376,8 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const plan = planDeskUp(desk.sessions);
       const settings = readManifestFile(resolveManifestPath()).settings;
       const result = dryRun
-        ? { exitCode: runPlan(plan, true) }
-        : runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
+        ? { exitCode: await runPlan(plan, true) }
+        : await runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
       const { exitCode } = result;
       if (!dryRun && exitCode === 0) {
         for (const action of plan) {
@@ -337,7 +392,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         actions: plan.map((action) => ({
           type: action.type,
           session: action.session.name,
-          tmuxSession: action.session.tmuxSession
+          sessionId: action.session.sessionId
         }))
       });
       return true;
@@ -350,7 +405,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const session = readDeskSessionBody(body.session);
       let nextSession: SessionSpec | undefined;
       let addError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const next = addSessionToManifest(manifest, {
           groupId,
           groupLabel: readOptionalString(body.groupLabel),
@@ -363,7 +418,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         const launch = managedAgentLsp.prepare(nextSession, next.settings);
-        const started = startSession(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
+        const started = await startSessionNativeAware(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
         if (!started.ok) {
           launch?.cleanup();
           addError = started.error;
@@ -431,7 +486,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const groupId = readRequiredString(body.groupId, 'groupId');
       let nextSession: SessionSpec | undefined;
       let addError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const next = addSessionToProjectManifest(manifest, { projectId, groupId, session });
         nextSession = findSessionForStart(next, { groupId, sessionName: session.name, projectId });
         const cwdValidation = validateSessionCwd(nextSession);
@@ -440,7 +495,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           return null;
         }
         const launch = managedAgentLsp.prepare(nextSession, next.settings);
-        const started = startSession(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
+        const started = await startSessionNativeAware(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
         if (!started.ok) {
           launch?.cleanup();
           addError = started.error;
@@ -478,15 +533,15 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const projectId = readRequiredString(body.projectId, 'projectId');
       const cwd = readOptionalString(body.cwd);
       let deleteError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const targets = collectProjectDeleteSessions(manifest, { projectId, cwd });
-        const killed = killSessionTargets(targets);
+        const killed = await killSessionTargets(targets);
         if (!killed.ok) {
           deleteError = killed.error;
           return null;
         }
         for (const target of targets) {
-          managedAgentLsp.cleanup(target.tmuxSession);
+          managedAgentLsp.cleanup(target.sessionId);
         }
         return deleteProjectFromManifest(manifest, { projectId, cwd });
       });
@@ -522,15 +577,15 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const groupId = readRequiredString(body.groupId, 'groupId');
       const projectCwd = readOptionalString(body.projectCwd);
       let deleteError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
         const targets = collectGroupDeleteSessions(manifest, { projectId, groupId, projectCwd });
-        const killed = killSessionTargets(targets);
+        const killed = await killSessionTargets(targets);
         if (!killed.ok) {
           deleteError = killed.error;
           return null;
         }
         for (const target of targets) {
-          managedAgentLsp.cleanup(target.tmuxSession);
+          managedAgentLsp.cleanup(target.sessionId);
         }
         return deleteGroupFromManifest(manifest, { projectId, groupId, projectCwd });
       });
@@ -553,6 +608,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const findSpec = (specs: SessionSpec[], name: string): SessionSpec | undefined =>
         specs.find((candidate) => candidate.projectId === projectId && candidate.groupId === groupId && candidate.name === name);
       const result = await withManifestFileLock(manifestPath, async () => {
+        const manifestSource = readFileSync(manifestPath, 'utf8');
         const manifest = readManifestFile(manifestPath);
         const oldSpec = findSpec(buildSessionSpecs(manifest, { homeDir: homedir() }), currentName);
         const next = editSessionInManifest(manifest, {
@@ -564,11 +620,44 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           session
         });
         const newSpec = findSpec(buildSessionSpecs(next, { homeDir: homedir() }), session.name);
+        if (
+          oldSpec &&
+          newSpec &&
+          isClaudeProfileChange(oldSpec, newSpec) &&
+          !newSpec.resume &&
+          sessionBody?.clearResume !== true
+        ) {
+          return {
+            updated: null,
+            respawnError:
+              'session edit aborted: continuity-no-resume-id: Claude profile changes require a captured resume id or an explicit fresh start'
+          };
+        }
+        if (oldSpec && newSpec && requiresClaudeProfileHandoff(oldSpec, newSpec)) {
+          return {
+            updated: null,
+            respawnError: undefined,
+            handoff: { manifestSource, manifest, next, oldSpec, newSpec }
+          };
+        }
+        // Fail closed (R2.1): a native edit that changes the session's identity
+        // (possible for a legacy entry without a persisted sessionId) must retire
+        // the master under its OLD identity, BEFORE the manifest edit commits. If
+        // it can't be retired (e.g. daemon down), abort — neither orphan the old
+        // atch master nor desync the manifest against a still-running master.
+        const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
+        if (!staleGuard.ok) {
+          return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };
+        }
+        const wasRunning = oldSpec ? runningSessionSet().has(oldSpec.sessionId) : false;
         writeManifestFile(manifestPath, next);
-        if (shouldRespawnAfterEdit(oldSpec, newSpec, (target) => listTmuxSessions().has(target)) && newSpec) {
-          managedAgentLsp.cleanup(newSpec.tmuxSession);
+        if (
+          shouldRespawnAfterEdit(oldSpec, newSpec, () => wasRunning) &&
+          newSpec
+        ) {
+          managedAgentLsp.cleanup(newSpec.sessionId);
           const launch = managedAgentLsp.prepare(newSpec, next.settings);
-          const restarted = restartSession(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
+          const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? newSpec, launch?.envFilePath));
           if (!restarted.ok) {
             launch?.cleanup();
             return { updated: next, respawnError: `session edit saved but respawn failed: ${restarted.error}` };
@@ -577,8 +666,56 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         }
         return { updated: next, respawnError: undefined };
       });
-      if (result.respawnError) {
-        sendJson(res, 500, { error: result.respawnError });
+      let completed = result;
+      if (result.handoff) {
+        const { manifestSource, manifest, next, oldSpec, newSpec } = result.handoff;
+        const wasRunning = runningSessionSet().has(oldSpec.sessionId);
+        let targetLaunch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
+        let sourceLaunch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
+        const handoff = await executeClaudeProfileHandoff({
+          oldSpec,
+          newSpec,
+          homeDir: homedir(),
+          wasRunning,
+          retire: () => retireNativeSession(oldSpec.sessionId),
+          commit: () =>
+            commitManifestIfUnchanged(manifestPath, manifestSource, next),
+          startTarget: async () => {
+            managedAgentLsp.cleanup(newSpec.sessionId);
+            targetLaunch = managedAgentLsp.prepare(newSpec, next.settings);
+            const started = await startSessionNativeAware(
+              nativeAgentLaunch(
+                targetLaunch?.session ?? newSpec,
+                targetLaunch?.envFilePath
+              )
+            );
+            if (!started.ok) targetLaunch?.cleanup();
+            return started;
+          },
+          restoreSource: async () => {
+            sourceLaunch = managedAgentLsp.prepare(oldSpec, manifest.settings);
+            const restored = await startSessionNativeAware(
+              nativeAgentLaunch(
+                sourceLaunch?.session ?? oldSpec,
+                sourceLaunch?.envFilePath
+              )
+            );
+            if (!restored.ok) sourceLaunch?.cleanup();
+            return restored;
+          }
+        });
+        completed = handoff.ok
+          ? { updated: next, respawnError: undefined }
+          : {
+              updated: handoff.committed ? next : null,
+              respawnError: handoff.committed
+                ? `session edit saved but profile handoff start failed: ${handoff.error}`
+                : `session edit aborted: ${handoff.error}`
+            };
+        if (handoff.ok && wasRunning) scheduleAgentResumeCapture(newSpec);
+      }
+      if (completed.respawnError) {
+        sendJson(res, 500, { error: completed.respawnError });
         return true;
       }
       sendJson(res, 200, buildDeskSnapshot());
@@ -592,27 +729,43 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const groupId = readRequiredString(body.groupId, 'groupId');
       const sessionName = readRequiredString(body.sessionName, 'sessionName');
       const projectCwd = readOptionalString(body.projectCwd);
-      const tmuxSession = readOptionalString(body.tmuxSession);
+      const extraTarget = readOptionalString(body.sessionId);
       let deleteError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, (manifest) => {
-        const targets = collectSessionDeleteTargets(manifest, {
+      const updated = await updateManifestFile(manifestPath, async (manifest) => {
+        const specTargets = collectSessionDeleteTargets(manifest, {
           projectId,
           groupId,
           sessionName,
           projectCwd
-        }).map((candidate) => candidate.tmuxSession);
-        if (tmuxSession && !targets.includes(tmuxSession)) {
-          targets.push(tmuxSession);
+        });
+        const targets = specTargets.map((candidate) => candidate.sessionId);
+        // Retire by SessionSpec; a caller-supplied extra id not among the
+        // specs is retired best-effort.
+        const killTargets: Array<SessionSpec | string> = [...specTargets];
+        if (extraTarget && !targets.includes(extraTarget)) {
+          targets.push(extraTarget);
+          killTargets.push(extraTarget);
         }
-        const killed = killSessionTargets(targets);
+        const killed = await killSessionTargets(killTargets);
         if (!killed.ok) {
           deleteError = killed.error;
           return null;
         }
         for (const target of targets) {
-          managedAgentLsp.cleanup(target);
+          // targets are raw session keys. LSP wiring keys sessionId; broker
+          // rings and tool journals
+          // key by the host's env identity, which is the sessionId for hosts
+          // launched after the DESK_SESSION_ID rename and the legacy name for
+          // ones still running from before it — dispose both (idempotent
+          // no-op for whichever does not exist).
+          const targetId = target;
+          managedAgentLsp.cleanup(targetId);
           agentSurfaceBroker.disposeSession(target);
           deleteToolJournal(target);
+          if (targetId !== target) {
+            agentSurfaceBroker.disposeSession(targetId);
+            deleteToolJournal(targetId);
+          }
         }
         return deleteSessionFromManifest(manifest, { projectId, groupId, sessionName, projectCwd });
       });
@@ -626,15 +779,15 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
 
     if (req.method === 'POST' && url.pathname === '/api/restart-project-session') {
       const body = await readJsonBody(req);
-      const tmuxSession = readRequiredString(body.tmuxSession, 'tmuxSession');
-      const session = loadDesk({}).sessions.find((candidate) => candidate.tmuxSession === tmuxSession);
+      const sessionId = readRequiredString(body.sessionId, 'sessionId');
+      const session = loadDesk({}).sessions.find((candidate) => candidate.sessionId === sessionId);
       if (!session) {
-        sendJson(res, 404, { error: `session ${tmuxSession} does not exist in config` });
+        sendJson(res, 404, { error: `session ${sessionId} does not exist in config` });
         return true;
       }
-      managedAgentLsp.cleanup(session.tmuxSession);
+      managedAgentLsp.cleanup(session.sessionId);
       const launch = managedAgentLsp.prepare(session, readManifestFile(resolveManifestPath()).settings);
-      const restarted = restartSession(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
+      const restarted = await restartSessionNativeAware(nativeAgentLaunch(launch?.session ?? session, launch?.envFilePath));
       if (!restarted.ok) {
         launch?.cleanup();
         sendJson(res, 500, { error: restarted.error });
@@ -647,7 +800,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
 
     if (req.method === 'POST' && url.pathname === '/api/set-session-ui-mode') {
       const body = await readJsonBody(req);
-      const tmuxSession = readRequiredString(body.tmuxSession, 'tmuxSession');
+      const sessionId = readRequiredString(body.sessionId, 'sessionId');
       const uiMode = readRequiredString(body.uiMode, 'uiMode');
       if (uiMode !== 'terminal' && uiMode !== 'native') {
         sendJson(res, 400, { error: 'uiMode must be terminal or native', code: 'ui-mode-invalid' });
@@ -657,7 +810,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       await withManifestFileLock(manifestPath, async () => {
         const manifest = readManifestFile(manifestPath);
         const validated = validateUiModeSwitch(manifest, {
-          tmuxSession,
+          sessionId,
           uiMode,
           confirmDiscard: body.confirmDiscard === true,
           homeDir: homedir()
@@ -670,8 +823,8 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           sendJson(res, 200, buildDeskSnapshot());
           return;
         }
-        if (!uiModeSwitchGuard.begin(tmuxSession)) {
-          sendJson(res, 409, { error: `ui-mode switch already in progress for ${tmuxSession}`, code: 'switch-in-progress' });
+        if (!uiModeSwitchGuard.begin(sessionId)) {
+          sendJson(res, 409, { error: `ui-mode switch already in progress for ${sessionId}`, code: 'switch-in-progress' });
           return;
         }
         try {
@@ -681,11 +834,11 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
             {
               write: (next) => writeManifestFile(manifestPath, next),
               prepare: (spec) => {
-                managedAgentLsp.cleanup(spec.tmuxSession);
+                managedAgentLsp.cleanup(spec.sessionId);
                 launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
                 return nativeAgentLaunch(launch?.session ?? spec, launch?.envFilePath);
               },
-              restart: (spec) => restartSession(spec),
+              restart: (spec) => restartSessionNativeAware(spec),
               scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
             }
           );
@@ -696,7 +849,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           }
           sendJson(res, 200, buildDeskSnapshot());
         } finally {
-          uiModeSwitchGuard.end(tmuxSession);
+          uiModeSwitchGuard.end(sessionId);
         }
       });
       return true;

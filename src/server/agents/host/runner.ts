@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import type {
   AgentHostClientFrame,
@@ -19,11 +20,11 @@ import { createToolJournal, toolJournalPath, type ToolJournal } from './toolJour
 import type { AgentHostEnv } from './types.js';
 
 /**
- * Adapter host runner — the in-tmux process that owns one agent driver and bridges it
+ * Adapter host runner — the session-hosted process that owns one agent driver and bridges it
  * to the desk server's broker over /ws/agent-host.
  *
- * Lifecycle (spec docs/native-ui-mode-spec.md §5):
- *   1. read env (DESK_TMUX_SESSION, DESK_AGENT, DESK_AGENT_RESUME, DESK_AGENT_BYPASS,
+ * Lifecycle:
+ *   1. read env (DESK_SESSION_ID, DESK_AGENT, DESK_AGENT_RESUME, DESK_AGENT_BYPASS,
  *      DESK_SERVER_URL, DESK_AGENT_HOST_TOKEN, optional DESK_AGENT_CWD,
  *      DESK_AGENT_HOST_LOG_LEVEL)
  *   2. print pane banner + structured one-line logs (R5)
@@ -40,7 +41,7 @@ import type { AgentHostEnv } from './types.js';
  *      committed events (N1, glm sign-off msg-20260705-152314)
  *  11. reconnect: bounded-pre-hello (10 attempts, exit nonzero on exhaustion);
  *      unbounded-post-hello with capped backoff (parity: agent outlives server restart)
- *  12. crash-exit cleanly on shutdown / fatal driver error so the tmux pane surfaces it
+ *  12. crash-exit cleanly on shutdown / fatal driver error so the terminal pane surfaces it
  */
 
 const RING_SIZE = 200;
@@ -65,6 +66,8 @@ export interface AgentHostOptions {
   exit?: (code: number) => void;
   /** Override pid (test seam); production uses process.pid. */
   pid?: number;
+  /** Stable for this host process across websocket reconnects. */
+  producerInstanceId?: string;
   /** Override now (test seam); production uses Date.now. */
   now?: () => Date;
   /** Override setTimeout/clearTimeout (test seam). */
@@ -100,6 +103,7 @@ export class AgentHost {
   private readonly createSocketFn: (url: string) => WebSocketLike;
   private readonly exitFn: (code: number) => void;
   private readonly pid: number;
+  private readonly producerInstanceId: string;
   private readonly now: () => Date;
   private readonly scheduler: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
   private readonly signals: NodeJS.Signals[];
@@ -133,10 +137,11 @@ export class AgentHost {
     this.createSocketFn = opts.createSocket ?? ((url) => new WebSocket(url));
     this.exitFn = opts.exit ?? ((code) => process.exit(code));
     this.pid = opts.pid ?? process.pid;
+    this.producerInstanceId = opts.producerInstanceId ?? randomUUID();
     this.now = opts.now ?? (() => new Date());
     this.scheduler = opts.scheduler ?? { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as NodeJS.Timeout) };
     this.signals = opts.signals ?? ['SIGTERM', 'SIGINT'];
-    this.toolJournal = opts.toolJournal ?? createToolJournal({ path: toolJournalPath(opts.env.DESK_TMUX_SESSION) });
+    this.toolJournal = opts.toolJournal ?? createToolJournal({ path: toolJournalPath(opts.env.DESK_SESSION_ID) });
   }
 
   /**
@@ -248,13 +253,15 @@ export class AgentHost {
   private sendHello(): void {
     const frame: AgentHostClientFrame = {
       type: 'hello',
-      session: this.env.DESK_TMUX_SESSION,
+      session: this.env.DESK_SESSION_ID,
       token: this.env.DESK_AGENT_HOST_TOKEN,
       agent: this.env.DESK_AGENT,
-      pid: this.pid
+      pid: this.pid,
+      generation: this.env.DESK_SESSION_GENERATION,
+      producerInstanceId: this.producerInstanceId
     };
     this.sendFrame(frame);
-    this.logger.info(`hello sent session=${this.env.DESK_TMUX_SESSION} agent=${this.env.DESK_AGENT} pid=${this.pid}`);
+    this.logger.info(`hello sent session=${this.env.DESK_SESSION_ID} agent=${this.env.DESK_AGENT} pid=${this.pid}`);
   }
 
   private async runMessageLoop(
@@ -408,7 +415,7 @@ export class AgentHost {
       this.logger.info('driver started');
     } catch (err) {
       this.logger.error(`driver.start failed: ${describeError(err)}`);
-      // start failure is fatal — emit agent-error and exit nonzero so the tmux pane surfaces it
+      // start failure is fatal — emit agent-error and exit nonzero so the terminal pane surfaces it
       this.emitDriverEvent({
         kind: 'agent-error',
         message: describeError(err),

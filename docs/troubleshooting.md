@@ -55,6 +55,22 @@ desk serve --dev
 The development command does not switch to the private Bun runtime when Vite is
 missing.
 
+### Terminals report missing because Desk cannot find `atch`
+
+Desk preflights the atch executable before starting the terminal daemon. It
+logs the failure and keeps non-terminal workspace features available. Resolution
+is `DESK_ATCH_BIN`, same-release `libexec/atch`, then `PATH`, in that order.
+Managed releases and the Docker image include the pinned same-release binary.
+Reinstall or rebuild a missing or corrupt bundle; use an absolute override only
+when intentionally testing another build:
+
+```bash
+DESK_ATCH_BIN=/opt/atch/bin/atch desk serve
+```
+
+Terminal transport fails closed rather than reporting a healthy runtime that
+cannot provision sessions.
+
 ### Startup reports `EMFILE: too many open files`
 
 This is an operating-system watcher limit, not a reason to change server modes.
@@ -100,7 +116,7 @@ Common causes:
 - invalid `cwd`
 - missing agent CLI
 - custom command exits immediately
-- tmux is not installed
+- `atch` is missing or not executable
 
 ### A terminal cell is blank
 
@@ -108,12 +124,11 @@ Check:
 
 ```bash
 desk capture <session-name> --lines 100
-tmux ls
 ```
 
-If capture has output but the browser is blank, inspect terminal broker health
-in [Operations](/operations). If capture is empty, inspect the tmux session
-directly:
+If capture has output but the browser is blank, inspect terminal transport
+health in [Operations](/operations). If capture is empty, attach to the atch
+session directly through Desk:
 
 ```bash
 desk attach <session-name>
@@ -122,9 +137,9 @@ desk attach <session-name>
 ### Scrolling behaves differently for OpenCode
 
 OpenCode is a full-screen TUI. Its conversation scroll lives inside the app,
-not in tmux scrollback like append-style Codex or Claude output. Desk routes
-scroll based on terminal state so full-screen TUIs receive page-scroll keys
-instead of the tmux-backed scrollback overlay.
+not in the daemon's frozen scrollback like append-style Codex or Claude output.
+Desk routes scroll based on terminal state so full-screen TUIs receive
+page-scroll keys instead of the frozen scrollback overlay.
 
 ## Agents
 
@@ -150,7 +165,7 @@ Check the session's `bypassPermissions` value in `desk.yml`.
 - OpenCode receives per-session permission configuration through
   `OPENCODE_CONFIG_CONTENT`.
 
-Restart an already-running pane after changing permission behavior.
+Restart an already-running session after changing permission behavior.
 
 ### Attention events do not appear
 
@@ -252,24 +267,51 @@ on a shared or public interface.
 
 ### Does Desk host my agents?
 
-No. Desk launches local tmux sessions on the host where the server runs.
+No. Desk launches local atch sessions on the host where the server runs.
 
 ### Does Desk store my model credentials?
 
-No. Agent CLIs authenticate through their own configuration.
+Desk never reads, transmits, or proxies them — but with **agent profiles** it
+does own the directory they sit in, so the honest answer depends on how the
+session runs.
+
+- **Without a profile**, the agent CLI authenticates into its own normal
+  location (`~/.claude`, `~/.codex`) and Desk touches nothing.
+- **With a profile**, Desk points the CLI at `~/.config/desk/profiles/<id>`
+  by setting `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. The CLI writes its own
+  credential files (`.credentials.json`, `auth.json`) there. Desk creates the
+  directory `0700` and does not parse what the CLI puts in it.
+
+The practical consequences: those files are as sensitive as the ones in your
+home directory, and **they are not covered by a backup of `~/.claude`** — see
+the backup answer below.
 
 ### Can I run multiple browsers?
 
-Yes, but remember each browser is a view onto the same local tmux and manifest
-state. Coordinate operator actions when multiple people access the same server.
+Yes, but remember each browser is a view onto the same local atch sessions and
+manifest state. Coordinate operator actions when multiple people access the
+same server.
 
 ### Can I edit the manifest by hand?
 
-Yes. Desk uses `~/.config/desk/desk.yml`. Keep YAML valid and run `desk status`
-or reload the UI afterward.
+Yes. Desk uses `~/.config/desk/desk.yml`. Keep YAML valid, preserve each
+session's durable `sessionId`, and run `desk status` or reload the UI afterward.
 
 ### What should I back up?
 
-Back up `~/.config/desk/desk.yml`, `~/.config/desk/channels`, and
-`~/.config/desk/notes` if you care about local configuration, conversations,
-and notes.
+Back up the whole of `~/.config/desk` — that is the simplest correct answer,
+because everything Desk owns lives under it:
+
+| Path | Holds |
+| --- | --- |
+| `desk.yml` | the manifest: projects, groups, sessions, profiles |
+| `channels/` | every conversation, thread, upload, and delivery queue |
+| `notes/` | markdown notes |
+| `profiles/` | **agent credentials** for profiled sessions |
+| `claude/settings.json` | the hook settings Desk hands Claude at launch |
+
+<Warning>
+`profiles/` is the one that hurts to lose. A profiled session authenticates
+*into* its profile directory, so a backup that copies only `desk.yml`,
+`channels`, and `notes` restores a workspace whose agents are all logged out.
+</Warning>

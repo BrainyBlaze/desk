@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getMovedSessionTmux, getProjectDropGroup, getSidebarDropSessionTmux } from '../src/web/sidebarMove';
+import { getMovedSessionId, getProjectDropGroup, getSidebarDropSessionId } from '../src/web/sidebarMove';
 
 describe('sidebar session move helpers', () => {
   it('drops sessions on the first group when a project is the drop target', () => {
@@ -13,9 +13,9 @@ describe('sidebar session move helpers', () => {
     ).toBe('project-a:first');
   });
 
-  it('selects the moved session by its new tmux id after snapshot refresh', () => {
+  it('selects the moved session by its durable id after snapshot refresh', () => {
     expect(
-      getMovedSessionTmux(
+      getMovedSessionId(
         {
           view: {
             projects: [
@@ -23,7 +23,7 @@ describe('sidebar session move helpers', () => {
                 groups: [
                   {
                     id: 'project-b:target',
-                    sessions: [{ spec: { name: 'bash', tmuxSession: 'agentdesk-project-b-target-bash-new' } }]
+                    sessions: [{ spec: { name: 'bash', sessionId: 'session-bash' } }]
                   }
                 ]
               }
@@ -33,12 +33,12 @@ describe('sidebar session move helpers', () => {
         'project-b:target',
         'bash'
       )
-    ).toBe('agentdesk-project-b-target-bash-new');
+    ).toBe('session-bash');
   });
 
   it('reads the dragged session id from native drag data', () => {
     expect(
-      getSidebarDropSessionTmux({
+      getSidebarDropSessionId({
         getData(type: string) {
           return type === 'application/x-desk-session' ? 'agentdesk-source' : '';
         }
@@ -46,7 +46,7 @@ describe('sidebar session move helpers', () => {
     ).toBe('agentdesk-source');
 
     expect(
-      getSidebarDropSessionTmux({
+      getSidebarDropSessionId({
         getData(type: string) {
           return type === 'text/plain' ? 'agentdesk-fallback' : '';
         }

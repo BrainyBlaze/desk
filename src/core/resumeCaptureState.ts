@@ -5,6 +5,16 @@ import { writeFileAtomic } from '../server/fsOps.js';
 import { withFileLockSync } from '../shared/fileLock.js';
 
 export interface PendingResumeCapture {
+  sessionId: string;
+  agent: 'codex' | 'opencode';
+  cwd: string;
+  sinceMs: number;
+  deadlineMs: number;
+  launchResumeId?: string;
+}
+
+/** The pre-migration store shape (tmuxSession-keyed) — the transform's input. */
+export interface LegacyPendingResumeCapture {
   tmuxSession: string;
   agent: 'codex' | 'opencode';
   cwd: string;
@@ -51,15 +61,15 @@ export function upsertPendingResumeCapture(
   options: ResumeCaptureStateOptions = {}
 ): void {
   updatePendingResumeCaptures((captures) => {
-    const updated = captures.filter((entry) => entry.tmuxSession !== capture.tmuxSession);
+    const updated = captures.filter((entry) => entry.sessionId !== capture.sessionId);
     updated.push(capture);
     return updated;
   }, options);
 }
 
-export function removePendingResumeCapture(tmuxSession: string, options: ResumeCaptureStateOptions = {}): void {
+export function removePendingResumeCapture(sessionId: string, options: ResumeCaptureStateOptions = {}): void {
   updatePendingResumeCaptures(
-    (captures) => captures.filter((entry) => entry.tmuxSession !== tmuxSession),
+    (captures) => captures.filter((entry) => entry.sessionId !== sessionId),
     options
   );
 }
@@ -92,10 +102,10 @@ function withFileLockWithParent<T>(options: ResumeCaptureStateOptions, action: (
 }
 
 export function findPendingResumeCapture(
-  tmuxSession: string,
+  sessionId: string,
   options: ResumeCaptureStateOptions = {}
 ): PendingResumeCapture | undefined {
-  return readPendingResumeCaptures(options).find((entry) => entry.tmuxSession === tmuxSession);
+  return readPendingResumeCaptures(options).find((entry) => entry.sessionId === sessionId);
 }
 
 export function writePendingResumeCaptures(
@@ -114,13 +124,55 @@ export function clearPendingResumeCaptures(options: ResumeCaptureStateOptions = 
   }
 }
 
+/**
+ * §10 store transform (cutover 3a): the post-cutover pending-capture record,
+ * keyed by the durable sessionId. ADDITIVE — the runtime keeps reading the
+ * legacy shape until the migration gate has committed (3b flips the readers).
+ */
+/** @deprecated the migrated shape IS the canonical PendingResumeCapture. */
+export type MigratedPendingResumeCapture = PendingResumeCapture;
+
+export interface ResumeCaptureStoreMigration {
+  items: PendingResumeCapture[];
+  /** Entries whose tmuxSession has no sessionId (session gone from the manifest) — reported, never silently lost. */
+  dropped: LegacyPendingResumeCapture[];
+}
+
+/** Re-key the pending-capture store via the canonical tmuxSession→sessionId map. Pure. */
+export function migrateResumeCaptureStore(
+  items: readonly LegacyPendingResumeCapture[],
+  tmuxToSessionId: ReadonlyMap<string, string>
+): ResumeCaptureStoreMigration {
+  const migrated: PendingResumeCapture[] = [];
+  const dropped: LegacyPendingResumeCapture[] = [];
+  for (const item of items) {
+    const sessionId = tmuxToSessionId.get(item.tmuxSession);
+    if (sessionId === undefined) {
+      dropped.push(item);
+      continue;
+    }
+    const out: PendingResumeCapture = {
+      sessionId,
+      agent: item.agent,
+      cwd: item.cwd,
+      sinceMs: item.sinceMs,
+      deadlineMs: item.deadlineMs
+    };
+    if (item.launchResumeId !== undefined) {
+      out.launchResumeId = item.launchResumeId;
+    }
+    migrated.push(out);
+  }
+  return { items: migrated, dropped };
+}
+
 function isPendingResumeCapture(value: unknown): value is PendingResumeCapture {
   if (!value || typeof value !== 'object') {
     return false;
   }
   const record = value as Record<string, unknown>;
   return (
-    typeof record.tmuxSession === 'string' &&
+    typeof record.sessionId === 'string' &&
     (record.agent === 'codex' || record.agent === 'opencode') &&
     typeof record.cwd === 'string' &&
     typeof record.sinceMs === 'number' &&

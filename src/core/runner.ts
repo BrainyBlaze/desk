@@ -1,43 +1,44 @@
-import { spawnSync } from 'node:child_process';
-import { shellQuote } from '../shared/shell.js';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { daemonControl, type DaemonControlResult } from '../shared/daemonControlClient.js';
+import { atchCommandFor as buildAtchCommand } from '../shared/atchCommand.js';
+import { resolveAtchBinPath, resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
-import { createCaptureArgv, createKillSessionArgv, createStartSessionArgv } from './tmux.js';
-import { resolveSessionUiMode } from './manifest.js';
-import type { SessionSpec, TmuxPlanAction } from './types.js';
-
-/**
- * Human-readable message when a `spawnSync('tmux', …)` never actually ran the
- * process (produced no exit status) — most commonly tmux missing from PATH,
- * which yields `{ status: null, error: ENOENT, stdout/stderr: undefined }`.
- * Returns undefined when tmux ran. Callers must check this BEFORE touching
- * `result.stderr` (undefined on this path → `.trim()` throws) and must not treat
- * `status ?? 0` as success. Returned message tells the user tmux is missing
- * instead of failing silently or with a cryptic TypeError.
- */
-export function tmuxSpawnError(result: { error?: Error }): string | undefined {
-  if (!result.error) {
-    return undefined;
-  }
-  const code = (result.error as NodeJS.ErrnoException).code;
-  return code === 'ENOENT'
-    ? 'tmux not found — is it installed and on your PATH?'
-    : `tmux could not run: ${result.error.message}`;
-}
 import { ensureOpencodeConfigDir } from './opencodeConfig.js';
 import { findOpencodeLaunchResume } from './opencodeResume.js';
 import { upsertPendingResumeCapture } from './resumeCaptureState.js';
+import type { SessionPlanAction, SessionSpec } from './types.js';
+import { shellQuote } from '../shared/shell.js';
+import { sessionStateSubjectFor } from '../shared/controlPlane/index.js';
+import {
+  claudeContinuityDescriptorFor,
+  claudeProfileMemoryDescriptorFor
+} from '../shared/claudeContinuityDescriptor.js';
+
+export { atchCommandFor } from '../shared/atchCommand.js';
 
 export interface LoadDeskOptions {
   manifestPath?: string;
-  namespace?: string;
 }
 
 export interface LoadedDesk {
   manifestPath: string;
   sessions: SessionSpec[];
+}
+
+export type RunnerControl = (path: string, payload: unknown) => Promise<DaemonControlResult>;
+
+export interface RunnerLifecycleOptions {
+  env?: NodeJS.ProcessEnv;
+  control?: RunnerControl;
+  probeSession?: (socketPath: string) => boolean;
+  spawn?: typeof spawnSync;
+  atchBinPath?: string;
+  fromUrl?: string;
+  cwd?: string;
 }
 
 const RESUME_CAPTURE_CLOCK_SKEW_MS = 3_000;
@@ -47,8 +48,7 @@ export function loadDesk(options: LoadDeskOptions): LoadedDesk {
   const manifestPath = resolveManifestPath(options.manifestPath);
   const manifest = readManifestFile(manifestPath);
   const sessions = buildSessionSpecs(manifest, {
-    homeDir: homedir(),
-    namespace: options.namespace
+    homeDir: homedir()
   });
 
   return { manifestPath, sessions };
@@ -56,23 +56,14 @@ export function loadDesk(options: LoadDeskOptions): LoadedDesk {
 
 let deskCache: { path: string; mtimeMs: number; loaded: LoadedDesk } | null = null;
 
-/**
- * Manifest-mtime-cached loadDesk for hot paths (every websocket connect parsed
- * + rebuilt the whole manifest). Namespaced loads bypass the cache — they are
- * rare and the cache holds a single default-namespace entry. The fs watcher and
- * the settings POST both rewrite the manifest, bumping its mtime, so the cache
- * self-invalidates on any real change.
- */
+/** Manifest-mtime-cached load for hot read paths. */
 export function loadDeskCached(options: LoadDeskOptions = {}): LoadedDesk {
-  if (options.namespace) {
-    return loadDesk(options);
-  }
   const manifestPath = resolveManifestPath(options.manifestPath);
   let mtimeMs = 0;
   try {
     mtimeMs = statSync(manifestPath).mtimeMs;
   } catch {
-    // missing manifest: fall through to a live load (which handles absence)
+    // A live load below owns the missing-manifest diagnostic.
   }
   if (deskCache && deskCache.path === manifestPath && deskCache.mtimeMs === mtimeMs) {
     return deskCache.loaded;
@@ -82,155 +73,174 @@ export function loadDeskCached(options: LoadDeskOptions = {}): LoadedDesk {
   return loaded;
 }
 
-export function listTmuxSessions(): Set<string> {
-  const result = queryTmuxSessions();
-  return result.ok ? result.sessions : new Set();
+function socketPath(sessionId: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(resolveAtchSocketRoot(env), `${sessionId}.sock`);
 }
 
-type TmuxSessionQuery = { ok: true; sessions: Set<string> } | { ok: false; error: string };
-
-function queryTmuxSessions(): TmuxSessionQuery {
-  const result = spawnSync('tmux', ['list-sessions', '-F', '#S'], {
-    encoding: 'utf8'
-  });
-
-  const spawnError = tmuxSpawnError(result);
-  if (spawnError) {
-    return { ok: false, error: spawnError };
+/** Running sessions keyed only by durable sessionId. */
+export function runningSessionSet(
+  sessions: readonly SessionSpec[] = loadDeskCached().sessions,
+  options: RunnerLifecycleOptions = {}
+): Set<string> {
+  const probeSession = sessionProbeFor(options);
+  const running = new Set<string>();
+  if (!probeSession) {
+    return running;
   }
-  if (result.status === null) {
-    return { ok: false, error: 'tmux could not run' };
+  for (const session of sessions) {
+    if (probeSession(socketPath(session.sessionId, options.env))) {
+      running.add(session.sessionId);
+    }
   }
-  if (result.status !== 0) {
-    return { ok: true, sessions: new Set() };
-  }
+  return running;
+}
 
-  return {
-    ok: true,
-    sessions: new Set(
-      result.stdout
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
-    )
+function sessionProbeFor(options: RunnerLifecycleOptions): ((socketPath: string) => boolean) | undefined {
+  if (options.probeSession) {
+    return options.probeSession;
+  }
+  const env = options.env ?? process.env;
+  let atchBin: string;
+  try {
+    atchBin = options.atchBinPath ?? resolveAtchBinPath(options.fromUrl ?? import.meta.url, env, options.cwd);
+  } catch {
+    return undefined;
+  }
+  const spawn = options.spawn ?? spawnSync;
+  return (path) => {
+    const result = spawn(atchBin, ['push', path], {
+      env,
+      input: '',
+      stdio: ['pipe', 'ignore', 'ignore']
+    });
+    return !result.error && result.status === 0;
   };
 }
 
-let tmuxSessionsCache: { at: number; sessions: Set<string> } | null = null;
-const TMUX_SESSIONS_TTL_MS = 1000;
-
-/**
- * Short-TTL cache over `listTmuxSessions` for read-only hot paths (the 2s pulse
- * and the per-websocket-connect liveness gate). A killed/booted session reflects
- * within one TTL, except boot/kill explicitly invalidate so an intentional
- * mutation shows immediately. Correctness-critical callers (planDeskUp,
- * start/kill) keep the uncached list.
- */
-export function listTmuxSessionsCached(now = Date.now()): Set<string> {
-  if (tmuxSessionsCache && now - tmuxSessionsCache.at < TMUX_SESSIONS_TTL_MS) {
-    return tmuxSessionsCache.sessions;
-  }
-  const sessions = listTmuxSessions();
-  tmuxSessionsCache = { at: now, sessions };
-  return sessions;
-}
-
-export function invalidateTmuxSessionsCache(): void {
-  tmuxSessionsCache = null;
-}
-
-export function planDeskUp(sessions: SessionSpec[]): TmuxPlanAction[] {
-  const existingSessions = listTmuxSessions();
+export function planDeskUp(
+  sessions: SessionSpec[],
+  options: RunnerLifecycleOptions = {}
+): SessionPlanAction[] {
+  const existing = runningSessionSet(sessions, options);
   return sessions.map((session) => {
-    if (existingSessions.has(session.tmuxSession)) {
-      return {
-        type: 'preserve',
-        session,
-        argv: []
-      };
+    if (existing.has(session.sessionId)) {
+      return { type: 'preserve', session };
     }
     const launch = prepareSessionForLaunchWithMetadata(session);
     return {
       type: 'start',
       session: launch.session,
-      argv: createStartSessionArgv(launch.session),
       opencodeLaunchResumeId: launch.opencodeLaunchResumeId
     };
   });
 }
 
-export function runPlan(plan: TmuxPlanAction[], dryRun: boolean): number {
+function controlFor(options: RunnerLifecycleOptions): RunnerControl {
+  return options.control ?? ((path, payload) => daemonControl(path, payload, { env: options.env }));
+}
+
+function directNativeStartError(session: SessionSpec): string | undefined {
+  if (session.uiMode !== 'native') {
+    return undefined;
+  }
+  return (
+    `session ${session.sessionId} is native-mode and needs a running desk server; ` +
+    'start it through the web control plane after `desk serve`.'
+  );
+}
+
+async function provisionPreparedSession(
+  session: SessionSpec,
+  options: RunnerLifecycleOptions
+): Promise<{ ok: boolean; error?: string }> {
+  const continuity = claudeContinuityDescriptorFor(session);
+  const claudeMemory = claudeProfileMemoryDescriptorFor(session);
+  const result = await controlFor(options)('/control/provision', {
+    sessionId: session.sessionId,
+    command: buildAtchCommand(session),
+    geometry: { rows: 24, cols: 80 },
+    subject: sessionStateSubjectFor(session),
+    ...(continuity ? { continuity } : {}),
+    ...(claudeMemory ? { claudeMemory } : {})
+  });
+  return result.ok ? { ok: true } : { ok: false, error: result.error };
+}
+
+export async function runPlan(
+  plan: SessionPlanAction[],
+  dryRun: boolean,
+  options: RunnerLifecycleOptions = {}
+): Promise<number> {
+  // One unstartable session must not strand the rest of the fleet: a single
+  // stale cwd used to abort the whole plan, leaving dozens of healthy
+  // sessions down with only the first error reported. Every action is
+  // attempted; failures are collected and reported together, and the exit
+  // code still fails (never a silent partial success).
+  const failures: string[] = [];
   for (const action of plan) {
     printPlanAction(action);
     if (dryRun || action.type === 'preserve') {
       continue;
     }
 
-    // Native-mode sessions run `exec desk agent-host`, which needs env the
-    // running desk server injects at spawn (DESK_SERVER_URL, host token). The
-    // bare CLI can't provide it, so the pane would exec, throw, and exit at once
-    // — which used to leave `desk up` printing "start" and exiting 0 while the
-    // session was already gone. Refuse up front with a clear pointer instead of
-    // booting into silent death. (Terminal/bash/command sessions are fine.)
-    if (resolveSessionUiMode(action.session) === 'native') {
-      console.error(
-        `session ${action.session.tmuxSession} is native-mode and needs a running desk server; ` +
-          'start it with `desk serve` instead of `desk up`.'
-      );
-      return 1;
+    // The CLI has no agent-host token. Native sessions must be launched by the
+    // web control plane, which enriches the static command before provisioning.
+    const nativeError = directNativeStartError(action.session);
+    if (nativeError) {
+      console.error(nativeError);
+      failures.push(`${action.session.sessionId}: ${nativeError}`);
+      continue;
     }
 
     const prepared = prepareSessionStart(action.session);
     if (!prepared.ok) {
       console.error(prepared.error);
-      return 1;
+      failures.push(`${action.session.sessionId}: ${prepared.error}`);
+      continue;
+    }
+    const result = await provisionPreparedSession(action.session, options);
+    if (!result.ok) {
+      const error = result.error ?? `atch provision failed for ${action.session.sessionId}`;
+      console.error(error);
+      failures.push(`${action.session.sessionId}: ${error}`);
+      continue;
     }
     const pendingCapture = pendingCaptureForLaunch(action.session, action.opencodeLaunchResumeId);
-    const result = spawnSync('tmux', action.argv, {
-      stdio: 'inherit'
-    });
-    const spawnErr = tmuxSpawnError(result);
-    if (spawnErr) {
-      console.error(spawnErr);
-      return 1;
-    }
-    if (result.status !== 0) {
-      return result.status ?? 1;
-    }
     if (pendingCapture) {
       upsertPendingResumeCapture(pendingCapture);
     }
   }
-
+  if (failures.length > 0) {
+    console.error(`${failures.length} session(s) could not start:\n  ${failures.join('\n  ')}`);
+    return 1;
+  }
   return 0;
 }
 
-export function startSession(session: SessionSpec): { ok: boolean; error?: string } {
-  if (listTmuxSessions().has(session.tmuxSession)) {
+export async function startSession(
+  session: SessionSpec,
+  options: RunnerLifecycleOptions = {}
+): Promise<{ ok: boolean; error?: string }> {
+  if (runningSessionSet([session], options).has(session.sessionId)) {
     return { ok: true };
+  }
+  const nativeError = directNativeStartError(session);
+  if (nativeError) {
+    return { ok: false, error: nativeError };
   }
   const preparedStart = prepareSessionStart(session);
   if (!preparedStart.ok) {
     return preparedStart;
   }
   const launch = prepareSessionForLaunchWithMetadata(session);
+  const result = await provisionPreparedSession(launch.session, options);
+  if (!result.ok) {
+    return result;
+  }
   const pendingCapture = pendingCaptureForLaunch(launch.session, launch.opencodeLaunchResumeId);
-  const result = spawnSync('tmux', createStartSessionArgv(launch.session), { encoding: 'utf8' });
-  const spawnErr = tmuxSpawnError(result);
-  if (spawnErr) {
-    return { ok: false, error: spawnErr };
-  }
-  if (result.status !== 0) {
-    return { ok: false, error: (result.stderr ?? '').trim() || `tmux start failed for ${session.tmuxSession}` };
-  }
-  if (!listTmuxSessions().has(session.tmuxSession)) {
-    return { ok: false, error: `tmux session exited during startup for ${session.tmuxSession}` };
-  }
-  applyTmuxSessionSettings(session.tmuxSession);
   if (pendingCapture) {
     upsertPendingResumeCapture(pendingCapture);
   }
-  invalidateTmuxSessionsCache(); // a freshly booted session must show this tick
   return { ok: true };
 }
 
@@ -259,13 +269,8 @@ export function prepareSessionForLaunchWithMetadata(
   if (session.customCommand || session.agent !== 'opencode' || session.resume) {
     return { session };
   }
-  // BUG-7 fix: skip the auto-resume heuristic for native-mode sessions. Native mode
-  // has explicit resume-id capture via session-info → persistSessionResume (broker
-  // harvests the id and writes it to the manifest). The heuristic is redundant for
-  // native mode and DANGEROUS on delete+recreate: a stale opencode session in the same
-  // cwd gets silently resumed, leaking the deleted conversation into the new agent.
-  // Terminal mode keeps the heuristic (it's the existing "restart picks up where you
-  // left off" UX).
+  // Native mode persists explicit resume ids through the agent surface. The
+  // terminal heuristic would risk resurrecting an unrelated deleted session.
   if (session.uiMode === 'native') {
     return { session };
   }
@@ -297,7 +302,7 @@ function prepareSessionStart(session: SessionSpec): { ok: true } | { ok: false; 
   } catch (error) {
     return {
       ok: false,
-      error: `failed to prepare opencode config for ${session.tmuxSession}: ${error instanceof Error ? error.message : String(error)}`
+      error: `failed to prepare opencode config for ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`
     };
   }
 }
@@ -308,7 +313,7 @@ function pendingCaptureForLaunch(session: SessionSpec, launchResumeId?: string) 
   }
   const now = Date.now();
   return {
-    tmuxSession: session.tmuxSession,
+    sessionId: session.sessionId,
     agent: 'opencode' as const,
     cwd: session.cwd,
     sinceMs: now - RESUME_CAPTURE_CLOCK_SKEW_MS,
@@ -317,67 +322,87 @@ function pendingCaptureForLaunch(session: SessionSpec, launchResumeId?: string) 
   };
 }
 
-/**
- * Per-session tmux options from manifest settings, applied at launch. With
- * `settings.tmux.statusLine: off` the desk-owned session drops tmux's status
- * line — every cell already names its session in the tab and the topbar has
- * the clock, so the green bar is duplicated chrome costing one terminal row
- * per cell. Default keeps tmux's own default (status on) for people who also
- * `tmux attach` from a real terminal.
- */
-function applyTmuxSessionSettings(tmuxSession: string): void {
-  try {
-    const statusLine = readManifestFile(resolveManifestPath()).settings?.tmux?.statusLine;
-    // YAML parses a bare `off` as boolean false — accept both spellings.
-    if (statusLine === 'off' || statusLine === false) {
-      spawnSync('tmux', ['set-option', '-t', tmuxSession, 'status', 'off'], { encoding: 'utf8' });
-    }
-  } catch {
-    // launch must not fail over a cosmetic option
-  }
+export async function killSession(
+  sessionId: string,
+  options: RunnerLifecycleOptions = {}
+): Promise<{ ok: boolean; error?: string }> {
+  const result = await controlFor(options)('/control/retire', { sessionId });
+  return result.ok ? { ok: true } : { ok: false, error: result.error };
 }
 
-export function killSession(tmuxSession: string): { ok: boolean; error?: string } {
-  if (!listTmuxSessions().has(tmuxSession)) {
-    return { ok: true };
+export async function restartSession(
+  session: SessionSpec,
+  options: RunnerLifecycleOptions = {}
+): Promise<{ ok: boolean; error?: string }> {
+  const nativeError = directNativeStartError(session);
+  if (nativeError) {
+    return { ok: false, error: nativeError };
   }
-  const result = spawnSync('tmux', createKillSessionArgv(tmuxSession), { encoding: 'utf8' });
-  const spawnErr = tmuxSpawnError(result);
-  if (spawnErr) {
-    return { ok: false, error: spawnErr };
+  const retired = await killSession(session.sessionId, options);
+  if (!retired.ok) {
+    return retired;
   }
-  if (result.status !== 0) {
-    return { ok: false, error: (result.stderr ?? '').trim() || `tmux kill failed for ${tmuxSession}` };
-  }
-  invalidateTmuxSessionsCache(); // a killed session must flip to MISSING this tick
-  return { ok: true };
+  return startSession(session, options);
 }
 
-export function restartSession(session: SessionSpec): { ok: boolean; error?: string } {
-  const killed = killSession(session.tmuxSession);
-  if (!killed.ok) {
-    return killed;
-  }
-  return startSession(session);
-}
-
-export function captureSession(session: SessionSpec, lines: number): number {
-  const result = spawnSync('tmux', createCaptureArgv(session.tmuxSession, lines), {
-    encoding: 'utf8'
+export async function captureSession(
+  session: SessionSpec,
+  lines: number,
+  options: RunnerLifecycleOptions = {}
+): Promise<number> {
+  const result = await controlFor(options)('/control/tail', {
+    sessionId: session.sessionId,
+    rows: lines,
+    offset: 0
   });
+  if (!result.ok) {
+    process.stderr.write(`${result.error ?? `capture failed for ${session.sessionId}`}\n`);
+    return 1;
+  }
+  const output = result.body?.lines;
+  if (!Array.isArray(output) || !output.every((line) => typeof line === 'string')) {
+    process.stderr.write(`terminal daemon returned invalid capture data for ${session.sessionId}\n`);
+    return 1;
+  }
+  if (output.length > 0) {
+    process.stdout.write(`${output.join('\n')}\n`);
+  }
+  return 0;
+}
 
-  const spawnErr = tmuxSpawnError(result);
-  if (spawnErr) {
-    process.stderr.write(`${spawnErr}\n`);
-    return 1; // never report success (exit 0) when tmux never ran
+function spawnFailure(result: Pick<SpawnSyncReturns<Buffer>, 'error'>, executable: string): string | undefined {
+  if (!result.error) {
+    return undefined;
   }
-  if (result.stdout) {
-    process.stdout.write(result.stdout);
-  }
-  if (result.stderr) {
-    process.stderr.write(result.stderr);
-  }
+  const code = (result.error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT'
+    ? `${executable} not found or no longer executable`
+    : `${executable} could not run: ${result.error.message}`;
+}
 
+export async function attachSession(
+  session: SessionSpec,
+  options: RunnerLifecycleOptions = {}
+): Promise<number> {
+  const env = options.env ?? process.env;
+  const atchBin = options.atchBinPath ?? resolveAtchBinPath(options.fromUrl ?? import.meta.url, env, options.cwd);
+  const observed = await controlFor(options)('/control/tail', {
+    sessionId: session.sessionId,
+    rows: 1,
+    offset: 0
+  });
+  if (!observed.ok) {
+    throw new Error(observed.error ?? `session ${session.sessionId} is not available through the terminal daemon`);
+  }
+  const spawn = options.spawn ?? spawnSync;
+  const result = spawn(atchBin, ['attach', socketPath(session.sessionId, env)], {
+    stdio: 'inherit',
+    env
+  });
+  const failure = spawnFailure(result, atchBin);
+  if (failure) {
+    throw new Error(failure);
+  }
   return result.status ?? 1;
 }
 
@@ -385,13 +410,13 @@ export function findSession(sessions: SessionSpec[], query: string): SessionSpec
   const matches = sessions.filter(
     (session) =>
       session.name === query ||
-      session.tmuxSession === query ||
+      session.sessionId === query ||
       session.resume === query ||
-      session.tmuxSession.includes(query)
+      session.sessionId.includes(query)
   );
 
   if (matches.length === 1) {
-    return matches[0];
+    return matches[0]!;
   }
   if (matches.length === 0) {
     throw new Error(`no session matches ${query}`);
@@ -399,27 +424,23 @@ export function findSession(sessions: SessionSpec[], query: string): SessionSpec
   throw new Error(`multiple sessions match ${query}: ${matches.map((session) => session.name).join(', ')}`);
 }
 
-export function printStatus(sessions: SessionSpec[]): void {
-  const result = queryTmuxSessions();
-  if (!result.ok) {
-    throw new Error(result.error);
-  }
-  const existing = result.sessions;
+export function printStatus(
+  sessions: SessionSpec[],
+  options: RunnerLifecycleOptions = {}
+): void {
+  const existing = runningSessionSet(sessions, options);
   for (const session of sessions) {
-    const state = existing.has(session.tmuxSession) ? 'running' : 'missing';
-    console.log(`${state.padEnd(8)} ${session.groupId.padEnd(8)} ${session.name.padEnd(18)} ${session.tmuxSession}`);
+    const state = existing.has(session.sessionId) ? 'running' : 'missing';
+    console.log(`${state.padEnd(8)} ${session.groupId.padEnd(8)} ${session.name.padEnd(18)} ${session.sessionId}`);
   }
 }
 
-function printPlanAction(action: TmuxPlanAction): void {
+function printPlanAction(action: SessionPlanAction): void {
   if (action.type === 'preserve') {
-    console.log(`preserve ${action.session.tmuxSession}`);
+    console.log(`preserve ${action.session.sessionId}`);
     return;
   }
-
-  console.log(`start    ${action.session.tmuxSession}`);
+  console.log(`start    ${action.session.sessionId}`);
   console.log(`         cwd: ${action.session.cwd}`);
   console.log(`         cmd: ${action.session.command}`);
 }
-
-// shellQuote now lives in ../shared/shell.ts (single audited copy).

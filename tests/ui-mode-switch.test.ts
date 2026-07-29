@@ -20,20 +20,20 @@ function manifest(): DeskManifest {
             sessions: [
               {
                 name: 'chat',
+                sessionId: 'chat',
                 agent: 'claude',
                 resume: '00000000-0000-7000-8000-000000000001',
-                uiMode: 'terminal',
-                tmuxSession: 'agentdesk-alpha-main-chat-00000000'
+                uiMode: 'terminal'
               },
-              { name: 'fresh', agent: 'codex', uiMode: 'terminal' },
-              { name: 'shell', agent: 'bash' },
-              { name: 'custom', command: 'htop' },
+              { name: 'fresh', sessionId: 'fresh', agent: 'codex', uiMode: 'terminal' },
+              { name: 'shell', sessionId: 'shell', agent: 'bash' },
+              { name: 'custom', sessionId: 'custom', command: 'htop' },
               {
                 name: 'native-chat',
+                sessionId: 'native-chat',
                 agent: 'opencode',
                 resume: 'ses_12a31855dffeHTCs6tcfOmsddP',
-                uiMode: 'native',
-                tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01'
+                uiMode: 'native'
               }
             ]
           }
@@ -52,9 +52,9 @@ function specFor(name: string): SessionSpec {
 }
 
 describe('validateUiModeSwitch', () => {
-  it('rejects unknown tmux sessions with 404', () => {
+  it('rejects unknown sessions with 404', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-ghost-00000000',
+      sessionId: 'ghost',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -63,7 +63,7 @@ describe('validateUiModeSwitch', () => {
 
   it('rejects native mode for bash sessions with a typed 400', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('shell').tmuxSession,
+      sessionId: specFor('shell').sessionId,
       uiMode: 'native',
       homeDir: HOME
     });
@@ -72,7 +72,7 @@ describe('validateUiModeSwitch', () => {
 
   it('rejects native mode for custom-command sessions with a typed 400', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('custom').tmuxSession,
+      sessionId: specFor('custom').sessionId,
       uiMode: 'native',
       homeDir: HOME
     });
@@ -81,14 +81,14 @@ describe('validateUiModeSwitch', () => {
 
   it('gates switching a session with no captured resume id behind confirmDiscard', () => {
     const blocked = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('fresh').tmuxSession,
+      sessionId: specFor('fresh').sessionId,
       uiMode: 'native',
       homeDir: HOME
     });
     expect(blocked).toMatchObject({ ok: false, status: 409, code: 'resume-not-captured' });
 
     const confirmed = validateUiModeSwitch(manifest(), {
-      tmuxSession: specFor('fresh').tmuxSession,
+      sessionId: specFor('fresh').sessionId,
       uiMode: 'native',
       confirmDiscard: true,
       homeDir: HOME
@@ -98,7 +98,7 @@ describe('validateUiModeSwitch', () => {
 
   it('accepts a resume-captured switch and pins identity while preserving fields', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -111,13 +111,13 @@ describe('validateUiModeSwitch', () => {
       agent: 'claude',
       resume: '00000000-0000-7000-8000-000000000001',
       uiMode: 'native',
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000'
+      sessionId: 'chat'
     });
   });
 
   it('switches native back to terminal by pinning the field so the native default cannot resurrect it', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01',
+      sessionId: 'native-chat',
       uiMode: 'terminal',
       homeDir: HOME
     });
@@ -125,12 +125,12 @@ describe('validateUiModeSwitch', () => {
       throw new Error(`expected ok, got ${result.code}`);
     }
     expect(result.edit.session.uiMode).toBe('terminal');
-    expect(result.edit.session.tmuxSession).toBe('agentdesk-alpha-main-native-chat-pinned01');
+    expect(result.edit.session.sessionId).toBe('native-chat');
   });
 
   it('treats a same-mode switch as a noop', () => {
     const result = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-native-chat-pinned01',
+      sessionId: 'native-chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -150,13 +150,13 @@ describe('createInFlightGuard', () => {
 });
 
 describe('performUiModeSwitch', () => {
-  it('writes the manifest before restarting, restarts exactly once, and keeps the pinned name', async () => {
+  it('writes the manifest before restarting, restarts exactly once, and keeps durable identity', async () => {
     const calls: string[] = [];
     let written: DeskManifest | undefined;
     let restarted: SessionSpec | undefined;
 
     const validated = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -181,17 +181,19 @@ describe('performUiModeSwitch', () => {
 
     expect(result.ok).toBe(true);
     expect(calls).toEqual(['write', 'restart']);
-    expect(restarted?.tmuxSession).toBe('agentdesk-alpha-main-chat-00000000');
+    expect(restarted?.sessionId).toBe('chat');
     expect(restarted?.uiMode).toBe('native');
     const persisted = written?.projects?.[0].groups[0].sessions.find((session) => session.name === 'chat');
     expect(persisted?.uiMode).toBe('native');
-    expect(persisted?.tmuxSession).toBe('agentdesk-alpha-main-chat-00000000');
+    // durable identity preserved; the legacy name key is never written back
+    expect(persisted?.sessionId).toBe('chat');
+    expect(persisted).not.toHaveProperty('tmuxSession');
   });
 
   it('propagates restart failures as a typed 500 without retrying', async () => {
     let restartCalls = 0;
     const validated = validateUiModeSwitch(manifest(), {
-      tmuxSession: 'agentdesk-alpha-main-chat-00000000',
+      sessionId: 'chat',
       uiMode: 'native',
       homeDir: HOME
     });
@@ -212,5 +214,54 @@ describe('performUiModeSwitch', () => {
 
     expect(restartCalls).toBe(1);
     expect(result).toMatchObject({ ok: false, status: 500, error: 'tmux exploded' });
+  });
+
+  it('awaits an async (native daemon) restart before reporting success', async () => {
+    const order: string[] = [];
+    const validated = validateUiModeSwitch(manifest(), {
+      sessionId: 'chat',
+      uiMode: 'native',
+      homeDir: HOME
+    });
+    if (!validated.ok || validated.noop) {
+      throw new Error('expected an actionable switch');
+    }
+
+    const result = await performUiModeSwitch(
+      { manifest: manifest(), validated, homeDir: HOME },
+      {
+        write: () => undefined,
+        restart: async () => {
+          order.push('restart-start');
+          await Promise.resolve();
+          order.push('restart-resolved');
+          return { ok: true };
+        },
+        scheduleCapture: () => order.push('capture')
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    // capture runs only after the async restart fully resolved
+    expect(order).toEqual(['restart-start', 'restart-resolved', 'capture']);
+  });
+
+  it('propagates an async restart failure as a typed 500', async () => {
+    const validated = validateUiModeSwitch(manifest(), {
+      sessionId: 'chat',
+      uiMode: 'native',
+      homeDir: HOME
+    });
+    if (!validated.ok || validated.noop) {
+      throw new Error('expected an actionable switch');
+    }
+    const result = await performUiModeSwitch(
+      { manifest: manifest(), validated, homeDir: HOME },
+      {
+        write: () => undefined,
+        restart: () => Promise.resolve({ ok: false, error: 'daemon unreachable' })
+      }
+    );
+    expect(result).toMatchObject({ ok: false, status: 500, error: 'daemon unreachable' });
   });
 });

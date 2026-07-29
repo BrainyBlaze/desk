@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { AgentSurfaceBroker, installAgentSurfaceBroker, type AttentionSink } from '../../src/server/agentSurfaceBroker';
+import { AgentSurfaceBroker, installAgentSurfaceBroker } from '../../src/server/agentSurfaceBroker';
 import {
   deriveAgentHostToken,
   getOrCreateAgentHostSecret
@@ -19,12 +19,6 @@ import type { AgentHostServerFrame, AgentUiServerFrame } from '../../src/core/ag
  */
 
 const SECRET = getOrCreateAgentHostSecret();
-const NOOP_ATTENTION: AttentionSink = {
-  pushEvent: () => undefined,
-  notifySignal: () => undefined,
-  raise: () => undefined
-};
-
 function tokenFor(session: string, agent: string): string {
   return deriveAgentHostToken(SECRET, session, agent);
 }
@@ -82,7 +76,10 @@ async function startStack(): Promise<{
     s.listen(0, '127.0.0.1', () => resolve(s));
   });
   const addr = httpServer.address() as { port: number };
-  const broker = new AgentSurfaceBroker({ resolveSecret: () => SECRET, attention: NOOP_ATTENTION });
+  const broker = new AgentSurfaceBroker({
+    resolveSecret: () => SECRET,
+    publishAgentState: () => undefined
+  });
   const dispose = installAgentSurfaceBroker(httpServer as never, broker);
   return {
     broker,
@@ -106,7 +103,15 @@ async function startStack(): Promise<{
  * protocol layer without spawning a real agent.
  */
 async function attachFakeDriverHost(host: TestPeer, session: string, agent: string, pid: number): Promise<void> {
-  host.send({ type: 'hello', session, agent, token: tokenFor(session, agent), pid });
+  host.send({
+    type: 'hello',
+    session,
+    agent,
+    token: tokenFor(session, agent),
+    pid,
+    generation: 1,
+    producerInstanceId: `native-${session}-${pid}`
+  });
   await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
   let seq = 0;
   host.ws.on('message', (raw) => {

@@ -1,53 +1,74 @@
-import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { resolveAtchSocketRoot } from '../shared/atchPaths.js';
 import { readManifestFile, resolveManifestPath } from '../core/config.js';
 import { buildSessionSpecs, parseDeskManifest } from '../core/manifest.js';
-import { listTmuxSessions } from '../core/runner.js';
+import {
+  readClaudeContinuityStatus,
+  type ClaudeContinuityStatus
+} from './claudeContinuityStatus.js';
+
 import { buildDeskViewModel } from '../ui/model.js';
 import type { DeskGroupSeed, DeskProjectSeed, DeskViewModel } from '../ui/model.js';
-import type { DeskManifest } from '../core/types.js';
+import type { DeskManifest, SessionSpec } from '../core/types.js';
+
+/** The running set, keyed by durable sessionId (atch socket probe). */
+function runningSessionsFor(sessions: readonly SessionSpec[]): Set<string> {
+  const socketRoot = resolveAtchSocketRoot();
+  const running = new Set<string>();
+  for (const session of sessions) {
+    if (existsSync(join(socketRoot, `${session.sessionId}.sock`))) {
+      running.add(session.sessionId);
+    }
+  }
+  return running;
+}
 
 export interface BuildDeskSnapshotOptions {
   homeDir?: string;
   manifestPath?: string;
-  namespace?: string;
 }
 
 export interface DeskSnapshot {
   configPath: string;
   view: DeskViewModel;
+  continuity: ClaudeContinuityStatus;
   generatedAt: string;
 }
 
 export function buildDeskSnapshot(options: BuildDeskSnapshotOptions = {}): DeskSnapshot {
   const manifestPath = resolveManifestPath(options.manifestPath);
   const manifest = readManifestFile(manifestPath);
+  const homeDir = options.homeDir ?? homedir();
   const sessions = buildSessionSpecs(manifest, {
-    homeDir: options.homeDir ?? homedir(),
-    namespace: options.namespace
+    homeDir
   });
 
   return {
     configPath: manifestPath,
-    view: buildDeskViewModel(sessions, listTmuxSessions(), buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    view: buildDeskViewModel(sessions, runningSessionsFor(sessions), buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    continuity: readClaudeContinuityStatus(sessions, { homeDir }),
     generatedAt: new Date().toISOString()
   };
 }
 
 export function buildDeskSnapshotFromManifest(
   source: string,
-  runningTmuxSessions: Set<string>,
+  runningSessions: Set<string>,
   options: BuildDeskSnapshotOptions = {}
 ): DeskSnapshot {
   const manifestPath = resolveManifestPath(options.manifestPath);
   const manifest = parseDeskManifest(source);
+  const homeDir = options.homeDir ?? homedir();
   const sessions = buildSessionSpecs(manifest, {
-    homeDir: options.homeDir ?? homedir(),
-    namespace: options.namespace
+    homeDir
   });
 
   return {
     configPath: manifestPath,
-    view: buildDeskViewModel(sessions, runningTmuxSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    continuity: readClaudeContinuityStatus(sessions, { homeDir }),
     generatedAt: new Date().toISOString()
   };
 }

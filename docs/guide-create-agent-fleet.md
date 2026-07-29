@@ -50,6 +50,12 @@ Hover a group row and click **Add session**:
 </Frame>
 
 - **Agent** — `codex`, `claude`, `opencode`, `bash`, or a custom command.
+- **Profile** — which provider account the session runs under, for agents that
+  support it. `Ambient account` uses whatever the CLI is already logged into;
+  pick a named profile to run this session under a specific account. The **+**
+  beside the picker creates one without losing what you have typed here.
+- **UI mode** — `terminal` (the CLI's own TUI, the default) or `native` (Desk's
+  chat surface, marked experimental).
 - **Bypass permissions** — for agent CLIs that support it, launches the
   session with the agent's permission prompts disabled. Leave it off for
   agents you want to approve actions interactively.
@@ -59,14 +65,18 @@ Hover a group row and click **Add session**:
 - **CWD** — inherited from the project unless you override it per session.
 
 <Note>
-Authenticate agent CLIs once in a normal terminal before adding them —
-Desk attaches to already-authenticated tools.
+Sign each agent CLI in once before adding sessions. **Where** you sign in
+depends on the session: one on the ambient account authenticates in a normal
+terminal, while a session on a named profile signs in *inside that profile* —
+the CLI writes its credentials to the profile's own directory, so an ambient
+login does not carry over. See
+[agent profiles](/configuration#agent-profiles).
 </Note>
 
 ## 4. Boot the fleet
 
 Press **Up** in the header (or run `desk up`) to start every missing session.
-Each session becomes a durable tmux session — closing the browser, dropping
+Each session becomes a durable atch session — closing the browser, dropping
 the network, or restarting Desk never kills an agent. The RUN/MISS chips in
 the header track fleet state live, and the MISS chip is itself a button that
 boots whatever is down.
@@ -90,8 +100,8 @@ down.
 desk status
 ```
 
-Every configured session should show as running with its tmux name. From
-here:
+Every configured session should show as running with its durable session id.
+From here:
 
 - [Choose the right layouts](/guide-multi-agent-layouts) for each group
 - [Put the agents in a channel](/guide-channels-collaboration) so they can

@@ -1,0 +1,207 @@
+{
+  "contract": "atch-wire-v3",
+  "note": "controller attach flow; incarnation is client-chosen (any 16 bytes); RECORD inner = record_type u8, record_seq u64, generation u32, output_offset u64, body_len u32, body, crc32 u32",
+  "flow": [
+    {
+      "name": "HELLO",
+      "direction": "client->master",
+      "header": {
+        "magic": "ATV3",
+        "version": 3,
+        "type": 1,
+        "typeName": "HELLO",
+        "flags": 0,
+        "payload_len": 23,
+        "generation": 0,
+        "sequence": "0",
+        "aux": "0"
+      },
+      "body": {
+        "client_version": 3,
+        "peer_role": 1,
+        "capabilities": 63,
+        "incarnation": {
+          "hex": "11111111111111111111111111111111"
+        }
+      },
+      "headerHex": "415456330300010000000000170000000000000000000000000000000000000000000000",
+      "payloadHex": "0300013f00000011111111111111111111111111111111",
+      "frameHex": "4154563303000100000000001700000000000000000000000000000000000000000000000300013f00000011111111111111111111111111111111"
+    },
+    {
+      "name": "ATTACH",
+      "direction": "client->master",
+      "header": {
+        "magic": "ATV3",
+        "version": 3,
+        "type": 2,
+        "typeName": "ATTACH",
+        "flags": 0,
+        "payload_len": 32,
+        "generation": 0,
+        "sequence": "1",
+        "aux": "0"
+      },
+      "body": {
+        "role": 1,
+        "prev_generation": 0,
+        "last_seen_offset": {
+          "u64": "0"
+        },
+        "last_seen_record_seq": {
+          "u64": "0"
+        },
+        "desired_rows": 40,
+        "desired_cols": 120,
+        "sessionId": "web-1"
+      },
+      "headerHex": "415456330300020000000000200000000000000001000000000000000000000000000000",
+      "payloadHex": "0100000000000000000000000000000000000000002800780005007765622d31",
+      "frameHex": "4154563303000200000000002000000000000000010000000000000000000000000000000100000000000000000000000000000000000000002800780005007765622d31"
+    },
+    {
+      "name": "INPUT",
+      "direction": "client->master",
+      "header": {
+        "magic": "ATV3",
+        "version": 3,
+        "type": 18,
+        "typeName": "INPUT",
+        "flags": 0,
+        "payload_len": 12,
+        "generation": 0,
+        "sequence": "2",
+        "aux": "0"
+      },
+      "body": {
+        "flags": 0,
+        "surface_id": 7,
+        "bytes": {
+          "hex": "6c730d"
+        }
+      },
+      "headerHex": "4154563303001200000000000c0000000000000002000000000000000000000000000000",
+      "payloadHex": "0007000000030000006c730d",
+      "frameHex": "4154563303001200000000000c00000000000000020000000000000000000000000000000007000000030000006c730d"
+    },
+    {
+      "name": "RESIZE",
+      "direction": "client->master",
+      "header": {
+        "magic": "ATV3",
+        "version": 3,
+        "type": 21,
+        "typeName": "RESIZE",
+        "flags": 0,
+        "payload_len": 16,
+        "generation": 0,
+        "sequence": "3",
+        "aux": "0"
+      },
+      "body": {
+        "lease_epoch": 1,
+        "surface_id": 7,
+        "generation": 1,
+        "rows": 50,
+        "cols": 200
+      },
+      "headerHex": "415456330300150000000000100000000000000003000000000000000000000000000000",
+      "payloadHex": "0100000007000000010000003200c800",
+      "frameHex": "4154563303001500000000001000000000000000030000000000000000000000000000000100000007000000010000003200c800"
+    },
+    {
+      "name": "ATTACH_ACK",
+      "direction": "master->client",
+      "header": {
+        "magic": "ATV3",
+        "version": 3,
+        "type": 3,
+        "typeName": "ATTACH_ACK",
+        "flags": 0,
+        "payload_len": 106,
+        "generation": 1,
+        "sequence": "0",
+        "aux": "0"
+      },
+      "body": {
+        "generation": 1,
+        "retained_start_offset": {
+          "u64": "0"
+        },
+        "retained_start_record_seq": {
+          "u64": "0"
+        },
+        "retained_end_offset": {
+          "u64": "0"
+        },
+        "retained_end_record_seq": {
+          "u64": "0"
+        },
+        "controller_ack_offset": {
+          "u64": "0"
+        },
+        "controller_ack_record_seq": {
+          "u64": "0"
+        },
+        "has_checkpoint": 0,
+        "checkpoint_set_id": {
+          "u64": "0"
+        },
+        "checkpoint_offset": {
+          "u64": "0"
+        },
+        "checkpoint_record_seq": {
+          "u64": "0"
+        },
+        "tail_offset": {
+          "u64": "0"
+        },
+        "tail_record_seq": {
+          "u64": "0"
+        },
+        "rows": 40,
+        "cols": 120,
+        "current_state_exact": 1,
+        "restart_recoverable": 1,
+        "main_exact": 1,
+        "alt_exact": 1,
+        "active_buffer": 0,
+        "caps": 63
+      },
+      "headerHex": "4154563303000300000000006a0000000100000000000000000000000000000000000000",
+      "payloadHex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002800780001010101003f000000",
+      "frameHex": "4154563303000300000000006a00000001000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002800780001010101003f000000"
+    },
+    {
+      "name": "RECORD(OUTPUT)",
+      "direction": "master->client",
+      "header": {
+        "magic": "ATV3",
+        "version": 3,
+        "type": 16,
+        "typeName": "RECORD",
+        "flags": 0,
+        "payload_len": 31,
+        "generation": 1,
+        "sequence": "1",
+        "aux": "0"
+      },
+      "body": {
+        "record_type": 1,
+        "record_seq": {
+          "u64": "1"
+        },
+        "generation": 1,
+        "output_offset": {
+          "u64": "0"
+        },
+        "body": {
+          "hex": "6869"
+        }
+      },
+      "headerHex": "4154563303001000000000001f0000000100000001000000000000000000000000000000",
+      "payloadHex": "010100000000000000010000000000000000000000020000006869dcc03ba8",
+      "frameHex": "4154563303001000000000001f0000000100000001000000000000000000000000000000010100000000000000010000000000000000000000020000006869dcc03ba8"
+    }
+  ]
+}

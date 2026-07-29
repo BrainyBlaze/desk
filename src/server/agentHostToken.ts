@@ -4,11 +4,11 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 /**
- * Durable adapter-host auth (spec: docs/native-ui-mode-spec.md §4).
+ * Durable adapter-host auth.
  *
  * Tokens must be verifiable after a Desk server restart, so they derive from a
  * persistent secret instead of in-memory state: token = HMAC-SHA256(secret,
- * tmuxSession + agent). Stable per session by design — the loopback socket
+ * sessionId + agent). Stable per session by design — the loopback socket
  * gates session identity, not replay, and the hello pid distinguishes spawns.
  */
 
@@ -31,12 +31,12 @@ export function getOrCreateAgentHostSecret(path: string = resolveAgentHostSecret
   return secret;
 }
 
-export function deriveAgentHostToken(secret: string, tmuxSession: string, agent: string): string {
-  return createHmac('sha256', secret).update(`${tmuxSession}\n${agent}`).digest('hex');
+export function deriveAgentHostToken(secret: string, sessionId: string, agent: string): string {
+  return createHmac('sha256', secret).update(`${sessionId}\n${agent}`).digest('hex');
 }
 
-export function verifyAgentHostToken(secret: string, tmuxSession: string, agent: string, token: string): boolean {
-  const expected = Buffer.from(deriveAgentHostToken(secret, tmuxSession, agent), 'utf8');
+export function verifyAgentHostToken(secret: string, sessionId: string, agent: string, token: string): boolean {
+  const expected = Buffer.from(deriveAgentHostToken(secret, sessionId, agent), 'utf8');
   const provided = Buffer.from(token, 'utf8');
   if (provided.length !== expected.length) {
     return false;

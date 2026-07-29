@@ -1,32 +1,38 @@
 ---
 title: "Agents and terminals"
-description: "Durable tmux sessions, the multiplexer, terminal rendering, attention signals, native agent chat, and fleet controls"
+description: "Durable atch sessions, the multiplexer, terminal rendering, attention signals, native agent chat, and fleet controls"
 ---
 
 The agent multiplexer is Desk's core surface. It lets one operator supervise
 many coding-agent sessions without losing process lifetime, terminal state, or
 attention signals.
 
-<Frame caption="A 2x2 group of durable tmux sessions with the sidebar tree and fleet telemetry">
-  <img src="/images/agents-multiplexer.png" alt="A 2x2 group of durable tmux sessions with the sidebar tree and fleet telemetry" />
+<Frame caption="A 2x2 group of durable atch sessions with the sidebar tree and fleet telemetry">
+  <img src="/images/agents-multiplexer.png" alt="A 2x2 group of durable atch sessions with the sidebar tree and fleet telemetry" />
 </Frame>
 
 ## Supported agents
 
-Desk has built-in profiles for:
+Desk has a built-in integration for each of:
 
 - Claude Code
 - OpenAI Codex
 - OpenCode
 - bash (or any custom command)
 
-Each profile prepares the agent-specific launch command, environment, resume
-metadata, and attention-signal integration for that CLI. Sessions for agents
-that support it can be launched with permission bypass enabled from a checkbox
-in the session form. Resume behavior is agent-specific: Claude Code
-conversation ids are harvested from the session and validated before reuse,
-OpenCode sessions are recaptured from the CLI's own session list with a picker
-on restart, and Codex sessions accept an explicit resume id.
+<Note>
+"Integration" here, not "profile". **Profile** means one thing in Desk: a named
+provider *account* a session runs under — see
+[agent profiles](/configuration#agent-profiles).
+</Note>
+
+Each integration prepares that CLI's launch command, environment, resume
+metadata, and state-reporting hooks. Sessions for agents that support it can be
+launched with permission bypass enabled from a checkbox in the session form.
+Resume behavior is agent-specific: Claude Code conversation ids are harvested
+from the session and validated before reuse, OpenCode sessions are recaptured
+from the CLI's own session list with a picker on restart, and Codex sessions
+accept an explicit resume id.
 
 Claude Code, Codex, and OpenCode sessions render as a native chat surface;
 bash and custom-command sessions render as terminals. Each SDK-backed session
@@ -60,7 +66,7 @@ conversation itself, instead of showing the CLI's terminal UI:
   proposed command or file diff, and resolve inline.
 - **Continuity** — transcripts survive reloads and browser switches: the
   server keeps the session's event history and replays it to every surface,
-  and the agent process itself lives in its tmux session, so nothing
+  and the agent process itself lives in its atch session, so nothing
   dies with the tab.
 
 <Frame caption="The slash palette lists the commands the connected agent advertises">
@@ -71,22 +77,20 @@ Messages sent from [channels](/channels) reach native sessions through the
 same injection path the composer uses, so agent-to-agent delivery works
 identically in both modes.
 
-## Durable tmux sessions
+## Durable atch sessions
 
-Every managed session runs inside a deterministic tmux session. This gives Desk
+Every managed session runs under an atch master keyed by its durable
+`sessionId`. This gives Desk
 three important properties:
 
 - closing the browser does not kill the agent
 - restarting Desk reattaches to running work
 - sessions can be captured, restarted, or booted without changing the UI model
 
-The browser terminal is a view of a tmux-backed process, not the process
+The browser terminal is a view of an atch-backed process, not the process
 owner. Attaching never resurrects a dead session — booting is always an
 explicit action — so an externally killed agent shows as missing instead of
 being silently restarted.
-
-Desk-launched sessions can drop tmux's own status line (reclaiming a terminal
-row per cell) with the manifest setting `settings.tmux.statusLine: off`.
 
 ## The sidebar
 
@@ -124,10 +128,10 @@ state.
 
 Terminal cells — bash sessions, custom commands, and SDK agents running with
 `uiMode: terminal` — use xterm.js in the browser and a server-side terminal
-broker for transport. The broker keeps one WebSocket per browser for all terminals,
-maintains one PTY per tmux session fanned out to every viewer (a desktop tab
-and a phone share the same PTY — keystrokes from one appear on the other),
-replays recent output on attach, and renders only visible cells.
+daemon for transport. One binary WebSocket per browser tab carries all visible
+terminal surfaces. The daemon owns the atch master connections, fans each
+session to every viewer (a desktop tab and a phone see the same process),
+restores snapshots on reveal, and streams output only to visible cells.
 
 Rendering uses hardware WebGL where available, under a shared budget of 8
 contexts — cells beyond the budget (and machines with software-only GL) fall
@@ -135,9 +139,10 @@ back to the DOM renderer. Hidden cells release their context to visible ones,
 and only the focused cell blinks its cursor.
 
 Scrollback: append-style agent output opens a frozen scrollback viewer fed by
-tmux capture (colors and layout preserved, native scrolling and selection);
-full-screen TUI programs get application-owned scrolling with agent-aware key
-encoding. A custom scroll rail on the cell edge tracks position.
+the daemon's xterm emulator snapshot (colors and layout preserved, native
+scrolling and selection); full-screen TUI programs get application-owned
+scrolling with agent-aware key encoding. A custom scroll rail on the cell edge
+tracks position.
 
 Terminals self-heal: if the connection drops, cells show a reconnect overlay
 and automatically re-arm on tab return, network recovery, or the first
@@ -146,26 +151,38 @@ without a click.
 
 ## Attention signals
 
-Desk watches each session for turn-complete, approval-requested, and
-input-needed signals — parsed from OSC 9 terminal notifications when the agent
-emits them, with bare terminal bells as the generic fallback (a bell poller
-covers sessions no browser is watching). Signals surface as:
+Session state comes from the agent itself. Desk installs lifecycle hooks into
+each supported CLI, and those hooks post typed events — turn opened, turn
+finished, tool started, tool ended, permission requested — to the daemon, which
+owns one canonical state per session. Native-mode sessions report the same
+facts through the SDK. Desk does not read the terminal to work out what an
+agent is doing, and a session whose hooks have not fired reads as **unknown**
+rather than being guessed at.
+
+That state surfaces as:
 
 - a pulsing lamp on the session row and its collapsed ancestors,
 - an entry in the events drawer with kind filters, unread tracking, and
   mark-all-read,
-- an attention sound (respecting the mute toggle),
-- and input to the channels delivery engine, which uses turn-complete signals
-  to pace prompt delivery.
+- an attention sound (respecting the mute toggle).
 
 Typing into a session clears its attention state; acknowledged events stop
 lighting up.
+
+Attention is for the operator, not for the delivery engine: channel messages
+are delivered whatever a session's activity is, because every agent CLI
+buffers typed input until its turn ends.
+
+<Note>
+If a session sits on `unknown`, run `desk hooks install` and restart it — hooks
+are read at launch, so a session started before they existed never reports.
+</Note>
 
 ## Command palette and keyboard
 
 `Ctrl+K` opens the session quick-switcher — attention-needing sessions first,
 then recent, then tree order, fuzzy-matched across session, group, project,
-and tmux names. `Ctrl+Shift+K` opens it even while a terminal has focus.
+and session ids. `Ctrl+Shift+K` opens it even while a terminal has focus.
 `Ctrl+Alt+1..9` focuses cell N; `Ctrl+Alt+←/→` cycles sessions tree-wide.
 See [Keyboard shortcuts](/keyboard-shortcuts) for the full map, including
 in-terminal copy, paste, and find.
@@ -197,10 +214,10 @@ who is screaming from the pager alone.
   running ones; groups and individual cells have their own boot actions.
 - **Restart** kills and relaunches one session (confirmed first).
 - **KILL** is the emergency stop: it kills **all** Claude Code and Codex CLI
-  processes and tmux sessions on the host — including ones Desk did not
-  launch. It confirms with an alarm before acting. Use it as a last resort,
-  not a routine control.
+  processes found by the host sweep and retires every configured atch session.
+  It confirms with an alarm before acting. Use it as a last resort, not a
+  routine control.
 
 The status bar keeps the selected session's identity (agent, working
-directory, copyable tmux target) and app-wide signals — agents needing input,
+directory, copyable session id) and app-wide signals — agents needing input,
 unread events and messages, mute, and sync state — visible at all times.

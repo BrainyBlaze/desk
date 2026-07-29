@@ -7,12 +7,12 @@ import { main } from '../src/cli/main.js';
 // `desk config` must print the manifest path even when the manifest is corrupt
 // (finding N13) — it is exactly the command a user needs to find the file to fix.
 // Driven in-process via main().
-function runConfig(manifest: string): { code: number; stdout: string } {
+async function runConfig(manifest: string): Promise<{ code: number; stdout: string }> {
   const out: string[] = [];
   const logSpy = vi.spyOn(console, 'log').mockImplementation((line = '') => out.push(String(line)));
   const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   try {
-    return { code: main(['config', '--file', manifest]), stdout: out.join('\n') };
+    return { code: await main(['config', '--file', manifest]), stdout: out.join('\n') };
   } finally {
     logSpy.mockRestore();
     errSpy.mockRestore();
@@ -32,9 +32,9 @@ describe('desk config', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('prints the path even when the manifest is unparseable', () => {
+  it('prints the path even when the manifest is unparseable', async () => {
     writeFileSync(manifest, 'groups: [oops\n'); // invalid YAML
-    const res = runConfig(manifest);
+    const res = await runConfig(manifest);
     expect(res.code).toBe(0);
     expect(res.stdout.trim()).toBe(manifest);
   });

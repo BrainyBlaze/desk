@@ -13,9 +13,6 @@ const ROUTE_OWNERS = {
     '/api/desk',
     '/api/system',
     '/api/pulse',
-    '/api/attention',
-    '/api/attention-clear',
-    '/api/attention-read',
     '/api/agent-event',
     '/api/kill-all'
   ],
@@ -41,10 +38,6 @@ const ROUTE_OWNERS = {
     '/api/reorder-sessions'
   ],
   'routes/terminalRoutes.ts': [
-    '/api/terminal-broker-metrics',
-    '/api/terminal-resize',
-    '/api/terminal-repaint',
-    '/api/terminal-scroll',
     '/api/terminal-capture'
   ]
 } as const;

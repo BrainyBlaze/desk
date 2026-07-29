@@ -3,11 +3,11 @@ import { editSessionInManifest } from '../core/config.js';
 import type { DeskManifest, DeskSession, DeskSessionUiMode, SessionSpec } from '../core/types.js';
 
 /**
- * Atomic UI-mode switch (spec: docs/native-ui-mode-spec.md §7).
+ * Atomic UI-mode switch.
  *
  * validateUiModeSwitch answers every reject with a typed code BEFORE any
  * mutation; performUiModeSwitch runs manifest-write-then-respawn through
- * injected dependencies so the sequencing is unit-testable without tmux.
+ * injected dependencies so the sequencing is unit-testable without a live transport.
  */
 
 export type UiModeSwitchErrorCode = 'unknown-session' | 'ui-mode-unsupported' | 'resume-not-captured';
@@ -25,22 +25,21 @@ export type UiModeSwitchValidation =
   | { ok: false; status: 400 | 404 | 409; code: UiModeSwitchErrorCode; error: string };
 
 export interface ValidateUiModeSwitchOptions {
-  tmuxSession: string;
+  sessionId: string;
   uiMode: DeskSessionUiMode;
   confirmDiscard?: boolean;
   homeDir: string;
-  namespace?: string;
 }
 
 export function validateUiModeSwitch(manifest: DeskManifest, options: ValidateUiModeSwitchOptions): UiModeSwitchValidation {
-  const specs = buildSessionSpecs(manifest, { homeDir: options.homeDir, namespace: options.namespace });
-  const spec = specs.find((candidate) => candidate.tmuxSession === options.tmuxSession);
+  const specs = buildSessionSpecs(manifest, { homeDir: options.homeDir });
+  const spec = specs.find((candidate) => candidate.sessionId === options.sessionId);
   if (!spec) {
     return {
       ok: false,
       status: 404,
       code: 'unknown-session',
-      error: `session ${options.tmuxSession} does not exist in config`
+      error: `session ${options.sessionId} does not exist in config`
     };
   }
   const record = findSessionRecord(manifest, spec);
@@ -49,7 +48,7 @@ export function validateUiModeSwitch(manifest: DeskManifest, options: ValidateUi
       ok: false,
       status: 404,
       code: 'unknown-session',
-      error: `session ${options.tmuxSession} has no manifest record`
+      error: `session ${options.sessionId} has no manifest record`
     };
   }
   if (options.uiMode === 'native' && !sessionSupportsNativeUiMode(record)) {
@@ -80,12 +79,11 @@ export interface PerformUiModeSwitchInput {
   manifest: DeskManifest;
   validated: Extract<UiModeSwitchValidation, { ok: true }>;
   homeDir: string;
-  namespace?: string;
 }
 
 export interface PerformUiModeSwitchDeps {
   write: (next: DeskManifest) => void;
-  restart: (spec: SessionSpec) => { ok: boolean; error?: string };
+  restart: (spec: SessionSpec) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
   /** Optional launch rewrite hook (LSP/MCP wiring); receives the post-edit spec. */
   prepare?: (spec: SessionSpec) => SessionSpec;
   scheduleCapture?: (spec: SessionSpec) => void;
@@ -109,14 +107,14 @@ export async function performUiModeSwitch(
   });
   deps.write(updated);
 
-  const nextSpec = buildSessionSpecs(updated, { homeDir: input.homeDir, namespace: input.namespace }).find(
-    (candidate) => candidate.tmuxSession === validated.spec.tmuxSession
+  const nextSpec = buildSessionSpecs(updated, { homeDir: input.homeDir }).find(
+    (candidate) => candidate.sessionId === validated.spec.sessionId
   );
   if (!nextSpec) {
-    return { ok: false, status: 500, error: `session ${validated.spec.tmuxSession} disappeared during ui-mode switch` };
+    return { ok: false, status: 500, error: `session ${validated.spec.sessionId} disappeared during ui-mode switch` };
   }
   const launchSpec = deps.prepare ? deps.prepare(nextSpec) : nextSpec;
-  const restarted = deps.restart(launchSpec);
+  const restarted = await deps.restart(launchSpec);
   if (!restarted.ok) {
     return { ok: false, status: 500, error: restarted.error ?? 'session restart failed' };
   }
@@ -141,7 +139,8 @@ export function createInFlightGuard(): { begin: (key: string) => boolean; end: (
 }
 
 function buildEdit(spec: SessionSpec, record: DeskSession, uiMode: DeskSessionUiMode): UiModeSwitchEdit {
-  const session: DeskSession = { ...record, tmuxSession: spec.tmuxSession };
+  // Durable sessionId already pins identity across the switch — no name pin.
+  const session: DeskSession = { ...record };
   // Always pin the mode explicitly: an absent field resolves to native for
   // SDK-backed agents, so deleting it would silently undo a terminal switch.
   session.uiMode = uiMode;

@@ -2,7 +2,8 @@ import type { DeskAgent } from '../../../core/types.js';
 
 /** Environment contract shared by the host CLI, runner, and driver loader. */
 export interface AgentHostEnv {
-  DESK_TMUX_SESSION: string;
+  DESK_SESSION_ID: string;
+  DESK_SESSION_GENERATION: number;
   DESK_AGENT: DeskAgent;
   DESK_AGENT_RESUME?: string;
   DESK_AGENT_BYPASS: string;

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { parseAgentHostEnv } from '../../../../src/server/agents/host/cli';
 
 const VALID_ENV: NodeJS.ProcessEnv = {
-  DESK_TMUX_SESSION: 'agentdesk-main-codex-abc12345',
+  DESK_SESSION_ID: 'agentdesk-main-codex-abc12345',
+  DESK_SESSION_GENERATION: '7',
   DESK_AGENT: 'codex',
   DESK_AGENT_BYPASS: '1',
   DESK_SERVER_URL: 'http://127.0.0.1:5173',
@@ -28,7 +29,8 @@ function makeEnv(overrides: Record<string, string | undefined> = {}): NodeJS.Pro
 describe('parseAgentHostEnv — required keys', () => {
   it('accepts a fully populated env', () => {
     expect(parseAgentHostEnv(makeEnv())).toEqual({
-      DESK_TMUX_SESSION: 'agentdesk-main-codex-abc12345',
+      DESK_SESSION_ID: 'agentdesk-main-codex-abc12345',
+      DESK_SESSION_GENERATION: 7,
       DESK_AGENT: 'codex',
       DESK_AGENT_BYPASS: '1',
       DESK_SERVER_URL: 'http://127.0.0.1:5173',
@@ -55,12 +57,24 @@ describe('parseAgentHostEnv — required keys', () => {
     expect(env.DESK_AGENT_HOST_LOG_LEVEL).toBeUndefined();
   });
 
-  it('rejects missing DESK_TMUX_SESSION', () => {
-    expect(() => parseAgentHostEnv(makeEnv({ DESK_TMUX_SESSION: undefined }))).toThrow(/DESK_TMUX_SESSION/);
+  it('rejects missing DESK_SESSION_ID', () => {
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_ID: undefined }))).toThrow(/DESK_SESSION_ID/);
   });
 
-  it('rejects empty DESK_TMUX_SESSION', () => {
-    expect(() => parseAgentHostEnv(makeEnv({ DESK_TMUX_SESSION: '' }))).toThrow(/DESK_TMUX_SESSION/);
+  it('rejects empty DESK_SESSION_ID', () => {
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_ID: '' }))).toThrow(/DESK_SESSION_ID/);
+  });
+
+  it('requires a positive integer DESK_SESSION_GENERATION', () => {
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_GENERATION: undefined }))).toThrow(
+      /DESK_SESSION_GENERATION/
+    );
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_GENERATION: '0' }))).toThrow(
+      /DESK_SESSION_GENERATION/
+    );
+    expect(() => parseAgentHostEnv(makeEnv({ DESK_SESSION_GENERATION: '1.5' }))).toThrow(
+      /DESK_SESSION_GENERATION/
+    );
   });
 
   it('rejects missing DESK_AGENT', () => {

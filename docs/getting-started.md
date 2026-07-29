@@ -19,10 +19,16 @@ packages, but installation stops before activation because Desk does not yet
 publish a compatible Node toolchain.
 
 The installer detects, installs, and rechecks the required host layer: CA
-certificates, archive and checksum tools, tmux 3.2+, Git 2.30+, Python 3.6+, make,
-and a working C++ compiler. It maintains its own checksum-verified Node 22.23.1,
+certificates, archive and checksum tools, Git 2.30+, Python 3.6+, make, and a
+working C++ compiler. It maintains its own checksum-verified Node 22.23.1,
 npm 10.9.8, and Bun 1.3.14 under the Desk install root. It does not replace your
 global runtimes.
+
+<Note>
+The installer builds the pinned bundled atch 1.6-bb1 fork for the host and
+verifies it before activation. Desk resolves `DESK_ATCH_BIN`, same-release
+`libexec/atch`, then `PATH`, in that order.
+</Note>
 
 Agent CLIs (`codex`, `claude`, and `opencode`), `gh`, and GPU telemetry commands
 are optional. Install only the integrations you intend to use.
@@ -62,7 +68,7 @@ are optional. Install only the integrations you intend to use.
   <Step title="Create your first session">
     In the UI, open **Add session** and choose a session name, agent or command,
     and repository directory. Desk writes the session to
-    `~/.config/desk/desk.yml` and owns its tmux lifetime.
+    `~/.config/desk/desk.yml` and owns its atch lifetime.
   </Step>
 </Steps>
 
@@ -98,12 +104,12 @@ Missing optional tools disable only their related subsystem.
 desk up --dry-run
 desk up
 desk status
-desk attach <name|tmux-session|resume-id>
-desk capture <name|tmux-session|resume-id> --lines 200
+desk attach <name|sessionId|resume>
+desk capture <name|sessionId|resume> --lines 200
 desk hooks install
 ```
 
-`desk up` starts missing configured sessions without replacing running tmux
+`desk up` starts missing configured sessions without replacing running atch
 sessions.
 
 ## Upgrade, reinstall, or downgrade
@@ -133,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
 ```
 
 Uninstall verifies Desk ownership before removing the launcher, releases,
-toolchains, and install metadata. It preserves `~/.config/desk`, projects, tmux
+toolchains, and install metadata. It preserves `~/.config/desk`, projects, atch
 sessions, credentials, and optional host tools. To remove configuration too,
 inspect it first and then delete it explicitly:
 
@@ -144,7 +150,7 @@ rm -rf ~/.config/desk
 ## Build from source
 
 Contributors should use the same pins as CI: Node 22.23.1, npm 10.9.8, and Bun
-1.3.14.
+1.3.14, plus `make` and a working C/C++ toolchain.
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git

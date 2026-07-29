@@ -4,8 +4,10 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
+import { mintSessionId } from '../shared/migration/index.js';
 import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
-import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, SessionSpec } from './types.js';
+import { collectSessions } from './sessionIdentity.js';
+import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, DeskSessionDraft, SessionSpec } from './types.js';
 
 export class ManifestMutationError extends Error {
   readonly code = 'manifest-conflict';
@@ -24,7 +26,7 @@ export interface ResolveDefaultManifestPathOptions {
 export interface AddSessionOptions {
   groupId: string;
   groupLabel?: string;
-  session: DeskSession;
+  session: DeskSessionDraft;
 }
 
 export interface AddGroupOptions {
@@ -46,7 +48,7 @@ export interface AddProjectGroupOptions extends AddGroupOptions {
 export interface AddProjectSessionOptions {
   projectId: string;
   groupId: string;
-  session: DeskSession;
+  session: DeskSessionDraft;
 }
 
 export interface EditProjectOptions {
@@ -207,7 +209,8 @@ export function addSessionToManifest(manifest: DeskManifest, options: AddSession
     throw new ManifestMutationError(`session ${options.session.name} already exists in group ${options.groupId}`);
   }
 
-  group.sessions.push(options.session);
+  const addedSession = materializeAddedSession(manifest, options.session);
+  group.sessions.push(addedSession);
   return { ...manifest, groups };
 }
 
@@ -279,7 +282,8 @@ export function addSessionToProjectManifest(manifest: DeskManifest, options: Add
   if (group.sessions.some((session) => session.name === options.session.name)) {
     throw new ManifestMutationError(`session ${options.session.name} already exists in group ${options.groupId}`);
   }
-  group.sessions.push(options.session);
+  const addedSession = materializeAddedSession(manifest, options.session);
+  group.sessions.push(addedSession);
   return { ...manifest, projects };
 }
 
@@ -551,7 +555,7 @@ function updateTargetGroup(
 function replaceSession(
   sessions: DeskSession[],
   currentName: string,
-  nextSession: DeskSession,
+  nextSession: DeskSessionDraft,
   cwd?: string,
   clearResume?: boolean
 ): DeskSession[] {
@@ -561,12 +565,10 @@ function replaceSession(
       return session;
     }
     replaced = true;
-    const merged = { ...nextSession };
-    // Preserve the pinned tmux session name unless the edit provides one:
-    // dropping it would re-derive the name and orphan the running session.
-    if (merged.tmuxSession === undefined && session.tmuxSession !== undefined) {
-      merged.tmuxSession = session.tmuxSession;
-    }
+    const merged: DeskSession = { ...nextSession, sessionId: session.sessionId };
+    // A persisted sessionId is the durable identity, not an editable field.
+    // Preserve it even if a stale or forged edit payload supplies another id.
+    merged.sessionId = session.sessionId;
     // Preserve an async-captured resume id unless the edit explicitly clears it:
     // a form loaded before capture finished must not silently erase the id.
     if (merged.resume === undefined && session.resume !== undefined && clearResume !== true) {
@@ -613,9 +615,14 @@ function findMoveSourceSpec(manifest: DeskManifest, options: MoveProjectSessionO
 function materializeMovedSession(session: DeskSession, sourceSpec: SessionSpec | undefined): DeskSession {
   return {
     ...session,
-    cwd: session.cwd ?? sourceSpec?.cwd,
-    tmuxSession: session.tmuxSession ?? sourceSpec?.tmuxSession
+    cwd: session.cwd ?? sourceSpec?.cwd
   };
+}
+
+function materializeAddedSession(manifest: DeskManifest, draft: DeskSessionDraft): DeskSession {
+  const { sessionId: _untrustedId, ...session } = draft;
+  const taken = new Set(collectSessions(manifest).map((existing) => existing.sessionId));
+  return { ...session, sessionId: mintSessionId(session.name, taken) };
 }
 
 function cwdMatches(candidate: string, target: string): boolean {

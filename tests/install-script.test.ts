@@ -55,7 +55,9 @@ describe('source-backed installer contract', () => {
     expect(source).toContain('${DESK_HOME}.install-lock');
     expect(source).not.toContain('DESK_INSTALL_DIR');
     expect(source).not.toContain(['desk', 'server'].join('-'));
+    expect(source).not.toMatch(/tmux/i);
     expect(source).not.toMatch(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/u);
+    expect(source).toContain('PATH="$root/bin:$PATH" "$root/bin/npm" --version');
   });
 
   it('has valid Bash syntax', () => {
@@ -144,16 +146,16 @@ describe('source-backed installer contract', () => {
   it('holds the sibling lock before invoking the host package manager', () => {
     const value = fixture();
     const log = join(value.root, 'package-manager.log');
-    const tmux = join(value.binDir, 'tmux');
+    const git = join(value.binDir, 'git');
     const packageManager = join(value.binDir, process.platform === 'darwin' ? 'brew' : 'apt-get');
     const sudo = join(value.binDir, 'sudo');
-    writeFileSync(tmux, '#!/usr/bin/env bash\nprintf "tmux 2.9\\n"\n');
+    writeFileSync(git, '#!/usr/bin/env bash\nprintf "git version 2.20.0\\n"\n');
     writeFileSync(
       packageManager,
       '#!/usr/bin/env bash\n[ "${1:-}" = "shellenv" ] && exit 0\n[ -d "${DESK_HOME}.install-lock" ] || exit 95\nprintf "%s\\n" "$*" >> "$PACKAGE_LOG"\nexit 73\n'
     );
     writeFileSync(sudo, '#!/usr/bin/env bash\nexec "$@"\n');
-    chmodSync(tmux, 0o755);
+    chmodSync(git, 0o755);
     chmodSync(packageManager, 0o755);
     chmodSync(sudo, 0o755);
 
@@ -176,6 +178,10 @@ describe('installer lifecycle', () => {
     expect(readFileSync(value.launcher(), 'utf8')).toContain('# desk-managed-launcher-v1');
     expect(readlinkSync(join(value.deskHome, 'current'))).toMatch(/^releases\/v0\.3\.0\//);
     expect(value.releaseInstances()).toHaveLength(1);
+    const release = realpathSync(join(value.deskHome, 'current'));
+    const atch = spawnSync(join(release, 'libexec', 'atch'), ['--version'], { encoding: 'utf8' });
+    expect(atch.status, atch.stderr).toBe(0);
+    expect(atch.stdout).toMatch(/^atch - version 1\.6-bb1,/);
 
     const help = spawnSync(value.launcher(), ['help'], {
       env: { ...process.env, DESK_HOME: value.deskHome },
@@ -183,6 +189,16 @@ describe('installer lifecycle', () => {
     });
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('Desk fixture help');
+  }, 20_000);
+
+  it('rejects a non-runnable bundled atch before activating the release', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_ATCH_MODE: 'broken' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/bundled atch.*version probe/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);
 
   it('reinstalls the same version into a new immutable instance and retains the previous one', () => {
@@ -223,6 +239,27 @@ describe('installer lifecycle', () => {
     expect(existsSync(value.launcher())).toBe(false);
     expect(existsSync(value.deskHome)).toBe(false);
     expect(readFileSync(join(value.configDir, 'preserved.txt'), 'utf8')).toBe('keep\n');
+  });
+
+  it('uninstalls a home that the running app wrote hooks and producer state into', () => {
+    const value = fixture();
+    const installed = value.run();
+    expect(installed.status, installed.stderr).toBe(0);
+    // `desk hooks install` writes the shim here, and the agent-state runtime
+    // writes one producer binding per session. Both land inside DESK_HOME, so
+    // an allow-list that omits them makes a used install impossible to remove.
+    mkdirSync(join(value.deskHome, 'hooks'), { recursive: true });
+    writeFileSync(join(value.deskHome, 'hooks', 'desk-agent-event.mjs'), 'export {}\n');
+    mkdirSync(join(value.deskHome, 'producers'), { recursive: true });
+    writeFileSync(join(value.deskHome, 'producers', 'claude-1-8.json'), '{}\n');
+
+    const removed = value.run({ args: ['--uninstall'] });
+
+    expect(removed.status, removed.stderr).toBe(0);
+    expect(existsSync(value.deskHome)).toBe(false);
+    // The Codex hooks file is user-global and keeps firing, so uninstall has to
+    // name it rather than silently leave a hook pointing at a deleted shim.
+    expect(removed.stdout).toMatch(/\.codex\/hooks\.json/);
   });
 
   it('refuses uninstall when an unidentified install-root path is present', () => {

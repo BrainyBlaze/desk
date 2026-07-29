@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, createConnection, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +19,7 @@ interface TrackedCli {
 }
 
 const activeCliProcesses = new Set<TrackedCli>();
+const activeCliHomes = new Set<string>();
 const cliEntry = join(process.cwd(), 'src', 'cli', 'main.ts');
 const cliExitTimeoutMs = 10_000;
 
@@ -94,11 +96,13 @@ function startNpxCli(argv: string[], port: number): TrackedCli {
 }
 
 function startDirectCli(argv: string[]): TrackedCli {
+  const home = mkdtempSync(join(tmpdir(), 'desk-serve-runtime-home-'));
+  activeCliHomes.add(home);
   return trackCli(
     spawn(process.execPath, ['--import', 'tsx', cliEntry, ...argv], {
       cwd: process.cwd(),
       detached: true,
-      env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+      env: { ...process.env, HOME: home, FORCE_COLOR: '0', NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe']
     })
   );
@@ -155,6 +159,10 @@ afterEach(async () => {
   for (const tracked of processes) {
     await stopProcessGroup(tracked);
   }
+  for (const home of activeCliHomes) {
+    rmSync(home, { recursive: true, force: true });
+  }
+  activeCliHomes.clear();
 });
 
 async function bindRandomPort(): Promise<{ server: Server; port: number }> {
@@ -287,16 +295,24 @@ describe('public CLI serve dispatch', () => {
       argv: ['agent-host', '--standalone'],
       expectedError: 'unknown option --standalone'
     }
-  ])('rejects $argv before opening a port', { timeout: 30_000 }, async ({ argv, expectedError }) => {
-    const port = await randomUnusedPort();
-    const cli = startNpxCli(argv, port);
-    const outcome = await within(cli.closed, cliExitTimeoutMs);
+  ])('rejects $argv without leaving a runtime process', { timeout: 30_000 }, async ({ argv, expectedError }) => {
+    const unrelatedListener = await bindRandomPort();
+    try {
+      const cli = startNpxCli(argv, unrelatedListener.port);
+      const cliPid = cli.child.pid;
+      if (cliPid === undefined) {
+        throw new Error('expected the CLI process to have a pid');
+      }
+      const outcome = await within(cli.closed, cliExitTimeoutMs);
 
-    expect(outcome).not.toBeNull();
-    expect(outcome?.code).not.toBe(0);
-    expect(cli.stderr).toContain(expectedError);
-    expect(cli.stdout).not.toContain('Local:');
-    expect(await portIsOpen(port)).toBe(false);
+      expect(outcome).not.toBeNull();
+      expect(outcome?.code).not.toBe(0);
+      expect(cli.stderr).toContain(expectedError);
+      expect(cli.stdout).not.toContain('Local:');
+      expect(await waitForProcessGroupExit(cliPid, 1_000)).toBe(true);
+    } finally {
+      await closeServer(unrelatedListener.server);
+    }
   });
 
   it('documents both serve forms, precedence, and no second public server command', { timeout: 30_000 }, async () => {

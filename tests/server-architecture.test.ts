@@ -107,20 +107,16 @@ describe('server architecture boundaries', () => {
     expect(importers).toEqual(['agents/codexProtocol.ts']);
   });
 
-  it('does not install the retired direct terminal websocket', () => {
-    const compositionRoot = readFileSync(join(SERVER_ROOT, 'vitePlugin.ts'), 'utf8');
-    const terminalPrimitives = readFileSync(join(SERVER_ROOT, 'terminalBridge.ts'), 'utf8');
 
-    expect(compositionRoot).not.toContain('installTerminalBridge');
-    expect(terminalPrimitives).not.toContain("'/ws/terminal'");
-  });
-
-  it('centralizes global tmux option commands in one module', () => {
-    const optionOwners = sourceFiles(SERVER_ROOT)
-      .filter((file) => readFileSync(file, 'utf8').includes("'set-option', '-g'"))
+  it('keeps the server free of tmux option/bridge primitives (deleted at cutover)', () => {
+    const offenders = sourceFiles(SERVER_ROOT)
+      .filter((file) => {
+        const source = readFileSync(file, 'utf8');
+        return source.includes("'set-option', '-g'") || source.includes('installTerminalBridge');
+      })
       .map((file) => relative(SERVER_ROOT, file));
 
-    expect(optionOwners).toEqual(['tmuxOptions.ts']);
+    expect(offenders).toEqual([]);
   });
 
   it('builds and releases only the full CLI with its private runtime', () => {

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
 import { readPendingResumeCaptures } from '../src/core/resumeCaptureState.js';
 import { prepareSessionForLaunch, runPlan } from '../src/core/runner.js';
@@ -53,6 +53,7 @@ projects:
       - id: main
         sessions:
           - name: custom
+            sessionId: custom
             command: printf custom
             agent: opencode
             uiMode: terminal
@@ -143,25 +144,14 @@ projects:
 });
 
 describe('opencode launch config materialization', () => {
-  it('does not create pending resume captures for custom commands with opencode metadata', () => {
+  it('does not create pending resume captures for custom commands with opencode metadata', async () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-custom-opencode-capture-'));
     try {
       const cwd = join(root, 'project');
-      const bin = join(root, 'bin');
       const statePath = join(root, 'resume-captures.json');
       mkdirSync(cwd);
-      mkdirSync(bin);
-      const tmuxPath = join(bin, 'tmux');
-      writeFileSync(
-        tmuxPath,
-        `#!/usr/bin/env node
-process.exit(0);
-`
-      );
-      chmodSync(tmuxPath, 0o755);
       process.env = {
         ...originalEnv,
-        PATH: `${bin}:${originalEnv.PATH ?? ''}`,
         DESK_OPENCODE_CONFIG_DIR: join(root, 'opencode-config'),
         DESK_RESUME_CAPTURE_STATE_PATH: statePath
       };
@@ -174,41 +164,33 @@ projects:
       - id: main
         sessions:
           - name: custom
+            sessionId: custom
             command: printf custom
             agent: opencode
             uiMode: terminal
 `),
         { homeDir: root }
       )[0]!;
-      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.tmuxSession] }];
+      const plan = [{ type: 'start' as const, session: spec }];
+      const control = vi.fn().mockResolvedValue({ ok: true });
 
-      expect(runPlan(plan, false)).toBe(0);
+      expect(await runPlan(plan, false, { control })).toBe(0);
+      expect(control).toHaveBeenCalledOnce();
       expect(readPendingResumeCaptures({ path: statePath })).toEqual([]);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
   });
 
-  it('prepares the Desk-owned opencode config for real runPlan starts but not dry-run', () => {
+  it('prepares the Desk-owned opencode config for real runPlan starts but not dry-run', async () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-opencode-config-launch-'));
     try {
       const cwd = join(root, 'project');
-      const bin = join(root, 'bin');
       const configDir = join(root, 'opencode-config');
       const statePath = join(root, 'resume-captures.json');
       mkdirSync(cwd);
-      mkdirSync(bin);
-      const tmuxPath = join(bin, 'tmux');
-      writeFileSync(
-        tmuxPath,
-        `#!/usr/bin/env node
-process.exit(0);
-`
-      );
-      chmodSync(tmuxPath, 0o755);
       process.env = {
         ...originalEnv,
-        PATH: `${bin}:${originalEnv.PATH ?? ''}`,
         DESK_OPENCODE_CONFIG_DIR: configDir,
         DESK_RESUME_CAPTURE_STATE_PATH: statePath
       };
@@ -221,23 +203,27 @@ projects:
       - id: main
         sessions:
           - name: opencode
+            sessionId: opencode
             agent: opencode
             uiMode: terminal
 `),
         { homeDir: root }
       )[0]!;
-      const plan = [{ type: 'start' as const, session: spec, argv: ['new-session', '-d', '-s', spec.tmuxSession] }];
+      const plan = [{ type: 'start' as const, session: spec }];
+      const control = vi.fn().mockResolvedValue({ ok: true });
 
-      expect(runPlan(plan, true)).toBe(0);
+      expect(await runPlan(plan, true, { control })).toBe(0);
+      expect(control).not.toHaveBeenCalled();
       expect(existsSync(join(configDir, 'plugin', 'desk-attention.js'))).toBe(false);
       expect(readPendingResumeCaptures({ path: statePath })).toEqual([]);
 
-      expect(runPlan(plan, false)).toBe(0);
+      expect(await runPlan(plan, false, { control })).toBe(0);
+      expect(control).toHaveBeenCalledOnce();
       expect(existsSync(join(configDir, 'opencode.json'))).toBe(true);
       expect(existsSync(join(configDir, 'plugin', 'desk-attention.js'))).toBe(true);
       expect(readPendingResumeCaptures({ path: statePath })).toEqual([
         expect.objectContaining({
-          tmuxSession: spec.tmuxSession,
+          sessionId: spec.sessionId,
           agent: 'opencode',
           cwd
         })
@@ -292,6 +278,7 @@ projects:
       - id: main
         sessions:
           - name: opencode
+            sessionId: opencode
             agent: opencode
             uiMode: terminal
 `),

@@ -5,8 +5,6 @@ import type {
   ChannelMessage,
   ChannelActivityEvent,
   LifecycleState,
-  LifecycleStatus,
-  PaneState,
   SubmitState,
   DeliveryBlockReason,
   QueuedItemMeta,
@@ -35,8 +33,6 @@ export type {
   ChannelMessage,
   ChannelActivityEvent,
   LifecycleState,
-  LifecycleStatus,
-  PaneState,
   SubmitState,
   DeliveryBlockReason,
   QueuedItemMeta,
@@ -267,14 +263,14 @@ export async function channelsViewRemove(payload: { name: string }): Promise<{ i
 }
 
 export async function channelsEvents(
-  filter: { channel?: string; tmuxSession?: string; kind?: DeliveryEventKind; sinceSeq?: number; limit?: number } = {}
+  filter: { channel?: string; sessionId?: string; kind?: DeliveryEventKind; sinceSeq?: number; limit?: number } = {}
 ): Promise<{ items: DeliveryEvent[]; latestSeq: number }> {
   const params = new URLSearchParams();
   if (filter.channel) {
     params.set('channel', filter.channel);
   }
-  if (filter.tmuxSession) {
-    params.set('tmuxSession', filter.tmuxSession);
+  if (filter.sessionId) {
+    params.set('sessionId', filter.sessionId);
   }
   if (filter.kind) {
     params.set('kind', filter.kind);
@@ -318,8 +314,8 @@ export async function channelsMessageDelete(payload: { channel: string; id: stri
   await post('/api/channels/message-delete', payload);
 }
 
-export async function channelsMemberAdd(channel: string, tmuxSession: string): Promise<{ member: ChannelMember }> {
-  return post('/api/channels/member-add', { channel, tmuxSession });
+export async function channelsMemberAdd(channel: string, sessionId: string): Promise<{ member: ChannelMember }> {
+  return post('/api/channels/member-add', { channel, sessionId });
 }
 
 export async function channelsMemberRemove(channel: string, name: string): Promise<void> {
@@ -345,8 +341,8 @@ export async function channelsMemberSupervisor(
   await post('/api/channels/member-supervisor', { channel, member, supervisor, supervisorMaxIdleMinutes });
 }
 
-export async function channelsQueueClear(tmuxSession: string): Promise<void> {
-  await post('/api/channels/queue-clear', { tmuxSession });
+export async function channelsQueueClear(sessionId: string): Promise<void> {
+  await post('/api/channels/queue-clear', { sessionId });
 }
 
 export async function channelsPost(payload: {
@@ -379,7 +375,9 @@ export interface EngineDiagnostics {
 }
 
 export type EngineActionName =
-  | 'mark-idle'
+  // No 'mark-idle': Channels may not mutate agent activity. Activity is the
+  // authority's, derived from typed agent evidence — an operator button that
+  // wrote it would be a second source of truth with a human behind it.
   | 'pause-session'
   | 'resume-session'
   | 'drop-queue'
@@ -394,7 +392,7 @@ export async function channelsEngineDiagnostics(): Promise<EngineDiagnostics> {
 
 export async function channelsEngineAction(
   action: EngineActionName,
-  opts: { tmuxSession?: string; seq?: number; reason?: string } = {}
+  opts: { sessionId?: string; seq?: number; reason?: string } = {}
 ): Promise<{ ok: boolean; sessions: SessionDiagnostic[] }> {
   return post('/api/channels/engine/action', { action, ...opts });
 }

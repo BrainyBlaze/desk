@@ -5,13 +5,13 @@ description: "Local mission control for coding-agent fleets."
 ---
 
 Desk is a local operator workspace for running many coding agents at once. It
-keeps each agent alive in tmux, renders the fleet in a browser multiplexer, and
-adds the collaboration and development tools you need around those agents:
-channels, an IDE, LSP-backed code intelligence, Git, GitHub, project boards,
-notes, and operational telemetry.
+keeps each agent alive in an atch session, renders the fleet in a browser
+multiplexer, and adds the collaboration and development tools you need around
+those agents: channels, an IDE, LSP-backed code intelligence, Git, GitHub,
+project boards, notes, and operational telemetry.
 
-<Frame caption="The agent multiplexer: four durable tmux sessions in a 2x2 group">
-  <img src="/images/agents-multiplexer.png" alt="The agent multiplexer: four durable tmux sessions in a 2x2 group" />
+<Frame caption="The agent multiplexer: four durable atch sessions in a 2x2 group">
+  <img src="/images/agents-multiplexer.png" alt="The agent multiplexer: four durable atch sessions in a 2x2 group" />
 </Frame>
 
 <Columns cols={2}>
@@ -21,7 +21,7 @@ notes, and operational telemetry.
   </Card>
 
   <Card title="Understand the model" icon="network" href="/concepts-architecture">
-    Learn how tmux, the manifest, the browser, the terminal broker, and agent
+    Learn how atch, the manifest, the browser, the terminal daemon, and agent
     hooks fit together.
   </Card>
 
@@ -48,22 +48,23 @@ Desk is built for:
   GitHub context, project boards, and notes in one browser workspace.
 - **Multi-agent workflows** where agents need shared channels, mentions,
   threads, delivery diagnostics, and explicit operator intervention points.
-- **Remote development boxes** where code, credentials, tmux, Git, agent CLIs,
+- **Remote development boxes** where code, credentials, atch, Git, agent CLIs,
   and language servers already live on the host.
 
 ## How the system is organized
 
 Desk separates process ownership from view ownership:
 
-- **tmux owns process lifetime.** Agent sessions keep running when the browser
+- **atch owns process lifetime.** Agent sessions keep running when the browser
   closes, the network drops, or the Desk server restarts.
 - **The manifest owns intent.** `~/.config/desk/desk.yml` defines projects,
   groups, sessions, layouts, startup commands, permissions, and UI settings.
 - **The browser owns the view.** The UI subscribes to terminals, channels,
   files, diffs, project boards, notes, and telemetry without becoming the
   owner of the agent process.
-- **The broker owns terminal transport.** One browser WebSocket multiplexes
-  visible terminal output, warm PTYs, scrollback snapshots, and broker metrics.
+- **The terminal daemon owns terminal transport.** One binary browser
+  WebSocket multiplexes visible surfaces while the supervised daemon manages
+  atch masters, generation fencing, snapshots, input, and resize.
 - **Hooks own agent events.** Codex, Claude, and OpenCode report lifecycle,
   attention, prompt, stop, and permission events back to Desk.
 
@@ -84,7 +85,7 @@ before designing a larger fleet.
 
 - [Architecture](/concepts-architecture) explains the runtime components.
 - [Workspace model](/concepts-workspace-model) explains projects, groups,
-  sessions, layouts, tmux names, and resume ids.
+  sessions, layouts, durable session ids, and resume ids.
 - [Agents and terminals](/agents-and-terminals) covers the native chat
   surface, terminal behavior, attention, rendering, and session controls.
 - [Channels protocol](/channels-protocol) documents message storage, delivery,

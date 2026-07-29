@@ -167,6 +167,39 @@ describe('session form payload', () => {
     expect('model' in buildSessionPayload({ ...base, model: '' })).toBe(false);
   });
 
+  it('carries a selected profile for a managed Claude or Codex launch', () => {
+    const payload = buildSessionPayload({
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'profiled',
+      cwd: '/tmp/profiled',
+      agent: 'claude',
+      profileId: 'work-claude',
+      resume: '',
+      initialResume: '',
+      bypassPermissions: false,
+      command: '',
+      uiMode: 'native'
+    });
+    expect(payload.profileId).toBe('work-claude');
+  });
+
+  it('omits profile selection for ambient and custom-command launches', () => {
+    const base = {
+      projectId: 'alpha',
+      groupId: 'main',
+      name: 'agent',
+      cwd: '/tmp/profiled',
+      agent: 'codex',
+      resume: '',
+      initialResume: '',
+      bypassPermissions: false,
+      uiMode: 'terminal' as const
+    };
+    expect('profileId' in buildSessionPayload({ ...base, profileId: '', command: '' })).toBe(false);
+    expect('profileId' in buildSessionPayload({ ...base, profileId: 'work-codex', command: 'codex-wrapper' })).toBe(false);
+  });
+
   it('marks a deliberate resume clear only when the field held a value at load', () => {
     const cleared = buildSessionPayload({
       projectId: 'alpha',
@@ -223,9 +256,31 @@ describe('session form modal source contract', () => {
     expect(source).toContain('UI mode');
   });
 
-  it('tracks uiMode in the session form state with a native default', () => {
+  // Terminal is the mode that works for every agent Desk drives, so it is what
+  // a new session starts as. Native is richer but narrower, and defaulting to
+  // it made the operator's first session the least predictable one.
+  it('defaults a new session to TERMINAL ui mode', () => {
     expect(source).toMatch(/uiMode: DeskSessionUiMode/);
-    expect(source).toMatch(/uiMode: 'native',\n  model: ''/);
+    expect(source).toMatch(/uiMode: 'terminal',\n {2}model: ''/);
+  });
+
+  it('marks native as experimental where the mode is CHOSEN, not in a tooltip', () => {
+    expect(source).toMatch(/value: 'native', label: 'native \(experimental\)'/);
+  });
+
+  // "Store" named the manifest write. The operator is creating or saving.
+  it('labels the submit by what the operator is doing', () => {
+    expect(source).toContain("mode === 'edit' ? 'Save session' : 'Create session'");
+    expect(source).not.toContain('Store session');
+  });
+
+  // Creating a profile from inside the wizard is a DETOUR: openAddSession
+  // resets the form, so a plain jump to Settings would discard what was typed.
+  it('returns to the session form after the create-profile detour', () => {
+    expect(source).toContain('onCreateProfile');
+    expect(source).toMatch(/setModalReturn\('addSession'\)/);
+    expect(source).toMatch(/setModalReturn\('editSession'\)/);
+    expect(source).toMatch(/const back = modalReturn;/);
   });
 
   it('prefills the edit command field only for custom-command sessions', () => {
@@ -250,5 +305,15 @@ describe('session form modal source contract', () => {
   it('does not replay the preliminary edit after the resume-discard switch gate', () => {
     expect(source).toMatch(/if \(!uiModeSwitchDiscard\) \{\n\s+editedSnapshot = await editProjectSession/);
     expect(source).toContain('setSnapshot(editedSnapshot)');
+  });
+
+  it('renders profile selection in both add and edit session modals', () => {
+    const sessionForms = source.match(/<SessionFormView[\s\S]*?\/>/g) ?? [];
+    expect(source).toContain('profileId: string');
+    expect(source).toMatch(/profileId: session\.spec\.profileId \?\? ''/);
+    expect(sessionForms).toHaveLength(2);
+    expect(sessionForms.every((form) => form.includes('profiles={agentProfiles}'))).toBe(true);
+    expect(source).toContain('<span>Profile</span>');
+    expect(source).toContain("value: '', label: 'Ambient account'");
   });
 });

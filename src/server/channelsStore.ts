@@ -429,7 +429,7 @@ export function destroyChannel(home: string, name: string): void {
 export function addMember(
   home: string,
   channel: string,
-  member: { name: string; type: string; tmuxSession?: string; agentLabel?: string }
+  member: { name: string; type: string; sessionId?: string; agentLabel?: string }
 ): ChannelMember {
   return withChannelLockSync(home, channel, () => addMemberUnlocked(home, channel, member));
 }
@@ -438,7 +438,7 @@ export function addMemberWithUniqueHandle(
   home: string,
   channel: string,
   base: string,
-  member: { type: string; tmuxSession?: string; agentLabel?: string }
+  member: { type: string; sessionId?: string; agentLabel?: string }
 ): ChannelMember {
   return withChannelLockSync(home, channel, () => {
     const name = uniqueMemberHandleLocked(home, channel, base);
@@ -477,7 +477,7 @@ export function updateMemberRole(
       name: member.name,
       type: member.type,
       joined: member.joined,
-      tmuxSession: member.tmuxSession,
+      sessionId: member.sessionId,
       role,
       functions,
       supervisor: member.supervisor,
@@ -522,7 +522,7 @@ export function updateMemberSupervisor(
       name: member.name,
       type: member.type,
       joined: member.joined,
-      tmuxSession: member.tmuxSession,
+      sessionId: member.sessionId,
       role: member.role,
       functions: member.functions,
       supervisor: supervisor || undefined,
@@ -536,7 +536,7 @@ export function updateMemberSupervisor(
 function addMemberUnlocked(
   home: string,
   channel: string,
-  member: { name: string; type: string; tmuxSession?: string; agentLabel?: string }
+  member: { name: string; type: string; sessionId?: string; agentLabel?: string }
 ): ChannelMember {
   const membersDir = join(channelDir(home, channel), '_members');
   if (!existsSync(membersDir)) {
@@ -553,12 +553,12 @@ function addMemberUnlocked(
       name: member.name,
       type: member.type,
       joined,
-      tmuxSession: member.tmuxSession,
+      sessionId: member.sessionId,
       agentLabel: member.agentLabel
     })
   );
   invalidateChannelSummary(home, channel);
-  return { name: member.name, type: member.type, status: 'active', joined, tmuxSession: member.tmuxSession };
+  return { name: member.name, type: member.type, status: 'active', joined, sessionId: member.sessionId };
 }
 
 function uniqueMemberHandleLocked(home: string, channel: string, base: string): string {

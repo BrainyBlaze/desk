@@ -1,35 +1,21 @@
 import { spawnSync } from 'node:child_process';
+import { loadDesk } from '../core/runner.js';
+import { retireNativeSession } from './runtime/nativeSessionControl.js';
 
 /**
  * Emergency kill switch.
  *
- * Finds and terminates ALL codex / claude CLI processes and every tmux session
- * that hosts one — not just Desk-managed sessions. Deliberately broad: this is
- * the "stop everything now" control behind a confirm dialog.
+ * Retires EVERY manifest session's atch master via the daemon control plane
+ * (bounded kill + socket-gone before each 200), then sweeps surviving agent
+ * CLI processes by pid — detached hosts, orphans, or agents started outside
+ * desk entirely. Deliberately broad: this is the "stop everything now"
+ * control behind a confirm dialog.
  */
 
-export interface KillTargets {
-  tmuxSessions: string[];
-  pids: number[];
-}
-
-/** A tmux session is a kill target when it is an agentdesk session or runs an agent CLI. */
-export function parseTmuxKillTargets(listOutput: string, paneCommands: string): string[] {
-  const sessions = new Set<string>();
-  for (const line of listOutput.split('\n')) {
-    const name = line.trim();
-    if (name.startsWith('agentdesk-')) {
-      sessions.add(name);
-    }
-  }
-  // `session\tpane_command` lines: include any session running codex/claude.
-  for (const line of paneCommands.split('\n')) {
-    const [name, command] = line.split('\t');
-    if (name && command && /(?:^|[\s/])(codex|claude)(?:\s|$)/i.test(command)) {
-      sessions.add(name.trim());
-    }
-  }
-  return [...sessions];
+export interface KillResult {
+  killedSessions: string[];
+  killedPids: number[];
+  errors: string[];
 }
 
 /** Parse `ps` output to agent CLI pids, excluding this server and the parser itself. */
@@ -53,44 +39,36 @@ export function parseAgentPids(psOutput: string, selfPid: number): number[] {
   return [...pids];
 }
 
-export function collectKillTargets(): KillTargets {
-  const sessionsList = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' });
-  const paneList = spawnSync('tmux', ['list-panes', '-a', '-F', '#{session_name}\t#{pane_current_command} #{pane_start_command}'], {
-    encoding: 'utf8'
-  });
-  const ps = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
-  const tmuxSessions = parseTmuxKillTargets(sessionsList.stdout ?? '', paneList.stdout ?? '');
-  const pids = parseAgentPids(ps.stdout ?? '', process.pid);
-  return { tmuxSessions, pids };
-}
-
-export interface KillResult {
-  killedSessions: string[];
-  killedPids: number[];
-  errors: string[];
-}
-
-export function executeKillSwitch(): KillResult {
-  const targets = collectKillTargets();
+export async function executeKillSwitch(): Promise<KillResult> {
   const result: KillResult = { killedSessions: [], killedPids: [], errors: [] };
 
-  for (const session of targets.tmuxSessions) {
-    const killed = spawnSync('tmux', ['kill-session', '-t', session], { encoding: 'utf8' });
-    if (killed.status === 0) {
-      result.killedSessions.push(session);
-    } else if (killed.stderr && !/can't find session/i.test(killed.stderr)) {
-      result.errors.push(killed.stderr.trim());
+  // Retire every manifest session. Retire is idempotent and awaited — a
+  // session with no live master is a harmless no-op, a refusing daemon is a
+  // reported error, never a silent skip.
+  let sessionIds: string[] = [];
+  try {
+    sessionIds = loadDesk({}).sessions.map((session) => session.sessionId);
+  } catch (error) {
+    result.errors.push(`manifest unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  for (const sessionId of sessionIds) {
+    const retired = await retireNativeSession(sessionId);
+    if (retired.ok) {
+      result.killedSessions.push(sessionId);
+    } else if (retired.error) {
+      result.errors.push(`retire ${sessionId}: ${retired.error}`);
     }
   }
 
-  // Killing the tmux sessions takes their panes' agent processes with them;
-  // sweep any survivors (detached / orphaned) by pid.
-  for (const pid of targets.pids) {
+  // Retiring the masters takes their agent processes with them; sweep any
+  // survivors (detached hosts, orphans, agents started outside desk) by pid.
+  const ps = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
+  for (const pid of parseAgentPids(ps.stdout ?? '', process.pid)) {
     try {
       process.kill(pid, 'SIGTERM');
       result.killedPids.push(pid);
     } catch {
-      // already gone with its tmux pane
+      // already gone with its master
     }
   }
   return result;

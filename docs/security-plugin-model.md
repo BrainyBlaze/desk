@@ -59,13 +59,14 @@ Treat uploaded files as untrusted, especially when they were produced by an agen
 
 ## Emergency kill switch scope
 
-The kill switch is host-wide for supported agent processes. It can terminate:
+The kill switch retires configured sessions and performs a host-wide sweep for
+supported agent processes. It can terminate:
 
-- every tmux session whose name starts with `agentdesk-`
-- any tmux session whose pane command is Codex or Claude
+- every atch session in the active manifest
 - remaining host `codex` or `claude` processes found by process scan
 
-It is intentionally broader than the active manifest. Use it only as an emergency stop control.
+The process sweep is intentionally broader than the active manifest. Use the
+control only as an emergency stop.
 
 ## Plugin extension points
 
@@ -127,7 +128,7 @@ stock Desk server safe to expose publicly.
 
 It covers:
 
-- terminal broker sockets
+- terminal WebSocket connections
 - filesystem watch sockets
 - LSP sockets
 
