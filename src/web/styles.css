@@ -880,6 +880,9 @@ button.statusSegment:hover {
   line-height: 1.35;
 }
 
+/* Column of <label><span>NAME</span><control/></label> rows.
+   .thinForm is the historical alias for the same pattern in forms. */
+.deskFieldStack,
 .thinForm {
   display: grid;
   /* minmax(0, 1fr), not 1fr: a plain `1fr` floors the column at its content's
@@ -891,28 +894,33 @@ button.statusSegment:hover {
   margin-top: 4px;
 }
 
+.deskFieldStack label,
 .thinForm label {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
+.deskFieldStack .checkLine,
 .thinForm .checkLine {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
 }
 
+.deskFieldStack .checkLine input,
 .thinForm .checkLine input {
   width: 14px;
   height: 14px;
 }
 
+.deskFieldStack label span,
 .thinForm label span {
   color: var(--desk-text-dim);
   font-size: 10px;
   text-transform: uppercase;
 }
 
+.deskFieldStack input,
 .thinForm input {
   min-width: 0;
   height: 24px;
@@ -924,7 +932,9 @@ button.statusSegment:hover {
   font-size: 11px;
 }
 
+.deskFieldStack input:focus,
 .thinForm input:focus,
+.deskFieldStack select:focus,
 .thinForm select:focus,
 select:focus {
   outline: none;
@@ -3674,6 +3684,8 @@ select {
   padding: 1px 7px; cursor: pointer; font-family: inherit;
 }
 .chanThreadChip:hover { background: var(--desk-glow); }
+.chanThreadChipFresh { border-color: var(--desk-accent); box-shadow: 0 0 8px var(--desk-glow); }
+.chanThreadChipDot { width: 6px; height: 6px; border-radius: 50%; background: var(--desk-accent); }
 .chanThreadChip.ghost { opacity: 0; border-style: dashed; color: var(--desk-text-dim); }
 .chanMessage:hover .chanThreadChip.ghost { opacity: 1; }
 
@@ -3891,7 +3903,7 @@ select {
   font: inherit; font-size: 10px; letter-spacing: 0.08em; cursor: pointer;
   box-shadow: 0 0 12px var(--desk-glow);
 }
-.chanJumpLatest:hover { background: var(--desk-glow); }
+.chanJumpLatest:hover { background: linear-gradient(var(--desk-glow), var(--desk-glow)) var(--desk-bg-elevated); }
 
 /* working strip above the composer */
 .chanWorkingStrip {
@@ -4180,10 +4192,17 @@ select {
 .chanFeaturedClose { margin-left: auto; background: none; border: none; color: var(--desk-text-dim); cursor: pointer; }
 .chanFeaturedError { padding: 10px 14px; color: var(--desk-error); font-size: 12px; }
 .chanFeaturedEmpty { padding: 16px 14px; color: var(--desk-text-dim); font-size: 12px; }
-.chanFeaturedFilters { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--desk-border-dim); }
-.chanFeaturedFilter { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--desk-text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-.chanFeaturedFilter select { background: rgba(20, 20, 30, 0.6); color: var(--desk-text); border: 1px solid var(--desk-border-dim); border-radius: 3px; padding: 3px 6px; font-size: 12px; font-family: inherit; cursor: pointer; text-transform: none; letter-spacing: 0; }
-.chanFeaturedFilter select:hover { border-color: var(--desk-accent); }
+/* Featured filter row: reuse .thinForm's label-span uppercase style, but lay
+   fields out horizontally (thinForm's default is a single-column grid). */
+.chanFeaturedFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--desk-line);
+  margin-top: 0;
+}
+.chanFeaturedFilters > label { min-width: 140px; }
 .chanFeaturedList { list-style: none; margin: 0; padding: 4px; overflow-y: auto; max-height: min(52vh, 520px); }
 .chanFeaturedItem { display: flex; align-items: stretch; gap: 4px; }
 .chanFeaturedItem.missing { opacity: 0.6; }
@@ -5386,6 +5405,17 @@ button.layoutBadge:hover:not(:disabled) {
   flex: none;
   flex-wrap: wrap;
 }
+/* Engine console filter row: same horizontal-form pattern as Featured. */
+.chanEngineFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 0;
+  margin-top: 0;
+  border-bottom: 1px solid var(--desk-line);
+}
+.chanEngineFilters > label { min-width: 140px; }
+.chanEngineFilters > label:first-child { flex: 1 1 200px; }
 .chanEngineBtn {
   font: inherit;
   font-size: 10.5px;
