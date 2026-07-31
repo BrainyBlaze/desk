@@ -26,6 +26,7 @@ const AT_BOTTOM_PX = 24;
 const ANCHOR_TOP_GAP = 44;
 /** dwell before a fully-visible unread block (no scrolling possible) is acked */
 const FULLY_VISIBLE_DWELL_MS = 1400;
+const ANCHOR_SETTLE_MS = 3200;
 /** distance (px) from an edge at which the next lazy-load page is prefetched */
 const NEAR_EDGE_PX = 300;
 
@@ -95,6 +96,7 @@ const MessageRow = memo(function MessageRow({
   grouped,
   unread,
   featured,
+  threadFresh,
   cursor,
   reactions,
   api
@@ -111,6 +113,7 @@ const MessageRow = memo(function MessageRow({
   grouped: boolean;
   unread: boolean;
   featured: boolean;
+  threadFresh: boolean;
   /** the keyboard-nav cursor is on this row — drives the cursor highlight */
   cursor: boolean;
   /** reaction kinds present on this message */
@@ -169,11 +172,16 @@ const MessageRow = memo(function MessageRow({
   );
 
   const threadChip = message.threadFile ? (
-    <button type="button" className="chanThreadChip" onClick={() => api.current.onOpenThread?.(message.id)}>
+    <button
+      type="button"
+      className={`chanThreadChip${threadFresh ? ' chanThreadChipFresh' : ''}`}
+      onClick={() => api.current.onOpenThread?.(message.id)}
+    >
       <MessageSquareReply size={11} />
       <span>
         {message.threadReplies ?? 0} {message.threadReplies === 1 ? 'reply' : 'replies'}
       </span>
+      {threadFresh ? <span className="chanThreadChipDot" /> : null}
     </button>
   ) : null;
 
@@ -305,6 +313,7 @@ export function MessageList({
   onOpenFile,
   onMentionNavigate,
   featuredIds,
+  threadSeen,
   onToggleFeatured,
   onDeepLink,
   onQuoteReply,
@@ -344,7 +353,7 @@ export function MessageList({
   /** reload the newest window (used by the latest pill when newer pages exist) */
   onJumpLatest?: () => void;
   /** report the last message the operator has read past (forward-only upstream) */
-  onReadProgress?: (lastReadId: string) => void;
+  onReadProgress?: (channel: string, lastReadId: string, options?: { offWindow?: boolean }) => void;
   onScrollPosition?: (channel: string, anchor: MessageScrollAnchor) => void;
   onOpenThread?: (parentId: string) => void;
   onMenu: (target: MessageMenuTarget) => void;
@@ -357,6 +366,7 @@ export function MessageList({
   onMentionNavigate?: (handle: string) => void;
   /** ids featured in THIS file context (root vs thread) — drives the row star fill */
   featuredIds?: Set<string>;
+  threadSeen?: Record<string, number>;
   onToggleFeatured?: (target: MessageRef) => void;
   /** copy a deep-link to the message; quote the message into the composer */
   onDeepLink?: (target: MessageRef) => void;
@@ -386,6 +396,20 @@ export function MessageList({
   const reportedReadRef = useRef<string | null>(null);
   const onReadProgressRef = useRef(onReadProgress);
   onReadProgressRef.current = onReadProgress;
+  const settledCandidateRef = useRef<{ channel: string; id: string } | null>(null);
+  const pendingAnchorRef = useRef<{ id: string; until: number } | null>(null);
+  const [settling, setSettling] = useState(false);
+  const settleRevealRef = useRef<number | null>(null);
+  const settleCapRef = useRef<number | null>(null);
+  const anchorStartRef = useRef(-1);
+  const beginSettle = (): void => {
+    setSettling(true);
+    anchorStartRef.current = -1;
+    if (settleCapRef.current) {
+      window.clearTimeout(settleCapRef.current);
+    }
+    settleCapRef.current = window.setTimeout(() => setSettling(false), ANCHOR_SETTLE_MS);
+  };
   const scrollRafRef = useRef<number | null>(null);
   const dwellRef = useRef<number | null>(null);
   // True while we are scripting the scroll (anchor jump / stick-to-bottom): the
@@ -411,7 +435,13 @@ export function MessageList({
       if (row?.kind === 'new-divider') {
         return 28;
       }
-      return compact ? 76 : 104;
+      const body = row?.kind === 'message' ? row.message.body : '';
+      let visualLines = 0;
+      for (const line of body.split('\n')) {
+        visualLines += Math.max(1, Math.ceil(line.length / 110));
+      }
+      const chrome = row?.kind === 'message' && row.message.threadFile ? 84 : 52;
+      return chrome + visualLines * 19 + (compact ? -12 : 0);
     },
     overscan: 10
   });
@@ -457,10 +487,16 @@ export function MessageList({
     if (!node) {
       return;
     }
+    programmaticScrollRef.current = true;
     if (rowsRef.current.length > 0) {
       virtualizer.scrollToIndex(rowsRef.current.length - 1, { align: 'end' });
     }
     node.scrollTop = node.scrollHeight;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        programmaticScrollRef.current = false;
+      });
+    });
   };
 
   const scrollToMessage = (messageId: string | null | undefined, align: 'start' | 'center' | 'end' | 'auto'): boolean => {
@@ -496,9 +532,12 @@ export function MessageList({
         scrollHeight: node.scrollHeight,
         bottomPx: AT_BOTTOM_PX
       });
+      if (readId) {
+        settledCandidateRef.current = { channel, id: readId };
+      }
       if (readId && readId !== reportedReadRef.current) {
         reportedReadRef.current = readId;
-        report(readId);
+        report(channel, readId);
       }
     }, FULLY_VISIBLE_DWELL_MS);
   };
@@ -529,12 +568,16 @@ export function MessageList({
         if (!inner) {
           return;
         }
-        if (Number.isFinite(restoreScrollAnchor.scrollTop)) {
-          inner.scrollTop = Math.max(0, Math.min(restoreScrollAnchor.scrollTop, inner.scrollHeight - inner.clientHeight));
-        } else if (restoreScrollAnchor.messageId && scrollToMessage(restoreScrollAnchor.messageId, 'start')) {
+        // Restore by MESSAGE id + offset first: the cached window can differ in
+        // size from when the anchor was captured, so a raw scrollTop pixel would
+        // land on a different (often near-top) message. Pixel is only a fallback
+        // when the remembered message is no longer in the window.
+        if (restoreScrollAnchor.messageId && scrollToMessage(restoreScrollAnchor.messageId, 'start')) {
           if (restoreScrollAnchor.offset !== undefined) {
             inner.scrollTop = Math.max(0, inner.scrollTop - restoreScrollAnchor.offset);
           }
+        } else if (Number.isFinite(restoreScrollAnchor.scrollTop)) {
+          inner.scrollTop = Math.max(0, Math.min(restoreScrollAnchor.scrollTop, inner.scrollHeight - inner.clientHeight));
         }
         const fromBottom = inner.scrollHeight - inner.scrollTop - inner.clientHeight;
         stickToBottomRef.current = fromBottom < 80;
@@ -562,6 +605,7 @@ export function MessageList({
     }
     const targetId = anchorId ?? null;
     if (!targetId) {
+      pendingAnchorRef.current = null;
       stickToBottomRef.current = true;
       scrollToBottom();
       setShowJump(false);
@@ -570,10 +614,12 @@ export function MessageList({
       return;
     }
     stickToBottomRef.current = false;
+    pendingAnchorRef.current = { id: targetId, until: Date.now() + ANCHOR_SETTLE_MS };
+    beginSettle();
     programmaticScrollRef.current = true;
     const applyAnchor = (): void => {
-      scrollToMessage(targetId, 'start');
       const inner = scrollRef.current;
+      scrollToMessage(targetId, 'start');
       if (inner) {
         inner.scrollTop = Math.max(0, inner.scrollTop - ANCHOR_TOP_GAP);
         setShowJump(inner.scrollHeight - inner.scrollTop - inner.clientHeight > 360);
@@ -604,14 +650,79 @@ export function MessageList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anchorKey, anchorId, rows.length]);
 
+  useLayoutEffect(() => {
+    const pending = pendingAnchorRef.current;
+    if (!pending) {
+      return;
+    }
+    if (Date.now() > pending.until) {
+      pendingAnchorRef.current = null;
+      return;
+    }
+    programmaticScrollRef.current = true;
+    scrollToMessage(pending.id, 'start');
+    const inner = scrollRef.current;
+    if (inner) {
+      inner.scrollTop = Math.max(0, inner.scrollTop - ANCHOR_TOP_GAP);
+    }
+    // Reveal when the ANCHOR's own offset stops moving (content above it has
+    // finished measuring) — not when totalSize stabilizes, which never happens
+    // under live traffic appending below the anchor.
+    if (settling) {
+      const idx = findMessageRowIndex(rowsRef.current, pending.id);
+      const item = idx === -1 ? undefined : virtualizer.getVirtualItems().find((v) => v.index === idx);
+      const start = item ? Math.round(item.start) : -1;
+      if (start !== anchorStartRef.current) {
+        anchorStartRef.current = start;
+        if (settleRevealRef.current) {
+          window.clearTimeout(settleRevealRef.current);
+        }
+        settleRevealRef.current = window.setTimeout(() => setSettling(false), 220);
+      }
+    }
+    let second = 0;
+    const first = window.requestAnimationFrame(() => {
+      second = window.requestAnimationFrame(() => {
+        programmaticScrollRef.current = false;
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(first);
+      window.cancelAnimationFrame(second);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalSize, settling]);
+
   useEffect(() => {
     const lastId = messages[messages.length - 1]?.id ?? null;
     if (lastId !== lastIdRef.current) {
       lastIdRef.current = lastId;
       if (stickToBottomRef.current) {
         scrollToBottom();
+        scheduleVisibleAck();
+        if (lastId && !hasNewer) {
+          const report = onReadProgressRef.current;
+          if (report && lastId !== reportedReadRef.current) {
+            reportedReadRef.current = lastId;
+            report(channel, lastId);
+          }
+        }
       }
     }
+  }, [messages]);
+
+  useLayoutEffect(() => {
+    programmaticScrollRef.current = true;
+    let second = 0;
+    const first = window.requestAnimationFrame(() => {
+      second = window.requestAnimationFrame(() => {
+        programmaticScrollRef.current = false;
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(first);
+      window.cancelAnimationFrame(second);
+    };
   }, [messages]);
 
   useLayoutEffect(() => {
@@ -624,6 +735,32 @@ export function MessageList({
     // virtual-list height and changes when markdown/images settle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [totalSize, rows.length]);
+
+  useEffect(() => {
+    return () => {
+      pendingAnchorRef.current = null;
+      if (scrollRafRef.current) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+      if (dwellRef.current) {
+        window.clearTimeout(dwellRef.current);
+        dwellRef.current = null;
+      }
+      const candidate = settledCandidateRef.current;
+      settledCandidateRef.current = null;
+      const report = onReadProgressRef.current;
+      if (candidate && report) {
+        report(candidate.channel, candidate.id, { offWindow: true });
+      }
+      if (settleRevealRef.current) {
+        window.clearTimeout(settleRevealRef.current);
+      }
+      if (settleCapRef.current) {
+        window.clearTimeout(settleCapRef.current);
+      }
+    };
+  }, [channel]);
 
   useEffect(
     () => () => {
@@ -649,9 +786,25 @@ export function MessageList({
     if (!node) {
       return;
     }
-    rememberScrollPosition();
     const fromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
-    stickToBottomRef.current = fromBottom < 80;
+    if (!programmaticScrollRef.current) {
+      pendingAnchorRef.current = null;
+      rememberScrollPosition();
+      stickToBottomRef.current = fromBottom < 80;
+      // Following the tail (within the stick threshold, no more to load below):
+      // the reader has seen the newest, so advance the pointer to the last
+      // message directly. Waiting for the at-bottom dwell/scan loses this under
+      // live traffic (the tail keeps moving), stranding the pointer far behind
+      // — which then anchors a much-earlier message on the next visit.
+      if (stickToBottomRef.current && !hasNewer) {
+        const tailId = messages[messages.length - 1]?.id ?? null;
+        const report = onReadProgressRef.current;
+        if (tailId && report && tailId !== reportedReadRef.current) {
+          reportedReadRef.current = tailId;
+          report(channel, tailId);
+        }
+      }
+    }
     setShowJump(fromBottom > 360);
 
     // Lazy load older when nearing the top, preserving the first visible message
@@ -661,9 +814,11 @@ export function MessageList({
       loadPendingRef.current = true;
       programmaticScrollRef.current = true; // suppress the read-scan during the shift
       const visible = virtualizer.getVirtualItems();
-      const firstMessage = visible.find((item) => rowsRef.current[item.index]?.kind === 'message');
+      const firstMessage = visible.find(
+        (item) => item.end > node.scrollTop && rowsRef.current[item.index]?.kind === 'message'
+      );
       const anchorKey = firstMessage ? rowsRef.current[firstMessage.index]?.key : undefined;
-      const anchorOffset = firstMessage ? firstMessage.start - node.scrollTop : 0;
+      const anchorOffset = firstMessage ? node.scrollTop - firstMessage.start : 0;
       void Promise.resolve(onLoadOlder()).then(() => {
         window.requestAnimationFrame(() => {
           const n = scrollRef.current;
@@ -674,7 +829,8 @@ export function MessageList({
               window.requestAnimationFrame(() => {
                 const inner = scrollRef.current;
                 if (inner) {
-                  inner.scrollTop = Math.max(0, inner.scrollTop + anchorOffset);
+                  const item = virtualizer.getVirtualItems().find((v) => v.index === index);
+                  inner.scrollTop = Math.max(0, (item ? item.start : inner.scrollTop) + anchorOffset);
                 }
               });
             }
@@ -706,18 +862,32 @@ export function MessageList({
       if (!inner || !report) {
         return;
       }
-      const readId = readProgressFromVirtualRows(rowsRef.current, virtualizer.getVirtualItems(), {
+      const items = virtualizer.getVirtualItems();
+      const metrics = {
         scrollOffset: inner.scrollTop,
         viewportHeight: inner.clientHeight,
         scrollHeight: inner.scrollHeight,
         bottomPx: AT_BOTTOM_PX,
         programmatic: programmaticScrollRef.current
-      });
+      };
+      const settled = readProgressFromVirtualRows(rowsRef.current, items, metrics);
+      if (settled) {
+        settledCandidateRef.current = { channel, id: settled };
+      }
+      // A genuine (non-programmatic) scroll that reaches the bottom means the
+      // operator read to the end — ack the tail immediately instead of waiting
+      // for the 1.4s dwell, which a quick scroll-up or channel switch skips.
+      const atBottom = inner.scrollHeight - inner.scrollTop - inner.clientHeight <= AT_BOTTOM_PX;
+      const readId =
+        atBottom && settled
+          ? settled
+          : readProgressFromVirtualRows(rowsRef.current, items, { ...metrics, mode: 'scrolled-past' });
       if (readId && readId !== reportedReadRef.current) {
         reportedReadRef.current = readId;
-        report(readId);
+        report(channel, readId);
       }
     });
+    scheduleVisibleAck();
   };
 
   // Stable callback surface for the rows: a ref so MessageRow's React.memo holds
@@ -811,6 +981,9 @@ export function MessageList({
         grouped={!compact && row.grouped}
         unread={unreadIds.has(message.id)}
         featured={featuredIds?.has(message.id) ?? false}
+        threadFresh={
+          threaded && Boolean(message.threadFile) && (message.threadReplies ?? 0) > (threadSeen?.[message.id] ?? 0)
+        }
         cursor={cursorId != null && cursorId === message.id}
         reactions={reactionsById?.get(message.id) ?? NO_REACTIONS}
         api={apiRef}
@@ -828,7 +1001,7 @@ export function MessageList({
         {messages.length === 0 ? (
           <div className="chanFeedEmpty">No messages yet — say something below.</div>
         ) : (
-          <div style={{ height: `${totalSize}px`, position: 'relative', width: '100%' }}>
+          <div style={{ height: `${totalSize}px`, position: 'relative', width: '100%', visibility: settling ? 'hidden' : 'visible' }}>
             {virtualItems.map((virtualRow) => {
               const row = rows[virtualRow.index];
               if (!row) {
@@ -869,6 +1042,7 @@ export function MessageList({
               onJumpLatest();
             }
             scrollToBottom();
+            scheduleVisibleAck();
           }}
         >
           <ChevronDown size={12} />

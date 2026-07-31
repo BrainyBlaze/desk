@@ -116,6 +116,7 @@ import {
   isFeatured,
   latestMessageId,
   lifecycleStateSignature,
+  mergeChannelWindow,
   messageMatchesFilter,
   nextMentionId,
   normalizeChannelSeenEntry,
@@ -159,6 +160,17 @@ interface SeenEntry {
 function readSeenMap(): Record<string, SeenEntry> {
   try {
     const parsed = JSON.parse(localStorage.getItem(SEEN_STORAGE_KEY) ?? '{}') as Record<string, SeenEntry>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+const THREAD_SEEN_STORAGE_KEY = 'desk.channelsThreadSeen';
+
+function readThreadSeenMap(): Record<string, Record<string, number>> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(THREAD_SEEN_STORAGE_KEY) ?? '{}') as Record<string, Record<string, number>>;
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {};
@@ -227,6 +239,8 @@ export function ChannelsSubsystem({
   const [seenMap, setSeenMap] = useState<Record<string, SeenEntry>>(() => readSeenMap());
   const seenMapRef = useRef(seenMap);
   seenMapRef.current = seenMap;
+  const [threadSeenMap, setThreadSeenMap] = useState<Record<string, Record<string, number>>>(() => readThreadSeenMap());
+  const threadReplyCountRef = useRef(new Map<string, number>());
   // Bumped when automatic channel display should re-apply its initial anchor.
   const [visitKey, setVisitKey] = useState(0);
   const [visitAnchorId, setVisitAnchorId] = useState<string | null>(null);
@@ -335,12 +349,6 @@ export function ChannelsSubsystem({
   const sidebarMenuRef = useClampedMenu(sidebarMenu ? { x: sidebarMenu.x, y: sidebarMenu.y } : null);
 
   const report = useCallback((err: unknown) => onError(err instanceof Error ? err.message : String(err)), [onError]);
-
-  useEffect(() => {
-    if (!active) {
-      activeReturnAnchorCheckRef.current = true;
-    }
-  }, [active]);
 
   // Close the context menus like every other desk menu: any click anywhere
   // (the menu's own items run first via their onClick) or Escape.
@@ -789,7 +797,6 @@ export function ChannelsSubsystem({
       const summary = options.summary ?? channelsRef.current.find((entry) => entry.name === channel);
       const since = options.initialWindow && summary ? channelInitialLoadSince(summary, seenMapRef.current[channel]) : null;
       if (options.initialWindow) {
-        beginVisit(since);
         setRestoreScrollChannel(null);
       }
       const next = await channelsDetail(channel, since);
@@ -797,9 +804,17 @@ export function ChannelsSubsystem({
       // channel — a newer refresh bumps the token and wins, so a stale response
       // is dropped instead of overwriting fresher content.
       if (selectedRef.current === channel && detailGateRef.current.isCurrent(channel, token)) {
-        setDetail(next);
+        const loaded = detailRef.current;
+        const applied =
+          options.initialWindow || !loaded || loaded.name !== channel ? next : mergeChannelWindow(loaded, next);
+        setDetail((current) =>
+          options.initialWindow || !current || current.name !== channel ? next : mergeChannelWindow(current, next)
+        );
+        if (options.initialWindow) {
+          beginVisit(since);
+        }
         if (threadRef.current) {
-          const stillExists = next.messages.some((message) => message.id === threadRef.current);
+          const stillExists = applied.messages.some((message) => message.id === threadRef.current);
           if (!stillExists) {
             setThreadParent(null);
             setThreadMessages([]);
@@ -887,7 +902,7 @@ export function ChannelsSubsystem({
           }
           const knownNow = new Set(current.messages.map((message) => message.id));
           const freshNow = page.messages.filter((message) => !knownNow.has(message.id));
-          return { ...current, messages: [...current.messages, ...freshNow], hasNewer: page.hasNewer };
+          return { ...current, messages: [...current.messages, ...freshNow], hasNewer: page.hasNewer, total: page.total };
         });
         return 'appended';
       }
@@ -951,16 +966,28 @@ export function ChannelsSubsystem({
       .catch(report);
   }, [report]);
 
+  const markThreadSeen = useCallback((channel: string, parentId: string, replies: number): void => {
+    setThreadSeenMap((current) => {
+      if (replies <= (current[channel]?.[parentId] ?? 0)) {
+        return current;
+      }
+      const merged = { ...current, [channel]: { ...current[channel], [parentId]: replies } };
+      localStorage.setItem(THREAD_SEEN_STORAGE_KEY, JSON.stringify(merged));
+      return merged;
+    });
+  }, []);
+
   const refreshThread = useCallback(async (channel: string, parent: string): Promise<void> => {
     try {
       const next = await channelsThread(channel, parent);
       if (selectedRef.current === channel && threadRef.current === parent) {
         setThreadMessages(next.messages);
+        markThreadSeen(channel, parent, next.messages.length);
       }
     } catch (err) {
       report(err);
     }
-  }, [report]);
+  }, [markThreadSeen, report]);
 
   const refreshState = useCallback(async (): Promise<void> => {
     try {
@@ -1006,17 +1033,10 @@ export function ChannelsSubsystem({
       // disturb the viewport the operator left behind.
       const selectedSummary = state.channels.find((channel) => channel.name === selectedRef.current);
       const loaded = detailRef.current;
-      const checkActiveReturnAnchor = activeRef.current && activeReturnAnchorCheckRef.current;
-      if (checkActiveReturnAnchor) {
-        activeReturnAnchorCheckRef.current = false;
-      }
       if (activeRef.current && selectedSummary && loaded && loaded.name === selectedSummary.name) {
         const newestLoaded = loaded.messages[loaded.messages.length - 1]?.id ?? null;
         const summaryLast = selectedSummary.lastMessage?.id ?? null;
-        if (checkActiveReturnAnchor && channelShouldReanchorCachedDetail(selectedSummary, seenMapRef.current[selectedSummary.name])) {
-          setRestoreScrollChannel(null);
-          void refreshDetail(selectedSummary.name, { initialWindow: true, summary: selectedSummary });
-        } else if (!loaded.hasNewer && newestLoaded !== summaryLast) {
+        if (!loaded.hasNewer && newestLoaded !== summaryLast) {
           const target = selectedSummary.name;
           void loadNewer(target).then((outcome) => {
             // Recover ONLY on a genuinely stale cursor (fetched, nothing came
@@ -1050,6 +1070,13 @@ export function ChannelsSubsystem({
         // Member join/leave only touches metadata, never the message window.
         if (loaded.members.length !== selectedSummary.members.length) {
           void refreshMeta(selectedSummary.name);
+        }
+        const knownThreadReplies = threadReplyCountRef.current.get(selectedSummary.name);
+        if (knownThreadReplies !== selectedSummary.threadReplyCount) {
+          threadReplyCountRef.current.set(selectedSummary.name, selectedSummary.threadReplyCount);
+          if (knownThreadReplies !== undefined && !loaded.hasNewer) {
+            void refreshDetail(selectedSummary.name);
+          }
         }
       }
       // Thread replies do not change root lastMessage — refresh the open
@@ -1133,23 +1160,26 @@ export function ChannelsSubsystem({
   // Advance a channel's read pointer as the feed reports scroll progress.
   // Forward-only: a poll re-render, an upward scroll, or a stale report can
   // never un-read messages (the unread badge would flicker otherwise).
-  const markChannelRead = useCallback((channel: string, lastReadId: string): void => {
+  const markChannelRead = useCallback((channel: string, lastReadId: string, options: { offWindow?: boolean } = {}): void => {
     setSeenMap((current) => {
-      const loaded = detailRef.current;
-      if (!loaded || loaded.name !== channel) {
-        return current;
-      }
-      const windowIndex = loaded.messages.findIndex((message) => message.id === lastReadId);
-      if (windowIndex === -1) {
-        return current;
-      }
-      // Absolute count = messages before the window + position within it, so the
-      // sidebar's `messageCount - count` is correct even when only a window loaded.
-      const count = (loaded.startIndex ?? 0) + windowIndex + 1;
       const entry = current[channel];
-      if (entry && entry.count >= count) {
-        return current; // forward-only: never move the read pointer backwards
+      const loaded = detailRef.current;
+      const messages = loaded && loaded.name === channel ? loaded.messages : null;
+      const windowIndex = messages ? messages.findIndex((message) => message.id === lastReadId) : -1;
+      if (entry) {
+        const entryIndex = messages ? messages.findIndex((message) => message.id === entry.id) : -1;
+        const regressed =
+          windowIndex !== -1 && entryIndex !== -1
+            ? entryIndex >= windowIndex
+            : entry.id === lastReadId || entry.id.slice(0, 19) > lastReadId.slice(0, 19);
+        if (regressed) {
+          return current;
+        }
       }
+      if (windowIndex === -1 && !options.offWindow) {
+        return current;
+      }
+      const count = windowIndex === -1 ? entry?.count ?? 0 : (loaded?.startIndex ?? 0) + windowIndex + 1;
       const merged = { ...current, [channel]: { id: lastReadId, count } };
       localStorage.setItem(SEEN_STORAGE_KEY, JSON.stringify(merged));
       return merged;
@@ -1227,6 +1257,7 @@ export function ChannelsSubsystem({
       const shouldReanchor = summary ? channelShouldReanchorCachedDetail(summary, seenMapRef.current[name]) : false;
       if (shouldReanchor) {
         setRestoreScrollChannel(null);
+        setVisitAnchorId(readAnchor);
         // Show the newly-selected channel's cached window immediately, THEN
         // reanchor to unread. Without this, detail stayed on the previous
         // channel while `selected` was already the new one: the header, feed,
@@ -1402,7 +1433,11 @@ export function ChannelsSubsystem({
       }
       try {
         await channelsPost({ channel, body, thread });
-        await refreshDetail(channel);
+        if (!thread && detailRef.current?.name === channel && detailRef.current.hasNewer) {
+          jumpToLatest(channel);
+        } else {
+          await refreshDetail(channel);
+        }
         if (thread) {
           await refreshThread(channel, thread);
         }
@@ -1412,7 +1447,7 @@ export function ChannelsSubsystem({
         return false;
       }
     },
-    [refreshDetail, refreshThread, report]
+    [jumpToLatest, refreshDetail, refreshThread, report]
   );
 
   const handleAddMember = (session: DeskSessionView): void => {
@@ -1467,7 +1502,10 @@ export function ChannelsSubsystem({
       return;
     }
     const { member, channel } = memberRoleModal;
-    void channelsMemberRoleClear(channel, member)
+    void Promise.all([
+      channelsMemberRoleClear(channel, member),
+      channelsMemberSupervisor(channel, member, false)
+    ])
       .then(async () => {
         setMemberRoleModal(null);
         onInfo(`@${member} role cleared`);
@@ -2488,7 +2526,7 @@ export function ChannelsSubsystem({
                       onLoadOlder={!filtering ? loadOlder : undefined}
                       onLoadNewer={!filtering ? () => void loadNewer(detail.name) : undefined}
                       onJumpLatest={!filtering && detail.hasNewer ? () => jumpToLatest(detail.name) : undefined}
-                      onReadProgress={active && !filtering ? (id) => markChannelRead(detail.name, id) : undefined}
+                      onReadProgress={active && !filtering ? markChannelRead : undefined}
                       onOpenThread={openThread}
                       onMenu={setMenuTarget}
                       onMention={mentionAuthor}
@@ -2498,6 +2536,7 @@ export function ChannelsSubsystem({
                       onOpenFile={onOpenFile}
                       onMentionNavigate={navigateToMember}
                       featuredIds={rootFeaturedIds}
+                      threadSeen={threadSeenMap[detail.name]}
                       onToggleFeatured={onToggleFeatured}
                       onDeepLink={onDeepLink}
                       onQuoteReply={onQuoteReply}

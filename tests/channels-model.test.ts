@@ -47,13 +47,14 @@ import {
   readProgressFromVirtualRows,
   reactionsForMessage,
   restoreScrollChannelForSelection,
+  mergeChannelWindow,
   shouldSwitchChannelForNavigation,
   sortFeatured,
   toSearchOptions,
   unreadCount,
   unreadIdsAfter
 } from '../src/web/channels/channelsModel.js';
-import type { ChannelActivityEvent, ChannelMessage, FeaturedMessageRef, LifecycleState, ReactionRef } from '../src/web/channels/channelsClient.js';
+import type { ChannelActivityEvent, ChannelDetail, ChannelMessage, FeaturedMessageRef, LifecycleState, ReactionRef } from '../src/web/channels/channelsClient.js';
 
 const msg = (id: string, timestamp: string, body = 'x', author = 'claude'): ChannelMessage => ({
   id,
@@ -295,11 +296,11 @@ describe('unread + filter', () => {
     expect(channelUnreadCount(3, 'm3', { id: 'm9', count: 9 })).toBe(0);
   });
 
-  it('normalizes a fully-read count to the current last message id', () => {
+  it('never rewrites the stored id from count math', () => {
     const channel = { messageCount: 3, lastMessage: { id: 'm3' } };
-    expect(normalizeChannelSeenEntry(channel, { id: 'm1', count: 3 })).toEqual({ id: 'm3', count: 3 });
-    expect(normalizeChannelSeenEntry(channel, { id: 'stale-high', count: 9 })).toEqual({ id: 'm3', count: 3 });
-    expect(channelReadPointer(channel, { id: 'stale-high', count: 9 })).toBe('m3');
+    expect(normalizeChannelSeenEntry(channel, { id: 'm1', count: 3 })).toEqual({ id: 'm1', count: 3 });
+    expect(normalizeChannelSeenEntry(channel, { id: 'stale-high', count: 9 })).toEqual({ id: 'stale-high', count: 9 });
+    expect(channelReadPointer(channel, { id: 'stale-high', count: 9 })).toBe('stale-high');
   });
 
   it('keeps the stored id when the channel still has unread messages', () => {
@@ -314,7 +315,7 @@ describe('unread + filter', () => {
     expect(channelInitialLoadSince(channel, { id: 'm5', count: 5 })).toBe('m5');
     expect(channelInitialLoadSince(channel, { id: 'm6', count: 6 })).toBe('m6');
     expect(channelInitialLoadSince(channel, { id: 'm7', count: 7 })).toBeNull();
-    expect(channelInitialLoadSince(channel, { id: 'stale-high', count: 99 })).toBeNull();
+    expect(channelInitialLoadSince(channel, { id: 'stale-high', count: 99 })).toBe('stale-high');
     expect(channelInitialLoadSince(channel, undefined)).toBeNull();
   });
 
@@ -323,7 +324,7 @@ describe('unread + filter', () => {
 
     expect(channelShouldReanchorCachedDetail(channel, { id: 'm5', count: 5 })).toBe(true);
     expect(channelShouldReanchorCachedDetail(channel, { id: 'm7', count: 7 })).toBe(false);
-    expect(channelShouldReanchorCachedDetail(channel, { id: 'stale-high', count: 99 })).toBe(false);
+    expect(channelShouldReanchorCachedDetail(channel, { id: 'stale-high', count: 99 })).toBe(true);
     expect(channelShouldReanchorCachedDetail(channel, undefined)).toBe(false);
   });
 });
@@ -803,5 +804,117 @@ describe('MessageList virtualization helpers (slice C)', () => {
         { scrollOffset: 128, viewportHeight: 400, scrollHeight: 1000, bottomPx: 24, programmatic: true }
       )
     ).toBeNull();
+  });
+
+  it('scrolled-past mode acks only rows whose bottom edge passed the viewport top', () => {
+    const rows = buildMessageListRows(messages, { now: new Date(2026, 5, 19, 12, 0, 0) });
+    const items = [
+      { index: 0, start: 0, end: 24 },
+      { index: 1, start: 24, end: 104 },
+      { index: 2, start: 104, end: 128 },
+      { index: 3, start: 128, end: 208 }
+    ];
+
+    expect(
+      readProgressFromVirtualRows(rows, items, {
+        scrollOffset: 128,
+        viewportHeight: 400,
+        scrollHeight: 1000,
+        bottomPx: 24,
+        mode: 'scrolled-past'
+      })
+    ).toBe('b');
+  });
+
+  it('scrolled-past mode never fast-acks the whole window at the bottom', () => {
+    const rows = buildMessageListRows(messages, { now: new Date(2026, 5, 19, 12, 0, 0) });
+
+    expect(
+      readProgressFromVirtualRows(rows, [{ index: 0, start: 476, end: 976 }], {
+        scrollOffset: 476,
+        viewportHeight: 500,
+        scrollHeight: 976,
+        bottomPx: 24,
+        mode: 'scrolled-past'
+      })
+    ).toBeNull();
+  });
+});
+
+describe('mergeChannelWindow', () => {
+  const window = (ids: string[], overrides: Partial<ChannelDetail> = {}): ChannelDetail => ({
+    name: 'dev',
+    goal: 'g',
+    members: [],
+    messages: ids.map((id, index) => msg(id, `2026-07-30 10:0${index}:00`)),
+    files: [],
+    hasOlder: false,
+    hasNewer: false,
+    total: ids.length,
+    startIndex: 0,
+    contentRevision: 'rev-a',
+    ...overrides
+  });
+
+  it('appends new tail messages while keeping prepended older pages', () => {
+    const current = window(['m1', 'm2', 'm3', 'm4'], { hasOlder: true, startIndex: 0, total: 6 });
+    const fetched = window(['m3', 'm4', 'm5', 'm6'], { hasOlder: true, startIndex: 2, total: 6, contentRevision: 'rev-b' });
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+    expect(merged.startIndex).toBe(0);
+    expect(merged.hasOlder).toBe(true);
+    expect(merged.contentRevision).toBe('rev-b');
+  });
+
+  it('patches edits and drops deletions inside the overlap', () => {
+    const current = window(['m1', 'm2', 'm3', 'm4']);
+    const fetched = window(['m1', 'm3', 'm4'], { total: 3, contentRevision: 'rev-b' });
+    fetched.messages[1] = { ...fetched.messages[1], body: 'edited' };
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm3', 'm4']);
+    expect(merged.messages[1].body).toBe('edited');
+    expect(merged.total).toBe(3);
+  });
+
+  it('adopts the fetched window wholesale when it covers the visible range from older ground', () => {
+    const current = window(['m5', 'm6'], { startIndex: 4, total: 6 });
+    const fetched = window(['m1', 'm2', 'm3', 'm4', 'm5', 'm6'], { total: 6, contentRevision: 'rev-b' });
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+    expect(merged.contentRevision).toBe('rev-b');
+  });
+
+  it('keeps a disjoint reader window and flips hasNewer instead of yanking to the tail', () => {
+    const current = window(['m1', 'm2'], { hasNewer: true, total: 90 });
+    const fetched = window(['m80', 'm81'], { startIndex: 79, total: 92, contentRevision: 'rev-b' });
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2']);
+    expect(merged.hasNewer).toBe(true);
+    expect(merged.total).toBe(92);
+    expect(merged.contentRevision).toBe('rev-a');
+  });
+
+  it('clamps startIndex when prefix deletions shrink the absolute range', () => {
+    const current = window(['m1', 'm2', 'm3'], { total: 3 });
+    const fetched = window(['m3'], { startIndex: 0, total: 1, contentRevision: 'rev-b' });
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+    expect(merged.startIndex).toBe(0);
+  });
+
+  it('keeps object identity for unchanged messages so rows do not remount', () => {
+    const current = window(['m1', 'm2', 'm3']);
+    const fetched = window(['m2', 'm3', 'm4'], { startIndex: 1, total: 4, contentRevision: 'rev-b' });
+    fetched.messages = [{ ...current.messages[1] }, { ...current.messages[2] }, fetched.messages[2]];
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4']);
+    expect(merged.messages[1]).toBe(current.messages[1]);
+    expect(merged.messages[2]).toBe(current.messages[2]);
+  });
+
+  it('replaces an empty window with the fetched one', () => {
+    const merged = mergeChannelWindow(window([]), window(['m1'], { contentRevision: 'rev-b' }));
+    expect(merged.messages.map((m) => m.id)).toEqual(['m1']);
+    expect(merged.contentRevision).toBe('rev-b');
   });
 });
