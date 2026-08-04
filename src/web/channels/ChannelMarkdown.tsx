@@ -26,6 +26,19 @@ function channelUrlTransform(url: string): string {
  *  - _files/<name>        → channel upload, served by the desk server
  *  - absolute / ~ paths   → open in the editor subsystem
  */
+function parseFileTarget(target: string): { path: string; reveal?: { line: number; column: number } } {
+  const raw = target.startsWith('file://') ? target.slice('file://'.length) : target;
+  const hash = /#L(\d+)(?:C(\d+))?$/i.exec(raw);
+  if (hash) {
+    return { path: raw.slice(0, hash.index), reveal: { line: Number(hash[1]), column: hash[2] ? Number(hash[2]) : 1 } };
+  }
+  const colon = /:(\d+)(?::(\d+))?$/.exec(raw);
+  if (colon) {
+    return { path: raw.slice(0, colon.index), reveal: { line: Number(colon[1]), column: colon[2] ? Number(colon[2]) : 1 } };
+  }
+  return { path: raw };
+}
+
 function ChannelMarkdown({
   body,
   channel,
@@ -34,7 +47,7 @@ function ChannelMarkdown({
 }: {
   body: string;
   channel: string;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, reveal?: { line: number; column: number }) => void;
   /** navigate to the member behind a mention chip (agent handles only) */
   onMentionClick?: (handle: string) => void;
 }): JSX.Element {
@@ -75,9 +88,9 @@ function ChannelMarkdown({
               );
             }
             if (target.startsWith('/') || target.startsWith('~') || target.startsWith('file://')) {
-              const path = target.startsWith('file://') ? target.slice('file://'.length) : target;
+              const { path, reveal } = parseFileTarget(target);
               return (
-                <button type="button" className="chanPathLink" title={`Open ${path} in the editor`} onClick={() => onOpenFile(path)}>
+                <button type="button" className="chanPathLink" title={`Open ${path} in the editor`} onClick={() => onOpenFile(path, reveal)}>
                   {children}
                 </button>
               );

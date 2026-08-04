@@ -73,7 +73,7 @@ interface RowApi {
   onShare?: (target: MessageRef) => void;
   onEdit?: (target: MessageRef) => void;
   onDelete?: (target: MessageRef) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, reveal?: { line: number; column: number }) => void;
   onMentionNavigate?: (handle: string) => void;
   onToggleFeatured?: (target: MessageRef) => void;
   onDeepLink?: (target: MessageRef) => void;
@@ -360,7 +360,7 @@ export function MessageList({
   onShare?: (target: MessageRef) => void;
   onEdit?: (target: MessageRef) => void;
   onDelete?: (target: MessageRef) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, reveal?: { line: number; column: number }) => void;
   /** navigate to the member behind a clicked mention chip */
   onMentionNavigate?: (handle: string) => void;
   /** ids featured in THIS file context (root vs thread) — drives the row star fill */
