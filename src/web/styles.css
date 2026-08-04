@@ -2554,6 +2554,7 @@ select {
 
 .confirmBody { display: flex; flex-direction: column; gap: 12px; }
 .confirmActions { display: flex; gap: 8px; justify-content: flex-end; }
+.confirmActionsSplit .deskCmd.danger { order: -1; margin-right: auto; }
 
 /* ---------- Editor subsystem: tabs + monaco ---------- */
 .editorStage { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0; }

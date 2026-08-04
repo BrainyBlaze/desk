@@ -3124,7 +3124,7 @@ export function ChannelsSubsystem({
                 </div>
               ) : null}
             </div>
-            <div className="confirmActions">
+            <div className="confirmActions confirmActionsSplit">
               <Cmd
                 icon={<X size={12} />}
                 label="Cancel"
