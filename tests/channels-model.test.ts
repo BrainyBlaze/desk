@@ -19,7 +19,6 @@ import {
   channelSidebarSections,
   composerInputHeightFromTopResize,
   channelInitialLoadSince,
-  channelReadPointer,
   channelShouldReanchorCachedDetail,
   channelUnreadCount,
   dayLabel,
@@ -40,7 +39,6 @@ import {
   messageClock,
   messageMatchesFilter,
   messageTargets,
-  normalizeChannelSeenEntry,
   nextMentionId,
   parseMessageLink,
   parseMessageTime,
@@ -294,20 +292,6 @@ describe('unread + filter', () => {
     expect(channelUnreadCount(7, 'm7', { id: 'm5', count: 5 })).toBe(2);
     // stale seen count never yields a negative unread
     expect(channelUnreadCount(3, 'm3', { id: 'm9', count: 9 })).toBe(0);
-  });
-
-  it('never rewrites the stored id from count math', () => {
-    const channel = { messageCount: 3, lastMessage: { id: 'm3' } };
-    expect(normalizeChannelSeenEntry(channel, { id: 'm1', count: 3 })).toEqual({ id: 'm1', count: 3 });
-    expect(normalizeChannelSeenEntry(channel, { id: 'stale-high', count: 9 })).toEqual({ id: 'stale-high', count: 9 });
-    expect(channelReadPointer(channel, { id: 'stale-high', count: 9 })).toBe('stale-high');
-  });
-
-  it('keeps the stored id when the channel still has unread messages', () => {
-    const channel = { messageCount: 7, lastMessage: { id: 'm7' } };
-    expect(normalizeChannelSeenEntry(channel, { id: 'm5', count: 5 })).toEqual({ id: 'm5', count: 5 });
-    expect(channelReadPointer(channel, { id: 'm5', count: 5 })).toBe('m5');
-    expect(channelReadPointer(channel, undefined)).toBeNull();
   });
 
   it('requests an initial window around the read pointer when unread messages exist', () => {
@@ -754,7 +738,9 @@ describe('MessageList virtualization helpers (slice C)', () => {
     const rows = buildMessageListRows(messages, { newDividerId: 'b', now: new Date(2026, 5, 19, 12, 0, 0) });
 
     expect(rows.map((row) => row.kind)).toEqual(['day', 'message', 'new-divider', 'message', 'day', 'message']);
-    expect(rows.map((row) => row.key)).toEqual(['day:Yesterday:0', 'msg:a', 'new:b', 'msg:b', 'day:Today:1', 'msg:c']);
+    expect(rows.map((row) => row.key)).toEqual(['day:2026-5-18', 'msg:a', 'new:b', 'msg:b', 'day:2026-5-19', 'msg:c']);
+    expect(rows[0]).toMatchObject({ kind: 'day', dayLabel: 'Yesterday' });
+    expect(rows[4]).toMatchObject({ kind: 'day', dayLabel: 'Today' });
     expect(rows[1]).toMatchObject({ kind: 'message', grouped: false });
     expect(rows[3]).toMatchObject({ kind: 'message', grouped: true });
   });
@@ -876,12 +862,22 @@ describe('mergeChannelWindow', () => {
     expect(merged.total).toBe(3);
   });
 
-  it('adopts the fetched window wholesale when it covers the visible range from older ground', () => {
+  it('keeps the loaded older bound on a tail-unchanged reconcile instead of widening history backward', () => {
     const current = window(['m5', 'm6'], { startIndex: 4, total: 6 });
     const fetched = window(['m1', 'm2', 'm3', 'm4', 'm5', 'm6'], { total: 6, contentRevision: 'rev-b' });
     const merged = mergeChannelWindow(current, fetched);
-    expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m5', 'm6']);
+    expect(merged.startIndex).toBe(4);
     expect(merged.contentRevision).toBe('rev-b');
+  });
+
+  it('recomputes startIndex from the fetched window when history shrank above the reader', () => {
+    const current = window(['m5', 'm6'], { startIndex: 4, total: 6 });
+    const fetched = window(['m3', 'm4', 'm5', 'm6'], { total: 4, contentRevision: 'rev-b' });
+    const merged = mergeChannelWindow(current, fetched);
+    expect(merged.messages.map((m) => m.id)).toEqual(['m5', 'm6']);
+    expect(merged.startIndex).toBe(2);
+    expect(merged.total).toBe(4);
   });
 
   it('keeps a disjoint reader window and flips hasNewer instead of yanking to the tail', () => {

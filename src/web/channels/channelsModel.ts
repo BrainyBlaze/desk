@@ -348,6 +348,7 @@ export function parseMessageTime(timestamp: string): Date | null {
 }
 
 export interface MessageGroup {
+  dayKey: string;
   dayLabel: string;
   messages: ChannelMessage[];
 }
@@ -381,7 +382,11 @@ export function groupMessagesByDay(messages: ChannelMessage[], now = new Date())
     const key = time ? `${time.getFullYear()}-${time.getMonth()}-${time.getDate()}` : 'unknown';
     if (key !== currentKey || groups.length === 0) {
       currentKey = key;
-      groups.push({ dayLabel: time ? dayLabel(time, now) : '—', messages: [message] });
+      groups.push({
+        dayKey: key === 'unknown' ? `unknown:${groups.length}` : key,
+        dayLabel: time ? dayLabel(time, now) : '—',
+        messages: [message]
+      });
     } else {
       groups[groups.length - 1].messages.push(message);
     }
@@ -399,7 +404,7 @@ export function buildMessageListRows(
   const groups = groupMessagesByDay(messages, options.now);
   for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
     const group = groups[groupIndex]!;
-    rows.push({ kind: 'day', key: `day:${group.dayLabel}:${groupIndex}`, dayLabel: group.dayLabel, groupIndex });
+    rows.push({ kind: 'day', key: `day:${group.dayKey}`, dayLabel: group.dayLabel, groupIndex });
     for (let messageIndex = 0; messageIndex < group.messages.length; messageIndex += 1) {
       const message = group.messages[messageIndex]!;
       if (options.newDividerId === message.id) {
@@ -503,20 +508,6 @@ export function channelUnreadCount(
 export interface ChannelSeenEntry {
   id: string;
   count: number;
-}
-
-export function normalizeChannelSeenEntry(
-  channel: { messageCount: number; lastMessage?: { id: string } | null },
-  seen: ChannelSeenEntry | undefined
-): ChannelSeenEntry | undefined {
-  return seen;
-}
-
-export function channelReadPointer(
-  channel: { messageCount: number; lastMessage?: { id: string } | null },
-  seen: ChannelSeenEntry | undefined
-): string | null {
-  return normalizeChannelSeenEntry(channel, seen)?.id ?? null;
 }
 
 export function channelInitialLoadSince(
@@ -978,8 +969,16 @@ export function mergeChannelWindow(current: ChannelDetail, fetched: ChannelDetai
       contentRevision: fetched.contentRevision
     };
   }
-  if (adopted.some((message) => message.id === current.messages[0].id)) {
-    return { ...fetched, messages: adopted };
+  const from = adopted.findIndex((message) => message.id === current.messages[0].id);
+  if (from >= 0) {
+    return {
+      ...current,
+      ...meta,
+      messages: adopted.slice(from),
+      startIndex: fetched.startIndex + from,
+      hasNewer: fetched.hasNewer,
+      contentRevision: fetched.contentRevision
+    };
   }
   return { ...current, ...meta, hasNewer: true };
 }

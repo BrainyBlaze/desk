@@ -26,7 +26,6 @@ const AT_BOTTOM_PX = 24;
 const ANCHOR_TOP_GAP = 44;
 /** dwell before a fully-visible unread block (no scrolling possible) is acked */
 const FULLY_VISIBLE_DWELL_MS = 1400;
-const ANCHOR_SETTLE_MS = 3200;
 /** distance (px) from an edge at which the next lazy-load page is prefetched */
 const NEAR_EDGE_PX = 300;
 
@@ -397,19 +396,6 @@ export function MessageList({
   const onReadProgressRef = useRef(onReadProgress);
   onReadProgressRef.current = onReadProgress;
   const settledCandidateRef = useRef<{ channel: string; id: string } | null>(null);
-  const pendingAnchorRef = useRef<{ id: string; until: number } | null>(null);
-  const [settling, setSettling] = useState(false);
-  const settleRevealRef = useRef<number | null>(null);
-  const settleCapRef = useRef<number | null>(null);
-  const anchorStartRef = useRef(-1);
-  const beginSettle = (): void => {
-    setSettling(true);
-    anchorStartRef.current = -1;
-    if (settleCapRef.current) {
-      window.clearTimeout(settleCapRef.current);
-    }
-    settleCapRef.current = window.setTimeout(() => setSettling(false), ANCHOR_SETTLE_MS);
-  };
   const scrollRafRef = useRef<number | null>(null);
   const dwellRef = useRef<number | null>(null);
   // True while we are scripting the scroll (anchor jump / stick-to-bottom): the
@@ -443,7 +429,10 @@ export function MessageList({
       const chrome = row?.kind === 'message' && row.message.threadFile ? 84 : 52;
       return chrome + visualLines * 19 + (compact ? -12 : 0);
     },
-    overscan: 10
+    overscan: 10,
+    anchorTo: 'end',
+    followOnAppend: 'auto',
+    scrollEndThreshold: 80
   });
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
@@ -605,7 +594,6 @@ export function MessageList({
     }
     const targetId = anchorId ?? null;
     if (!targetId) {
-      pendingAnchorRef.current = null;
       stickToBottomRef.current = true;
       scrollToBottom();
       setShowJump(false);
@@ -614,8 +602,6 @@ export function MessageList({
       return;
     }
     stickToBottomRef.current = false;
-    pendingAnchorRef.current = { id: targetId, until: Date.now() + ANCHOR_SETTLE_MS };
-    beginSettle();
     programmaticScrollRef.current = true;
     const applyAnchor = (): void => {
       const inner = scrollRef.current;
@@ -650,55 +636,11 @@ export function MessageList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anchorKey, anchorId, rows.length]);
 
-  useLayoutEffect(() => {
-    const pending = pendingAnchorRef.current;
-    if (!pending) {
-      return;
-    }
-    if (Date.now() > pending.until) {
-      pendingAnchorRef.current = null;
-      return;
-    }
-    programmaticScrollRef.current = true;
-    scrollToMessage(pending.id, 'start');
-    const inner = scrollRef.current;
-    if (inner) {
-      inner.scrollTop = Math.max(0, inner.scrollTop - ANCHOR_TOP_GAP);
-    }
-    // Reveal when the ANCHOR's own offset stops moving (content above it has
-    // finished measuring) — not when totalSize stabilizes, which never happens
-    // under live traffic appending below the anchor.
-    if (settling) {
-      const idx = findMessageRowIndex(rowsRef.current, pending.id);
-      const item = idx === -1 ? undefined : virtualizer.getVirtualItems().find((v) => v.index === idx);
-      const start = item ? Math.round(item.start) : -1;
-      if (start !== anchorStartRef.current) {
-        anchorStartRef.current = start;
-        if (settleRevealRef.current) {
-          window.clearTimeout(settleRevealRef.current);
-        }
-        settleRevealRef.current = window.setTimeout(() => setSettling(false), 220);
-      }
-    }
-    let second = 0;
-    const first = window.requestAnimationFrame(() => {
-      second = window.requestAnimationFrame(() => {
-        programmaticScrollRef.current = false;
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(first);
-      window.cancelAnimationFrame(second);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalSize, settling]);
-
   useEffect(() => {
     const lastId = messages[messages.length - 1]?.id ?? null;
     if (lastId !== lastIdRef.current) {
       lastIdRef.current = lastId;
       if (stickToBottomRef.current) {
-        scrollToBottom();
         scheduleVisibleAck();
         if (lastId && !hasNewer) {
           const report = onReadProgressRef.current;
@@ -711,34 +653,18 @@ export function MessageList({
     }
   }, [messages]);
 
-  useLayoutEffect(() => {
-    programmaticScrollRef.current = true;
-    let second = 0;
-    const first = window.requestAnimationFrame(() => {
-      second = window.requestAnimationFrame(() => {
-        programmaticScrollRef.current = false;
+  useEffect(() => {
+    if (hasNewer && stickToBottomRef.current && onLoadNewer && !loadPendingRef.current) {
+      loadPendingRef.current = true;
+      void Promise.resolve(onLoadNewer()).then(() => {
+        loadPendingRef.current = false;
       });
-    });
-    return () => {
-      window.cancelAnimationFrame(first);
-      window.cancelAnimationFrame(second);
-    };
-  }, [messages]);
-
-  useLayoutEffect(() => {
-    if (!stickToBottomRef.current) {
-      return;
     }
-    scrollToBottom();
-    setShowJump(false);
-    // scrollToBottom is intentionally render-local; totalSize is the measured
-    // virtual-list height and changes when markdown/images settle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalSize, rows.length]);
+  }, [hasNewer, messages]);
 
   useEffect(() => {
     return () => {
-      pendingAnchorRef.current = null;
       if (scrollRafRef.current) {
         window.cancelAnimationFrame(scrollRafRef.current);
         scrollRafRef.current = null;
@@ -752,12 +678,6 @@ export function MessageList({
       const report = onReadProgressRef.current;
       if (candidate && report) {
         report(candidate.channel, candidate.id, { offWindow: true });
-      }
-      if (settleRevealRef.current) {
-        window.clearTimeout(settleRevealRef.current);
-      }
-      if (settleCapRef.current) {
-        window.clearTimeout(settleCapRef.current);
       }
     };
   }, [channel]);
@@ -788,7 +708,6 @@ export function MessageList({
     }
     const fromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
     if (!programmaticScrollRef.current) {
-      pendingAnchorRef.current = null;
       rememberScrollPosition();
       stickToBottomRef.current = fromBottom < 80;
       // Following the tail (within the stick threshold, no more to load below):
@@ -807,39 +726,10 @@ export function MessageList({
     }
     setShowJump(fromBottom > 360);
 
-    // Lazy load older when nearing the top, preserving the first visible message
-    // by row key instead of raw scrollHeight deltas. That keeps prepend stable
-    // under dynamic markdown height measurement.
-    if (hasOlder && onLoadOlder && !loadPendingRef.current && !programmaticScrollRef.current && node.scrollTop < NEAR_EDGE_PX) {
+    if (hasOlder && onLoadOlder && !loadPendingRef.current && node.scrollTop < NEAR_EDGE_PX) {
       loadPendingRef.current = true;
-      programmaticScrollRef.current = true; // suppress the read-scan during the shift
-      const visible = virtualizer.getVirtualItems();
-      const firstMessage = visible.find(
-        (item) => item.end > node.scrollTop && rowsRef.current[item.index]?.kind === 'message'
-      );
-      const anchorKey = firstMessage ? rowsRef.current[firstMessage.index]?.key : undefined;
-      const anchorOffset = firstMessage ? node.scrollTop - firstMessage.start : 0;
       void Promise.resolve(onLoadOlder()).then(() => {
-        window.requestAnimationFrame(() => {
-          const n = scrollRef.current;
-          if (n && anchorKey) {
-            const index = rowsRef.current.findIndex((row) => row.key === anchorKey);
-            if (index !== -1) {
-              virtualizer.scrollToIndex(index, { align: 'start' });
-              window.requestAnimationFrame(() => {
-                const inner = scrollRef.current;
-                if (inner) {
-                  const item = virtualizer.getVirtualItems().find((v) => v.index === index);
-                  inner.scrollTop = Math.max(0, (item ? item.start : inner.scrollTop) + anchorOffset);
-                }
-              });
-            }
-          }
-          loadPendingRef.current = false;
-          window.requestAnimationFrame(() => {
-            programmaticScrollRef.current = false;
-          });
-        });
+        loadPendingRef.current = false;
       });
     }
     // Lazy load newer when nearing the bottom (deep-history view): append, no shift.
@@ -1001,7 +891,7 @@ export function MessageList({
         {messages.length === 0 ? (
           <div className="chanFeedEmpty">No messages yet — say something below.</div>
         ) : (
-          <div style={{ height: `${totalSize}px`, position: 'relative', width: '100%', visibility: settling ? 'hidden' : 'visible' }}>
+          <div style={{ height: `${totalSize}px`, position: 'relative', width: '100%' }}>
             {virtualItems.map((virtualRow) => {
               const row = rows[virtualRow.index];
               if (!row) {

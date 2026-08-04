@@ -104,7 +104,6 @@ import {
   channelSidebarListSize,
   channelSidebarNextCollapsedSections,
   channelInitialLoadSince,
-  channelReadPointer,
   channelSidebarResizeHandleEnabled,
   channelSidebarSections,
   channelShouldReanchorCachedDetail,
@@ -119,7 +118,6 @@ import {
   mergeChannelWindow,
   messageMatchesFilter,
   nextMentionId,
-  normalizeChannelSeenEntry,
   parseMessageLink,
   reactionsForMessage,
   restoreScrollChannelForSelection,
@@ -958,13 +956,20 @@ export function ChannelsSubsystem({
   }, [report]);
 
   // "Jump to latest" when the newest end isn't loaded (deep-history view):
-  // reload the newest window so the feed truly reaches the end. The list's
-  // stick-to-bottom then lands on the last message.
+  // reload the newest window and start a fresh visit so the anchor effect
+  // lands the feed on the last message.
   const jumpToLatest = useCallback((channel: string): void => {
     void channelsDetail(channel)
-      .then((next) => setDetail((current) => (current && current.name === channel ? next : current)))
+      .then((next) => {
+        if (selectedRef.current !== channel || detailRef.current?.name !== channel) {
+          return;
+        }
+        setRestoreScrollChannel(null);
+        setDetail(next);
+        beginVisit(null);
+      })
       .catch(report);
-  }, [report]);
+  }, [beginVisit, report]);
 
   const markThreadSeen = useCallback((channel: string, parentId: string, replies: number): void => {
     setThreadSeenMap((current) => {
@@ -1189,32 +1194,6 @@ export function ChannelsSubsystem({
   const rememberChannelScroll = useCallback((channel: string, anchor: MessageScrollAnchor): void => {
     scrollAnchorByChannelRef.current.set(channel, anchor);
   }, []);
-
-  useEffect(() => {
-    if (channels.length === 0) {
-      return;
-    }
-    setSeenMap((current) => {
-      let merged: Record<string, SeenEntry> | null = null;
-      for (const channel of channels) {
-        const currentEntry = current[channel.name];
-        const normalized = normalizeChannelSeenEntry(channel, currentEntry);
-        if (!currentEntry || !normalized) {
-          continue;
-        }
-        if (currentEntry.id === normalized.id && currentEntry.count === normalized.count) {
-          continue;
-        }
-        merged ??= { ...current };
-        merged[channel.name] = normalized;
-      }
-      if (!merged) {
-        return current;
-      }
-      localStorage.setItem(SEEN_STORAGE_KEY, JSON.stringify(merged));
-      return merged;
-    });
-  }, [channels]);
 
   // Fresh loads anchor to the read boundary when unread exists, otherwise to
   // latest. Cached switches restore the saved viewport only when nothing new
@@ -1706,11 +1685,7 @@ export function ChannelsSubsystem({
     () => (selected ? channels.find((channel) => channel.name === selected) : undefined),
     [channels, selected]
   );
-  const readPointerId = selected
-    ? selectedSummary
-      ? channelReadPointer(selectedSummary, seenMap[selected])
-      : seenMap[selected]?.id ?? null
-    : null;
+  const readPointerId = selected ? seenMap[selected]?.id ?? null : null;
   const newDividerId = useMemo(() => firstUnreadId(detail?.messages ?? [], readPointerId), [detail, readPointerId]);
   // Who is generating right now comes from the AUTHORITY, not from the
   // channels engine's own delivery bookkeeping. Delivery answers "did the

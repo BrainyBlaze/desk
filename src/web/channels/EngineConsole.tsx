@@ -119,11 +119,10 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
     [refresh]
   );
 
-  if (!open) {
-    return null;
-  }
-
-  const allSessions = (diag?.sessions ?? []).slice().sort((a, b) => b.queueDepth - a.queueDepth);
+  const allSessions = useMemo(
+    () => (diag?.sessions ?? []).slice().sort((a, b) => b.queueDepth - a.queueDepth),
+    [diag]
+  );
   const sessions = useMemo(() => {
     const search = sessionFilter.trim().toLowerCase();
     return allSessions.filter((s) => {
@@ -145,6 +144,11 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
       return true;
     });
   }, [allSessions, sessionFilter, activityFilter, queueFilter]);
+
+  if (!open) {
+    return null;
+  }
+
   // A stale snapshot (last poll failed) must not drive the live pills — render
   // them as unknown so they never assert minutes-old health beside the error.
   const live = stale ? null : diag;
