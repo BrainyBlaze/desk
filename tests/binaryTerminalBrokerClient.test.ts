@@ -83,6 +83,29 @@ describe('binary terminal broker client (§7.4)', () => {
   const output = (channelId: number, offset: bigint, bytes: Uint8Array, generation = 1, revision = 0) =>
     ({ type: BpFrameType.OUTPUT as const, channelId, generation, revision, offset, bytes });
 
+  it('re-subscribes after being hidden while its SUBSCRIBE ACK was in flight', () => {
+    // The ACK arrives for a surface the operator already hid (layout change,
+    // tab switch). The channel is released server-side, but the surface must
+    // not stay marked as awaiting an ACK: the reveal path refuses to
+    // re-subscribe while that flag is set, leaving a dead cell that swallows
+    // every keystroke with no Reconnect affordance.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
+
+    client.setVisibility('s1', false);
+    socket.deliver(ack(7)); // ACK lands for the now-hidden surface
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(1); // channel released
+
+    client.setVisibility('s1', true);
+
+    expect(
+      socket.ofType(BpFrameType.SUBSCRIBE),
+      'a revealed surface must subscribe again instead of staying dead'
+    ).toHaveLength(2);
+  });
+
   it('subscribes on open, then applies its ACK snapshot and live output', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));

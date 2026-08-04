@@ -18,7 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  * The oracle is the master's own fd count, sampled from /proc, after a
  * connect/close hammer: bounded means fixed, not "grows a little".
  */
-const ATCH_BIN = join(__dirname, '..', 'libexec', 'atch');
+const ATCH_BIN = process.env.ATCH_BIN ?? join(__dirname, '..', 'libexec', 'atch');
 const HAMMER_ROUNDS = 400;
 
 let socketRoot: string;
@@ -93,6 +93,19 @@ const probeAndClose = (path: string): Promise<void> =>
     socket.on('error', done);
   });
 
+/** Send an incomplete protocol discriminator, then close the connection. */
+const probePrefixAndClose = (path: string, length: number): Promise<void> =>
+  new Promise((resolve) => {
+    const socket = connect(path);
+    const done = (): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve();
+    };
+    socket.on('connect', () => socket.end(Buffer.alloc(length, 0x41), done));
+    socket.on('error', done);
+  });
+
 describe.skipIf(!existsSync(ATCH_BIN) || !existsSync('/proc/self/fd'))('atch control-socket fd hygiene', () => {
   beforeAll(async () => {
     socketRoot = mkdtempSync(join(tmpdir(), 'atch-fd-leak-'));
@@ -142,6 +155,21 @@ describe.skipIf(!existsSync(ATCH_BIN) || !existsSync('/proc/self/fd'))('atch con
     // The small slack absorbs an in-flight connection at sampling time.
     expect(after - baseline).toBeLessThanOrEqual(2);
     // and the master must still be alive — an fd_set overrun aborts it
+    expect(existsSync(`/proc/${pid}`)).toBe(true);
+  }, 60_000);
+
+  it('does not leak an accepted fd when a peer closes during the protocol discriminator', async () => {
+    const pid = masterPid;
+    expect(pid, 'the master must be running').toBeTruthy();
+    const baseline = openFdCount(pid!);
+
+    for (let i = 0; i < HAMMER_ROUNDS; i += 1) {
+      await probePrefixAndClose(socketPath, (i % 3) + 1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const after = openFdCount(pid!);
+
+    expect(after - baseline).toBeLessThanOrEqual(2);
     expect(existsSync(`/proc/${pid}`)).toBe(true);
   }, 60_000);
 });

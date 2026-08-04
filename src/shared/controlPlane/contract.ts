@@ -25,6 +25,14 @@ export const AGENT_PRODUCER_BINDINGS = {
   'opencode-native': { provider: 'opencode', mode: 'native' }
 } as const satisfies Record<AgentProducer, { provider: AgentProvider; mode: AgentMode }>;
 
+/**
+ * Health reasons are short operator-facing labels, not prose. Exported so a
+ * producer bounds its text to the SAME number the schema enforces — writing
+ * the limit twice is how a 200-char reason came to be rejected outright,
+ * silently dropping the degraded fact it carried.
+ */
+export const MAX_HEALTH_REASON_CHARS = 128;
+
 const boundedText = (max: number) =>
   z
     .string()
@@ -48,7 +56,7 @@ const healthInputSchema = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('healthy') }),
   z.strictObject({
     status: z.literal('degraded'),
-    reason: boundedText(128),
+    reason: boundedText(MAX_HEALTH_REASON_CHARS),
     detail: detailSchema.optional()
   })
 ]);
@@ -173,7 +181,7 @@ const sessionHealthSchema = z.discriminatedUnion('status', [
   }),
   z.strictObject({
     status: z.literal('degraded'),
-    reason: boundedText(128),
+    reason: boundedText(MAX_HEALTH_REASON_CHARS),
     since: timestampSchema,
     detail: detailSchema.optional()
   })

@@ -50,6 +50,7 @@ import type {
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import { isValidProfileId } from '../../shared/agentProfiles.js';
+import { isValidResumeIdForAgent } from '../resumeCapture.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
 import {
@@ -132,8 +133,19 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
   if (agent) {
     session.agent = agent;
   }
+  // Resume ids are provider-shaped (claude/codex UUIDs, OpenCode ses_ ids) and
+  // the capture seam already validates them. Validate here too so a malformed
+  // one never reaches the manifest, symmetric with profileId below: the HTTP
+  // seam is where operator input arrives, and a value that only fails later
+  // fails at session launch instead of at the request that introduced it.
   const resume = readOptionalString(record.resume);
   if (resume) {
+    // Only when DESK builds the provider command. A custom command receives the
+    // value as its own argument — an operator wrapping their agent may use any
+    // token their wrapper understands, and Desk has no standing to reject it.
+    if (command === undefined && !isValidResumeIdForAgent(session.agent, resume)) {
+      throw new ApiValidationError('session.resume is not a valid resume id for this agent');
+    }
     session.resume = resume;
   }
   if (record.bypassPermissions !== undefined) {

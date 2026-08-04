@@ -31,6 +31,9 @@ export const TERMINAL_PRODUCERS = {
  */
 export const GENERATION_ENV_VAR = 'DESK_SESSION_GENERATION';
 
+/** Exact OpenCode-internal session selected by this Desk terminal. */
+export const OPENCODE_PROVIDER_SESSION_ENV_VAR = 'DESK_OPENCODE_SESSION_ID';
+
 /** Operator-facing text copied out of an agent payload is bounded at the source. */
 export const PRODUCER_MAX_DETAIL_CHARS = 200;
 
@@ -198,9 +201,9 @@ async function deskPost(observation) {
   // No identity, no generation, or no recognised producer means the event
   // cannot be fenced or bound. Sending it anyway would be worse than silence:
   // it would be accepted as belonging to whatever generation is current.
-  if (!sessionId || !generation || !observation || !DESK_PRODUCER) return;
+  if (!sessionId || !generation || !observation || !DESK_PRODUCER) return false;
   const claim = deskClaimSequence(sessionId, generation);
-  if (!claim) return;
+  if (!claim) return false;
   const now = Date.now();
   const eventId = claim.instanceId + ':' + String(claim.seq);
   const body = {
@@ -231,10 +234,12 @@ async function deskPost(observation) {
     // fetch resolves for 4xx/5xx, so a server that REJECTS the event would
     // otherwise leave no trail at all.
     if (!response.ok) throw new Error('HTTP ' + response.status);
+    return true;
   } catch (err) {
     if (process.env.DESK_DEBUG) {
       process.stderr.write('[desk-producer] agent-event POST failed: ' + (err && err.message ? err.message : String(err)) + '\\n');
     }
+    return false;
   } finally {
     clearTimeout(timer);
   }
@@ -263,11 +268,11 @@ let deskRegisteredProviderSession;
 async function deskRegisterEndpoint(serverUrl, providerSessionId) {
   const sessionId = process.env.DESK_SESSION_ID;
   const generation = deskGeneration();
-  if (!sessionId || !generation || !DESK_PRODUCER || !serverUrl) return;
+  if (!sessionId || !generation || !DESK_PRODUCER || !serverUrl) return false;
   // Re-register only when something actually changed: a new internal agent
   // session is a new poll target, and re-sending the same pair every event
   // would be pure noise on the control plane.
-  if (deskRegisteredEndpoint === serverUrl && deskRegisteredProviderSession === providerSessionId) return;
+  if (deskRegisteredEndpoint === serverUrl && deskRegisteredProviderSession === providerSessionId) return true;
   // Registration claims from the SAME durable sequence as events, so the
   // daemon can bind this metadata to a producer identity it has already seen.
   // Unbound endpoint metadata is spoofable: anything that can reach the port
@@ -275,9 +280,7 @@ async function deskRegisterEndpoint(serverUrl, providerSessionId) {
   // the real producer. Claiming here leaves gaps in the event stream's numbers;
   // that is fine — the contract is monotonicity, not contiguity.
   const claim = deskClaimSequence(sessionId, generation);
-  if (!claim) return;
-  deskRegisteredEndpoint = serverUrl;
-  deskRegisteredProviderSession = providerSessionId;
+  if (!claim) return false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 1500);
   try {
@@ -299,15 +302,17 @@ async function deskRegisterEndpoint(serverUrl, providerSessionId) {
       })
     });
     if (!response.ok) throw new Error('HTTP ' + response.status);
+    deskRegisteredEndpoint = serverUrl;
+    deskRegisteredProviderSession = providerSessionId;
+    return true;
   } catch (err) {
     // Registration failing must never break the agent. The cost is a slower
     // recovery, not a wrong state: without an endpoint the session simply
     // reads unknown after a restart, which is true.
-    deskRegisteredEndpoint = undefined;
-    deskRegisteredProviderSession = undefined;
     if (process.env.DESK_DEBUG) {
       process.stderr.write('[desk-producer] endpoint registration failed: ' + (err && err.message ? err.message : String(err)) + '\\n');
     }
+    return false;
   } finally {
     clearTimeout(timer);
   }

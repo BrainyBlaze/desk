@@ -26,6 +26,7 @@ import {
   profileEnvPrefix,
   profileScrubPrefix
 } from '../shared/agentProfiles.js';
+import { OPENCODE_PROVIDER_SESSION_ENV_VAR } from './agentState/producerEmit.js';
 
 const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'profiles', 'groups', 'projects']);
 
@@ -438,10 +439,13 @@ function buildOpencodeCommand(session: DeskSession, cwd: string, homeDir: string
   // dangerous flag). Default is yolo (only an explicit unchecked box -> ask).
   const bypass = session.bypassPermissions !== false;
   const permissionContent = opencodePermissionConfigContent(bypass);
-  const envPrefix = `${agentEnvPrefix(session.agent, sessionId)} OPENCODE_CONFIG_DIR="$desk_opencode_config" OPENCODE_CONFIG_CONTENT=${shellQuote(permissionContent)} OPENCODE_DISABLE_MOUSE=1`;
+  const providerSessionEnv = session.resume
+    ? ` ${OPENCODE_PROVIDER_SESSION_ENV_VAR}=${shellQuote(session.resume)}`
+    : '';
+  const envPrefix = `${agentEnvPrefix(session.agent, sessionId)}${providerSessionEnv} OPENCODE_CONFIG_DIR="$desk_opencode_config" OPENCODE_CONFIG_CONTENT=${shellQuote(permissionContent)} OPENCODE_DISABLE_MOUSE=1`;
   const launch = session.resume
     ? `${envPrefix} exec ${args.join(' ')}`
-    : `if [ -n "\${DESK_OPENCODE_RESUME_ID:-}" ]; then ${envPrefix} exec "$desk_opencode" --session "$DESK_OPENCODE_RESUME_ID"; else ${envPrefix} exec "$desk_opencode"; fi`;
+    : `if [ -n "\${DESK_OPENCODE_RESUME_ID:-}" ]; then ${envPrefix} ${OPENCODE_PROVIDER_SESSION_ENV_VAR}="$DESK_OPENCODE_RESUME_ID" exec "$desk_opencode" --session "$DESK_OPENCODE_RESUME_ID"; else ${envPrefix} exec "$desk_opencode"; fi`;
   return [
     `cd ${shellQuote(cwd)}`,
     'desk_opencode="${DESK_OPENCODE_BIN:-$(command -v opencode 2>/dev/null || true)}"',

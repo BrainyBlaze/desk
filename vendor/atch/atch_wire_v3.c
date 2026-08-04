@@ -137,7 +137,7 @@ int atch_v3_reassembler_push_at(atch_v3_reassembler *r, const unsigned char *b, 
     if (rc) return rc;
     if (r->active && now >= r->expiry_ms) { r->active=0; r->length=0; return ATCH_V3_TRUNCATED; }
     if (!r->active && !(f.flags & 4u)) { if (atch_v3_validate_payload(f.type, f.payload, f.payload_length) != ATCH_V3_OK) return ATCH_V3_TRUNCATED; *out=f; return ATCH_V3_OK; }
-    if (!r->active) { r->active=1; r->type=f.type; r->flags=f.flags; r->generation=f.generation; r->sequence=f.sequence; r->aux=f.aux; r->next_sequence=f.sequence; r->expiry_ms=now+ATCH_V3_MORE_TIMEOUT_MS; }
+    if (!r->active) { r->active=1; r->length=0; r->type=f.type; r->flags=f.flags; r->generation=f.generation; r->sequence=f.sequence; r->aux=f.aux; r->next_sequence=f.sequence; r->expiry_ms=now+ATCH_V3_MORE_TIMEOUT_MS; }
     if (f.type != r->type) { r->active=0; r->length=0; return ATCH_V3_TRUNCATED; }
     if (f.sequence != r->next_sequence) { r->active=0; r->length=0; return ATCH_V3_BAD_SEQUENCE; }
     if (f.payload_length > ATCH_V3_MAX_MSG-r->length) return ATCH_V3_PAYLOAD_TOO_LARGE;
@@ -148,7 +148,7 @@ int atch_v3_reassembler_push_at(atch_v3_reassembler *r, const unsigned char *b, 
     if (atch_v3_validate_payload(out->type, out->payload, out->payload_length) != ATCH_V3_OK) {
         r->active=0; r->length=0; return ATCH_V3_TRUNCATED;
     }
-    r->active=0; return ATCH_V3_OK;
+    r->active=0; r->length=0; return ATCH_V3_OK;
 }
 int atch_v3_reassembler_push(atch_v3_reassembler *r,const unsigned char *b,size_t n,atch_v3_frame *out){return atch_v3_reassembler_push_at(r,b,n,0,out);}
 int atch_v3_reassembler_expired(const atch_v3_reassembler *r,uint64_t now){return r->active && now>=r->expiry_ms;}

@@ -3,13 +3,17 @@ import {
   constants,
   fchmodSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   openSync,
+  readFileSync,
   readSync,
-  unlinkSync
+  renameSync,
+  unlinkSync,
+  writeSync
 } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { dirname, isAbsolute, join } from 'node:path';
 import { TextDecoder } from 'node:util';
 
 export type AtchEvent =
@@ -38,6 +42,8 @@ export interface AtchEventDecoderOptions {
 }
 
 const DEFAULT_MAX_LINE_BYTES = 4096;
+const ATCH_EVENT_CURSOR_VERSION = 1 as const;
+const MAX_CURSOR_BYTES = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -187,6 +193,14 @@ export function atchEventPath(
   return join(socketRoot, `${sessionKey}.${generation}.events.ndjson`);
 }
 
+export function atchEventCursorPath(
+  socketRoot: string,
+  sessionId: string,
+  generation: number
+): string {
+  return `${atchEventPath(socketRoot, sessionId, generation)}.offset`;
+}
+
 export function prepareAtchEventSink(
   socketRoot: string,
   sessionId: string,
@@ -241,6 +255,7 @@ export function prepareAtchEventSink(
 
 export interface AtchEventTailerOptions {
   path: string;
+  cursorPath?: string;
   onEvent: (event: AtchEvent, context: AtchEventDeliveryContext) => void;
   onDiagnostic?: (diagnostic: AtchEventDiagnostic) => void;
   pollIntervalMs?: number;
@@ -254,6 +269,7 @@ const TAILER_READ_BYTES = 64 * 1024;
 
 export class AtchEventTailer {
   private readonly path: string;
+  private readonly cursorPath: string | undefined;
   private readonly onEvent: (
     event: AtchEvent,
     context: AtchEventDeliveryContext
@@ -263,12 +279,16 @@ export class AtchEventTailer {
   private readonly decoder: AtchEventDecoder;
   private fd: number | undefined;
   private offset = 0;
+  private committedOffset = 0;
+  private persistedOffset: number | undefined;
+  private cursorInitialized = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private lastIoError: string | undefined;
   private replayPending = true;
 
   constructor(options: AtchEventTailerOptions) {
     this.path = options.path;
+    this.cursorPath = options.cursorPath;
     this.onEvent = options.onEvent;
     this.onDiagnostic = options.onDiagnostic;
     this.pollIntervalMs = options.pollIntervalMs ?? 100;
@@ -289,22 +309,30 @@ export class AtchEventTailer {
   pollNow(): boolean {
     try {
       const fd = this.ensureOpen();
+      this.initializeCursor();
       const stat = fstatSync(fd);
       let phase: AtchEventDeliveryContext['phase'] = this.replayPending
         ? 'replay'
         : 'live';
       if (stat.size < this.offset) {
         this.offset = 0;
+        this.committedOffset = 0;
         this.decoder.reset();
         phase = 'resync';
       }
 
       const buffer = Buffer.allocUnsafe(TAILER_READ_BYTES);
       while (true) {
-        const read = readSync(fd, buffer, 0, buffer.length, this.offset);
+        const readStart = this.offset;
+        const read = readSync(fd, buffer, 0, buffer.length, readStart);
         if (read === 0) break;
         this.offset += read;
-        for (const event of this.decoder.push(buffer.subarray(0, read))) {
+        const chunk = buffer.subarray(0, read);
+        const lastNewline = chunk.lastIndexOf(0x0a);
+        if (lastNewline >= 0) {
+          this.committedOffset = readStart + lastNewline + 1;
+        }
+        for (const event of this.decoder.push(chunk)) {
           try {
             this.onEvent(event, { phase });
           } catch (error) {
@@ -315,6 +343,7 @@ export class AtchEventTailer {
           }
         }
       }
+      this.persistCursor();
       this.replayPending = false;
       this.lastIoError = undefined;
       return true;
@@ -334,6 +363,9 @@ export class AtchEventTailer {
     this.timer = undefined;
     this.closeFile();
     this.offset = 0;
+    this.committedOffset = 0;
+    this.persistedOffset = undefined;
+    this.cursorInitialized = false;
     this.decoder.reset();
     this.replayPending = true;
   }
@@ -357,9 +389,120 @@ export class AtchEventTailer {
     return fd;
   }
 
+  private initializeCursor(): void {
+    if (this.cursorInitialized) return;
+    const persisted =
+      this.cursorPath === undefined
+        ? undefined
+        : readAtchEventCursor(this.cursorPath);
+    if (persisted !== undefined) {
+      this.offset = persisted;
+      this.committedOffset = persisted;
+      this.persistedOffset = persisted;
+      this.replayPending = false;
+    }
+    this.cursorInitialized = true;
+  }
+
+  private persistCursor(): void {
+    if (
+      this.cursorPath === undefined ||
+      this.persistedOffset === this.committedOffset
+    ) {
+      return;
+    }
+    writeAtchEventCursor(this.cursorPath, this.committedOffset);
+    this.persistedOffset = this.committedOffset;
+  }
+
   private closeFile(): void {
     if (this.fd !== undefined) closeSync(this.fd);
     this.fd = undefined;
+  }
+}
+
+function readAtchEventCursor(path: string): number | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (
+      !stat.isFile() ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.size > MAX_CURSOR_BYTES
+    ) {
+      throw new Error('atch event cursor must be a small regular file with mode 0600');
+    }
+    if (process.getuid && stat.uid !== process.getuid()) {
+      throw new Error('atch event cursor must be owned by the current user');
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(fd, 'utf8'));
+    } catch {
+      throw new Error('atch event cursor is not valid JSON');
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).length !== 2 ||
+      (parsed as { version?: unknown }).version !== ATCH_EVENT_CURSOR_VERSION ||
+      !Number.isSafeInteger((parsed as { offset?: unknown }).offset) ||
+      ((parsed as { offset: number }).offset < 0)
+    ) {
+      throw new Error('atch event cursor does not match the supported schema');
+    }
+    return (parsed as { offset: number }).offset;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function writeAtchEventCursor(path: string, offset: number): void {
+  const bytes = Buffer.from(
+    `${JSON.stringify({ version: ATCH_EVENT_CURSOR_VERSION, offset })}\n`
+  );
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      temporary,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600
+    );
+    fchmodSync(fd, 0o600);
+    let written = 0;
+    while (written < bytes.length) {
+      const count = writeSync(fd, bytes, written, bytes.length - written);
+      if (count <= 0) throw new Error('atch event cursor write made no progress');
+      written += count;
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temporary, path);
+    const directoryFd = openSync(dirname(path), constants.O_RDONLY);
+    try {
+      fsyncSync(directoryFd);
+    } finally {
+      closeSync(directoryFd);
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
 }
 

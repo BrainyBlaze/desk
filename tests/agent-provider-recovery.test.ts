@@ -166,7 +166,7 @@ describe('daemon OpenCode recovery', () => {
         occurredAt: 900,
         observedAt: 950,
         facts: [{ kind: 'heartbeat' }]
-      })
+      }, { kind: 'producer-bootstrap' })
     ).toMatchObject({ kind: 'accepted' });
     expect(
       daemon.agentEndpoint({
@@ -227,6 +227,63 @@ describe('daemon OpenCode recovery', () => {
         transport: 'poll',
         producerSeq: 2
       }
+    });
+  });
+
+  it('rejects a push fact from a different provider session without mutating state', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockRejectedValue(new Error('poll intentionally unavailable'));
+    const running = start(fetch);
+
+    expect(
+      running.agentEvent(
+        {
+          schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+          sessionId: 'opencode-a',
+          generation: 1,
+          provider: 'opencode',
+          mode: 'terminal',
+          producer: 'opencode-terminal',
+          producerInstanceId: 'plugin-a',
+          producerSeq: 3,
+          eventId: 'plugin-a:push:3',
+          invocationId: 'turn-3',
+          occurredAt: 1_000,
+          observedAt: 1_000,
+          facts: [{ kind: 'activity', activity: 'working' }]
+        },
+        { kind: 'provider-session', providerSessionId: 'provider-a' }
+      )
+    ).toMatchObject({ kind: 'accepted' });
+
+    expect(
+      running.agentEvent(
+        {
+          schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+          sessionId: 'opencode-a',
+          generation: 1,
+          provider: 'opencode',
+          mode: 'terminal',
+          producer: 'opencode-terminal',
+          producerInstanceId: 'plugin-a',
+          producerSeq: 4,
+          eventId: 'plugin-a:push:4',
+          invocationId: 'turn-4',
+          occurredAt: 1_010,
+          observedAt: 1_010,
+          facts: [{ kind: 'activity', activity: 'idle' }]
+        },
+        { kind: 'provider-session', providerSessionId: 'provider-b' }
+      )
+    ).toEqual({
+      kind: 'rejected',
+      reason: 'provider-session-mismatch'
+    });
+
+    expect(running.agentStates().snapshots[0]?.subject).toMatchObject({
+      kind: 'agent',
+      activity: 'working'
     });
   });
 
@@ -324,7 +381,7 @@ describe('daemon atch title recovery', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('keeps restart history silent but publishes title changes after sink truncation', async () => {
+  it('keeps consumed history silent but publishes downtime and resync title changes', async () => {
     const sessionId = 'opencode-a';
     const sockPath = join(home, `${sessionId}.sock`);
     const subject = {
@@ -376,8 +433,34 @@ describe('daemon atch title recovery', () => {
     const firstLatestSeq = daemon.events().latestSeq;
     expect(firstLatestSeq).toBeGreaterThan(0);
 
+    appendFileSync(
+      sink,
+      `${JSON.stringify({
+        ts: 2,
+        type: 'state',
+        state: 'busy',
+        title: '\u280b x'
+      })}\n`
+    );
+    await vi.waitFor(() => {
+      expect(daemon?.agentStates().snapshots[0]?.subject).toMatchObject({
+        kind: 'agent',
+        activity: 'working'
+      });
+    });
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq);
+
     daemon.dispose();
     daemon = undefined;
+    appendFileSync(
+      sink,
+      `${JSON.stringify({
+        ts: 3,
+        type: 'state',
+        state: 'idle',
+        title: 'Ready'
+      })}\n`
+    );
     master = new FakeAtchMaster(sockPath);
     await master.listen();
     daemon = create();
@@ -396,21 +479,21 @@ describe('daemon atch title recovery', () => {
     expect(snapshot?.subject).toMatchObject({
       kind: 'agent',
       activity: 'idle',
-      evidence: { source: 'terminal-title', observedAt: 1_250 }
+      evidence: { source: 'terminal-title', observedAt: 3_000 }
     });
     expect(daemon.terminalObservation(sessionId)).toMatchObject({
       generation: 1,
       activity: 'idle',
-      activityAt: 1_250,
+      activityAt: 3_000,
       title: 'Ready'
     });
-    expect(daemon.events().latestSeq).toBe(firstLatestSeq);
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq + 1);
     expect(diagnostics).toEqual([]);
 
     appendFileSync(
       sink,
       `${JSON.stringify({
-        ts: 2,
+        ts: 4,
         type: 'state',
         state: 'busy',
         title: '\u280b x'
@@ -422,13 +505,13 @@ describe('daemon atch title recovery', () => {
         activity: 'working'
       });
     });
-    expect(daemon.events().latestSeq).toBe(firstLatestSeq);
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq + 1);
 
     truncateSync(sink, 0);
     appendFileSync(
       sink,
       `${JSON.stringify({
-        ts: 3,
+        ts: 5,
         type: 'state',
         state: 'idle',
         title: 'Ready'
@@ -440,7 +523,7 @@ describe('daemon atch title recovery', () => {
         activity: 'idle'
       });
     });
-    expect(daemon.events().latestSeq).toBe(firstLatestSeq + 1);
+    expect(daemon.events().latestSeq).toBe(firstLatestSeq + 2);
     expect(diagnostics).toEqual([]);
   });
 });

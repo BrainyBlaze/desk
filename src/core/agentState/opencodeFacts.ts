@@ -12,7 +12,7 @@
 // (`GET /session/status`) — which is what makes honest recovery after a Desk
 // restart possible without replaying stale history.
 
-import { boundedDetail, type AgentSemanticFact, type AgentWaitInput } from './facts.js';
+import { boundedDetail, boundedReason, type AgentSemanticFact, type AgentWaitInput } from './facts.js';
 
 /**
  * The event `type` strings of the SDK's `Event` union, pinned.
@@ -225,7 +225,7 @@ function sessionErrorFacts(observation: OpencodeObservation): AgentSemanticFact[
     case 'APIError':
       return [{ kind: 'blocked', wait: apiErrorWait(error, detail) }];
     default:
-      return [{ kind: 'health', health: { status: 'degraded', reason: detail ?? 'session-error' } }];
+      return [{ kind: 'health', health: { status: 'degraded', reason: boundedReason(detail, 'session-error') } }];
   }
 }
 

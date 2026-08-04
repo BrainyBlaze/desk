@@ -20,6 +20,7 @@ import {
   AGENT_STATE_SCHEMA_VERSION,
   AGENT_PRODUCER_BINDINGS,
   GenerationLedger,
+  parseAgentStateEnvelope,
   parseChannelMessageDeskEventInput,
   parseDeskEventReadRequest,
   type AgentProducer,
@@ -70,11 +71,13 @@ import {
 } from './fileDeskEventJournal.js';
 import {
   AtchEventTailer,
+  atchEventCursorPath,
   atchEventPath,
   prepareAtchEventSink,
   type AtchEventDiagnostic
 } from './atchEvents.js';
 import type { TerminalObservationSnapshot } from './sessionManager.js';
+import type { AgentObservationScope } from '../../core/agentState/providerAdapter.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -148,6 +151,18 @@ export type AgentProviderReconcileResult =
          | 'recovery-error';
     };
 
+export type TerminalAgentEventResult =
+  | DaemonAgentStateIntakeResult
+  | {
+      kind: 'rejected';
+      reason:
+        | 'invalid-provider-scope'
+        | 'provider-session-unregistered'
+        | 'provider-session-mismatch';
+      carried?: never;
+      current?: never;
+    };
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
   /** Spawn + attach the atch master for a session (CREATE contract). */
@@ -179,7 +194,10 @@ export interface TerminalDaemon {
     sessionIds?: readonly string[]
   ): Promise<AgentProviderReconcileResult[]>;
   /** Accept one canonical, generation-fenced agent-state observation. */
-  agentEvent(input: unknown): DaemonAgentStateIntakeResult;
+  agentEvent(
+    input: unknown,
+    scope?: AgentObservationScope
+  ): TerminalAgentEventResult;
   /** One atomic view shared by every canonical state consumer. */
   agentStates(): { revision: number; snapshots: SessionStateSnapshot[] };
   /** Durable unified agent/channel event projection, newest first. */
@@ -425,6 +443,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     sessionId: string;
     generation: number;
     path: string;
+    cursorPath: string;
     tailer: AtchEventTailer;
   }
   const eventObservers = new Map<string, EventObserver>();
@@ -447,16 +466,21 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       eventObservers.delete(observer.sessionId);
     }
     if (removeSink) {
-      try {
-        unlinkSync(observer.path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          reportAtchDiagnostic(observer, {
-            code: 'tailer-io',
-            message: `could not remove atch event sink: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          });
+      for (const [path, label] of [
+        [observer.path, 'sink'],
+        [observer.cursorPath, 'cursor']
+      ] as const) {
+        try {
+          unlinkSync(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            reportAtchDiagnostic(observer, {
+              code: 'tailer-io',
+              message: `could not remove atch event ${label}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            });
+          }
         }
       }
     }
@@ -468,9 +492,15 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   ): EventObserver => {
     const current = eventObservers.get(sessionId);
     if (current?.generation === generation && current.path === path) return current;
-    let observer: EventObserver;
+    const cursorPath = atchEventCursorPath(
+      options.atchSocketRoot,
+      sessionId,
+      generation
+    );
+    const diagnosticIdentity = { sessionId, generation, path };
     const tailer = new AtchEventTailer({
       path,
+      cursorPath,
       ...(options.atchEventPollIntervalMs === undefined
         ? {}
         : { pollIntervalMs: options.atchEventPollIntervalMs }),
@@ -483,9 +513,10 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           if (context.phase === 'replay') replayingAtchTransitions.delete(replayKey);
         }
       },
-      onDiagnostic: (diagnostic) => reportAtchDiagnostic(observer, diagnostic)
+      onDiagnostic: (diagnostic) =>
+        reportAtchDiagnostic(diagnosticIdentity, diagnostic)
     });
-    observer = { sessionId, generation, path, tailer };
+    const observer = { sessionId, generation, path, cursorPath, tailer };
     if (!tailer.start()) {
       throw new Error('atch event sink could not be opened securely');
     }
@@ -524,10 +555,19 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
             try {
               preparedObserver = startEventObserver(sessionId, generation, path);
             } catch (error) {
-              try {
-                unlinkSync(path);
-              } catch {
-                // Preserve the observer startup error.
+              for (const cleanupPath of [
+                path,
+                atchEventCursorPath(
+                  options.atchSocketRoot,
+                  sessionId,
+                  generation
+                )
+              ]) {
+                try {
+                  unlinkSync(cleanupPath);
+                } catch {
+                  // Preserve the observer startup error.
+                }
               }
               throw error;
             }
@@ -585,8 +625,57 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return result;
     },
     reconcileAgentProviders,
-    agentEvent(input) {
-      return router.sessions.ingestAgentState(input);
+    agentEvent(input, scope) {
+      let envelope: AgentStateEnvelope;
+      try {
+        envelope = parseAgentStateEnvelope(input);
+      } catch {
+        return router.sessions.ingestAgentState(input);
+      }
+      if (envelope.producer !== 'opencode-terminal') {
+        return scope === undefined
+          ? router.sessions.ingestAgentState(envelope)
+          : { kind: 'rejected', reason: 'invalid-provider-scope' };
+      }
+      if (scope?.kind === 'producer-bootstrap') {
+        return envelope.facts.length === 1 &&
+          envelope.facts[0]?.kind === 'heartbeat'
+          ? router.sessions.ingestAgentState(envelope)
+          : { kind: 'rejected', reason: 'invalid-provider-scope' };
+      }
+      if (
+        scope?.kind !== 'provider-session' ||
+        scope.providerSessionId.trim().length === 0
+      ) {
+        return {
+          kind: 'rejected',
+          reason: 'provider-session-unregistered'
+        };
+      }
+      const registration = endpointStore.get(
+        envelope.sessionId,
+        envelope.generation,
+        envelope.producer
+      );
+      if (registration === undefined) {
+        return {
+          kind: 'rejected',
+          reason: 'provider-session-unregistered'
+        };
+      }
+      if (registration.providerSessionId !== scope.providerSessionId) {
+        return {
+          kind: 'rejected',
+          reason: 'provider-session-mismatch'
+        };
+      }
+      if (registration.producerInstanceId !== envelope.producerInstanceId) {
+        return {
+          kind: 'rejected',
+          reason: 'producer-instance-mismatch'
+        };
+      }
+      return router.sessions.ingestAgentState(envelope);
     },
     agentStates() {
       return router.sessions.stateSnapshots();
@@ -682,6 +771,34 @@ function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
     rows: Number.isFinite(rows) && rows > 0 ? Math.min(Math.floor(rows), 1000) : 24,
     cols: Number.isFinite(cols) && cols > 0 ? Math.min(Math.floor(cols), 1000) : 80
   };
+}
+
+function readAgentObservationScope(
+  value: unknown
+): AgentObservationScope | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const scope = value as Record<string, unknown>;
+  if (
+    scope.kind === 'producer-bootstrap' &&
+    Object.keys(scope).length === 1
+  ) {
+    return { kind: 'producer-bootstrap' };
+  }
+  if (
+    scope.kind === 'provider-session' &&
+    typeof scope.providerSessionId === 'string' &&
+    scope.providerSessionId.trim().length > 0 &&
+    scope.providerSessionId.length <= 512 &&
+    Object.keys(scope).length === 2
+  ) {
+    return {
+      kind: 'provider-session',
+      providerSessionId: scope.providerSessionId.trim()
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -928,7 +1045,32 @@ export function createDaemonControlHandler(
         }
         if (req.method === 'POST' && url.pathname === '/control/agent-event') {
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
-          const result = daemon.agentEvent(body);
+          const wrapped =
+            Object.prototype.hasOwnProperty.call(body, 'envelope') ||
+            Object.prototype.hasOwnProperty.call(body, 'scope');
+          let envelope: unknown = body;
+          let scope: AgentObservationScope | undefined;
+          if (wrapped) {
+            scope = readAgentObservationScope(body.scope);
+            if (
+              !Object.prototype.hasOwnProperty.call(body, 'envelope') ||
+              scope === undefined ||
+              Object.keys(body).some(
+                (key) => key !== 'envelope' && key !== 'scope'
+              )
+            ) {
+              sendJson(res, 400, {
+                ok: false,
+                reason: 'invalid-provider-scope'
+              });
+              return;
+            }
+            envelope = body.envelope;
+          }
+          const result =
+            scope === undefined
+              ? daemon.agentEvent(envelope)
+              : daemon.agentEvent(envelope, scope);
           if (result.kind === 'accepted' || result.kind === 'duplicate') {
             sendJson(res, 200, {
               ok: true,
@@ -938,7 +1080,9 @@ export function createDaemonControlHandler(
             });
             return;
           }
-          const status = result.reason === 'invalid-envelope'
+          const status =
+            result.reason === 'invalid-envelope' ||
+            result.reason === 'invalid-provider-scope'
             ? 400
             : result.reason === 'producer-unregistered'
               ? 404

@@ -50,7 +50,7 @@ export interface SessionStatusView {
   exited: boolean;
 }
 
-const UNKNOWN_AGENT: AgentStatusView = {
+export const UNKNOWN_AGENT: AgentStatusView = {
   tone: 'unknown',
   label: 'unknown',
   detail: undefined,

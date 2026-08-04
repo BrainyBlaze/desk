@@ -271,6 +271,26 @@ describe('API body parsing and respawn', () => {
     );
   });
 
+  it('validates resume at the same seam as profileId', () => {
+    const uuid = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+    expect(readDeskSessionBody({ name: 's', cwd: '/x', agent: 'claude', resume: uuid }).resume).toBe(uuid);
+    expect(readDeskSessionBody({ name: 's', cwd: '/x', agent: 'opencode', resume: `ses_${'a'.repeat(24)}` }).resume)
+      .toBe(`ses_${'a'.repeat(24)}`);
+    // A malformed id used to reach the manifest and fail only at launch.
+    expect(() => readDeskSessionBody({ name: 's', cwd: '/x', agent: 'claude', resume: '../../etc/passwd' })).toThrow(
+      /not a valid resume id/
+    );
+    // Provider-shaped, but for the wrong provider.
+    expect(() => readDeskSessionBody({ name: 's', cwd: '/x', agent: 'claude', resume: `ses_${'a'.repeat(24)}` })).toThrow(
+      /not a valid resume id/
+    );
+    // A custom command owns its own argument: Desk passes the token through to
+    // the operator's wrapper and has no grammar to impose on it.
+    expect(
+      readDeskSessionBody({ name: 's', cwd: '/x', command: 'claude-wrapper', agent: 'claude', resume: 'sess-edited' }).resume
+    ).toBe('sess-edited');
+  });
+
   it('refuses a profile on a custom-command body at the API edge', () => {
     expect(() => readDeskSessionBody({ name: 's', cwd: '/x', command: 'htop', profileId: 'work' })).toThrow(
       /not supported for custom-command/

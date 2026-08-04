@@ -416,6 +416,14 @@ export class BinaryTerminalBrokerClient {
       if (this.connected) {
         this.sendFrame({ type: BpFrameType.UNSUBSCRIBE, channelId });
       }
+      // The ACK resolved this subscribe, so the surface is no longer waiting on
+      // one. Leaving the flag set outlives the hide: setVisible's reveal branch
+      // refuses to re-subscribe while `awaitingAck` is true, so the cell would
+      // come back with no channel, silently swallowing every keystroke and
+      // showing no Reconnect affordance.
+      if (surface) {
+        surface.awaitingAck = false;
+      }
       return;
     }
     surface.channelId = channelId;

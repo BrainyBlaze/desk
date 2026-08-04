@@ -45,6 +45,7 @@ afterEach(() => {
   delete process.env.DESK_SESSION_ID;
   delete process.env.DESK_SESSION_GENERATION;
   delete process.env.DESK_API;
+  delete process.env.DESK_OPENCODE_SESSION_ID;
 });
 
 let pluginDir: string | undefined;
@@ -72,8 +73,9 @@ async function loadPlugin(input: unknown = {}): Promise<OpencodeHooks> {
  * only the interaction it drives. The load post has its own test — asserting it
  * here as well would make every other assertion depend on it.
  */
-async function loadHooks(): Promise<OpencodeHooks> {
-  const hooks = await loadPlugin();
+async function loadHooks(providerSessionId = 'ses_1'): Promise<OpencodeHooks> {
+  process.env.DESK_OPENCODE_SESSION_ID = providerSessionId;
+  const hooks = await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
   posted = [];
   return hooks;
 }
@@ -117,9 +119,78 @@ describe('the plugin announces itself on load without claiming a state', () => {
     const hooks = await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
     expect(typeof hooks.event).toBe('function');
   });
+
+  it('rebinds before registration when Desk missed the load heartbeat', async () => {
+    process.env.DESK_OPENCODE_SESSION_ID = 'ses_1';
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let deskAvailable = false;
+    let producerBound = false;
+    globalThis.fetch = (async (url: string, init: { body?: string }) => {
+      const call = {
+        url: String(url),
+        body: JSON.parse(init.body ?? '{}') as Record<string, unknown>
+      };
+      calls.push(call);
+      if (call.url.endsWith('/api/agent-event')) {
+        if (!deskAvailable) {
+          return { ok: false, status: 503 } as Response;
+        }
+        producerBound = true;
+        return { ok: true, status: 200 } as Response;
+      }
+      return {
+        ok: deskAvailable && producerBound,
+        status: deskAvailable && producerBound ? 200 : 404
+      } as Response;
+    }) as unknown as typeof globalThis.fetch;
+
+    const hooks = await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
+    deskAvailable = true;
+    calls.length = 0;
+    await hooks.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'ses_1', status: { type: 'busy' } }
+      }
+    });
+
+    expect(calls.map((call) => call.url.split('/').at(-1))).toEqual([
+      'agent-event',
+      'agent-endpoint',
+      'agent-event'
+    ]);
+    expect(calls[0].body).toMatchObject({
+      observation: { type: 'hook:plugin.loaded' }
+    });
+    expect(calls[2].body).toMatchObject({
+      observation: {
+        type: 'session.status',
+        sessionID: 'ses_1'
+      }
+    });
+  });
 });
 
 describe('opencode plugin reports the events that actually exist', () => {
+  it('ignores events from another internal OpenCode session', async () => {
+    const hooks = await loadHooks('ses_parent');
+    await hooks.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'ses_foreign', status: { type: 'idle' } }
+      }
+    });
+    expect(posted).toEqual([]);
+
+    await hooks.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'ses_parent', status: { type: 'busy' } }
+      }
+    });
+    expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'working' }]);
+  });
+
   it('learns WORKING from a busy session status', async () => {
     const hooks = await loadHooks();
     await hooks.event?.({
@@ -181,6 +252,29 @@ describe('opencode plugin reports the events that actually exist', () => {
     expect(learnedFacts()).toEqual([{ kind: 'activity', activity: 'idle' }]);
   });
 
+  it('keeps a long session error reportable instead of dropping the degraded fact', async () => {
+    // The contract caps health.reason and REJECTS anything longer, so a
+    // producer that trimmed to the looser detail cap emitted an envelope the
+    // authority refused — losing the very degradation it was reporting.
+    const hooks = await loadHooks();
+    await hooks.event?.({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'ses_1',
+          error: { name: 'SomeUnmappedError', data: { message: 'x'.repeat(180) } }
+        }
+      }
+    });
+    const facts = learnedFacts();
+    expect(facts).toHaveLength(1);
+    expect(facts[0].kind).toBe('health');
+    if (facts[0].kind === 'health' && facts[0].health.status === 'degraded') {
+      expect(facts[0].health.reason.length).toBeLessThanOrEqual(128);
+      expect(facts[0].health.reason.length).toBeGreaterThan(0);
+    }
+  });
+
   it('routes a retryable API error to the provider, keeping the lamp dark', async () => {
     const hooks = await loadHooks();
     await hooks.event?.({
@@ -199,6 +293,28 @@ describe('opencode plugin reports the events that actually exist', () => {
 });
 
 describe('opencode plugin opens the turn and proves it is still alive', () => {
+  it('registers a newly selected provider session before posting its first fact', async () => {
+    delete process.env.DESK_OPENCODE_SESSION_ID;
+    const hooks = await loadPlugin({ serverUrl: 'http://127.0.0.1:4096' });
+    posted = [];
+
+    await hooks['chat.message']?.(
+      { sessionID: 'ses_selected' },
+      { message: {}, parts: [] }
+    );
+
+    expect(posted).toHaveLength(2);
+    expect(posted[0]).toMatchObject({
+      providerSessionId: 'ses_selected'
+    });
+    expect(posted[1]).toMatchObject({
+      observation: {
+        type: 'hook:chat.message',
+        sessionID: 'ses_selected'
+      }
+    });
+  });
+
   it('opens the turn from the chat.message hook', async () => {
     const hooks = await loadHooks();
     await hooks['chat.message']?.({ sessionID: 'ses_1' }, { message: {}, parts: [] });

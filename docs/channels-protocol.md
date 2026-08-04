@@ -205,6 +205,16 @@ Canonical activity is still published — the lamp, the status dot, and the
 engine console all read it — it simply no longer decides whether text is sent.
 A background pump retries eligible queues every few seconds.
 
+One case does leave the live queue: a **send that never returns**. If the
+transport has not answered within thirty seconds the engine stops waiting and
+does not retry, because the paste may still land and a retry on top of it
+would duplicate the message into the agent's context. The session is marked
+`send-failed` in the engine console, so the stall is visible immediately, and
+the item's durable record survives — an engine restart re-queues it, and the
+operator can revert it by hand before that. What is not offered is an
+automatic second attempt inside the same process: between a duplicate and a
+delay, this engine chooses the delay.
+
 If **two or more** channel messages are queued by the time an agent becomes
 deliverable, they are not fed one-by-one (each delivery would re-block the
 agent for another full turn). Instead the engine sends **one digest**: counts

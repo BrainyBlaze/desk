@@ -470,6 +470,9 @@ projects:
     expect(commands[3]).toContain("desk_opencode_config='/workspace/.config/desk/opencode'");
     expect(commands[3]).toContain('OPENCODE_CONFIG_DIR="$desk_opencode_config"');
     expect(commands[3]).toContain('OPENCODE_DISABLE_MOUSE=1');
+    expect(commands[3]).toContain(
+      "DESK_OPENCODE_SESSION_ID='ses_12a31855dffeHTCs6tcfOmsddP'"
+    );
     expect(commands[3]).toContain('exec "$desk_opencode" --session \'ses_12a31855dffeHTCs6tcfOmsddP\'');
     expect(commands[3]).not.toContain('dangerously');
     // no bypassPermissions set -> defaults to yolo (allow) via per-session OPENCODE_CONFIG_CONTENT
@@ -559,6 +562,9 @@ projects:
     expect(command).not.toContain('node -e');
     expect(command).not.toContain('session list');
     expect(command).toContain('DESK_OPENCODE_RESUME_ID');
+    expect(command).toContain(
+      'DESK_OPENCODE_SESSION_ID="$DESK_OPENCODE_RESUME_ID"'
+    );
   });
 
   it('applies MCP launch flags only when explicitly requested', () => {

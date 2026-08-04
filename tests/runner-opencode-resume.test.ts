@@ -100,6 +100,9 @@ projects:
 
     expect(result.finalArgs).toEqual(['--session', 'ses_recent']);
     expect(result.command).not.toContain('node -e');
+    expect(result.command).toContain(
+      'DESK_OPENCODE_SESSION_ID="$DESK_OPENCODE_RESUME_ID"'
+    );
   });
 
   it('launches opencode fresh when recent cwd session fallback is ambiguous', async () => {

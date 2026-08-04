@@ -256,6 +256,62 @@ describe('canonical system agent-state routes', () => {
     });
   });
 
+  it('carries the exact OpenCode provider session beside the canonical envelope', async () => {
+    const agentStateGateway = gateway();
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'opencode',
+        producer: 'opencode-terminal',
+        observation: {
+          type: 'session.status',
+          sessionID: 'provider-session-a',
+          status: { type: 'busy' }
+        }
+      })
+    );
+
+    expect(result.status).toBe(200);
+    expect(agentStateGateway.submitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'opencode',
+        producer: 'opencode-terminal',
+        facts: [{ kind: 'activity', activity: 'working' }]
+      }),
+      {
+        kind: 'provider-session',
+        providerSessionId: 'provider-session-a'
+      }
+    );
+  });
+
+  it('marks only the OpenCode plugin-load heartbeat as an unscoped bootstrap', async () => {
+    const agentStateGateway = gateway();
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'opencode',
+        producer: 'opencode-terminal',
+        observation: { type: 'hook:plugin.loaded' }
+      })
+    );
+
+    expect(result.status).toBe(200);
+    expect(agentStateGateway.submitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        producer: 'opencode-terminal',
+        facts: [{ kind: 'heartbeat' }]
+      }),
+      { kind: 'producer-bootstrap' }
+    );
+  });
+
   it('confirms an exact Claude provider session before forwarding SessionStart facts', async () => {
     const agentStateGateway = gateway();
     const confirmClaudeSessionStart = vi.fn().mockReturnValue({
