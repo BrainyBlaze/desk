@@ -2994,6 +2994,8 @@ select {
 }
 .gitSectionHeader:hover { color: var(--desk-accent); background: var(--desk-glow); }
 .gitSectionHeader .deskPill { height: 16px; padding: 0 6px; font-size: 9px; margin-left: auto; }
+.gitSectionHeader .gitSectionHeaderPills { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+.gitSectionHeader .gitSectionHeaderPills .deskPill { margin-left: 0; }
 .gitSectionBody { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0 8px; }
 
 /* commit box */
