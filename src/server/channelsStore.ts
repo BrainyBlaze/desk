@@ -88,6 +88,7 @@ export interface ChannelSummary {
   goal: string;
   members: ChannelMember[];
   messageCount: number;
+  threadReplyCount: number;
   /** Opaque content-addressed revision of the root conversation. */
   contentRevision: string;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
@@ -298,7 +299,11 @@ function fileFingerprint(path: string): string {
 }
 
 function rootContentRevision(text: string): string {
-  return `sha256:${createHash('sha256').update(text).digest('hex')}`;
+  const stable = text
+    .split('\n')
+    .filter((line) => !line.startsWith('**thread**: '))
+    .join('\n');
+  return `sha256:${createHash('sha256').update(stable).digest('hex')}`;
 }
 
 function readStableRoot(rootFile: string): RootSnapshot {
@@ -352,6 +357,7 @@ export function listChannels(home = resolveChannelsHome()): ChannelSummary[] {
         goal: channelGoal(preamble),
         members: listChannelMembers(home, entry.name),
         messageCount: messages.length,
+        threadReplyCount: messages.reduce((sum, message) => sum + (message.threadReplies ?? 0), 0),
         contentRevision: snapshot.contentRevision,
         lastMessage: last
           ? {
