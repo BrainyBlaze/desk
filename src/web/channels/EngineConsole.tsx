@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Gauge } from 'lucide-react';
 import { ActionModal } from './ActionModal.js';
+import { DeskSelect } from '../arwes/primitives.js';
 import {
   channelsEngineAction,
   channelsEngineDiagnostics,
@@ -68,6 +69,9 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
   const [busyAction, setBusyAction] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [sessionFilter, setSessionFilter] = useState('');
+  const [activityFilter, setActivityFilter] = useState<string>('all');
+  const [queueFilter, setQueueFilter] = useState<string>('all');
 
   // True when the last poll/refresh failed: the cached `diag` is now stale, so
   // the live pills (pump live / N queued) must render as unknown rather than
@@ -115,11 +119,36 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
     [refresh]
   );
 
+  const allSessions = useMemo(
+    () => (diag?.sessions ?? []).slice().sort((a, b) => b.queueDepth - a.queueDepth),
+    [diag]
+  );
+  const sessions = useMemo(() => {
+    const search = sessionFilter.trim().toLowerCase();
+    return allSessions.filter((s) => {
+      if (search) {
+        const haystack = `${s.sessionId} ${s.sessionName ?? ''} ${s.agent ?? ''}`.toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      if (activityFilter !== 'all') {
+        if (activityFilter === 'paused' && !s.pausedByOperator) return false;
+        if (activityFilter === 'stuck' && !s.submitState?.startsWith('submit-stuck')) return false;
+        if (
+          activityFilter !== 'paused' &&
+          activityFilter !== 'stuck' &&
+          s.activity !== activityFilter
+        ) return false;
+      }
+      if (queueFilter === 'with' && s.queueDepth === 0) return false;
+      if (queueFilter === 'empty' && s.queueDepth > 0) return false;
+      return true;
+    });
+  }, [allSessions, sessionFilter, activityFilter, queueFilter]);
+
   if (!open) {
     return null;
   }
 
-  const sessions = (diag?.sessions ?? []).slice().sort((a, b) => b.queueDepth - a.queueDepth);
   // A stale snapshot (last poll failed) must not drive the live pills — render
   // them as unknown so they never assert minutes-old health beside the error.
   const live = stale ? null : diag;
@@ -165,6 +194,48 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
         ) : null}
         {error ? <div className="chanEngineError">{error}</div> : null}
 
+        {allSessions.length > 0 ? (
+          <div className="deskFieldStack chanEngineFilters">
+            <label>
+              <span>Session</span>
+              <input
+                type="text"
+                placeholder="filter by id / name / agent"
+                value={sessionFilter}
+                onChange={(e) => setSessionFilter(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>Activity</span>
+              <DeskSelect
+                value={activityFilter}
+                options={[
+                  { value: 'all', label: 'All' },
+                  { value: 'working', label: 'Working' },
+                  { value: 'blocked', label: 'Blocked' },
+                  { value: 'idle', label: 'Idle' },
+                  { value: 'unknown', label: 'Unknown' },
+                  { value: 'paused', label: 'Paused' },
+                  { value: 'stuck', label: 'Stuck' }
+                ]}
+                onChange={setActivityFilter}
+              />
+            </label>
+            <label>
+              <span>Queue</span>
+              <DeskSelect
+                value={queueFilter}
+                options={[
+                  { value: 'all', label: 'All' },
+                  { value: 'with', label: 'Has queue' },
+                  { value: 'empty', label: 'Empty' }
+                ]}
+                onChange={setQueueFilter}
+              />
+            </label>
+          </div>
+        ) : null}
+
         <div className="chanEngineSessions">
           {sessions.map((s) => (
             <SessionRow
@@ -201,7 +272,11 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
               onResume={() => void act('resume-session', { sessionId: s.sessionId })}
             />
           ))}
-          {diag && sessions.length === 0 ? <div className="chanEngineEmpty">No tracked sessions.</div> : null}
+          {diag && sessions.length === 0 ? (
+            <div className="chanEngineEmpty">
+              {allSessions.length === 0 ? 'No tracked sessions.' : 'No sessions match the current filters.'}
+            </div>
+          ) : null}
           {!diag && !error ? <div className="chanEngineEmpty">Loading…</div> : null}
         </div>
 

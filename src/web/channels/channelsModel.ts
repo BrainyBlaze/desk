@@ -1,5 +1,6 @@
 import type {
   ChannelActivityEvent,
+  ChannelDetail,
   ChannelMessage,
   ChannelSearchOptions,
   FeaturedMessageRef,
@@ -347,6 +348,7 @@ export function parseMessageTime(timestamp: string): Date | null {
 }
 
 export interface MessageGroup {
+  dayKey: string;
   dayLabel: string;
   messages: ChannelMessage[];
 }
@@ -368,6 +370,7 @@ export interface ReadProgressVirtualMetrics {
   scrollHeight: number;
   bottomPx: number;
   programmatic?: boolean;
+  mode?: 'settled' | 'scrolled-past';
 }
 
 /** Groups messages by calendar day for separators. */
@@ -379,7 +382,11 @@ export function groupMessagesByDay(messages: ChannelMessage[], now = new Date())
     const key = time ? `${time.getFullYear()}-${time.getMonth()}-${time.getDate()}` : 'unknown';
     if (key !== currentKey || groups.length === 0) {
       currentKey = key;
-      groups.push({ dayLabel: time ? dayLabel(time, now) : '—', messages: [message] });
+      groups.push({
+        dayKey: key === 'unknown' ? `unknown:${groups.length}` : key,
+        dayLabel: time ? dayLabel(time, now) : '—',
+        messages: [message]
+      });
     } else {
       groups[groups.length - 1].messages.push(message);
     }
@@ -397,7 +404,7 @@ export function buildMessageListRows(
   const groups = groupMessagesByDay(messages, options.now);
   for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
     const group = groups[groupIndex]!;
-    rows.push({ kind: 'day', key: `day:${group.dayLabel}:${groupIndex}`, dayLabel: group.dayLabel, groupIndex });
+    rows.push({ kind: 'day', key: `day:${group.dayKey}`, dayLabel: group.dayLabel, groupIndex });
     for (let messageIndex = 0; messageIndex < group.messages.length; messageIndex += 1) {
       const message = group.messages[messageIndex]!;
       if (options.newDividerId === message.id) {
@@ -443,14 +450,16 @@ export function readProgressFromVirtualRows(
   if (metrics.programmatic) {
     return null;
   }
-  const fromBottom = metrics.scrollHeight - metrics.scrollOffset - metrics.viewportHeight;
-  if (fromBottom <= metrics.bottomPx) {
-    return lastMessageIdFromRows(rows);
+  if (metrics.mode !== 'scrolled-past') {
+    const fromBottom = metrics.scrollHeight - metrics.scrollOffset - metrics.viewportHeight;
+    if (fromBottom <= metrics.bottomPx) {
+      return lastMessageIdFromRows(rows);
+    }
   }
   let readId: string | null = null;
-  const viewBottom = metrics.scrollOffset + metrics.viewportHeight - 4;
+  const limit = metrics.mode === 'scrolled-past' ? metrics.scrollOffset : metrics.scrollOffset + metrics.viewportHeight - 4;
   for (const item of [...virtualItems].sort((a, b) => a.index - b.index)) {
-    if (item.end > viewBottom) {
+    if (item.end > limit) {
       break;
     }
     const row = rows[item.index];
@@ -501,41 +510,18 @@ export interface ChannelSeenEntry {
   count: number;
 }
 
-/**
- * Keep the two persisted read-pointer fields coherent. Sidebar badges use the
- * absolute count, while the feed divider/highlight uses the message id. If the
- * count already says the channel is fully read, normalize the id to the current
- * last message so a stale id cannot keep the feed visually unread forever.
- */
-export function normalizeChannelSeenEntry(
-  channel: { messageCount: number; lastMessage?: { id: string } | null },
-  seen: ChannelSeenEntry | undefined
-): ChannelSeenEntry | undefined {
-  if (!seen) {
-    return undefined;
-  }
-  const lastMessageId = channel.lastMessage?.id ?? null;
-  if (lastMessageId && channelUnreadCount(channel.messageCount, lastMessageId, seen) === 0) {
-    return { id: lastMessageId, count: channel.messageCount };
-  }
-  return seen;
-}
-
-export function channelReadPointer(
-  channel: { messageCount: number; lastMessage?: { id: string } | null },
-  seen: ChannelSeenEntry | undefined
-): string | null {
-  return normalizeChannelSeenEntry(channel, seen)?.id ?? null;
-}
-
 export function channelInitialLoadSince(
   channel: { messageCount: number; lastMessage?: { id: string } | null },
   seen: ChannelSeenEntry | undefined
 ): string | null {
-  if (channelUnreadCount(channel.messageCount, channel.lastMessage?.id ?? null, seen) === 0) {
+  if (!seen) {
     return null;
   }
-  return channelReadPointer(channel, seen);
+  const lastMessageId = channel.lastMessage?.id ?? null;
+  if (lastMessageId && seen.id === lastMessageId) {
+    return null;
+  }
+  return seen.id;
 }
 
 export function channelShouldReanchorCachedDetail(
@@ -944,4 +930,55 @@ export function parseMessageLink(text: string): { channel: string; messageId: st
 export function buildQuoteReply(message: { author: string; body: string }): string {
   const quoted = message.body.split('\n').map((line) => `> ${line}`).join('\n');
   return `> @${message.author}:\n${quoted}\n\n`;
+}
+
+export function mergeChannelWindow(current: ChannelDetail, fetched: ChannelDetail): ChannelDetail {
+  const meta = {
+    goal: fetched.goal,
+    members: fetched.members,
+    files: fetched.files,
+    total: fetched.total,
+    firstMessageAt: fetched.firstMessageAt,
+    lastMessageAt: fetched.lastMessageAt
+  };
+  if (current.messages.length === 0 || fetched.messages.length === 0) {
+    return { ...fetched };
+  }
+  const byId = new Map(current.messages.map((message) => [message.id, message]));
+  const adopted = fetched.messages.map((message) => {
+    const prev = byId.get(message.id);
+    return prev &&
+      prev.body === message.body &&
+      prev.author === message.author &&
+      prev.timestamp === message.timestamp &&
+      prev.hasEndTurn === message.hasEndTurn &&
+      (prev.threadFile ?? null) === (message.threadFile ?? null) &&
+      (prev.threadReplies ?? 0) === (message.threadReplies ?? 0)
+      ? prev
+      : message;
+  });
+  const splice = current.messages.findIndex((message) => message.id === adopted[0].id);
+  if (splice >= 0) {
+    return {
+      ...current,
+      ...meta,
+      messages: [...current.messages.slice(0, splice), ...adopted],
+      startIndex: splice > 0 ? Math.max(0, fetched.startIndex - splice) : fetched.startIndex,
+      hasOlder: splice > 0 ? current.hasOlder : fetched.hasOlder,
+      hasNewer: fetched.hasNewer,
+      contentRevision: fetched.contentRevision
+    };
+  }
+  const from = adopted.findIndex((message) => message.id === current.messages[0].id);
+  if (from >= 0) {
+    return {
+      ...current,
+      ...meta,
+      messages: adopted.slice(from),
+      startIndex: fetched.startIndex + from,
+      hasNewer: fetched.hasNewer,
+      contentRevision: fetched.contentRevision
+    };
+  }
+  return { ...current, ...meta, hasNewer: true };
 }

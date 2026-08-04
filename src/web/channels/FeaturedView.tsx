@@ -3,6 +3,7 @@ import { Star } from 'lucide-react';
 import { ActionModal, useActionSounds } from './ActionModal.js';
 import { channelsFeatured, channelsFeaturedRemove, type FeaturedMessageItem } from './channelsClient.js';
 import { sortFeatured } from './channelsModel.js';
+import { DeskSelect } from '../arwes/primitives.js';
 
 /**
  * Featured / saved messages view. Lists the globally-featured messages
@@ -111,35 +112,32 @@ Stars are shared across the whole desk — every agent sees the same featured li
         <span>{filteredItems.length} of {items.length} saved</span>
       </div>
       {items.length > 0 ? (
-        <div className="chanFeaturedFilters">
-          <label className="chanFeaturedFilter">
+        <div className="deskFieldStack chanFeaturedFilters">
+          <label>
             <span>Channel</span>
-            <select value={channelFilter} onChange={(e) => setChannelFilter(e.target.value)}>
-              <option value="all">All</option>
-              {uniqueChannels.map((c) => (
-                <option key={c} value={c}>#{c}</option>
-              ))}
-            </select>
+            <DeskSelect
+              value={channelFilter}
+              options={[{ value: 'all', label: 'All' }, ...uniqueChannels.map((c) => ({ value: c, label: `#${c}` }))]}
+              onChange={setChannelFilter}
+            />
           </label>
           {uniqueProjects.length > 0 ? (
-            <label className="chanFeaturedFilter">
+            <label>
               <span>Project</span>
-              <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
-                <option value="all">All</option>
-                {uniqueProjects.map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
+              <DeskSelect
+                value={projectFilter}
+                options={[{ value: 'all', label: 'All' }, ...uniqueProjects.map((p) => ({ value: p, label: p }))]}
+                onChange={setProjectFilter}
+              />
             </label>
           ) : null}
-          <label className="chanFeaturedFilter">
+          <label>
             <span>Bot</span>
-            <select value={authorFilter} onChange={(e) => setAuthorFilter(e.target.value)}>
-              <option value="all">All</option>
-              {uniqueAuthors.map((a) => (
-                <option key={a} value={a}>@{a}</option>
-              ))}
-            </select>
+            <DeskSelect
+              value={authorFilter}
+              options={[{ value: 'all', label: 'All' }, ...uniqueAuthors.map((a) => ({ value: a, label: `@${a}` }))]}
+              onChange={setAuthorFilter}
+            />
           </label>
         </div>
       ) : null}

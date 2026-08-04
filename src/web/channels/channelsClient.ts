@@ -48,6 +48,7 @@ export interface ChannelSummary {
   goal: string;
   members: ChannelMember[];
   messageCount: number;
+  threadReplyCount: number;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
   /** Opaque content-addressed revision of the channel's root conversation.
    *  Changes on ANY mutation the count/last-id/preview signature can miss —
