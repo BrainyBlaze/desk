@@ -328,6 +328,64 @@ function AgentMultiplexerImpl({
 
 export const AgentMultiplexer = memo(AgentMultiplexerImpl);
 
+function buildTabDragImage(btn: HTMLButtonElement): HTMLCanvasElement | null {
+  const rect = btn.getBoundingClientRect();
+  const w = Math.round(rect.width);
+  const h = Math.round(rect.height);
+  if (!w || !h) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.cssText = `width:${w}px;height:${h}px;position:fixed;top:-9999px;left:-9999px;pointer-events:none`;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.scale(dpr, dpr);
+  const cs = getComputedStyle(btn);
+  const cut = 6;
+  const octagon = (): void => {
+    ctx.beginPath();
+    ctx.moveTo(cut, 0);
+    ctx.lineTo(w - cut, 0);
+    ctx.lineTo(w, cut);
+    ctx.lineTo(w, h - cut);
+    ctx.lineTo(w - cut, h);
+    ctx.lineTo(cut, h);
+    ctx.lineTo(0, h - cut);
+    ctx.lineTo(0, cut);
+    ctx.closePath();
+  };
+  const surface = cs.getPropertyValue('--desk-surface').trim();
+  octagon();
+  ctx.fillStyle = surface || cs.backgroundColor;
+  ctx.fill();
+  octagon();
+  ctx.fillStyle = cs.backgroundColor;
+  ctx.fill();
+  const dot = btn.querySelector<HTMLElement>('.statusDot');
+  if (dot) {
+    const ds = getComputedStyle(dot);
+    const opaque = ds.backgroundColor !== 'rgba(0, 0, 0, 0)' && ds.backgroundColor !== 'transparent';
+    ctx.beginPath();
+    ctx.arc(dot.offsetLeft + dot.offsetWidth / 2, h / 2, dot.offsetWidth / 2, 0, Math.PI * 2);
+    if (opaque) {
+      ctx.fillStyle = ds.backgroundColor;
+      ctx.fill();
+    } else {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = ds.borderColor || cs.color;
+      ctx.stroke();
+    }
+  }
+  const label = btn.querySelector('span:last-child')?.textContent ?? '';
+  ctx.fillStyle = cs.color;
+  ctx.font = `${cs.fontSize} ${cs.fontFamily}`;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, dot ? dot.offsetLeft + dot.offsetWidth + 6 : 10, h / 2 + 1);
+  document.body.appendChild(canvas);
+  return canvas;
+}
+
 function TerminalCellImpl({
   group,
   cell,
@@ -410,6 +468,20 @@ function TerminalCellImpl({
                 className={`cellTab ${session.spec.sessionId === cell.activeSession?.spec.sessionId ? 'selected' : ''} ${
                   session.spec.sessionId === selectedSessionId ? 'globalSelected' : ''
                 }`}
+                style={{ clipPath: CLIP_OCTAGON_PILL }}
+                draggable
+                onDragStart={(event: DragEvent<HTMLButtonElement>) => {
+                  event.stopPropagation();
+                  event.dataTransfer.effectAllowed = 'move';
+                  const ghost = buildTabDragImage(event.currentTarget);
+                  if (ghost) {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    event.dataTransfer.setDragImage(ghost, event.clientX - rect.left, event.clientY - rect.top);
+                    window.setTimeout(() => ghost.remove(), 0);
+                  }
+                  onDragSession(session.spec.sessionId);
+                }}
+                onDragEnd={() => onDragSession(null)}
                 onMouseEnter={() => bleeps.hover?.play()}
                 onClick={() => {
                   bleeps.click?.play();

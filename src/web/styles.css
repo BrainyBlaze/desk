@@ -1986,19 +1986,22 @@ select:focus {
 }
 
 .cellTab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
   max-width: 220px;
-  height: 22px;
+  height: 20px;
   gap: 6px;
-  padding: 0;
+  padding: 0 10px;
   border: none;
-  background: transparent;
-  color: var(--desk-text-dim);
   cursor: pointer;
-  font-size: 11px;
-  transition: color 0.12s ease;
+  user-select: none;
+  white-space: nowrap;
+  color: var(--desk-text-dim);
+  background: var(--arwes-frames-bg-color);
+  font-size: 12px;
+  transition: color 140ms ease, background-color 140ms ease;
 }
 
 .cellTab:hover {
@@ -2012,9 +2015,12 @@ select:focus {
   white-space: nowrap;
 }
 
+.cellTab .statusDot { flex: none; }
+
 .cellTab.selected,
 .cellTab.globalSelected {
-  color: var(--desk-accent);
+  color: var(--desk-text);
+  background: var(--desk-glow);
 }
 
 .cellTabs .cellRemove {
