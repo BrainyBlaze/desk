@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type MouseEvent } from 'react';
 import { Animated, Animator, useBleeps } from '@arwes/react';
 import { BookOpen, CopyX, FileCode, X, XCircle } from 'lucide-react';
 import { CLIP_OCTAGON_PILL, CLIP_OCTAGON_TINY } from '../arwes/primitives.js';
@@ -62,7 +62,27 @@ export function EditorTabs({
   const [dropPosition, setDropPosition] = useState<number | null>(null);
   const [menu, setMenu] = useState<TabMenuState | null>(null);
   const menuRef = useClampedMenu(menu);
+  const stripRef = useRef<HTMLDivElement | null>(null);
   const labels = labelsProp ?? tabLabels(tabs);
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (!strip) {
+      return;
+    }
+    const el = strip.querySelector<HTMLElement>('.editorTabActive');
+    if (!el) {
+      return;
+    }
+    const elRect = el.getBoundingClientRect();
+    const stripRect = strip.getBoundingClientRect();
+    const pad = 12;
+    if (elRect.left < stripRect.left) {
+      strip.scrollBy({ left: elRect.left - stripRect.left - pad, behavior: 'smooth' });
+    } else if (elRect.right > stripRect.right) {
+      strip.scrollBy({ left: elRect.right - stripRect.right + pad, behavior: 'smooth' });
+    }
+  }, [active]);
 
   useEffect(() => {
     if (!menu) {
@@ -114,7 +134,7 @@ export function EditorTabs({
   }
 
   return (
-    <div className="editorTabs" role="tablist">
+    <div className="editorTabs" role="tablist" ref={stripRef}>
       {tabs.map((path, index) => {
         const tabMeta = meta.get(path);
         const isActive = path === active;
