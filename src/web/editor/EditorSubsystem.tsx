@@ -232,7 +232,7 @@ export function EditorSubsystem({
   onSidebarCollapsedChange?: (collapsed: boolean) => void;
   registerSidebarToggle?: (toggle: () => void) => void;
   /** exposes openFile so other subsystems (git) can jump into the editor */
-  registerFileOpener?: (open: (path: string) => void) => void;
+  registerFileOpener?: (open: (path: string, reveal?: RevealTarget) => void) => void;
   /** exposes open+reveal-in-tree (git subsystem's "reveal in explorer") */
   registerFileReveal?: (reveal: (path: string) => void) => void;
   /** notes variant: exposes create-note so the rail/terminals can mint notes */
@@ -1362,7 +1362,7 @@ export function EditorSubsystem({
   // appears. The retry is TIME-driven (not React-state-driven) because the boot
   // root-restore can re-set the SAME root while bumping the read generation,
   // silently dropping an in-flight read with no re-render to react to.
-  const openPathAcrossRoots = useCallback(async (path: string): Promise<void> => {
+  const openPathAcrossRoots = useCallback(async (path: string, reveal?: RevealTarget): Promise<void> => {
     let target: { root: string; path: string; isDir: boolean };
     try {
       target = await fsRootFor(path);
@@ -1389,10 +1389,10 @@ export function EditorSubsystem({
           return; // revealed (the freshly-switched root's tree may still be mounting otherwise)
         }
       } else {
+        await openFileRef.current(target.path, reveal);
         if (tabsRef.current.includes(target.path)) {
           return; // opened
         }
-        await openFileRef.current(target.path);
       }
     }
   }, []);
@@ -1400,7 +1400,7 @@ export function EditorSubsystem({
   // Cross-subsystem opens (chat/git file links). Registered once; reads live
   // state via refs, so a link opens even when no folder is open yet.
   useEffect(() => {
-    registerFileOpener?.((path) => void openPathAcrossRoots(path));
+    registerFileOpener?.((path, reveal) => void openPathAcrossRoots(path, reveal));
   }, [openPathAcrossRoots, registerFileOpener]);
 
   // "Reveal in explorer" from the git subsystem: open + expand + flash.

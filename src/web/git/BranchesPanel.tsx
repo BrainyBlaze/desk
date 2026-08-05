@@ -170,8 +170,10 @@ export function BranchesPanel({
       >
         {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         <TextReveal as="span" manager="decipher">Branches</TextReveal>
-        <Pill tone={local.length > 0 ? undefined : 'muted'}>{local.length}</Pill>
-        {worktrees.length > 1 ? <Pill tone="muted" title="worktrees">{worktrees.length} trees</Pill> : null}
+        <span className="gitSectionHeaderPills">
+          <Pill tone={local.length > 0 ? undefined : 'muted'}>{local.length}</Pill>
+          {worktrees.length > 1 ? <Pill tone="muted" title="worktrees">{worktrees.length} trees</Pill> : null}
+        </span>
       </button>
       {!collapsed ? (
         <div className="gitSectionBody gitBranchesBody">

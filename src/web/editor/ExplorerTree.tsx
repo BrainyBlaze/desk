@@ -466,14 +466,14 @@ export function ExplorerTree({
   const relativeToRoot = (path: string): string =>
     path === root ? '.' : path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 
-  const performMove = async (sourcePath: string, targetDir: string): Promise<void> => {
+  const performMove = async (sourcePath: string, targetDir: string, plain = false): Promise<void> => {
     const sourceParent = parentOf(sourcePath);
     if (sourcePath === targetDir || sourceParent === targetDir || isDescendantOf(targetDir, sourcePath)) {
       return;
     }
     const destination = `${targetDir}/${fileNameOf(sourcePath)}`;
     try {
-      if (onRenameFile) {
+      if (onRenameFile && !plain) {
         const sourceKind = (childrenByDirRef.current.get(sourceParent) ?? []).find((entry) => entry.path === sourcePath)?.kind;
         await onRenameFile(sourcePath, destination, sourceKind === 'dir' ? 'dir' : 'file');
         // watcher reloads both dirs when the move lands.
@@ -527,7 +527,20 @@ export function ExplorerTree({
     // Handle internal file moves
     const source = event.dataTransfer.getData(DRAG_MIME);
     if (source) {
-      void performMove(source, path);
+      let paths: string[];
+      try {
+        const parsed = JSON.parse(source);
+        paths = Array.isArray(parsed) ? parsed : [source];
+      } catch {
+        paths = [source];
+      }
+      const sources = paths.filter((candidate) => !paths.some((other) => other !== candidate && isDescendantOf(candidate, other)));
+      void (async () => {
+        const plain = sources.length > 1;
+        for (const sourcePath of sources) {
+          await performMove(sourcePath, path, plain);
+        }
+      })();
     }
   };
 
@@ -589,7 +602,8 @@ export function ExplorerTree({
               draggable
               onContextMenu={(event) => onRowContextMenu(event, entry)}
               onDragStart={(event) => {
-                event.dataTransfer.setData(DRAG_MIME, entry.path);
+                const paths = selectedPaths.has(entry.path) && selectedPaths.size > 1 ? Array.from(selectedPaths) : [entry.path];
+                event.dataTransfer.setData(DRAG_MIME, JSON.stringify(paths));
                 event.dataTransfer.effectAllowed = 'move';
               }}
               onDragOver={isDir ? (event) => onDirDragOver(event, entry.path) : undefined}

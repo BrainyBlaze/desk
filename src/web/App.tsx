@@ -169,6 +169,7 @@ import {
   TextReveal
 } from './arwes/primitives.js';
 import { EditorSubsystem } from './editor/EditorSubsystem.js';
+import type { RevealTarget } from './editor/MonacoHost.js';
 import { resolveLspConfig, makeCreateLspBinding, type LspUiConfig } from './editor/lsp/appLspWiring.js';
 import { setLspStatus, clearLspStatus, lspStatusKey } from './editor/lsp/lspStatusStore.js';
 import { useEditorRoot } from './editorRoot.js';
@@ -322,8 +323,8 @@ export function App(): JSX.Element {
   const [agentPaletteOpen, setAgentPaletteOpen] = useState(false);
   // The git subsystem's "Open file" jumps into the editor; the opener appears
   // once the editor has a root, so early requests are parked until then.
-  const editorFileOpenerRef = useRef<((path: string) => void) | null>(null);
-  const pendingEditorOpenRef = useRef<string | null>(null);
+  const editorFileOpenerRef = useRef<((path: string, reveal?: RevealTarget) => void) | null>(null);
+  const pendingEditorOpenRef = useRef<{ path: string; reveal?: RevealTarget } | null>(null);
   // Editor ⇄ git navigation, both directions trampoline through App with a
   // pending slot — either side may not have booted when the jump happens.
   const editorRevealRef = useRef<((path: string) => void) | null>(null);
@@ -2109,7 +2110,7 @@ export function App(): JSX.Element {
       if (editorFileOpenerRef.current) {
         editorFileOpenerRef.current(path);
       } else {
-        pendingEditorOpenRef.current = path;
+        pendingEditorOpenRef.current = { path };
       }
     }
   });
@@ -2247,7 +2248,7 @@ export function App(): JSX.Element {
                       const pending = pendingEditorOpenRef.current;
                       if (pending) {
                         pendingEditorOpenRef.current = null;
-                        open(pending);
+                        open(pending.path, pending.reveal);
                       }
                     }}
                     registerFileReveal={(reveal) => {
@@ -2278,7 +2279,7 @@ export function App(): JSX.Element {
                       if (editorFileOpenerRef.current) {
                         editorFileOpenerRef.current(path);
                       } else {
-                        pendingEditorOpenRef.current = path;
+                        pendingEditorOpenRef.current = { path };
                       }
                     }}
                     onRevealInExplorer={(path) => {
@@ -2343,12 +2344,12 @@ export function App(): JSX.Element {
                     registerNavigator={(navigate) => {
                       channelsNavigatorRef.current = navigate;
                     }}
-                    onOpenFile={(path) => {
+                    onOpenFile={(path, reveal) => {
                       setSubsystem('editor');
                       if (editorFileOpenerRef.current) {
-                        editorFileOpenerRef.current(path);
+                        editorFileOpenerRef.current(path, reveal);
                       } else {
-                        pendingEditorOpenRef.current = path;
+                        pendingEditorOpenRef.current = { path, reveal };
                       }
                     }}
                     onSidebarCollapsedChange={channelsSidebar.onCollapsedChange}

@@ -204,7 +204,7 @@ export function ChannelsSubsystem({
   onError: (message: string) => void;
   onInfo: (message: string) => void;
   /** open a file (absolute path) in the editor subsystem */
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, reveal?: { line: number; column: number }) => void;
   /** jump to the agents subsystem with this durable session selected */
   onRevealAgent?: (sessionId: string) => void;
   /** total unread messages across channels (drives the rail badge) */
@@ -3124,7 +3124,7 @@ export function ChannelsSubsystem({
                 </div>
               ) : null}
             </div>
-            <div className="confirmActions">
+            <div className="confirmActions confirmActionsSplit">
               <Cmd
                 icon={<X size={12} />}
                 label="Cancel"
