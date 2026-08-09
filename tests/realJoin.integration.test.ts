@@ -239,6 +239,8 @@ describe.skipIf(!AVAILABLE)('REAL join — daemon ↔ real atch master (§7.1)',
 
     mgr.retire(name);
     expect(await until(() => !existsSync(sockPath), 4000)).toBe(true);
+    rmSync(`${sockPath}.log`, { force: true }); // clean the scrollback companion this test wrote
+  });
 
   it('a leftover node with a LIVE foreign master is never reclaimed (spawn refuses)', { timeout: 25000 }, async () => {
     // The dual of the reboot case: an existing socket that STILL accepts a
