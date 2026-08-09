@@ -44,11 +44,15 @@ export function buildDeskSnapshot(options: BuildDeskSnapshotOptions = {}): DeskS
   const sessions = buildSessionSpecs(manifest, {
     homeDir
   });
+  const runningSessions = runningSessionsFor(sessions);
 
   return {
     configPath: manifestPath,
-    view: buildDeskViewModel(sessions, runningSessionsFor(sessions), buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
-    continuity: readClaudeContinuityStatus(sessions, { homeDir }),
+    view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
+    continuity: readClaudeContinuityStatus(sessions, {
+      homeDir,
+      runningSessions
+    }),
     generatedAt: new Date().toISOString()
   };
 }
@@ -68,7 +72,10 @@ export function buildDeskSnapshotFromManifest(
   return {
     configPath: manifestPath,
     view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
-    continuity: readClaudeContinuityStatus(sessions, { homeDir }),
+    continuity: readClaudeContinuityStatus(sessions, {
+      homeDir,
+      runningSessions
+    }),
     generatedAt: new Date().toISOString()
   };
 }

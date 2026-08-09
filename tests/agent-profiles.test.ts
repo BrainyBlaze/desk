@@ -284,11 +284,11 @@ describe('API body parsing and respawn', () => {
     expect(() => readDeskSessionBody({ name: 's', cwd: '/x', agent: 'claude', resume: `ses_${'a'.repeat(24)}` })).toThrow(
       /not a valid resume id/
     );
-    // A custom command owns its own argument: Desk passes the token through to
-    // the operator's wrapper and has no grammar to impose on it.
-    expect(
-      readDeskSessionBody({ name: 's', cwd: '/x', command: 'claude-wrapper', agent: 'claude', resume: 'sess-edited' }).resume
-    ).toBe('sess-edited');
+    // A custom command is not a Desk-managed provider session, even when the
+    // declared agent and token otherwise look provider-shaped.
+    expect(() =>
+      readDeskSessionBody({ name: 's', cwd: '/x', command: 'claude-wrapper', agent: 'claude', resume: uuid })
+    ).toThrow(/managed provider/);
   });
 
   it('refuses a profile on a custom-command body at the API edge', () => {

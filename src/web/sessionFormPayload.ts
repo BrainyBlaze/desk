@@ -25,7 +25,6 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   agent?: string;
   profileId?: string;
   resume?: string;
-  clearResume?: boolean;
   bypassPermissions?: boolean;
   command?: string;
   uiMode?: DeskSessionUiMode;
@@ -34,15 +33,11 @@ export function buildSessionPayload(form: SessionFormPayloadInput): {
   const cwd = form.cwd.trim() || undefined;
   const command = form.command.trim();
   const resume = form.resume.trim();
-  // Only an emptied field that previously SHOWED a value is a deliberate clear;
-  // an empty field that loaded empty may simply predate async resume capture.
-  const clearResume = resume === '' && form.initialResume.trim() !== '';
   const profileId = (form.profileId ?? '').trim();
   const agentFields = {
     agent: form.agent,
     ...(profileId && supportsAgentProfiles(form.agent, command !== '') ? { profileId } : {}),
     resume: resume || undefined,
-    ...(clearResume ? { clearResume: true } : {}),
     bypassPermissions: supportsBypassPermissions(form.agent) ? form.bypassPermissions : undefined
   };
   if (command) {

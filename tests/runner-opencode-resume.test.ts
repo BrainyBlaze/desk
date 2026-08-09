@@ -1,279 +1,148 @@
-import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
-import { readPendingResumeCaptures } from '../src/core/resumeCaptureState.js';
-import { prepareSessionForLaunch, runPlan } from '../src/core/runner.js';
+import {
+  atchCommandFor,
+  planDeskUp,
+  runPlan,
+  startSession
+} from '../src/core/runner.js';
+import type { SessionSpec } from '../src/core/types.js';
 
-const execFileAsync = promisify(execFile);
 const originalEnv = { ...process.env };
 
 afterEach(() => {
   process.env = { ...originalEnv };
 });
 
-describe('opencode launch resume fallback', () => {
-  it('does not auto-resume custom commands that carry opencode metadata', () => {
-    const root = mkdtempSync(join(tmpdir(), 'desk-custom-opencode-runner-'));
+describe('opencode launch continuity', () => {
+  it('does not inspect cwd sessions or rewrite a resume-less launch', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-opencode-no-inference-'));
     try {
       const cwd = join(root, 'project');
-      mkdirSync(cwd);
-      const sessionsPath = join(root, 'sessions.json');
-      const stubPath = join(root, 'opencode-stub.js');
-      writeFileSync(
-        sessionsPath,
-        JSON.stringify([
-          {
-            id: 'ses_recent',
-            title: 'recent',
-            created: Date.now() - 2000,
-            updated: Date.now() - 1000,
-            projectId: 'global',
-            directory: cwd
-          }
-        ])
-      );
-      writeFileSync(
-        stubPath,
-        `#!/usr/bin/env node
-const fs = require('node:fs');
-process.stdout.write(fs.readFileSync(process.env.TEST_OPENCODE_SESSIONS, 'utf8'));
-`
-      );
-      chmodSync(stubPath, 0o755);
-      const spec = buildSessionSpecs(
-        parseDeskManifest(`
-projects:
-  - id: sample
-    cwd: ${cwd}
-    groups:
-      - id: main
-        sessions:
-          - name: custom
-            sessionId: custom
-            command: printf custom
-            agent: opencode
-            uiMode: terminal
-`),
-        { homeDir: root }
-      )[0]!;
+      const markerPath = join(root, 'session-list-called');
+      const stubPath = writeSessionListStub(root, cwd, markerPath);
+      process.env = {
+        ...originalEnv,
+        DESK_OPENCODE_BIN: stubPath,
+        TEST_OPENCODE_PROBE_MARKER: markerPath
+      };
+      const spec = opencodeSpec(root, cwd);
 
-      const prepared = prepareSessionForLaunch(spec, {
-        env: {
-          ...process.env,
-          DESK_OPENCODE_BIN: stubPath,
-          TEST_OPENCODE_SESSIONS: sessionsPath
-        },
-        homeDir: root
-      });
+      const plan = planDeskUp([spec], { probeSession: () => false });
 
-      expect(prepared.command).toBe(spec.command);
-      expect(prepared.command).not.toContain('DESK_OPENCODE_RESUME_ID');
+      expect(plan).toHaveLength(1);
+      expect(plan[0]).toMatchObject({ type: 'start', session: spec });
+      expect(plan[0]!.session.command).toBe(spec.command);
+      expect(existsSync(markerPath)).toBe(false);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
   });
 
-  it('launches opencode with the single recent cwd session when resume is unset', async () => {
-    const now = Date.now();
-    const result = await runPreparedOpencodeCommandWithSessions([
-      {
-        id: 'ses_recent',
-        title: 'recent',
-        created: now - 2 * 60 * 60 * 1000,
-        updated: now - 1000,
-        projectId: 'global',
-        directory: '__CWD__'
-      },
-      {
-        id: 'ses_stale',
-        title: 'stale',
-        created: now - 10 * 24 * 60 * 60 * 1000,
-        updated: now - 9 * 24 * 60 * 60 * 1000,
-        projectId: 'global',
-        directory: '__CWD__'
-      }
-    ]);
+  it('passes a resume-less launch through startSession without a session-list probe', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-opencode-start-no-inference-'));
+    try {
+      const cwd = join(root, 'project');
+      const markerPath = join(root, 'session-list-called');
+      const stubPath = writeSessionListStub(root, cwd, markerPath);
+      process.env = {
+        ...originalEnv,
+        DESK_OPENCODE_BIN: stubPath,
+        DESK_OPENCODE_CONFIG_DIR: join(root, 'opencode-config'),
+        TEST_OPENCODE_PROBE_MARKER: markerPath
+      };
+      const spec = opencodeSpec(root, cwd);
+      const control = vi.fn().mockResolvedValue({ ok: true });
 
-    expect(result.finalArgs).toEqual(['--session', 'ses_recent']);
-    expect(result.command).not.toContain('node -e');
-    expect(result.command).toContain(
-      'DESK_OPENCODE_SESSION_ID="$DESK_OPENCODE_RESUME_ID"'
-    );
+      await expect(
+        startSession(spec, { probeSession: () => false, control })
+      ).resolves.toEqual({ ok: true });
+
+      expect(control).toHaveBeenCalledOnce();
+      expect(control.mock.calls[0]![1]).toMatchObject({
+        sessionId: spec.sessionId,
+        command: atchCommandFor(spec)
+      });
+      expect(existsSync(markerPath)).toBe(false);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
-  it('launches opencode fresh when recent cwd session fallback is ambiguous', async () => {
-    const now = Date.now();
-    const result = await runPreparedOpencodeCommandWithSessions([
-      {
-        id: 'ses_first',
-        title: 'first',
-        created: now - 5000,
-        updated: now - 5000,
-        projectId: 'global',
-        directory: '__CWD__'
-      },
-      {
-        id: 'ses_second',
-        title: 'second',
-        created: now - 4000,
-        updated: now - 4000,
-        projectId: 'global',
-        directory: '__CWD__'
-      }
-    ]);
+  it('preserves an explicit manifest resume id in the launched command', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-opencode-explicit-resume-'));
+    try {
+      const cwd = join(root, 'project');
+      process.env = {
+        ...originalEnv,
+        DESK_OPENCODE_CONFIG_DIR: join(root, 'opencode-config')
+      };
+      const spec = opencodeSpec(
+        root,
+        cwd,
+        'ses_12a31855dffeHTCs6tcfOmsddP'
+      );
+      const control = vi.fn().mockResolvedValue({ ok: true });
 
-    expect(result.finalArgs).toEqual([]);
-  });
+      await expect(
+        startSession(spec, { probeSession: () => false, control })
+      ).resolves.toEqual({ ok: true });
 
-  it('launches opencode fresh when the only cwd session is stale', async () => {
-    const now = Date.now();
-    const result = await runPreparedOpencodeCommandWithSessions([
-      {
-        id: 'ses_stale',
-        title: 'stale',
-        created: now - 10 * 24 * 60 * 60 * 1000,
-        updated: now - 8 * 24 * 60 * 60 * 1000,
-        projectId: 'global',
-        directory: '__CWD__'
-      }
-    ]);
-
-    expect(result.finalArgs).toEqual([]);
+      expect(spec.command).toContain("--session 'ses_12a31855dffeHTCs6tcfOmsddP'");
+      expect(control.mock.calls[0]![1]).toMatchObject({
+        sessionId: spec.sessionId,
+        command: atchCommandFor(spec)
+      });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 });
 
 describe('opencode launch config materialization', () => {
-  it('does not create pending resume captures for custom commands with opencode metadata', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'desk-custom-opencode-capture-'));
-    try {
-      const cwd = join(root, 'project');
-      const statePath = join(root, 'resume-captures.json');
-      mkdirSync(cwd);
-      process.env = {
-        ...originalEnv,
-        DESK_OPENCODE_CONFIG_DIR: join(root, 'opencode-config'),
-        DESK_RESUME_CAPTURE_STATE_PATH: statePath
-      };
-      const spec = buildSessionSpecs(
-        parseDeskManifest(`
-projects:
-  - id: sample
-    cwd: ${cwd}
-    groups:
-      - id: main
-        sessions:
-          - name: custom
-            sessionId: custom
-            command: printf custom
-            agent: opencode
-            uiMode: terminal
-`),
-        { homeDir: root }
-      )[0]!;
-      const plan = [{ type: 'start' as const, session: spec }];
-      const control = vi.fn().mockResolvedValue({ ok: true });
-
-      expect(await runPlan(plan, false, { control })).toBe(0);
-      expect(control).toHaveBeenCalledOnce();
-      expect(readPendingResumeCaptures({ path: statePath })).toEqual([]);
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
-  });
-
-  it('prepares the Desk-owned opencode config for real runPlan starts but not dry-run', async () => {
+  it('prepares Desk-owned config without creating pending capture state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-opencode-config-launch-'));
     try {
       const cwd = join(root, 'project');
       const configDir = join(root, 'opencode-config');
       const statePath = join(root, 'resume-captures.json');
-      mkdirSync(cwd);
       process.env = {
         ...originalEnv,
         DESK_OPENCODE_CONFIG_DIR: configDir,
         DESK_RESUME_CAPTURE_STATE_PATH: statePath
       };
-      const spec = buildSessionSpecs(
-        parseDeskManifest(`
-projects:
-  - id: sample
-    cwd: ${cwd}
-    groups:
-      - id: main
-        sessions:
-          - name: opencode
-            sessionId: opencode
-            agent: opencode
-            uiMode: terminal
-`),
-        { homeDir: root }
-      )[0]!;
+      const spec = opencodeSpec(root, cwd);
       const plan = [{ type: 'start' as const, session: spec }];
       const control = vi.fn().mockResolvedValue({ ok: true });
 
       expect(await runPlan(plan, true, { control })).toBe(0);
       expect(control).not.toHaveBeenCalled();
       expect(existsSync(join(configDir, 'plugin', 'desk-attention.js'))).toBe(false);
-      expect(readPendingResumeCaptures({ path: statePath })).toEqual([]);
+      expect(existsSync(statePath)).toBe(false);
 
       expect(await runPlan(plan, false, { control })).toBe(0);
       expect(control).toHaveBeenCalledOnce();
       expect(existsSync(join(configDir, 'opencode.json'))).toBe(true);
       expect(existsSync(join(configDir, 'plugin', 'desk-attention.js'))).toBe(true);
-      expect(readPendingResumeCaptures({ path: statePath })).toEqual([
-        expect.objectContaining({
-          sessionId: spec.sessionId,
-          agent: 'opencode',
-          cwd
-        })
-      ]);
+      expect(existsSync(statePath)).toBe(false);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
   });
 });
 
-async function runPreparedOpencodeCommandWithSessions(
-  sessions: Array<{
-    id: string;
-    title: string;
-    created: number;
-    updated: number;
-    projectId: string;
-    directory: string;
-  }>
-): Promise<{ command: string; finalArgs: string[] }> {
-  const root = mkdtempSync(join(tmpdir(), 'desk-opencode-runner-'));
-  try {
-    const cwd = join(root, 'project');
-    mkdirSync(cwd);
-    const sessionsPath = join(root, 'sessions.json');
-    const argsPath = join(root, 'args.jsonl');
-    const stubPath = join(root, 'opencode-stub.js');
-    writeFileSync(
-      sessionsPath,
-      JSON.stringify(sessions.map((session) => ({ ...session, directory: session.directory.replace('__CWD__', cwd) })))
-    );
-    writeFileSync(
-      stubPath,
-      `#!/usr/bin/env node
-const fs = require('node:fs');
-const args = process.argv.slice(2);
-if (args[0] === 'session' && args[1] === 'list') {
-  process.stdout.write(fs.readFileSync(process.env.TEST_OPENCODE_SESSIONS, 'utf8'));
-  process.exit(0);
-}
-fs.writeFileSync(process.env.TEST_OPENCODE_ARGS, JSON.stringify(args) + '\\n', { flag: 'a' });
-`
-    );
-    chmodSync(stubPath, 0o755);
-
-    const spec = buildSessionSpecs(
-      parseDeskManifest(`
+function opencodeSpec(
+  root: string,
+  cwd: string,
+  resume?: string
+): SessionSpec {
+  mkdirSync(cwd, { recursive: true });
+  const resumeLine = resume ? `\n            resume: ${resume}` : '';
+  return buildSessionSpecs(
+    parseDeskManifest(`
 projects:
   - id: sample
     cwd: ${cwd}
@@ -283,30 +152,34 @@ projects:
           - name: opencode
             sessionId: opencode
             agent: opencode
-            uiMode: terminal
+            uiMode: terminal${resumeLine}
 `),
-      { homeDir: root }
-    )[0];
-    const prepared = prepareSessionForLaunch(spec, {
-      env: {
-        ...process.env,
-        DESK_OPENCODE_BIN: stubPath,
-        TEST_OPENCODE_ARGS: argsPath,
-        TEST_OPENCODE_SESSIONS: sessionsPath
-      },
-      homeDir: root
-    });
-    await execFileAsync('bash', ['-lc', prepared.command], {
-      env: {
-        ...process.env,
-        DESK_OPENCODE_BIN: stubPath,
-        TEST_OPENCODE_ARGS: argsPath,
-        TEST_OPENCODE_SESSIONS: sessionsPath
-      }
-    });
-    const lines = readFileSync(argsPath, 'utf8').trim().split('\n');
-    return { command: prepared.command, finalArgs: JSON.parse(lines.at(-1)!) as string[] };
-  } finally {
-    rmSync(root, { force: true, recursive: true });
-  }
+    { homeDir: root }
+  )[0]!;
+}
+
+function writeSessionListStub(
+  root: string,
+  cwd: string,
+  markerPath: string
+): string {
+  const stubPath = join(root, 'opencode-stub.cjs');
+  writeFileSync(
+    stubPath,
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(process.env.TEST_OPENCODE_PROBE_MARKER, 'called');
+process.stdout.write(JSON.stringify([{
+  id: 'ses_12a31855dffeHTCs6tcfOmsddP',
+  title: 'recent',
+  created: Date.now() - 2000,
+  updated: Date.now() - 1000,
+  projectId: 'global',
+  directory: ${JSON.stringify(cwd)}
+}]));
+`
+  );
+  chmodSync(stubPath, 0o755);
+  expect(markerPath).toBeTruthy();
+  return stubPath;
 }

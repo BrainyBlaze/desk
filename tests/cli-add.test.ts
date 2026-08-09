@@ -41,7 +41,14 @@ describe('desk add --agent validation', () => {
   });
 
   it('accepts a supported agent', async () => {
-    const res = await runAdd(['--file', manifest, '--group', 'g', '--name', 'n', '--cwd', '/tmp', '--agent', 'claude', '--resume', 'x']);
+    const res = await runAdd([
+      '--file', manifest,
+      '--group', 'g',
+      '--name', 'n',
+      '--cwd', '/tmp',
+      '--agent', 'claude',
+      '--resume', '11111111-1111-4111-8111-111111111111'
+    ]);
     expect(res.code).toBe(0);
     expect(existsSync(manifest)).toBe(true);
   });

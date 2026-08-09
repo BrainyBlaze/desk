@@ -9,7 +9,8 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
-  statSync
+  statSync,
+  writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +21,7 @@ import {
   atchEventPath,
   prepareAtchEventSink
 } from '../src/server/runtime/atchEvents.js';
+import { readProviderSessionBinding } from '../src/server/providerSessionBinding.js';
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
@@ -63,6 +65,57 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
 
     daemon.dispose();
     expect(server.listeners).toHaveLength(0); // bridge unmounted
+  });
+
+  it('owns provider reset authorization and completion in the durable daemon', async () => {
+    const manifestPath = join(home, 'desk.yml');
+    writeFileSync(
+      manifestPath,
+      `groups:\n  - id: main\n    sessions:\n      - name: alpha\n        cwd: ${home}\n        agent: codex\n        resume: 11111111-1111-4111-8111-111111111111\n        uiMode: terminal\n        sessionId: alpha\n`
+    );
+    const daemon = createTerminalDaemon({
+      homeRoot: home,
+      atchBinPath: '/bin/false',
+      atchSocketRoot: home,
+      httpServer: new FakeUpgradeServer(),
+      manifestPath,
+      homeDir: home
+    });
+    try {
+      const first = await daemon.resetProviderSession('alpha');
+      expect(first).toMatchObject({
+        ok: true,
+        generation: 0,
+        state: 'authorized'
+      });
+      expect(
+        readProviderSessionBinding({
+          deskSessionId: 'alpha',
+          manifestPath,
+          homeDir: home
+        })
+      ).toMatchObject({ ok: true, providerSessionId: null });
+
+      const second = await daemon.resetProviderSession('alpha');
+      expect(second).toMatchObject({
+        ok: true,
+        generation: 0,
+        state: 'authorized'
+      });
+      if (first.ok && second.ok) {
+        expect(second.authorizationId).not.toBe(first.authorizationId);
+      }
+      expect(
+        daemon.completeProviderSessionLaunch({
+          deskSessionId: 'alpha',
+          provider: 'codex',
+          providerSessionId: '22222222-2222-4222-8222-222222222222',
+          generation: 1
+        })
+      ).toEqual({ ok: false, reason: 'authorization-unclaimed' });
+    } finally {
+      daemon.dispose();
+    }
   });
 
   it('starts the daemon in its OWN http server (separate-process entry) and closes cleanly', async () => {
@@ -178,6 +231,51 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
     expect(existsSync(sink)).toBe(true);
     retire.mockResolvedValueOnce({ ok: true });
     await daemon.retire('sess-1');
+    expect(existsSync(sink)).toBe(false);
+    daemon.dispose();
+  });
+
+  it('keeps a newer event sink when exact-generation retirement is stale', async () => {
+    const daemon = createTerminalDaemon({
+      homeRoot: home,
+      atchBinPath: '/opt/atch',
+      atchSocketRoot: home,
+      httpServer: new FakeUpgradeServer()
+    });
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttach').mockImplementation(
+      async (sessionId, options) => {
+        await options.prepareSpawn?.({
+          sessionId,
+          generation: 4,
+          args: options.args,
+          env: {}
+        });
+        return { ok: true, generation: 4, created: true };
+      }
+    );
+    await daemon.provision('sess-1', {
+      command: ['bash'],
+      geometry: { rows: 24, cols: 80 },
+      subject: { kind: 'terminal' }
+    });
+    const sink = atchEventPath(home, 'sess-1', 4);
+    const retire = vi.spyOn(
+      daemon.router.sessions,
+      'retireGenerationAwaited'
+    );
+    retire.mockResolvedValueOnce({
+      ok: false,
+      reason: 'generation-mismatch',
+      expectedGeneration: 3,
+      currentGeneration: 4,
+      error: 'session sess-1 is generation 4, not 3'
+    });
+
+    await daemon.retireGeneration('sess-1', 3);
+
+    expect(existsSync(sink)).toBe(true);
+    retire.mockResolvedValueOnce({ ok: true });
+    await daemon.retireGeneration('sess-1', 4);
     expect(existsSync(sink)).toBe(false);
     daemon.dispose();
   });

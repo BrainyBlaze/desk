@@ -6,6 +6,7 @@ import { buildProducerRuntime } from './agentState/producerEmit.js';
 import { shellQuote } from '../shared/shell.js';
 import { writeTextFileAtomic } from '../shared/atomicFile.js';
 import { withFileLockSync } from '../shared/fileLock.js';
+import { PROVIDER_SESSION_ID_PAYLOAD_FIELD } from '../shared/providerSessionIdentity.js';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -388,6 +389,7 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
 export function buildDeskAgentEventShim(): string {
   return `#!/usr/bin/env node
 ${buildProducerRuntime()}
+const DESK_PROVIDER_SESSION_ID_FIELDS = ${JSON.stringify(PROVIDER_SESSION_ID_PAYLOAD_FIELD)};
 const chunks = [];
 process.stdin.on('data', (chunk) => chunks.push(chunk));
 process.stdin.on('end', async () => {
@@ -424,7 +426,9 @@ process.stdin.on('end', async () => {
     tool: deskBounded(input.tool_name),
     toolUseId: deskBounded(input.tool_use_id),
     turnId: deskBounded(input.turn_id || input.turnId),
-    providerSessionId: deskBounded(input.session_id || input.sessionId),
+    providerSessionId: deskBounded(
+      input[DESK_PROVIDER_SESSION_ID_FIELDS[DESK_PROVIDER]]
+    ),
     notificationId: notificationIdFromPrompt(input.prompt)
   };
   // No throttling. A tool edge is an INTERVAL boundary, not a beat: dropping
@@ -488,7 +492,7 @@ function mergeHookConfig(
   // Lock the read-modify-write on this shared user config: `desk hooks install`
   // can race Claude Code (or a second install) writing ~/.claude/settings.json.
   // The atomic write prevents a torn file, not a lost update. Lock a separate
-  // `.lock` path (see resumeCaptureState / the manifest).
+  // `.lock` path, matching the manifest update convention.
   mkdirSync(dirname(path), { recursive: true });
   return withFileLockSync(`${path}.lock`, () => mergeHookConfigLocked(path, desired, currentShimPath));
 }

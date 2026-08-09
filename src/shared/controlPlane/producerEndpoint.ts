@@ -59,7 +59,16 @@ const endpointRegistrationSchema = z.strictObject({
   observedAt: timestampSchema
 });
 
+const endpointFingerprintSchema = z.strictObject(producerFields);
+
+const endpointActivationSchema = z.strictObject({
+  ...producerFields,
+  providerSessionId: identifierSchema
+});
+
 export type AgentEndpointRegistration = z.infer<typeof endpointRegistrationSchema>;
+export type AgentEndpointFingerprint = z.infer<typeof endpointFingerprintSchema>;
+export type AgentEndpointActivation = z.infer<typeof endpointActivationSchema>;
 
 export type AgentEndpointAdaptation =
   | { kind: 'registration'; registration: AgentEndpointRegistration }
@@ -92,4 +101,15 @@ export function adaptAgentEndpointRegistration(
 
 export function parseAgentEndpointRegistration(input: unknown): AgentEndpointRegistration {
   return endpointRegistrationSchema.parse(input);
+}
+
+export function agentEndpointFingerprint(
+  registration: AgentEndpointRegistration
+): AgentEndpointFingerprint {
+  const { observedAt: _observedAt, ...fingerprint } = registration;
+  return endpointFingerprintSchema.parse(fingerprint);
+}
+
+export function parseAgentEndpointActivation(input: unknown): AgentEndpointActivation {
+  return endpointActivationSchema.parse(input);
 }

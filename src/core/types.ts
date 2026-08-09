@@ -181,5 +181,4 @@ export type SessionPlanActionType = 'start' | 'preserve';
 export interface SessionPlanAction {
   type: SessionPlanActionType;
   session: SessionSpec;
-  opencodeLaunchResumeId?: string;
 }

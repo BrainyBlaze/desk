@@ -100,6 +100,71 @@ groups:
     expect(command).not.toContain('mcp_servers.desk_lsp');
   });
 
+  it('reports missing durable identity only for running terminal providers', () => {
+    const snapshot = buildDeskSnapshotFromManifest(
+      `
+groups:
+  - id: research
+    sessions:
+      - name: running-claude
+        cwd: /workspace/claude
+        agent: claude
+        sessionId: running-claude
+      - name: running-codex
+        cwd: /workspace/codex
+        agent: codex
+        sessionId: running-codex
+      - name: running-opencode
+        cwd: /workspace/opencode
+        agent: opencode
+        sessionId: running-opencode
+      - name: stopped-never-launched
+        cwd: /workspace/stopped
+        agent: codex
+        sessionId: stopped-never-launched
+      - name: running-resume-bound
+        cwd: /workspace/bound
+        agent: codex
+        resume: 00000000-0000-7000-8000-000000000001
+        sessionId: running-resume-bound
+      - name: running-native
+        cwd: /workspace/native
+        agent: claude
+        uiMode: native
+        sessionId: running-native
+      - name: running-custom
+        cwd: /workspace/custom
+        agent: codex
+        command: bash
+        sessionId: running-custom
+`,
+      new Set([
+        'running-claude',
+        'running-codex',
+        'running-opencode',
+        'running-resume-bound',
+        'running-native',
+        'running-custom'
+      ]),
+      { homeDir: '/workspace' }
+    );
+
+    expect(snapshot.continuity.issues).toEqual([
+      expect.objectContaining({
+        sessionId: 'running-claude',
+        code: 'provider-session-identity-missing'
+      }),
+      expect.objectContaining({
+        sessionId: 'running-codex',
+        code: 'provider-session-identity-missing'
+      }),
+      expect.objectContaining({
+        sessionId: 'running-opencode',
+        code: 'provider-session-identity-missing'
+      })
+    ]);
+  });
+
   it('surfaces durable Claude continuity and profile-memory attention without changing liveness', () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'desk-snapshot-continuity-'));
     try {

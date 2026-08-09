@@ -16,7 +16,10 @@ interface Captured {
 
 interface DaemonMock {
   provision: ReturnType<typeof vi.fn>;
+  resetProviderSession: ReturnType<typeof vi.fn>;
+  completeProviderSessionLaunch: ReturnType<typeof vi.fn>;
   retire: ReturnType<typeof vi.fn>;
+  retireGeneration: ReturnType<typeof vi.fn>;
   input: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
   terminalObservation: ReturnType<typeof vi.fn>;
@@ -68,7 +71,18 @@ function invoke(
 function daemonMock(provisionResult: unknown = { ok: true, generation: 1, created: true }): DaemonMock {
   return {
     provision: vi.fn().mockResolvedValue(provisionResult),
+    resetProviderSession: vi.fn().mockResolvedValue({
+      ok: true,
+      authorizationId: 'authorization-1',
+      generation: 7,
+      state: 'authorized'
+    }),
+    completeProviderSessionLaunch: vi.fn().mockReturnValue({
+      ok: true,
+      kind: 'completed'
+    }),
     retire: vi.fn().mockResolvedValue({ ok: true }),
+    retireGeneration: vi.fn().mockResolvedValue({ ok: true }),
     input: vi.fn().mockReturnValue(true),
     tail: vi.fn().mockReturnValue({ lines: ['line-a', 'line-b'], totalAvailable: 42 }),
     terminalObservation: vi.fn().mockReturnValue({
@@ -85,6 +99,11 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     }),
     agentEndpoint: vi.fn().mockReturnValue({
       kind: 'accepted',
+      registration: agentEndpoint(),
+      active: false
+    }),
+    activateAgentEndpoint: vi.fn().mockResolvedValue({
+      kind: 'activated',
       registration: agentEndpoint()
     }),
     agentEvent: vi.fn().mockReturnValue({
@@ -153,7 +172,7 @@ const agentEndpoint = (
   producerInstanceId: 'plugin-a',
   producerSeq: 2,
   endpoint: 'http://127.0.0.1:4096/',
-  providerSessionId: 'provider-session-a',
+  providerSessionId: 'ses_aaaaaaaaaaaaaaaaaaaa',
   observedAt: 1_000,
   ...overrides
 });
@@ -181,14 +200,32 @@ describe('daemon control handler', () => {
       sessionId: 'spawntest',
       command: ['sh', '-c', 'bash'],
       geometry: { rows: 10, cols: 20 },
-      subject: agentSubject
+      subject: agentSubject,
+      providerSessionId: '11111111-2222-4333-8444-555555555555'
     });
     expect(result).toEqual({ status: 200, body: { ok: true } });
     expect(daemon.provision).toHaveBeenCalledWith('spawntest', {
       command: ['sh', '-c', 'bash'],
       geometry: { rows: 10, cols: 20 },
-      subject: agentSubject
+      subject: agentSubject,
+      providerSessionId: '11111111-2222-4333-8444-555555555555'
     });
+  });
+
+  it('rejects a non-string provider session id before provisioning', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'spawntest',
+      command: ['codex'],
+      subject: agentSubject,
+      providerSessionId: 7
+    });
+
+    expect(result).toEqual({
+      status: 400,
+      body: { ok: false, error: 'providerSessionId must be a string' }
+    });
+    expect(daemon.provision).not.toHaveBeenCalled();
   });
 
   it('runs Claude continuity preflight before provisioning', async () => {
@@ -374,6 +411,56 @@ describe('daemon control handler', () => {
     expect(result.body?.error).toContain('cap-exceeded');
   });
 
+  it('preserves typed provider reset recovery detail in a provision refusal', async () => {
+    const daemon = daemonMock({
+      ok: false,
+      reason: 'provider-session-identity-missing',
+      detail: 'reset-incomplete'
+    });
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'sess-a',
+      command: ['codex'],
+      subject: agentSubject
+    });
+
+    expect(result).toEqual({
+      status: 503,
+      body: {
+        ok: false,
+        error:
+          'provider-session-identity-missing: reset-incomplete; rerun `desk reset-provider-session sess-a --force` to finish the interrupted reset',
+        detail: 'reset-incomplete',
+        recovery:
+          'rerun `desk reset-provider-session sess-a --force` to finish the interrupted reset'
+      }
+    });
+  });
+
+  it('explains that a consumed claim needs a new explicit reset', async () => {
+    const daemon = daemonMock({
+      ok: false,
+      reason: 'provider-session-identity-missing',
+      detail: 'authorization-consumed'
+    });
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'sess-a',
+      command: ['codex'],
+      subject: agentSubject
+    });
+
+    expect(result).toEqual({
+      status: 503,
+      body: {
+        ok: false,
+        error:
+          'provider-session-identity-missing: authorization-consumed; rerun `desk reset-provider-session sess-a --force` after confirming the prior provider process is stopped',
+        detail: 'authorization-consumed',
+        recovery:
+          'rerun `desk reset-provider-session sess-a --force` after confirming the prior provider process is stopped'
+      }
+    });
+  });
+
   it('reports a thrown provision error as HTTP 500', async () => {
     const daemon = { ...daemonMock(), provision: vi.fn().mockRejectedValue(new Error('spawn failed')) };
     const result = await invoke(daemon, 'POST', '/control/provision', {
@@ -397,6 +484,162 @@ describe('daemon control handler', () => {
     const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
     expect(result.status).toBe(502);
     expect(result.body?.error).toContain('kill command exited 1');
+  });
+
+  it('retires only the exact requested generation', async () => {
+    const daemon = daemonMock();
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/retire-generation',
+      { sessionId: 'sess-a', generation: 7 }
+    );
+
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    expect(daemon.retireGeneration).toHaveBeenCalledWith('sess-a', 7);
+    expect(daemon.retire).not.toHaveBeenCalled();
+  });
+
+  it('authorizes provider-session reset only through the explicit daemon transaction', async () => {
+    const daemon = daemonMock();
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/reset',
+      { sessionId: 'sess-a' }
+    );
+
+    expect(result).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        authorizationId: 'authorization-1',
+        generation: 7,
+        state: 'authorized'
+      }
+    });
+    expect(daemon.resetProviderSession).toHaveBeenCalledWith('sess-a');
+  });
+
+  it('preserves typed reset recovery details from the daemon', async () => {
+    const daemon = daemonMock();
+    daemon.resetProviderSession.mockResolvedValue({
+      ok: false,
+      reason: 'session-live',
+      error: 'session sess-a still has a listening master'
+    });
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/reset',
+      { sessionId: 'sess-a' }
+    );
+
+    expect(result).toEqual({
+      status: 409,
+      body: {
+        ok: false,
+        reason: 'session-live',
+        error: 'session sess-a still has a listening master'
+      }
+    });
+  });
+
+  it('completes only an exact provider launch authorization', async () => {
+    const daemon = daemonMock();
+    const body = {
+      deskSessionId: 'sess-a',
+      provider: 'codex',
+      providerSessionId: '11111111-1111-4111-8111-111111111111',
+      generation: 8
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/complete',
+      body
+    );
+
+    expect(result).toEqual({
+      status: 200,
+      body: { ok: true, kind: 'completed' }
+    });
+    expect(daemon.completeProviderSessionLaunch).toHaveBeenCalledWith(body);
+  });
+
+  it.each([
+    [{ deskSessionId: '../bad', provider: 'codex', providerSessionId: '11111111-1111-4111-8111-111111111111', generation: 8 }, 'invalid deskSessionId'],
+    [{ deskSessionId: 'sess-a', provider: 'bash', providerSessionId: '11111111-1111-4111-8111-111111111111', generation: 8 }, 'invalid provider'],
+    [{ deskSessionId: 'sess-a', provider: 'codex', providerSessionId: 'not-an-id', generation: 8 }, 'invalid providerSessionId'],
+    [{ deskSessionId: 'sess-a', provider: 'codex', providerSessionId: '11111111-1111-4111-8111-111111111111', generation: 0 }, 'generation must be a positive safe integer']
+  ])('rejects malformed provider launch completion %#', async (body, error) => {
+    const daemon = daemonMock();
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/complete',
+      body
+    );
+
+    expect(result).toEqual({ status: 400, body: { ok: false, error } });
+    expect(daemon.completeProviderSessionLaunch).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, 1.5, '1', null])(
+    'rejects invalid exact-retire generation %j',
+    async (generation) => {
+      const daemon = daemonMock();
+
+      const result = await invoke(
+        daemon,
+        'POST',
+        '/control/retire-generation',
+        { sessionId: 'sess-a', generation }
+      );
+
+      expect(result).toEqual({
+        status: 400,
+        body: { ok: false, error: 'generation must be a positive safe integer' }
+      });
+      expect(daemon.retireGeneration).not.toHaveBeenCalled();
+    }
+  );
+
+  it('surfaces an exact-retire generation mismatch without killing the successor', async () => {
+    const daemon = {
+      ...daemonMock(),
+      retireGeneration: vi.fn().mockResolvedValue({
+        ok: false,
+        reason: 'generation-mismatch',
+        expectedGeneration: 6,
+        currentGeneration: 7,
+        error: 'session sess-a is generation 7, not 6'
+      })
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/retire-generation',
+      { sessionId: 'sess-a', generation: 6 }
+    );
+
+    expect(result).toEqual({
+      status: 409,
+      body: {
+        ok: false,
+        reason: 'generation-mismatch',
+        expectedGeneration: 6,
+        currentGeneration: 7,
+        error: 'session sess-a is generation 7, not 6'
+      }
+    });
+    expect(daemon.retire).not.toHaveBeenCalled();
   });
 
   it('answers the health probe', async () => {
@@ -544,7 +787,15 @@ describe('daemon control handler', () => {
     for (const [method, path, body] of [
       ['GET', '/control/health', undefined],
       ['POST', '/control/provision', { sessionId: 'sess-a', command: ['bash'], subject: terminalSubject }],
+      ['POST', '/control/provider-session/reset', { sessionId: 'sess-a' }],
+      ['POST', '/control/provider-session/complete', {
+        deskSessionId: 'sess-a',
+        provider: 'codex',
+        providerSessionId: '11111111-1111-4111-8111-111111111111',
+        generation: 1
+      }],
       ['POST', '/control/retire', { sessionId: 'sess-a' }],
+      ['POST', '/control/retire-generation', { sessionId: 'sess-a', generation: 1 }],
       ['POST', '/control/input', { sessionId: 'sess-a', text: 'x' }],
       ['POST', '/control/tail', { sessionId: 'sess-a' }],
       ['GET', '/control/terminal-observation?sessionId=sess-a', undefined],
@@ -620,12 +871,30 @@ describe('daemon control handler', () => {
     expect(daemon.agentEndpoint).toHaveBeenCalledWith(registration);
     expect(result).toEqual({
       status: 200,
-      body: { ok: true, kind: 'accepted' }
+      body: { ok: true, kind: 'accepted', active: false }
+    });
+  });
+
+  it('activates exact staged endpoint metadata through a separate control request', async () => {
+    const daemon = daemonMock();
+    const { observedAt: _observedAt, ...activation } = agentEndpoint();
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/agent-endpoint/activate',
+      activation
+    );
+
+    expect(daemon.activateAgentEndpoint).toHaveBeenCalledWith(activation);
+    expect(result).toEqual({
+      status: 200,
+      body: { ok: true, kind: 'activated' }
     });
   });
 
   it.each([
     ['invalid-registration', 400],
+    ['provider-session-id-invalid', 400],
     ['producer-unregistered', 404],
     ['generation-fence', 409],
     ['producer-instance-mismatch', 409],

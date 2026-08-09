@@ -37,13 +37,14 @@ import { XtermEmulatorFactory } from './xtermEmulator.js';
 import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
-import type { DaemonAgentStateIntakeResult, EnsureResult } from '../../shared/runtime/daemonCore.js';
+import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
 import {
   FileIntakeStore,
   type FileIntakeStoreDependencies
 } from './fileIntakeStore.js';
 import {
   FileAgentEndpointStore,
+  type AgentEndpointActivationResult,
   type AgentEndpointStoreResult
 } from './fileAgentEndpointStore.js';
 import { reconcileOpencodeStatus } from '../../core/agentState/opencodeReconcile.js';
@@ -76,8 +77,30 @@ import {
   prepareAtchEventSink,
   type AtchEventDiagnostic
 } from './atchEvents.js';
-import type { TerminalObservationSnapshot } from './sessionManager.js';
+import type {
+  ProviderSessionProvisionRecoveryDetail,
+  RetireGenerationResult,
+  SessionSpawnPreallocationContext,
+  SessionSpawnPreallocationResult,
+  SessionSpawnResult,
+  TerminalObservationSnapshot
+} from './sessionManager.js';
 import type { AgentObservationScope } from '../../core/agentState/providerAdapter.js';
+import {
+  isProviderSessionProvider,
+  isValidProviderSessionId,
+  type ProviderSessionProvider
+} from '../../shared/providerSessionIdentity.js';
+import type {
+  CompleteProviderSessionLaunchInput,
+  CompleteProviderSessionLaunchResult
+} from './providerSessionLaunchLedger.js';
+import { FileProviderSessionLaunchLedger } from './providerSessionLaunchLedger.js';
+import {
+  authorizeProviderSessionReset,
+  type ProviderSessionResetResult as ProviderSessionAuthorizationResetResult
+} from '../providerSessionReset.js';
+import { readProviderSessionBinding } from '../providerSessionBinding.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -122,6 +145,12 @@ export interface TerminalDaemonOptions {
     path: string;
     diagnostic: AtchEventDiagnostic;
   }) => void;
+  /** Active manifest path override for isolated daemon composition tests. */
+  manifestPath?: string;
+  /** Home directory used to resolve manifest session cwd values in tests. */
+  homeDir?: string;
+  /** Injectable worker admission policy for deterministic composition tests. */
+  supervisor?: WorkerSupervisor;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -129,10 +158,11 @@ export interface TerminalDaemonSessionSpec {
   command: string[];
   geometry: { rows: number; cols: number };
   subject: SessionRegistration['subject'];
+  providerSessionId?: string;
 }
 
 /** Provision outcome: ensure result, or the spawn/attach failure that rolled back. */
-export type ProvisionResult = EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' };
+export type ProvisionResult = SessionSpawnResult;
 
 export type AgentProviderReconcileResult =
   | { sessionId: string; kind: 'reconciled' }
@@ -163,6 +193,14 @@ export type TerminalAgentEventResult =
       current?: never;
     };
 
+export type ProviderSessionResetResult =
+  | ProviderSessionAuthorizationResetResult
+  | {
+      ok: false;
+      reason: 'session-live' | 'retire-failed';
+      error: string;
+    };
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
   /** Spawn + attach the atch master for a session (CREATE contract). */
@@ -174,6 +212,17 @@ export interface TerminalDaemon {
    * generation. A failed kill is a failure, never a silent 200.
    */
   retire(sessionId: string): Promise<{ ok: boolean; error?: string }>;
+  /** Retire exactly one native generation without touching a successor. */
+  retireGeneration(
+    sessionId: string,
+    generation: number
+  ): Promise<RetireGenerationResult>;
+  /** Stop one session and authorize exactly one fresh provider launch. */
+  resetProviderSession(sessionId: string): Promise<ProviderSessionResetResult>;
+  /** Complete one exact claimed launch after its identity is durably bound. */
+  completeProviderSessionLaunch(
+    input: CompleteProviderSessionLaunchInput
+  ): CompleteProviderSessionLaunchResult;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
   /**
@@ -189,6 +238,8 @@ export interface TerminalDaemon {
   reconcileAtchEvents(sessionId: string, generation: number): boolean;
   /** Bind durable provider transport metadata to the canonical producer sequence. */
   agentEndpoint(input: unknown): AgentEndpointStoreResult;
+  /** Activate one exact staged provider registration after durable identity binding. */
+  activateAgentEndpoint(input: unknown): Promise<AgentEndpointActivationResult>;
   /** Recover present OpenCode state from the exact registered provider session. */
   reconcileAgentProviders(
     sessionIds?: readonly string[]
@@ -226,6 +277,98 @@ export interface TerminalDaemon {
 /** Assemble the durable terminal daemon + mount its binary WS bridge (additive). */
 export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDaemon {
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
+  const providerLaunchLedger = new FileProviderSessionLaunchLedger(
+    join(options.homeRoot, '_engine', 'provider-session-launch.ndjson')
+  );
+  const providerProvisionFailure = (
+    detail: ProviderSessionProvisionRecoveryDetail
+  ): SessionSpawnPreallocationResult => ({
+    ok: false,
+    reason: 'provider-session-identity-missing',
+    detail
+  });
+  const preallocateProviderSession = (
+    context: SessionSpawnPreallocationContext,
+    spec: TerminalDaemonSessionSpec
+  ): SessionSpawnPreallocationResult => {
+    if (
+      context.subject.kind !== 'agent' ||
+      !isProviderSessionProvider(context.subject.provider)
+    ) {
+      return { ok: true };
+    }
+    const provider = context.subject.provider;
+    if (
+      spec.providerSessionId !== undefined &&
+      !isValidProviderSessionId(provider, spec.providerSessionId)
+    ) {
+      return providerProvisionFailure('invalid-provider-session-id');
+    }
+    const binding = readProviderSessionBinding({
+      deskSessionId: context.sessionId,
+      ...(options.manifestPath === undefined
+        ? {}
+        : { manifestPath: options.manifestPath }),
+      ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+    });
+    if (!binding.ok) {
+      if (binding.code === 'provider-session-not-found') {
+        return providerProvisionFailure('session-not-found');
+      }
+      if (binding.code === 'provider-session-agent-mismatch') {
+        return providerProvisionFailure('agent-mismatch');
+      }
+      return providerProvisionFailure('invalid-provider-session-id');
+    }
+    if (binding.provider !== provider) {
+      return providerProvisionFailure('provider-mismatch');
+    }
+    const requestedBinding = spec.providerSessionId ?? null;
+    if (binding.providerSessionId !== requestedBinding) {
+      return providerProvisionFailure('binding-mismatch');
+    }
+    if (binding.providerSessionId !== null) {
+      const completion = providerLaunchLedger.completeForResumedLaunch({
+        deskSessionId: context.sessionId,
+        provider,
+        providerSessionId: binding.providerSessionId,
+        generation: context.currentGeneration
+      });
+      if (completion.ok) return { ok: true };
+      if (completion.reason === 'invalid-provider-session-id') {
+        return providerProvisionFailure('invalid-provider-session-id');
+      }
+      if (completion.reason === 'provider-mismatch') {
+        return providerProvisionFailure('provider-mismatch');
+      }
+      if (completion.reason === 'generation-mismatch') {
+        return providerProvisionFailure('generation-mismatch');
+      }
+      if (completion.reason === 'provider-session-mismatch') {
+        return providerProvisionFailure('binding-mismatch');
+      }
+      if (completion.reason === 'reset-incomplete') {
+        return providerProvisionFailure('reset-incomplete');
+      }
+      return providerProvisionFailure('not-authorized');
+    }
+    const currentAuthorization = providerLaunchLedger.current(context.sessionId);
+    if (
+      context.currentGeneration === 0 &&
+      (currentAuthorization === undefined ||
+        currentAuthorization.state === 'completed')
+    ) {
+      return { ok: true };
+    }
+    const claim = providerLaunchLedger.claim({
+      deskSessionId: context.sessionId,
+      provider,
+      currentGeneration: context.currentGeneration,
+      nextGeneration: context.nextGeneration
+    });
+    if (claim.ok) return { ok: true };
+    return providerProvisionFailure(claim.reason);
+  };
   const eventJournal = new FileDeskEventJournal(
     join(options.homeRoot, '_engine', 'desk-events.ndjson')
   );
@@ -244,7 +387,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     `${sessionId}\0${generation}`;
   const router = new TerminalWsRouter({
     ledger,
-    supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
+    supervisor:
+      options.supervisor ?? new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
     now,
     initialAgentHealth: (subject) => {
@@ -324,7 +468,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     ) {
       return { sessionId, kind: 'skipped', reason: 'not-opencode-session' };
     }
-    const registration = endpointStore.get(
+    const registration = endpointStore.getActive(
       sessionId,
       snapshot.generation,
       'opencode-terminal'
@@ -546,6 +690,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           geometry: spec.geometry,
           subject: spec.subject,
           detached: true,
+          preallocateSpawn: (context) =>
+            preallocateProviderSession(context, spec),
           prepareSpawn: ({ generation, args }) => {
             const path = prepareAtchEventSink(
               options.atchSocketRoot,
@@ -592,6 +738,45 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       if (result.ok && observer) stopEventObserver(observer, true);
       return result;
     },
+    async retireGeneration(sessionId, generation) {
+      const observer = eventObservers.get(sessionId);
+      const result = await router.sessions.retireGenerationAwaited(
+        sessionId,
+        generation
+      );
+      if (result.ok && observer?.generation === generation) {
+        stopEventObserver(observer, true);
+      }
+      return result;
+    },
+    async resetProviderSession(sessionId) {
+      const result = await router.sessions.resetForProviderSession(
+        sessionId,
+        socketPath(sessionId),
+        (generation) => {
+          const observer = eventObservers.get(sessionId);
+          if (observer) stopEventObserver(observer, true);
+          return authorizeProviderSessionReset(
+            {
+              deskSessionId: sessionId,
+              generation,
+              ...(options.manifestPath === undefined
+                ? {}
+                : { manifestPath: options.manifestPath }),
+              ...(options.homeDir === undefined
+                ? {}
+                : { homeDir: options.homeDir })
+            },
+            { ledger: providerLaunchLedger }
+          );
+        }
+      );
+      if (!result.ok) return result;
+      return result.value;
+    },
+    completeProviderSessionLaunch(input) {
+      return providerLaunchLedger.complete(input);
+    },
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
@@ -618,9 +803,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       }
     },
     agentEndpoint(input) {
-      const result = endpointStore.register(input);
-      if (result.kind === 'accepted') {
-        void reconcileAgentProviders([result.registration.sessionId]);
+      return endpointStore.register(input);
+    },
+    async activateAgentEndpoint(input) {
+      const result = endpointStore.activate(input);
+      if (result.kind === 'activated' || result.kind === 'already-active') {
+        await reconcileAgentProviders([result.registration.sessionId]);
       }
       return result;
     },
@@ -652,7 +840,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           reason: 'provider-session-unregistered'
         };
       }
-      const registration = endpointStore.get(
+      const registration = endpointStore.getActive(
         envelope.sessionId,
         envelope.generation,
         envelope.producer
@@ -709,6 +897,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       intakeStore?.close();
       intakeStore = undefined;
       eventJournal.close();
+      providerLaunchLedger.close();
     }
   };
 }
@@ -825,10 +1014,14 @@ export function createDaemonControlHandler(
     TerminalDaemon,
     | 'provision'
     | 'retire'
+    | 'retireGeneration'
+    | 'resetProviderSession'
+    | 'completeProviderSessionLaunch'
     | 'input'
     | 'tail'
     | 'terminalObservation'
     | 'agentEndpoint'
+    | 'activateAgentEndpoint'
     | 'agentEvent'
     | 'agentStates'
     | 'events'
@@ -868,6 +1061,17 @@ export function createDaemonControlHandler(
           if (subject === undefined) {
             sendJson(res, 400, { ok: false, error: 'invalid subject' });
             return;
+          }
+          let providerSessionId: string | undefined;
+          if (body.providerSessionId !== undefined) {
+            if (typeof body.providerSessionId !== 'string') {
+              sendJson(res, 400, {
+                ok: false,
+                error: 'providerSessionId must be a string'
+              });
+              return;
+            }
+            providerSessionId = body.providerSessionId;
           }
           let claudeMemory: ClaudeProfileMemoryDescriptor | undefined;
           try {
@@ -963,7 +1167,8 @@ export function createDaemonControlHandler(
           const ens = await daemon.provision(body.sessionId, {
             command: body.command,
             geometry: readProvisionGeometry(body.geometry),
-            subject
+            subject,
+            ...(providerSessionId === undefined ? {} : { providerSessionId })
           });
           if (ens.ok) {
             sendJson(res, 200, {
@@ -971,7 +1176,21 @@ export function createDaemonControlHandler(
               ...(memoryAttention === undefined ? {} : { memoryAttention })
             });
           } else {
-            sendJson(res, 503, { ok: false, error: `atch provision refused: ${ens.reason}` });
+            const detail = 'detail' in ens ? ens.detail : undefined;
+            const recovery =
+              detail === 'reset-incomplete'
+                ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` to finish the interrupted reset`
+                : detail === 'authorization-consumed'
+                  ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` after confirming the prior provider process is stopped`
+                  : undefined;
+            sendJson(res, 503, {
+              ok: false,
+              error: `${ens.reason}${
+                detail === undefined ? '' : `: ${detail}`
+              }${recovery === undefined ? '' : `; ${recovery}`}`,
+              ...(detail === undefined ? {} : { detail }),
+              ...(recovery === undefined ? {} : { recovery })
+            });
           }
           return;
         }
@@ -984,6 +1203,125 @@ export function createDaemonControlHandler(
           const retired = await daemon.retire(body.sessionId);
           if (!retired.ok) {
             sendJson(res, 502, { ok: false, error: retired.error ?? 'retire failed' });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/provider-session/reset'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          const result = await daemon.resetProviderSession(body.sessionId);
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found'
+                ? 404
+                : result.reason === 'retire-failed'
+                  ? 502
+                  : result.reason === 'provider-session-store-failed'
+                    ? 500
+                    : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/provider-session/complete'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (!isSafeDaemonSessionId(body.deskSessionId)) {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'invalid deskSessionId'
+            });
+            return;
+          }
+          if (!isProviderSessionProvider(body.provider)) {
+            sendJson(res, 400, { ok: false, error: 'invalid provider' });
+            return;
+          }
+          if (
+            typeof body.providerSessionId !== 'string' ||
+            !isValidProviderSessionId(
+              body.provider,
+              body.providerSessionId
+            )
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'invalid providerSessionId'
+            });
+            return;
+          }
+          if (
+            !Number.isSafeInteger(body.generation) ||
+            (body.generation as number) <= 0
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'generation must be a positive safe integer'
+            });
+            return;
+          }
+          const result = daemon.completeProviderSessionLaunch({
+            deskSessionId: body.deskSessionId,
+            provider: body.provider as ProviderSessionProvider,
+            providerSessionId: body.providerSessionId,
+            generation: body.generation as number
+          });
+          if (!result.ok) {
+            sendJson(res, 409, result);
+            return;
+          }
+          sendJson(res, 200, { ok: true, kind: result.kind });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/retire-generation'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          if (
+            !Number.isSafeInteger(body.generation) ||
+            (body.generation as number) <= 0
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'generation must be a positive safe integer'
+            });
+            return;
+          }
+          const retired = await daemon.retireGeneration(
+            body.sessionId,
+            body.generation as number
+          );
+          if (!retired.ok) {
+            const status =
+              retired.reason === 'session-not-found'
+                ? 404
+                : retired.reason === 'generation-mismatch'
+                  ? 409
+                  : 502;
+            sendJson(res, status, retired);
             return;
           }
           sendJson(res, 200, { ok: true });
@@ -1099,11 +1437,16 @@ export function createDaemonControlHandler(
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
           const result = daemon.agentEndpoint(body);
           if (result.kind === 'accepted' || result.kind === 'duplicate') {
-            sendJson(res, 200, { ok: true, kind: result.kind });
+            sendJson(res, 200, {
+              ok: true,
+              kind: result.kind,
+              active: result.active
+            });
             return;
           }
           const status =
-            result.reason === 'invalid-registration'
+            result.reason === 'invalid-registration' ||
+            result.reason === 'provider-session-id-invalid'
               ? 400
               : result.reason === 'producer-unregistered'
                 ? 404
@@ -1114,6 +1457,26 @@ export function createDaemonControlHandler(
             ...(result.carried === undefined ? {} : { carried: result.carried }),
             ...(result.current === undefined ? {} : { current: result.current })
           });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/agent-endpoint/activate'
+        ) {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          const result = await daemon.activateAgentEndpoint(body);
+          if (result.kind === 'rejected') {
+            const status =
+              result.reason === 'invalid-activation' ||
+              result.reason === 'provider-session-id-invalid'
+                ? 400
+                : result.reason === 'endpoint-unregistered'
+                  ? 404
+                  : 409;
+            sendJson(res, status, { ok: false, reason: result.reason });
+            return;
+          }
+          sendJson(res, 200, { ok: true, kind: result.kind });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/control/agent-states') {

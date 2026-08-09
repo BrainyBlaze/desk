@@ -150,6 +150,30 @@ describe('OpencodeDriver lifecycle', () => {
     });
   });
 
+  it('start() fails closed when getSession returns a different session id', async () => {
+    const requestedId = 'ses_requested123456789012345678901234567890123456';
+    const returnedId = 'ses_returned1234567890123456789012345678901234567';
+    const backend = makeMockBackend({ initialSessionId: requestedId });
+    backend.getSession = async (id) => ({
+      id: returnedId,
+      projectID: 'proj-1',
+      directory: '/tmp/mock',
+      title: 'wrong session',
+      version: '1.0.0',
+      time: { created: Date.now(), updated: Date.now() }
+    }) as Session;
+    const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend, resumeId: requestedId });
+
+    await expect(driver.start()).rejects.toMatchObject({
+      message: expect.stringContaining(
+        `OpenCode returned session ${returnedId} for requested session ${requestedId}`
+      ),
+      code: 'driver-start-failed',
+      retryable: false
+    });
+    expect(backend.calls.some((call) => call.method === 'createSession')).toBe(false);
+  });
+
   it('start() rejects being called twice', async () => {
     const backend = makeMockBackend();
     const driver = new OpencodeDriver({ cwd: '/tmp/mock', bypass: false, backend });

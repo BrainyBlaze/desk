@@ -4,7 +4,7 @@
 // input fails closed.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -415,10 +415,6 @@ describe('cutover store migration — production first-start gate (§10)', () =>
       join(channelsRoot, 'desk', '_members', 'claude.md'),
       '---\nname: claude\ntype: claude-cli\ntmux: tmux-a\nrole: implementer\n---\n'
     );
-    writeFileSync(
-      join(root, '.config', 'desk', 'resume-captures.json'),
-      `${JSON.stringify({ captures: [{ tmuxSession: 'tmux-a', agent: 'codex', cwd: '/workspace', sinceMs: 1, deadlineMs: 2 }] })}\n`
-    );
     writeFileSync(join(root, '.config', 'desk', 'tool-journal', 'tmux-a.jsonl'), '{}\n');
   });
 
@@ -433,6 +429,42 @@ describe('cutover store migration — production first-start gate (§10)', () =>
       availableBytes: () => 1024n * 1024n * 1024n,
       ...overrides
     });
+
+  const stageJournalWithLegacyResumeFingerprint = (): string => {
+    const resumePath = join(root, '.config', 'desk', 'resume-captures.json');
+    writeFileSync(
+      resumePath,
+      `${JSON.stringify({ version: 1, captures: [] })}\n`
+    );
+    expect(() =>
+      migrate({
+        afterPhase: (phase: string) => {
+          if (phase === 'staged') throw new Error('simulated old-binary crash');
+        }
+      })
+    ).toThrow(/simulated old-binary crash/);
+
+    const journalPath = join(migrationRoot, 'journal.json');
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
+      sourceFingerprint: Array<Record<string, unknown>>;
+    };
+    const stat = statSync(resumePath);
+    const toolJournalIndex = journal.sourceFingerprint.findIndex(
+      (entry) =>
+        typeof entry.path === 'string' &&
+        entry.path.startsWith(join(root, '.config', 'desk', 'tool-journal'))
+    );
+    expect(toolJournalIndex).toBeGreaterThanOrEqual(0);
+    journal.sourceFingerprint.splice(toolJournalIndex, 0, {
+      path: resumePath,
+      kind: 'file',
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ino: stat.ino
+    });
+    writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+    return resumePath;
+  };
 
   it('refuses before staging when the legacy channels engine is live', () => {
     mkdirSync(join(channelsRoot, '_engine'), { recursive: true });
@@ -457,14 +489,12 @@ describe('cutover store migration — production first-start gate (§10)', () =>
     expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'migration', 'seed-journal.json'), 'utf8')).items[0].sessionId).toBe('claude');
     expect(JSON.parse(readFileSync(join(channelsRoot, '_engine', 'events.jsonl'), 'utf8'))).toMatchObject({ sessionId: 'claude' });
     expect(readFileSync(join(channelsRoot, 'desk', '_members', 'claude.md'), 'utf8')).toContain('session: claude');
-    expect(JSON.parse(readFileSync(join(root, '.config', 'desk', 'resume-captures.json'), 'utf8')).captures[0]).toMatchObject({ sessionId: 'claude' });
     expect(existsSync(join(channelsRoot, '_engine', 'queue'))).toBe(false);
     expect(existsSync(join(root, '.config', 'desk', 'tool-journal'))).toBe(false);
     expect(existsSync(join(migrationRoot, 'backup', 'manifest', 'desk.yml'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'backup', 'channels', '_engine', 'queue', 'tmux-a', '0000000001.json'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'backup', 'channels', '_engine', 'events.jsonl'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'backup', 'channels', 'desk', '_members', 'claude.md'))).toBe(true);
-    expect(existsSync(join(migrationRoot, 'backup', 'resume-captures.json'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'backup', 'tool-journal', 'tmux-a.jsonl'))).toBe(true);
     expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(true);
   });
@@ -486,8 +516,7 @@ describe('cutover store migration — production first-start gate (§10)', () =>
     for (const path of [
       join(channelsRoot, '_engine', 'paused.json'),
       join(channelsRoot, '_engine', 'events.jsonl'),
-      join(channelsRoot, 'desk', '_members', 'claude.md'),
-      join(root, '.config', 'desk', 'resume-captures.json')
+      join(channelsRoot, 'desk', '_members', 'claude.md')
     ]) {
       writeFileSync(path, readFileSync(path, 'utf8').replaceAll('tmux-a', legacyTmuxSession));
     }
@@ -558,6 +587,22 @@ describe('cutover store migration — production first-start gate (§10)', () =>
     expect(migrate().status).toBe('migrated');
     expect(migrate().status).toBe('already-migrated');
     expect(readManifestFile(manifestPath).groups[0].sessions[0].sessionId).toBe('claude');
+  });
+
+  it('resumes a v1 staged journal whose fingerprint includes the retired resume capture store', () => {
+    stageJournalWithLegacyResumeFingerprint();
+    expect(migrate().status).toBe('migrated');
+    expect(readManifestFile(manifestPath).groups[0].sessions[0].sessionId).toBe(
+      'claude'
+    );
+  });
+
+  it('rejects a v1 staged journal when the retired resume capture store mutated', () => {
+    const resumePath = stageJournalWithLegacyResumeFingerprint();
+    writeFileSync(resumePath, 'mutated after staging\n');
+
+    expect(() => migrate()).toThrow(/source mutated after staging/);
+    expect(existsSync(join(migrationRoot, 'migration.done'))).toBe(false);
   });
 
   it('accepts durable sessions added after the one-time migration', () => {

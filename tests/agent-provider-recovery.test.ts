@@ -30,6 +30,8 @@ type UpgradeListener = (
   head: Buffer
 ) => void;
 
+const PROVIDER_SESSION_ID = 'ses_aaaaaaaaaaaaaaaaaaaa';
+
 class FakeUpgradeServer {
   listeners: UpgradeListener[] = [];
 
@@ -126,7 +128,10 @@ describe('daemon OpenCode recovery', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  function start(fetch: typeof globalThis.fetch): TerminalDaemon {
+  function start(
+    fetch: typeof globalThis.fetch,
+    options: { activate?: boolean } = {}
+  ): TerminalDaemon {
     daemon = createTerminalDaemon({
       homeRoot: home,
       atchBinPath: '/bin/false',
@@ -168,8 +173,7 @@ describe('daemon OpenCode recovery', () => {
         facts: [{ kind: 'heartbeat' }]
       }, { kind: 'producer-bootstrap' })
     ).toMatchObject({ kind: 'accepted' });
-    expect(
-      daemon.agentEndpoint({
+    const registration = {
         schemaVersion: AGENT_STATE_SCHEMA_VERSION,
         sessionId: 'opencode-a',
         generation: 1,
@@ -179,14 +183,21 @@ describe('daemon OpenCode recovery', () => {
         producerInstanceId: 'plugin-a',
         producerSeq: 2,
         endpoint: 'http://127.0.0.1:4096/',
-        providerSessionId: 'provider-a',
+        providerSessionId: PROVIDER_SESSION_ID,
         observedAt: 975
-      })
-    ).toMatchObject({ kind: 'accepted' });
+      } as const;
+    expect(daemon.agentEndpoint(registration)).toMatchObject({
+      kind: 'accepted',
+      active: false
+    });
     expect(daemon.agentStates().snapshots[0]?.subject).toMatchObject({
       kind: 'agent',
       activity: 'unknown'
     });
+    if (options.activate !== false) {
+      const { observedAt: _observedAt, ...activation } = registration;
+      void daemon.activateAgentEndpoint(activation);
+    }
     return daemon;
   }
 
@@ -196,7 +207,7 @@ describe('daemon OpenCode recovery', () => {
         new Response(
         JSON.stringify({
           stale_other_conversation: { type: 'busy' },
-          'provider-a': { type: 'idle' }
+          [PROVIDER_SESSION_ID]: { type: 'idle' }
         }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
@@ -230,6 +241,57 @@ describe('daemon OpenCode recovery', () => {
     });
   });
 
+  it('fences reconciliation and provider-scoped events until exact activation', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ [PROVIDER_SESSION_ID]: { type: 'idle' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    const running = start(fetch, { activate: false });
+
+    await expect(running.reconcileAgentProviders(['opencode-a'])).resolves.toEqual([
+      { sessionId: 'opencode-a', kind: 'skipped', reason: 'endpoint-unregistered' }
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(
+      running.agentEvent(
+        {
+          schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+          sessionId: 'opencode-a',
+          generation: 1,
+          provider: 'opencode',
+          mode: 'terminal',
+          producer: 'opencode-terminal',
+          producerInstanceId: 'plugin-a',
+          producerSeq: 3,
+          eventId: 'plugin-a:push:3',
+          invocationId: 'turn-3',
+          occurredAt: 1_000,
+          observedAt: 1_000,
+          facts: [{ kind: 'activity', activity: 'working' }]
+        },
+        { kind: 'provider-session', providerSessionId: PROVIDER_SESSION_ID }
+      )
+    ).toMatchObject({ kind: 'rejected', reason: 'provider-session-unregistered' });
+
+    await expect(
+      running.activateAgentEndpoint({
+        schemaVersion: AGENT_STATE_SCHEMA_VERSION,
+        sessionId: 'opencode-a',
+        generation: 1,
+        provider: 'opencode',
+        mode: 'terminal',
+        producer: 'opencode-terminal',
+        producerInstanceId: 'plugin-a',
+        producerSeq: 2,
+        endpoint: 'http://127.0.0.1:4096/',
+        providerSessionId: PROVIDER_SESSION_ID
+      })
+    ).resolves.toMatchObject({ kind: 'activated' });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it('rejects a push fact from a different provider session without mutating state', async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
@@ -253,7 +315,7 @@ describe('daemon OpenCode recovery', () => {
           observedAt: 1_000,
           facts: [{ kind: 'activity', activity: 'working' }]
         },
-        { kind: 'provider-session', providerSessionId: 'provider-a' }
+        { kind: 'provider-session', providerSessionId: PROVIDER_SESSION_ID }
       )
     ).toMatchObject({ kind: 'accepted' });
 
@@ -289,7 +351,7 @@ describe('daemon OpenCode recovery', () => {
 
   it('reconciles immediately after accepting a provider endpoint registration', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
-      new Response(JSON.stringify({ 'provider-a': { type: 'idle' } }), {
+      new Response(JSON.stringify({ [PROVIDER_SESSION_ID]: { type: 'idle' } }), {
         status: 200,
         headers: { 'content-type': 'application/json' }
       })

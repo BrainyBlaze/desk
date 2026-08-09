@@ -20,13 +20,23 @@ import {
   type AgentProducer,
   type AgentStateEnvelope
 } from '../shared/controlPlane/contract.js';
-import { daemonControl } from '../shared/daemonControlClient.js';
+import {
+  completeProviderSessionLaunch,
+  daemonControl
+} from '../shared/daemonControlClient.js';
 import {
   nativeAgentFactsFor,
   type NativeAgentObservation
 } from '../shared/runtime/nativeLifecycle.js';
+import type { ProviderSessionProvider } from '../shared/providerSessionIdentity.js';
 import { verifyAgentHostToken } from './agentHostToken.js';
-import { isValidResumeIdForAgent, persistSessionResume } from './resumeCapture.js';
+import {
+  bindProviderSessionIdentity,
+  readProviderSessionBinding,
+  type BindProviderSessionIdentityInput,
+  type ProviderSessionBindingReadResult,
+  type ProviderSessionBindingResult
+} from './providerSessionBinding.js';
 
 /**
  * Agent-surface broker — Phase 2 server core.
@@ -82,6 +92,8 @@ interface HostConnection {
   agent: AgentProvider;
   session: string;
   producer: NativeProducerCursor;
+  /** Non-null only after exact bind + launch authorization completion. */
+  providerSessionId: string | null;
 }
 
 interface NativeProducerCursor {
@@ -105,10 +117,22 @@ interface AgentSurfaceSession {
   ringBytes: number;
   lastSeq: number;
   producer: NativeProducerCursor | null;
+  /** Survives only an exact same-producer reconnect within this broker process. */
+  authorizedProviderSession: {
+    producer: NativeProducerCursor;
+    providerSessionId: string;
+  } | null;
   inflight: Map<string, InflightCommand>;
-  /** Once true, skip the persistSessionResume manifest write on subsequent session-info. */
-  persistedResumeGuard: boolean;
+  /** Serialize host events so identity binding cannot be overtaken by later state. */
+  eventTail: Promise<void>;
   idleSince?: number;
+}
+
+export interface CompleteProviderLaunchAuthorizationInput {
+  deskSessionId: string;
+  provider: ProviderSessionProvider;
+  providerSessionId: string;
+  generation: number;
 }
 
 export interface AgentSurfaceBrokerOptions {
@@ -119,14 +143,23 @@ export interface AgentSurfaceBrokerOptions {
   resolveSecret?: () => string;
   /** Inject the canonical authority publisher (test seam). */
   publishAgentState?: (envelope: AgentStateEnvelope) => void | Promise<void>;
-  /**
-   * Inject the resume-persistence path (test seam). Production leaves this undefined
-   * and the broker calls persistSessionResume(sessionId, resume) which writes the
-   * default manifest at ~/.config/desk/desk.yml. Tests pass a custom function that
-   * writes to a temp manifest so the broker's session-info handling can be exercised
-   * hermetically.
-   */
-  persistResume?: (sessionId: string, resume: string) => boolean | Promise<boolean>;
+  /** Inject the typed, manifest-locked provider identity binder (test seam). */
+  bindProviderSession?: (
+    input: BindProviderSessionIdentityInput
+  ) => Promise<ProviderSessionBindingResult>;
+  /** Read an existing durable binding before a surviving host replays events. */
+  readProviderSessionBinding?: (input: {
+    deskSessionId: string;
+  }) => ProviderSessionBindingReadResult;
+  /** Complete a matching one-shot launch authorization after durable binding. */
+  completeLaunchAuthorization?: (
+    input: CompleteProviderLaunchAuthorizationInput
+  ) => void | Promise<void>;
+  /** Retire only the native generation that emitted a rejected identity. */
+  terminateNativeGeneration?: (
+    sessionId: string,
+    generation: number
+  ) => void | Promise<void>;
   now?: () => number;
 }
 
@@ -138,7 +171,19 @@ export class AgentSurfaceBroker {
   private readonly commandTimeoutMs: number;
   private readonly resolveSecret: () => string;
   private readonly publishAgentState: (envelope: AgentStateEnvelope) => void | Promise<void>;
-  private readonly persistResume: (sessionId: string, resume: string) => boolean | Promise<boolean>;
+  private readonly bindProviderSession: (
+    input: BindProviderSessionIdentityInput
+  ) => Promise<ProviderSessionBindingResult>;
+  private readonly readProviderSession: (input: {
+    deskSessionId: string;
+  }) => ProviderSessionBindingReadResult;
+  private readonly completeLaunchAuthorization: (
+    input: CompleteProviderLaunchAuthorizationInput
+  ) => void | Promise<void>;
+  private readonly terminateNativeGeneration: (
+    sessionId: string,
+    generation: number
+  ) => void | Promise<void>;
   private readonly now: () => number;
   private readonly sessions = new Map<string, AgentSurfaceSession>();
   private readonly browserClients = new Map<WebSocket, BrowserClient>();
@@ -149,7 +194,14 @@ export class AgentSurfaceBroker {
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.resolveSecret = options.resolveSecret ?? defaultResolveSecret;
     this.publishAgentState = options.publishAgentState ?? defaultPublishAgentState;
-    this.persistResume = options.persistResume ?? ((sessionId, resume) => persistSessionResume(sessionId, resume));
+    this.bindProviderSession = options.bindProviderSession ?? bindProviderSessionIdentity;
+    this.readProviderSession =
+      options.readProviderSessionBinding ?? readProviderSessionBinding;
+    this.completeLaunchAuthorization =
+      options.completeLaunchAuthorization ??
+      defaultCompleteLaunchAuthorization;
+    this.terminateNativeGeneration =
+      options.terminateNativeGeneration ?? defaultTerminateNativeGeneration;
     this.now = options.now ?? Date.now;
   }
 
@@ -159,7 +211,7 @@ export class AgentSurfaceBroker {
   async injectUserMessage(session: string, text: string, source: 'ui' | 'channel' | 'external'): Promise<void> {
     const sess = this.sessions.get(session);
     const host = sess?.host;
-    if (!host) {
+    if (!host || host.providerSessionId === null) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${session}`, false);
     }
     const requestId = newRequestId();
@@ -253,18 +305,14 @@ export class AgentSurfaceBroker {
     const changedSpawn =
       session.producer !== null &&
       (session.producer.generation !== frame.generation ||
+        session.producer.provider !== provider ||
         session.producer.producerInstanceId !== frame.producerInstanceId ||
         session.lastHostPid !== frame.pid);
     if (changedSpawn) {
       session.ring = [];
       session.ringBytes = 0;
       session.lastSeq = 0;
-      // A new pid is a fresh spawn — the agent may mint a NEW session id (e.g.
-      // confirmDiscard switch where the user explicitly accepted losing the prior
-      // conversation). Reset persistedResumeGuard so the next session-info event with
-      // the new id re-runs persistSessionResume; otherwise the manifest would keep the
-      // OLD id and the next restart would silently resume the pre-discard conversation.
-      session.persistedResumeGuard = false;
+      session.authorizedProviderSession = null;
       // Already-subscribed surfaces still hold the OLD spawn's rows. Without a
       // fresh snapshot they would keep them and APPEND the new spawn's backfill
       // as live events — live ids (user-N) can never dedupe against history ids
@@ -296,12 +344,39 @@ export class AgentSurfaceBroker {
             publishTail: Promise.resolve()
           };
     session.producer = producer;
+    let providerSessionId =
+      session.authorizedProviderSession?.producer === producer
+        ? session.authorizedProviderSession.providerSessionId
+        : null;
+    if (providerSessionId === null) {
+      try {
+        const binding = this.readProviderSession({
+          deskSessionId: session.session
+        });
+        if (
+          binding.ok &&
+          binding.provider === provider &&
+          binding.providerSessionId !== null
+        ) {
+          providerSessionId = binding.providerSessionId;
+          session.authorizedProviderSession = {
+            producer,
+            providerSessionId
+          };
+        }
+      } catch (error) {
+        console.error(
+          `[agent-surface] durable provider binding unavailable for ${session.session}: ${describeError(error)}`
+        );
+      }
+    }
     const host: HostConnection = {
       ws,
       pid: frame.pid,
       agent: provider,
       session: session.session,
-      producer
+      producer,
+      providerSessionId
     };
     session.host = host;
     session.idleSince = undefined;
@@ -309,7 +384,14 @@ export class AgentSurfaceBroker {
     ws.on('message', (raw2) => this.handleHostFrame(session, host, raw2));
 
     this.send(ws, { type: 'hello-ack', lastSeq: session.lastSeq });
-    this.publishNativeObservation(session, host, { kind: 'host-connected' }, this.now());
+    if (host.providerSessionId !== null) {
+      this.publishNativeObservation(
+        session,
+        host,
+        { kind: 'host-connected' },
+        this.now()
+      );
+    }
   }
 
   private handleHostFrame(session: AgentSurfaceSession, host: HostConnection, raw: unknown): void {
@@ -331,7 +413,13 @@ export class AgentSurfaceBroker {
         // Duplicate hello — ignore (already verified).
         return;
       case 'event':
-        this.handleHostEvent(session, host, frame.event);
+        session.eventTail = session.eventTail
+          .then(() => this.handleHostEvent(session, host, frame.event))
+          .catch((error) => {
+            console.error(
+              `[agent-surface] host event pipeline failed for ${session.session}: ${describeError(error)}`
+            );
+          });
         return;
       case 'command-result':
         this.handleCommandResult(session, frame.requestId, frame.ok, frame.ok ? undefined : frame.error);
@@ -339,52 +427,92 @@ export class AgentSurfaceBroker {
     }
   }
 
-  private handleHostEvent(
+  private async handleHostEvent(
     session: AgentSurfaceSession,
     host: HostConnection,
     event: AgentSurfaceEvent
-  ): void {
+  ): Promise<void> {
+    if (session.host !== host) {
+      return;
+    }
     if (event.seq <= session.lastSeq) {
       return; // already accepted (idempotent — protects against host re-emits on reconnect)
     }
-    session.lastSeq = event.seq;
-    if (!isTransient(event)) {
-      const retained = { event, bytes: Buffer.byteLength(JSON.stringify(event)) };
-      if (retained.bytes <= this.ringMaxBytes) {
-        session.ring.push(retained);
-        session.ringBytes += retained.bytes;
-        while (session.ring.length > this.ringSize || session.ringBytes > this.ringMaxBytes) {
-          const removed = session.ring.shift();
-          if (removed) {
-            session.ringBytes -= removed.bytes;
-          }
+    if (event.kind === 'session-info') {
+      if (!event.agentSessionId) {
+        await this.rejectProviderIdentity(
+          session,
+          host,
+          'session-info did not include a provider session id'
+        );
+        return;
+      }
+      if (
+        host.providerSessionId !== null &&
+        host.providerSessionId !== event.agentSessionId
+      ) {
+        await this.rejectProviderIdentity(
+          session,
+          host,
+          `host provider session changed from ${host.providerSessionId} to ${event.agentSessionId}`
+        );
+        return;
+      }
+      try {
+        const binding = await this.bindProviderSession({
+          deskSessionId: session.session,
+          provider: host.agent,
+          providerSessionId: event.agentSessionId
+        });
+        if (!binding.ok) {
+          await this.rejectProviderIdentity(session, host, binding.error);
+          return;
         }
+        if (session.host !== host) {
+          return;
+        }
+        await this.completeLaunchAuthorization({
+          deskSessionId: session.session,
+          provider: host.agent,
+          providerSessionId: event.agentSessionId,
+          generation: host.producer.generation
+        });
+      } catch (error) {
+        await this.rejectProviderIdentity(session, host, describeError(error));
+        return;
       }
-    }
-    // spec §6: session-info with agentSessionId is the load-bearing path for FRESH native
-    // sessions to gain a resume id (the driver can't know the id at start() time — claude
-    // streaming-init deadlock fix). Persist via the existing resumeCapture plumbing, which
-    // also pins the session name. persistSessionResume is idempotent; we additionally
-    // gate on session.persistedResumeGuard so repeated session-info events on the same host
-    // don't re-read the manifest after the first successful write.
-    if (event.kind === 'session-info' && event.agentSessionId && session.host && !session.persistedResumeGuard) {
-      const agent = session.host.agent;
-      if (isValidResumeIdForAgent(agent, event.agentSessionId)) {
-        const hostPid = session.host.pid;
-        session.persistedResumeGuard = true;
-        void Promise.resolve(this.persistResume(session.session, event.agentSessionId))
-          .then((persisted) => {
-            if (session.lastHostPid === hostPid) {
-              session.persistedResumeGuard = persisted;
-            }
-          })
-          .catch(() => {
-            if (session.lastHostPid === hostPid) {
-              session.persistedResumeGuard = false;
-            }
-          });
+      if (session.host !== host) {
+        return;
       }
+      const becameAuthorized = host.providerSessionId === null;
+      host.providerSessionId = event.agentSessionId;
+      session.authorizedProviderSession = {
+        producer: host.producer,
+        providerSessionId: event.agentSessionId
+      };
+      if (becameAuthorized) {
+        this.publishNativeObservation(
+          session,
+          host,
+          { kind: 'host-connected' },
+          this.now()
+        );
+      }
+    } else if (host.providerSessionId === null) {
+      if (event.kind === 'agent-error' && event.fatal) {
+        this.retainHostEvent(session, event);
+        this.fanEventToSurfaces(session, event);
+        return;
+      }
+      await this.rejectProviderIdentity(
+        session,
+        host,
+        `host emitted ${event.kind} before provider session identity authorization`
+      );
+      return;
     }
+
+    this.retainHostEvent(session, event);
     this.publishNativeObservation(
       session,
       host,
@@ -393,6 +521,53 @@ export class AgentSurfaceBroker {
       correlationFor(event)
     );
     this.fanEventToSurfaces(session, event);
+  }
+
+  private retainHostEvent(session: AgentSurfaceSession, event: AgentSurfaceEvent): void {
+    session.lastSeq = event.seq;
+    if (isTransient(event)) {
+      return;
+    }
+    const retained = { event, bytes: Buffer.byteLength(JSON.stringify(event)) };
+    if (retained.bytes > this.ringMaxBytes) {
+      return;
+    }
+    session.ring.push(retained);
+    session.ringBytes += retained.bytes;
+    while (session.ring.length > this.ringSize || session.ringBytes > this.ringMaxBytes) {
+      const removed = session.ring.shift();
+      if (removed) {
+        session.ringBytes -= removed.bytes;
+      }
+    }
+  }
+
+  private async rejectProviderIdentity(
+    session: AgentSurfaceSession,
+    host: HostConnection,
+    error: string
+  ): Promise<void> {
+    if (session.authorizedProviderSession?.producer === host.producer) {
+      session.authorizedProviderSession = null;
+    }
+    host.providerSessionId = null;
+    if (session.host === host) {
+      session.host = null;
+      session.idleSince = this.now();
+    }
+    this.send(host.ws, { type: 'error', code: 'invalid-frame', message: error });
+    try {
+      host.ws.close(1008, 'provider session identity rejected');
+    } catch {
+      // best-effort transport close; exact generation retirement is authoritative
+    }
+    try {
+      await this.terminateNativeGeneration(session.session, host.producer.generation);
+    } catch (terminationError) {
+      console.error(
+        `[agent-surface] exact generation retirement failed for ${session.session}@${host.producer.generation}: ${describeError(terminationError)}`
+      );
+    }
   }
 
   private handleHostGone(ws: WebSocket): void {
@@ -407,12 +582,14 @@ export class AgentSurfaceBroker {
         // BUG-9 duplicate-rows is fixed at the codex history-mapper level (id mismatch
         // between live optimistic rows and backfill rows), not here.
         this.broadcast(session, { type: 'exit', session: session.session, reason: 'crashed' });
-        this.publishNativeObservation(
-          session,
-          host,
-          { kind: 'host-disconnected' },
-          this.now()
-        );
+        if (host.providerSessionId !== null) {
+          this.publishNativeObservation(
+            session,
+            host,
+            { kind: 'host-disconnected' },
+            this.now()
+          );
+        }
       }
     }
   }
@@ -510,7 +687,7 @@ export class AgentSurfaceBroker {
   private browserSend(client: BrowserClient, sessionName: string, surfaceId: string, text: string): void {
     const session = this.requireSession(sessionName);
     this.requireVisibleSubscription(client, sessionName, surfaceId);
-    if (!session.host) {
+    if (!session.host || session.host.providerSessionId === null) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
     const requestId = newRequestId();
@@ -528,7 +705,7 @@ export class AgentSurfaceBroker {
   ): void {
     const session = this.requireSession(sessionName);
     this.requireVisibleSubscription(client, sessionName, surfaceId);
-    if (!session.host) {
+    if (!session.host || session.host.providerSessionId === null) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
     const cmdRequestId = newRequestId();
@@ -545,7 +722,7 @@ export class AgentSurfaceBroker {
   private browserInterrupt(client: BrowserClient, sessionName: string, surfaceId: string): void {
     const session = this.requireSession(sessionName);
     this.requireVisibleSubscription(client, sessionName, surfaceId);
-    if (!session.host) {
+    if (!session.host || session.host.providerSessionId === null) {
       throw brokerError('adapter-unavailable', `no adapter host connected for ${sessionName}`, true);
     }
     const requestId = newRequestId();
@@ -583,8 +760,9 @@ export class AgentSurfaceBroker {
         ringBytes: 0,
         lastSeq: 0,
         producer: null,
+        authorizedProviderSession: null,
         inflight: new Map(),
-        persistedResumeGuard: false
+        eventTail: Promise.resolve()
       };
       this.sessions.set(name, session);
     }
@@ -936,6 +1114,40 @@ async function defaultPublishAgentState(envelope: AgentStateEnvelope): Promise<v
   });
   if (!result.ok) {
     throw new Error(result.error ?? 'terminal daemon rejected native agent observation');
+  }
+}
+
+async function defaultCompleteLaunchAuthorization(
+  input: CompleteProviderLaunchAuthorizationInput
+): Promise<void> {
+  const result = await completeProviderSessionLaunch(input, {
+    timeoutMs: 1_500
+  });
+  if (
+    !result.ok ||
+    (result.body?.kind !== 'completed' &&
+      result.body?.kind !== 'not-required')
+  ) {
+    throw new Error(
+      result.error ??
+        'terminal daemon returned an invalid provider launch completion receipt'
+    );
+  }
+}
+
+async function defaultTerminateNativeGeneration(
+  sessionId: string,
+  generation: number
+): Promise<void> {
+  const result = await daemonControl(
+    '/control/retire-generation',
+    { sessionId, generation },
+    { timeoutMs: 6_000 }
+  );
+  if (!result.ok) {
+    throw new Error(
+      result.error ?? `terminal daemon rejected exact generation retirement for ${sessionId}@${generation}`
+    );
   }
 }
 

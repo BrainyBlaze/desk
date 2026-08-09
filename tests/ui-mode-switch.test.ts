@@ -79,7 +79,7 @@ describe('validateUiModeSwitch', () => {
     expect(result).toMatchObject({ ok: false, status: 400, code: 'ui-mode-unsupported' });
   });
 
-  it('gates switching a session with no captured resume id behind confirmDiscard', () => {
+  it('gates switching a session with no stored resume id behind confirmDiscard', () => {
     const blocked = validateUiModeSwitch(manifest(), {
       sessionId: specFor('fresh').sessionId,
       uiMode: 'native',
@@ -236,14 +236,12 @@ describe('performUiModeSwitch', () => {
           await Promise.resolve();
           order.push('restart-resolved');
           return { ok: true };
-        },
-        scheduleCapture: () => order.push('capture')
+        }
       }
     );
 
     expect(result.ok).toBe(true);
-    // capture runs only after the async restart fully resolved
-    expect(order).toEqual(['restart-start', 'restart-resolved', 'capture']);
+    expect(order).toEqual(['restart-start', 'restart-resolved']);
   });
 
   it('propagates an async restart failure as a typed 500', async () => {

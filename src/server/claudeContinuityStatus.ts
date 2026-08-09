@@ -1,13 +1,15 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionSpec } from '../core/types.js';
+import { sessionStateSubjectFor } from '../shared/controlPlane/sessionSubject.js';
 import { claudeMemoryProjectSlug } from './claudeProfileMemory.js';
 
 export type ClaudeContinuityAttentionCode =
   | 'continuity-resume-unconfirmed'
   | 'continuity-store-corrupt'
   | 'claude-memory-conflicts'
-  | 'claude-memory-sync-failed';
+  | 'claude-memory-sync-failed'
+  | 'provider-session-identity-missing';
 
 export interface ClaudeContinuityAttention {
   sessionId: string;
@@ -24,6 +26,32 @@ export interface ClaudeContinuityStatus {
 
 interface ReadClaudeContinuityStatusOptions {
   homeDir: string;
+  runningSessions: ReadonlySet<string>;
+}
+
+function providerIdentityIssue(
+  session: SessionSpec,
+  runningSessions: ReadonlySet<string>
+): ClaudeContinuityAttention | undefined {
+  if (
+    !runningSessions.has(session.sessionId) ||
+    session.resume !== undefined
+  ) {
+    return undefined;
+  }
+  const subject = sessionStateSubjectFor(session);
+  if (subject.kind !== 'agent' || subject.mode !== 'terminal') {
+    return undefined;
+  }
+  return {
+    sessionId: session.sessionId,
+    ...(session.profileId === undefined
+      ? {}
+      : { profileId: session.profileId }),
+    cwd: session.cwd,
+    code: 'provider-session-identity-missing',
+    message: `Running ${subject.provider} terminal session has no durable provider session identity`
+  };
 }
 
 function readJsonRecord(path: string): Record<string, unknown> {
@@ -181,6 +209,11 @@ export function readClaudeContinuityStatus(
 ): ClaudeContinuityStatus {
   const issues: ClaudeContinuityAttention[] = [];
   for (const session of sessions) {
+    const providerIdentity = providerIdentityIssue(
+      session,
+      options.runningSessions
+    );
+    if (providerIdentity) issues.push(providerIdentity);
     if (session.agent !== 'claude') continue;
     const activation = activationIssue(session, options.homeDir);
     if (activation) issues.push(activation);

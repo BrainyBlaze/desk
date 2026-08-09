@@ -25,6 +25,8 @@ import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
 import type { DeskSessionDraft } from '../core/types.js';
+import { requestProviderSessionReset } from '../shared/daemonControlClient.js';
+import { isProviderSessionProvider } from '../shared/providerSessionIdentity.js';
 
 const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
 
@@ -41,6 +43,8 @@ Usage: desk <command> [options]
   attach <name|sessionId|resume>            Attach a terminal to a session
   capture <name|sessionId|resume> [--lines N]
                                             Print recent output of a session
+  reset-provider-session <name|sessionId> --force
+                                            Authorize one fresh provider launch
   hooks install [--home DIR]                 Install global agent event hooks
   agent-host                                Run the native UI adapter host (spawned by desk; not user-facing)
   terminal-daemon                           Run the atch terminal daemon (spawned by desk serve; not user-facing)
@@ -87,7 +91,8 @@ const COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
   ['status', new Set(['--file', '-f'])],
   ['up', new Set(['--file', '-f', '--dry-run'])],
   ['attach', new Set(['--file', '-f'])],
-  ['capture', new Set(['--file', '-f', '--lines'])]
+  ['capture', new Set(['--file', '-f', '--lines'])],
+  ['reset-provider-session', new Set(['--force'])]
 ]);
 
 async function runCli(argv: string[]): Promise<number> {
@@ -194,6 +199,49 @@ export async function main(argv: string[]): Promise<number> {
       }
       const session = findSession(desk.sessions, args.target);
       return await captureSession(session, args.lines);
+    }
+
+    if (args.command === 'reset-provider-session') {
+      if (!args.target) {
+        throw new Error(
+          'reset-provider-session requires a session name or sessionId'
+        );
+      }
+      if (!args.force) {
+        throw new Error('reset-provider-session requires --force');
+      }
+      const session = findSession(desk.sessions, args.target);
+      if (args.target !== session.name && args.target !== session.sessionId) {
+        throw new Error(
+          'reset-provider-session target must be a session name or sessionId'
+        );
+      }
+      if (!isProviderSessionProvider(session.agent)) {
+        throw new Error(
+          `Desk session ${session.sessionId} is not configured for a supported provider`
+        );
+      }
+      const result = await requestProviderSessionReset(session.sessionId);
+      if (!result.ok) {
+        throw new Error(
+          result.error ??
+            `provider-session reset failed for Desk session ${session.sessionId}`
+        );
+      }
+      if (
+        result.body?.state !== 'authorized' ||
+        typeof result.body.authorizationId !== 'string' ||
+        !Number.isSafeInteger(result.body.generation) ||
+        (result.body.generation as number) < 0
+      ) {
+        throw new Error(
+          'terminal daemon returned an invalid provider-session reset receipt'
+        );
+      }
+      console.log(
+        `authorized one fresh provider launch for ${session.name} (${session.sessionId})`
+      );
+      return 0;
     }
 
     throw new Error(`unknown command ${args.command}`);

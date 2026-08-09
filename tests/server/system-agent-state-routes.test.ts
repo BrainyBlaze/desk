@@ -53,7 +53,10 @@ function producerBody(overrides: Record<string, unknown> = {}): Record<string, u
     eventId: 'hooks-a:3',
     invocationId: 'turn-3',
     occurredAt: 900,
-    observation: { hook: 'Stop' },
+    observation: {
+      hook: 'Stop',
+      providerSessionId: '22222222-2222-4222-8222-222222222222'
+    },
     ...overrides
   };
 }
@@ -69,7 +72,7 @@ function endpointBody(overrides: Record<string, unknown> = {}): Record<string, u
     producerInstanceId: 'plugin-a',
     producerSeq: 4,
     endpoint: 'http://127.0.0.1:4096/',
-    providerSessionId: 'provider-session-a',
+    providerSessionId: 'ses_aaaaaaaaaaaaaaaaaaaa',
     ...overrides
   };
 }
@@ -131,12 +134,18 @@ function endpointGateway(
   overrides: Partial<AgentEndpointGateway> = {}
 ): AgentEndpointGateway & {
   registerEndpoint: ReturnType<typeof vi.fn>;
+  activateEndpoint: ReturnType<typeof vi.fn>;
 } {
   return {
     registerEndpoint: vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      body: { ok: true, kind: 'accepted' }
+      body: { ok: true, kind: 'accepted', active: false }
+    }),
+    activateEndpoint: vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { ok: true, kind: 'activated' }
     }),
     ...overrides
   };
@@ -196,14 +205,46 @@ async function invoke(
   agentEndpointGateway: AgentEndpointGateway = endpointGateway(),
   options: Partial<SystemRoutesOptions> = {}
 ): Promise<Captured> {
-  const managedAgentLsp = { reconcile: vi.fn(), cleanupAll: vi.fn() };
-  const route = createSystemRoutes(managedAgentLsp, {
+  const route = systemRoute(
     agentStateGateway,
     deskEventGateway,
     agentEndpointGateway,
+    options
+  );
+  return invokeRoute(route, method, path, body);
+}
+
+function systemRoute(
+  agentStateGateway: AgentStateGateway,
+  deskEventGateway: DeskEventGateway = eventGateway(),
+  agentEndpointGateway: AgentEndpointGateway = endpointGateway(),
+  options: Partial<SystemRoutesOptions> = {}
+): ReturnType<typeof createSystemRoutes> {
+  const managedAgentLsp = { reconcile: vi.fn(), cleanupAll: vi.fn() };
+  return createSystemRoutes(managedAgentLsp, {
+    agentStateGateway,
+    deskEventGateway,
+    agentEndpointGateway,
+    bindProviderSessionIdentity: vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    }),
+    completeProviderSessionLaunch: vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { ok: true, kind: 'not-required' }
+    }),
     now: () => 950,
     ...options
   });
+}
+
+async function invokeRoute(
+  route: ReturnType<typeof createSystemRoutes>,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<Captured> {
   const req = new PassThrough() as unknown as IncomingMessage & PassThrough;
   req.method = method;
   req.url = path;
@@ -318,6 +359,10 @@ describe('canonical system agent-state routes', () => {
       ok: true,
       generationId: 'generation-a'
     });
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    });
     const body = producerBody({
       provider: 'claude',
       producer: 'claude-hooks',
@@ -335,19 +380,346 @@ describe('canonical system agent-state routes', () => {
       body,
       eventGateway(),
       endpointGateway(),
-      { confirmClaudeSessionStart }
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
     );
 
     expect(confirmClaudeSessionStart).toHaveBeenCalledWith({
       deskSessionId: 'agent-a',
       providerSessionId: '11111111-2222-4333-8444-555555555555'
     });
+    expect(bindProviderSessionIdentity).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      provider: 'claude',
+      providerSessionId: '11111111-2222-4333-8444-555555555555'
+    });
     expect(agentStateGateway.submitEvent).toHaveBeenCalledOnce();
+    expect(confirmClaudeSessionStart.mock.invocationCallOrder[0]).toBeLessThan(
+      bindProviderSessionIdentity.mock.invocationCallOrder[0]!
+    );
+    expect(bindProviderSessionIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+      agentStateGateway.submitEvent.mock.invocationCallOrder[0]!
+    );
     expect(result.status).toBe(200);
+  });
+
+  it('binds an exact Codex thread id without Claude confirmation before forwarding', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'already-bound'
+    });
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        observation: {
+          hook: 'SessionStart',
+          matcher: 'resume',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
+    );
+
+    expect(confirmClaudeSessionStart).not.toHaveBeenCalled();
+    expect(bindProviderSessionIdentity).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      provider: 'codex',
+      providerSessionId: '22222222-2222-4222-8222-222222222222'
+    });
+    expect(bindProviderSessionIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+      agentStateGateway.submitEvent.mock.invocationCallOrder[0]!
+    );
+    expect(result.status).toBe(200);
+  });
+
+  it('confirms Claude before the first bind even when a later hook carries the first identity', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn().mockReturnValue({
+      ok: true,
+      generationId: 'generation-a'
+    });
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    });
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'claude',
+        producer: 'claude-hooks',
+        observation: {
+          hook: 'UserPromptSubmit',
+          providerSessionId: '11111111-2222-4333-8444-555555555555'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
+    );
+
+    expect(result.status).toBe(200);
+    expect(confirmClaudeSessionStart).toHaveBeenCalledOnce();
+    expect(bindProviderSessionIdentity).toHaveBeenCalledOnce();
+    expect(confirmClaudeSessionStart.mock.invocationCallOrder[0]).toBeLessThan(
+      bindProviderSessionIdentity.mock.invocationCallOrder[0]!
+    );
+    expect(bindProviderSessionIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+      agentStateGateway.submitEvent.mock.invocationCallOrder[0]!
+    );
+  });
+
+  it('short-circuits repeated hooks after one successful provider bind', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn().mockReturnValue({
+      ok: true,
+      generationId: 'generation-a'
+    });
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'already-bound'
+    });
+    const route = systemRoute(
+      agentStateGateway,
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
+    );
+    const observation = {
+      provider: 'claude',
+      producer: 'claude-hooks',
+      observation: {
+        hook: 'UserPromptSubmit',
+        providerSessionId: '11111111-2222-4333-8444-555555555555'
+      }
+    };
+
+    expect(
+      (await invokeRoute(route, 'POST', '/api/agent-event', producerBody(observation)))
+        .status
+    ).toBe(200);
+    expect(
+      (
+        await invokeRoute(
+          route,
+          'POST',
+          '/api/agent-event',
+          producerBody({
+            ...observation,
+            producerSeq: 4,
+            eventId: 'hooks-a:4',
+            invocationId: 'turn-4',
+            observation: {
+              hook: 'PostToolUse',
+              providerSessionId: '11111111-2222-4333-8444-555555555555'
+            }
+          })
+        )
+      ).status
+    ).toBe(200);
+
+    expect(confirmClaudeSessionStart).toHaveBeenCalledOnce();
+    expect(bindProviderSessionIdentity).toHaveBeenCalledOnce();
+    expect(agentStateGateway.submitEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a transient late-hook storage failure without dropping either state event', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('manifest fsync failed'))
+      .mockResolvedValueOnce({ ok: true, kind: 'persisted' });
+    const route = systemRoute(
+      agentStateGateway,
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+    const first = producerBody({
+      observation: {
+        hook: 'UserPromptSubmit',
+        providerSessionId: '22222222-2222-4222-8222-222222222222'
+      }
+    });
+    const second = producerBody({
+      producerSeq: 4,
+      eventId: 'hooks-a:4',
+      invocationId: 'turn-4',
+      observation: {
+        hook: 'PostToolUse',
+        providerSessionId: '22222222-2222-4222-8222-222222222222'
+      }
+    });
+
+    expect((await invokeRoute(route, 'POST', '/api/agent-event', first)).status).toBe(
+      200
+    );
+    expect((await invokeRoute(route, 'POST', '/api/agent-event', second)).status).toBe(
+      200
+    );
+    expect(bindProviderSessionIdentity).toHaveBeenCalledTimes(2);
+    expect(agentStateGateway.submitEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a late-hook binder mismatch as fatal and does not forward state', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: false,
+      code: 'provider-session-mismatch',
+      error: 'Desk session is already bound to a different provider session id'
+    });
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        observation: {
+          hook: 'PostToolUse',
+          providerSessionId: '33333333-3333-4333-8333-333333333333'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, code: 'provider-session-mismatch' }
+    });
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a bound hook event when launch completion is rejected', async () => {
+    const agentStateGateway = gateway();
+    const completeProviderSessionLaunch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      error: 'authorization-unclaimed',
+      body: { ok: false, reason: 'authorization-unclaimed' }
+    });
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { completeProviderSessionLaunch }
+    );
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, reason: 'authorization-unclaimed' }
+    });
+    expect(completeProviderSessionLaunch).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      provider: 'codex',
+      providerSessionId: '22222222-2222-4222-8222-222222222222',
+      generation: 2
+    });
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a different id against the in-memory binding without another manifest transaction', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    });
+    const route = systemRoute(
+      agentStateGateway,
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+
+    expect(
+      (
+        await invokeRoute(
+          route,
+          'POST',
+          '/api/agent-event',
+          producerBody({
+            observation: {
+              hook: 'SessionStart',
+              providerSessionId: '22222222-2222-4222-8222-222222222222'
+            }
+          })
+        )
+      ).status
+    ).toBe(200);
+    const mismatch = await invokeRoute(
+      route,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        producerSeq: 4,
+        eventId: 'hooks-a:4',
+        invocationId: 'turn-4',
+        observation: {
+          hook: 'PostToolUse',
+          providerSessionId: '33333333-3333-4333-8333-333333333333'
+        }
+      })
+    );
+
+    expect(mismatch).toMatchObject({
+      status: 409,
+      body: { ok: false, code: 'provider-session-mismatch' }
+    });
+    expect(bindProviderSessionIdentity).toHaveBeenCalledOnce();
+    expect(agentStateGateway.submitEvent).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an invalid provider id before confirmation, binding, or forwarding', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn();
+    const bindProviderSessionIdentity = vi.fn();
+
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'claude',
+        producer: 'claude-hooks',
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: 'not-a-provider-id'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
+    );
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, code: 'provider-session-id-invalid' }
+    });
+    expect(confirmClaudeSessionStart).not.toHaveBeenCalled();
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
   });
 
   it('rejects a mismatched Claude provider SessionStart before forwarding facts', async () => {
     const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi.fn();
     const confirmClaudeSessionStart = vi.fn().mockReturnValue({
       ok: false,
       code: 'continuity-resume-unconfirmed',
@@ -370,7 +742,7 @@ describe('canonical system agent-state routes', () => {
       body,
       eventGateway(),
       endpointGateway(),
-      { confirmClaudeSessionStart }
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
     );
 
     expect(result).toEqual({
@@ -382,6 +754,121 @@ describe('canonical system agent-state routes', () => {
         error: 'expected one provider session and observed another'
       }
     });
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing provider id before binding or forwarding SessionStart', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi.fn();
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({ observation: { hook: 'SessionStart', matcher: 'startup' } }),
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, code: 'provider-session-id-missing' }
+    });
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('returns a typed binder rejection before forwarding SessionStart', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: false,
+      code: 'provider-session-mismatch',
+      error: 'Desk session is already bound to another Codex thread'
+    });
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        observation: {
+          hook: 'SessionStart',
+          matcher: 'resume',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toEqual({
+      handled: true,
+      status: 409,
+      body: {
+        ok: false,
+        code: 'provider-session-mismatch',
+        error: 'Desk session is already bound to another Codex thread'
+      }
+    });
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('returns storage failure before forwarding SessionStart', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi
+      .fn()
+      .mockRejectedValue(new Error('manifest fsync failed'));
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        observation: {
+          hook: 'SessionStart',
+          matcher: 'resume',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toEqual({
+      handled: true,
+      status: 500,
+      body: {
+        ok: false,
+        code: 'provider-session-store-failed',
+        error: 'provider session identity storage failed: manifest fsync failed'
+      }
+    });
+    expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not bind a mismatched provider/producer hook pair', async () => {
+    const agentStateGateway = gateway();
+    const bindProviderSessionIdentity = vi.fn();
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'codex',
+        producer: 'claude-hooks',
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result.status).toBe(400);
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
     expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
   });
 
@@ -423,7 +910,12 @@ describe('canonical system agent-state routes', () => {
       // SessionEnd is the hook that genuinely asserts nothing: the daemon
       // watches the process exit itself. (SessionStart does assert — a started
       // session is idle — so it is no longer an example of silence.)
-      producerBody({ observation: { hook: 'SessionEnd' } })
+      producerBody({
+        observation: {
+          hook: 'SessionEnd',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }
+      })
     );
 
     expect(result).toEqual({
@@ -451,26 +943,161 @@ describe('canonical system agent-state routes', () => {
     expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
   });
 
-  it('server-stamps and forwards endpoint registration outside the state envelope', async () => {
+  it.each(['persisted', 'already-bound'] as const)(
+    'stages, binds (%s), then activates exact endpoint registration',
+    async (kind) => {
     const endpoints = endpointGateway();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({ ok: true, kind });
+    const completeProviderSessionLaunch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { ok: true, kind: 'completed' }
+    });
     const result = await invoke(
       gateway(),
       'POST',
       '/api/agent-endpoint',
       endpointBody(),
       eventGateway(),
-      endpoints
+      endpoints,
+      { bindProviderSessionIdentity, completeProviderSessionLaunch }
     );
 
-    expect(endpoints.registerEndpoint).toHaveBeenCalledWith({
+    const staged = {
       ...endpointBody(),
       observedAt: 950
-    } satisfies AgentEndpointRegistration);
+    } satisfies AgentEndpointRegistration;
+    expect(endpoints.registerEndpoint).toHaveBeenCalledWith(staged);
+    expect(bindProviderSessionIdentity).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      provider: 'opencode',
+      providerSessionId: 'ses_aaaaaaaaaaaaaaaaaaaa'
+    });
+    const { observedAt: _observedAt, ...activation } = staged;
+    expect(endpoints.activateEndpoint).toHaveBeenCalledWith(activation);
+    expect(endpoints.registerEndpoint.mock.invocationCallOrder[0]).toBeLessThan(
+      bindProviderSessionIdentity.mock.invocationCallOrder[0]!
+    );
+    expect(bindProviderSessionIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+      completeProviderSessionLaunch.mock.invocationCallOrder[0]!
+    );
+    expect(completeProviderSessionLaunch.mock.invocationCallOrder[0]).toBeLessThan(
+      endpoints.activateEndpoint.mock.invocationCallOrder[0]!
+    );
     expect(result).toEqual({
       handled: true,
       status: 200,
-      body: { ok: true, kind: 'accepted' }
+      body: { ok: true, kind: 'activated' }
     });
+    }
+  );
+
+  it('leaves a bound endpoint inactive when launch completion is rejected', async () => {
+    const endpoints = endpointGateway();
+    const completeProviderSessionLaunch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      error: 'generation-mismatch',
+      body: { ok: false, reason: 'generation-mismatch' }
+    });
+
+    const result = await invoke(
+      gateway(),
+      'POST',
+      '/api/agent-endpoint',
+      endpointBody(),
+      eventGateway(),
+      endpoints,
+      { completeProviderSessionLaunch }
+    );
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, reason: 'generation-mismatch' }
+    });
+    expect(endpoints.activateEndpoint).not.toHaveBeenCalled();
+  });
+
+  it('keeps a registration without provider identity staged and inactive', async () => {
+    const endpoints = endpointGateway();
+    const bindProviderSessionIdentity = vi.fn();
+    const result = await invoke(
+      gateway(),
+      'POST',
+      '/api/agent-endpoint',
+      endpointBody({ providerSessionId: undefined }),
+      eventGateway(),
+      endpoints,
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toMatchObject({
+      status: 200,
+      body: { ok: true, kind: 'accepted', active: false }
+    });
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+    expect(endpoints.activateEndpoint).not.toHaveBeenCalled();
+  });
+
+  it('recovers a duplicate staged registration through already-bound and idempotent activation', async () => {
+    const endpoints = endpointGateway({
+      registerEndpoint: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { ok: true, kind: 'duplicate', active: false }
+      }),
+      activateEndpoint: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { ok: true, kind: 'already-active' }
+      })
+    });
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'already-bound'
+    });
+
+    const result = await invoke(
+      gateway(),
+      'POST',
+      '/api/agent-endpoint',
+      endpointBody(),
+      eventGateway(),
+      endpoints,
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toMatchObject({
+      status: 200,
+      body: { ok: true, kind: 'already-active' }
+    });
+    expect(bindProviderSessionIdentity).toHaveBeenCalledOnce();
+    expect(endpoints.activateEndpoint).toHaveBeenCalledOnce();
+  });
+
+  it('leaves staged endpoint inactive when provider identity binding is rejected', async () => {
+    const endpoints = endpointGateway();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: false,
+      code: 'provider-session-mismatch',
+      error: 'Desk session is already bound to another provider session'
+    });
+
+    const result = await invoke(
+      gateway(),
+      'POST',
+      '/api/agent-endpoint',
+      endpointBody(),
+      eventGateway(),
+      endpoints,
+      { bindProviderSessionIdentity }
+    );
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, code: 'provider-session-mismatch' }
+    });
+    expect(endpoints.activateEndpoint).not.toHaveBeenCalled();
   });
 
   it('rejects a non-loopback endpoint before contacting the daemon', async () => {
@@ -515,6 +1142,55 @@ describe('canonical system agent-state routes', () => {
       status: 409,
       body: { ok: false, reason: 'producer-instance-mismatch' }
     });
+  });
+
+  it('rejects malformed staged and activation receipts before advancing continuity', async () => {
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    });
+    const malformedStage = endpointGateway({
+      registerEndpoint: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { ok: true, kind: 'accepted' }
+      })
+    });
+    expect(
+      (
+        await invoke(
+          gateway(),
+          'POST',
+          '/api/agent-endpoint',
+          endpointBody(),
+          eventGateway(),
+          malformedStage,
+          { bindProviderSessionIdentity }
+        )
+      ).status
+    ).toBe(502);
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+
+    const malformedActivation = endpointGateway({
+      activateEndpoint: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { ok: true, kind: 'accepted' }
+      })
+    });
+    expect(
+      (
+        await invoke(
+          gateway(),
+          'POST',
+          '/api/agent-endpoint',
+          endpointBody(),
+          eventGateway(),
+          malformedActivation,
+          { bindProviderSessionIdentity }
+        )
+      ).status
+    ).toBe(502);
   });
 
   it('returns one validated snapshot revision and never fabricates idle', async () => {

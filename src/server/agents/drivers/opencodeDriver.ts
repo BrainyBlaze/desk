@@ -178,6 +178,9 @@ export class OpencodeDriver implements AgentDriver {
       if (!existing) {
         throw sessionGoneError(this.opts.resumeId);
       }
+      if (existing.id !== this.opts.resumeId) {
+        throw sessionMismatchError(this.opts.resumeId, existing.id);
+      }
       sessionId = existing.id;
     } else {
       const created = await this.backend.createSession(this.opts.sessionTitle ?? 'desk native');
@@ -518,6 +521,14 @@ export class OpencodeDriver implements AgentDriver {
 
 function sessionGoneError(resumeId: string): Error {
   return driverCommandError(`opencode session ${resumeId} not found (deleted?)`, 'driver-start-failed', false);
+}
+
+function sessionMismatchError(requestedId: string, returnedId: string): Error {
+  return driverCommandError(
+    `OpenCode returned session ${returnedId} for requested session ${requestedId}`,
+    'driver-start-failed',
+    false
+  );
 }
 
 function notStartedError(): Error {

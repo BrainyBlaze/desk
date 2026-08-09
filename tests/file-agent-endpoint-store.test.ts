@@ -10,6 +10,9 @@ import {
 } from '../src/shared/controlPlane/index.js';
 import { FileAgentEndpointStore } from '../src/server/runtime/fileAgentEndpointStore.js';
 
+const PROVIDER_SESSION_ID = 'ses_aaaaaaaaaaaaaaaaaaaa';
+const OTHER_PROVIDER_SESSION_ID = 'ses_bbbbbbbbbbbbbbbbbbbb';
+
 const registration = (
   overrides: Partial<AgentEndpointRegistration> = {}
 ): AgentEndpointRegistration => ({
@@ -33,7 +36,7 @@ describe('agent endpoint registration contract', () => {
         {
           ...registration(),
           observedAt: undefined,
-          providerSessionId: 'ses_alpha'
+          providerSessionId: PROVIDER_SESSION_ID
         },
         { observedAt: 700 }
       )
@@ -41,7 +44,7 @@ describe('agent endpoint registration contract', () => {
       kind: 'registration',
       registration: registration({
         observedAt: 700,
-        providerSessionId: 'ses_alpha'
+        providerSessionId: PROVIDER_SESSION_ID
       })
     });
   });
@@ -102,35 +105,99 @@ describe('FileAgentEndpointStore', () => {
       )
     ).toMatchObject({ kind: 'rejected', reason: 'producer-instance-mismatch' });
     expect(
-      store.register(registration({ producerSeq: 2, providerSessionId: 'ses_alpha' }))
+      store.register(
+        registration({ producerSeq: 2, providerSessionId: PROVIDER_SESSION_ID })
+      )
     ).toMatchObject({ kind: 'accepted' });
     expect(
-      store.register(registration({ producerSeq: 2, providerSessionId: 'ses_beta' }))
+      store.register(
+        registration({ producerSeq: 2, providerSessionId: OTHER_PROVIDER_SESSION_ID })
+      )
     ).toMatchObject({ kind: 'rejected', reason: 'idempotency-conflict' });
     expect(
-      store.register(registration({ producerSeq: 1, providerSessionId: 'ses_alpha' }))
+      store.register(
+        registration({ producerSeq: 1, providerSessionId: PROVIDER_SESSION_ID })
+      )
     ).toMatchObject({ kind: 'rejected', reason: 'producer-order' });
   });
 
-  it('durably retains one selected provider session and poll sequence', () => {
+  it('persists exact registration as inactive before idempotent activation', () => {
     const first = new FileAgentEndpointStore(path, dependencies());
-    expect(first.register(registration())).toMatchObject({ kind: 'accepted' });
+    const staged = registration({
+      producerSeq: 2,
+      providerSessionId: PROVIDER_SESSION_ID
+    });
     expect(
-      first.register(registration({ producerSeq: 2, providerSessionId: 'ses_alpha' }))
-    ).toMatchObject({ kind: 'accepted' });
+      first.register(staged)
+    ).toMatchObject({ kind: 'accepted', active: false });
+    expect(first.get('work-opencode', 5, 'opencode-terminal')).toMatchObject({
+      providerSessionId: PROVIDER_SESSION_ID
+    });
+    expect(first.getActive('work-opencode', 5, 'opencode-terminal')).toBeUndefined();
+    expect(
+      first.reservePollSequence('work-opencode', 5, 'opencode-terminal')
+    ).toBeUndefined();
+
+    expect(
+      first.register({ ...staged, observedAt: 900 })
+    ).toMatchObject({ kind: 'duplicate', active: false });
+    const { observedAt: _observedAt, ...activation } = staged;
+    expect(first.activate(activation)).toMatchObject({ kind: 'activated' });
+    expect(first.activate(activation)).toMatchObject({ kind: 'already-active' });
+    expect(first.getActive('work-opencode', 5, 'opencode-terminal')).toMatchObject({
+      providerSessionId: PROVIDER_SESSION_ID
+    });
     expect(first.reservePollSequence('work-opencode', 5, 'opencode-terminal')).toMatchObject({
       pollSeq: 1,
-      registration: { providerSessionId: 'ses_alpha' }
+      registration: { providerSessionId: PROVIDER_SESSION_ID }
     });
 
     const restarted = new FileAgentEndpointStore(path, dependencies());
-    expect(restarted.get('work-opencode', 5, 'opencode-terminal')).toMatchObject({
-      providerSessionId: 'ses_alpha',
+    expect(restarted.getActive('work-opencode', 5, 'opencode-terminal')).toMatchObject({
+      providerSessionId: PROVIDER_SESSION_ID,
       producerInstanceId: 'plugin-instance-a'
     });
+    expect(restarted.register({ ...staged, observedAt: 1_200 })).toMatchObject({
+      kind: 'duplicate',
+      active: true
+    });
+    expect(restarted.activate(activation)).toMatchObject({ kind: 'already-active' });
     expect(
       restarted.reservePollSequence('work-opencode', 5, 'opencode-terminal')
     ).toMatchObject({ pollSeq: 2 });
+  });
+
+  it('keeps an inactive registration fenced across restart and rejects a changed activation fingerprint', () => {
+    const staged = registration({ providerSessionId: PROVIDER_SESSION_ID });
+    const first = new FileAgentEndpointStore(path, dependencies());
+    expect(first.register(staged)).toMatchObject({ kind: 'accepted', active: false });
+
+    const restarted = new FileAgentEndpointStore(path, dependencies());
+    expect(restarted.get('work-opencode', 5, 'opencode-terminal')).toBeDefined();
+    expect(restarted.getActive('work-opencode', 5, 'opencode-terminal')).toBeUndefined();
+    const { observedAt: _observedAt, ...activation } = staged;
+    expect(
+      restarted.activate({
+        ...activation,
+        providerSessionId: OTHER_PROVIDER_SESSION_ID
+      })
+    ).toMatchObject({ kind: 'rejected', reason: 'registration-mismatch' });
+    expect(restarted.getActive('work-opencode', 5, 'opencode-terminal')).toBeUndefined();
+    expect(restarted.register({ ...staged, observedAt: 1_200 })).toMatchObject({
+      kind: 'duplicate',
+      active: false
+    });
+    expect(restarted.activate(activation)).toMatchObject({ kind: 'activated' });
+    expect(restarted.getActive('work-opencode', 5, 'opencode-terminal')).toBeDefined();
+  });
+
+  it('rejects invalid provider identity before durable staging', () => {
+    const store = new FileAgentEndpointStore(path, dependencies());
+
+    expect(
+      store.register(registration({ providerSessionId: 'ses_short' }))
+    ).toMatchObject({ kind: 'rejected', reason: 'provider-session-id-invalid' });
+    expect(store.get('work-opencode', 5, 'opencode-terminal')).toBeUndefined();
   });
 
   it('does not persist metadata rejected by the canonical producer watermark', () => {

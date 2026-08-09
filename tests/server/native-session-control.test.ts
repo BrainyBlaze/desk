@@ -116,11 +116,40 @@ describe('provisionNativeSession', () => {
       cwd: '/tmp/work',
       profileId: 'work'
     });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).providerSessionId).toBe(
+      '11111111-2222-4333-8444-555555555555'
+    );
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).claudeMemory).toEqual({
       schemaVersion: 1,
       provider: 'claude',
       cwd: '/tmp/work',
       profileId: 'work'
+    });
+  });
+
+  it('sends the exact Codex resume id as provider fence input', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provisionNativeSession({
+      ...baseSpec,
+      agent: 'codex',
+      uiMode: 'native',
+      resume: '11111111-2222-4333-8444-555555555555'
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      providerSessionId: '11111111-2222-4333-8444-555555555555',
+      subject: {
+        kind: 'agent',
+        provider: 'codex',
+        mode: 'native',
+        producer: 'codex-native'
+      }
     });
   });
 

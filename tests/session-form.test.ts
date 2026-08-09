@@ -200,7 +200,7 @@ describe('session form payload', () => {
     expect('profileId' in buildSessionPayload({ ...base, profileId: 'work-codex', command: 'codex-wrapper' })).toBe(false);
   });
 
-  it('marks a deliberate resume clear only when the field held a value at load', () => {
+  it('never turns an emptied resume field into an unaudited reset request', () => {
     const cleared = buildSessionPayload({
       projectId: 'alpha',
       groupId: 'main',
@@ -213,7 +213,8 @@ describe('session form payload', () => {
       command: '',
       uiMode: 'terminal'
     });
-    expect(cleared.clearResume).toBe(true);
+    expect('clearResume' in cleared).toBe(false);
+    expect(cleared.resume).toBeUndefined();
 
     const staleEmpty = buildSessionPayload({
       projectId: 'alpha',
@@ -227,7 +228,7 @@ describe('session form payload', () => {
       command: '',
       uiMode: 'terminal'
     });
-    expect(staleEmpty.clearResume).toBeUndefined();
+    expect('clearResume' in staleEmpty).toBe(false);
     expect(staleEmpty.resume).toBeUndefined();
   });
 

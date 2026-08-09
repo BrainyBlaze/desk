@@ -396,6 +396,111 @@ describe('spawnMaster ownership', () => {
 });
 
 describe('SessionManager.spawnAndAttach (provision rollback)', () => {
+  it('runs the provider fence before generation allocation or process execution', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-provider-fence-'));
+    const marker = join(dir, 'spawned.marker');
+    try {
+      const store = new InMemoryGenerationLedger();
+      new GenerationLedger(store).allocate('shell');
+      const { manager, ledger } = makeManager(store);
+      const result = await manager.spawnAndAttach('shell', {
+        binPath: '/usr/bin/touch',
+        args: [marker],
+        sockPath: join(dir, 'shell.sock'),
+        geometry: { rows: 24, cols: 80 },
+        readyTimeoutMs: 200,
+        detached: true,
+        preallocateSpawn: (context) => {
+          expect(context).toMatchObject({
+            sessionId: 'shell',
+            currentGeneration: 1,
+            nextGeneration: 2
+          });
+          return {
+            ok: false,
+            reason: 'provider-session-identity-missing',
+            detail: 'not-authorized'
+          };
+        }
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        reason: 'provider-session-identity-missing',
+        detail: 'not-authorized'
+      });
+      expect(ledger.current('shell')).toBe(1);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a dead socket tombstone before running the provider fence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-provider-fence-'));
+    const sockPath = join(dir, 'shell.sock');
+    writeFileSync(sockPath, 'stale');
+    try {
+      const { manager, ledger } = makeManager();
+      const result = await manager.spawnAndAttach('shell', {
+        binPath: '/bin/false',
+        args: [],
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        detached: true,
+        preallocateSpawn: () => {
+          expect(existsSync(sockPath)).toBe(false);
+          return {
+            ok: false,
+            reason: 'provider-session-identity-missing',
+            detail: 'reset-incomplete'
+          };
+        }
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        reason: 'provider-session-identity-missing',
+        detail: 'reset-incomplete'
+      });
+      expect(ledger.current('shell')).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('bypasses the provider fence when provision returns an attached live session', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-provider-fence-'));
+    const sockPath = join(dir, 'shell.sock');
+    const server = await listenAsMaster(sockPath, 1);
+    try {
+      const { manager } = makeManager();
+      expect(manager.ensure('shell', { rows: 24, cols: 80 }).ok).toBe(true);
+      expect(
+        await manager.attachMaster('shell', sockPath, { rows: 24, cols: 80 })
+      ).toBe(true);
+      const fence = vi.fn(() => ({
+        ok: false as const,
+        reason: 'provider-session-identity-missing' as const,
+        detail: 'not-authorized' as const
+      }));
+
+      await expect(
+        manager.spawnAndAttach('shell', {
+          binPath: '/bin/false',
+          args: [],
+          sockPath,
+          geometry: { rows: 24, cols: 80 },
+          preallocateSpawn: fence
+        })
+      ).resolves.toMatchObject({ ok: true, generation: 1, created: false });
+      expect(fence).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('frees the allocated slot when the master never comes up (no capacity leak)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-provision-'));
     try {
@@ -493,9 +598,152 @@ describe('SessionManager.spawnAndAttach (provision rollback)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('serializes provider reset behind an in-flight provision before touching identity state', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-provider-reset-'));
+    const sockPath = join(dir, 'shell.sock');
+    let releasePreparation: (() => void) | undefined;
+    const preparationGate = new Promise<void>((resolve) => {
+      releasePreparation = resolve;
+    });
+    const transaction = vi.fn(async (generation: number) => generation);
+    try {
+      const { manager } = makeManager();
+      const provision = manager.spawnAndAttach('shell', {
+        binPath: '/bin/false',
+        args: [],
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        prepareSpawn: async () => {
+          await preparationGate;
+          throw new Error('stop before spawn');
+        }
+      });
+      await waitFor(() => manager.stateSnapshot('shell') !== undefined);
+
+      const reset = manager.resetForProviderSession(
+        'shell',
+        sockPath,
+        transaction
+      );
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(transaction).not.toHaveBeenCalled();
+
+      releasePreparation?.();
+      await expect(provision).resolves.toEqual({
+        ok: false,
+        reason: 'spawn-failed'
+      });
+      await expect(reset).resolves.toEqual({
+        ok: true,
+        generation: 1,
+        value: 1
+      });
+      expect(transaction).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses provider reset while an unowned socket still has a live listener', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-provider-reset-'));
+    const sockPath = join(dir, 'shell.sock');
+    const server = await listenAsMaster(sockPath, 1);
+    const transaction = vi.fn(async () => undefined);
+    try {
+      const { manager } = makeManager();
+
+      await expect(
+        manager.resetForProviderSession('shell', sockPath, transaction)
+      ).resolves.toEqual({
+        ok: false,
+        reason: 'session-live',
+        error: 'session shell still has a listening master'
+      });
+      expect(transaction).not.toHaveBeenCalled();
+      expect(existsSync(sockPath)).toBe(true);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('SessionManager.retireAwaited (the restart-race pin)', () => {
+  it('does not retire a newer generation for a stale exact-generation request', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-retire-generation-'));
+    const sockPath = join(dir, 'shell.sock');
+    const server = await listenAsMaster(sockPath, 2);
+    try {
+      const store = new InMemoryGenerationLedger();
+      const ledger = new GenerationLedger(store);
+      ledger.allocate('shell');
+      ledger.allocate('shell');
+      const { manager } = makeManager(store);
+      const restored = await manager.restoreAndAttach('shell', {
+        sockPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: {
+          binPath: '/bin/sh',
+          args: ['-c', `rm -f ${shellQuote(sockPath)}`]
+        }
+      });
+      expect(restored).toMatchObject({ ok: true, generation: 2 });
+
+      const result = await manager.retireGenerationAwaited('shell', 1);
+
+      expect(result).toEqual({
+        ok: false,
+        reason: 'generation-mismatch',
+        expectedGeneration: 1,
+        currentGeneration: 2,
+        error: 'session shell is generation 2, not 1'
+      });
+      expect(manager.stateSnapshot('shell')).toMatchObject({ generation: 2 });
+      expect(existsSync(sockPath)).toBe(true);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retires only the exact requested generation to confirmed completion', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-retire-generation-'));
+    const sockPath = join(dir, 'shell.sock');
+    const server = await listenAsMaster(sockPath, 1);
+    try {
+      const store = new InMemoryGenerationLedger();
+      new GenerationLedger(store).allocate('shell');
+      const { manager } = makeManager(store);
+      expect(
+        (
+          await manager.restoreAndAttach('shell', {
+            sockPath,
+            geometry: { rows: 24, cols: 80 },
+            killSpec: {
+              binPath: '/bin/sh',
+              args: ['-c', `rm -f ${shellQuote(sockPath)}`]
+            }
+          })
+        ).ok
+      ).toBe(true);
+
+      const result = await manager.retireGenerationAwaited('shell', 1, {
+        timeoutMs: 4_000
+      });
+
+      expect(result).toEqual({ ok: true });
+      expect(manager.stateSnapshot('shell')).toMatchObject({
+        generation: 1,
+        lifecycle: 'exited'
+      });
+      expect(existsSync(sockPath)).toBe(false);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('resolves only after the kill completed AND the socket disappeared', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-retire-'));
     const sockPath = join(dir, 'shell.sock');
@@ -641,6 +889,11 @@ describe('spawnAndAttach foreign-socket preflight (ownership invariant)', () => 
       const store = new InMemoryGenerationLedger();
       new GenerationLedger(store).allocate('shell'); // durable current = the master's 1
       const { manager, ledger } = makeManager(store);
+      const fence = vi.fn(() => ({
+        ok: false as const,
+        reason: 'provider-session-identity-missing' as const,
+        detail: 'not-authorized' as const
+      }));
       const result = await manager.spawnAndAttach('shell', {
         binPath: '/bin/true',
         args: [],
@@ -648,11 +901,13 @@ describe('spawnAndAttach foreign-socket preflight (ownership invariant)', () => 
         geometry: { rows: 24, cols: 80 },
         readyTimeoutMs: 2000,
         detached: true,
+        preallocateSpawn: fence,
         killSpec: { binPath: '/usr/bin/touch', args: [marker] }
       });
       expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
       expect(manager.state('shell')).toBeUndefined(); // no session admitted
       expect(ledger.current('shell')).toBe(1); // NOT advanced — reconcile can still adopt it
+      expect(fence).not.toHaveBeenCalled();
       await new Promise((r) => setTimeout(r, 200));
       expect(existsSync(marker)).toBe(false); // the foreign master was NOT killed
       // and it still accepts connections (alive + adoptable)

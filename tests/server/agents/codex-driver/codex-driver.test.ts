@@ -336,7 +336,7 @@ describe('createCodexDriver', () => {
     });
   });
 
-  it('falls back to a fresh thread when resume fails instead of dying', async () => {
+  it('fails closed when thread/resume fails and never starts a fresh thread', async () => {
     const transport = new FakeCodexTransport({
       initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
       'thread/resume': () => {
@@ -348,20 +348,28 @@ describe('createCodexDriver', () => {
       }
     });
     const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: 'thread-gone' });
-    const events: Array<{ kind: string; message?: string; fatal?: boolean }> = [];
-    driver.onEvent((e) => events.push(e as { kind: string; message?: string; fatal?: boolean }));
 
-    const started = await driver.start();
-
-    // The dead resume id must not kill the session: a fresh thread starts and
-    // the failure surfaces as a non-fatal transcript notice.
-    expect(started.session.agentSessionId).toBe('thread-fresh');
-    expect(transport.calls).toContainEqual(
+    await expect(driver.start()).rejects.toThrow('no rollout found for thread id thread-gone');
+    expect(transport.calls).not.toContainEqual(
       expect.objectContaining({ type: 'request', method: 'thread/start' })
     );
-    const notice = events.find((e) => e.kind === 'agent-error');
-    expect(notice?.fatal).toBe(false);
-    expect(notice?.message).toContain('could not be resumed');
+  });
+
+  it('fails closed when thread/resume returns a different thread id', async () => {
+    const requestedId = '019ec5e5-78dc-7eb3-99d9-2a98122d6ad7';
+    const returnedId = '019ec5e5-78dc-7eb3-99d9-2a98122d6ad8';
+    const transport = new FakeCodexTransport({
+      initialize: () => ({ userAgent: 'codex-cli 0.142.5', codexHome: '/tmp/codex-home', platformFamily: 'unix', platformOs: 'linux' }),
+      'thread/resume': () => ({ thread: thread({ id: returnedId }) })
+    });
+    const driver = createCodexDriver({ transport, cwd: '/repo', resumeId: requestedId });
+
+    await expect(driver.start()).rejects.toThrow(
+      `codex thread/resume returned ${returnedId} for requested thread ${requestedId}`
+    );
+    expect(transport.calls).not.toContainEqual(
+      expect.objectContaining({ type: 'request', method: 'thread/start' })
+    );
   });
 
   it('advertises native-safe Codex slash commands on start for the composer palette', async () => {

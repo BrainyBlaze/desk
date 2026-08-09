@@ -40,6 +40,9 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
       command: atchCommandFor(spec),
       geometry: { rows: 24, cols: 80 },
       subject: sessionStateSubjectFor(spec),
+      ...(spec.resume === undefined
+        ? {}
+        : { providerSessionId: spec.resume }),
       ...(continuity ? { continuity } : {}),
       ...(claudeMemory ? { claudeMemory } : {})
     })

@@ -21,7 +21,6 @@ interface SessionPayload {
   agent?: string;
   profileId?: string;
   resume?: string;
-  clearResume?: boolean;
   bypassPermissions?: boolean;
   command?: string;
   uiMode?: 'terminal' | 'native';
