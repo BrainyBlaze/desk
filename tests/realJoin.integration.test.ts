@@ -7,6 +7,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { MasterClient } from '../src/server/runtime/masterClient.js';
@@ -36,6 +37,20 @@ async function until(pred: () => boolean, timeoutMs: number, stepMs = 30): Promi
     await wait(stepMs);
   }
   return pred();
+}
+/** Does a live master accept a connection on this socket? (test-local mirror). */
+function socketHasListenerT(path: string, timeoutMs = 250): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ path });
+    const settle = (result: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs, () => settle(false));
+    socket.once('connect', () => settle(true));
+    socket.once('error', () => settle(false));
+  });
 }
 function killSession(name: string): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -175,6 +190,86 @@ describe.skipIf(!AVAILABLE)('REAL join — daemon ↔ real atch master (§7.1)',
     // retire runs `atch kill -f NAME`; the session socket disappears.
     mgr.retire(name);
     expect(await until(() => !existsSync(sockPath), 4000)).toBe(true);
+  });
+
+  it('reboot recovery: a leftover socket NODE with no live master does not wedge respawn', { timeout: 25000 }, async () => {
+    // Reproduces the post-reboot wedge: on WSL /tmp survives a restart, so every
+    // session's socket node persists after its holder was killed by the reboot.
+    // The node has no listener (dead master). Both atch's own bind ("session is
+    // already running") and spawnMaster's existence gate refuse an existing node
+    // regardless of liveness, so without reclaiming it the session can NEVER be
+    // respawned. doSpawnAndAttach must remove the listener-less tombstone and
+    // spawn cleanly. A companion .log is left in place (it holds prior scrollback
+    // and atch appends to it).
+    const name = track(`deskreboot${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`);
+    const sockPath = join(SOCK_DIR, name);
+
+    // Fabricate the reboot leftover: a bound-then-closed AF_UNIX node with NO
+    // listener. Node's net.Server.close() unlinks the path, so use a raw
+    // bind()+close(), which leaves the node behind exactly as a SIGKILLed
+    // holder would after a reboot.
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('python3', [
+      '-c',
+      `import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()`,
+      sockPath
+    ]);
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(`${sockPath}.log`, 'prior scrollback\n');
+    expect(existsSync(sockPath)).toBe(true); // the tombstone is present
+    expect(await socketHasListenerT(sockPath)).toBe(false); // and dead
+
+    const mgr = new SessionManager({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
+      emulatorFactory: { create: () => new FakeEmu() },
+      now: () => Date.now(),
+      sendBrowser: () => {}
+    });
+    const ens = await mgr.spawnAndAttach(name, {
+      binPath: ATCH_BIN,
+      args: ['start', name, 'cat'],
+      sockPath,
+      geometry: { rows: 40, cols: 120 },
+      detached: true,
+      killSpec: { binPath: ATCH_BIN, args: ['kill', '-f', name] },
+      readyTimeoutMs: 6000
+    });
+    expect(ens.ok).toBe(true); // NOT spawn-failed: the tombstone was reclaimed
+
+    mgr.retire(name);
+    expect(await until(() => !existsSync(sockPath), 4000)).toBe(true);
+    rmSync(`${sockPath}.log`, { force: true }); // clean the scrollback companion this test wrote
+  });
+
+  it('a leftover node with a LIVE foreign master is never reclaimed (spawn refuses)', { timeout: 25000 }, async () => {
+    // The dual of the reboot case: an existing socket that STILL accepts a
+    // connection belongs to a live master and must never be allocated over —
+    // the listener check gates the reclaim, so this spawn fails closed.
+    const name = track(`desklive${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`);
+    const sockPath = join(SOCK_DIR, name);
+    // A real, listening master under this exact socket path.
+    await spawnMaster({ binPath: ATCH_BIN, args: ['start', name, 'cat'], sockPath, generation: 1, detached: true, readyTimeoutMs: 6000 });
+    expect(await socketHasListenerT(sockPath)).toBe(true);
+
+    const mgr = new SessionManager({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
+      emulatorFactory: { create: () => new FakeEmu() },
+      now: () => Date.now(),
+      sendBrowser: () => {}
+    });
+    const ens = await mgr.spawnAndAttach(name, {
+      binPath: ATCH_BIN,
+      args: ['start', name, 'cat'],
+      sockPath,
+      geometry: { rows: 40, cols: 120 },
+      detached: true,
+      killSpec: { binPath: ATCH_BIN, args: ['kill', '-f', name] },
+      readyTimeoutMs: 6000
+    });
+    expect(ens.ok).toBe(false); // fail closed over a live foreign master
+    expect(existsSync(sockPath)).toBe(true); // and it was left untouched
   });
 
   it('FULL STACK with the REAL @xterm/headless emulator: real atch output renders into the screen snapshot', { timeout: 25000 }, async () => {

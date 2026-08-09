@@ -29,7 +29,7 @@ import { MasterClient } from './masterClient.js';
 import { SpawnMasterError, spawnMaster } from './spawnMaster.js';
 import { Role } from '../../shared/atchWire/frames.js';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { type AtchEvent } from './atchEvents.js';
 
 interface KillCommandSpec {
@@ -414,8 +414,26 @@ export class SessionManager {
     // start refuses until a human deletes the file. Refuse only for a socket
     // that actually accepts a connection; a refused connect means the owner
     // is gone and the stale node is ours to replace.
-    if (opts.detached === true && existsSync(opts.sockPath) && (await socketHasListener(opts.sockPath))) {
-      return { ok: false, reason: 'spawn-failed' };
+    if (opts.detached === true && existsSync(opts.sockPath)) {
+      if (await socketHasListener(opts.sockPath)) {
+        return { ok: false, reason: 'spawn-failed' };
+      }
+      // No listener: the previous master is gone but its socket NODE survived —
+      // e.g. a reboot that killed every holder yet kept /tmp (WSL preserves it
+      // across restarts). This tombstone is not an owner, and both atch's own
+      // bind() ("session is already running") and spawnMaster's existence gate
+      // refuse an existing node regardless of liveness — so without removing it
+      // here the session can NEVER respawn until a human deletes the file, which
+      // is exactly the permanent wedge the comment above forbids. Reclaim it.
+      // The root is private (0700, this user) and the spawn is serialized per
+      // sessionId (inflight), so no concurrent owner can appear in the gap.
+      try {
+        unlinkSync(opts.sockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return { ok: false, reason: 'spawn-failed' };
+        }
+      }
     }
     const ens = this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
     if (!ens.ok) return ens;
