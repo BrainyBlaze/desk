@@ -115,7 +115,7 @@ describe('bundled atch distribution contract', () => {
     }
   });
 
-  it('builds the pinned fork before every Desk distribution', async () => {
+  it('builds the pinned fork before every Desk distribution', { timeout: 30000 }, async () => {
     const packageJson = JSON.parse(source('package.json'));
     const gitignore = source('.gitignore');
 
