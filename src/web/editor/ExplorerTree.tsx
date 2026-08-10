@@ -4,6 +4,7 @@ import { BookOpen, ChevronDown, ChevronRight, ClipboardCopy, ClipboardPaste, Cop
 import { CLIP_OCTAGON_TINY, Cmd, Modal } from '../arwes/primitives.js';
 import type { DeskBleepName } from '../arwes/bleeps.js';
 import { LIST_REVEAL, LIST_ROW_DURATION } from '../arwes/motion.js';
+import { sourceFromDataTransfer, type UploadSource } from '@mfup/client';
 import { fsCopy, fsCreate, fsDelete, fsList, fsRename, fsUpload, type FsEntry, type FsWatchSocket } from './fsClient.js';
 import { duplicateName, fileNameOf } from './editorState.js';
 import { dirIcon, fileIcon } from './fileIcons.js';
@@ -84,7 +85,9 @@ export function ExplorerTree({
   onError,
   registerActions,
   git,
-  onVisibleDirsChange
+  onVisibleDirsChange,
+  onUploadSource,
+  stagingName
 }: {
   root: string;
   watcher: FsWatchSocket;
@@ -108,6 +111,10 @@ export function ExplorerTree({
   git?: TreeGitIntegration;
   /** reports root + expanded dirs + their visible child dirs (status-map scope) */
   onVisibleDirsChange?: (dirs: string[]) => void;
+  /** streaming upload hook; resolves false when unavailable → legacy path */
+  onUploadSource?: (source: UploadSource | FileList | File[], targetDir: string) => Promise<boolean>;
+  /** active upload session's staging dir name (.incoming.<sid>) — hidden from the tree while live */
+  stagingName?: string | null;
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const [childrenByDir, setChildrenByDir] = useState<Map<string, FsEntry[]>>(new Map());
@@ -120,7 +127,6 @@ export function ExplorerTree({
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [lastSelectedPath, setLastSelectedPath] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
   const [uploadDir, setUploadDir] = useState<string | null>(null);
   const menuRef = useClampedMenu(menu);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -259,13 +265,13 @@ export function ExplorerTree({
         continue;
       }
       for (const entry of entries) {
-        if (entry.expandable) {
+        if (entry.expandable && entry.name !== stagingName) {
           dirs.add(entry.path);
         }
       }
     }
     onVisibleDirsChange([...dirs].sort());
-  }, [expanded, childrenByDir, root, onVisibleDirsChange]);
+  }, [expanded, childrenByDir, root, onVisibleDirsChange, stagingName]);
 
   const startCreate = (kind: 'create-file' | 'create-dir', dirPath: string): void => {
     setMenu(null);
@@ -442,7 +448,6 @@ export function ExplorerTree({
     if (list.length === 0) {
       return;
     }
-    setUploading(true);
     try {
       for (const file of list) {
         const buffer = await file.arrayBuffer();
@@ -458,8 +463,6 @@ export function ExplorerTree({
       setUploadDir(null);
     } catch (error) {
       onError(error instanceof Error ? error.message : 'upload failed');
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -520,7 +523,14 @@ export function ExplorerTree({
 
     // Handle file uploads
     if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
-      void uploadFiles(event.dataTransfer.files, path);
+      const source = sourceFromDataTransfer(event.dataTransfer);
+      const fallback = [...event.dataTransfer.files];
+      void (async () => {
+        if (source && onUploadSource && (await onUploadSource(source, path))) {
+          return;
+        }
+        await uploadFiles(fallback, path);
+      })();
       return;
     }
 
@@ -687,8 +697,11 @@ export function ExplorerTree({
     );
   };
 
+  const visibleEntries = (entries: FsEntry[]): FsEntry[] =>
+    stagingName ? entries.filter((entry) => entry.name !== stagingName) : entries;
+
   const renderBranch = (dirPath: string): JSX.Element => {
-    const entries = childrenByDir.get(dirPath) ?? [];
+    const entries = visibleEntries(childrenByDir.get(dirPath) ?? []);
     const isCreateHere = pendingEdit && pendingEdit.kind !== 'rename' && pendingEdit.dirPath === dirPath;
     return (
       <Animator combine manager="stagger" duration={{ stagger: LIST_REVEAL.stagger, limit: LIST_REVEAL.limit }}>
@@ -700,7 +713,7 @@ export function ExplorerTree({
     );
   };
 
-  const rootEntries = childrenByDir.get(root) ?? [];
+  const rootEntries = visibleEntries(childrenByDir.get(root) ?? []);
   const isCreateAtRoot = pendingEdit && pendingEdit.kind !== 'rename' && pendingEdit.dirPath === root;
   const menuDir = menu?.entry ? (menu.entry.expandable ? menu.entry.path : parentOf(menu.entry.path)) : root;
 
@@ -933,7 +946,15 @@ export function ExplorerTree({
         hidden
         onChange={(event) => {
           if (event.target.files && uploadDir) {
-            void uploadFiles(event.target.files, uploadDir);
+            const dir = uploadDir;
+            const picked = [...event.target.files];
+            void (async () => {
+              if (onUploadSource && (await onUploadSource(picked, dir))) {
+                setUploadDir(null);
+                return;
+              }
+              await uploadFiles(picked, dir);
+            })();
             event.target.value = '';
           }
         }}

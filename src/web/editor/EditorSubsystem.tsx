@@ -54,6 +54,8 @@ import { FsWatchSocket, fsCreate, fsCreateApply, fsCreatePreview, fsDelete, fsDe
 import { deriveNoteName, isUntitledNote, noteFileName } from './noteNames.js';
 import { ExplorerTree, type ExplorerTreeActions, type TreeGitIntegration, type TreeGitMenuSpec } from './ExplorerTree.js';
 import { SearchPanel } from './SearchPanel.js';
+import { UploadsHost } from './UploadCard.js';
+import type { DeskUploads } from './useDeskUploads.js';
 import { EditorTabs, type TabMeta } from './EditorTabs.js';
 import { MonacoHost, type RevealTarget } from './MonacoHost.js';
 import { closeTab, fileNameOf, moveTab, openTab } from './editorState.js';
@@ -321,6 +323,11 @@ export function EditorSubsystem({
   const [tabs, setTabs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [reveal, setReveal] = useState<RevealTarget | null>(null);
+  const uploadStartRef = useRef<DeskUploads['start'] | null>(null);
+  const registerUploadStart = useCallback((start: DeskUploads['start'] | null) => {
+    uploadStartRef.current = start;
+  }, []);
+  const [uploadStagingName, setUploadStagingName] = useState<string | null>(null);
   const [renderTick, forceRender] = useState(0);
   const bump = useCallback(() => forceRender((value) => value + 1), []);
 
@@ -2229,6 +2236,8 @@ export function EditorSubsystem({
               registerActions={registerTreeActions}
               git={treeGit}
               onVisibleDirsChange={gitEnabled ? handleVisibleDirs : undefined}
+              onUploadSource={(source, targetDir) => uploadStartRef.current?.(source, root, targetDir) ?? Promise.resolve(false)}
+              stagingName={uploadStagingName}
             />
           ) : null}
           {root && sidebarMode === 'search' ? (
@@ -2563,6 +2572,7 @@ export function EditorSubsystem({
               </div>
             </Modal>
           ) : null}
+          <UploadsHost onError={onError} register={registerUploadStart} onStagingChange={setUploadStagingName} />
         </main>
       </Panel>
     </Group>

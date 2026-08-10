@@ -19,6 +19,7 @@ import { createSettingsRoutes } from './routes/settingsRoutes.js';
 import { createSystemRoutes } from './routes/systemRoutes.js';
 import { createProfileRoutes } from './routes/profileRoutes.js';
 import { createTerminalRoutes } from './routes/terminalRoutes.js';
+import { createUploadsApi } from './uploadsApi.js';
 
 export type { DeskApiHost } from './deskApiTypes.js';
 export { applySettingsPatch } from './routes/settingsRoutes.js';
@@ -55,7 +56,14 @@ export function installDeskApi(host: DeskApiHost, options: InstallDeskApiOptions
     }
   }
 
+  const uploadsApi = createUploadsApi();
+  uploadsApi.attach(host.httpServer);
+  disposers.add(() => {
+    void uploadsApi.dispose().catch((err) => console.warn('[desk-uploads] dispose failed:', err));
+  });
+
   const routes: DeskRoute[] = [
+    uploadsApi.route,
     (req, res, url) => handleFsRequest(req, res, url, { fileOperationCoordinator: services.lspFileOperationCoordinator }),
     handleGitRequest,
     handleProjectsRequest,

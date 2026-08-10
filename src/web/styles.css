@@ -2556,8 +2556,37 @@ select {
 .confirmActions { display: flex; gap: 8px; justify-content: flex-end; }
 .confirmActionsSplit .deskCmd.danger { order: -1; margin-right: auto; }
 
+.uploadCard {
+  position: absolute; right: 14px; bottom: 14px; z-index: 30;
+  width: 320px; max-width: calc(100% - 28px);
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 10px 12px;
+  background: var(--desk-bg-elevated);
+  border: 1px solid var(--desk-line);
+  font-size: 11px; color: var(--desk-text-dim);
+}
+.uploadCardHead { display: flex; align-items: center; gap: 6px; color: var(--desk-text); }
+.uploadCardTitle { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.uploadCardClose {
+  background: none; border: none; color: var(--desk-text-dim); cursor: pointer; padding: 2px;
+  display: grid; place-items: center;
+}
+.uploadCardClose:hover { color: var(--desk-error); }
+.uploadCardBar { height: 4px; background: var(--desk-glow); overflow: hidden; }
+.uploadCardBarFill {
+  height: 100%; background: var(--desk-accent); box-shadow: 0 0 8px var(--desk-accent);
+  transition: width 200ms ease;
+}
+.uploadCardStats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.uploadCardCurrent { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.75; }
+.uploadCardOk { display: inline-flex; align-items: center; gap: 4px; color: var(--desk-ok); }
+.uploadCardErr { display: inline-flex; align-items: center; gap: 4px; color: var(--desk-error); }
+.uploadCardAsk { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--desk-line); padding-top: 7px; }
+.uploadCardAskName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--desk-warn); }
+.uploadCardActions { display: flex; justify-content: flex-end; }
+
 /* ---------- Editor subsystem: tabs + monaco ---------- */
-.editorStage { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0; }
+.editorStage { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0; }
 .editorStage > .deskPanel { flex: 1; height: auto; min-height: 0; margin: 12px; }
 
 .editorTabs {

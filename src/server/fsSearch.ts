@@ -106,7 +106,7 @@ export function hasRipgrep(): boolean {
 
 export async function searchFiles(root: string, query: string): Promise<FileSearchResult> {
   const files = hasRipgrep()
-    ? (await runRipgrep(['--files', '--hidden', '--glob', '!.git/**'], root)).split('\n').filter(Boolean)
+    ? (await runRipgrep(['--files', '--hidden', '--glob', '!.git/**', '--glob', '!**/.incoming.????????-????-????-????-????????????/**'], root)).split('\n').filter(Boolean)
     : walkFiles(root);
   const scored = files
     .map((path) => ({ path, score: scoreFuzzyPath(query, path) }))
@@ -122,7 +122,7 @@ export async function searchContent(root: string, query: string): Promise<Conten
   const matches = hasRipgrep()
     ? parseRipgrepJson(
         await runRipgrep(
-          ['--json', '--smart-case', '--hidden', '--glob', '!.git/**', '--max-count', '20', '-e', query, '.'],
+          ['--json', '--smart-case', '--hidden', '--glob', '!.git/**', '--glob', '!**/.incoming.????????-????-????-????-????????????/**', '--max-count', '20', '-e', query, '.'],
           root
         )
       ).map((match) => ({ ...match, path: match.path.replace(/^\.\//, '') }))
