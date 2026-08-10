@@ -28,7 +28,7 @@ import {
   UserPlus,
   X
 } from 'lucide-react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
+import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import type { SessionStatusMap } from '../usePulse.js';
 import type { PanelImperativeHandle, PanelSize } from 'react-resizable-panels';
 import { publishStatus, type StatusSegment } from '../statusSegments.js';
@@ -2115,6 +2115,14 @@ export function ChannelsSubsystem({
   /* ---------- render ---------- */
 
   const channelSidebarSectionState = channelSidebarSections({ hasDetail: Boolean(detail), fileCount: detail?.files.length ?? 0 });
+  const sidebarSectionsLayout = useDefaultLayout({
+    id: 'desk-channels-sidebar-sections-v1',
+    panelIds: [
+      'channels-list-section',
+      ...(detail ? ['channels-members-section'] : []),
+      ...(detail && channelSidebarSectionState.files ? ['channels-files-section'] : [])
+    ]
+  });
 
   return (
     <Group
@@ -2147,7 +2155,13 @@ export function ChannelsSubsystem({
             </div>
           </div>
 
-          <Group orientation="vertical" className="chanSidebarSections" id="desk-channels-sidebar-sections-v1">
+          <Group
+            orientation="vertical"
+            className="chanSidebarSections"
+            id="desk-channels-sidebar-sections-v1"
+            defaultLayout={sidebarSectionsLayout.defaultLayout}
+            onLayoutChanged={sidebarSectionsLayout.onLayoutChanged}
+          >
             <Panel
               id="channels-list-section"
               panelRef={channelListPanelRef}
