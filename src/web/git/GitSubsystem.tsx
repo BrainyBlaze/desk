@@ -18,7 +18,7 @@ import {
   Upload,
   X
 } from 'lucide-react';
-import { Group, Panel, Separator } from 'react-resizable-panels';
+import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 import type { PanelImperativeHandle, PanelSize } from 'react-resizable-panels';
 import { formatAheadBehind, gitStatusCounts, publishStatus, type StatusSegment } from '../statusSegments.js';
 import { CLIP_OCTAGON_TINY, Cmd, DeskPanel, IconButton, Modal, Pill, TextReveal } from '../arwes/primitives.js';
@@ -260,6 +260,7 @@ export function GitSubsystem({
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistedCollapse(GIT_SIDEBAR_STORAGE_KEY, onSidebarCollapsedChange);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
   const restoringSidebarRef = useRef(false);
+  const sectionsLayout = useDefaultLayout({ id: 'desk-git-sections-v2' });
   // Persisted width: localStorage cache for instant boot, desk.yml as truth.
   const initialWidthRef = useRef(
     readStoredSidebarWidth(localStorage.getItem(`${SIDEBAR_WIDTH_STORAGE_PREFIX}git`)) ?? 180
@@ -542,23 +543,22 @@ export function GitSubsystem({
     setSectionCollapsed(which, size.inPixels <= 30);
   }
 
-  // Re-apply section collapse when the subsystem becomes visible again (the
-  // panels mount while hidden, so the imperative state can get lost).
-  useEffect(() => {
+  // Re-apply section collapse before the subsystem paints visible: the panels
+  // mount while hidden so the imperative state can get lost, and a persisted
+  // expanded layout would otherwise flash before rAF re-collapsed it.
+  useLayoutEffect(() => {
     if (!active) {
       return;
     }
-    window.requestAnimationFrame(() => {
-      if (changesCollapsed) {
-        changesPanelRef.current?.collapse();
-      }
-      if (historyCollapsed) {
-        historyPanelRef.current?.collapse();
-      }
-      if (branchesCollapsed) {
-        branchesPanelSectionRef.current?.collapse();
-      }
-    });
+    if (changesCollapsed) {
+      changesPanelRef.current?.collapse();
+    }
+    if (historyCollapsed) {
+      historyPanelRef.current?.collapse();
+    }
+    if (branchesCollapsed) {
+      branchesPanelSectionRef.current?.collapse();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
@@ -1514,7 +1514,13 @@ export function GitSubsystem({
               {/* Branches leads: picking/comparing a branch frames the changes
                   below it. New group id — the library keeps per-id layouts and
                   a reordered group under the old id restores stale sizes. */}
-              <Group orientation="vertical" className="gitSectionsGroup" id="desk-git-sections-v2">
+              <Group
+                orientation="vertical"
+                className="gitSectionsGroup"
+                id="desk-git-sections-v2"
+                defaultLayout={sectionsLayout.defaultLayout}
+                onLayoutChanged={sectionsLayout.onLayoutChanged}
+              >
                 <Panel
                   id="git-branches-section"
                   panelRef={branchesPanelSectionRef}
