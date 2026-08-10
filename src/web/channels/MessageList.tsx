@@ -31,6 +31,36 @@ const NEAR_EDGE_PX = 300;
 
 const ChannelMarkdown = lazy(() => import('./ChannelMarkdown.js'));
 
+const FEED_SIZES_KEY = 'desk.chanFeedSizes';
+const FEED_SIZES_CAP = 2000;
+
+function readStoredFeedSizes(): Map<string, number> {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(FEED_SIZES_KEY) ?? '[]') as unknown;
+    if (Array.isArray(parsed)) {
+      return new Map(parsed.filter((e): e is [string, number] => Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'number'));
+    }
+  } catch {
+    return new Map();
+  }
+  return new Map();
+}
+
+function persistFeedSizes(cache: Map<unknown, number>): void {
+  try {
+    const merged = readStoredFeedSizes();
+    for (const [key, size] of cache) {
+      if (typeof key === 'string') {
+        merged.delete(key);
+        merged.set(key, size);
+      }
+    }
+    sessionStorage.setItem(FEED_SIZES_KEY, JSON.stringify([...merged.entries()].slice(-FEED_SIZES_CAP)));
+  } catch {
+    return;
+  }
+}
+
 /** The four frozen ReactionKind values in display order, each with its icon.
     Present kinds always show; absent ones reveal on row hover for one-click adding. */
 const REACTION_KINDS: ReadonlyArray<{ kind: ReactionKind; icon: JSX.Element; label: string }> = [
@@ -379,6 +409,14 @@ export function MessageList({
 }): JSX.Element {
   const bleeps = useBleeps<DeskBleepName>();
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollIdleTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (scrollIdleTimerRef.current !== null) {
+        window.clearTimeout(scrollIdleTimerRef.current);
+      }
+    };
+  }, []);
   const activeRef = useRef(active);
   activeRef.current = active;
   const stickToBottomRef = useRef(true);
@@ -406,6 +444,14 @@ export function MessageList({
   const loadPendingRef = useRef(false);
 
   const rows = useMemo(() => buildMessageListRows(messages, { newDividerId, compact }), [messages, newDividerId, compact]);
+  const [initialMeasurements] = useState(() => {
+    let start = 0;
+    return [...readStoredFeedSizes().entries()].map(([key, size], index) => {
+      const item = { index, key, start, end: start + size, size, lane: 0 };
+      start += size;
+      return item;
+    });
+  });
   const rowsRef = useRef<MessageListRow[]>(rows);
   rowsRef.current = rows;
   const unreadIds = useMemo(() => unreadIdsAfter(messages, unreadFromId), [messages, unreadFromId]);
@@ -432,10 +478,16 @@ export function MessageList({
     overscan: 10,
     anchorTo: 'end',
     followOnAppend: 'auto',
-    scrollEndThreshold: 80
+    scrollEndThreshold: 80,
+    initialMeasurementsCache: initialMeasurements
   });
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
+  const persistSizesRef = useRef<() => void>(() => {});
+  persistSizesRef.current = () => persistFeedSizes(virtualizer.itemSizeCache);
+  useEffect(() => {
+    return () => persistSizesRef.current();
+  }, []);
 
   const captureScrollAnchor = (): MessageScrollAnchor | null => {
     const node = scrollRef.current;
@@ -699,6 +751,19 @@ export function MessageList({
   // bottom edge has passed the viewport top is "read", and reaching the bottom
   // acks the rest. Coalesced to one DOM scan per frame; forward-only upstream.
   const handleScroll = (): void => {
+    const scrollNode = scrollRef.current;
+    if (scrollNode) {
+      if (scrollIdleTimerRef.current === null) {
+        scrollNode.classList.add('chanFeedScrolling');
+      } else {
+        window.clearTimeout(scrollIdleTimerRef.current);
+      }
+      scrollIdleTimerRef.current = window.setTimeout(() => {
+        scrollIdleTimerRef.current = null;
+        scrollRef.current?.classList.remove('chanFeedScrolling');
+        persistSizesRef.current();
+      }, 140);
+    }
     if (!activeRef.current) {
       return;
     }
