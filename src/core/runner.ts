@@ -8,10 +8,7 @@ import { resolveAtchBinPath, resolveAtchSocketRoot } from '../shared/atchPaths.j
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
 import { ensureOpencodeConfigDir } from './opencodeConfig.js';
-import { findOpencodeLaunchResume } from './opencodeResume.js';
-import { upsertPendingResumeCapture } from './resumeCaptureState.js';
 import type { SessionPlanAction, SessionSpec } from './types.js';
-import { shellQuote } from '../shared/shell.js';
 import { sessionStateSubjectFor } from '../shared/controlPlane/index.js';
 import {
   claudeContinuityDescriptorFor,
@@ -40,9 +37,6 @@ export interface RunnerLifecycleOptions {
   fromUrl?: string;
   cwd?: string;
 }
-
-const RESUME_CAPTURE_CLOCK_SKEW_MS = 3_000;
-const RESUME_CAPTURE_TIMEOUT_MS = 45_000;
 
 export function loadDesk(options: LoadDeskOptions): LoadedDesk {
   const manifestPath = resolveManifestPath(options.manifestPath);
@@ -126,12 +120,7 @@ export function planDeskUp(
     if (existing.has(session.sessionId)) {
       return { type: 'preserve', session };
     }
-    const launch = prepareSessionForLaunchWithMetadata(session);
-    return {
-      type: 'start',
-      session: launch.session,
-      opencodeLaunchResumeId: launch.opencodeLaunchResumeId
-    };
+    return { type: 'start', session };
   });
 }
 
@@ -160,6 +149,9 @@ async function provisionPreparedSession(
     command: buildAtchCommand(session),
     geometry: { rows: 24, cols: 80 },
     subject: sessionStateSubjectFor(session),
+    ...(session.resume === undefined
+      ? {}
+      : { providerSessionId: session.resume }),
     ...(continuity ? { continuity } : {}),
     ...(claudeMemory ? { claudeMemory } : {})
   });
@@ -205,10 +197,6 @@ export async function runPlan(
       failures.push(`${action.session.sessionId}: ${error}`);
       continue;
     }
-    const pendingCapture = pendingCaptureForLaunch(action.session, action.opencodeLaunchResumeId);
-    if (pendingCapture) {
-      upsertPendingResumeCapture(pendingCapture);
-    }
   }
   if (failures.length > 0) {
     console.error(`${failures.length} session(s) could not start:\n  ${failures.join('\n  ')}`);
@@ -232,64 +220,11 @@ export async function startSession(
   if (!preparedStart.ok) {
     return preparedStart;
   }
-  const launch = prepareSessionForLaunchWithMetadata(session);
-  const result = await provisionPreparedSession(launch.session, options);
+  const result = await provisionPreparedSession(session, options);
   if (!result.ok) {
     return result;
   }
-  const pendingCapture = pendingCaptureForLaunch(launch.session, launch.opencodeLaunchResumeId);
-  if (pendingCapture) {
-    upsertPendingResumeCapture(pendingCapture);
-  }
   return { ok: true };
-}
-
-export interface PrepareSessionForLaunchOptions {
-  env?: NodeJS.ProcessEnv;
-  homeDir?: string;
-  nowMs?: number;
-}
-
-export function prepareSessionForLaunch(
-  session: SessionSpec,
-  options: PrepareSessionForLaunchOptions = {}
-): SessionSpec {
-  return prepareSessionForLaunchWithMetadata(session, options).session;
-}
-
-export interface PreparedSessionForLaunch {
-  session: SessionSpec;
-  opencodeLaunchResumeId?: string;
-}
-
-export function prepareSessionForLaunchWithMetadata(
-  session: SessionSpec,
-  options: PrepareSessionForLaunchOptions = {}
-): PreparedSessionForLaunch {
-  if (session.customCommand || session.agent !== 'opencode' || session.resume) {
-    return { session };
-  }
-  // Native mode persists explicit resume ids through the agent surface. The
-  // terminal heuristic would risk resurrecting an unrelated deleted session.
-  if (session.uiMode === 'native') {
-    return { session };
-  }
-  const resume = findOpencodeLaunchResume({
-    cwd: session.cwd,
-    env: options.env,
-    homeDir: options.homeDir,
-    nowMs: options.nowMs
-  });
-  if (!resume) {
-    return { session };
-  }
-  return {
-    session: {
-      ...session,
-      command: `DESK_OPENCODE_RESUME_ID=${shellQuote(resume)}; export DESK_OPENCODE_RESUME_ID; ${session.command}`
-    },
-    opencodeLaunchResumeId: resume
-  };
 }
 
 function prepareSessionStart(session: SessionSpec): { ok: true } | { ok: false; error: string } {
@@ -305,21 +240,6 @@ function prepareSessionStart(session: SessionSpec): { ok: true } | { ok: false; 
       error: `failed to prepare opencode config for ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`
     };
   }
-}
-
-function pendingCaptureForLaunch(session: SessionSpec, launchResumeId?: string) {
-  if (session.customCommand || session.agent !== 'opencode' || session.resume) {
-    return null;
-  }
-  const now = Date.now();
-  return {
-    sessionId: session.sessionId,
-    agent: 'opencode' as const,
-    cwd: session.cwd,
-    sinceMs: now - RESUME_CAPTURE_CLOCK_SKEW_MS,
-    deadlineMs: now + RESUME_CAPTURE_TIMEOUT_MS,
-    launchResumeId
-  };
 }
 
 export async function killSession(

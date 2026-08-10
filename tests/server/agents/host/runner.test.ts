@@ -82,6 +82,7 @@ function makeMockDriver(opts: {
   startEvents?: DriverEvent[];
   startReturn?: { session: { agentSessionId?: string; model?: string }; status: DriverStatusEvent };
   history?: DriverEvent[];
+  fetchHistory?: () => Promise<DriverEvent[]>;
   failStart?: Error;
 } = {}): AgentDriver & {
   injectCalls: Array<{ text: string; source: string }>;
@@ -119,7 +120,7 @@ function makeMockDriver(opts: {
     interrupt: async () => {
       state.interruptCalls += 1;
     },
-    fetchHistory: async () => opts.history ?? [],
+    fetchHistory: opts.fetchHistory ?? (async () => opts.history ?? []),
     shutdown: async () => {
       state.shutdownCalls += 1;
     },
@@ -286,6 +287,40 @@ describe('AgentHost hello + hello-ack', () => {
     expect(statusEvents.length).toBe(1); // single emit from the runner contract
   });
 
+  it('emits authoritative session-info before driver callbacks raised during start', async () => {
+    const driver = makeMockDriver({
+      startEvents: [
+        { kind: 'status', state: 'processing' },
+        {
+          kind: 'assistant-message',
+          id: 'early-message',
+          turnId: 'early-turn',
+          markdown: 'early'
+        }
+      ],
+      startReturn: {
+        session: { agentSessionId: 'ses_authoritative' },
+        status: { kind: 'status', state: 'idle' }
+      }
+    });
+    const { host, socket, sentFrames } = makeHost({ driver });
+    const runPromise = host.run();
+    socket.fireOpen();
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+    socket.fireMessage({ type: 'shutdown', requestId: 'r1' });
+    await runPromise;
+
+    const events = sentFrames()
+      .filter((frame) => frame.type === 'event')
+      .map((frame) => (frame as { event: DriverEvent }).event);
+    expect(events.map((event) => event.kind).slice(0, 3)).toEqual([
+      'session-info',
+      'status',
+      'assistant-message'
+    ]);
+  });
+
   it('hello-ack lastSeq>0 (transient drop) skips backfill — no history-boundary', async () => {
     const driver = makeMockDriver({
       startReturn: { session: { agentSessionId: 'ses_a' }, status: { kind: 'status', state: 'idle' } },
@@ -304,6 +339,55 @@ describe('AgentHost hello + hello-ack', () => {
       .map((f) => (f as { event: AgentSurfaceEventPayload }).event) as AgentSurfaceEventPayload[];
     expect(events.some((e) => e.kind === 'history-boundary')).toBe(false);
     expect(events.some((e) => e.kind === 'user-message')).toBe(false);
+  });
+
+  it('re-emits cached session-info before awaiting history after a server restart', async () => {
+    let historyReads = 0;
+    let releaseReconnectHistory!: () => void;
+    const reconnectHistoryPending = new Promise<void>((resolve) => {
+      releaseReconnectHistory = resolve;
+    });
+    const driver = makeMockDriver({
+      startReturn: {
+        session: { agentSessionId: 'ses_reconnect' },
+        status: { kind: 'status', state: 'idle' }
+      },
+      fetchHistory: async () => {
+        historyReads += 1;
+        if (historyReads > 1) await reconnectHistoryPending;
+        return [];
+      }
+    });
+    const { host, socket, sentFrames } = makeHost({ driver });
+    const runPromise = host.run();
+    socket.fireOpen();
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+    expect(historyReads).toBe(1);
+
+    socket.sent.length = 0;
+    socket.fireClose();
+    await flush();
+    socket.fireOpen();
+    await flush();
+    socket.fireMessage({ type: 'hello-ack', lastSeq: 0 });
+    await flush();
+
+    expect(historyReads).toBe(2);
+    const eventsBeforeHistory = sentFrames()
+      .filter((frame) => frame.type === 'event')
+      .map((frame) => (frame as { event: DriverEvent }).event);
+    expect(eventsBeforeHistory.map((event) => event.kind)).toEqual([
+      'session-info'
+    ]);
+    expect(eventsBeforeHistory[0]).toMatchObject({
+      agentSessionId: 'ses_reconnect'
+    });
+
+    releaseReconnectHistory();
+    await flush();
+    socket.fireMessage({ type: 'shutdown', requestId: 'r1' });
+    await runPromise;
   });
 });
 

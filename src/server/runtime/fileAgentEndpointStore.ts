@@ -12,15 +12,19 @@ import {
 import { randomBytes } from 'node:crypto';
 import { dirname } from 'node:path';
 import {
+  agentEndpointFingerprint,
+  parseAgentEndpointActivation,
   parseAgentEndpointRegistration,
+  type AgentEndpointActivation,
   type AgentEndpointRegistration,
   type AgentProducer,
   type AgentProducerSequenceClaim,
   type AgentProducerSequenceClaimResult,
   type AgentStateProducerRegistration
 } from '../../shared/controlPlane/index.js';
+import { isValidProviderSessionId } from '../../shared/providerSessionIdentity.js';
 
-const STORE_VERSION = 1 as const;
+const STORE_VERSION = 2 as const;
 const MAX_ENDPOINTS = 512;
 
 export interface FileAgentEndpointStoreDependencies {
@@ -37,6 +41,7 @@ export interface FileAgentEndpointStoreDependencies {
 interface StoredEndpoint {
   registration: AgentEndpointRegistration;
   pollSeq: number;
+  active: boolean;
 }
 
 interface PersistedStore {
@@ -45,8 +50,8 @@ interface PersistedStore {
 }
 
 export type AgentEndpointStoreResult =
-  | { kind: 'accepted'; registration: AgentEndpointRegistration }
-  | { kind: 'duplicate'; registration: AgentEndpointRegistration }
+  | { kind: 'accepted'; registration: AgentEndpointRegistration; active: false }
+  | { kind: 'duplicate'; registration: AgentEndpointRegistration; active: boolean }
   | {
       kind: 'rejected';
       reason:
@@ -56,9 +61,24 @@ export type AgentEndpointStoreResult =
         | 'producer-mismatch'
         | 'producer-instance-mismatch'
         | 'producer-order'
-        | 'idempotency-conflict';
+        | 'idempotency-conflict'
+        | 'provider-session-id-invalid';
       carried?: number;
       current?: number;
+    };
+
+export type AgentEndpointActivationResult =
+  | {
+      kind: 'activated' | 'already-active';
+      registration: AgentEndpointRegistration;
+    }
+  | {
+      kind: 'rejected';
+      reason:
+        | 'invalid-activation'
+        | 'provider-session-id-invalid'
+        | 'endpoint-unregistered'
+        | 'registration-mismatch';
     };
 
 export interface ReservedAgentPoll {
@@ -83,6 +103,12 @@ export class FileAgentEndpointStore {
       registration = parseAgentEndpointRegistration(input);
     } catch {
       return { kind: 'rejected', reason: 'invalid-registration' };
+    }
+    if (
+      registration.providerSessionId !== undefined &&
+      !isValidProviderSessionId('opencode', registration.providerSessionId)
+    ) {
+      return { kind: 'rejected', reason: 'provider-session-id-invalid' };
     }
 
     const current = this.dependencies.currentGeneration(registration.sessionId);
@@ -122,8 +148,13 @@ export class FileAgentEndpointStore {
       return { kind: 'rejected', reason: 'producer-instance-mismatch' };
     }
     if (prior !== undefined && registration.producerSeq === prior.registration.producerSeq) {
-      return JSON.stringify(registration) === JSON.stringify(prior.registration)
-        ? { kind: 'duplicate', registration: structuredClone(prior.registration) }
+      return JSON.stringify(agentEndpointFingerprint(registration)) ===
+        JSON.stringify(agentEndpointFingerprint(prior.registration))
+        ? {
+            kind: 'duplicate',
+            registration: structuredClone(prior.registration),
+            active: prior.active
+          }
         : { kind: 'rejected', reason: 'idempotency-conflict' };
     }
     if (prior !== undefined && registration.producerSeq < prior.registration.producerSeq) {
@@ -152,12 +183,17 @@ export class FileAgentEndpointStore {
     }
     next.set(key, {
       registration: structuredClone(registration),
-      pollSeq: prior?.pollSeq ?? 0
+      pollSeq: prior?.pollSeq ?? 0,
+      active: false
     });
     trimOldest(next);
     this.persist(next);
     this.entries = next;
-    return { kind: 'accepted', registration: structuredClone(registration) };
+    return {
+      kind: 'accepted',
+      registration: structuredClone(registration),
+      active: false
+    };
   }
 
   get(
@@ -170,6 +206,61 @@ export class FileAgentEndpointStore {
     return registration === undefined ? undefined : structuredClone(registration);
   }
 
+  getActive(
+    sessionId: string,
+    generation: number,
+    producer: AgentProducer
+  ): AgentEndpointRegistration | undefined {
+    const stored = this.entries.get(endpointKey(sessionId, generation, producer));
+    if (stored === undefined || !stored.active) return undefined;
+    return structuredClone(stored.registration);
+  }
+
+  activate(input: unknown): AgentEndpointActivationResult {
+    let activation: AgentEndpointActivation;
+    try {
+      activation = parseAgentEndpointActivation(input);
+    } catch {
+      return { kind: 'rejected', reason: 'invalid-activation' };
+    }
+    if (!isValidProviderSessionId('opencode', activation.providerSessionId)) {
+      return { kind: 'rejected', reason: 'provider-session-id-invalid' };
+    }
+    const key = endpointKey(
+      activation.sessionId,
+      activation.generation,
+      activation.producer
+    );
+    const current = this.entries.get(key);
+    if (current === undefined) {
+      return { kind: 'rejected', reason: 'endpoint-unregistered' };
+    }
+    if (
+      JSON.stringify(agentEndpointFingerprint(current.registration)) !==
+      JSON.stringify(activation)
+    ) {
+      return { kind: 'rejected', reason: 'registration-mismatch' };
+    }
+    if (current.active) {
+      return {
+        kind: 'already-active',
+        registration: structuredClone(current.registration)
+      };
+    }
+    const next = new Map(this.entries);
+    next.set(key, {
+      registration: structuredClone(current.registration),
+      pollSeq: current.pollSeq,
+      active: true
+    });
+    this.persist(next);
+    this.entries = next;
+    return {
+      kind: 'activated',
+      registration: structuredClone(current.registration)
+    };
+  }
+
   reservePollSequence(
     sessionId: string,
     generation: number,
@@ -177,7 +268,7 @@ export class FileAgentEndpointStore {
   ): ReservedAgentPoll | undefined {
     const key = endpointKey(sessionId, generation, producer);
     const current = this.entries.get(key);
-    if (current === undefined) return undefined;
+    if (current === undefined || !current.active) return undefined;
     const pollSeq = current.pollSeq + 1;
     if (!Number.isSafeInteger(pollSeq)) {
       throw new Error('agent endpoint poll sequence exhausted');
@@ -185,7 +276,8 @@ export class FileAgentEndpointStore {
     const next = new Map(this.entries);
     next.set(key, {
       registration: structuredClone(current.registration),
-      pollSeq
+      pollSeq,
+      active: true
     });
     this.persist(next);
     this.entries = next;
@@ -216,10 +308,19 @@ export class FileAgentEndpointStore {
     for (const value of (parsed as PersistedStore).entries) {
       try {
         const registration = parseAgentEndpointRegistration(value.registration);
-        if (!Number.isSafeInteger(value.pollSeq) || value.pollSeq < 0) return new Map();
+        if (
+          !Number.isSafeInteger(value.pollSeq) ||
+          value.pollSeq < 0 ||
+          typeof value.active !== 'boolean' ||
+          (registration.providerSessionId !== undefined &&
+            !isValidProviderSessionId('opencode', registration.providerSessionId)) ||
+          (value.active && registration.providerSessionId === undefined)
+        ) {
+          return new Map();
+        }
         result.set(
           endpointKey(registration.sessionId, registration.generation, registration.producer),
-          { registration, pollSeq: value.pollSeq }
+          { registration, pollSeq: value.pollSeq, active: value.active }
         );
       } catch {
         return new Map();

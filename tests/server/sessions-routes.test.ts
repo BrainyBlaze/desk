@@ -29,6 +29,67 @@ const session: SessionSpec = {
   uiMode: 'terminal'
 };
 
+async function invokeGlobalProviderAdd(
+  onProvision: (manifestPath: string) => Response | Promise<Response>
+): Promise<{ statusCode: number; payload: Record<string, unknown>; manifestSource: string }> {
+  const home = mkdtempSync(join(tmpdir(), 'desk-add-provider-home-'));
+  const work = mkdtempSync(join(tmpdir(), 'desk-add-provider-work-'));
+  const savedHome = process.env.HOME;
+  const savedDaemonUrl = process.env.DESK_DAEMON_URL;
+  try {
+    const configDir = join(home, '.config', 'desk');
+    mkdirSync(configDir, { recursive: true });
+    const manifestPath = join(configDir, 'desk.yml');
+    writeFileSync(
+      manifestPath,
+      'groups:\n  - id: main\n    label: Main\n    sessions: []\n'
+    );
+    process.env.HOME = home;
+    process.env.DESK_DAEMON_URL = 'http://127.0.0.1:43131';
+    vi.stubGlobal('fetch', vi.fn(() => onProvision(manifestPath)));
+
+    const req = Object.assign(new PassThrough(), {
+      method: 'POST',
+      url: '/api/add',
+      headers: { 'content-type': 'application/json' }
+    }) as unknown as IncomingMessage;
+    req.end(
+      JSON.stringify({
+        groupId: 'main',
+        session: { name: 'new-agent', cwd: work, agent: 'codex' }
+      })
+    );
+    const chunks: string[] = [];
+    const res = {
+      statusCode: 0,
+      setHeader: () => undefined,
+      end: (payload?: unknown) => {
+        if (payload !== undefined) chunks.push(String(payload));
+      }
+    } as unknown as ServerResponse;
+    const route = createSessionsRoutes({
+      managedAgentLsp: { prepare: () => undefined } as never,
+      nativeAgentLaunch: (spec) => spec,
+      agentSurfaceBroker: { disposeSession: vi.fn() }
+    });
+
+    await createDeskApiMiddleware([route])(req, res, vi.fn());
+    return {
+      statusCode: res.statusCode,
+      payload: JSON.parse(chunks.join('')) as Record<string, unknown>,
+      manifestSource: readFileSync(manifestPath, 'utf8')
+    };
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDaemonUrl === undefined) delete process.env.DESK_DAEMON_URL;
+    else process.env.DESK_DAEMON_URL = savedDaemonUrl;
+    vi.unstubAllGlobals();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 describe('sessions route managed startup', () => {
   it('preserves the actionable startSession failure reason for the API response', async () => {
     const cleanup = vi.fn();
@@ -100,7 +161,6 @@ describe('sessions route validation', () => {
           name: 'custom-agent',
           command: 'claude-wrapper',
           agent: 'claude',
-          resume: 'sess-edited',
           bypassPermissions: true
         },
         { cwdRequired: false }
@@ -109,9 +169,22 @@ describe('sessions route validation', () => {
       name: 'custom-agent',
       command: 'claude-wrapper',
       agent: 'claude',
-      resume: 'sess-edited',
       bypassPermissions: true
     });
+  });
+
+  it('rejects resume ids for custom-command sessions', () => {
+    expect(() =>
+      readDeskSessionBody(
+        {
+          name: 'custom-agent',
+          command: 'claude-wrapper',
+          agent: 'claude',
+          resume: '11111111-1111-4111-8111-111111111111'
+        },
+        { cwdRequired: false }
+      )
+    ).toThrow(/managed provider/);
   });
 
   it('surfaces an invalid session payload as a typed 400 response', async () => {
@@ -145,6 +218,98 @@ describe('sessions route validation', () => {
       error: 'session body is required',
       code: 'invalid-input'
     });
+  });
+
+  it('rejects generic resume clearing and names the explicit reset command', async () => {
+    const req = Object.assign(new PassThrough(), {
+      method: 'POST',
+      url: '/api/edit-project-session',
+      headers: { 'content-type': 'application/json' }
+    }) as unknown as IncomingMessage;
+    req.end(
+      JSON.stringify({
+        projectId: 'proj',
+        groupId: 'main',
+        currentName: 'agent',
+        session: {
+          name: 'agent',
+          agent: 'codex',
+          clearResume: true
+        }
+      })
+    );
+    const chunks: string[] = [];
+    const res = {
+      statusCode: 0,
+      setHeader: () => undefined,
+      end: (payload?: unknown) => {
+        if (payload !== undefined) chunks.push(String(payload));
+      }
+    } as unknown as ServerResponse;
+    const route = createSessionsRoutes({
+      managedAgentLsp: {} as never,
+      nativeAgentLaunch: (spec) => spec,
+      agentSurfaceBroker: { disposeSession: vi.fn() }
+    });
+
+    await createDeskApiMiddleware([route])(req, res, vi.fn());
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(chunks.join(''))).toEqual({
+      ok: false,
+      code: 'provider-session-reset-required',
+      error:
+        'provider session identity can only be cleared with desk reset-provider-session <name-or-session-id> --force'
+    });
+  });
+});
+
+describe('sessions route provider add transaction', () => {
+  it('commits the new provider session before asking the daemon to provision it', async () => {
+    let visibleDuringProvision = false;
+    const result = await invokeGlobalProviderAdd((manifestPath) => {
+      visibleDuringProvision = readFileSync(manifestPath, 'utf8').includes(
+        'name: new-agent'
+      );
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(visibleDuringProvision).toBe(true);
+    expect(result.manifestSource).toContain('name: new-agent');
+  });
+
+  it('rolls back the exact manifest commit when provisioning fails', async () => {
+    let visibleDuringProvision = false;
+    const result = await invokeGlobalProviderAdd((manifestPath) => {
+      visibleDuringProvision = readFileSync(manifestPath, 'utf8').includes(
+        'name: new-agent'
+      );
+      return new Response(
+        JSON.stringify({ ok: false, error: 'provision rejected' }),
+        { status: 409 }
+      );
+    });
+
+    expect(result.statusCode).toBe(500);
+    expect(visibleDuringProvision).toBe(true);
+    expect(result.manifestSource).not.toContain('name: new-agent');
+  });
+
+  it('does not overwrite a concurrent manifest edit when failed provision cannot roll back', async () => {
+    const result = await invokeGlobalProviderAdd((manifestPath) => {
+      const committed = readFileSync(manifestPath, 'utf8');
+      writeFileSync(manifestPath, `${committed}settings:\n  theme: dark\n`);
+      return new Response(
+        JSON.stringify({ ok: false, error: 'provision rejected' }),
+        { status: 409 }
+      );
+    });
+
+    expect(result.statusCode).toBe(500);
+    expect(result.manifestSource).toContain('name: new-agent');
+    expect(result.manifestSource).toContain('theme: dark');
+    expect(result.payload.error).toMatch(/rollback skipped.*changed concurrently/);
   });
 });
 

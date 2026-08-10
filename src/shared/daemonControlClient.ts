@@ -1,3 +1,5 @@
+import type { ProviderSessionProvider } from './providerSessionIdentity.js';
+
 export interface DaemonControlResult {
   ok: boolean;
   error?: string;
@@ -20,6 +22,13 @@ export interface DaemonControlOptions {
   timeoutMs?: number;
   /** Injectable transport for tests; defaults to globalThis.fetch. */
   fetchImpl?: typeof fetch;
+}
+
+export interface CompleteProviderSessionLaunchRequest {
+  deskSessionId: string;
+  provider: ProviderSessionProvider;
+  providerSessionId: string;
+  generation: number;
 }
 
 /** Derive the daemon's HTTP control origin from its websocket endpoint. */
@@ -60,6 +69,20 @@ export async function daemonControl(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload)
   });
+}
+
+export function requestProviderSessionReset(
+  sessionId: string,
+  options: DaemonControlOptions = {}
+): Promise<DaemonControlResult> {
+  return daemonControl('/control/provider-session/reset', { sessionId }, options);
+}
+
+export function completeProviderSessionLaunch(
+  input: CompleteProviderSessionLaunchRequest,
+  options: DaemonControlOptions = {}
+): Promise<DaemonControlResult> {
+  return daemonControl('/control/provider-session/complete', input, options);
 }
 
 /**

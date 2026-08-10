@@ -5,6 +5,11 @@ import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
 import { mintSessionId } from '../shared/migration/index.js';
+import {
+  isProviderSessionProvider,
+  isValidProviderSessionId,
+  type ProviderSessionProvider
+} from '../shared/providerSessionIdentity.js';
 import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
 import { collectSessions } from './sessionIdentity.js';
 import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, DeskSessionDraft, SessionSpec } from './types.js';
@@ -77,13 +82,6 @@ export interface DeleteProjectGroupOptions {
 export interface EditProjectSessionOptions extends AddProjectSessionOptions {
   currentName: string;
   projectCwd?: string;
-  /**
-   * Resume ids are captured asynchronously, so an edit form loaded before capture
-   * finishes carries an empty field. An omitted resume therefore PRESERVES the
-   * manifest value; only an explicit clearResume drops it (deliberate stale-id
-   * recovery from the edit modal).
-   */
-  clearResume?: boolean;
 }
 
 export interface DeleteProjectSessionOptions {
@@ -130,8 +128,12 @@ export function readManifestFile(path: string): DeskManifest {
 /** Atomic replacement only. Read-modify-write callers must use updateManifestFile. */
 export function writeManifestFile(path: string, manifest: DeskManifest): void {
   const serialized = serializeDeskManifest(manifest);
+  writeManifestSource(path, serialized);
+}
+
+function writeManifestSource(path: string, source: string): void {
   // Never persist an empty/whitespace payload — that would wipe the config.
-  if (serialized.trim() === '') {
+  if (source.trim() === '') {
     throw new Error('refusing to write an empty desk manifest');
   }
   mkdirSync(dirname(path), { recursive: true });
@@ -139,11 +141,23 @@ export function writeManifestFile(path: string, manifest: DeskManifest): void {
   // or 0-byte manifest. rename(2) is atomic on the same filesystem.
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    writeFileSync(tmp, serialized, { flag: 'wx' });
+    writeFileSync(tmp, source, { flag: 'wx' });
     renameSync(tmp, path);
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+export async function restoreManifestSourceIfUnchanged(
+  path: string,
+  expectedSource: string,
+  previousSource: string
+): Promise<boolean> {
+  return withManifestFileLock(path, () => {
+    if (readFileSync(path, 'utf8') !== expectedSource) return false;
+    writeManifestSource(path, previousSource);
+    return true;
+  });
 }
 
 export async function withManifestFileLock<T>(path: string, action: () => T | Promise<T>): Promise<T> {
@@ -385,8 +399,7 @@ export function editSessionInManifest(manifest: DeskManifest, options: EditProje
       group.sessions,
       options.currentName,
       options.session,
-      projectExists ? undefined : options.projectCwd,
-      options.clearResume
+      projectExists ? undefined : options.projectCwd
     );
   });
 }
@@ -556,8 +569,7 @@ function replaceSession(
   sessions: DeskSession[],
   currentName: string,
   nextSession: DeskSessionDraft,
-  cwd?: string,
-  clearResume?: boolean
+  cwd?: string
 ): DeskSession[] {
   let replaced = false;
   const next = sessions.map((session) => {
@@ -565,13 +577,29 @@ function replaceSession(
       return session;
     }
     replaced = true;
+    if (
+      nextSession.resume !== undefined &&
+      nextSession.resume !== session.resume
+    ) {
+      throw new ManifestMutationError(
+        `provider session identity is immutable; use desk reset-provider-session ${currentName} --force`
+      );
+    }
+    if (
+      session.resume !== undefined &&
+      managedProviderFor(session) !== managedProviderFor(nextSession)
+    ) {
+      throw new ManifestMutationError(
+        `provider session owner is immutable; use desk reset-provider-session ${currentName} --force`
+      );
+    }
     const merged: DeskSession = { ...nextSession, sessionId: session.sessionId };
     // A persisted sessionId is the durable identity, not an editable field.
     // Preserve it even if a stale or forged edit payload supplies another id.
     merged.sessionId = session.sessionId;
-    // Preserve an async-captured resume id unless the edit explicitly clears it:
-    // a form loaded before capture finished must not silently erase the id.
-    if (merged.resume === undefined && session.resume !== undefined && clearResume !== true) {
+    // Generic editing never clears a durable provider identity. A fresh-start
+    // reset is a daemon-owned one-shot transaction, not a manifest edit flag.
+    if (merged.resume === undefined && session.resume !== undefined) {
       merged.resume = session.resume;
     }
     return merged;
@@ -621,8 +649,37 @@ function materializeMovedSession(session: DeskSession, sourceSpec: SessionSpec |
 
 function materializeAddedSession(manifest: DeskManifest, draft: DeskSessionDraft): DeskSession {
   const { sessionId: _untrustedId, ...session } = draft;
+  if (session.resume !== undefined) {
+    const provider = managedProviderFor(session);
+    if (provider === undefined) {
+      throw new ManifestMutationError(
+        `session ${session.name} resume id requires a managed provider session`
+      );
+    }
+    if (!isValidProviderSessionId(provider, session.resume)) {
+      throw new ManifestMutationError(
+        `session ${session.name} requires a valid ${provider} provider session id`
+      );
+    }
+    const owner = collectSessions(manifest).find(
+      (candidate) => candidate.resume === session.resume
+    );
+    if (owner) {
+      throw new ManifestMutationError(
+        `provider session id is already bound to session ${owner.name}`
+      );
+    }
+  }
   const taken = new Set(collectSessions(manifest).map((existing) => existing.sessionId));
   return { ...session, sessionId: mintSessionId(session.name, taken) };
+}
+
+function managedProviderFor(
+  session: Pick<DeskSessionDraft, 'agent' | 'command'>
+): ProviderSessionProvider | undefined {
+  if (session.command !== undefined) return undefined;
+  const provider = session.agent ?? 'codex';
+  return isProviderSessionProvider(provider) ? provider : undefined;
 }
 
 function cwdMatches(candidate: string, target: string): boolean {

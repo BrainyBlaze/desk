@@ -58,6 +58,7 @@ describe('runPlan atch-native lifecycle', () => {
     const spec = {
       ...terminalPlan()[0]!.session,
       agent: 'claude' as const,
+      customCommand: false,
       resume: '11111111-2222-4333-8444-555555555555',
       profileId: 'work'
     };
@@ -67,6 +68,7 @@ describe('runPlan atch-native lifecycle', () => {
     expect(control).toHaveBeenCalledWith(
       '/control/provision',
       expect.objectContaining({
+        providerSessionId: spec.resume,
         continuity: {
           schemaVersion: 1,
           provider: 'claude',
@@ -84,12 +86,33 @@ describe('runPlan atch-native lifecycle', () => {
     );
   });
 
+  it('passes the exact Codex resume id as provider fence input', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const control = vi.fn().mockResolvedValue({ ok: true });
+    const spec = {
+      ...terminalPlan()[0]!.session,
+      agent: 'codex' as const,
+      customCommand: false,
+      resume: '11111111-2222-4333-8444-555555555555'
+    };
+
+    await expect(
+      runPlan([{ type: 'start', session: spec }], false, { control })
+    ).resolves.toBe(0);
+
+    expect(control).toHaveBeenCalledWith(
+      '/control/provision',
+      expect.objectContaining({ providerSessionId: spec.resume })
+    );
+  });
+
   it('passes Claude profile memory ownership without requiring a resume id', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const control = vi.fn().mockResolvedValue({ ok: true });
     const spec = {
       ...terminalPlan()[0]!.session,
       agent: 'claude' as const,
+      customCommand: false,
       profileId: 'work'
     };
 

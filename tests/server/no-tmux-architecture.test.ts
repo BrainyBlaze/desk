@@ -109,7 +109,7 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
 });
 
 describe('no-tmux gate oracle (mutant rejection)', () => {
-  const sanctionedRel = 'core/resumeCaptureState.ts';
+  const sanctionedRel = 'core/manifest.ts';
   const realSource = readFileSync(join(SRC, sanctionedRel), 'utf8');
 
   it('rejects a live legacy invocation added to an otherwise sanctioned mixed file', () => {
@@ -147,7 +147,6 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
     expect(Object.keys(SANCTIONS).sort()).toEqual(
       [
         'core/manifest.ts',
-        'core/resumeCaptureState.ts',
         'core/sessionIdentity.ts',
         'server/channelsEvents.ts',
         'server/channelsProtocol.ts',

@@ -99,7 +99,13 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('producerInstanceId');
     expect(shim).toContain('producerSeq');
     expect(shim).toContain('providerSessionId');
-    expect(shim).toContain('input.session_id');
+    expect(shim).toContain(
+      'const DESK_PROVIDER_SESSION_ID_FIELDS = {"claude":"session_id","codex":"session_id","opencode":"sessionID"}'
+    );
+    expect(shim).toContain(
+      'input[DESK_PROVIDER_SESSION_ID_FIELDS[DESK_PROVIDER]]'
+    );
+    expect(shim).not.toContain('input.session_id || input.sessionId');
     expect(shim).toContain('process.exit(0)');
     expect(shim).not.toContain('console.log');
     // Failure diagnostic is present but debug-gated (must not spam an alt-screen TUI).

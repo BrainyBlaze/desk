@@ -38,7 +38,6 @@ import {
   type LegacyIdentityOptions
 } from '../core/sessionIdentity.js';
 import { withFileLockSync } from '../shared/fileLock.js';
-import { migrateResumeCaptureStore, type LegacyPendingResumeCapture } from '../core/resumeCaptureState.js';
 import { migrateDeliveryEventLine } from './channelsEvents.js';
 import { migrateMemberManifestContent } from './channelsProtocol.js';
 import { advanceMigration, isValidSessionId, validateManifestMigration, type MigrationPhase, type Rollback } from '../shared/migration/index.js';
@@ -582,7 +581,10 @@ export function ensureProductionCutoverMigration(
         return finishProductionCommit(existing, journalPath, markerPath, options.afterPhase);
       }
       if (existing?.phase === 'staged') {
-        assertSourceFingerprint(existing.sourceFingerprint, productionSourceRoots(homeDir, manifestPath, channelsRoot));
+        assertSourceFingerprint(
+          existing.sourceFingerprint,
+          productionResumeSourceRoots(existing.sourceFingerprint, homeDir, manifestPath, channelsRoot)
+        );
         existing.phase = 'committing';
         writeProductionJournal(journalPath, existing);
         options.afterPhase?.('committing');
@@ -597,7 +599,7 @@ export function ensureProductionCutoverMigration(
 
       const sourceRoots = productionSourceRoots(homeDir, manifestPath, channelsRoot);
       const sourceFingerprint = fingerprintSources(sourceRoots);
-      const requiredBytes = estimateStageBytes(fingerprintSources(productionStageSourceRoots(homeDir, manifestPath, channelsRoot))) + PRODUCTION_MIGRATION_RESERVE_BYTES;
+      const requiredBytes = estimateStageBytes(fingerprintSources(productionStageSourceRoots(manifestPath, channelsRoot))) + PRODUCTION_MIGRATION_RESERVE_BYTES;
       const availableBytes = (options.availableBytes ?? defaultAvailableBytes)(migrationRoot);
       if (availableBytes < requiredBytes) {
         throw new Error(`cutover: insufficient free space (${availableBytes} available, ${requiredBytes} required)`);
@@ -627,7 +629,6 @@ export function ensureProductionCutoverMigration(
       const durabilityPlan = planDurabilityMigration(channelsRoot, migration.tmuxToSessionId);
       writeDurabilitySeedJournal(durabilityPlan, stageChannelsRoot);
       const additionalArtifacts = stageOwnedProductionStores({
-        homeDir,
         channelsRoot,
         stageRoot,
         backupRoot,
@@ -675,18 +676,34 @@ function productionSourceRoots(homeDir: string, manifestPath: string, channelsRo
   return [
     manifestPath,
     channelsRoot,
-    join(homeDir, '.config', 'desk', 'resume-captures.json'),
     join(homeDir, '.config', 'desk', 'tool-journal')
   ];
 }
 
-function productionStageSourceRoots(homeDir: string, manifestPath: string, channelsRoot: string): string[] {
+function productionResumeSourceRoots(
+  expected: readonly SourceFingerprintEntry[],
+  homeDir: string,
+  manifestPath: string,
+  channelsRoot: string
+): string[] {
+  const resumeCapturesPath = join(homeDir, '.config', 'desk', 'resume-captures.json');
+  if (expected.some((entry) => entry.path === resumeCapturesPath)) {
+    return [
+      manifestPath,
+      channelsRoot,
+      resumeCapturesPath,
+      join(homeDir, '.config', 'desk', 'tool-journal')
+    ];
+  }
+  return productionSourceRoots(homeDir, manifestPath, channelsRoot);
+}
+
+function productionStageSourceRoots(manifestPath: string, channelsRoot: string): string[] {
   return [
     manifestPath,
     join(channelsRoot, '_engine', 'paused.json'),
     join(channelsRoot, '_engine', 'queue'),
     join(channelsRoot, '_engine', 'events.jsonl'),
-    join(homeDir, '.config', 'desk', 'resume-captures.json'),
     ...collectMemberManifestPaths(channelsRoot)
   ];
 }
@@ -725,7 +742,6 @@ function productionArtifacts(paths: {
 }
 
 function stageOwnedProductionStores(options: {
-  homeDir: string;
   channelsRoot: string;
   stageRoot: string;
   backupRoot: string;
@@ -742,18 +758,6 @@ function stageOwnedProductionStores(options: {
       sourceExisted: true
     });
   };
-
-  const resumePath = join(options.homeDir, '.config', 'desk', 'resume-captures.json');
-  if (existsSync(resumePath)) {
-    const captures = readLegacyResumeCaptures(resumePath);
-    const migrated = migrateResumeCaptureStore(captures, options.tmuxToSessionId);
-    if (migrated.dropped.length > 0) {
-      throw new Error(`cutover: ${migrated.dropped.length} resume captures are unmapped; refusing partial migration`);
-    }
-    const stagedPath = join(options.stageRoot, 'resume-captures.json');
-    writeFileAtomic(stagedPath, `${JSON.stringify({ version: 2, captures: migrated.items }, null, 2)}\n`);
-    replaceArtifact('resume-captures', resumePath, stagedPath, join(options.backupRoot, 'resume-captures.json'));
-  }
 
   const eventsPath = join(options.channelsRoot, '_engine', 'events.jsonl');
   if (existsSync(eventsPath)) {
@@ -778,49 +782,6 @@ function stageOwnedProductionStores(options: {
     replaceArtifact(`member-${memberIndex++}`, sourcePath, stagedPath, backupPath);
   }
   return artifacts;
-}
-
-function readLegacyResumeCaptures(path: string): LegacyPendingResumeCapture[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-  } catch (error) {
-    throw new Error(`cutover: malformed resume-capture store at ${path}: ${(error as Error).message}`);
-  }
-  const values = Array.isArray(parsed)
-    ? parsed
-    : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { captures?: unknown }).captures)
-      ? (parsed as { captures: unknown[] }).captures
-      : null;
-  if (values === null) {
-    throw new Error(`cutover: malformed resume-capture store at ${path}`);
-  }
-  return values.map((value, index): LegacyPendingResumeCapture => {
-    if (value === null || typeof value !== 'object') {
-      throw new Error(`cutover: malformed resume capture ${index} at ${path}`);
-    }
-    const record = value as Record<string, unknown>;
-    if (
-      typeof record.tmuxSession !== 'string' ||
-      (record.agent !== 'codex' && record.agent !== 'opencode') ||
-      typeof record.cwd !== 'string' ||
-      typeof record.sinceMs !== 'number' ||
-      !Number.isFinite(record.sinceMs) ||
-      typeof record.deadlineMs !== 'number' ||
-      !Number.isFinite(record.deadlineMs) ||
-      (record.launchResumeId !== undefined && typeof record.launchResumeId !== 'string')
-    ) {
-      throw new Error(`cutover: malformed resume capture ${index} at ${path}`);
-    }
-    return {
-      tmuxSession: record.tmuxSession,
-      agent: record.agent,
-      cwd: record.cwd,
-      sinceMs: record.sinceMs,
-      deadlineMs: record.deadlineMs,
-      ...(record.launchResumeId !== undefined ? { launchResumeId: record.launchResumeId } : {})
-    };
-  });
 }
 
 const EVENT_STREAM_CHUNK_BYTES = 64 * 1024;

@@ -20,6 +20,8 @@ import { homedir } from 'node:os';
 
 // Samples use ~ expansion against the real home — never hardcode it (CI runs as /home/runner).
 const HOME = homedir();
+const CLAUDE_RESUME_ID = '11111111-1111-4111-8111-111111111111';
+const OTHER_CLAUDE_RESUME_ID = '22222222-2222-4222-8222-222222222222';
 
 describe('desk config', () => {
   it('resolves the default manifest path under user config', () => {
@@ -165,7 +167,7 @@ groups:
     });
   });
 
-  it('preserves a captured resume id when an edit payload omits it without an explicit clear', () => {
+  it('preserves a persisted resume id across generic edits and ignores the removed clear bypass', () => {
     const manifest = addSessionToManifest(createEmptyManifest(), {
       groupId: 'research',
       groupLabel: 'Research',
@@ -173,7 +175,7 @@ groups:
         name: 'chat-agent',
         cwd: '~/projects/sample',
         agent: 'claude',
-        resume: 'sess-uuid-1',
+        resume: CLAUDE_RESUME_ID,
         tmuxSession: 'agentdesk-research-chat-agent-pinned00'
       }
     });
@@ -183,15 +185,118 @@ groups:
       currentName: 'chat-agent',
       session: { name: 'chat-agent', cwd: '~/projects/sample', agent: 'claude', bypassPermissions: true }
     });
-    expect(edited.groups[0].sessions[0].resume).toBe('sess-uuid-1');
+    expect(edited.groups[0].sessions[0].resume).toBe(CLAUDE_RESUME_ID);
 
-    const cleared = editSessionInManifest(manifest, {
+    const legacyBypass = editSessionInManifest(manifest, {
       groupId: 'research',
       currentName: 'chat-agent',
       clearResume: true,
       session: { name: 'chat-agent', cwd: '~/projects/sample', agent: 'claude' }
     });
-    expect(cleared.groups[0].sessions[0].resume).toBeUndefined();
+    expect(legacyBypass.groups[0].sessions[0].resume).toBe(CLAUDE_RESUME_ID);
+  });
+
+  it('rejects replacing a durable provider binding through a generic edit', () => {
+    const manifest = addSessionToManifest(createEmptyManifest(), {
+      groupId: 'research',
+      session: {
+        name: 'chat-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        resume: CLAUDE_RESUME_ID
+      }
+    });
+
+    expect(() =>
+      editSessionInManifest(manifest, {
+        groupId: 'research',
+        currentName: 'chat-agent',
+        session: {
+          name: 'chat-agent',
+          cwd: '~/projects/sample',
+          agent: 'claude',
+          resume: OTHER_CLAUDE_RESUME_ID
+        }
+      })
+    ).toThrow(/reset-provider-session/);
+    expect(manifest.groups[0].sessions[0].resume).toBe(CLAUDE_RESUME_ID);
+  });
+
+  it('rejects changing the provider that owns a durable binding', () => {
+    const manifest = addSessionToManifest(createEmptyManifest(), {
+      groupId: 'research',
+      session: {
+        name: 'chat-agent',
+        cwd: '~/projects/sample',
+        agent: 'claude',
+        resume: CLAUDE_RESUME_ID
+      }
+    });
+
+    expect(() =>
+      editSessionInManifest(manifest, {
+        groupId: 'research',
+        currentName: 'chat-agent',
+        session: {
+          name: 'chat-agent',
+          cwd: '~/projects/sample',
+          agent: 'codex',
+          resume: CLAUDE_RESUME_ID
+        }
+      })
+    ).toThrow(/reset-provider-session/);
+  });
+
+  it('rejects adding a resume id already owned anywhere in the manifest', () => {
+    const manifest = addSessionToManifest(createEmptyManifest(), {
+      groupId: 'research',
+      session: {
+        name: 'first-agent',
+        cwd: '~/projects/first',
+        agent: 'claude',
+        resume: CLAUDE_RESUME_ID
+      }
+    });
+
+    expect(() =>
+      addSessionToManifest(manifest, {
+        groupId: 'other',
+        session: {
+          name: 'second-agent',
+          cwd: '~/projects/second',
+          agent: 'claude',
+          resume: CLAUDE_RESUME_ID
+        }
+      })
+    ).toThrow(/already bound/);
+  });
+
+  it('rejects an invalid provider resume id before adding a session', () => {
+    expect(() =>
+      addSessionToManifest(createEmptyManifest(), {
+        groupId: 'research',
+        session: {
+          name: 'chat-agent',
+          cwd: '~/projects/sample',
+          agent: 'claude',
+          resume: 'not-a-provider-id'
+        }
+      })
+    ).toThrow(/valid claude provider session id/);
+  });
+
+  it('rejects a provider resume id on a non-provider session', () => {
+    expect(() =>
+      addSessionToManifest(createEmptyManifest(), {
+        groupId: 'research',
+        session: {
+          name: 'shell',
+          cwd: '~/projects/sample',
+          command: 'bash',
+          resume: CLAUDE_RESUME_ID
+        }
+      })
+    ).toThrow(/managed provider/);
   });
 
   it('adds empty groups to manifest data', () => {
@@ -237,7 +342,7 @@ groups:
                 id: 'main',
                 label: 'Main',
                 layout: { kind: '1x1' },
-                sessions: [{ name: 'agent', agent: 'codex', resume: 'resume-id' }]
+                sessions: [{ name: 'agent', agent: 'codex' }]
               }
             ]
           }

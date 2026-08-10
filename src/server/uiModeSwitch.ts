@@ -62,14 +62,14 @@ export function validateUiModeSwitch(manifest: DeskManifest, options: ValidateUi
   if (spec.uiMode === options.uiMode) {
     return { ok: true, noop: true, spec, edit: buildEdit(spec, record, options.uiMode) };
   }
-  // Without a captured resume id the respawned process cannot rejoin the
+  // Without a stored resume id the respawned process cannot rejoin the
   // conversation, so the switch would silently discard it in either direction.
   if (!record.resume && options.confirmDiscard !== true) {
     return {
       ok: false,
       status: 409,
       code: 'resume-not-captured',
-      error: `session ${spec.name} has no captured resume id yet; switching now starts a fresh conversation (retry with confirmDiscard to proceed)`
+      error: `session ${spec.name} has no stored resume id; switching now starts a fresh conversation (retry with confirmDiscard to proceed)`
     };
   }
   return { ok: true, noop: false, spec, edit: buildEdit(spec, record, options.uiMode) };
@@ -86,7 +86,6 @@ export interface PerformUiModeSwitchDeps {
   restart: (spec: SessionSpec) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
   /** Optional launch rewrite hook (LSP/MCP wiring); receives the post-edit spec. */
   prepare?: (spec: SessionSpec) => SessionSpec;
-  scheduleCapture?: (spec: SessionSpec) => void;
 }
 
 export type PerformUiModeSwitchResult =
@@ -118,7 +117,6 @@ export async function performUiModeSwitch(
   if (!restarted.ok) {
     return { ok: false, status: 500, error: restarted.error ?? 'session restart failed' };
   }
-  deps.scheduleCapture?.(nextSpec);
   return { ok: true, spec: nextSpec };
 }
 

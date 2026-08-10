@@ -5,7 +5,6 @@
 // lost; policy belongs to the gate.
 
 import { describe, expect, it } from 'vitest';
-import { migrateResumeCaptureStore, type PendingResumeCapture } from '../../src/core/resumeCaptureState.js';
 import { migrateDeliveryEventLine } from '../../src/server/channelsEvents.js';
 import { migrateMemberManifestContent } from '../../src/server/channelsProtocol.js';
 
@@ -13,38 +12,6 @@ const MAP = new Map([
   ['agentdesk-desk-main-codex-a159d2bf', 'codex-2'],
   ['agentdesk-canary-shell-002e06d4', 'shell']
 ]);
-
-describe('migrateResumeCaptureStore', () => {
-  const capture = (tmuxSession: string): PendingResumeCapture => ({
-    tmuxSession,
-    agent: 'codex',
-    cwd: '/w',
-    sinceMs: 100,
-    deadlineMs: 200,
-    launchResumeId: 'r-1'
-  });
-
-  it('re-keys mapped entries to sessionId and preserves every field', () => {
-    const result = migrateResumeCaptureStore([capture('agentdesk-canary-shell-002e06d4')], MAP);
-    expect(result.items).toEqual([
-      { sessionId: 'shell', agent: 'codex', cwd: '/w', sinceMs: 100, deadlineMs: 200, launchResumeId: 'r-1' }
-    ]);
-    expect(result.dropped).toEqual([]);
-  });
-
-  it('reports unmapped entries instead of silently losing them', () => {
-    const gone = capture('agentdesk-gone-xyz');
-    const result = migrateResumeCaptureStore([gone, capture('agentdesk-canary-shell-002e06d4')], MAP);
-    expect(result.dropped).toEqual([gone]);
-    expect(result.items).toHaveLength(1);
-  });
-
-  it('omits an absent launchResumeId rather than writing undefined', () => {
-    const { launchResumeId: _omit, ...bare } = capture('agentdesk-canary-shell-002e06d4');
-    const result = migrateResumeCaptureStore([bare], MAP);
-    expect('launchResumeId' in result.items[0]).toBe(false);
-  });
-});
 
 describe('migrateDeliveryEventLine', () => {
   it('renames tmuxSession to sessionId with the mapped value, preserving all other fields', () => {

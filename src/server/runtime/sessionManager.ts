@@ -42,6 +42,7 @@ interface DetachedKillSpec extends KillCommandSpec {
 }
 
 interface DetachedKillRecord extends DetachedKillSpec {
+  generation: number;
   sockPath: string;
   mustConfirm?: boolean;
 }
@@ -61,6 +62,41 @@ export interface SessionSpawnPreparationContext {
 export type PrepareSessionSpawn = (
   context: SessionSpawnPreparationContext
 ) => SessionSpawnPreparation | Promise<SessionSpawnPreparation>;
+
+export type ProviderSessionProvisionRecoveryDetail =
+  | 'not-authorized'
+  | 'reset-incomplete'
+  | 'authorization-consumed'
+  | 'provider-mismatch'
+  | 'generation-mismatch'
+  | 'binding-mismatch'
+  | 'invalid-provider-session-id'
+  | 'session-not-found'
+  | 'agent-mismatch';
+
+export interface SessionSpawnPreallocationContext {
+  sessionId: string;
+  currentGeneration: number;
+  nextGeneration: number;
+  subject: SessionRegistration['subject'];
+}
+
+export type SessionSpawnPreallocationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'provider-session-identity-missing';
+      detail: ProviderSessionProvisionRecoveryDetail;
+    };
+
+export type PreallocateSessionSpawn = (
+  context: SessionSpawnPreallocationContext
+) => SessionSpawnPreallocationResult | Promise<SessionSpawnPreallocationResult>;
+
+export type SessionSpawnResult =
+  | EnsureResult
+  | { ok: false; reason: 'spawn-failed' | 'attach-failed' }
+  | Exclude<SessionSpawnPreallocationResult, { ok: true }>;
 
 export interface TerminalObservationSnapshot {
   sessionId: string;
@@ -88,6 +124,36 @@ export type AtchObservationResult =
         | 'generation-mismatch'
         | 'lifecycle-exited'
         | 'invalid-event';
+    };
+
+export type RetireGenerationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'session-not-found';
+      expectedGeneration: number;
+      error: string;
+    }
+  | {
+      ok: false;
+      reason: 'generation-mismatch';
+      expectedGeneration: number;
+      currentGeneration: number;
+      error: string;
+    }
+  | {
+      ok: false;
+      reason: 'retire-failed';
+      expectedGeneration: number;
+      error: string;
+    };
+
+export type ProviderSessionResetLivenessResult<T> =
+  | { ok: true; generation: number; value: T }
+  | {
+      ok: false;
+      reason: 'session-live' | 'retire-failed';
+      error: string;
     };
 
 /**
@@ -152,6 +218,7 @@ export interface SessionManagerDeps {
 
 export class SessionManager {
   private readonly core: DaemonCore;
+  private readonly ledger: GenerationLedger;
   private readonly now: () => number;
   private readonly masters = new Map<string, MasterClient>();
   private readonly terminalObservations = new Map<string, TerminalObservationSnapshot>();
@@ -177,10 +244,12 @@ export class SessionManager {
    * provisions would otherwise double-spawn against one socket, overwrite each
    * other's owner/cleanup, or kill the shared master from the loser's rollback.
    */
-  private readonly inflight = new Map<string, Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }>>();
+  private readonly inflight = new Map<string, Promise<SessionSpawnResult>>();
+  private readonly lifecycleTails = new Map<string, Promise<void>>();
 
   constructor(deps: SessionManagerDeps) {
     this.now = deps.now;
+    this.ledger = deps.ledger;
     this.core = new DaemonCore({
       ledger: deps.ledger,
       supervisor: deps.supervisor,
@@ -240,7 +309,11 @@ export class SessionManager {
     // Register the kill command BEFORE the attach so a close that races the
     // attach's success can never leave an attached-but-unkillable master; the
     // attach itself only validates (it never closes a healthy master).
-    this.detachedKills.set(sessionId, { ...opts.killSpec, sockPath: opts.sockPath });
+    this.detachedKills.set(sessionId, {
+      ...opts.killSpec,
+      generation: restored.generation,
+      sockPath: opts.sockPath
+    });
     let attached = false;
     try {
       // The ACK generation MUST equal the restored ledger generation — the
@@ -371,14 +444,17 @@ export class SessionManager {
       /** For a detached master, the command to stop the session on retire (e.g. `atch kill -f NAME`). */
       killSpec?: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
+      preallocateSpawn?: PreallocateSessionSpawn;
       prepareSpawn?: PrepareSessionSpawn;
     }
-  ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
+  ): Promise<SessionSpawnResult> {
     const pending = this.inflight.get(sessionId);
     if (pending !== undefined) {
       return pending;
     }
-    const operation = this.doSpawnAndAttach(sessionId, opts).finally(() => {
+    const operation = this.runSerializedLifecycle(sessionId, () =>
+      this.doSpawnAndAttach(sessionId, opts)
+    ).finally(() => {
       this.inflight.delete(sessionId);
     });
     this.inflight.set(sessionId, operation);
@@ -397,9 +473,10 @@ export class SessionManager {
       detached?: boolean;
       killSpec?: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
+      preallocateSpawn?: PreallocateSessionSpawn;
       prepareSpawn?: PrepareSessionSpawn;
     }
-  ): Promise<EnsureResult | { ok: false; reason: 'spawn-failed' | 'attach-failed' }> {
+  ): Promise<SessionSpawnResult> {
     if (this.core.hasLiveSession(sessionId) && this.masters.has(sessionId)) {
       return this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' }); // already provisioned AND attached — idempotent no-op
     }
@@ -435,7 +512,18 @@ export class SessionManager {
         }
       }
     }
-    const ens = this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
+    const subject = opts.subject ?? { kind: 'terminal' };
+    if (opts.preallocateSpawn !== undefined) {
+      const currentGeneration = this.ledger.current(sessionId);
+      const decision = await opts.preallocateSpawn({
+        sessionId,
+        currentGeneration,
+        nextGeneration: currentGeneration + 1,
+        subject
+      });
+      if (!decision.ok) return decision;
+    }
+    const ens = this.ensure(sessionId, opts.geometry, subject);
     if (!ens.ok) return ens;
     const token = Symbol('spawn-op');
     this.owners.set(sessionId, token);
@@ -483,7 +571,12 @@ export class SessionManager {
         // Register FIRST, then attempt to confirmed completion: a failed or
         // unconfirmed cleanup RETAINS the record so a later control retire can
         // finish the job (a half-forked master may surface its socket late).
-        const record = { ...opts.killSpec, sockPath: opts.sockPath, mustConfirm: true };
+        const record = {
+          ...opts.killSpec,
+          generation: ens.generation,
+          sockPath: opts.sockPath,
+          mustConfirm: true
+        };
         this.detachedKills.set(sessionId, record);
         await this.confirmKill(sessionId, record, 5_000);
       }
@@ -497,7 +590,11 @@ export class SessionManager {
       // A detached master: the launcher exits normally (do NOT retire on that);
       // teardown is the kill command, if provided.
       if (opts.killSpec !== undefined) {
-        this.detachedKills.set(sessionId, { ...opts.killSpec, sockPath: opts.sockPath });
+        this.detachedKills.set(sessionId, {
+          ...opts.killSpec,
+          generation: ens.generation,
+          sockPath: opts.sockPath
+        });
       }
     } else {
       // A tracked foreground child: retire when it exits, kill it on retire.
@@ -730,19 +827,151 @@ export class SessionManager {
    * retire loses the ONLY teardown and the next retire reads falsely clean.
    */
   async retireAwaited(sessionId: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; error?: string }> {
+    return this.runSerializedLifecycle(sessionId, () =>
+      this.retireAwaitedUnlocked(sessionId, opts)
+    );
+  }
+
+  private async retireAwaitedUnlocked(
+    sessionId: string,
+    opts: { timeoutMs?: number } = {}
+  ): Promise<{ ok: boolean; error?: string }> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
-    // Order behind an in-flight provision: tearing down mid-operation would
-    // consume the killSpec while the ACK continuation later installs a client
-    // against a retired core. The provision settles deterministically first.
-    const pending = this.inflight.get(sessionId);
-    if (pending !== undefined) {
-      await pending.catch(() => undefined);
-    }
     const kill = this.beginRetire(sessionId);
     if (kill === undefined) {
       return { ok: true };
     }
     return this.confirmKill(sessionId, kill, timeoutMs);
+  }
+
+  /**
+   * Retire one exact native generation. A stale caller may observe a successor
+   * under the same Desk session id, but it can never tear that successor down.
+   */
+  async retireGenerationAwaited(
+    sessionId: string,
+    expectedGeneration: number,
+    opts: { timeoutMs?: number } = {}
+  ): Promise<RetireGenerationResult> {
+    return this.runSerializedLifecycle(sessionId, () =>
+      this.retireGenerationAwaitedUnlocked(
+        sessionId,
+        expectedGeneration,
+        opts
+      )
+    );
+  }
+
+  private async retireGenerationAwaitedUnlocked(
+    sessionId: string,
+    expectedGeneration: number,
+    opts: { timeoutMs?: number } = {}
+  ): Promise<RetireGenerationResult> {
+    const timeoutMs = opts.timeoutMs ?? 5_000;
+    const snapshot = this.stateSnapshot(sessionId);
+    const retainedKill = this.detachedKills.get(sessionId);
+    const currentGeneration = snapshot?.generation ?? retainedKill?.generation;
+    if (currentGeneration === undefined) {
+      return {
+        ok: false,
+        reason: 'session-not-found',
+        expectedGeneration,
+        error: `session ${sessionId} has no native generation`
+      };
+    }
+    if (currentGeneration !== expectedGeneration) {
+      return {
+        ok: false,
+        reason: 'generation-mismatch',
+        expectedGeneration,
+        currentGeneration,
+        error: `session ${sessionId} is generation ${currentGeneration}, not ${expectedGeneration}`
+      };
+    }
+
+    const kill = snapshot === undefined ? retainedKill : this.beginRetire(sessionId);
+    if (kill === undefined) {
+      return { ok: true };
+    }
+    if (kill.generation !== expectedGeneration) {
+      return {
+        ok: false,
+        reason: 'retire-failed',
+        expectedGeneration,
+        error: `session ${sessionId} retained kill generation ${kill.generation}, not ${expectedGeneration}`
+      };
+    }
+    const result = await this.confirmKill(sessionId, kill, timeoutMs);
+    return result.ok
+      ? { ok: true }
+      : {
+          ok: false,
+          reason: 'retire-failed',
+          expectedGeneration,
+          error: result.error ?? 'retire failed'
+        };
+  }
+
+  async resetForProviderSession<T>(
+    sessionId: string,
+    sockPath: string,
+    transaction: (generation: number) => T | Promise<T>,
+    opts: { timeoutMs?: number } = {}
+  ): Promise<ProviderSessionResetLivenessResult<T>> {
+    return this.runSerializedLifecycle(sessionId, async () => {
+      const retired = await this.retireAwaitedUnlocked(sessionId, opts);
+      if (!retired.ok) {
+        return {
+          ok: false,
+          reason: 'retire-failed',
+          error: retired.error ?? `session ${sessionId} could not be retired`
+        };
+      }
+      if (existsSync(sockPath)) {
+        if (await socketHasListener(sockPath)) {
+          return {
+            ok: false,
+            reason: 'session-live',
+            error: `session ${sessionId} still has a listening master`
+          };
+        }
+        try {
+          unlinkSync(sockPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            return {
+              ok: false,
+              reason: 'retire-failed',
+              error: `could not remove stale socket for session ${sessionId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            };
+          }
+        }
+      }
+      const generation = this.ledger.current(sessionId);
+      const value = await transaction(generation);
+      return { ok: true, generation, value };
+    });
+  }
+
+  private runSerializedLifecycle<T>(
+    sessionId: string,
+    operation: () => T | Promise<T>
+  ): Promise<T> {
+    const previous = this.lifecycleTails.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    const tail = current.then(
+      () => undefined,
+      () => undefined
+    );
+    this.lifecycleTails.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.lifecycleTails.get(sessionId) === tail) {
+        this.lifecycleTails.delete(sessionId);
+      }
+    });
+    return current;
   }
 
   /**
@@ -762,7 +991,9 @@ export class SessionManager {
     // delete the only teardown record and strand the late master.
     const wasUncertain = kill.mustConfirm === true;
     if (!wasUncertain && !existsSync(kill.sockPath)) {
-      this.detachedKills.delete(sessionId); // nothing addressable remains — clean
+      if (this.detachedKills.get(sessionId) === kill) {
+        this.detachedKills.delete(sessionId);
+      }
       return { ok: true };
     }
     const killed = await runKillCommand(kill, timeoutMs); // bounded: a hung kill fails, never blocks forever
@@ -774,13 +1005,17 @@ export class SessionManager {
       // whose socket may not have surfaced yet.
       if (!wasUncertain) {
         if (!existsSync(kill.sockPath)) {
-          this.detachedKills.delete(sessionId);
+          if (this.detachedKills.get(sessionId) === kill) {
+            this.detachedKills.delete(sessionId);
+          }
           return { ok: true };
         }
         if (kill.staleCleanupSpec !== undefined) {
           const cleaned = await runKillCommand(kill.staleCleanupSpec, timeoutMs);
           if (cleaned.ok && (await waitForSocketGone(kill.sockPath, timeoutMs))) {
-            this.detachedKills.delete(sessionId);
+            if (this.detachedKills.get(sessionId) === kill) {
+              this.detachedKills.delete(sessionId);
+            }
             return { ok: true };
           }
         }
@@ -793,7 +1028,9 @@ export class SessionManager {
       kill.mustConfirm = true;
       return { ok: false, error: `atch socket still present after kill: ${kill.sockPath}` }; // record retained
     }
-    this.detachedKills.delete(sessionId); // confirmed — consume
+    if (this.detachedKills.get(sessionId) === kill) {
+      this.detachedKills.delete(sessionId);
+    }
     return { ok: true };
   }
 

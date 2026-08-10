@@ -64,6 +64,16 @@ function connectTo(url: string): Promise<TestPeer> {
   });
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 800): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error('waitUntil timeout');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 async function startStack(): Promise<{
   broker: AgentSurfaceBroker;
   close: () => void;
@@ -78,7 +88,10 @@ async function startStack(): Promise<{
   const addr = httpServer.address() as { port: number };
   const broker = new AgentSurfaceBroker({
     resolveSecret: () => SECRET,
-    publishAgentState: () => undefined
+    publishAgentState: () => undefined,
+    bindProviderSession: async () => ({ ok: true, kind: 'already-bound' }),
+    completeLaunchAuthorization: async () => undefined,
+    terminateNativeGeneration: async () => undefined
   });
   const dispose = installAgentSurfaceBroker(httpServer as never, broker);
   return {
@@ -102,7 +115,13 @@ async function startStack(): Promise<{
  * reproduces that behavior so we can verify the C3 invariant end-to-end at the
  * protocol layer without spawning a real agent.
  */
-async function attachFakeDriverHost(host: TestPeer, session: string, agent: string, pid: number): Promise<void> {
+async function attachFakeDriverHost(
+  broker: AgentSurfaceBroker,
+  host: TestPeer,
+  session: string,
+  agent: 'claude' | 'codex' | 'opencode',
+  pid: number
+): Promise<void> {
   host.send({
     type: 'hello',
     session,
@@ -113,7 +132,22 @@ async function attachFakeDriverHost(host: TestPeer, session: string, agent: stri
     producerInstanceId: `native-${session}-${pid}`
   });
   await host.waitFor((f) => (f as { type?: string }).type === 'hello-ack');
-  let seq = 0;
+  let seq = 1;
+  host.send({
+    type: 'event',
+    event: {
+      kind: 'session-info',
+      agentSessionId:
+        agent === 'opencode'
+          ? 'ses_abc123def456ghi789jkl012mno345pqr678stu901vwx'
+          : '11111111-2222-4333-8444-555555555555',
+      seq,
+      ts: new Date().toISOString()
+    }
+  });
+  await waitUntil(
+    () => broker.snapshot().find((entry) => entry.session === session)?.lastSeq === seq
+  );
   host.ws.on('message', (raw) => {
     let frame: AgentHostServerFrame;
     try {
@@ -145,7 +179,7 @@ describe('spec §8 C3 invariant: channel → native → user-message source=chan
   it('broker.injectUserMessage(source=channel) reaches every subscribed surface as user-message source=channel', async () => {
     const harness = await startStack();
     const host = await harness.connectHost();
-    await attachFakeDriverHost(host, 'sess-c3', 'opencode', 1);
+    await attachFakeDriverHost(harness.broker, host, 'sess-c3', 'opencode', 1);
 
     const browser = await harness.connectBrowser();
     await browser.waitFor((f) => (f as { type?: string }).type === 'ready');
@@ -174,7 +208,7 @@ describe('spec §8 C3 invariant: channel → native → user-message source=chan
   it('multiple surfaces (visible + hidden) both receive the channel-origin user-message', async () => {
     const harness = await startStack();
     const host = await harness.connectHost();
-    await attachFakeDriverHost(host, 'sess-c3-multi', 'opencode', 1);
+    await attachFakeDriverHost(harness.broker, host, 'sess-c3-multi', 'opencode', 1);
 
     const visible = await harness.connectBrowser();
     await visible.waitFor((f) => (f as { type?: string }).type === 'ready');
@@ -212,7 +246,7 @@ describe('spec §8 C3 invariant: channel → native → user-message source=chan
   it('ui-origin inject (the surface Send button) preserves source=ui through the round-trip', async () => {
     const harness = await startStack();
     const host = await harness.connectHost();
-    await attachFakeDriverHost(host, 'sess-c3-ui', 'claude', 1);
+    await attachFakeDriverHost(harness.broker, host, 'sess-c3-ui', 'claude', 1);
 
     const browser = await harness.connectBrowser();
     await browser.waitFor((f) => (f as { type?: string }).type === 'ready');

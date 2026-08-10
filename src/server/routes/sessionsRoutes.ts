@@ -14,6 +14,7 @@ import {
   editSessionInManifest,
   moveSessionInManifest,
   readManifestFile,
+  restoreManifestSourceIfUnchanged,
   reorderGroupsInManifest,
   reorderProjectsInManifest,
   reorderSessionsInManifest,
@@ -50,7 +51,10 @@ import type {
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import { isValidProfileId } from '../../shared/agentProfiles.js';
-import { isValidResumeIdForAgent } from '../resumeCapture.js';
+import {
+  isProviderSessionProvider,
+  isValidProviderSessionId
+} from '../../shared/providerSessionIdentity.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { deleteToolJournal } from '../agents/host/toolJournal.js';
 import {
@@ -61,7 +65,6 @@ import {
 import { shouldRespawnAfterEdit } from '../editRespawn.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
 import type { DeskRoute } from '../plugin.js';
-import { scheduleCodexResumeCapture, scheduleOpencodeResumeCapture } from '../resumeCapture.js';
 import { buildDeskSnapshot } from '../snapshot.js';
 import { createInFlightGuard, performUiModeSwitch, validateUiModeSwitch } from '../uiModeSwitch.js';
 
@@ -108,11 +111,6 @@ export async function commitManifestIfUnchanged(
   });
 }
 
-function scheduleAgentResumeCapture(session: SessionSpec): void {
-  scheduleCodexResumeCapture(session);
-  scheduleOpencodeResumeCapture(session);
-}
-
 export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boolean } = {}): DeskSessionDraft {
   if (!value || typeof value !== 'object') {
     throw new ApiValidationError('session body is required');
@@ -133,17 +131,16 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
   if (agent) {
     session.agent = agent;
   }
-  // Resume ids are provider-shaped (claude/codex UUIDs, OpenCode ses_ ids) and
-  // the capture seam already validates them. Validate here too so a malformed
-  // one never reaches the manifest, symmetric with profileId below: the HTTP
-  // seam is where operator input arrives, and a value that only fails later
-  // fails at session launch instead of at the request that introduced it.
+  // Resume ids are provider-shaped (claude/codex UUIDs, OpenCode ses_ ids).
+  // Validate them at the HTTP seam so malformed operator input never reaches
+  // the manifest and fails later during session launch.
   const resume = readOptionalString(record.resume);
   if (resume) {
-    // Only when DESK builds the provider command. A custom command receives the
-    // value as its own argument — an operator wrapping their agent may use any
-    // token their wrapper understands, and Desk has no standing to reject it.
-    if (command === undefined && !isValidResumeIdForAgent(session.agent, resume)) {
+    const provider = command === undefined ? session.agent ?? 'codex' : undefined;
+    if (!isProviderSessionProvider(provider)) {
+      throw new ApiValidationError('session.resume requires a managed provider session');
+    }
+    if (!isValidProviderSessionId(provider, resume)) {
       throw new ApiValidationError('session.resume is not a valid resume id for this agent');
     }
     session.resume = resume;
@@ -220,6 +217,72 @@ export function validateSessionCwd(
     return { ok: true };
   }
   return { ok: false, error: `cwd does not exist for ${session.name}: ${session.cwd}` };
+}
+
+interface CommittedSessionAdd {
+  previousSource: string;
+  committedSource: string;
+  manifest: DeskManifest;
+  session: SessionSpec;
+}
+
+async function commitSessionAdd(
+  manifestPath: string,
+  mutate: (manifest: DeskManifest) => DeskManifest,
+  findOptions: FindSessionForStartOptions
+): Promise<{ ok: true; addition: CommittedSessionAdd } | { ok: false; error: string }> {
+  return withManifestFileLock(manifestPath, () => {
+    const previousSource = readFileSync(manifestPath, 'utf8');
+    const manifest = mutate(readManifestFile(manifestPath));
+    const session = findSessionForStart(manifest, findOptions);
+    const cwdValidation = validateSessionCwd(session);
+    if (!cwdValidation.ok) return cwdValidation;
+    writeManifestFile(manifestPath, manifest);
+    return {
+      ok: true,
+      addition: {
+        previousSource,
+        committedSource: readFileSync(manifestPath, 'utf8'),
+        manifest,
+        session
+      }
+    };
+  });
+}
+
+async function provisionCommittedSessionAdd(
+  manifestPath: string,
+  addition: CommittedSessionAdd,
+  managedAgentLsp: ManagedAgentLsp,
+  nativeAgentLaunch: SessionsRoutesOptions['nativeAgentLaunch']
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let launch: ReturnType<ManagedAgentLsp['prepare']> | undefined;
+  let error: string | undefined;
+  try {
+    launch = managedAgentLsp.prepare(addition.session, addition.manifest.settings);
+    const started = await startSessionNativeAware(
+      nativeAgentLaunch(
+        launch?.session ?? addition.session,
+        launch?.envFilePath
+      )
+    );
+    if (started.ok) return { ok: true };
+    error = started.error ?? 'start failed';
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+  }
+  launch?.cleanup();
+  const rolledBack = await restoreManifestSourceIfUnchanged(
+    manifestPath,
+    addition.committedSource,
+    addition.previousSource
+  );
+  return {
+    ok: false,
+    error: rolledBack
+      ? error
+      : `${error}; rollback skipped because the manifest changed concurrently`
+  };
 }
 
 export function collectProjectDeleteSessions(manifest: DeskManifest, options: DeleteTargetsOptions): SessionSpec[] {
@@ -391,13 +454,6 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         ? { exitCode: await runPlan(plan, true) }
         : await runManagedPlan(plan, settings, managedAgentLsp, nativeAgentLaunch);
       const { exitCode } = result;
-      if (!dryRun && exitCode === 0) {
-        for (const action of plan) {
-          if (action.type === 'start') {
-            scheduleAgentResumeCapture(action.session);
-          }
-        }
-      }
       sendJson(res, exitCode === 0 ? 200 : 500, {
         exitCode,
         ...('error' in result && result.error ? { error: result.error } : {}),
@@ -415,34 +471,29 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const manifestPath = resolveManifestPath();
       const groupId = readRequiredString(body.groupId, 'groupId');
       const session = readDeskSessionBody(body.session);
-      let nextSession: SessionSpec | undefined;
-      let addError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, async (manifest) => {
-        const next = addSessionToManifest(manifest, {
+      const committed = await commitSessionAdd(
+        manifestPath,
+        (manifest) => addSessionToManifest(manifest, {
           groupId,
           groupLabel: readOptionalString(body.groupLabel),
           session
-        });
-        nextSession = findSessionForStart(next, { groupId, sessionName: session.name });
-        const cwdValidation = validateSessionCwd(nextSession);
-        if (!cwdValidation.ok) {
-          addError = cwdValidation.error;
-          return null;
-        }
-        const launch = managedAgentLsp.prepare(nextSession, next.settings);
-        const started = await startSessionNativeAware(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
-        if (!started.ok) {
-          launch?.cleanup();
-          addError = started.error;
-          return null;
-        }
-        return next;
-      });
-      if (!updated || !nextSession) {
-        sendJson(res, 500, { error: addError ?? 'session add failed' });
+        }),
+        { groupId, sessionName: session.name }
+      );
+      if (!committed.ok) {
+        sendJson(res, 500, { error: committed.error });
         return true;
       }
-      scheduleAgentResumeCapture(nextSession);
+      const provisioned = await provisionCommittedSessionAdd(
+        manifestPath,
+        committed.addition,
+        managedAgentLsp,
+        nativeAgentLaunch
+      );
+      if (!provisioned.ok) {
+        sendJson(res, 500, { error: provisioned.error });
+        return true;
+      }
       sendJson(res, 200, buildDeskSnapshot());
       return true;
     }
@@ -496,30 +547,26 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const session = readDeskSessionBody(body.session, { cwdRequired: false });
       const projectId = readRequiredString(body.projectId, 'projectId');
       const groupId = readRequiredString(body.groupId, 'groupId');
-      let nextSession: SessionSpec | undefined;
-      let addError: string | undefined;
-      const updated = await updateManifestFile(manifestPath, async (manifest) => {
-        const next = addSessionToProjectManifest(manifest, { projectId, groupId, session });
-        nextSession = findSessionForStart(next, { groupId, sessionName: session.name, projectId });
-        const cwdValidation = validateSessionCwd(nextSession);
-        if (!cwdValidation.ok) {
-          addError = cwdValidation.error;
-          return null;
-        }
-        const launch = managedAgentLsp.prepare(nextSession, next.settings);
-        const started = await startSessionNativeAware(nativeAgentLaunch(launch?.session ?? nextSession, launch?.envFilePath));
-        if (!started.ok) {
-          launch?.cleanup();
-          addError = started.error;
-          return null;
-        }
-        return next;
-      });
-      if (!updated || !nextSession) {
-        sendJson(res, 500, { error: addError ?? 'project session add failed' });
+      const committed = await commitSessionAdd(
+        manifestPath,
+        (manifest) =>
+          addSessionToProjectManifest(manifest, { projectId, groupId, session }),
+        { groupId, sessionName: session.name, projectId }
+      );
+      if (!committed.ok) {
+        sendJson(res, 500, { error: committed.error });
         return true;
       }
-      scheduleAgentResumeCapture(nextSession);
+      const provisioned = await provisionCommittedSessionAdd(
+        manifestPath,
+        committed.addition,
+        managedAgentLsp,
+        nativeAgentLaunch
+      );
+      if (!provisioned.ok) {
+        sendJson(res, 500, { error: provisioned.error });
+        return true;
+      }
       sendJson(res, 200, buildDeskSnapshot());
       return true;
     }
@@ -614,6 +661,15 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const manifestPath = resolveManifestPath();
       const session = readDeskSessionBody(body.session, { cwdRequired: false });
       const sessionBody = body.session as Record<string, unknown> | undefined;
+      if (sessionBody?.clearResume === true) {
+        sendJson(res, 409, {
+          ok: false,
+          code: 'provider-session-reset-required',
+          error:
+            'provider session identity can only be cleared with desk reset-provider-session <name-or-session-id> --force'
+        });
+        return true;
+      }
       const projectId = readRequiredString(body.projectId, 'projectId');
       const groupId = readRequiredString(body.groupId, 'groupId');
       const currentName = readRequiredString(body.currentName, 'currentName');
@@ -628,7 +684,6 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           groupId,
           currentName,
           projectCwd: readOptionalString(body.projectCwd),
-          clearResume: sessionBody?.clearResume === true,
           session
         });
         const newSpec = findSpec(buildSessionSpecs(next, { homeDir: homedir() }), session.name);
@@ -636,13 +691,12 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           oldSpec &&
           newSpec &&
           isClaudeProfileChange(oldSpec, newSpec) &&
-          !newSpec.resume &&
-          sessionBody?.clearResume !== true
+          !newSpec.resume
         ) {
           return {
             updated: null,
             respawnError:
-              'session edit aborted: continuity-no-resume-id: Claude profile changes require a captured resume id or an explicit fresh start'
+              'session edit aborted: continuity-no-resume-id: Claude profile changes require a stored resume id or an explicit fresh start'
           };
         }
         if (oldSpec && newSpec && requiresClaudeProfileHandoff(oldSpec, newSpec)) {
@@ -674,7 +728,6 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
             launch?.cleanup();
             return { updated: next, respawnError: `session edit saved but respawn failed: ${restarted.error}` };
           }
-          scheduleAgentResumeCapture(newSpec);
         }
         return { updated: next, respawnError: undefined };
       });
@@ -724,7 +777,6 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
                 ? `session edit saved but profile handoff start failed: ${handoff.error}`
                 : `session edit aborted: ${handoff.error}`
             };
-        if (handoff.ok && wasRunning) scheduleAgentResumeCapture(newSpec);
       }
       if (completed.respawnError) {
         sendJson(res, 500, { error: completed.respawnError });
@@ -805,7 +857,6 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         sendJson(res, 500, { error: restarted.error });
         return true;
       }
-      scheduleAgentResumeCapture(session);
       sendJson(res, 200, buildDeskSnapshot());
       return true;
     }
@@ -850,8 +901,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
                 launch = managedAgentLsp.prepare(spec, readManifestFile(manifestPath).settings);
                 return nativeAgentLaunch(launch?.session ?? spec, launch?.envFilePath);
               },
-              restart: (spec) => restartSessionNativeAware(spec),
-              scheduleCapture: (spec) => scheduleAgentResumeCapture(spec)
+              restart: (spec) => restartSessionNativeAware(spec)
             }
           );
           if (!result.ok) {

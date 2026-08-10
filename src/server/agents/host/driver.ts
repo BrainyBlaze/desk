@@ -99,8 +99,8 @@ export function driverCommandError(
  *   arrives — so the start() return carries best-known identity (resume id when
  *   resuming, undefined when fresh), and the real session id + model arrive later as a
  *   `session-info` event the host MUST forward. For FRESH sessions that event is where
- *   the resume id first appears; the broker's `session-info` → `persistSessionResume`
- *   mapping (spec §6) is the only id path in that case.
+ *   the resume id first appears; the broker's typed provider-session bind followed by
+ *   launch authorization is the only identity path in that case.
  */
 export interface AgentDriver {
   /**

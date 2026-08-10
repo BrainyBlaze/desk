@@ -380,7 +380,15 @@ export class AgentHost {
     }
     const driver = this.loadDriverFn(this.env, this.logger);
     this.driver = driver;
-    driver.onEvent((event) => this.handleDriverEvent(event));
+    const startupEvents: DriverEvent[] = [];
+    let sessionInfoEmitted = false;
+    driver.onEvent((event) => {
+      if (!sessionInfoEmitted) {
+        startupEvents.push(event);
+        return;
+      }
+      this.handleDriverEvent(event);
+    });
 
     try {
       const { session, status } = await driver.start();
@@ -392,6 +400,10 @@ export class AgentHost {
         model: session.model,
         commands: session.commands
       });
+      sessionInfoEmitted = true;
+      for (const event of startupEvents) {
+        this.handleDriverEvent(event);
+      }
       // emit deterministic status
       this.emitDriverEvent(status);
       if (needsInitialBackfill) {
@@ -432,6 +444,11 @@ export class AgentHost {
     if (!this.driver) {
       return;
     }
+    if (!opts.skipStatus && this.lastSessionInfo) {
+      // Restore durable identity before history I/O so a reconnecting host cannot
+      // be retired while a slow provider history request is still in flight.
+      this.emitDriverEvent(this.lastSessionInfo);
+    }
     let history: DriverEvent[];
     try {
       history = await this.driver.fetchHistory();
@@ -452,14 +469,8 @@ export class AgentHost {
       return;
     }
     if (!opts.skipStatus) {
-      // Re-emit cached session-info + status before backfill events so the subscriber
-      // observes the correct FSM state (not the broker's default 'starting'). This was
-      // an empty block with a comment — P0 merge blocker found by claude browser pass
-      // (msg-20260706-011046): after server restart, all surfaces stuck on 'starting'
-      // with Send disabled forever because no status was re-emitted during backfill.
-      if (this.lastSessionInfo) {
-        this.emitDriverEvent(this.lastSessionInfo);
-      }
+      // Re-emit cached status before backfill events so the subscriber observes
+      // the correct FSM state instead of the broker's default 'starting'.
       if (this.lastStatus) {
         this.emitDriverEvent(this.lastStatus);
       }

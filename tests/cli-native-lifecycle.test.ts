@@ -41,7 +41,9 @@ describe('desk CLI native lifecycle', () => {
     sessions:
       - name: alpha
         cwd: /tmp
-        command: bash
+        agent: codex
+        resume: 11111111-1111-4111-8111-111111111111
+        uiMode: terminal
         sessionId: alpha
 `);
   });
@@ -114,6 +116,72 @@ describe('desk CLI native lifecycle', () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       'http://127.0.0.1:5173/api/up',
       expect.objectContaining({ body: JSON.stringify({ dryRun: true }) })
+    );
+  });
+
+  it('refuses provider-session reset without the explicit destructive force flag', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await run(['reset-provider-session', 'alpha']);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'reset-provider-session requires --force'
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not accept a provider resume id as the destructive reset target', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await run([
+      'reset-provider-session',
+      '11111111-1111-4111-8111-111111111111',
+      '--force'
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'target must be a session name or sessionId'
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requests one daemon-owned provider-session reset for the durable Desk id', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            authorizationId: 'authorization-1',
+            generation: 3,
+            state: 'authorized'
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          }
+        )
+      )
+    );
+
+    const result = await run([
+      'reset-provider-session',
+      'alpha',
+      '--force'
+    ]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('authorized one fresh provider launch');
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      'http://127.0.0.1:5178/control/provider-session/reset',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ sessionId: 'alpha' })
+      })
     );
   });
 });

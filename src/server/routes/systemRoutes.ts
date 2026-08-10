@@ -9,6 +9,8 @@ import {
 } from '../../core/agentState/providerAdapter.js';
 import {
   adaptAgentEndpointRegistration,
+  agentEndpointFingerprint,
+  parseAgentEndpointActivation,
   parseDeskEventClearResponse,
   parseDeskEventFeedResponse,
   parseDeskEventReadRequest,
@@ -20,8 +22,10 @@ import {
   type SessionStateSnapshot
 } from '../../shared/controlPlane/index.js';
 import {
+  completeProviderSessionLaunch as completeProviderSessionLaunchDefault,
   daemonControl,
   daemonControlGet,
+  type CompleteProviderSessionLaunchRequest,
   type DaemonControlResult
 } from '../../shared/daemonControlClient.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
@@ -29,10 +33,19 @@ import {
   confirmClaudeSessionStart as confirmClaudeSessionStartDefault,
   type ConfirmClaudeSessionStartResult
 } from '../claudeProfileContinuity.js';
+import {
+  bindProviderSessionIdentity as bindProviderSessionIdentityDefault,
+  type BindProviderSessionIdentityInput,
+  type ProviderSessionBindingResult
+} from '../providerSessionBinding.js';
 import { executeKillSwitch } from '../killSwitch.js';
 import type { DeskRoute } from '../plugin.js';
 import { buildDeskSnapshot } from '../snapshot.js';
 import { getSystemSnapshot } from '../systemSampler.js';
+import {
+  isValidProviderSessionId,
+  type ProviderSessionProvider
+} from '../../shared/providerSessionIdentity.js';
 
 interface ManagedAgentLifecycle {
   reconcile(runningSessions: Set<string>): void;
@@ -49,6 +62,9 @@ export interface AgentStateGateway {
 
 export interface AgentEndpointGateway {
   registerEndpoint(registration: AgentEndpointRegistration): Promise<DaemonControlResult>;
+  activateEndpoint(
+    activation: ReturnType<typeof parseAgentEndpointActivation>
+  ): Promise<DaemonControlResult>;
 }
 
 export interface DeskEventGateway {
@@ -64,12 +80,27 @@ export interface SystemRoutesOptions {
   confirmClaudeSessionStart?: (
     input: ClaudeSessionStartIdentity
   ) => ConfirmClaudeSessionStartResult;
+  bindProviderSessionIdentity?: (
+    input: BindProviderSessionIdentityInput
+  ) => Promise<ProviderSessionBindingResult>;
+  completeProviderSessionLaunch?: (
+    input: CompleteProviderSessionLaunchRequest
+  ) => Promise<DaemonControlResult>;
   now?: () => number;
 }
 
 export interface ClaudeSessionStartIdentity {
   deskSessionId: string;
   providerSessionId: string;
+}
+
+interface ProviderHookIdentity {
+  deskSessionId: string;
+  generation: number;
+  provider: Exclude<ProviderSessionProvider, 'opencode'>;
+  providerSessionId: string;
+  hook: string;
+  isSessionStart: boolean;
 }
 
 interface AgentStateView {
@@ -92,7 +123,9 @@ const defaultAgentStateGateway: AgentStateGateway = {
 
 const defaultAgentEndpointGateway: AgentEndpointGateway = {
   registerEndpoint: (registration) =>
-    daemonControl('/control/agent-endpoint', registration)
+    daemonControl('/control/agent-endpoint', registration),
+  activateEndpoint: (activation) =>
+    daemonControl('/control/agent-endpoint/activate', activation)
 };
 
 const defaultDeskEventGateway: DeskEventGateway = {
@@ -102,17 +135,26 @@ const defaultDeskEventGateway: DeskEventGateway = {
   clearEvents: () => daemonControl('/control/events/clear', {})
 };
 
-function claudeSessionStartIdentity(
+function providerHookIdentity(
   input: unknown
 ):
   | { kind: 'none' }
-  | { kind: 'invalid'; error: string }
-  | { kind: 'identity'; value: ClaudeSessionStartIdentity } {
+  | {
+      kind: 'invalid';
+      code: 'provider-session-id-missing' | 'provider-session-id-invalid';
+      error: string;
+    }
+  | { kind: 'identity'; value: ProviderHookIdentity } {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { kind: 'none' };
   }
   const body = input as Record<string, unknown>;
-  if (body.provider !== 'claude' || body.producer !== 'claude-hooks') {
+  let provider: ProviderHookIdentity['provider'];
+  if (body.provider === 'claude' && body.producer === 'claude-hooks') {
+    provider = 'claude';
+  } else if (body.provider === 'codex' && body.producer === 'codex-hooks') {
+    provider = 'codex';
+  } else {
     return { kind: 'none' };
   }
   const observation = body.observation;
@@ -120,23 +162,33 @@ function claudeSessionStartIdentity(
     return { kind: 'none' };
   }
   const fields = observation as Record<string, unknown>;
-  if (fields.hook !== 'SessionStart') {
-    return { kind: 'none' };
-  }
   if (
     typeof fields.providerSessionId !== 'string' ||
     fields.providerSessionId.trim().length === 0
   ) {
     return {
       kind: 'invalid',
-      error: 'Claude SessionStart did not include a provider session id'
+      code: 'provider-session-id-missing',
+      error: `${provider} hook did not include a provider session id`
+    };
+  }
+  const providerSessionId = fields.providerSessionId.trim();
+  if (!isValidProviderSessionId(provider, providerSessionId)) {
+    return {
+      kind: 'invalid',
+      code: 'provider-session-id-invalid',
+      error: `Invalid ${provider} provider session id`
     };
   }
   return {
     kind: 'identity',
     value: {
       deskSessionId: body.sessionId as string,
-      providerSessionId: fields.providerSessionId.trim()
+      generation: body.generation as number,
+      provider,
+      providerSessionId,
+      hook: fields.hook as string,
+      isSessionStart: fields.hook === 'SessionStart'
     }
   };
 }
@@ -270,6 +322,15 @@ export function createSystemRoutes(
         homeDir: homedir(),
         ...input
       }));
+  const bindProviderSessionIdentity =
+    options.bindProviderSessionIdentity ?? bindProviderSessionIdentityDefault;
+  const completeProviderSessionLaunch =
+    options.completeProviderSessionLaunch ??
+    completeProviderSessionLaunchDefault;
+  const providerSessionBindings = new Map<
+    string,
+    { provider: ProviderSessionProvider; providerSessionId: string }
+  >();
   const now = options.now ?? Date.now;
   return async (req, res, url) => {
     if (req.method === 'GET' && url.pathname === '/api/desk') {
@@ -333,29 +394,115 @@ export function createSystemRoutes(
         });
         return true;
       }
-      const sessionStart = claudeSessionStartIdentity(body);
-      if (sessionStart.kind === 'invalid') {
+      const providerIdentity = providerHookIdentity(body);
+      if (providerIdentity.kind === 'invalid') {
         sendJson(res, 409, {
           ok: false,
-          code: 'continuity-resume-unconfirmed',
-          error: sessionStart.error
+          code: providerIdentity.code,
+          error: providerIdentity.error
         });
         return true;
       }
-      if (sessionStart.kind === 'identity') {
-        let confirmation: ConfirmClaudeSessionStartResult;
-        try {
-          confirmation = confirmClaudeSessionStart(sessionStart.value);
-        } catch (error) {
-          confirmation = {
+      if (providerIdentity.kind === 'identity') {
+        const identity = providerIdentity.value;
+        const bindingKey = JSON.stringify([
+          identity.deskSessionId,
+          identity.generation
+        ]);
+        const cached = providerSessionBindings.get(bindingKey);
+        if (
+          cached &&
+          (cached.provider !== identity.provider ||
+            cached.providerSessionId !== identity.providerSessionId)
+        ) {
+          sendJson(res, 409, {
             ok: false,
-            code: 'continuity-store-corrupt',
-            error: error instanceof Error ? error.message : String(error)
-          };
-        }
-        if (!confirmation.ok) {
-          sendJson(res, 409, confirmation);
+            code: 'provider-session-mismatch',
+            error: `Desk session ${identity.deskSessionId} generation ${identity.generation} is already bound to a different provider session id`
+          });
           return true;
+        }
+        if (!cached) {
+          if (identity.provider === 'claude') {
+            let confirmation: ConfirmClaudeSessionStartResult;
+            try {
+              confirmation = confirmClaudeSessionStart({
+                deskSessionId: identity.deskSessionId,
+                providerSessionId: identity.providerSessionId
+              });
+            } catch (error) {
+              confirmation = {
+                ok: false,
+                code: 'continuity-store-corrupt',
+                error: error instanceof Error ? error.message : String(error)
+              };
+            }
+            if (!confirmation.ok) {
+              sendJson(res, 409, confirmation);
+              return true;
+            }
+          }
+
+          let binding: ProviderSessionBindingResult | undefined;
+          try {
+            binding = await bindProviderSessionIdentity({
+              deskSessionId: identity.deskSessionId,
+              provider: identity.provider,
+              providerSessionId: identity.providerSessionId
+            });
+          } catch (error) {
+            if (identity.isSessionStart) {
+              sendJson(res, 500, {
+                ok: false,
+                code: 'provider-session-store-failed',
+                error: `provider session identity storage failed: ${error instanceof Error ? error.message : String(error)}`
+              });
+              return true;
+            }
+          }
+          if (binding && !binding.ok) {
+            sendJson(res, 409, binding);
+            return true;
+          }
+          if (binding?.ok) {
+            let completion: DaemonControlResult;
+            try {
+              completion = await completeProviderSessionLaunch({
+                deskSessionId: identity.deskSessionId,
+                provider: identity.provider,
+                providerSessionId: identity.providerSessionId,
+                generation: identity.generation
+              });
+            } catch (error) {
+              completion = {
+                ok: false,
+                error: `terminal daemon unavailable: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              };
+            }
+            if (!completion.ok) {
+              const failure = gatewayFailure(completion);
+              sendJson(res, failure.status, failure.body);
+              return true;
+            }
+            if (
+              completion.body?.ok !== true ||
+              (completion.body.kind !== 'completed' &&
+                completion.body.kind !== 'not-required')
+            ) {
+              sendJson(res, 502, {
+                ok: false,
+                error:
+                  'terminal daemon returned malformed provider launch completion receipt'
+              });
+              return true;
+            }
+            providerSessionBindings.set(bindingKey, {
+              provider: identity.provider,
+              providerSessionId: identity.providerSessionId
+            });
+          }
         }
       }
       if (adapted.kind === 'no-facts') {
@@ -417,10 +564,102 @@ export function createSystemRoutes(
         sendJson(res, failure.status, failure.body);
         return true;
       }
-      if (result.body?.ok !== true) {
+      if (
+        result.body?.ok !== true ||
+        (result.body.kind !== 'accepted' && result.body.kind !== 'duplicate') ||
+        typeof result.body.active !== 'boolean'
+      ) {
         sendJson(res, 502, {
           ok: false,
           error: 'terminal daemon returned malformed agent endpoint receipt'
+        });
+        return true;
+      }
+      const providerSessionId = adapted.registration.providerSessionId;
+      if (providerSessionId === undefined) {
+        sendJson(res, result.status ?? 200, result.body);
+        return true;
+      }
+
+      let binding: ProviderSessionBindingResult;
+      try {
+        binding = await bindProviderSessionIdentity({
+          deskSessionId: adapted.registration.sessionId,
+          provider: 'opencode',
+          providerSessionId
+        });
+      } catch (error) {
+        sendJson(res, 500, {
+          ok: false,
+          code: 'provider-session-store-failed',
+          error: `provider session identity storage failed: ${error instanceof Error ? error.message : String(error)}`
+        });
+        return true;
+      }
+      if (!binding.ok) {
+        sendJson(res, 409, binding);
+        return true;
+      }
+
+      let completion: DaemonControlResult;
+      try {
+        completion = await completeProviderSessionLaunch({
+          deskSessionId: adapted.registration.sessionId,
+          provider: 'opencode',
+          providerSessionId,
+          generation: adapted.registration.generation
+        });
+      } catch (error) {
+        completion = {
+          ok: false,
+          error: `terminal daemon unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        };
+      }
+      if (!completion.ok) {
+        const failure = gatewayFailure(completion);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      if (
+        completion.body?.ok !== true ||
+        (completion.body.kind !== 'completed' &&
+          completion.body.kind !== 'not-required')
+      ) {
+        sendJson(res, 502, {
+          ok: false,
+          error:
+            'terminal daemon returned malformed provider launch completion receipt'
+        });
+        return true;
+      }
+
+      const activation = parseAgentEndpointActivation(
+        agentEndpointFingerprint(adapted.registration)
+      );
+      try {
+        result = await agentEndpointGateway.activateEndpoint(activation);
+      } catch (error) {
+        result = {
+          ok: false,
+          error: `terminal daemon unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        };
+      }
+      if (!result.ok) {
+        const failure = gatewayFailure(result);
+        sendJson(res, failure.status, failure.body);
+        return true;
+      }
+      if (
+        result.body?.ok !== true ||
+        (result.body.kind !== 'activated' && result.body.kind !== 'already-active')
+      ) {
+        sendJson(res, 502, {
+          ok: false,
+          error: 'terminal daemon returned malformed agent endpoint activation receipt'
         });
         return true;
       }

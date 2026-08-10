@@ -42,10 +42,9 @@ const MIGRATION_CONSTRUCTS = [
  * a violation even when it reuses an allowed construct.
  */
 export const SANCTIONS: Record<string, Sanction> = {
-  'server/cutoverStoreMigration.ts': { count: 39, allowed: MIGRATION_CONSTRUCTS },
+  'server/cutoverStoreMigration.ts': { count: 36, allowed: MIGRATION_CONSTRUCTS },
   'server/channelsEvents.ts': { count: 9, allowed: MIGRATION_CONSTRUCTS },
   'server/channelsProtocol.ts': { count: 6, allowed: MIGRATION_CONSTRUCTS },
-  'core/resumeCaptureState.ts': { count: 6, allowed: MIGRATION_CONSTRUCTS },
   'core/manifest.ts': { count: 2, allowed: MIGRATION_CONSTRUCTS },
   'core/sessionIdentity.ts': { count: 5, allowed: MIGRATION_CONSTRUCTS },
   'shared/migration/channelsPausedTransform.ts': { count: 8, allowed: MIGRATION_CONSTRUCTS },
