@@ -3667,6 +3667,11 @@ select {
 .chanFeedColumn { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; padding: 0 10px 10px; }
 .chanFeed { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding: 8px 4px; }
 .chanFeed.compact { padding: 4px 2px; }
+.chanFeed.chanFeedScrolling .chanMessage { pointer-events: none; }
+.chanFeed.chanFeedScrolling .chanReaction,
+.chanFeed.chanFeedScrolling .chanThreadChip,
+.chanFeed.chanFeedScrolling .chanMessageBody a,
+.chanFeed.chanFeedScrolling .chanMessageBody button { pointer-events: auto; }
 .chanFeedEmpty { color: var(--desk-text-dim); font-size: 12px; text-align: center; padding: 30px 0; }
 
 .chanDaySeparator { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; }
