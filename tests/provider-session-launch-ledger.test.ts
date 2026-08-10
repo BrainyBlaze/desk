@@ -236,6 +236,40 @@ describe('FileProviderSessionLaunchLedger', () => {
     replayed.close();
   });
 
+  it('replays a completed resumed launch at generation zero', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    const prepared = first.prepare({
+      deskSessionId: 'desk-alpha',
+      provider: 'codex',
+      expectedPriorBinding: '11111111-1111-4111-8111-111111111111',
+      generation: 0
+    });
+
+    expect(
+      first.completeForResumedLaunch({
+        deskSessionId: 'desk-alpha',
+        provider: 'codex',
+        providerSessionId: '11111111-1111-4111-8111-111111111111',
+        generation: 0
+      })
+    ).toEqual({
+      ok: true,
+      kind: 'completed',
+      authorization: { ...prepared, state: 'completed' }
+    });
+    first.close();
+
+    const replayed = new FileProviderSessionLaunchLedger(path);
+    expect(replayed.current('desk-alpha')).toEqual({
+      ...prepared,
+      state: 'completed'
+    });
+    replayed.close();
+  });
+
   it('completes a stale authorized reset for the exact still-bound resumed identity', () => {
     const path = ledgerPath();
     const ledger = new FileProviderSessionLaunchLedger(path, {

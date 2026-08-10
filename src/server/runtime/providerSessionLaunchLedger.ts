@@ -549,15 +549,11 @@ function parseRecord(
     generation: record.generation as number,
     state
   };
-  const identityGeneration =
-    state === 'claimed' || state === 'completed'
-      ? parsed.generation - 1
-      : parsed.generation;
   validateIdentity({
     deskSessionId: parsed.deskSessionId,
     provider: parsed.provider,
     expectedPriorBinding: parsed.expectedPriorBinding,
-    generation: identityGeneration
+    generation: parsed.generation
   });
   return parsed;
 }
