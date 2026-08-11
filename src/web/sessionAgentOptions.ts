@@ -7,7 +7,7 @@ export const SESSION_AGENT_OPTIONS: DeskSelectOption[] = AGENTS.map((agent) => (
 }));
 
 export function supportsBypassPermissions(agent: string): boolean {
-  return agentProvider(agent) !== undefined;
+  return agentProvider(agent)?.bypass === true;
 }
 
 export function supportsNativeUi(agent: string, hasCustomCommand: boolean): boolean {

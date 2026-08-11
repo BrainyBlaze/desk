@@ -423,7 +423,8 @@ projects:
 `);
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
     expect(commands[0]).toContain("DESK_SESSION_ID='qwen' DESK_AGENT='qwen' qwen");
-    expect(commands[0]).toContain("--yolo --resume '123e4567-e89b-12d3-a456-426614174000'");
+    expect(commands[0]).toContain("--resume '123e4567-e89b-12d3-a456-426614174000'");
+    expect(commands[0]).not.toContain('--yolo');
     expect(commands[1]).toContain("DESK_SESSION_ID='kimi' DESK_AGENT='kimi' kimi");
     expect(commands[1]).toContain("--session 'kimi-session-abc'");
     expect(commands[1]).not.toContain('--yolo');

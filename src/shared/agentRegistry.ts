@@ -9,6 +9,7 @@ export interface AgentDescriptor {
   terminalProducer?: string;
   nativeProducer?: string;
   native?: boolean;
+  bypass?: boolean;
   sessionIdField?: string;
   sessionIdShape?: AgentSessionIdShape;
   profileEnvVar?: string;
@@ -20,6 +21,7 @@ export const AGENTS = [
     id: 'codex',
     label: 'codex',
     kind: 'agent',
+    bypass: true,
     terminalProducer: 'codex-hooks',
     nativeProducer: 'codex-native',
     native: true,
@@ -32,6 +34,7 @@ export const AGENTS = [
     id: 'claude',
     label: 'claude',
     kind: 'agent',
+    bypass: true,
     terminalProducer: 'claude-hooks',
     nativeProducer: 'claude-native',
     native: true,
@@ -44,6 +47,7 @@ export const AGENTS = [
     id: 'opencode',
     label: 'opencode',
     kind: 'agent',
+    bypass: true,
     terminalProducer: 'opencode-terminal',
     nativeProducer: 'opencode-native',
     native: true,
@@ -66,6 +70,7 @@ export const AGENTS = [
     id: 'kimi',
     label: 'kimi',
     kind: 'agent',
+    bypass: true,
     terminalProducer: 'kimi-hooks',
     native: false,
     sessionIdField: 'session_id',

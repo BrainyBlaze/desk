@@ -428,9 +428,6 @@ export function buildAgentCommand(
   }
   if (session.agent === 'qwen') {
     const args = ['qwen'];
-    if (session.bypassPermissions) {
-      args.push('--yolo');
-    }
     if (session.resume) {
       args.push('--resume', shellQuote(session.resume));
     }
