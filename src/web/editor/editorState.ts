@@ -7,7 +7,7 @@ export function openTab(tabs: string[], active: string | null, path: string): { 
   if (tabs.includes(path)) {
     return { tabs, active: path };
   }
-  return { tabs: [...tabs, path], active: path };
+  return { tabs: [path, ...tabs], active: path };
 }
 
 export function closeTab(tabs: string[], active: string | null, path: string): TabSelection {
