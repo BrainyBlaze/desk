@@ -64,6 +64,8 @@ export interface InstalledAgentHooks {
   codexHooksPath: string;
   claudeSettingsPath: string;
   opencodePluginPath: string;
+  qwenSettingsPath: string;
+  kimiConfigPath: string;
   /** Config paths that were NOT written because their existing content was
    *  malformed JSON (a .bak was made). The caller must report these honestly. */
   skipped: string[];
@@ -172,6 +174,43 @@ export function buildClaudeHooksSettings(shimPath: string): ClaudeHooksSettings 
       SessionEnd: hook('SessionEnd')
     }
   };
+}
+
+export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
+  const hook = (event: string): HookGroup[] => [
+    { hooks: [{ type: 'command', command: command(shimPath, 'qwen', event), timeout: 10_000 }] }
+  ];
+  return {
+    hooks: {
+      SessionStart: hook('SessionStart'),
+      UserPromptSubmit: hook('UserPromptSubmit'),
+      PreToolUse: hook('PreToolUse'),
+      PostToolUse: hook('PostToolUse'),
+      PostToolUseFailure: hook('PostToolUseFailure'),
+      PermissionRequest: hook('PermissionRequest'),
+      Notification: hook('Notification'),
+      Stop: hook('Stop'),
+      StopFailure: hook('StopFailure'),
+      SessionEnd: hook('SessionEnd')
+    }
+  };
+}
+
+const KIMI_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PostToolUse',
+  'PermissionRequest',
+  'Notification',
+  'Stop',
+  'SessionEnd'
+] as const;
+
+export function buildKimiHooksToml(shimPath: string): string {
+  return KIMI_HOOK_EVENTS.map(
+    (event) =>
+      `[[hooks]]\nevent = "${event}"\ncommand = ${JSON.stringify(command(shimPath, 'kimi', event))}\ntimeout = 10\n`
+  ).join('\n');
 }
 
 export function codexHookPreflightStatus(input: {
@@ -374,8 +413,25 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   // has no business editing it to install its own reporting.
   writeTextIfChanged(claudeSettingsPath, `${JSON.stringify(buildClaudeHooksSettings(shimPath), null, 2)}\n`);
   writeTextIfChanged(opencodePluginPath, buildOpencodeAttentionPlugin());
+  const qwenSettingsPath = join(homeDir, '.qwen', 'settings.json');
+  if (mergeHookConfig(qwenSettingsPath, buildQwenHooksSettings(shimPath), shimPath) === 'skipped-malformed') {
+    skipped.push(qwenSettingsPath);
+  }
+  const kimiConfigPath = join(homeDir, '.kimi-code', 'config.toml');
+  appendKimiHooks(kimiConfigPath, shimPath);
 
-  return { shimPath, codexHooksPath, claudeSettingsPath, opencodePluginPath, skipped };
+  return { shimPath, codexHooksPath, claudeSettingsPath, opencodePluginPath, qwenSettingsPath, kimiConfigPath, skipped };
+}
+
+function appendKimiHooks(path: string, shimPath: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  if (existing.includes(`--agent 'kimi'`) || existing.includes('--agent kimi')) {
+    return;
+  }
+  const block = buildKimiHooksToml(shimPath);
+  const next = existing === '' ? block : `${existing.replace(/\n*$/, '\n\n')}${block}`;
+  writeTextIfChanged(path, next);
 }
 
 /**
