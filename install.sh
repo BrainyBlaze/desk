@@ -189,7 +189,7 @@ token=$LOCK_TOKEN
 pid=$$
 host=$host
 started=$now
-installer=0.3.1
+installer=0.4.0
 LOCK
   LOCK_OWNED=1
 }
