@@ -2,6 +2,7 @@ import { AgentHost } from './runner.js';
 import type { AgentHostEnv } from './types.js';
 import { AgentHostLogger, type AgentHostLogLevel } from './logger.js';
 import type { DeskAgent } from '../../../core/types.js';
+import { AGENT_IDS, isAgentId } from '../../../shared/agentRegistry.js';
 
 /**
  * `desk agent-host` CLI entry — read the locked env contract (msg-20260705-154138) and
@@ -46,7 +47,7 @@ export function parseAgentHostEnv(env: NodeJS.ProcessEnv): AgentHostEnv {
   }
   const DESK_AGENT = requireEnv(env, 'DESK_AGENT') as DeskAgent;
   if (!isDeskAgent(DESK_AGENT)) {
-    throw new Error(`DESK_AGENT must be one of claude | codex | opencode | bash; got ${String(DESK_AGENT)}`);
+    throw new Error(`DESK_AGENT must be one of ${AGENT_IDS.join(' | ')}; got ${String(DESK_AGENT)}`);
   }
   const DESK_AGENT_BYPASS = requireEnv(env, 'DESK_AGENT_BYPASS');
   if (DESK_AGENT_BYPASS !== '0' && DESK_AGENT_BYPASS !== '1') {
@@ -95,5 +96,5 @@ function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
 }
 
 function isDeskAgent(value: string): value is DeskAgent {
-  return value === 'claude' || value === 'codex' || value === 'opencode' || value === 'bash';
+  return isAgentId(value);
 }

@@ -403,6 +403,32 @@ groups:
     });
   });
 
+  it('constructs shell commands for qwen and kimi', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: qwen
+            sessionId: qwen
+            agent: qwen
+            bypassPermissions: true
+            resume: 123e4567-e89b-12d3-a456-426614174000
+          - name: kimi
+            sessionId: kimi
+            agent: kimi
+            resume: kimi-session-abc
+`);
+    const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
+    expect(commands[0]).toContain("DESK_SESSION_ID='qwen' DESK_AGENT='qwen' qwen");
+    expect(commands[0]).toContain("--yolo --resume '123e4567-e89b-12d3-a456-426614174000'");
+    expect(commands[1]).toContain("DESK_SESSION_ID='kimi' DESK_AGENT='kimi' kimi");
+    expect(commands[1]).toContain("--session 'kimi-session-abc'");
+    expect(commands[1]).not.toContain('--yolo');
+  });
+
   it('constructs shell commands for supported agents', () => {
     const manifest = parseDeskManifest(`
 projects:

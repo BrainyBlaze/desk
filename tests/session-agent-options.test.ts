@@ -3,13 +3,22 @@ import { SESSION_AGENT_OPTIONS, supportsBypassPermissions, supportsNativeUi } fr
 
 describe('session agent options', () => {
   it('includes every agent supported by the add-session modal', () => {
-    expect(SESSION_AGENT_OPTIONS.map((option) => option.value)).toEqual(['codex', 'claude', 'opencode', 'bash']);
+    expect(SESSION_AGENT_OPTIONS.map((option) => option.value)).toEqual([
+      'codex',
+      'claude',
+      'opencode',
+      'qwen',
+      'kimi',
+      'bash'
+    ]);
   });
 
   it('shows bypass permissions for agents Desk can launch in yolo mode', () => {
     expect(supportsBypassPermissions('codex')).toBe(true);
     expect(supportsBypassPermissions('claude')).toBe(true);
     expect(supportsBypassPermissions('opencode')).toBe(true);
+    expect(supportsBypassPermissions('qwen')).toBe(true);
+    expect(supportsBypassPermissions('kimi')).toBe(true);
     expect(supportsBypassPermissions('bash')).toBe(false);
   });
 
@@ -17,6 +26,8 @@ describe('session agent options', () => {
     expect(supportsNativeUi('codex', false)).toBe(true);
     expect(supportsNativeUi('claude', false)).toBe(true);
     expect(supportsNativeUi('opencode', false)).toBe(true);
+    expect(supportsNativeUi('qwen', false)).toBe(false);
+    expect(supportsNativeUi('kimi', false)).toBe(false);
     expect(supportsNativeUi('bash', false)).toBe(false);
     expect(supportsNativeUi('', false)).toBe(false);
   });

@@ -2,6 +2,7 @@ import YAML from 'yaml';
 import { checkGlobalUniqueness, isValidSessionId } from '../shared/migration/index.js';
 import { shellQuote } from '../shared/shell.js';
 import { isSupportedAgent } from './types.js';
+import { agentProvider } from '../shared/agentRegistry.js';
 import type {
   AgentMcpLaunchConfig,
   AgentProfile,
@@ -282,7 +283,7 @@ function validateSessionUiMode(session: Pick<DeskSession, 'name' | 'agent' | 'co
 /** Native UI mode is limited to SDK-backed agents launched without a custom command. */
 export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' | 'command'>): boolean {
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
+  return !hasCustomCommand && agentProvider(session.agent)?.native === true;
 }
 
 /**
@@ -424,6 +425,26 @@ export function buildAgentCommand(
   }
   if (session.agent === 'opencode') {
     return buildOpencodeCommand(session, cwd, homeDir, sessionId);
+  }
+  if (session.agent === 'qwen') {
+    const args = ['qwen'];
+    if (session.bypassPermissions) {
+      args.push('--yolo');
+    }
+    if (session.resume) {
+      args.push('--resume', shellQuote(session.resume));
+    }
+    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
+  }
+  if (session.agent === 'kimi') {
+    const args = ['kimi'];
+    if (session.bypassPermissions) {
+      args.push('--yolo');
+    }
+    if (session.resume) {
+      args.push('--session', shellQuote(session.resume));
+    }
+    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
   }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }

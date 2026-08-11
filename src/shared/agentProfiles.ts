@@ -12,15 +12,22 @@
 
 import { join } from 'node:path';
 import { shellQuote } from './shell.js';
+import {
+  AGENT_PROVIDER_ENTRIES,
+  agentProvider,
+  type AgentProfileProviderId
+} from './agentRegistry.js';
 
 /** Providers with a documented credential-directory override. */
-export type ProfileProviderId = 'claude' | 'codex';
+export type ProfileProviderId = AgentProfileProviderId;
 
 /** The credential-directory variable each provider CLI reads. */
-export const PROFILE_ENV_VAR: Record<ProfileProviderId, string> = {
-  claude: 'CLAUDE_CONFIG_DIR',
-  codex: 'CODEX_HOME'
-};
+export const PROFILE_ENV_VAR: Record<ProfileProviderId, string> = Object.fromEntries(
+  AGENT_PROVIDER_ENTRIES.filter((agent) => agent.profileEnvVar !== undefined).map((agent) => [
+    agent.id,
+    agent.profileEnvVar
+  ])
+) as Record<ProfileProviderId, string>;
 
 /**
  * Inherited provider credential variables removed from a PROFILED child.
@@ -46,7 +53,7 @@ export function isValidProfileId(id: unknown): id is string {
 }
 
 export function isProfileProvider(value: unknown): value is ProfileProviderId {
-  return value === 'claude' || value === 'codex';
+  return typeof value === 'string' && agentProvider(value)?.profileEnvVar !== undefined;
 }
 
 /** The Desk-owned credential directory for a profile. */

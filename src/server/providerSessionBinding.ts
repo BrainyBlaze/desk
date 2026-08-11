@@ -7,6 +7,7 @@ import {
 import { buildSessionSpecs } from '../core/manifest.js';
 import type { DeskManifest, DeskSession } from '../core/types.js';
 import {
+  isProviderSessionProvider,
   isValidProviderSessionId,
   type ProviderSessionProvider
 } from '../shared/providerSessionIdentity.js';
@@ -90,11 +91,7 @@ export function readProviderSessionBinding(
       error: `Desk session not found: ${input.deskSessionId}`
     };
   }
-  if (
-    target.agent !== 'claude' &&
-    target.agent !== 'codex' &&
-    target.agent !== 'opencode'
-  ) {
+  if (!isProviderSessionProvider(target.agent)) {
     return {
       ok: false,
       code: 'provider-session-agent-mismatch',

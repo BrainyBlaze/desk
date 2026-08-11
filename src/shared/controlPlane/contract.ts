@@ -1,29 +1,26 @@
 import { z } from 'zod';
+import {
+  AGENT_PRODUCER_BINDINGS_TABLE,
+  AGENT_PRODUCER_IDS,
+  AGENT_PROVIDER_IDS,
+  type AgentProducerId,
+  type AgentProviderId
+} from '../agentRegistry.js';
 
 export const AGENT_STATE_SCHEMA_VERSION = 3 as const;
 
 export type SessionLifecycle = 'starting' | 'running' | 'exited';
 export type AgentActivity = 'working' | 'blocked' | 'idle' | 'unknown';
 export type WaitOwner = 'operator' | 'provider' | 'desk';
-export type AgentProvider = 'codex' | 'claude' | 'opencode';
+export type AgentProvider = AgentProviderId;
 export type AgentMode = 'terminal' | 'native';
 export type AgentStateTransport = 'push' | 'poll';
-export type AgentProducer =
-  | 'codex-hooks'
-  | 'codex-native'
-  | 'claude-hooks'
-  | 'claude-native'
-  | 'opencode-terminal'
-  | 'opencode-native';
+export type AgentProducer = AgentProducerId;
 
-export const AGENT_PRODUCER_BINDINGS = {
-  'codex-hooks': { provider: 'codex', mode: 'terminal' },
-  'codex-native': { provider: 'codex', mode: 'native' },
-  'claude-hooks': { provider: 'claude', mode: 'terminal' },
-  'claude-native': { provider: 'claude', mode: 'native' },
-  'opencode-terminal': { provider: 'opencode', mode: 'terminal' },
-  'opencode-native': { provider: 'opencode', mode: 'native' }
-} as const satisfies Record<AgentProducer, { provider: AgentProvider; mode: AgentMode }>;
+export const AGENT_PRODUCER_BINDINGS = AGENT_PRODUCER_BINDINGS_TABLE satisfies Record<
+  AgentProducer,
+  { provider: AgentProvider; mode: AgentMode }
+>;
 
 /**
  * Health reasons are short operator-facing labels, not prose. Exported so a
@@ -98,16 +95,9 @@ const envelopeSchema = z
     schemaVersion: z.literal(AGENT_STATE_SCHEMA_VERSION),
     sessionId: identifierSchema,
     generation: positiveSequenceSchema,
-    provider: z.enum(['codex', 'claude', 'opencode']),
+    provider: z.enum(AGENT_PROVIDER_IDS),
     mode: z.enum(['terminal', 'native']),
-    producer: z.enum([
-      'codex-hooks',
-      'codex-native',
-      'claude-hooks',
-      'claude-native',
-      'opencode-terminal',
-      'opencode-native'
-    ]),
+    producer: z.enum(AGENT_PRODUCER_IDS),
     producerInstanceId: identifierSchema,
     transport: z.enum(['push', 'poll']).optional(),
     producerSeq: positiveSequenceSchema,
@@ -217,16 +207,9 @@ const evidenceSchema = z.union([producerEvidenceSchema, titleEvidenceSchema]);
 const agentSubjectSchema = z
   .strictObject({
     kind: z.literal('agent'),
-    provider: z.enum(['codex', 'claude', 'opencode']),
+    provider: z.enum(AGENT_PROVIDER_IDS),
     mode: z.enum(['terminal', 'native']),
-    producer: z.enum([
-      'codex-hooks',
-      'codex-native',
-      'claude-hooks',
-      'claude-native',
-      'opencode-terminal',
-      'opencode-native'
-    ]),
+    producer: z.enum(AGENT_PRODUCER_IDS),
     activity: z.enum(['working', 'blocked', 'idle', 'unknown']),
     activitySince: timestampSchema,
     wait: agentWaitSchema.nullable(),

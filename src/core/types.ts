@@ -1,13 +1,15 @@
-export type DeskAgent = 'codex' | 'claude' | 'bash' | 'opencode' | string;
+import { AGENT_IDS, isAgentId, type AgentId, type AgentProfileProviderId } from '../shared/agentRegistry.js';
+
+export type DeskAgent = AgentId | string;
 
 /** The agents desk knows how to launch. `DeskAgent` widens to `string` for
  *  forward-compat at the type level, so this is the runtime source of truth —
  *  used by manifest validation and the CLI add-boundary so a typo can't be
  *  written to the config (which would brick every later command on load). */
-export const SUPPORTED_AGENTS = ['codex', 'claude', 'bash', 'opencode'] as const;
+export const SUPPORTED_AGENTS = AGENT_IDS;
 
 export function isSupportedAgent(value: string | undefined): boolean {
-  return typeof value === 'string' && (SUPPORTED_AGENTS as readonly string[]).includes(value);
+  return isAgentId(value);
 }
 
 /** UI surface for a session's cell. Absent on the manifest record = 'terminal'. */
@@ -88,7 +90,7 @@ export interface DeskManifest {
 }
 
 /** Providers that support an isolated credential directory today. */
-export type ProfileProvider = 'claude' | 'codex';
+export type ProfileProvider = AgentProfileProviderId;
 
 /**
  * One named provider account. `id` is immutable and keys the credential

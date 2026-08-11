@@ -1,5 +1,6 @@
 import type { AgentMode, AgentProducer, AgentProvider } from './contract.js';
 import type { SessionRegistration } from './authority.js';
+import { AGENT_PROVIDER_ENTRIES, isAgentProviderId } from '../agentRegistry.js';
 
 export interface SessionSubjectSource {
   agent?: string;
@@ -7,28 +8,17 @@ export interface SessionSubjectSource {
   customCommand?: boolean;
 }
 
-const PRODUCER_BY_PROVIDER_AND_MODE = {
-  codex: {
-    terminal: 'codex-hooks',
-    native: 'codex-native'
-  },
-  claude: {
-    terminal: 'claude-hooks',
-    native: 'claude-native'
-  },
-  opencode: {
-    terminal: 'opencode-terminal',
-    native: 'opencode-native'
-  }
-} as const satisfies Record<AgentProvider, Record<AgentMode, AgentProducer>>;
+const PRODUCER_BY_PROVIDER_AND_MODE = Object.fromEntries(
+  AGENT_PROVIDER_ENTRIES.map((agent) => [
+    agent.id,
+    { terminal: agent.terminalProducer, native: agent.nativeProducer }
+  ])
+) as Record<AgentProvider, Record<AgentMode, AgentProducer>>;
 
 export function sessionStateSubjectFor(
   source: SessionSubjectSource
 ): SessionRegistration['subject'] {
-  if (
-    source.customCommand === true ||
-    (source.agent !== 'codex' && source.agent !== 'claude' && source.agent !== 'opencode')
-  ) {
+  if (source.customCommand === true || !isAgentProviderId(source.agent)) {
     return { kind: 'terminal' };
   }
   const provider = source.agent;

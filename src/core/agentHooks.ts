@@ -4,6 +4,7 @@ import { buildOpencodeAttentionPlugin } from './agentState/opencodeProducer.js';
 import { defaultOpencodeConfigDir } from './opencodeConfig.js';
 import { buildProducerRuntime } from './agentState/producerEmit.js';
 import { shellQuote } from '../shared/shell.js';
+import type { AgentProviderId } from '../shared/agentRegistry.js';
 import { writeTextFileAtomic } from '../shared/atomicFile.js';
 import { withFileLockSync } from '../shared/fileLock.js';
 import { PROVIDER_SESSION_ID_PAYLOAD_FIELD } from '../shared/providerSessionIdentity.js';
@@ -191,7 +192,7 @@ export function codexHookPreflightStatus(input: {
   return { active: true };
 }
 
-export type HookProbeProvider = 'claude' | 'codex' | 'opencode';
+export type HookProbeProvider = AgentProviderId;
 
 /**
  * What the filesystem can honestly say about a provider's trust records.

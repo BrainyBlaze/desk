@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import {
   isValidProviderSessionId,
+  PROVIDER_SESSION_PROVIDERS,
   type ProviderSessionProvider
 } from '../../shared/providerSessionIdentity.js';
 
@@ -86,11 +87,7 @@ interface ProviderSessionLaunchLedgerOptions {
   createAuthorizationId?: () => string;
 }
 
-const PROVIDERS = new Set<ProviderSessionProvider>([
-  'claude',
-  'codex',
-  'opencode'
-]);
+const PROVIDERS = new Set<ProviderSessionProvider>(PROVIDER_SESSION_PROVIDERS);
 
 /**
  * Daemon-owned, append-only authorization ledger. Every mutation is fsync'd

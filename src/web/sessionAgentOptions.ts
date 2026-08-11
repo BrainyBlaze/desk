@@ -1,20 +1,22 @@
 import type { DeskSelectOption } from './arwes/primitives.js';
+import { AGENTS, agentProvider } from '../shared/agentRegistry.js';
 
-export const SESSION_AGENT_OPTIONS: DeskSelectOption[] = [
-  { value: 'codex', label: 'codex' },
-  { value: 'claude', label: 'claude' },
-  { value: 'opencode', label: 'opencode' },
-  { value: 'bash', label: 'bash' }
-];
+export const SESSION_AGENT_OPTIONS: DeskSelectOption[] = AGENTS.map((agent) => ({
+  value: agent.id,
+  label: agent.label
+}));
 
 export function supportsBypassPermissions(agent: string): boolean {
-  return agent === 'codex' || agent === 'claude' || agent === 'opencode';
+  return agentProvider(agent) !== undefined;
 }
 
 export function supportsNativeUi(agent: string, hasCustomCommand: boolean): boolean {
-  return !hasCustomCommand && (agent === 'codex' || agent === 'claude' || agent === 'opencode');
+  return !hasCustomCommand && agentProvider(agent)?.native === true;
 }
 
-export function supportsAgentProfiles(agent: string, hasCustomCommand: boolean): agent is 'codex' | 'claude' {
-  return !hasCustomCommand && (agent === 'codex' || agent === 'claude');
+export function supportsAgentProfiles(
+  agent: string,
+  hasCustomCommand: boolean
+): boolean {
+  return !hasCustomCommand && agentProvider(agent)?.profileEnvVar !== undefined;
 }
