@@ -3561,7 +3561,8 @@ select {
 }
 .chanRow:hover { background: var(--desk-glow); }
 .chanRow.selected { border-color: var(--desk-line); background: var(--desk-glow); box-shadow: inset 2px 0 0 var(--desk-accent); }
-.chanRowHead { display: flex; align-items: center; gap: 6px; color: var(--desk-accent); font-size: 12px; min-width: 0; }
+.chanRowHead { display: flex; align-items: center; gap: 6px; color: var(--desk-accent); font-size: 12px; min-width: 0; min-height: 18px; }
+.chanRowHead .deskPill { height: 16px; padding: 0 6px; font-size: 9px; margin-left: auto; }
 .chanRowName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
 .chanRowPreview {
   color: var(--desk-text-dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
