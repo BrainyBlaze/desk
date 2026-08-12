@@ -6,7 +6,7 @@ ARG TARGETARCH
 ARG BUN_VERSION=1.3.14
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip python3 make g++ rustc cargo \
+      ca-certificates curl unzip python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eu; \

@@ -2,7 +2,7 @@
 // snapshot is PROVENANCE-pinned (repository/commit/version + a content
 // digest), the build script refuses drift, and the release ships ONLY the
 // `moor` name — no compatibility binary is ever built or shipped. Building is
-// exercised by `npm run build:moor` on the release builder; this contract
+// exercised by `npm run fetch:moor` on developer/CI hosts; this contract
 // validates the pinned inputs and (when present) the built artifact.
 
 import { spawnSync } from 'node:child_process';
