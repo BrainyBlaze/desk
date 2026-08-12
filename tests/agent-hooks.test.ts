@@ -103,6 +103,9 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('"claude":"session_id"');
     expect(shim).toContain('"codex":"session_id"');
     expect(shim).toContain('"opencode":"sessionID"');
+    expect(shim).toContain('"qwen":"session_id"');
+    expect(shim).toContain('"kimi":"session_id"');
+    expect(shim).toContain('"grok":"session_id"');
     expect(shim).toContain(
       'input[DESK_PROVIDER_SESSION_ID_FIELDS[DESK_PROVIDER]]'
     );
@@ -140,6 +143,9 @@ describe('agent hook configuration generation', () => {
         hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep-claude' }] }] }
       });
       writeFileSync(claudePath, operatorClaudeSettings);
+      const kimiPath = join(home, '.kimi-code', 'config.toml');
+      mkdirSync(dirname(kimiPath), { recursive: true });
+      writeFileSync(kimiPath, '[[hooks]]\nevent = "Stop"\ncommand = "echo keep-kimi"\ntimeout = 5\n');
       const grokPath = join(home, '.grok', 'user-settings.json');
       mkdirSync(dirname(grokPath), { recursive: true });
       writeFileSync(
@@ -176,12 +182,62 @@ describe('agent hook configuration generation', () => {
 
       expect(readFileSync(installed.opencodePluginPath, 'utf8')).toContain('/api/agent-event');
 
+      const kimi = readFileSync(kimiPath, 'utf8');
+      expect(kimi).toContain('echo keep-kimi');
+      expect(kimi.match(/desk-agent-event/g)?.length).toBe(7);
+      expect(kimi.match(/timeout = 10/g)?.length).toBe(7);
+
+      const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
+      const qwenTimeouts = Object.values(qwen.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout));
+      expect(qwenTimeouts).toHaveLength(10);
+      expect(new Set(qwenTimeouts)).toEqual(new Set([10]));
+
       const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
       expect(grok.apiKey).toBe('keep-key');
       expect(JSON.stringify(grok)).toContain('echo keep-grok');
       expect(JSON.stringify(grok)).toContain('desk-agent-event');
       expect(JSON.stringify(grok)).toContain('UserPromptSubmit');
       expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(6);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('kimi hook config maintenance', () => {
+  it('rewrites stale desk blocks to the current shim and keeps operator blocks', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-kimi-'));
+    try {
+      const kimiPath = join(home, '.kimi-code', 'config.toml');
+      mkdirSync(dirname(kimiPath), { recursive: true });
+      writeFileSync(
+        kimiPath,
+        '[[hooks]]\nevent = "Stop"\ncommand = "echo keep-kimi"\ntimeout = 5\n\n' +
+          '[[hooks]]\nevent = "Stop"\ncommand = "\'/old/desk-agent-event.mjs\' --agent \'kimi\' --event \'Stop\'"\ntimeout = 10\n'
+      );
+      const installed = installAgentHooks({ homeDir: home });
+      const kimi = readFileSync(kimiPath, 'utf8');
+      expect(kimi).toContain('echo keep-kimi');
+      expect(kimi).not.toContain('/old/desk-agent-event.mjs');
+      expect(kimi).toContain(installed.shimPath);
+      expect(kimi.match(/desk-agent-event/g)?.length).toBe(7);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a config whose hooks entry cannot hold [[hooks]] blocks and reports it', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-kimi-'));
+    try {
+      const kimiPath = join(home, '.kimi-code', 'config.toml');
+      mkdirSync(dirname(kimiPath), { recursive: true });
+      const incompatible = '[hooks]\nfoo = 1\n';
+      writeFileSync(kimiPath, incompatible);
+      const installed = installAgentHooks({ homeDir: home });
+      expect(installed.skipped).toContain(kimiPath);
+      expect(readFileSync(kimiPath, 'utf8')).toBe(incompatible);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

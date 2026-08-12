@@ -414,16 +414,15 @@ projects:
           - name: qwen
             sessionId: qwen
             agent: qwen
-            bypassPermissions: true
             resume: 123e4567-e89b-12d3-a456-426614174000
           - name: kimi
             sessionId: kimi
             agent: kimi
+            bypassPermissions: true
             resume: kimi-session-abc
           - name: grok
             sessionId: grok
             agent: grok
-            bypassPermissions: true
             resume: a1b2c3d4e5f6
 `);
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
@@ -432,10 +431,27 @@ projects:
     expect(commands[0]).not.toContain('--yolo');
     expect(commands[1]).toContain("DESK_SESSION_ID='kimi' DESK_AGENT='kimi' kimi");
     expect(commands[1]).toContain("--session 'kimi-session-abc'");
-    expect(commands[1]).not.toContain('--yolo');
+    expect(commands[1]).toContain('--yolo');
     expect(commands[2]).toContain("DESK_SESSION_ID='grok' DESK_AGENT='grok' grok");
     expect(commands[2]).toContain("--session 'a1b2c3d4e5f6'");
     expect(commands[2]).not.toContain('--yolo');
+  });
+
+  it('rejects bypassPermissions for agents that cannot honor it', () => {
+    expect(() =>
+      parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: qwen
+            sessionId: qwen
+            agent: qwen
+            bypassPermissions: true
+`)
+    ).toThrow(/cannot use bypassPermissions/);
   });
 
   it('constructs shell commands for supported agents', () => {

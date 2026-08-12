@@ -51,6 +51,7 @@ import type {
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import { isValidProfileId } from '../../shared/agentProfiles.js';
+import { agentProvider } from '../../shared/agentRegistry.js';
 import {
   isProviderSessionProvider,
   isValidProviderSessionId
@@ -172,6 +173,9 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
 
   session.agent ??= 'codex';
   session.bypassPermissions = Boolean(record.bypassPermissions);
+  if (session.bypassPermissions && agentProvider(session.agent)?.bypass !== true) {
+    throw new ApiValidationError(`session.bypassPermissions is not supported for agent ${session.agent}`);
+  }
   const uiMode = readOptionalString(record.uiMode);
   if (uiMode !== undefined) {
     if (uiMode !== 'terminal' && uiMode !== 'native') {

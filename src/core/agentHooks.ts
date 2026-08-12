@@ -179,7 +179,7 @@ export function buildClaudeHooksSettings(shimPath: string): ClaudeHooksSettings 
 
 export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
   const hook = (event: string): HookGroup[] => [
-    { hooks: [{ type: 'command', command: command(shimPath, 'qwen', event), timeout: 10_000 }] }
+    { hooks: [{ type: 'command', command: command(shimPath, 'qwen', event), timeout: 10 }] }
   ];
   return {
     hooks: {
@@ -302,6 +302,33 @@ export function probeHookInstallation(
       ...(installed ? {} : { detail: 'desk-owned claude settings do not invoke the current shim' })
     };
   }
+  if (provider === 'qwen') {
+    const installed = hookConfigInvokes(join(homeDir, '.qwen', 'settings.json'), shimPath);
+    return {
+      provider,
+      installed,
+      trust: 'not-applicable',
+      ...(installed ? {} : { detail: 'qwen settings.json does not invoke the current shim' })
+    };
+  }
+  if (provider === 'grok') {
+    const installed = hookConfigInvokes(join(homeDir, '.grok', 'user-settings.json'), shimPath);
+    return {
+      provider,
+      installed,
+      trust: 'not-applicable',
+      ...(installed ? {} : { detail: 'grok user-settings.json does not invoke the current shim' })
+    };
+  }
+  if (provider === 'kimi') {
+    const installed = kimiConfigInvokes(join(homeDir, '.kimi-code', 'config.toml'), shimPath);
+    return {
+      provider,
+      installed,
+      trust: 'not-applicable',
+      ...(installed ? {} : { detail: 'kimi config.toml does not invoke the current shim' })
+    };
+  }
   const codexHooksPath = join(homeDir, '.codex', 'hooks.json');
   const installed = hookConfigInvokes(codexHooksPath, shimPath);
   return {
@@ -310,6 +337,14 @@ export function probeHookInstallation(
     trust: codexTrustSignal(homeDir, codexHooksPath),
     ...(installed ? {} : { detail: 'codex hooks.json does not invoke the current shim' })
   };
+}
+
+function kimiConfigInvokes(path: string, shimPath: string): boolean {
+  try {
+    return readFileSync(path, 'utf8').includes(shimPath);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -435,7 +470,9 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
     skipped.push(qwenSettingsPath);
   }
   const kimiConfigPath = join(homeDir, '.kimi-code', 'config.toml');
-  appendKimiHooks(kimiConfigPath, shimPath);
+  if (appendKimiHooks(kimiConfigPath, shimPath) === 'skipped-incompatible') {
+    skipped.push(kimiConfigPath);
+  }
   const grokSettingsPath = join(homeDir, '.grok', 'user-settings.json');
   if (mergeHookConfig(grokSettingsPath, buildGrokHooksSettings(shimPath), shimPath) === 'skipped-malformed') {
     skipped.push(grokSettingsPath);
@@ -453,15 +490,39 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   };
 }
 
-function appendKimiHooks(path: string, shimPath: string): void {
+function appendKimiHooks(path: string, shimPath: string): 'merged' | 'skipped-incompatible' {
   mkdirSync(dirname(path), { recursive: true });
+  return withFileLockSync(`${path}.lock`, () => appendKimiHooksLocked(path, shimPath));
+}
+
+function appendKimiHooksLocked(path: string, shimPath: string): 'merged' | 'skipped-incompatible' {
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
-  if (existing.includes(`--agent 'kimi'`) || existing.includes('--agent kimi')) {
-    return;
+  if (/^\s*hooks\s*=|^\s*\[hooks\]/m.test(existing)) {
+    return 'skipped-incompatible';
   }
+  const kept: string[] = [];
+  const lines = existing.split('\n');
+  let index = 0;
+  while (index < lines.length) {
+    if (lines[index].trim() === '[[hooks]]') {
+      const start = index;
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith('[')) {
+        index += 1;
+      }
+      const block = lines.slice(start, index).join('\n');
+      if (!block.includes('desk-agent-event')) {
+        kept.push(block);
+      }
+      continue;
+    }
+    kept.push(lines[index]);
+    index += 1;
+  }
+  const base = kept.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n*$/, '');
   const block = buildKimiHooksToml(shimPath);
-  const next = existing === '' ? block : `${existing.replace(/\n*$/, '\n\n')}${block}`;
-  writeTextIfChanged(path, next);
+  writeTextIfChanged(path, base === '' ? block : `${base}\n\n${block}`);
+  return 'merged';
 }
 
 /**

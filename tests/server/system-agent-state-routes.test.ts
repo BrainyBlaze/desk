@@ -783,6 +783,30 @@ describe('canonical system agent-state routes', () => {
     expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
   });
 
+  it('rejects opaque provider session ids that break the id grammar', async () => {
+    for (const providerSessionId of ['', '   ', 'has space', 'x'.repeat(129), 'семь-и-юникод']) {
+      const agentStateGateway = gateway();
+      const bindProviderSessionIdentity = vi.fn();
+      const result = await invoke(
+        agentStateGateway,
+        'POST',
+        '/api/agent-event',
+        producerBody({
+          provider: 'kimi',
+          producer: 'kimi-hooks',
+          observation: { hook: 'SessionStart', providerSessionId }
+        }),
+        eventGateway(),
+        endpointGateway(),
+        { bindProviderSessionIdentity }
+      );
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({ ok: false });
+      expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+      expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+    }
+  });
+
   it('rejects a mismatched Claude provider SessionStart before forwarding facts', async () => {
     const agentStateGateway = gateway();
     const bindProviderSessionIdentity = vi.fn();

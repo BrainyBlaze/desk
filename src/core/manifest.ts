@@ -254,6 +254,7 @@ function validateSession(groupId: string, session: LegacyDeskSession, inheritedC
     throw new ManifestValidationError(`group ${groupId} has a session without a name`);
   }
   validateSessionUiMode(session);
+  validateSessionBypass(session);
   if (typeof session.command === 'string' && session.command.trim() !== '') {
     return;
   }
@@ -278,6 +279,23 @@ function validateSessionUiMode(session: Pick<DeskSession, 'name' | 'agent' | 'co
       `session ${session.name} cannot use native uiMode; only codex/claude/opencode agent sessions support it`
     );
   }
+}
+
+function validateSessionBypass(
+  session: Pick<DeskSession, 'name' | 'agent' | 'command' | 'bypassPermissions'>
+): void {
+  if (session.bypassPermissions !== true) {
+    return;
+  }
+  if (typeof session.command === 'string' && session.command.trim() !== '') {
+    return;
+  }
+  if (agentProvider(session.agent)?.bypass === true) {
+    return;
+  }
+  throw new ManifestValidationError(
+    `session ${session.name} cannot use bypassPermissions; agent ${session.agent ?? 'none'} does not support it`
+  );
 }
 
 /** Native UI mode is limited to SDK-backed agents launched without a custom command. */

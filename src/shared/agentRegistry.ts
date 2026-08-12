@@ -63,7 +63,6 @@ export const AGENTS = [
     native: false,
     sessionIdField: 'session_id',
     sessionIdShape: 'uuid',
-    profileEnvVar: 'QWEN_HOME',
     hooks: 'qwen'
   },
   {
@@ -75,7 +74,6 @@ export const AGENTS = [
     native: false,
     sessionIdField: 'session_id',
     sessionIdShape: 'opaque',
-    profileEnvVar: 'KIMI_CODE_HOME',
     hooks: 'kimi'
   },
   {

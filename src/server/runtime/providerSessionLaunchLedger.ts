@@ -302,6 +302,7 @@ export class FileProviderSessionLaunchLedger {
     this.recoveredPreparedAuthorizationIds.clear();
     if (!existsSync(this.path)) return;
     const bytes = readFileSync(this.path);
+    const foreignProviders = new Set<string>();
     let offset = 0;
     while (offset < bytes.length) {
       const newline = bytes.indexOf(0x0a, offset);
@@ -327,9 +328,8 @@ export class FileProviderSessionLaunchLedger {
       }
       const foreignProvider = foreignProviderOf(parsed);
       if (foreignProvider !== undefined) {
-        process.stderr.write(
-          `provider launch ledger: skipping record for unknown provider "${foreignProvider}"\n`
-        );
+        foreignProviders.add(foreignProvider);
+        this.applyForeignRecord(parsed as Record<string, unknown>);
         if (newline === -1) this.appendRecordSeparator();
         offset = next;
         continue;
@@ -339,7 +339,23 @@ export class FileProviderSessionLaunchLedger {
       if (newline === -1) this.appendRecordSeparator();
       offset = next;
     }
+    for (const provider of foreignProviders) {
+      process.stderr.write(
+        `provider launch ledger: skipped records for unknown provider "${provider}"\n`
+      );
+    }
     this.markRecoveredPrepared();
+  }
+
+  private applyForeignRecord(record: Record<string, unknown>): void {
+    if (record.state !== 'prepared' || typeof record.deskSessionId !== 'string') {
+      return;
+    }
+    const displaced = this.currentBySession.get(record.deskSessionId);
+    if (displaced !== undefined) {
+      this.currentBySession.delete(record.deskSessionId);
+      this.sessionByAuthorization.delete(displaced.authorizationId);
+    }
   }
 
   private markRecoveredPrepared(): void {
@@ -519,31 +535,17 @@ function foreignProviderOf(input: unknown): string | undefined {
     return undefined;
   }
   const record = input as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  if (
-    keys.join(',') !==
-    'authorizationId,deskSessionId,expectedPriorBinding,generation,provider,state'
-  ) {
-    return undefined;
-  }
   if (
     typeof record.provider !== 'string' ||
+    record.provider.trim().length === 0 ||
     PROVIDERS.has(record.provider as ProviderSessionProvider)
   ) {
     return undefined;
   }
-  const state = record.state;
   if (
     typeof record.authorizationId !== 'string' ||
     record.authorizationId.trim().length === 0 ||
-    typeof record.deskSessionId !== 'string' ||
-    (state !== 'prepared' &&
-      state !== 'authorized' &&
-      state !== 'claimed' &&
-      state !== 'completed') ||
-    (record.expectedPriorBinding !== null &&
-      typeof record.expectedPriorBinding !== 'string') ||
-    !Number.isSafeInteger(record.generation)
+    typeof record.deskSessionId !== 'string'
   ) {
     return undefined;
   }

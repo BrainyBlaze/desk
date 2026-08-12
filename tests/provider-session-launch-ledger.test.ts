@@ -58,6 +58,81 @@ describe('FileProviderSessionLaunchLedger', () => {
     second.close();
   });
 
+  it('skips foreign records that carry unknown extra fields', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-known'
+    });
+    const prepared = first.prepare({
+      deskSessionId: 'desk-known',
+      provider: 'claude',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    first.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-foreign',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation: 1,
+        state: 'prepared',
+        futureField: 'ignored'
+      })}\n`
+    );
+
+    const second = new FileProviderSessionLaunchLedger(path);
+    expect(second.current('desk-known')).toEqual(prepared);
+    expect(second.current('desk-foreign')).toBeUndefined();
+    second.close();
+  });
+
+  it('lets a skipped foreign prepared record supersede the chain it displaced', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-known'
+    });
+    first.prepare({
+      deskSessionId: 'desk-known',
+      provider: 'claude',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    first.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-known',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation: 4,
+        state: 'prepared'
+      })}\n`
+    );
+
+    const second = new FileProviderSessionLaunchLedger(path);
+    expect(second.current('desk-known')).toBeUndefined();
+    second.close();
+  });
+
+  it('still fails loud on malformed records for known providers', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path);
+    first.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({ provider: 'claude', deskSessionId: 'desk-known', state: 'prepared' })}\n`
+    );
+
+    expect(() => new FileProviderSessionLaunchLedger(path)).toThrow(/invalid authorization record/);
+  });
+
   it('durably replays prepared and authorized reset states', () => {
     const path = ledgerPath();
     const first = new FileProviderSessionLaunchLedger(path, {

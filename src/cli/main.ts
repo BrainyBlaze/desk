@@ -291,7 +291,11 @@ function runHooksCommand(target: string | undefined, options: Map<string, string
   report(installed.claudeSettingsPath);
   console.log(`installed ${installed.opencodePluginPath}`);
   report(installed.qwenSettingsPath);
-  console.log(`installed ${installed.kimiConfigPath}`);
+  console.log(
+    skipped.has(installed.kimiConfigPath)
+      ? `SKIPPED ${installed.kimiConfigPath} (existing hooks entry is incompatible with [[hooks]] — fix it and re-run)`
+      : `merged ${installed.kimiConfigPath}`
+  );
   report(installed.grokSettingsPath);
   console.log('codex note: non-managed command hooks may require trust before they fire');
   return skipped.size > 0 ? 1 : 0;
