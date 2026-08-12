@@ -127,13 +127,20 @@ function sessionProbeFor(options: RunnerLifecycleOptions): ((socketPath: string)
       return false; // the probe never ran — unobservable, never claimed alive
     }
     if (result.status === 0) {
-      return true;
+      return true; // the push landed: a holder accepted it
     }
+    // Otherwise ALIVE needs positive proof. The holder distinguishes three
+    // refusals (verified against moor 237a62c in a real install), and only the
+    // first one can come from a live holder:
+    //   "input lease is busy"  — a holder answered; the daemon holds the §7.3
+    //                            lease, which is the NORMAL state of a session
+    //                            the user is actually using;
+    //   "is not running"       — the rendezvous survived its holder (tombstone);
+    //   "does not exist"       — no rendezvous at all.
+    // Treating "any other answer" as alive would report every stale tombstone
+    // as a running session, so the rule is positive proof or nothing.
     const answer = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-    if (answer.includes('does not exist')) {
-      return false;
-    }
-    return answer.trim().length > 0;
+    return /lease is busy/.test(answer);
   };
 }
 

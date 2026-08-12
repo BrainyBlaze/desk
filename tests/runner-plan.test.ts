@@ -212,47 +212,31 @@ describe('runPlan moor-native lifecycle', () => {
     );
   });
 
-  it('reads the probe ANSWER, so an adopted session is not reported missing', () => {
-    // Answers taken from the real holder (moor 237a62c) during manual QA. A
-    // session the daemon has adopted refuses the push because the daemon holds
-    // the input lease, and exits 1 — byte-identical in status to an absent
-    // session. Classifying by exit code alone reported every healthy adopted
-    // session as missing (`desk status` showed all sessions missing while
-    // /control/moor-status answered running:true).
+  it('classifies every real probe answer: only a live holder counts (desk#50)', () => {
+    // The four answers moor 237a62c actually gives, captured in a real
+    // install. Exit code cannot separate them — all three refusals exit 1 —
+    // and the refusal that proves LIFE arrives on stdout, so the probe reads
+    // both streams and requires positive proof.
     const session = terminalPlan()[0]!.session;
-    // The real binary prints this refusal on STDOUT; other refusals use
-    // stderr. The probe must read both — reading one stream is how the
-    // original misclassification survived a first fix (verified in a real
-    // install against moor 237a62c).
     const answer = (status: number, stdout: string, stderr = '') => ({ status, stdout, stderr });
-    const options = (spawn: unknown) => ({
-      moorBinPath: '/release/libexec/moor',
-      env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
-      spawn: spawn as never
-    });
+    const probe = (result: unknown) =>
+      runningSessionSet([session], {
+        moorBinPath: '/release/libexec/moor',
+        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
+        spawn: vi.fn().mockReturnValue(result) as never
+      });
 
-    // Adopted and healthy — a holder answered, only the lease was busy.
-    expect(
-      runningSessionSet([session], options(vi.fn().mockReturnValue(answer(1, 'moor: input lease is busy\n'))))
-    ).toEqual(new Set(['terminal-session']));
-
-    // The same refusal on stderr must classify identically.
-    expect(
-      runningSessionSet([session], options(vi.fn().mockReturnValue(answer(1, '', 'moor: input lease is busy\n'))))
-    ).toEqual(new Set(['terminal-session']));
-
-    // The one proof of absence.
-    expect(
-      runningSessionSet(
-        [session],
-        options(vi.fn().mockReturnValue(answer(1, "moor: session '/run/desk/terminal-session' does not exist\n")))
-      )
-    ).toEqual(new Set());
-
-    // The probe itself could not run — unobservable is never claimed alive.
-    expect(
-      runningSessionSet([session], options(vi.fn().mockReturnValue({ error: new Error('ENOENT'), status: null })))
-    ).toEqual(new Set());
+    // Accepted push — a holder took the bytes.
+    expect(probe(answer(0, ''))).toEqual(new Set(['terminal-session']));
+    // The daemon holds the §7.3 lease: the normal state of a session in use.
+    expect(probe(answer(1, 'moor: input lease is busy\n'))).toEqual(new Set(['terminal-session']));
+    expect(probe(answer(1, '', 'moor: input lease is busy\n'))).toEqual(new Set(['terminal-session']));
+    // The rendezvous outlived its holder — a tombstone, not a session.
+    expect(probe(answer(1, "moor: session '/run/desk/terminal-session' is not running\n"))).toEqual(new Set());
+    // No rendezvous at all.
+    expect(probe(answer(1, "moor: session '/run/desk/terminal-session' does not exist\n"))).toEqual(new Set());
+    // The probe could not run: unobservable is never claimed alive.
+    expect(probe({ error: new Error('ENOENT'), status: null })).toEqual(new Set());
   });
 
   it('probes the daemon then attaches the shipped binary to the durable socket', async () => {
