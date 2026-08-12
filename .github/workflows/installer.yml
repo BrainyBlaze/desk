@@ -124,4 +124,6 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify installer and release behavior with local Moor fixtures
-        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts
+        # The slower Intel runner can exceed Vitest 3's fork-RPC deadline even
+        # after every assertion passes. Threads preserve the same test coverage.
+        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts --pool=threads
