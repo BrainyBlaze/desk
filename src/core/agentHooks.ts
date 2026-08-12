@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { CLAUDE_NOTIFICATION_MATCHERS } from './agentState/claudeFacts.js';
 import { buildOpencodeAttentionPlugin } from './agentState/opencodeProducer.js';
 import { defaultOpencodeConfigDir } from './opencodeConfig.js';
@@ -67,6 +67,9 @@ export interface InstalledAgentHooks {
   qwenSettingsPath: string;
   kimiConfigPath: string;
   grokSettingsPath: string;
+  /** Optional agent configs left untouched because their CLI's config
+   *  directory does not exist on this machine. */
+  notInstalled: string[];
   /** Config paths that were NOT written: malformed JSON (a .bak was made) or a
    *  kimi hooks entry that cannot hold [[hooks]] blocks (left untouched). The
    *  caller must report these honestly. */
@@ -473,18 +476,19 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   // has no business editing it to install its own reporting.
   writeTextIfChanged(claudeSettingsPath, `${JSON.stringify(buildClaudeHooksSettings(shimPath), null, 2)}\n`);
   writeTextIfChanged(opencodePluginPath, buildOpencodeAttentionPlugin());
+  const notInstalled: string[] = [];
   const qwenSettingsPath = join(homeDir, '.qwen', 'settings.json');
-  if (mergeHookConfig(qwenSettingsPath, buildQwenHooksSettings(shimPath), shimPath) === 'skipped-malformed') {
-    skipped.push(qwenSettingsPath);
-  }
+  installOptionalAgentHooks(qwenSettingsPath, notInstalled, skipped, () =>
+    mergeHookConfig(qwenSettingsPath, buildQwenHooksSettings(shimPath), shimPath)
+  );
   const kimiConfigPath = join(homeDir, '.kimi-code', 'config.toml');
-  if (appendKimiHooks(kimiConfigPath, shimPath) === 'skipped-incompatible') {
-    skipped.push(kimiConfigPath);
-  }
+  installOptionalAgentHooks(kimiConfigPath, notInstalled, skipped, () =>
+    appendKimiHooks(kimiConfigPath, shimPath)
+  );
   const grokSettingsPath = join(homeDir, '.grok', 'user-settings.json');
-  if (mergeHookConfig(grokSettingsPath, buildGrokHooksSettings(shimPath), shimPath) === 'skipped-malformed') {
-    skipped.push(grokSettingsPath);
-  }
+  installOptionalAgentHooks(grokSettingsPath, notInstalled, skipped, () =>
+    mergeHookConfig(grokSettingsPath, buildGrokHooksSettings(shimPath), shimPath)
+  );
 
   return {
     shimPath,
@@ -494,12 +498,38 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
     qwenSettingsPath,
     kimiConfigPath,
     grokSettingsPath,
+    notInstalled,
     skipped
   };
 }
 
+function installOptionalAgentHooks(
+  configPath: string,
+  notInstalled: string[],
+  skipped: string[],
+  install: () => 'merged' | 'skipped-malformed' | 'skipped-incompatible'
+): void {
+  let stats;
+  try {
+    stats = statSync(dirname(configPath));
+  } catch {
+    notInstalled.push(configPath);
+    return;
+  }
+  if (!stats.isDirectory()) {
+    skipped.push(configPath);
+    return;
+  }
+  try {
+    if (install() !== 'merged') {
+      skipped.push(configPath);
+    }
+  } catch {
+    skipped.push(configPath);
+  }
+}
+
 function appendKimiHooks(path: string, shimPath: string): 'merged' | 'skipped-incompatible' {
-  mkdirSync(dirname(path), { recursive: true });
   return withFileLockSync(`${path}.lock`, () => appendKimiHooksLocked(path, shimPath));
 }
 

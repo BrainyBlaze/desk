@@ -143,6 +143,7 @@ describe('agent hook configuration generation', () => {
         hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep-claude' }] }] }
       });
       writeFileSync(claudePath, operatorClaudeSettings);
+      mkdirSync(join(home, '.qwen'), { recursive: true });
       const kimiPath = join(home, '.kimi-code', 'config.toml');
       mkdirSync(dirname(kimiPath), { recursive: true });
       writeFileSync(kimiPath, '[[hooks]]\nevent = "Stop"\ncommand = "echo keep-kimi"\ntimeout = 5\n');
@@ -200,6 +201,44 @@ describe('agent hook configuration generation', () => {
       expect(JSON.stringify(grok)).toContain('desk-agent-event');
       expect(JSON.stringify(grok)).toContain('UserPromptSubmit');
       expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(6);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('optional agent hook installs', () => {
+  it('leaves machines without the new agent CLIs byte-untouched and reports them', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-absent-'));
+    try {
+      const installed = installAgentHooks({ homeDir: home });
+      expect(installed.skipped).toEqual([]);
+      expect(installed.notInstalled).toEqual([
+        installed.qwenSettingsPath,
+        installed.kimiConfigPath,
+        installed.grokSettingsPath
+      ]);
+      expect(existsSync(installed.qwenSettingsPath)).toBe(false);
+      expect(existsSync(installed.kimiConfigPath)).toBe(false);
+      expect(existsSync(installed.grokSettingsPath)).toBe(false);
+      expect(existsSync(join(home, '.qwen'))).toBe(false);
+      expect(existsSync(installed.claudeSettingsPath)).toBe(true);
+      expect(existsSync(installed.codexHooksPath)).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('survives a hostile optional config path without aborting the shared install', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-hostile-'));
+    try {
+      writeFileSync(join(home, '.qwen'), 'not a directory');
+      const installed = installAgentHooks({ homeDir: home });
+      expect(installed.skipped).toEqual([installed.qwenSettingsPath]);
+      expect(readFileSync(join(home, '.qwen'), 'utf8')).toBe('not a directory');
+      expect(existsSync(installed.claudeSettingsPath)).toBe(true);
+      expect(existsSync(installed.codexHooksPath)).toBe(true);
+      expect(existsSync(installed.opencodePluginPath)).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -290,13 +290,21 @@ function runHooksCommand(target: string | undefined, options: Map<string, string
   report(installed.codexHooksPath);
   report(installed.claudeSettingsPath);
   console.log(`installed ${installed.opencodePluginPath}`);
-  report(installed.qwenSettingsPath);
-  console.log(
-    skipped.has(installed.kimiConfigPath)
-      ? `SKIPPED ${installed.kimiConfigPath} (existing hooks entry is incompatible with [[hooks]] — fix it and re-run)`
-      : `merged ${installed.kimiConfigPath}`
-  );
-  report(installed.grokSettingsPath);
+  const notInstalled = new Set(installed.notInstalled);
+  const reportOptional = (path: string): void => {
+    if (notInstalled.has(path)) {
+      console.log(`skipped ${path} (agent CLI config directory not found)`);
+      return;
+    }
+    if (skipped.has(path)) {
+      console.log(`SKIPPED ${path} (existing config could not be merged — fix it and re-run)`);
+      return;
+    }
+    console.log(`merged ${path}`);
+  };
+  reportOptional(installed.qwenSettingsPath);
+  reportOptional(installed.kimiConfigPath);
+  reportOptional(installed.grokSettingsPath);
   console.log('codex note: non-managed command hooks may require trust before they fire');
   return skipped.size > 0 ? 1 : 0;
 }
