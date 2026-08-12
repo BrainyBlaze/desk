@@ -214,7 +214,9 @@ describe('reconcile liveness (wedged sockets must not stall startup)', () => {
       await killFakeMoorHolder(healthySock);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+    // Test budget must sit ABOVE the 5.9 s proof window (Vitest's default
+    // 5 s would abort before the assertion could run under load).
+  }, 8_000);
 });
 
 describe('the daemon resolves its moor binary instead of trusting the variable', () => {
