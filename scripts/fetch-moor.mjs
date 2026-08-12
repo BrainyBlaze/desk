@@ -74,11 +74,18 @@ export function readMoorPin(root = DEFAULT_ROOT) {
     );
   }
   const pin = JSON.parse(readFileSync(path, 'utf8'));
+  // EXACT key sets: an unknown key is either a typo silently ignored (a
+  // pinned field that never actually pins) or smuggled data — both rejected.
+  const topKeys = Object.keys(pin).sort();
+  const expectedTop = ['commit', 'repository', 'schemaVersion', 'targets', 'version'];
+  if (topKeys.length !== expectedTop.length || topKeys.some((key, i) => key !== expectedTop[i])) {
+    throw new Error(`moor pin must carry exactly [${expectedTop.join(', ')}]; got [${topKeys.join(', ')}]`);
+  }
   if (pin.schemaVersion !== MOOR_PIN_SCHEMA_VERSION) {
     throw new Error(`moor pin schemaVersion ${pin.schemaVersion} is not the supported ${MOOR_PIN_SCHEMA_VERSION}`);
   }
-  if (typeof pin.version !== 'string' || pin.version.length === 0) {
-    throw new Error('moor pin is missing a release version');
+  if (typeof pin.version !== 'string' || !/^v\d+\.\d+\.\d+$/.test(pin.version)) {
+    throw new Error(`moor pin version must be a canonical tag like v0.1.0, got ${JSON.stringify(pin.version)}`);
   }
   if (typeof pin.commit !== 'string' || !/^[0-9a-f]{40}$/.test(pin.commit)) {
     throw new Error('moor pin is missing the exact 40-hex release commit');
@@ -99,8 +106,17 @@ export function readMoorPin(root = DEFAULT_ROOT) {
     );
   }
   for (const [triple, target] of Object.entries(pin.targets)) {
-    if (typeof target?.asset !== 'string' || target.asset.length === 0 || target.asset.includes('/')) {
-      throw new Error(`moor pin target ${triple} is missing a plain asset filename`);
+    const targetKeys = Object.keys(target ?? {}).sort();
+    const expectedTarget = ['asset', 'sha256', 'size'];
+    if (targetKeys.length !== expectedTarget.length || targetKeys.some((key, i) => key !== expectedTarget[i])) {
+      throw new Error(
+        `moor pin target ${triple} must carry exactly [${expectedTarget.join(', ')}]; got [${targetKeys.join(', ')}]`
+      );
+    }
+    // A literal release filename: name chars only — no traversal, path
+    // separators, query/fragment syntax, or whitespace can reach a URL.
+    if (typeof target.asset !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*(\.exe)?$/.test(target.asset) || target.asset.includes('..')) {
+      throw new Error(`moor pin target ${triple} asset is not a literal release filename: ${JSON.stringify(target.asset)}`);
     }
     if (!Number.isSafeInteger(target?.size) || target.size <= 0 || target.size > MAX_ASSET_BYTES) {
       throw new Error(`moor pin target ${triple} is missing a sane byte size`);
