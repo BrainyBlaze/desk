@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import {
@@ -165,6 +165,7 @@ describe('MoorMasterClient', () => {
   const cleanups: Array<() => void> = [];
   afterEach(() => {
     while (cleanups.length > 0) cleanups.pop()!();
+    vi.useRealTimers();
   });
 
   async function start(
@@ -591,23 +592,26 @@ describe('MoorMasterClient', () => {
   });
 
   it('closes the connection when an emitted keepalive is refused with LEASE_NOT_HELD', async () => {
-    let closed = false;
-    const { holder, client, identity } = await start({
-      onClose: () => {
-        closed = true;
-      }
+    let markClosed!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      markClosed = resolve;
     });
+    const { holder, client, identity } = await start({
+      onClose: markClosed
+    });
+    vi.useFakeTimers();
     await completeAttach(holder, client, identity);
-    // Wait for the real 3 s idle keepalive, then refuse it.
-    const keepalive = await holder.next();
+    const next = holder.next();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const keepalive = await next;
     expect(keepalive.kind).toBe(MoorKind.LEASE_KEEPALIVE);
     holder.send(
       MoorKind.ERROR,
       joined(integer(15, 2), joined(integer(14, 2), text('lease not held')))
     );
-    await waitFor(() => closed, 'connection closed after refused keepalive');
+    await closed;
     expect(() => client.requestStatus()).toThrow(/not attached/);
-  }, 7_000);
+  });
 
   it('refuses a nonzero resume cursor that does not carry its source incarnation', () => {
     expect(

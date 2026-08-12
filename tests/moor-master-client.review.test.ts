@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import { MoorMasterClient } from '../src/server/runtime/moorMasterClient.js';
@@ -181,6 +181,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
   const cleanup: Array<() => void> = [];
   afterEach(() => {
     while (cleanup.length > 0) cleanup.pop()!();
+    vi.useRealTimers();
   });
 
   async function start(
@@ -279,6 +280,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
 
   it('keeps a granted viewer lease alive every three seconds', async () => {
     const { holder, client } = await start();
+    vi.useFakeTimers();
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
@@ -288,18 +290,18 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
 
-    const keepalive = await Promise.race([
-      holder.next(),
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3_400))
-    ]);
-    expect(keepalive?.kind).toBe(MoorKind.LEASE_KEEPALIVE);
-    expect(keepalive?.payload).toEqual(
+    const next = holder.next();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const keepalive = await next;
+    expect(keepalive.kind).toBe(MoorKind.LEASE_KEEPALIVE);
+    expect(keepalive.payload).toEqual(
       joined(integer(5, 4), new Uint8Array(16).fill(0xd4))
     );
   });
 
   it('does not postpone lease keepalive for non-owner STATUS traffic', async () => {
     const { holder, client } = await start();
+    vi.useFakeTimers();
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
@@ -308,15 +310,13 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
-    await new Promise((resolve) => setTimeout(resolve, 2_400));
+    await vi.advanceTimersByTimeAsync(2_400);
 
     client.requestStatus();
     expect((await holder.next()).kind).toBe(MoorKind.STATUS);
-    const keepalive = await Promise.race([
-      holder.next(),
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1_000))
-    ]);
-    expect(keepalive?.kind).toBe(MoorKind.LEASE_KEEPALIVE);
+    const next = holder.next();
+    await vi.advanceTimersByTimeAsync(600);
+    expect((await next).kind).toBe(MoorKind.LEASE_KEEPALIVE);
   });
 
   it('refuses a granted lease result when ATTACH_ACK says this viewer does not own it', async () => {
@@ -602,6 +602,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       markClosed = resolve;
     });
     const { holder, client } = await start({ onClose: markClosed });
+    vi.useFakeTimers();
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
@@ -611,7 +612,9 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
 
-    const keepalive = await holder.next();
+    const next = holder.next();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const keepalive = await next;
     expect(keepalive.kind).toBe(MoorKind.LEASE_KEEPALIVE);
     holder.send(
       MoorKind.ERROR,
@@ -693,8 +696,23 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
 
   it('enforces the two-second identity/adoption deadline against a silent holder', async () => {
     const { client } = await start();
+    vi.useFakeTimers();
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
-    expect(await settle(attached, 2_250)).toBe('rejected');
+    let outcome: 'pending' | 'resolved' | 'rejected' = 'pending';
+    void attached.then(
+      () => {
+        outcome = 'resolved';
+      },
+      () => {
+        outcome = 'rejected';
+      }
+    );
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(outcome).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
+    expect(outcome).toBe('rejected');
   });
 
   it('refuses ATTACH_ACK when the required terminal-state frame is missing', async () => {

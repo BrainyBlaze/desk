@@ -141,8 +141,16 @@ describe('Moor controller frame encoder', () => {
 
     expect(first).toMatchObject({ kind: 1, more: 1, scope: 7, sequence: 1, length: MOOR_MAX_FRAME_PAYLOAD });
     expect(second).toMatchObject({ kind: 1, more: 0, scope: 7, sequence: 2, length: 3 });
-    expect(encoded.subarray(MOOR_HEADER_SIZE, secondOffset)).toEqual(payload.subarray(0, MOOR_MAX_FRAME_PAYLOAD));
-    expect(encoded.subarray(secondOffset + MOOR_HEADER_SIZE)).toEqual(payload.subarray(MOOR_MAX_FRAME_PAYLOAD));
+    expect(
+      Buffer.from(encoded.subarray(MOOR_HEADER_SIZE, secondOffset)).equals(
+        Buffer.from(payload.subarray(0, MOOR_MAX_FRAME_PAYLOAD))
+      )
+    ).toBe(true);
+    expect(
+      Buffer.from(encoded.subarray(secondOffset + MOOR_HEADER_SIZE)).equals(
+        Buffer.from(payload.subarray(MOOR_MAX_FRAME_PAYLOAD))
+      )
+    ).toBe(true);
   });
 
   it('rejects invalid scope, kind, size, fixed-size fragmentation, and sequence exhaustion', () => {
