@@ -905,7 +905,7 @@ build_release() {
   [ -f "$source_root/scripts/distribution/moor-pin.json" ] || die "Desk source archive has no committed Moor pin."
   validate_staged_moor_pin "$source_root/scripts/distribution/moor-pin.json" || \
     die "Desk release Moor metadata does not match its committed pin."
-  downloaded_moor="$WORK_DIR/$MOOR_ASSET"
+  downloaded_moor="$WORK_DIR/moor"
   download_and_verify_moor "$downloaded_moor"
   mkdir -p -- "$source_root/libexec"
   mv -- "$downloaded_moor" "$source_root/libexec/moor"

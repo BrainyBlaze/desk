@@ -233,6 +233,15 @@ exec /bin/chmod "$@"
     expect(result.status, result.stderr).toBe(0);
   }, 20_000);
 
+  it('probes target-qualified Moor bytes under the canonical executable basename', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'argv0-sensitive' } });
+
+    expect(result.status, result.stderr).toBe(0);
+    const release = realpathSync(join(value.deskHome, 'current'));
+    expect(readFileSync(join(release, 'libexec', 'moor'))).toEqual(readFileSync(value.moorAssetPath()));
+  }, 20_000);
+
   it('rejects a non-runnable bundled moor before activating the release', () => {
     const value = fixture();
     const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'broken' } });

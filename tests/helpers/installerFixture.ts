@@ -120,6 +120,7 @@ set -euo pipefail
 [ "\${1:-}" = "--version" ] || exit 96
 case "\${DESK_INSTALLER_FIXTURE_MOOR_MODE:-valid}" in
   valid) printf 'moor 0.1.0\\n' ;;
+  argv0-sensitive) printf '%s 0.1.0\\n' "$(basename "$0")" ;;
   broken) exit 97 ;;
   wrong-version) printf 'moor 9.9.9\\n' ;;
   hanging) exec sleep 10 ;;
