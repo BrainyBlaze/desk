@@ -7,10 +7,7 @@
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
 
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
-import { resolveMoorSocketRoot } from '../../shared/moorPaths.js';
-import { daemonControl, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
+import { daemonControl, daemonControlGet, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
 import { loadDeskCached, runningSessionSet } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
 import { moorCommandFor } from '../../shared/moorCommand.js';
@@ -122,7 +119,7 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
 export interface NativeChannelsTransport {
   /** Paste text then a delayed Enter (bracketed-paste staging + separate submit). */
   sendText: (sessionId: string, text: string) => Promise<boolean>;
-  /** Running iff the session's moor holder socket exists. */
+  /** Running iff the holder answers the real `moor push` probe (#8: exit-code truth). */
   sessionRunning: (sessionId: string) => boolean;
   /** The emulator's on-screen tail (plain text), null when unobservable. */
   capturePane: (sessionId: string) => Promise<string | null>;
@@ -130,7 +127,8 @@ export interface NativeChannelsTransport {
   sendEnter: (sessionId: string) => Promise<boolean>;
   /**
    * Session start time in epoch SECONDS (legacy session_created parity),
-   * from the moor socket's stat; null when unobservable.
+   * from the adopted holder's own wallStart clock (#8: wire truth, never a
+   * filesystem timestamp); null when unobservable.
    */
   sessionCreatedAt: (sessionId: string) => Promise<number | null>;
 }
@@ -223,16 +221,14 @@ export function createNativeChannelsTransport(
       return (await daemonControl('/control/input', { sessionId: sessionId, text: '\r' })).ok;
     },
     async sessionCreatedAt(sessionId) {
-      const socketRoot = resolveMoorSocketRoot();
-      try {
-        const stat = statSync(join(socketRoot, sessionId)); // moor rendezvous: no suffix
-        // Some filesystems report no birthtime (0); the socket is created at
-        // session start and never rewritten, so ctime is a faithful fallback.
-        const ms = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs;
-        return Math.floor(ms / 1000);
-      } catch {
-        return null; // unobservable — same degraded read as a dead session
-      }
+      // #8: WIRE truth, not a filesystem timestamp — the adopted ATTACH_ACK's
+      // wallStart is the holder's own start clock, immune to fs birthtime
+      // quirks and to a rendezvous recreated by a successor generation.
+      const result = await daemonControlGet(`/control/moor-status?sessionId=${encodeURIComponent(sessionId)}`);
+      const wallStartMs = result.ok ? result.body?.wallStartMs : undefined;
+      return typeof wallStartMs === 'number' && Number.isFinite(wallStartMs) && wallStartMs > 0
+        ? Math.floor(wallStartMs / 1000)
+        : null; // no live adopted link / daemon unreachable — unobservable
     }
   };
 }

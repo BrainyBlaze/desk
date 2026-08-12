@@ -242,6 +242,8 @@ export interface TerminalDaemon {
   clearSessionLog(
     sessionId: string
   ): Promise<HolderLogClearOutcome | 'no-link'>;
+  /** #8: the adopted ATTACH_ACK descriptor while a live moor link exists. */
+  moorSessionStatus(sessionId: string): MoorStatus | undefined;
   /**
    * Enter the DRAINING state (idempotent, synchronous): from this instant the
    * control plane refuses every state-changing request, so a graceful
@@ -942,6 +944,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     clearSessionLog(sessionId) {
       return router.sessions.clearHolderLog(sessionId);
     },
+    moorSessionStatus(sessionId) {
+      return router.sessions.moorStatus(sessionId);
+    },
     agentEndpoint(input) {
       return endpointStore.register(input);
     },
@@ -1202,6 +1207,7 @@ export function createDaemonControlHandler(
     | 'input'
     | 'tail'
     | 'clearSessionLog'
+    | 'moorSessionStatus'
     | 'terminalObservation'
     | 'agentEndpoint'
     | 'activateAgentEndpoint'
@@ -1407,6 +1413,30 @@ export function createDaemonControlHandler(
               ...(recovery === undefined ? {} : { recovery })
             });
           }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/control/moor-status') {
+          const sessionId = url.searchParams.get('sessionId');
+          if (!isSafeDaemonSessionId(sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          // #8: liveness/creation-time are WIRE truth, never filesystem
+          // guesses. The adopted ATTACH_ACK descriptor exists exactly while a
+          // live adopted link exists (published after markRunning, cleared in
+          // beginRetire), and its wallStart is the holder's own start clock.
+          const status = daemon.moorSessionStatus(sessionId);
+          if (status === undefined) {
+            sendJson(res, 404, { ok: false, error: 'session has no live moor link' });
+            return;
+          }
+          sendJson(res, 200, {
+            ok: true,
+            generation: status.generation,
+            wallStartMs: Number(status.wallStart),
+            pid: status.pid,
+            running: status.running
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/log-clear') {

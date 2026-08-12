@@ -6,6 +6,7 @@
 // on a shared host (and a foreign-owned directory there would be an ambush).
 
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { findPackageRoot } from './packageRoot.js';
@@ -72,12 +73,78 @@ export function isExecutableFile(path: string): boolean {
 }
 
 /**
+ * The exact holder version this Desk release speaks (the wire/store contract
+ * was proven against this build). Attestation pins the probe output to it.
+ */
+export const MOOR_ATTESTED_VERSION = 'moor 0.1.0';
+
+/**
+ * #10 protocol/build attestation: an executable file at the resolved path is
+ * NOT yet a moor holder — a stale fork, a renamed tool, or an arbitrary PATH
+ * squatter would pass the X_OK preflight and fail (or worse, half-work) at
+ * the first provision. The probe runs the candidate's own `--version` and
+ * requires the exact attested answer; anything else — wrong output, nonzero
+ * exit, spawn failure, hang past the deadline — rejects the candidate.
+ */
+export function attestMoorBinary(
+  path: string,
+  probe: (
+    path: string
+  ) => { status: number | null; stdout: string; error?: Error } = defaultVersionProbe
+): { ok: true } | { ok: false; reason: string } {
+  let result: { status: number | null; stdout: string; error?: Error };
+  try {
+    result = probe(path);
+  } catch (error) {
+    return { ok: false, reason: `version probe failed to run: ${(error as Error).message}` };
+  }
+  if (result.error !== undefined) {
+    return { ok: false, reason: `version probe failed to run: ${result.error.message}` };
+  }
+  if (result.status !== 0) {
+    return { ok: false, reason: `version probe exited ${result.status}` };
+  }
+  const answer = result.stdout.trim();
+  if (answer !== MOOR_ATTESTED_VERSION) {
+    return {
+      ok: false,
+      reason: `version probe answered ${JSON.stringify(answer)}, expected ${JSON.stringify(MOOR_ATTESTED_VERSION)}`
+    };
+  }
+  return { ok: true };
+}
+
+function defaultVersionProbe(path: string): { status: number | null; stdout: string; error?: Error } {
+  const result = spawnSync(path, ['--version'], {
+    encoding: 'utf8',
+    timeout: 3_000,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    ...(result.error === undefined ? {} : { error: result.error })
+  };
+}
+
+/**
  * The moor binary for the daemon child: DESK_MOOR_BIN wins, then the
  * same-release bundled libexec/moor when present and executable, then PATH.
  * Operator and development overrides change only which branch fires, never
- * the runtime semantics.
+ * the runtime semantics. EVERY branch is attestation-gated (#10): the
+ * selected candidate must answer the exact attested `--version`, so an
+ * arbitrary executable can never become the daemon's holder. An explicit
+ * DESK_MOOR_BIN that fails attestation is a hard error (the operator named
+ * it; silently ignoring it would mask a misconfiguration), while a failed
+ * bundled/PATH candidate falls through to the next SOURCE in the fixed
+ * chain — never to a weaker check.
  */
-export function resolveMoorBinPath(fromUrl: string, env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string {
+export function resolveMoorBinPath(
+  fromUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+  attest: typeof attestMoorBinary = attestMoorBinary
+): string {
   const explicit = env.DESK_MOOR_BIN?.trim();
   if (explicit !== undefined && explicit.length > 0) {
     // An explicit setting is preflighted, not trusted: a daemon that reports
@@ -85,11 +152,15 @@ export function resolveMoorBinPath(fromUrl: string, env: NodeJS.ProcessEnv = pro
     if (!isExecutableFile(explicit)) {
       throw new Error(`DESK_MOOR_BIN is not an executable file: ${explicit}`);
     }
+    const attested = attest(explicit);
+    if (!attested.ok) {
+      throw new Error(`DESK_MOOR_BIN failed moor attestation: ${attested.reason} (${explicit})`);
+    }
     return explicit;
   }
   try {
     const bundled = join(resolveReleaseRoot(fromUrl, cwd), 'libexec', 'moor');
-    if (isExecutableFile(bundled)) {
+    if (isExecutableFile(bundled) && attest(bundled).ok) {
       return bundled;
     }
   } catch {
@@ -100,9 +171,9 @@ export function resolveMoorBinPath(fromUrl: string, env: NodeJS.ProcessEnv = pro
   for (const dir of (env.PATH ?? '').split(delimiter)) {
     if (dir.length === 0) continue;
     const candidate = join(dir, 'moor');
-    if (isExecutableFile(candidate)) {
+    if (isExecutableFile(candidate) && attest(candidate).ok) {
       return candidate;
     }
   }
-  throw new Error('no moor binary found: set DESK_MOOR_BIN, ship libexec/moor, or install moor on PATH');
+  throw new Error('no attested moor binary found: set DESK_MOOR_BIN, ship libexec/moor, or install moor on PATH');
 }

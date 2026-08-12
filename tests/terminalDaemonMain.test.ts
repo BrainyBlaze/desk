@@ -236,7 +236,7 @@ describe('the daemon resolves its moor binary instead of trusting the variable',
   it('accepts an executable override and passes it through', () => {
     const dir = mkdtempSync(join(tmpdir(), 'desk-moorbin-'));
     const executable = join(dir, 'moor');
-    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(executable, '#!/bin/sh\n[ "$1" = --version ] && { echo "moor 0.1.0"; exit 0; }\nexit 0\n', { mode: 0o755 });
 
     expect(resolveDaemonConfig({ DESK_MOOR_BIN: executable } as NodeJS.ProcessEnv).moorBinPath).toBe(executable);
     rmSync(dir, { recursive: true, force: true });

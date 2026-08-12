@@ -409,26 +409,30 @@ describe('createNativeChannelsTransport', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('agentdesk-g-orphan-xyz');
   });
 
-  it('sessionCreatedAt reads the socket stat in epoch seconds and null when absent', async () => {
+  it('sessionCreatedAt is the adopted holder wallStart in epoch seconds and null without a live link', async () => {
     stubDesk();
-    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const root = mkdtempSync(join(tmpdir(), 'desk-sock-root-'));
-    const savedRoot = process.env.DESK_MOOR_SOCKET_ROOT;
-    try {
-      process.env.DESK_MOOR_SOCKET_ROOT = root;
-      writeFileSync(join(root, 'shell'), '');
-      const transport = createNativeChannelsTransport();
-      const created = await transport.sessionCreatedAt('shell');
-      expect(created).not.toBeNull();
-      expect(Math.abs((created ?? 0) - Math.floor(Date.now() / 1000))).toBeLessThan(60);
-      expect(await transport.sessionCreatedAt('agentdesk-g-ghost-999')).toBeNull();
-    } finally {
-      if (savedRoot === undefined) delete process.env.DESK_MOOR_SOCKET_ROOT;
-      else process.env.DESK_MOOR_SOCKET_ROOT = savedRoot;
-      rmSync(root, { recursive: true, force: true });
-    }
+    const startedMs = Date.now() - 5_000;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/control/moor-status')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({ ok: true, generation: 2, wallStartMs: startedMs, pid: 42, running: true })
+        };
+      }
+      return { ok: false, status: 404, text: async () => '{"ok":false}' };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createNativeChannelsTransport();
+    // #8: wire truth — the holder's own wallStart clock, never a socket stat.
+    expect(await transport.sessionCreatedAt('shell')).toBe(Math.floor(startedMs / 1000));
+    const statusCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/control/moor-status'));
+    expect(String(statusCall?.[0])).toContain('sessionId=shell');
+
+    // No live adopted link (daemon 404) → unobservable, никаких fs-догадок.
+    fetchMock.mockResolvedValue({ ok: false, status: 404, text: async () => '{"ok":false}' } as never);
+    expect(await transport.sessionCreatedAt('agentdesk-g-ghost-999')).toBeNull();
   });
 });
 
