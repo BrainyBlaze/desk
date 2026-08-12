@@ -43,7 +43,9 @@ import type { DeskRoute } from '../plugin.js';
 import { buildDeskSnapshot } from '../snapshot.js';
 import { getSystemSnapshot } from '../systemSampler.js';
 import {
+  hookIdentityProvider,
   isValidProviderSessionId,
+  type HookIdentityProvider,
   type ProviderSessionProvider
 } from '../../shared/providerSessionIdentity.js';
 
@@ -97,7 +99,7 @@ export interface ClaudeSessionStartIdentity {
 interface ProviderHookIdentity {
   deskSessionId: string;
   generation: number;
-  provider: Exclude<ProviderSessionProvider, 'opencode'>;
+  provider: HookIdentityProvider;
   providerSessionId: string;
   hook: string;
   isSessionStart: boolean;
@@ -149,12 +151,8 @@ function providerHookIdentity(
     return { kind: 'none' };
   }
   const body = input as Record<string, unknown>;
-  let provider: ProviderHookIdentity['provider'];
-  if (body.provider === 'claude' && body.producer === 'claude-hooks') {
-    provider = 'claude';
-  } else if (body.provider === 'codex' && body.producer === 'codex-hooks') {
-    provider = 'codex';
-  } else {
+  const provider = hookIdentityProvider(body.provider, body.producer);
+  if (provider === undefined) {
     return { kind: 'none' };
   }
   const observation = body.observation;

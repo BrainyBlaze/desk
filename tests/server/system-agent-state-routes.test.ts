@@ -437,6 +437,72 @@ describe('canonical system agent-state routes', () => {
     expect(result.status).toBe(200);
   });
 
+  it('binds a Qwen provider session id without Claude confirmation', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    });
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'qwen',
+        producer: 'qwen-hooks',
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: '33333333-3333-4333-8333-333333333333'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
+    );
+
+    expect(confirmClaudeSessionStart).not.toHaveBeenCalled();
+    expect(bindProviderSessionIdentity).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      provider: 'qwen',
+      providerSessionId: '33333333-3333-4333-8333-333333333333'
+    });
+    expect(result.status).toBe(200);
+  });
+
+  it('binds an opaque Kimi provider session id without Claude confirmation', async () => {
+    const agentStateGateway = gateway();
+    const confirmClaudeSessionStart = vi.fn();
+    const bindProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'persisted'
+    });
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'kimi',
+        producer: 'kimi-hooks',
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: 'kimi-session_01HZX4T9QK'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { confirmClaudeSessionStart, bindProviderSessionIdentity }
+    );
+
+    expect(confirmClaudeSessionStart).not.toHaveBeenCalled();
+    expect(bindProviderSessionIdentity).toHaveBeenCalledWith({
+      deskSessionId: 'agent-a',
+      provider: 'kimi',
+      providerSessionId: 'kimi-session_01HZX4T9QK'
+    });
+    expect(result.status).toBe(200);
+  });
+
   it('confirms Claude before the first bind even when a later hook carries the first identity', async () => {
     const agentStateGateway = gateway();
     const confirmClaudeSessionStart = vi.fn().mockReturnValue({

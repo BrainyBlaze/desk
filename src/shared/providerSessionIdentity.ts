@@ -3,12 +3,41 @@ import {
   AGENT_PROVIDER_IDS,
   agentProvider,
   isAgentProviderId,
+  type AgentHooksStyle,
+  type AgentProviderEntry,
   type AgentProviderId
 } from './agentRegistry.js';
 
 export const PROVIDER_SESSION_PROVIDERS = AGENT_PROVIDER_IDS;
 
 export type ProviderSessionProvider = AgentProviderId;
+
+type HookIdentityEntry = Extract<
+  AgentProviderEntry,
+  { hooks: Exclude<AgentHooksStyle, 'plugin'>; terminalProducer: string }
+>;
+
+export type HookIdentityProvider = HookIdentityEntry['id'];
+
+export const HOOK_IDENTITY_PRODUCERS = Object.fromEntries(
+  AGENT_PROVIDER_ENTRIES.filter(
+    (agent) =>
+      agent.hooks !== undefined &&
+      agent.hooks !== 'plugin' &&
+      agent.terminalProducer !== undefined
+  ).map((agent) => [agent.id, agent.terminalProducer])
+) as Record<HookIdentityProvider, string>;
+
+export function hookIdentityProvider(
+  provider: unknown,
+  producer: unknown
+): HookIdentityProvider | undefined {
+  if (typeof provider !== 'string' || !(provider in HOOK_IDENTITY_PRODUCERS)) {
+    return undefined;
+  }
+  const key = provider as HookIdentityProvider;
+  return HOOK_IDENTITY_PRODUCERS[key] === producer ? key : undefined;
+}
 
 export const PROVIDER_SESSION_ID_PAYLOAD_FIELD = Object.fromEntries(
   AGENT_PROVIDER_ENTRIES.map((agent) => [agent.id, agent.sessionIdField])
