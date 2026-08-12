@@ -157,7 +157,7 @@ export interface SessionSpec {
   resume?: string;
   bypassPermissions?: boolean;
   customCommand?: boolean;
-  /** Durable lifecycle identity and atch socket key (§10). */
+  /** Durable lifecycle identity and moor socket key (§10). */
   sessionId: string;
   /** Selected agent profile, or absent for the ambient account. */
   profileId?: string;

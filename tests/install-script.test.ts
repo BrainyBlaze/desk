@@ -179,9 +179,9 @@ describe('installer lifecycle', () => {
     expect(readlinkSync(join(value.deskHome, 'current'))).toMatch(/^releases\/v0\.3\.0\//);
     expect(value.releaseInstances()).toHaveLength(1);
     const release = realpathSync(join(value.deskHome, 'current'));
-    const atch = spawnSync(join(release, 'libexec', 'atch'), ['--version'], { encoding: 'utf8' });
-    expect(atch.status, atch.stderr).toBe(0);
-    expect(atch.stdout).toMatch(/^atch - version 1\.6-bb1,/);
+    const moor = spawnSync(join(release, 'libexec', 'moor'), ['--version'], { encoding: 'utf8' });
+    expect(moor.status, moor.stderr).toBe(0);
+    expect(moor.stdout.trim()).toBe('moor 0.1.0');
 
     const help = spawnSync(value.launcher(), ['help'], {
       env: { ...process.env, DESK_HOME: value.deskHome },
@@ -191,12 +191,12 @@ describe('installer lifecycle', () => {
     expect(help.stdout).toContain('Desk fixture help');
   }, 20_000);
 
-  it('rejects a non-runnable bundled atch before activating the release', () => {
+  it('rejects a non-runnable bundled moor before activating the release', () => {
     const value = fixture();
-    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_ATCH_MODE: 'broken' } });
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'broken' } });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/bundled atch.*version probe/i);
+    expect(result.stderr).toMatch(/bundled moor.*version probe/i);
     expect(existsSync(value.launcher())).toBe(false);
     expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);

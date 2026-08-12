@@ -31,8 +31,8 @@ describe('desk CLI native lifecycle', () => {
 `
     );
     vi.stubEnv('PATH', '');
-    vi.stubEnv('DESK_ATCH_BIN', join(dir, 'missing-atch'));
-    vi.stubEnv('DESK_ATCH_SOCKET_ROOT', join(dir, 'atch'));
+    vi.stubEnv('DESK_MOOR_BIN', join(dir, 'missing-moor'));
+    vi.stubEnv('DESK_MOOR_SOCKET_ROOT', join(dir, 'moor'));
     vi.stubEnv('HOME', dir);
     const defaultManifest = join(dir, '.config', 'desk', 'desk.yml');
     mkdirSync(join(dir, '.config', 'desk'), { recursive: true });
@@ -55,15 +55,15 @@ describe('desk CLI native lifecycle', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('fails attach honestly when the configured atch binary is unavailable', async () => {
+  it('fails attach honestly when the configured moor binary is unavailable', async () => {
     const result = await run(['attach', '--file', manifest, 'alpha']);
 
     expect(result.code).toBe(1);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toContain('DESK_ATCH_BIN is not an executable file');
+    expect(result.stderr).toContain('DESK_MOOR_BIN is not an executable file');
   });
 
-  it('reports status from the canonical atch socket path without requiring the binary', async () => {
+  it('reports status from the canonical moor socket path without requiring the binary', async () => {
     const result = await run(['status', '--file', manifest]);
 
     expect(result.code).toBe(0);

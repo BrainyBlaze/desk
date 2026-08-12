@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   daemonChildEnv,
-  resolveAtchBinPath,
+  resolveMoorBinPath,
   resolveDaemonCommand,
   resolveReleaseRoot,
   startDaemonSupervisor
@@ -357,8 +357,8 @@ describe('resolveDaemonCommand', () => {
   });
 });
 
-describe('resolveAtchBinPath', () => {
-  it('preflights DESK_ATCH_BIN, then release libexec/atch, then an ABSOLUTE PATH hit, else throws', () => {
+describe('resolveMoorBinPath', () => {
+  it('preflights DESK_MOOR_BIN, then release libexec/moor, then an ABSOLUTE PATH hit, else throws', () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
     const pathDir = mkdtempSync(join(tmpdir(), 'desk-path-'));
     try {
@@ -367,32 +367,32 @@ describe('resolveAtchBinPath', () => {
       mkdirSync(join(root, 'src'), { recursive: true });
       const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
 
-      // an explicit-but-unusable DESK_ATCH_BIN fails BEFORE launch, not at first provision
-      setEnv('DESK_ATCH_BIN', '/opt/custom/atch');
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/not an executable/);
+      // an explicit-but-unusable DESK_MOOR_BIN fails BEFORE launch, not at first provision
+      setEnv('DESK_MOOR_BIN', '/opt/custom/moor');
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/not an executable/);
 
-      const custom = join(pathDir, 'custom-atch');
+      const custom = join(pathDir, 'custom-moor');
       writeFileSync(custom, '#!/bin/sh\n');
       chmodSync(custom, 0o755);
-      setEnv('DESK_ATCH_BIN', custom);
-      expect(resolveAtchBinPath(fromUrl)).toBe(custom);
+      setEnv('DESK_MOOR_BIN', custom);
+      expect(resolveMoorBinPath(fromUrl)).toBe(custom);
 
       // no explicit, no bundled, nothing on PATH → fail closed
-      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('DESK_MOOR_BIN', undefined);
       setEnv('PATH', '/nonexistent-dir');
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/no atch binary/);
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/no moor binary/);
 
       // a PATH hit resolves to the ABSOLUTE preflighted path, never the bare name
-      writeFileSync(join(pathDir, 'atch'), '#!/bin/sh\n');
-      chmodSync(join(pathDir, 'atch'), 0o755);
+      writeFileSync(join(pathDir, 'moor'), '#!/bin/sh\n');
+      chmodSync(join(pathDir, 'moor'), 0o755);
       setEnv('PATH', pathDir);
-      expect(resolveAtchBinPath(fromUrl)).toBe(join(pathDir, 'atch'));
+      expect(resolveMoorBinPath(fromUrl)).toBe(join(pathDir, 'moor'));
 
       // the same-release bundled binary outranks PATH
       mkdirSync(join(root, 'libexec'), { recursive: true });
-      writeFileSync(join(root, 'libexec', 'atch'), '#!/bin/sh\n');
-      chmodSync(join(root, 'libexec', 'atch'), 0o755);
-      expect(resolveAtchBinPath(fromUrl)).toBe(join(root, 'libexec', 'atch'));
+      writeFileSync(join(root, 'libexec', 'moor'), '#!/bin/sh\n');
+      chmodSync(join(root, 'libexec', 'moor'), 0o755);
+      expect(resolveMoorBinPath(fromUrl)).toBe(join(root, 'libexec', 'moor'));
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(pathDir, { recursive: true, force: true });
@@ -408,18 +408,18 @@ describe('resolveAtchBinPath', () => {
       mkdirSync(join(root, 'src'), { recursive: true });
       const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
 
-      // libexec/atch as a DIRECTORY must not preflight as the atch binary
-      mkdirSync(join(root, 'libexec', 'atch'), { recursive: true });
-      setEnv('DESK_ATCH_BIN', undefined);
+      // libexec/moor as a DIRECTORY must not preflight as the moor binary
+      mkdirSync(join(root, 'libexec', 'moor'), { recursive: true });
+      setEnv('DESK_MOOR_BIN', undefined);
       setEnv('PATH', '/nonexistent-dir');
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/no atch binary/);
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/no moor binary/);
 
-      // an explicit DESK_ATCH_BIN naming a directory fails the preflight too
-      setEnv('DESK_ATCH_BIN', join(root, 'libexec', 'atch'));
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/not an executable/);
+      // an explicit DESK_MOOR_BIN naming a directory fails the preflight too
+      setEnv('DESK_MOOR_BIN', join(root, 'libexec', 'moor'));
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/not an executable/);
 
       // runtime/node as a DIRECTORY must not be picked as the release runtime
-      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('DESK_MOOR_BIN', undefined);
       setEnv('DESK_DAEMON_CMD', undefined);
       mkdirSync(join(root, 'runtime', 'node'), { recursive: true });
       expect(resolveDaemonCommand(fromUrl, process.env, '/usr/local/bin/node')).toEqual([

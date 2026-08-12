@@ -65,7 +65,8 @@ export class FileGenerationLedgerStore implements GenerationLedgerStore {
         typeof rec.s !== 'string' ||
         rec.s.length === 0 ||
         !Number.isSafeInteger(rec.g) ||
-        (rec.g as number) < 1
+        (rec.g as number) < 1 ||
+        (rec.g as number) > 0xffff_ffff // OB-18: generations are u32, never wrap
       ) {
         throw new Error(
           `corrupt generation ledger at byte ${offset}: invalid generation record`
@@ -108,6 +109,13 @@ export class FileGenerationLedgerStore implements GenerationLedgerStore {
   }
 
   write(sessionId: string, generation: number): void {
+    // OB-18: generations are u32 and never wrap — an out-of-range value must
+    // never be persisted (refusal BEFORE any mutation or append).
+    if (!Number.isSafeInteger(generation) || generation < 1 || generation > 0xffff_ffff) {
+      throw new Error(
+        `generation ledger refuses out-of-range generation ${generation} for ${sessionId}`
+      );
+    }
     const prev = this.max.get(sessionId) ?? 0;
     if (generation <= prev) return; // monotonic guard — never lower a recorded max
     if (this.fd === null) this.fd = openSync(this.path, 'a');

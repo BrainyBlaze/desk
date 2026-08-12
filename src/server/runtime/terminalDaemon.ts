@@ -1,8 +1,8 @@
 // Terminal daemon assembly (cutover Phase 2 Step 3, core). Composes the durable
 // terminal daemon the web server mounts at cutover: a TerminalWsRouter backed by
 // a fsync'd generation ledger and the real @xterm/headless emulator, the binary
-// WS bridge on /ws/terminal, and atch session provisioning via @codex's verified
-// contract (CREATE = `atch start ABSOLUTE_SOCKET_PATH cmd`, KILL = `atch kill -f
+// WS bridge on /ws/terminal, and moor session provisioning via @codex's verified
+// contract (CREATE = `moor start ABSOLUTE_SOCKET_PATH cmd`, KILL = `moor kill -f
 // ABSOLUTE_SOCKET_PATH`; a slash-bearing name is the socket path, which isolates
 // the canary under a dedicated socket root).
 //
@@ -14,8 +14,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, unlinkSync } from 'node:fs';
-import { ensurePrivateSocketRoot } from '../../shared/atchPaths.js';
+import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { ensurePrivateSocketRoot } from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   AGENT_PRODUCER_BINDINGS,
@@ -29,7 +29,8 @@ import {
   type DeskEventFeedResponse,
   type DeskEventReadRequest,
   type SessionRegistration,
-  type SessionStateSnapshot
+  type SessionStateSnapshot,
+  type SessionStateTransition
 } from '../../shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../../shared/runtime/index.js';
 import { TerminalWsRouter } from './terminalWsRouter.js';
@@ -71,13 +72,14 @@ import {
   type DeskEventJournalHealth
 } from './fileDeskEventJournal.js';
 import {
-  AtchEventTailer,
-  atchEventCursorPath,
-  atchEventPath,
-  prepareAtchEventSink,
-  type AtchEventDiagnostic
-} from './atchEvents.js';
+  MoorEventObserver,
+  moorEventStoreDir,
+  moorEventStoreRoot,
+  type MoorEventDiagnostic
+} from './moorEventObserver.js';
+import type { MoorStatus } from '../../shared/moorWire/messages.js';
 import type {
+  HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
   RetireGenerationResult,
   SessionSpawnPreallocationContext,
@@ -110,10 +112,10 @@ interface UpgradeServer {
 export interface TerminalDaemonOptions {
   /** Durable state root (the generation ledger lives under <root>/_engine). */
   homeRoot: string;
-  /** Path to the atch binary. */
-  atchBinPath: string;
+  /** Path to the moor binary. */
+  moorBinPath: string;
   /** Dedicated ABSOLUTE socket root; a session's socket is <root>/<sessionId>.sock. */
-  atchSocketRoot: string;
+  moorSocketRoot: string;
   httpServer: UpgradeServer;
   /** WS path (default /ws/terminal). */
   wsPath?: string;
@@ -136,14 +138,14 @@ export interface TerminalDaemonOptions {
   hookInstallationProbe?: (
     provider: HookProbeProvider
   ) => HookInstallationProbe;
-  /** Poll cadence for generation-bound atch event sinks. */
-  atchEventPollIntervalMs?: number;
-  /** Injectable structured diagnostic sink for atch event ingestion. */
-  onAtchEventDiagnostic?: (context: {
+  /** Poll cadence for generation-bound moor event sinks. */
+  moorEventPollIntervalMs?: number;
+  /** Injectable structured diagnostic sink for moor event ingestion. */
+  onMoorEventDiagnostic?: (context: {
     sessionId: string;
     generation: number;
     path: string;
-    diagnostic: AtchEventDiagnostic;
+    diagnostic: MoorEventDiagnostic;
   }) => void;
   /** Active manifest path override for isolated daemon composition tests. */
   manifestPath?: string;
@@ -203,7 +205,7 @@ export type ProviderSessionResetResult =
 
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
-  /** Spawn + attach the atch master for a session (CREATE contract). */
+  /** Spawn + attach the moor holder for a session (CREATE contract). */
   provision(sessionId: string, spec: TerminalDaemonSessionSpec): Promise<ProvisionResult>;
   /**
    * Retire a session (KILL contract), resolving only after the kill command
@@ -235,7 +237,35 @@ export interface TerminalDaemon {
   /** Latest generation-bound terminal observation, independent of semantic authority. */
   terminalObservation(sessionId: string): TerminalObservationSnapshot | undefined;
   /** Re-open a surviving generation's event sink after daemon restart. */
-  reconcileAtchEvents(sessionId: string, generation: number): boolean;
+  reconcileMoorEvents(sessionId: string, generation: number): Promise<boolean>;
+  /** §10.2.13 committed-log clear over the live moor link — full result algebra. */
+  clearSessionLog(
+    sessionId: string
+  ): Promise<HolderLogClearOutcome | 'no-link'>;
+  /**
+   * Enter the DRAINING state (idempotent, synchronous): from this instant the
+   * control plane refuses every state-changing request, so a graceful
+   * shutdown's lease-handover snapshot cannot race a late provision.
+   */
+  beginDrain(): void;
+  isDraining(): boolean;
+  /**
+   * Mutation drain barrier: a state-changing control request acquires this
+   * BEFORE its first awaited body read (registering how to ABORT itself) and
+   * releases it when its response finishes. Returns undefined once draining —
+   * the atomically-checked refusal. close() truly awaits the barrier: no
+   * shutdown step past it can run while an admitted mutation can still run.
+   */
+  enterMutation(abort: () => void): (() => void) | undefined;
+  /** Resolves when no admitted mutation remains in flight (draining only). */
+  awaitMutationDrain(): Promise<void>;
+  /**
+   * Sever every still-open admitted mutation (bounded-shutdown escalation):
+   * each registered abort destroys its connection, which fires the request's
+   * close-path release — so the barrier ALWAYS empties instead of the
+   * shutdown proceeding past a live mutation. Returns how many were severed.
+   */
+  abortOpenMutations(): number;
   /** Bind durable provider transport metadata to the canonical producer sequence. */
   agentEndpoint(input: unknown): AgentEndpointStoreResult;
   /** Activate one exact staged provider registration after durable identity binding. */
@@ -378,13 +408,27 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   const hookInstallationProbe =
     options.hookInstallationProbe ?? probeHookInstallation;
   let ready = false;
-  let scheduleAtchObserverCleanup = (
+  let draining = false;
+  const openMutations = new Set<{ abort: () => void }>();
+  let mutationDrainWaiters: Array<() => void> = [];
+  let scheduleMoorObserverCleanup = (
     _sessionId: string,
     _generation: number
   ): void => {};
-  const replayingAtchTransitions = new Set<string>();
-  const atchTransitionKey = (sessionId: string, generation: number): string =>
+  const replayingMoorTransitions = new Set<string>();
+  const moorTransitionKey = (sessionId: string, generation: number): string =>
     `${sessionId}\0${generation}`;
+  /**
+   * Downtime catch-up: replay re-projects the WHOLE retained store into a
+   * fresh authority, so publishing every replayed transition would storm the
+   * journal with history it already carries. But swallowing them all loses
+   * every change that happened WHILE the daemon was down (an agent's
+   * completion, most notably). The compromise is a summary: remember the LAST
+   * suppressed transition per (session, generation) and publish exactly that
+   * one when the replay finishes — downstream sees one event carrying the
+   * final caught-up state.
+   */
+  const suppressedReplayTransitions = new Map<string, SessionStateTransition>();
   const router = new TerminalWsRouter({
     ledger,
     supervisor:
@@ -411,15 +455,16 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return undefined;
     },
     onStateTransition: (transition) => {
-      if (
-        !replayingAtchTransitions.has(
-          atchTransitionKey(transition.sessionId, transition.generation)
-        )
-      ) {
+      const key = moorTransitionKey(transition.sessionId, transition.generation);
+      if (replayingMoorTransitions.has(key)) {
+        // Replay: keep only the LAST transition — it carries the final
+        // caught-up state and is published once the replay completes.
+        suppressedReplayTransitions.set(key, transition);
+      } else {
         eventJournal.appendTransition(transition);
       }
       if (transition.cause === 'lifecycle-exited') {
-        scheduleAtchObserverCleanup(
+        scheduleMoorObserverCleanup(
           transition.sessionId,
           transition.generation
         );
@@ -582,97 +627,171 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   };
   const disposeBridge = installTerminalWsBridge(options.httpServer, router, options.wsPath !== undefined ? { path: options.wsPath } : {});
 
-  const socketPath = (sessionId: string): string => join(options.atchSocketRoot, `${sessionId}.sock`);
+  // Moor rendezvous: `<root>/<sessionId>` — the holder publishes exactly this
+  // name (no suffix); every consumer resolves it through this one function.
+  const socketPath = (sessionId: string): string => join(options.moorSocketRoot, sessionId);
   interface EventObserver {
     sessionId: string;
     generation: number;
+    /** The per-generation committed event-store DIRECTORY. */
     path: string;
-    cursorPath: string;
-    tailer: AtchEventTailer;
+    observer: MoorEventObserver;
   }
   const eventObservers = new Map<string, EventObserver>();
-  const reportAtchDiagnostic = (
+  const reportMoorDiagnostic = (
     observer: Pick<EventObserver, 'sessionId' | 'generation' | 'path'>,
-    diagnostic: AtchEventDiagnostic
+    diagnostic: MoorEventDiagnostic
   ): void => {
-    if (options.onAtchEventDiagnostic) {
-      options.onAtchEventDiagnostic({ ...observer, diagnostic });
+    if (options.onMoorEventDiagnostic) {
+      options.onMoorEventDiagnostic({ ...observer, diagnostic });
       return;
     }
     // eslint-disable-next-line no-console
     console.error(
-      `[atch-events] ${observer.sessionId}@${observer.generation} ${diagnostic.code}: ${diagnostic.message}`
+      `[moor-events] ${observer.sessionId}@${observer.generation} ${diagnostic.code}: ${diagnostic.message}`
     );
   };
-  const stopEventObserver = (observer: EventObserver, removeSink: boolean): void => {
-    observer.tailer.stop();
+  // Tag-01 path identity — the §1.2 CANONICAL SESSION identity form: 0x01
+  // followed by the RAW path bytes (confirmed by the real binary's attach
+  // fence). The EVENT-store identity is DIFFERENT: the real ATTACH_ACK
+  // carries the handed-off path's raw posix bytes with NO tag (unix.rs
+  // `event_path.as_os_str().as_bytes()`), so its comparand is the raw path.
+  const tag01Identity = (path: string): Uint8Array => {
+    const pathBytes = Buffer.from(path);
+    const identity = new Uint8Array(1 + pathBytes.length);
+    identity[0] = 1;
+    identity.set(pathBytes, 1);
+    return identity;
+  };
+  const eventStoreIdentity = (path: string): Uint8Array => new Uint8Array(Buffer.from(path));
+  const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean => {
+    if (a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) {
+      if (a[index] !== b[index]) return false;
+    }
+    return true;
+  };
+  /**
+   * OB-39 event-store authority: the adopted ATTACH_ACK/STATUS descriptor must
+   * exist, carry the store layout, and name EXACTLY (byte-for-byte raw POSIX
+   * path bytes — never a lossy decoded string) the directory Desk handed to
+   * this launch. Returns the acknowledged 4-field frontier the observer
+   * replays from.
+   */
+  const resolveStoreAuthority = (
+    status: MoorStatus | undefined,
+    handedOffDir: string
+  ):
+    | { ok: true; frontier: { bodySlot: number; commitIndex: bigint; bodyLength: bigint; bodyHash: Uint8Array } }
+    | { ok: false; error: string } => {
+    if (status === undefined || status.layout !== 2) {
+      return { ok: false, error: 'moor attach descriptor is missing or does not carry the event store' };
+    }
+    if (!bytesEqual(status.eventIdentity, eventStoreIdentity(handedOffDir))) {
+      // Byte-for-byte against the raw handed-off path: a lossy decode can
+      // never collapse distinct identities, and any mismatch — different
+      // directory OR an unexpected identity shape — is the same refusal.
+      return {
+        ok: false,
+        error:
+          'moor event-store descriptor names a different directory than this launch handed off'
+      };
+    }
+    return {
+      ok: true,
+      frontier: {
+        bodySlot: status.bodySlot,
+        commitIndex: status.commitIndex,
+        bodyLength: status.bodyLength,
+        bodyHash: status.bodyHash
+      }
+    };
+  };
+  const stopEventObserver = (observer: EventObserver): void => {
+    observer.observer.stop();
     if (eventObservers.get(observer.sessionId) === observer) {
       eventObservers.delete(observer.sessionId);
     }
-    if (removeSink) {
-      for (const [path, label] of [
-        [observer.path, 'sink'],
-        [observer.cursorPath, 'cursor']
-      ] as const) {
-        try {
-          unlinkSync(path);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            reportAtchDiagnostic(observer, {
-              code: 'tailer-io',
-              message: `could not remove atch event ${label}: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            });
-          }
-        }
-      }
-    }
   };
-  const startEventObserver = (
+  const startEventObserver = async (
     sessionId: string,
     generation: number,
-    path: string
-  ): EventObserver => {
+    path: string,
+    descriptor?: { bodySlot: number; commitIndex: bigint; bodyLength: bigint; bodyHash: Uint8Array }
+  ): Promise<EventObserver> => {
     const current = eventObservers.get(sessionId);
     if (current?.generation === generation && current.path === path) return current;
-    const cursorPath = atchEventCursorPath(
-      options.atchSocketRoot,
-      sessionId,
-      generation
-    );
     const diagnosticIdentity = { sessionId, generation, path };
-    const tailer = new AtchEventTailer({
-      path,
-      cursorPath,
-      ...(options.atchEventPollIntervalMs === undefined
+    const expectedIdentity = tag01Identity(socketPath(sessionId));
+    const storeObserver = new MoorEventObserver({
+      directory: path,
+      generation,
+      identity: expectedIdentity,
+      ...(descriptor === undefined ? {} : { descriptor }),
+      ...(options.moorEventPollIntervalMs === undefined
         ? {}
-        : { pollIntervalMs: options.atchEventPollIntervalMs }),
+        : { pollIntervalMs: options.moorEventPollIntervalMs }),
       onEvent: (event, context) => {
-        const replayKey = atchTransitionKey(sessionId, generation);
-        if (context.phase === 'replay') replayingAtchTransitions.add(replayKey);
+        const replayKey = moorTransitionKey(sessionId, generation);
+        if (context.phase === 'replay') replayingMoorTransitions.add(replayKey);
         try {
-          router.sessions.observeAtchEvent(sessionId, generation, event);
+          router.sessions.observeMoorEvent(sessionId, generation, event);
         } finally {
-          if (context.phase === 'replay') replayingAtchTransitions.delete(replayKey);
+          if (context.phase === 'replay') replayingMoorTransitions.delete(replayKey);
         }
       },
-      onDiagnostic: (diagnostic) =>
-        reportAtchDiagnostic(diagnosticIdentity, diagnostic)
+      onDiagnostic: (message) =>
+        reportMoorDiagnostic(diagnosticIdentity, { code: 'tailer-io', message }),
+      onTerminal: () => {
+        // A live session with no lifecycle observer is not operable — but a
+        // STALE observer's late terminal callback must never touch a
+        // successor: everything is guarded by the current registration, the
+        // retirement is exact-generation, and the store is left in place
+        // (§11.6: cleanup of a published store belongs to the holder).
+        const registered = eventObservers.get(sessionId);
+        if (registered === undefined || registered.observer !== storeObserver) {
+          return;
+        }
+        stopEventObserver(registered);
+        void router.sessions.retireGenerationAwaited(sessionId, generation);
+      }
     });
-    const observer = { sessionId, generation, path, cursorPath, tailer };
-    if (!tailer.start()) {
-      throw new Error('atch event sink could not be opened securely');
-    }
-    if (current) stopEventObserver(current, false);
+    const observer = { sessionId, generation, path, observer: storeObserver };
+    // Registered BEFORE the replay runs: an already-committed exit transition
+    // schedules its cleanup as a microtask, which must find this registration
+    // (or the exited store would survive as an orphan).
+    if (current) stopEventObserver(current);
     eventObservers.set(sessionId, observer);
+    const replayKey = moorTransitionKey(sessionId, generation);
+    suppressedReplayTransitions.delete(replayKey); // no stale carryover into this replay
+    if (!(await storeObserver.start())) {
+      suppressedReplayTransitions.delete(replayKey);
+      if (eventObservers.get(sessionId) === observer) {
+        eventObservers.delete(sessionId);
+      }
+      storeObserver.stop();
+      throw new Error('moor event store could not be observed');
+    }
+    // Downtime catch-up: the replay is fully delivered inside start(), so the
+    // last suppressed transition IS the final caught-up state — publish it as
+    // the one summary event downstream missed while the daemon was down. The
+    // key was cleared before start(), so this entry belongs to exactly THIS
+    // replay — publish unconditionally: a replayed exit legitimately stops
+    // this very observer (cleanup microtask) and must still be announced.
+    const caughtUp = suppressedReplayTransitions.get(replayKey);
+    suppressedReplayTransitions.delete(replayKey);
+    if (caughtUp !== undefined) {
+      eventJournal.appendTransition(caughtUp);
+    }
     return observer;
   };
-  scheduleAtchObserverCleanup = (sessionId, generation): void => {
+  scheduleMoorObserverCleanup = (sessionId, generation): void => {
     queueMicrotask(() => {
       const observer = eventObservers.get(sessionId);
       if (observer?.generation === generation) {
-        stopEventObserver(observer, true);
+        // §11.6: observation stops here; the PUBLISHED store belongs to the
+        // holder's own retirement cleanup — Desk never deletes it.
+        stopEventObserver(observer);
       }
     });
   };
@@ -680,62 +799,64 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   return {
     router,
     async provision(sessionId, spec) {
-      const sockPath = socketPath(sessionId);
-      let preparedObserver: EventObserver | undefined;
-      try {
-        const result = await router.sessions.spawnAndAttach(sessionId, {
-          binPath: options.atchBinPath,
-          args: ['start', sockPath, ...spec.command],
-          sockPath,
-          geometry: spec.geometry,
-          subject: spec.subject,
-          detached: true,
-          preallocateSpawn: (context) =>
-            preallocateProviderSession(context, spec),
-          prepareSpawn: ({ generation, args }) => {
-            const path = prepareAtchEventSink(
-              options.atchSocketRoot,
-              sessionId,
-              generation
-            );
-            try {
-              preparedObserver = startEventObserver(sessionId, generation, path);
-            } catch (error) {
-              for (const cleanupPath of [
-                path,
-                atchEventCursorPath(
-                  options.atchSocketRoot,
-                  sessionId,
-                  generation
-                )
-              ]) {
-                try {
-                  unlinkSync(cleanupPath);
-                } catch {
-                  // Preserve the observer startup error.
-                }
-              }
-              throw error;
-            }
-            return { args: [args[0]!, '-T', path, ...args.slice(1)] };
-          },
-          killSpec: {
-            binPath: options.atchBinPath,
-            args: ['kill', '-f', sockPath],
-            staleCleanupSpec: { binPath: options.atchBinPath, args: ['rm', sockPath] }
-          }
-        });
-        if (!result.ok && preparedObserver) stopEventObserver(preparedObserver, true);
-        return result;
-      } catch (error) {
-        if (preparedObserver) stopEventObserver(preparedObserver, true);
-        throw error;
+      const sessionPath = socketPath(sessionId);
+      let storeDir: string | undefined;
+      let observedGeneration: number | undefined;
+      const result = await router.sessions.spawnAndAttachMoor(sessionId, {
+        binPath: options.moorBinPath,
+        sessionPath,
+        command: spec.command,
+        geometry: spec.geometry,
+        subject: spec.subject,
+        preallocateSpawn: (context) => preallocateProviderSession(context, spec),
+        // The holder itself creates and commits the -T store during launch;
+        // Desk only NAMES the per-generation directory here and observes it
+        // after the launcher reports ready.
+        prepareSpawn: ({ generation }) => {
+          observedGeneration = generation;
+          storeDir = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
+          return { storeDir };
+        },
+        killSpec: {
+          binPath: options.moorBinPath,
+          args: ['kill', '-f', sessionPath],
+          staleCleanupSpec: { binPath: options.moorBinPath, args: ['rm', sessionPath] }
+        }
+      });
+      if (!result.ok) return result;
+      // OB-39: the holder's ATTACH_ACK descriptor is the event-store
+      // authority — the supervisor never guesses. The descriptor must exist,
+      // carry the store layout, and name EXACTLY the directory this launch
+      // handed to the holder; observation replays from the acknowledged
+      // frontier, never behind it.
+      const status = result.moorStatus;
+      if (storeDir !== undefined && observedGeneration !== undefined) {
+        // Every rejection below retires EXACTLY the generation this provision
+        // observed — a stale provision result must never retire a successor.
+        const handedOffDir = storeDir;
+        const generation = observedGeneration;
+        const authority = resolveStoreAuthority(status, handedOffDir);
+        if (!authority.ok) {
+          await router.sessions.retireGenerationAwaited(sessionId, generation);
+          throw new Error(authority.error);
+        }
+        try {
+          await startEventObserver(sessionId, generation, handedOffDir, authority.frontier);
+        } catch (error) {
+          // Fail closed: a session whose lifecycle events cannot be observed
+          // is not provisioned — tear the fresh holder down. Store cleanup
+          // belongs to the holder's own retirement (§11.6); Desk deletes
+          // nothing it merely named.
+          await router.sessions.retireGenerationAwaited(sessionId, generation);
+          throw error;
+        }
       }
+      return result;
     },
     async retire(sessionId) {
       const observer = eventObservers.get(sessionId);
       const result = await router.sessions.retireAwaited(sessionId);
-      if (result.ok && observer) stopEventObserver(observer, true);
+      if (result.ok && observer) stopEventObserver(observer);
       return result;
     },
     async retireGeneration(sessionId, generation) {
@@ -745,7 +866,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         generation
       );
       if (result.ok && observer?.generation === generation) {
-        stopEventObserver(observer, true);
+        stopEventObserver(observer);
       }
       return result;
     },
@@ -755,7 +876,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         socketPath(sessionId),
         (generation) => {
           const observer = eventObservers.get(sessionId);
-          if (observer) stopEventObserver(observer, true);
+          if (observer) stopEventObserver(observer);
           return authorizeProviderSessionReset(
             {
               deskSessionId: sessionId,
@@ -786,21 +907,40 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     terminalObservation(sessionId) {
       return router.sessions.terminalObservation(sessionId);
     },
-    reconcileAtchEvents(sessionId, generation) {
-      const path = atchEventPath(options.atchSocketRoot, sessionId, generation);
-      if (!existsSync(path)) return false;
+    async reconcileMoorEvents(sessionId, generation) {
+      // Restart reconciliation re-observes the surviving holder's committed
+      // event store for the ADOPTED generation under the SAME OB-39 authority
+      // as provision: the re-adopted ATTACH_ACK descriptor must exist and
+      // name exactly the directory this launch derived, and observation
+      // replays from the acknowledged frontier — the supervisor never guesses
+      // from the filesystem alone.
+      const path = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
+      const diagnose = (message: string): false => {
+        reportMoorDiagnostic({ sessionId, generation, path }, { code: 'tailer-io', message });
+        return false;
+      };
+      const status = router.sessions.moorStatus(sessionId);
+      if (status !== undefined && status.generation !== generation) {
+        return diagnose(
+          `could not reconcile the moor event store: adopted status is generation ${status.generation}, not ${generation}`
+        );
+      }
+      const authority = resolveStoreAuthority(status, path);
+      if (!authority.ok) {
+        return diagnose(`could not reconcile the moor event store: ${authority.error}`);
+      }
+      if (!existsSync(path)) return diagnose('could not reconcile the moor event store: the acknowledged store directory does not exist');
       try {
-        startEventObserver(sessionId, generation, path);
+        await startEventObserver(sessionId, generation, path, authority.frontier);
         return true;
       } catch (error) {
-        reportAtchDiagnostic({ sessionId, generation, path }, {
-          code: 'tailer-io',
-          message: `could not reconcile atch event sink: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        });
-        return false;
+        return diagnose(`could not reconcile the moor event store: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
       }
+    },
+    clearSessionLog(sessionId) {
+      return router.sessions.clearHolderLog(sessionId);
     },
     agentEndpoint(input) {
       return endpointStore.register(input);
@@ -889,9 +1029,51 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     markReady() {
       ready = true;
     },
+    beginDrain() {
+      draining = true;
+    },
+    isDraining() {
+      return draining;
+    },
+    enterMutation(abort) {
+      // Atomic with the drain check: either the mutation is admitted and
+      // COUNTED (with its abort registered), or it is refused — there is no
+      // window where a request saw not-draining but escaped the barrier.
+      if (draining) return undefined;
+      const registration = { abort };
+      openMutations.add(registration);
+      return () => {
+        if (!openMutations.delete(registration)) return; // idempotent
+        if (openMutations.size === 0 && mutationDrainWaiters.length > 0) {
+          const waiters = mutationDrainWaiters;
+          mutationDrainWaiters = [];
+          for (const waiter of waiters) waiter();
+        }
+      };
+    },
+    awaitMutationDrain() {
+      if (openMutations.size === 0) return Promise.resolve();
+      return new Promise((resolve) => {
+        mutationDrainWaiters.push(resolve);
+      });
+    },
+    abortOpenMutations() {
+      const severed = [...openMutations];
+      for (const registration of severed) {
+        try {
+          registration.abort();
+        } catch {
+          // The connection is already gone; its close-path release follows.
+        }
+      }
+      return severed.length;
+    },
     dispose() {
+      // ABRUPT teardown: no lease handover here — the graceful §7.4 viewer
+      // detach (release + AWAITED released results) lives on the async
+      // close() shutdown path, which runs it before calling dispose.
       for (const observer of [...eventObservers.values()]) {
-        stopEventObserver(observer, false);
+        stopEventObserver(observer);
       }
       disposeBridge();
       intakeStore?.close();
@@ -992,7 +1174,7 @@ function readAgentObservationScope(
 
 /**
  * The daemon's HTTP control plane: the web server posts here to provision/retire
- * a session's atch master on demand (the spawn/boot/restart cutover path). It is
+ * a session's moor holder on demand (the spawn/boot/restart cutover path). It is
  * an ordinary `request` listener; the binary terminal transport rides the
  * separate `upgrade` event, so the two never collide. Bodies read through the
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
@@ -1019,6 +1201,7 @@ export function createDaemonControlHandler(
     | 'completeProviderSessionLaunch'
     | 'input'
     | 'tail'
+    | 'clearSessionLog'
     | 'terminalObservation'
     | 'agentEndpoint'
     | 'activateAgentEndpoint'
@@ -1029,6 +1212,8 @@ export function createDaemonControlHandler(
     | 'readEvents'
     | 'clearEvents'
     | 'isReady'
+    | 'isDraining'
+    | 'enterMutation'
     | 'health'
   >,
   handlerOptions: DaemonControlHandlerOptions = {}
@@ -1046,6 +1231,36 @@ export function createDaemonControlHandler(
           // not-ready.
           sendJson(res, 503, { ok: false, error: 'starting' });
           return;
+        }
+        if (req.method !== 'GET') {
+          // Mutation drain barrier — acquired BEFORE the first awaited body
+          // read, atomically with the draining check: either this mutation is
+          // admitted and COUNTED (shutdown then waits for it to finish, so
+          // its lease lands in the handover snapshot), or it is refused 503.
+          // A body that arrives after close() began can therefore never slip
+          // a state change behind the lease snapshot. Read-only routes stay
+          // answerable while existing connections drain.
+          const releaseMutation = daemon.enterMutation(() => {
+            // Shutdown escalation: sever this connection — its close event
+            // fires the release below, so the barrier always empties.
+            req.destroy();
+          });
+          if (releaseMutation === undefined) {
+            sendJson(res, 503, { ok: false, error: 'draining' });
+            return;
+          }
+          // Released on EVERY exit — normal finish, early return, thrown
+          // route error (the catch below still sends a response), or a client
+          // that vanished mid-body.
+          let released = false;
+          const releaseOnce = (): void => {
+            if (!released) {
+              released = true;
+              releaseMutation();
+            }
+          };
+          res.once('finish', releaseOnce);
+          res.once('close', releaseOnce);
         }
         if (req.method === 'POST' && url.pathname === '/control/provision') {
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
@@ -1192,6 +1407,25 @@ export function createDaemonControlHandler(
               ...(recovery === undefined ? {} : { recovery })
             });
           }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/log-clear') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          // §10.2.13: the FULL result algebra reaches the control-plane
+          // caller — cleared and already-clear are both success, refused is
+          // the holder's completed decision, indeterminate got no valid
+          // complete result and nothing may be assumed about it.
+          const outcome = await daemon.clearSessionLog(body.sessionId);
+          if (outcome === 'no-link') {
+            sendJson(res, 404, { ok: false, outcome, error: 'session has no live moor link' });
+            return;
+          }
+          const ok = outcome === 'cleared' || outcome === 'already-clear';
+          sendJson(res, ok ? 200 : outcome === 'refused' ? 409 : 502, { ok, outcome });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/retire') {
@@ -1580,7 +1814,7 @@ export interface ProvisionRequest {
 }
 
 /**
- * Provision atch masters for a set of sessions (the daemon process's startup
+ * Provision moor holders for a set of sessions (the daemon process's startup
  * loop). Sequential so a burst of spawns does not thundering-herd the host; each
  * failure is isolated and reported, never aborting the rest.
  */
@@ -1623,7 +1857,7 @@ export interface RunningTerminalDaemon {
 
 /**
  * The daemon-process main: start the standalone terminal daemon server, then
- * provision the atch master for each running session. Returns a handle with the
+ * provision the moor holder for each running session. Returns a handle with the
  * bound port and per-session provisioning results; a process entry adds the
  * signal handling around it.
  */
@@ -1658,9 +1892,9 @@ export async function startTerminalDaemonServer(
 ): Promise<TerminalDaemonServer> {
   const server = createServer();
   // The socket root must exist (0700, this user) BEFORE anything can bind
-  // <root>/<sessionId>.sock — atch skips its own mkdir for slash-bearing names
+  // <root>/<sessionId> — the holder skips its own mkdir for slash-bearing names
   // and the master's bind() fails ENOENT on an absent parent.
-  ensurePrivateSocketRoot(options.atchSocketRoot);
+  ensurePrivateSocketRoot(options.moorSocketRoot);
   const daemon = createTerminalDaemon({ ...options, httpServer: server });
   server.on(
     'request',
@@ -1681,13 +1915,63 @@ export async function startTerminalDaemonServer(
   });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : options.port;
+  let shutdownPromise: Promise<void> | undefined;
   return {
     daemon,
     server,
     port,
     close() {
-      daemon.dispose();
-      return new Promise<void>((resolve) => server.close(() => resolve()));
+      // Single-flight: repeated close calls (SIGINT + SIGTERM racing) join
+      // the SAME shutdown promise instead of re-running the sequence.
+      shutdownPromise ??= (async () => {
+        // 1. DRAIN synchronously as the very first instruction: from here the
+        //    control plane refuses every state-changing request, so nothing
+        //    can install a master behind the handover snapshot.
+        daemon.beginDrain();
+        // 2. Stop accepting NEW http connections (existing ones finish their
+        //    current — already drain-refused — requests).
+        const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+        // 3. TRULY await the mutation barrier — no shutdown step past this
+        //    line can run while an admitted mutation can still run. Bounded
+        //    by ESCALATION, not by giving up: a request that has not
+        //    finished within 5 s is severed (its connection destroyed),
+        //    which fires its close-path release, so the barrier always
+        //    empties. The client sees an aborted connection — never a 200
+        //    behind the lease snapshot.
+        const escalate = setTimeout(() => {
+          const severed = daemon.abortOpenMutations();
+          if (severed > 0) {
+            process.stderr.write(
+              `desk daemon shutdown: severed ${severed} still-open control mutation(s) after the drain deadline\n`
+            );
+          }
+        }, 5_000);
+        escalate.unref?.();
+        await daemon.awaitMutationDrain();
+        clearTimeout(escalate);
+        // 4. Settle every in-flight provision that could still attach and
+        //    take a lease; only then is the master map final.
+        await daemon.router.sessions.awaitInflightSpawns();
+        // 4. §7.4 graceful viewer detach: release every owned lease and WAIT
+        //    for the released results (bounded by the client's 2 s release
+        //    deadline). Refused/indeterminate outcomes are reported on
+        //    stderr — a failed handover is a fact of the departure, never a
+        //    silent drop; the holders survive either way.
+        const handover = await daemon.router.sessions.releaseAllLeases();
+        for (const entry of handover) {
+          if (entry.outcome !== 'released') {
+            process.stderr.write(
+              `desk daemon shutdown: lease handover for ${entry.sessionId}: ${entry.outcome}\n`
+            );
+          }
+        }
+        // 5. Close the viewer links (detach WITHOUT retiring — the holders
+        //    outlive the daemon), tear the daemon down, finish server close.
+        daemon.router.sessions.closeAllLinks();
+        daemon.dispose();
+        await serverClosed;
+      })();
+      return shutdownPromise;
     }
   };
 }

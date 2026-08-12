@@ -6,7 +6,7 @@ import {
   type AgentStateEnvelope,
   parseSessionStateSnapshot
 } from '../src/shared/controlPlane/contract.js';
-import { AgentStateAuthority } from '../src/shared/controlPlane/authority.js';
+import { AgentStateAuthority, MOOR_LIVENESS_REASON } from '../src/shared/controlPlane/authority.js';
 
 const SESSION_ID = 'codex-2';
 const GENERATION = 4;
@@ -895,6 +895,119 @@ describe('AgentStateAuthority', () => {
     expect(authority.snapshot(SESSION_ID)).toMatchObject({
       generation: GENERATION + 1,
       subject: { kind: 'agent', activity: 'unknown', evidence: null }
+    });
+  });
+});
+
+describe('observeHolderLiveness (§10 indeterminate state)', () => {
+  function makeTerminal(now: () => number): AgentStateAuthority {
+    const authority = new AgentStateAuthority({ openToolLeaseMs: 500, now, workingLeaseMs: 50 });
+    authority.registerSession({
+      sessionId: 'shell',
+      generation: 2,
+      lifecycle: 'running',
+      subject: { kind: 'terminal' }
+    });
+    return authority;
+  }
+
+  it('degrades ANY subject kind on lost liveness, refines detail, and restores only its own reason', () => {
+    let at = 10;
+    const authority = makeTerminal(() => at);
+
+    at = 20;
+    const lost = authority.observeHolderLiveness('shell', 2, false, 'probe-pending');
+    expect(lost.kind).toBe('applied');
+    expect(authority.snapshot('shell')?.health).toEqual({
+      status: 'degraded',
+      reason: MOOR_LIVENESS_REASON,
+      since: 20,
+      detail: 'probe-pending'
+    });
+
+    // The bounded probe refines the SAME degradation in place.
+    at = 30;
+    const refined = authority.observeHolderLiveness('shell', 2, false, 'rendezvous-live');
+    expect(refined.kind).toBe('applied');
+    expect(authority.snapshot('shell')?.health).toMatchObject({
+      status: 'degraded',
+      reason: MOOR_LIVENESS_REASON,
+      detail: 'rendezvous-live'
+    });
+
+    // Identical repeat carries no information.
+    expect(authority.observeHolderLiveness('shell', 2, false, 'rendezvous-live').kind).toBe('noop');
+
+    at = 40;
+    const restored = authority.observeHolderLiveness('shell', 2, true);
+    expect(restored.kind).toBe('applied');
+    // The EXACT overlaid health returns — the session was healthy since 10
+    // and the false alarm does not break that continuity.
+    expect(authority.snapshot('shell')?.health).toEqual({ status: 'healthy', since: 10 });
+    // Restoring an already-healthy session is a no-op, not a health churn.
+    expect(authority.observeHolderLiveness('shell', 2, true).kind).toBe('noop');
+  });
+
+  it("restores a producer's own degradation verbatim after a liveness round-trip", () => {
+    const authority = new AgentStateAuthority({ openToolLeaseMs: 500, now: () => 10, workingLeaseMs: 50 });
+    registerAgent(authority); // degraded 'awaiting-reconciliation' since 10
+
+    authority.observeHolderLiveness(SESSION_ID, GENERATION, false, 'probe-pending');
+    expect(authority.snapshot(SESSION_ID)?.health).toMatchObject({
+      status: 'degraded',
+      reason: MOOR_LIVENESS_REASON
+    });
+    const restored = authority.observeHolderLiveness(SESSION_ID, GENERATION, true);
+    expect(restored.kind).toBe('applied');
+    expect(authority.snapshot(SESSION_ID)?.health).toMatchObject({
+      status: 'degraded',
+      reason: 'awaiting-reconciliation'
+    });
+  });
+
+  it("a producer statement DURING the episode supersedes the saved overlay", () => {
+    const authority = new AgentStateAuthority({ openToolLeaseMs: 500, now: () => 10, workingLeaseMs: 50 });
+    registerAgent(authority, INSTANCE_ID);
+
+    authority.observeHolderLiveness(SESSION_ID, GENERATION, false, 'probe-pending');
+    // The producer speaks while the liveness overlay is active: ITS statement
+    // wins over anything the overlay saved.
+    expect(
+      authority.assessAgentHealth(SESSION_ID, GENERATION, { status: 'healthy' }).kind
+    ).toBe('applied');
+    // Restoration finds a foreign (healthy) health — nothing ours to clear,
+    // and the stale saved overlay must not resurrect the old degradation.
+    expect(authority.observeHolderLiveness(SESSION_ID, GENERATION, true).kind).toBe('noop');
+    expect(authority.snapshot(SESSION_ID)?.health).toMatchObject({ status: 'healthy' });
+  });
+
+  it("never clears another source's degradation on restoration", () => {
+    const authority = new AgentStateAuthority({ openToolLeaseMs: 500, now: () => 10, workingLeaseMs: 50 });
+    registerAgent(authority); // registers degraded 'awaiting-reconciliation'
+    expect(authority.snapshot(SESSION_ID)?.health).toMatchObject({
+      status: 'degraded',
+      reason: 'awaiting-reconciliation'
+    });
+    const restored = authority.observeHolderLiveness(SESSION_ID, GENERATION, true);
+    expect(restored.kind).toBe('noop');
+    expect(authority.snapshot(SESSION_ID)?.health).toMatchObject({
+      status: 'degraded',
+      reason: 'awaiting-reconciliation'
+    });
+  });
+
+  it('rejects a stale generation and an exited lifecycle', () => {
+    let at = 10;
+    const authority = makeTerminal(() => at);
+    expect(authority.observeHolderLiveness('shell', 1, false, 'probe-pending').kind).toBe('rejected');
+    expect(authority.observeHolderLiveness('missing', 2, false).kind).toBe('rejected');
+
+    at = 20;
+    authority.markExited('shell', 2, { code: 0, signal: null });
+    const afterExit = authority.observeHolderLiveness('shell', 2, false, 'probe-pending');
+    expect(afterExit.kind).toBe('rejected');
+    expect(authority.snapshot('shell')?.health).not.toMatchObject({
+      reason: MOOR_LIVENESS_REASON
     });
   });
 });

@@ -3,8 +3,8 @@ import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { daemonControl, type DaemonControlResult } from '../shared/daemonControlClient.js';
-import { atchCommandFor as buildAtchCommand } from '../shared/atchCommand.js';
-import { resolveAtchBinPath, resolveAtchSocketRoot } from '../shared/atchPaths.js';
+import { moorCommandFor as buildAtchCommand } from '../shared/moorCommand.js';
+import { resolveMoorBinPath, resolveMoorSocketRoot } from '../shared/moorPaths.js';
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
 import { ensureOpencodeConfigDir } from './opencodeConfig.js';
@@ -15,7 +15,7 @@ import {
   claudeProfileMemoryDescriptorFor
 } from '../shared/claudeContinuityDescriptor.js';
 
-export { atchCommandFor } from '../shared/atchCommand.js';
+export { moorCommandFor } from '../shared/moorCommand.js';
 
 export interface LoadDeskOptions {
   manifestPath?: string;
@@ -33,7 +33,7 @@ export interface RunnerLifecycleOptions {
   control?: RunnerControl;
   probeSession?: (socketPath: string) => boolean;
   spawn?: typeof spawnSync;
-  atchBinPath?: string;
+  moorBinPath?: string;
   fromUrl?: string;
   cwd?: string;
 }
@@ -68,7 +68,7 @@ export function loadDeskCached(options: LoadDeskOptions = {}): LoadedDesk {
 }
 
 function socketPath(sessionId: string, env: NodeJS.ProcessEnv = process.env): string {
-  return join(resolveAtchSocketRoot(env), `${sessionId}.sock`);
+  return join(resolveMoorSocketRoot(env), sessionId); // moor rendezvous: no suffix
 }
 
 /** Running sessions keyed only by durable sessionId. */
@@ -94,15 +94,15 @@ function sessionProbeFor(options: RunnerLifecycleOptions): ((socketPath: string)
     return options.probeSession;
   }
   const env = options.env ?? process.env;
-  let atchBin: string;
+  let moorBin: string;
   try {
-    atchBin = options.atchBinPath ?? resolveAtchBinPath(options.fromUrl ?? import.meta.url, env, options.cwd);
+    moorBin = options.moorBinPath ?? resolveMoorBinPath(options.fromUrl ?? import.meta.url, env, options.cwd);
   } catch {
     return undefined;
   }
   const spawn = options.spawn ?? spawnSync;
   return (path) => {
-    const result = spawn(atchBin, ['push', path], {
+    const result = spawn(moorBin, ['push', path], {
       env,
       input: '',
       stdio: ['pipe', 'ignore', 'ignore']
@@ -192,7 +192,7 @@ export async function runPlan(
     }
     const result = await provisionPreparedSession(action.session, options);
     if (!result.ok) {
-      const error = result.error ?? `atch provision failed for ${action.session.sessionId}`;
+      const error = result.error ?? `moor provision failed for ${action.session.sessionId}`;
       console.error(error);
       failures.push(`${action.session.sessionId}: ${error}`);
       continue;
@@ -305,7 +305,7 @@ export async function attachSession(
   options: RunnerLifecycleOptions = {}
 ): Promise<number> {
   const env = options.env ?? process.env;
-  const atchBin = options.atchBinPath ?? resolveAtchBinPath(options.fromUrl ?? import.meta.url, env, options.cwd);
+  const moorBin = options.moorBinPath ?? resolveMoorBinPath(options.fromUrl ?? import.meta.url, env, options.cwd);
   const observed = await controlFor(options)('/control/tail', {
     sessionId: session.sessionId,
     rows: 1,
@@ -315,11 +315,11 @@ export async function attachSession(
     throw new Error(observed.error ?? `session ${session.sessionId} is not available through the terminal daemon`);
   }
   const spawn = options.spawn ?? spawnSync;
-  const result = spawn(atchBin, ['attach', socketPath(session.sessionId, env)], {
+  const result = spawn(moorBin, ['attach', socketPath(session.sessionId, env)], {
     stdio: 'inherit',
     env
   });
-  const failure = spawnFailure(result, atchBin);
+  const failure = spawnFailure(result, moorBin);
   if (failure) {
     throw new Error(failure);
   }

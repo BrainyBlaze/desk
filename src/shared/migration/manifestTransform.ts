@@ -1,6 +1,6 @@
 // Manifest session-identity transform (spec §10, phase 3 transform + phase 4
 // validate). Re-keys a session manifest from the legacy tmux identity to the
-// atch-native sessionId, preserving an existing durable identity or minting a
+// daemon-native sessionId, preserving an existing durable identity or minting a
 // grammar-valid, globally-unique sessionId for a legacy session, and emitting
 // the canonical tmuxSession→sessionId map that every other
 // §10 store transform (channelsPaused, resume state, AgentSurface) re-keys

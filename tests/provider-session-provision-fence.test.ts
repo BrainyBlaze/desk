@@ -79,8 +79,8 @@ function daemonFor(
 ): TerminalDaemon {
     return createTerminalDaemon({
       homeRoot: root,
-      atchBinPath: '/bin/false',
-      atchSocketRoot: root,
+      moorBinPath: '/bin/false',
+      moorSocketRoot: root,
       httpServer: new FakeUpgradeServer(),
       manifestPath,
       homeDir: root,
@@ -93,7 +93,7 @@ function daemonFor(
     currentGeneration: number,
     providerSessionId?: string
   ) {
-    vi.spyOn(daemon.router.sessions, 'spawnAndAttach').mockImplementation(
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
       async (sessionId, options) => {
         const decision = await options.preallocateSpawn?.({
           sessionId,
@@ -263,7 +263,7 @@ function daemonFor(
     const replayed = new FileProviderSessionLaunchLedger(ledgerPath);
     expect(replayed.current('alpha')).toMatchObject({
       state: 'claimed',
-      generation: 1
+      generation: 2 // OB-18: the fresh supervised claim owns generation 2
     });
     replayed.close();
   });
@@ -347,7 +347,7 @@ function daemonFor(
   it('preserves non-agent provisioning at positive generations', async () => {
     const { root, manifestPath } = fixture();
     const daemon = daemonFor(root, manifestPath);
-    vi.spyOn(daemon.router.sessions, 'spawnAndAttach').mockImplementation(
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
       async (sessionId, options) => {
         const decision = await options.preallocateSpawn?.({
           sessionId,

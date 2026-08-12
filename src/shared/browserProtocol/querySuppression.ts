@@ -6,7 +6,18 @@
 // suppressed. Keeping it pure makes the whole matrix unit-testable independent
 // of the terminal runtime.
 
-import { QueryClass } from '../atchWire/frames.js';
+/** The frozen §4.2 terminal-query classes (now owned by this module). */
+export enum QueryClass {
+  DA1 = 1,
+  DA2 = 2,
+  DSR = 3,
+  CPR = 4,
+  DECRQM = 5,
+  XTVERSION = 6,
+  PIXEL_GEOM = 7,
+  COLOR = 8,
+  FOCUS = 9
+}
 
 /** Who answers a query (§7.7). `worker` = the authoritative headless emulator;
  *  `surface` = the ONE lease-owning browser surface (pixel/color/focus, which

@@ -7,13 +7,13 @@ on:
   pull_request:
     paths:
       - 'install.sh'
-      - 'scripts/build-atch.mjs'
+      - 'scripts/build-moor.mjs'
       - 'scripts/create-release-assets.mjs'
       - 'scripts/distribution/**'
       - 'scripts/build-standalone.ts'
       - 'scripts/smoke-serve-modes.mjs'
-      - 'vendor/atch/**'
-      - 'tests/atch-distribution-contract.test.ts'
+      - 'vendor/moor/**'
+      - 'tests/moor-distribution-contract.test.ts'
       - 'src/**'
       - 'package.json'
       - 'package-lock.json'
@@ -65,7 +65,7 @@ jobs:
           export DESK_RELEASE_BASE_URL="file://$RUNNER_TEMP/release-assets"
           bash install.sh
           release=$(cd -P "$DESK_HOME/current" && pwd)
-          "$release/libexec/atch" --version | grep -F 'atch - version 1.6-bb1,'
+          test "$("$release/libexec/moor" --version)" = 'moor 0.1.0'
           (cd "$root/outside" && "$root/bin/desk" help)
           node scripts/smoke-serve-modes.mjs --desk "$root/bin/desk" --cwd "$root/outside"
           bash install.sh --uninstall

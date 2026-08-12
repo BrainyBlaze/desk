@@ -1,5 +1,5 @@
 // Cutover store-migration executors (cutover Phase 2, Step 2). Re-key the
-// engine's on-disk stores from the legacy tmuxSession to the atch-native
+// engine's on-disk stores from the legacy tmuxSession to the daemon-native
 // sessionId, driving the pure §10 transforms over real files.
 //
 // Canary-safe by construction: every executor takes an explicit sourceRoot

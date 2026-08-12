@@ -15,7 +15,7 @@ describe('Docker full CLI contract', () => {
     expect(source).toContain('BUN_VERSION=1.3.14');
     expect(source).toContain('npm run build:distribution');
     expect(source).toContain('libexec/desk-standalone');
-    expect(source.match(/libexec\/atch --version/g)).toHaveLength(2);
+    expect(source.match(/libexec\/moor --version/g)).toHaveLength(2);
     expect(source).toContain('COPY --from=builder /opt/desk /opt/desk');
     expect(source).toContain('ln -s /opt/desk/dist/cli/main.js /usr/local/bin/desk');
     expect(source).toContain('ENTRYPOINT ["desk"]');

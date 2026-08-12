@@ -1,6 +1,6 @@
-// Native (atch) session control for the web server (cutover spawn/boot/restart).
+// Native (moor) session control for the web server (cutover spawn/boot/restart).
 //
-// The three-tier split means the web process never spawns atch itself — the
+// The three-tier split means the web process never spawns moor itself — the
 // separate daemon process owns the @xterm/headless screen authority, so
 // session start/restart provisions via the daemon's HTTP control plane
 // (createDaemonControlHandler). Every path returns a concrete {ok,error}; a daemon that is down or refuses a
@@ -9,27 +9,27 @@
 
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveAtchSocketRoot } from '../../shared/atchPaths.js';
+import { resolveMoorSocketRoot } from '../../shared/moorPaths.js';
 import { daemonControl, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
 import { loadDeskCached, runningSessionSet } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
-import { atchCommandFor } from '../../shared/atchCommand.js';
+import { moorCommandFor } from '../../shared/moorCommand.js';
 import { sessionStateSubjectFor } from '../../shared/controlPlane/index.js';
 import {
   claudeContinuityDescriptorFor,
   claudeProfileMemoryDescriptorFor
 } from '../../shared/claudeContinuityDescriptor.js';
 
-// The atch child command lives in shared/atchCommand — one audited copy for
+// The moor child command lives in shared/moorCommand — one audited copy for
 // this wrapper and the core runner lifecycle. Re-exported for existing
 // consumers/tests.
-export { atchCommandFor };
+export { moorCommandFor };
 
 // HTTP transport lives in the shared daemonControlClient (one client for the
 // server wrapper here and the codex-lane core/CLI consumers, R8.4/R6.1-style
 // single audited copy). This module keeps only the session-level semantics.
 
-/** Provision (spawn + attach) a session's atch master via the daemon. */
+/** Provision (spawn + attach) a session's moor holder via the daemon. */
 export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
   const sessionId = spec.sessionId;
   const continuity = claudeContinuityDescriptorFor(spec);
@@ -37,7 +37,7 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
   return toOkResult(
     daemonControl('/control/provision', {
       sessionId,
-      command: atchCommandFor(spec),
+      command: moorCommandFor(spec),
       geometry: { rows: 24, cols: 80 },
       subject: sessionStateSubjectFor(spec),
       ...(spec.resume === undefined
@@ -49,7 +49,7 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
   );
 }
 
-/** Retire a session's atch master via the daemon (KILL contract). */
+/** Retire a session's moor holder via the daemon (KILL contract). */
 export function retireNativeSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
   return toOkResult(daemonControl('/control/retire', { sessionId }));
 }
@@ -57,7 +57,7 @@ export function retireNativeSession(sessionId: string): Promise<{ ok: boolean; e
 /**
  * The native identity a session edit leaves behind, or undefined if unchanged.
  *
- * A session's atch master is keyed by its durable sessionId. A persisted
+ * A session's moor holder is keyed by its durable sessionId. A persisted
  * sessionId survives renames, so only a LEGACY entry lacking one (whose id is
  * minted from the name) can change identity on rename — leaving the running
  * master keyed by the old id. The edit path retires the returned id so that
@@ -82,7 +82,7 @@ export function staleNativeIdentityAfterEdit(
  * the pre-edit identity BEFORE the manifest rename commits. Returns `ok: false`
  * (the caller MUST abort the edit, leaving the manifest untouched and
  * provisioning nothing) when the retire fails — so a rename can never orphan
- * the old atch master nor desync the manifest against a still-running master.
+ * the old moor holder nor desync the manifest against a still-running master.
  * A no-op (ok) when the flag is off or the identity is unchanged. (R2.1.)
  */
 export async function retireStaleIdentityForEdit(
@@ -122,7 +122,7 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
 export interface NativeChannelsTransport {
   /** Paste text then a delayed Enter (bracketed-paste staging + separate submit). */
   sendText: (sessionId: string, text: string) => Promise<boolean>;
-  /** Running iff the session's atch master socket exists. */
+  /** Running iff the session's moor holder socket exists. */
   sessionRunning: (sessionId: string) => boolean;
   /** The emulator's on-screen tail (plain text), null when unobservable. */
   capturePane: (sessionId: string) => Promise<string | null>;
@@ -130,7 +130,7 @@ export interface NativeChannelsTransport {
   sendEnter: (sessionId: string) => Promise<boolean>;
   /**
    * Session start time in epoch SECONDS (legacy session_created parity),
-   * from the atch socket's stat; null when unobservable.
+   * from the moor socket's stat; null when unobservable.
    */
   sessionCreatedAt: (sessionId: string) => Promise<number | null>;
 }
@@ -215,7 +215,7 @@ export function createNativeChannelsTransport(
       return sent;
     },
     sessionRunning(sessionId) {
-      // runningSessionSet is already flag-aware (atch socket probe) and cached.
+      // runningSessionSet is already flag-aware (moor socket probe) and cached.
       return runningSessionSet().has(sessionId);
     },
     capturePane,
@@ -223,9 +223,9 @@ export function createNativeChannelsTransport(
       return (await daemonControl('/control/input', { sessionId: sessionId, text: '\r' })).ok;
     },
     async sessionCreatedAt(sessionId) {
-      const socketRoot = resolveAtchSocketRoot();
+      const socketRoot = resolveMoorSocketRoot();
       try {
-        const stat = statSync(join(socketRoot, `${sessionId}.sock`));
+        const stat = statSync(join(socketRoot, sessionId)); // moor rendezvous: no suffix
         // Some filesystems report no birthtime (0); the socket is created at
         // session start and never rewritten, so ctime is a faithful fallback.
         const ms = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs;

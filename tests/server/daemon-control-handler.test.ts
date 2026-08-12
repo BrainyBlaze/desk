@@ -56,6 +56,10 @@ function invoke(
       setHeader() {
         /* sendJson sets content-type; irrelevant to these assertions */
       },
+      once() {
+        /* mutation-barrier release listeners; the mock resolves on end() */
+        return res;
+      },
       end(payload?: string) {
         resolve({ status, body: payload ? (JSON.parse(payload) as Captured['body']) : undefined });
       }
@@ -149,6 +153,8 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     readEvents: vi.fn().mockReturnValue(0),
     clearEvents: vi.fn().mockReturnValue(0),
     isReady: vi.fn().mockReturnValue(true),
+    isDraining: vi.fn().mockReturnValue(false),
+    enterMutation: vi.fn((_abort: () => void) => () => undefined),
     health: vi.fn().mockReturnValue({ status: 'healthy' })
   };
 }

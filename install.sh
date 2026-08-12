@@ -9,7 +9,7 @@ REPO="BrainyBlaze/desk"
 NODE_VERSION="22.23.1"
 NPM_VERSION="10.9.8"
 BUN_VERSION="1.3.14"
-ATCH_VERSION="1.6-bb1"
+MOOR_VERSION="0.1.0"
 PYTHON_MIN_VERSION="3.6"
 LOCK_TOKEN=""
 LOCK_OWNED=0
@@ -764,7 +764,7 @@ ensure_bun_toolchain() {
 }
 
 build_release() {
-  local archive extract source_root install_id version_dir final runtime_path atch_output
+  local archive extract source_root install_id version_dir final runtime_path moor_output
   archive="$WORK_DIR/$SOURCE_ASSET"
   download_and_verify_asset "$RELEASE_BASE/$SOURCE_ASSET" "$archive" "$SOURCE_SHA" "$SOURCE_ASSET"
   extract="$WORK_DIR/source-extract"
@@ -784,13 +784,13 @@ build_release() {
   )
   [ -x "$STAGED_RELEASE/dist/cli/main.js" ] || die "distribution build did not produce dist/cli/main.js."
   [ -x "$STAGED_RELEASE/libexec/desk-standalone" ] || die "distribution build did not produce libexec/desk-standalone."
-  [ -x "$STAGED_RELEASE/libexec/atch" ] || die "distribution build did not produce bundled atch."
-  if ! atch_output="$("$STAGED_RELEASE/libexec/atch" --version 2>/dev/null)"; then
-    die "bundled atch failed its version probe."
+  [ -x "$STAGED_RELEASE/libexec/moor" ] || die "distribution build did not produce bundled moor."
+  if ! moor_output="$("$STAGED_RELEASE/libexec/moor" --version 2>/dev/null)"; then
+    die "bundled moor failed its version probe."
   fi
-  case "$atch_output" in
-    "atch - version $ATCH_VERSION,"*) ;;
-    *) die "bundled atch returned an unexpected version probe: $atch_output" ;;
+  case "$moor_output" in
+    "moor $MOOR_VERSION") ;;
+    *) die "bundled moor returned an unexpected version probe: $moor_output" ;;
   esac
   mkdir -p -- "$STAGED_RELEASE/runtime"
   runtime_path="$NODE_ROOT/bin/node"

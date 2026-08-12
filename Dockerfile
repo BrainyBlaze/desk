@@ -6,7 +6,7 @@ ARG TARGETARCH
 ARG BUN_VERSION=1.3.14
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip python3 make g++ \
+      ca-certificates curl unzip python3 make g++ rustc cargo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eu; \
@@ -31,7 +31,7 @@ COPY . .
 RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build:distribution \
     && test -x dist/cli/main.js \
     && test -x libexec/desk-standalone \
-    && libexec/atch --version | grep -F 'atch - version 1.6-bb1,'
+    && test "$(libexec/moor --version)" = 'moor 0.1.0'
 
 FROM node:22.23.1-bookworm-slim AS runtime
 
@@ -68,7 +68,7 @@ COPY --from=builder /opt/desk /opt/desk
 RUN ln -s /opt/desk/dist/cli/main.js /usr/local/bin/desk \
     && desk help >/dev/null \
     && test -x /opt/desk/libexec/desk-standalone \
-    && /opt/desk/libexec/atch --version | grep -F 'atch - version 1.6-bb1,'
+    && test "$(/opt/desk/libexec/moor --version)" = 'moor 0.1.0'
 
 WORKDIR /workspace
 EXPOSE 5173

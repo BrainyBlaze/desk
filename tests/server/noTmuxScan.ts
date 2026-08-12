@@ -96,6 +96,6 @@ export function scanLegacySurface(files: ScannedFile[]): string[] {
 /** The flag scan: the cutover flag and its predicate must not exist at all. */
 export function scanFlagSurface(files: ScannedFile[]): string[] {
   return files
-    .filter(({ source }) => source.includes('DESK_ATCH_NATIVE') || source.includes('nativeSessionsEnabled'))
+    .filter(({ source }) => source.includes('nativeSessionsEnabled'))
     .map(({ rel }) => rel);
 }

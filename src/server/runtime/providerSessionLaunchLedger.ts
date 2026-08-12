@@ -208,9 +208,11 @@ export class FileProviderSessionLaunchLedger {
     if (current.provider !== input.provider) {
       return { ok: false, reason: 'provider-mismatch' };
     }
+    const expectedNext = nextSupervisedGeneration(input.currentGeneration);
     if (
       current.generation !== input.currentGeneration ||
-      input.nextGeneration !== input.currentGeneration + 1 ||
+      expectedNext > 0xffff_ffff || // OB-18 exhaustion: refuse before any append
+      input.nextGeneration !== expectedNext ||
       !Number.isSafeInteger(input.nextGeneration)
     ) {
       return { ok: false, reason: 'generation-mismatch' };
@@ -418,7 +420,7 @@ export class FileProviderSessionLaunchLedger {
         record.generation === current.generation) ||
       (current.state === 'authorized' &&
         record.state === 'claimed' &&
-        record.generation === current.generation + 1) ||
+        record.generation === nextSupervisedGeneration(current.generation)) ||
       ((current.state === 'prepared' || current.state === 'authorized') &&
         record.state === 'completed' &&
         current.expectedPriorBinding !== null &&
@@ -484,6 +486,17 @@ export class FileProviderSessionLaunchLedger {
   }
 }
 
+/**
+ * The OB-18 supervised-generation transition: a fresh lineage's first
+ * supervised allocation is 2 (generation 1 is reserved for unsupervised
+ * holders), every later one advances by exactly one. This MUST match the
+ * durable GenerationLedger's allocator, or a claim would be consumed at a
+ * generation the spawn never owns.
+ */
+function nextSupervisedGeneration(current: number): number {
+  return current === 0 ? 2 : current + 1;
+}
+
 function validateIdentity(input: PrepareProviderSessionLaunchInput): void {
   if (
     input.deskSessionId.trim().length === 0 ||
@@ -502,7 +515,8 @@ function validateIdentity(input: PrepareProviderSessionLaunchInput): void {
   }
   if (
     !Number.isSafeInteger(input.generation) ||
-    input.generation < 0
+    input.generation < 0 ||
+    input.generation > 0xffff_ffff // OB-18: u32 generations never wrap
   ) {
     throw new Error('provider launch generation is invalid');
   }

@@ -1,4 +1,4 @@
-// Daemon-owned native agent-host lifecycle (spec §6.9/§3.6, C14). atch stays
+// Daemon-owned native agent-host lifecycle (spec §6.9/§3.6, C14). the holder stays
 // terminal-only; the daemon supervises native hosts and projects them to the
 // control-plane native-fsm source.
 
