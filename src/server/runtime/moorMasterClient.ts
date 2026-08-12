@@ -1108,7 +1108,24 @@ export class MoorMasterClient {
         this.h.onHeartbeat?.(decoded.monotonicMs, decoded.flags);
         return;
       case 'wakeup':
-        this.requirePhase(decoded.type, this.phase === 'lease-pending' || this.phase === 'attached');
+        // §10.2.11 (OB-30): WAKEUP is an UNSOLICITED, coalescible notice that
+        // the durable event stream advanced. It is not part of the §6 attach
+        // order and the holder owes it no position there: the child can write
+        // — and the store can commit — at any instant after the connection is
+        // adopted, including while ATTACH is still in flight. Restricting it
+        // to the post-ACK phases made a legal frame fatal: manual QA on a
+        // clean install could not attach ANY session whose child produced
+        // output during the handshake (every `bash` with a real TERM), and
+        // the daemon reported nothing but `attach-failed`.
+        //
+        // Before adoption the rule still holds: nothing may precede identity.
+        this.requirePhase(
+          decoded.type,
+          this.phase === 'adopted' ||
+            this.phase === 'preamble' ||
+            this.phase === 'lease-pending' ||
+            this.phase === 'attached'
+        );
         this.h.onWakeup?.();
         return;
     }

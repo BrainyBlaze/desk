@@ -244,6 +244,49 @@ describe('MoorMasterClient', () => {
     expect(client.terminalStatePreamble).toEqual(new Uint8Array(0));
   });
 
+  it('accepts WAKEUP anywhere after adoption, including mid-attach (OB-30)', async () => {
+    // §10.2.11: WAKEUP is an UNSOLICITED, coalescible notice that the durable
+    // event stream advanced — it owes the §6 attach order no position. A child
+    // that writes while ATTACH is in flight (every shell with a real TERM
+    // prints its prompt immediately) makes the store commit right then, and
+    // rejecting that frame made the whole attach fail: on a clean install no
+    // such session could be attached at all.
+    const wakeups: number[] = [];
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start({
+      onWakeup: () => wakeups.push(1),
+      onProtocolError: (error) => protocolErrors.push(error.code)
+    });
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next(); // HELLO
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    holder.send(MoorKind.WAKEUP, new Uint8Array()); // adopted, ATTACH in flight
+    await holder.next(); // ATTACH
+    holder.send(MoorKind.WAKEUP, new Uint8Array()); // still before the preamble
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.WAKEUP, new Uint8Array()); // between preamble and ACK
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    await expect(attached).resolves.toMatchObject({ generation: GENERATION });
+    expect(protocolErrors).toEqual([]);
+    expect(wakeups.length).toBe(3);
+  });
+
+  it('still refuses WAKEUP before identity adoption', async () => {
+    const protocolErrors: string[] = [];
+    const wakeups: number[] = [];
+    const { holder, client } = await start({
+      onWakeup: () => wakeups.push(1),
+      onProtocolError: (error) => protocolErrors.push(error.code)
+    });
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next(); // HELLO, no HELLO_ACK yet
+    holder.send(MoorKind.WAKEUP, new Uint8Array());
+    await expect(attached).rejects.toThrow();
+    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+    expect(wakeups).toEqual([]);
+  });
+
   it('refuses an injected noncanonical POSIX identity', () => {
     const bytes = Buffer.from('/tmp/../session');
     const identity = new Uint8Array(1 + bytes.length);
