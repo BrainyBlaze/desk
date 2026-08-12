@@ -437,6 +437,23 @@ projects:
     expect(commands[2]).not.toContain('--yolo');
   });
 
+  it('keeps silently ignoring bypassPermissions on shell sessions as before', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: shell
+            sessionId: shell
+            agent: bash
+            bypassPermissions: true
+`);
+    const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
+    expect(commands[0]).toContain('bash');
+  });
+
   it('rejects bypassPermissions for agents that cannot honor it', () => {
     expect(() =>
       parseDeskManifest(`

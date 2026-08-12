@@ -290,11 +290,12 @@ function validateSessionBypass(
   if (typeof session.command === 'string' && session.command.trim() !== '') {
     return;
   }
-  if (agentProvider(session.agent)?.bypass === true) {
+  const provider = agentProvider(session.agent);
+  if (provider === undefined || provider.bypass === true) {
     return;
   }
   throw new ManifestValidationError(
-    `session ${session.name} cannot use bypassPermissions; agent ${session.agent ?? 'none'} does not support it`
+    `session ${session.name} cannot use bypassPermissions; agent ${session.agent} does not support it`
   );
 }
 

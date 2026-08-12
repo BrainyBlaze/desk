@@ -173,7 +173,8 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
 
   session.agent ??= 'codex';
   session.bypassPermissions = Boolean(record.bypassPermissions);
-  if (session.bypassPermissions && agentProvider(session.agent)?.bypass !== true) {
+  const bypassProvider = agentProvider(session.agent);
+  if (session.bypassPermissions && bypassProvider !== undefined && bypassProvider.bypass !== true) {
     throw new ApiValidationError(`session.bypassPermissions is not supported for agent ${session.agent}`);
   }
   const uiMode = readOptionalString(record.uiMode);
