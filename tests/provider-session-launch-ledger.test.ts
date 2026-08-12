@@ -25,6 +25,39 @@ describe('FileProviderSessionLaunchLedger', () => {
     return join(root, '_engine', 'provider-session-launch.ndjson');
   }
 
+  it('skips whole chains from unknown providers and keeps known chains intact', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-known'
+    });
+    const prepared = first.prepare({
+      deskSessionId: 'desk-known',
+      provider: 'claude',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    first.close();
+
+    const foreign = (state: string, generation: number) =>
+      JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-foreign',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation,
+        state
+      });
+    appendFileSync(
+      path,
+      `${foreign('prepared', 1)}\n${foreign('authorized', 1)}\n${foreign('claimed', 2)}\n${foreign('completed', 2)}\n`
+    );
+
+    const second = new FileProviderSessionLaunchLedger(path);
+    expect(second.current('desk-known')).toEqual(prepared);
+    expect(second.current('desk-foreign')).toBeUndefined();
+    second.close();
+  });
+
   it('durably replays prepared and authorized reset states', () => {
     const path = ledgerPath();
     const first = new FileProviderSessionLaunchLedger(path, {

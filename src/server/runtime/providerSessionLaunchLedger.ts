@@ -325,6 +325,15 @@ export class FileProviderSessionLaunchLedger {
           `corrupt provider launch ledger at byte ${offset}: malformed interior record`
         );
       }
+      const foreignProvider = foreignProviderOf(parsed);
+      if (foreignProvider !== undefined) {
+        process.stderr.write(
+          `provider launch ledger: skipping record for unknown provider "${foreignProvider}"\n`
+        );
+        if (newline === -1) this.appendRecordSeparator();
+        offset = next;
+        continue;
+      }
       const record = parseRecord(parsed, offset);
       this.applyRecord(record, offset);
       if (newline === -1) this.appendRecordSeparator();
@@ -503,6 +512,42 @@ function validateIdentity(input: PrepareProviderSessionLaunchInput): void {
   ) {
     throw new Error('provider launch generation is invalid');
   }
+}
+
+function foreignProviderOf(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.join(',') !==
+    'authorizationId,deskSessionId,expectedPriorBinding,generation,provider,state'
+  ) {
+    return undefined;
+  }
+  if (
+    typeof record.provider !== 'string' ||
+    PROVIDERS.has(record.provider as ProviderSessionProvider)
+  ) {
+    return undefined;
+  }
+  const state = record.state;
+  if (
+    typeof record.authorizationId !== 'string' ||
+    record.authorizationId.trim().length === 0 ||
+    typeof record.deskSessionId !== 'string' ||
+    (state !== 'prepared' &&
+      state !== 'authorized' &&
+      state !== 'claimed' &&
+      state !== 'completed') ||
+    (record.expectedPriorBinding !== null &&
+      typeof record.expectedPriorBinding !== 'string') ||
+    !Number.isSafeInteger(record.generation)
+  ) {
+    return undefined;
+  }
+  return record.provider;
 }
 
 function parseRecord(
