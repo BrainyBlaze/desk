@@ -102,12 +102,34 @@ function sessionProbeFor(options: RunnerLifecycleOptions): ((socketPath: string)
   }
   const spawn = options.spawn ?? spawnSync;
   return (path) => {
+    // `moor push` with empty stdin is the CLI-side liveness probe (there is no
+    // daemon to ask in a bare `desk status`). Its EXIT CODE alone cannot answer
+    // the question: a healthy session that the daemon has adopted refuses the
+    // push with `input lease is busy` and exits 1 — exactly like an absent
+    // session, which exits 1 with `does not exist`. Classifying by exit code
+    // reported every adopted (i.e. normally working) session as missing.
+    //
+    // The distinction is in the ANSWER: only a live holder can refuse for a
+    // session-specific reason. An answer naming a nonexistent session is the
+    // one proof of absence; a successful push and every other refusal both
+    // prove a holder is there.
     const result = spawn(moorBin, ['push', path], {
       env,
       input: '',
-      stdio: ['pipe', 'ignore', 'ignore']
+      encoding: 'utf8',
+      stdio: ['pipe', 'ignore', 'pipe']
     });
-    return !result.error && result.status === 0;
+    if (result.error) {
+      return false; // the probe never ran — unobservable, never claimed alive
+    }
+    if (result.status === 0) {
+      return true;
+    }
+    const answer = `${result.stderr ?? ''}`;
+    if (answer.includes('does not exist')) {
+      return false;
+    }
+    return answer.trim().length > 0;
   };
 }
 

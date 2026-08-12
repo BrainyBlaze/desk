@@ -212,6 +212,40 @@ describe('runPlan moor-native lifecycle', () => {
     );
   });
 
+  it('reads the probe ANSWER, so an adopted session is not reported missing', () => {
+    // Answers taken from the real holder (moor 237a62c) during manual QA. A
+    // session the daemon has adopted refuses the push because the daemon holds
+    // the input lease, and exits 1 — byte-identical in status to an absent
+    // session. Classifying by exit code alone reported every healthy adopted
+    // session as missing (`desk status` showed all sessions missing while
+    // /control/moor-status answered running:true).
+    const session = terminalPlan()[0]!.session;
+    const answer = (status: number, stderr: string) => ({ status, stderr });
+    const options = (spawn: unknown) => ({
+      moorBinPath: '/release/libexec/moor',
+      env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
+      spawn: spawn as never
+    });
+
+    // Adopted and healthy — a holder answered, only the lease was busy.
+    expect(
+      runningSessionSet([session], options(vi.fn().mockReturnValue(answer(1, 'moor: input lease is busy\n'))))
+    ).toEqual(new Set(['terminal-session']));
+
+    // The one proof of absence.
+    expect(
+      runningSessionSet(
+        [session],
+        options(vi.fn().mockReturnValue(answer(1, "moor: session '/run/desk/terminal-session' does not exist\n")))
+      )
+    ).toEqual(new Set());
+
+    // The probe itself could not run — unobservable is never claimed alive.
+    expect(
+      runningSessionSet([session], options(vi.fn().mockReturnValue({ error: new Error('ENOENT'), status: null })))
+    ).toEqual(new Set());
+  });
+
   it('probes the daemon then attaches the shipped binary to the durable socket', async () => {
     const session = terminalPlan()[0]!.session;
     const control = vi.fn().mockResolvedValue({ ok: true, body: { ok: true, lines: [] } });
