@@ -11,7 +11,7 @@ export function supportsBypassPermissions(agent: string): boolean {
 }
 
 export function supportsNativeUi(agent: string, hasCustomCommand: boolean): boolean {
-  return !hasCustomCommand && agentProvider(agent)?.native === true;
+  return !hasCustomCommand && agentProvider(agent)?.nativeProducer !== undefined;
 }
 
 export function supportsAgentProfiles(

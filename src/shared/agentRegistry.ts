@@ -1,19 +1,19 @@
-export type AgentKind = 'agent' | 'shell';
-export type AgentSessionIdShape = 'uuid' | 'opencode' | 'opaque';
+type AgentKind = 'agent' | 'shell';
+type AgentSessionIdShape = 'uuid' | 'opencode' | 'opaque';
 export type AgentHooksStyle = 'claude' | 'codex' | 'plugin' | 'qwen' | 'kimi' | 'grok';
 
-export interface AgentDescriptor {
+interface AgentDescriptor {
   id: string;
   label: string;
   kind: AgentKind;
   terminalProducer?: string;
   nativeProducer?: string;
-  native?: boolean;
   bypass?: boolean;
   sessionIdField?: string;
   sessionIdShape?: AgentSessionIdShape;
   profileEnvVar?: string;
   hooks?: AgentHooksStyle;
+  launch?: { resumeFlag: string; bypassFlag?: string };
 }
 
 export const AGENTS = [
@@ -24,7 +24,6 @@ export const AGENTS = [
     bypass: true,
     terminalProducer: 'codex-hooks',
     nativeProducer: 'codex-native',
-    native: true,
     sessionIdField: 'session_id',
     sessionIdShape: 'uuid',
     profileEnvVar: 'CODEX_HOME',
@@ -37,7 +36,6 @@ export const AGENTS = [
     bypass: true,
     terminalProducer: 'claude-hooks',
     nativeProducer: 'claude-native',
-    native: true,
     sessionIdField: 'session_id',
     sessionIdShape: 'uuid',
     profileEnvVar: 'CLAUDE_CONFIG_DIR',
@@ -50,7 +48,6 @@ export const AGENTS = [
     bypass: true,
     terminalProducer: 'opencode-terminal',
     nativeProducer: 'opencode-native',
-    native: true,
     sessionIdField: 'sessionID',
     sessionIdShape: 'opencode',
     hooks: 'plugin'
@@ -60,10 +57,10 @@ export const AGENTS = [
     label: 'qwen',
     kind: 'agent',
     terminalProducer: 'qwen-hooks',
-    native: false,
     sessionIdField: 'session_id',
     sessionIdShape: 'uuid',
-    hooks: 'qwen'
+    hooks: 'qwen',
+    launch: { resumeFlag: '--resume' }
   },
   {
     id: 'kimi',
@@ -71,20 +68,20 @@ export const AGENTS = [
     kind: 'agent',
     bypass: true,
     terminalProducer: 'kimi-hooks',
-    native: false,
     sessionIdField: 'session_id',
     sessionIdShape: 'opaque',
-    hooks: 'kimi'
+    hooks: 'kimi',
+    launch: { resumeFlag: '--session', bypassFlag: '--yolo' }
   },
   {
     id: 'grok',
     label: 'grok',
     kind: 'agent',
     terminalProducer: 'grok-hooks',
-    native: false,
     sessionIdField: 'session_id',
     sessionIdShape: 'opaque',
-    hooks: 'grok'
+    hooks: 'grok',
+    launch: { resumeFlag: '--session' }
   },
   {
     id: 'bash',
@@ -93,10 +90,10 @@ export const AGENTS = [
   }
 ] as const satisfies readonly AgentDescriptor[];
 
-export type AgentEntry = (typeof AGENTS)[number];
+type AgentEntry = (typeof AGENTS)[number];
 export type AgentProviderEntry = Extract<AgentEntry, { kind: 'agent' }>;
-export type AgentProfileProviderEntry = Extract<AgentProviderEntry, { profileEnvVar: string }>;
-export type AgentNativeProviderEntry = Extract<AgentProviderEntry, { nativeProducer: string }>;
+type AgentProfileProviderEntry = Extract<AgentProviderEntry, { profileEnvVar: string }>;
+type AgentNativeProviderEntry = Extract<AgentProviderEntry, { nativeProducer: string }>;
 
 export type AgentId = AgentEntry['id'];
 export type AgentProviderId = AgentProviderEntry['id'];
@@ -142,7 +139,7 @@ export const AGENT_PRODUCER_BINDINGS_TABLE = Object.fromEntries(
 
 const AGENT_BY_ID = new Map<string, AgentDescriptor>(AGENT_LIST.map((agent) => [agent.id, agent]));
 
-export function agentById(id: string | undefined): AgentDescriptor | undefined {
+function agentById(id: string | undefined): AgentDescriptor | undefined {
   return id === undefined ? undefined : AGENT_BY_ID.get(id);
 }
 

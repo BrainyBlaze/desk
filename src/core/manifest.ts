@@ -301,7 +301,7 @@ function validateSessionBypass(
 /** Native UI mode is limited to SDK-backed agents launched without a custom command. */
 export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' | 'command'>): boolean {
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  return !hasCustomCommand && agentProvider(session.agent)?.native === true;
+  return !hasCustomCommand && agentProvider(session.agent)?.nativeProducer !== undefined;
 }
 
 /**
@@ -444,27 +444,14 @@ export function buildAgentCommand(
   if (session.agent === 'opencode') {
     return buildOpencodeCommand(session, cwd, homeDir, sessionId);
   }
-  if (session.agent === 'qwen') {
-    const args = ['qwen'];
-    if (session.resume) {
-      args.push('--resume', shellQuote(session.resume));
-    }
-    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
-  }
-  if (session.agent === 'kimi') {
-    const args = ['kimi'];
-    if (session.bypassPermissions) {
-      args.push('--yolo');
+  const launch = agentProvider(session.agent)?.launch;
+  if (launch && session.agent) {
+    const args = [session.agent];
+    if (session.bypassPermissions && launch.bypassFlag) {
+      args.push(launch.bypassFlag);
     }
     if (session.resume) {
-      args.push('--session', shellQuote(session.resume));
-    }
-    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
-  }
-  if (session.agent === 'grok') {
-    const args = ['grok'];
-    if (session.resume) {
-      args.push('--session', shellQuote(session.resume));
+      args.push(launch.resumeFlag, shellQuote(session.resume));
     }
     return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
   }

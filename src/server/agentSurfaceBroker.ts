@@ -1067,7 +1067,7 @@ function nativeProviderFor(agent: DeskAgent): AgentProvider | undefined {
   if (!isAgentProviderId(agent)) {
     return undefined;
   }
-  return agentProvider(agent)?.native === true ? agent : undefined;
+  return agentProvider(agent)?.nativeProducer !== undefined ? agent : undefined;
 }
 
 function nativeProducerFor(provider: AgentProvider): AgentProducer {

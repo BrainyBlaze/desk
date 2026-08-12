@@ -67,8 +67,9 @@ export interface InstalledAgentHooks {
   qwenSettingsPath: string;
   kimiConfigPath: string;
   grokSettingsPath: string;
-  /** Config paths that were NOT written because their existing content was
-   *  malformed JSON (a .bak was made). The caller must report these honestly. */
+  /** Config paths that were NOT written: malformed JSON (a .bak was made) or a
+   *  kimi hooks entry that cannot hold [[hooks]] blocks (left untouched). The
+   *  caller must report these honestly. */
   skipped: string[];
 }
 
@@ -177,40 +178,47 @@ export function buildClaudeHooksSettings(shimPath: string): ClaudeHooksSettings 
   };
 }
 
-export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
-  const hook = (event: string): HookGroup[] => [
-    { hooks: [{ type: 'command', command: command(shimPath, 'qwen', event), timeout: 10 }] }
-  ];
+const QWEN_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PermissionRequest',
+  'Notification',
+  'Stop',
+  'StopFailure',
+  'SessionEnd'
+] as const;
+
+const GROK_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'Notification',
+  'Stop'
+] as const;
+
+function buildClaudeStyleHooksSettings(
+  shimPath: string,
+  agent: string,
+  events: readonly string[],
+  timeout: number
+): { hooks: Record<string, HookGroup[]> } {
   return {
-    hooks: {
-      SessionStart: hook('SessionStart'),
-      UserPromptSubmit: hook('UserPromptSubmit'),
-      PreToolUse: hook('PreToolUse'),
-      PostToolUse: hook('PostToolUse'),
-      PostToolUseFailure: hook('PostToolUseFailure'),
-      PermissionRequest: hook('PermissionRequest'),
-      Notification: hook('Notification'),
-      Stop: hook('Stop'),
-      StopFailure: hook('StopFailure'),
-      SessionEnd: hook('SessionEnd')
-    }
+    hooks: Object.fromEntries(
+      events.map((event) => [event, [{ hooks: [commandHook(shimPath, agent, event, timeout)] }]])
+    )
   };
 }
 
+export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
+  return buildClaudeStyleHooksSettings(shimPath, 'qwen', QWEN_HOOK_EVENTS, 10);
+}
+
 export function buildGrokHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
-  const hook = (event: string): HookGroup[] => [
-    { hooks: [{ type: 'command', command: command(shimPath, 'grok', event), timeout: 10 }] }
-  ];
-  return {
-    hooks: {
-      SessionStart: hook('SessionStart'),
-      UserPromptSubmit: hook('UserPromptSubmit'),
-      PreToolUse: hook('PreToolUse'),
-      PostToolUse: hook('PostToolUse'),
-      Notification: hook('Notification'),
-      Stop: hook('Stop')
-    }
-  };
+  return buildClaudeStyleHooksSettings(shimPath, 'grok', GROK_HOOK_EVENTS, 10);
 }
 
 const KIMI_HOOK_EVENTS = [

@@ -1,19 +1,12 @@
-import type { AgentMode, AgentProducer, AgentProvider } from './contract.js';
+import type { AgentMode, AgentProducer } from './contract.js';
 import type { SessionRegistration } from './authority.js';
-import { AGENT_PROVIDER_ENTRIES, isAgentProviderId } from '../agentRegistry.js';
+import { agentProvider, isAgentProviderId } from '../agentRegistry.js';
 
 export interface SessionSubjectSource {
   agent?: string;
   uiMode?: AgentMode;
   customCommand?: boolean;
 }
-
-const PRODUCER_BY_PROVIDER_AND_MODE = Object.fromEntries(
-  AGENT_PROVIDER_ENTRIES.map((agent) => [
-    agent.id,
-    { terminal: agent.terminalProducer, native: agent.nativeProducer }
-  ])
-) as Record<AgentProvider, Record<AgentMode, AgentProducer>>;
 
 export function sessionStateSubjectFor(
   source: SessionSubjectSource
@@ -22,11 +15,16 @@ export function sessionStateSubjectFor(
     return { kind: 'terminal' };
   }
   const provider = source.agent;
-  const mode = source.uiMode === 'native' ? 'native' : 'terminal';
+  const entry = agentProvider(provider);
+  const mode = source.uiMode === 'native' && entry?.nativeProducer !== undefined ? 'native' : 'terminal';
+  const producer = mode === 'native' ? entry?.nativeProducer : entry?.terminalProducer;
+  if (producer === undefined) {
+    return { kind: 'terminal' };
+  }
   return {
     kind: 'agent',
     provider,
     mode,
-    producer: PRODUCER_BY_PROVIDER_AND_MODE[provider][mode]
+    producer: producer as AgentProducer
   };
 }
