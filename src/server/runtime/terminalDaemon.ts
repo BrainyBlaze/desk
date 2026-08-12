@@ -385,11 +385,24 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return providerProvisionFailure('not-authorized');
     }
     const currentAuthorization = providerLaunchLedger.current(context.sessionId);
-    if (
-      context.currentGeneration === 0 &&
-      (currentAuthorization === undefined ||
-        currentAuthorization.state === 'completed')
-    ) {
+    // A FIRST launch needs no authorization: the fence exists to stop a
+    // relaunch from silently orphaning an existing provider conversation, and
+    // here there is none — the binding is null (checked above) and the ledger
+    // has never recorded anything for this session.
+    //
+    // desk#47: the generation used to stand in for "never launched", and it is
+    // not one. The generation ledger is monotonic and tombstone-surviving by
+    // §4.8.1, so it advances on every ATTEMPT — including one that died before
+    // the child ever ran (an agent CLI missing from PATH is the common case).
+    // The manifest entry was rolled back, so the session did not exist, yet
+    // the counter had moved: every later attempt on that name was refused as
+    // an unauthorized relaunch, and `reset-provider-session` could not clear
+    // it either, because that command requires the session to be IN the
+    // manifest. The name was dead with no way back from the UI or the CLI.
+    if (currentAuthorization === undefined) {
+      return { ok: true };
+    }
+    if (context.currentGeneration === 0 && currentAuthorization.state === 'completed') {
       return { ok: true };
     }
     const claim = providerLaunchLedger.claim({
