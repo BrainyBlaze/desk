@@ -185,22 +185,31 @@ describe('agent hook configuration generation', () => {
 
       const kimi = readFileSync(kimiPath, 'utf8');
       expect(kimi).toContain('echo keep-kimi');
-      expect(kimi.match(/desk-agent-event/g)?.length).toBe(7);
-      expect(kimi.match(/timeout = 10/g)?.length).toBe(7);
+      expect(kimi.match(/desk-agent-event/g)?.length).toBe(10);
+      expect(kimi.match(/timeout = 10/g)?.length).toBe(10);
 
       const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
       const qwenTimeouts = Object.values(qwen.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
         .flat()
         .flatMap((group) => group.hooks.map((hook) => hook.timeout));
       expect(qwenTimeouts).toHaveLength(10);
-      expect(new Set(qwenTimeouts)).toEqual(new Set([10]));
+      expect(new Set(qwenTimeouts)).toEqual(new Set([10_000]));
 
       const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
       expect(grok.apiKey).toBe('keep-key');
       expect(JSON.stringify(grok)).toContain('echo keep-grok');
       expect(JSON.stringify(grok)).toContain('desk-agent-event');
       expect(JSON.stringify(grok)).toContain('UserPromptSubmit');
-      expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(6);
+      expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(7);
+      const grokEvents = Object.keys(grok.hooks);
+      expect(grokEvents).toEqual(
+        expect.arrayContaining(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure'])
+      );
+      const grokTimeouts = Object.values(grok.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout))
+        .filter((timeout) => timeout !== undefined);
+      expect(new Set(grokTimeouts)).toEqual(new Set([10]));
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -261,7 +270,7 @@ describe('kimi hook config maintenance', () => {
       expect(kimi).toContain('echo keep-kimi');
       expect(kimi).not.toContain('/old/desk-agent-event.mjs');
       expect(kimi).toContain(installed.shimPath);
-      expect(kimi.match(/desk-agent-event/g)?.length).toBe(7);
+      expect(kimi.match(/desk-agent-event/g)?.length).toBe(10);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

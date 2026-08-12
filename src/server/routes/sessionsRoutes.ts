@@ -157,6 +157,9 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
     if (!isValidProfileId(profileId)) {
       throw new ApiValidationError('session.profileId is not a valid profile id');
     }
+    if (!command && agentProvider(session.agent ?? 'codex')?.profileEnvVar === undefined) {
+      throw new ApiValidationError(`session.profileId is not supported for agent ${session.agent ?? 'codex'}`);
+    }
     session.profileId = profileId;
   }
 

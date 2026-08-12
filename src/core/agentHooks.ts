@@ -199,8 +199,9 @@ const GROK_HOOK_EVENTS = [
   'UserPromptSubmit',
   'PreToolUse',
   'PostToolUse',
-  'Notification',
-  'Stop'
+  'PostToolUseFailure',
+  'Stop',
+  'StopFailure'
 ] as const;
 
 function buildClaudeStyleHooksSettings(
@@ -217,7 +218,7 @@ function buildClaudeStyleHooksSettings(
 }
 
 export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
-  return buildClaudeStyleHooksSettings(shimPath, 'qwen', QWEN_HOOK_EVENTS, 10);
+  return buildClaudeStyleHooksSettings(shimPath, 'qwen', QWEN_HOOK_EVENTS, 10_000);
 }
 
 export function buildGrokHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
@@ -227,10 +228,13 @@ export function buildGrokHooksSettings(shimPath: string): { hooks: Record<string
 const KIMI_HOOK_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
+  'PreToolUse',
   'PostToolUse',
+  'PostToolUseFailure',
   'PermissionRequest',
   'Notification',
   'Stop',
+  'StopFailure',
   'SessionEnd'
 ] as const;
 
@@ -535,7 +539,7 @@ function appendKimiHooks(path: string, shimPath: string): 'merged' | 'skipped-in
 
 function appendKimiHooksLocked(path: string, shimPath: string): 'merged' | 'skipped-incompatible' {
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
-  if (/^\s*hooks\s*=|^\s*\[hooks\]/m.test(existing)) {
+  if (/^\s*hooks\s*=|^\s*\[hooks[\].]/m.test(existing)) {
     return 'skipped-incompatible';
   }
   const kept: string[] = [];
@@ -545,11 +549,11 @@ function appendKimiHooksLocked(path: string, shimPath: string): 'merged' | 'skip
     if (lines[index].trim() === '[[hooks]]') {
       const start = index;
       index += 1;
-      while (index < lines.length && !lines[index].startsWith('[')) {
+      while (index < lines.length && !lines[index].trimStart().startsWith('[')) {
         index += 1;
       }
       const block = lines.slice(start, index).join('\n');
-      if (!block.includes('desk-agent-event')) {
+      if (!/desk-agent-event(\.mjs)?' --agent/.test(block)) {
         kept.push(block);
       }
       continue;
@@ -610,7 +614,7 @@ process.stdin.on('end', async () => {
     matcher: deskBounded(discriminantOf(hook, input)),
     message: deskBounded(input.message),
     tool: deskBounded(input.tool_name),
-    toolUseId: deskBounded(input.tool_use_id),
+    toolUseId: deskBounded(input.tool_use_id || input.tool_call_id),
     turnId: deskBounded(input.turn_id || input.turnId),
     providerSessionId: deskBounded(
       input[DESK_PROVIDER_SESSION_ID_FIELDS[DESK_PROVIDER]]
@@ -726,11 +730,20 @@ function mergeHookConfigLocked(
  * longer exists or speaks a retired schema. Both failures are silent: a hook
  * that errors never breaks the agent, so nobody would notice the duplicate.
  */
-function isStaleDeskHook(hook: unknown, currentShimPath: string): boolean {
+function isStaleDeskHook(hook: unknown, currentShimPath: string, desiredGroups?: HookGroup[]): boolean {
   if (!isRecord(hook) || typeof hook.command !== 'string') {
     return false;
   }
-  return hook.command.includes(DESK_SHIM_BASENAME) && !hook.command.includes(currentShimPath);
+  if (!hook.command.includes(DESK_SHIM_BASENAME)) {
+    return false;
+  }
+  if (!hook.command.includes(currentShimPath)) {
+    return true;
+  }
+  if (desiredGroups === undefined) {
+    return false;
+  }
+  return !desiredGroups.some((group) => group.hooks.some((desired) => isSameHook(hook, desired)));
 }
 
 function mergeHookGroups(
@@ -742,7 +755,7 @@ function mergeHookGroups(
     Array.isArray(existing) ? existing.map((group) => normalizeHookGroup(group)) : []
   ).map((group) => ({
     ...group,
-    hooks: (Array.isArray(group.hooks) ? group.hooks : []).filter((hook) => !isStaleDeskHook(hook, currentShimPath))
+    hooks: (Array.isArray(group.hooks) ? group.hooks : []).filter((hook) => !isStaleDeskHook(hook, currentShimPath, desiredGroups))
   }));
   for (const desired of desiredGroups) {
     const matcher = desired.matcher ?? '';
@@ -770,7 +783,12 @@ function normalizeHookGroup(group: unknown): Record<string, unknown> {
 }
 
 function isSameHook(existing: unknown, desired: HookHandler): boolean {
-  return isRecord(existing) && existing.type === desired.type && existing.command === desired.command;
+  return (
+    isRecord(existing) &&
+    existing.type === desired.type &&
+    existing.command === desired.command &&
+    existing.timeout === desired.timeout
+  );
 }
 
 type JsonObjectRead =
