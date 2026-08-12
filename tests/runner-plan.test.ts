@@ -220,7 +220,11 @@ describe('runPlan moor-native lifecycle', () => {
     // session as missing (`desk status` showed all sessions missing while
     // /control/moor-status answered running:true).
     const session = terminalPlan()[0]!.session;
-    const answer = (status: number, stderr: string) => ({ status, stderr });
+    // The real binary prints this refusal on STDOUT; other refusals use
+    // stderr. The probe must read both — reading one stream is how the
+    // original misclassification survived a first fix (verified in a real
+    // install against moor 237a62c).
+    const answer = (status: number, stdout: string, stderr = '') => ({ status, stdout, stderr });
     const options = (spawn: unknown) => ({
       moorBinPath: '/release/libexec/moor',
       env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
@@ -230,6 +234,11 @@ describe('runPlan moor-native lifecycle', () => {
     // Adopted and healthy — a holder answered, only the lease was busy.
     expect(
       runningSessionSet([session], options(vi.fn().mockReturnValue(answer(1, 'moor: input lease is busy\n'))))
+    ).toEqual(new Set(['terminal-session']));
+
+    // The same refusal on stderr must classify identically.
+    expect(
+      runningSessionSet([session], options(vi.fn().mockReturnValue(answer(1, '', 'moor: input lease is busy\n'))))
     ).toEqual(new Set(['terminal-session']));
 
     // The one proof of absence.

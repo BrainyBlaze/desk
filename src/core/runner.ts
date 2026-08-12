@@ -117,7 +117,11 @@ function sessionProbeFor(options: RunnerLifecycleOptions): ((socketPath: string)
       env,
       input: '',
       encoding: 'utf8',
-      stdio: ['pipe', 'ignore', 'pipe']
+      // BOTH streams: the holder prints `input lease is busy` on STDOUT while
+      // other refusals use stderr, and reading only one of them silently
+      // reproduces the very misclassification this probe was fixed for
+      // (verified against moor 237a62c in a real install).
+      stdio: ['pipe', 'pipe', 'pipe']
     });
     if (result.error) {
       return false; // the probe never ran — unobservable, never claimed alive
@@ -125,7 +129,7 @@ function sessionProbeFor(options: RunnerLifecycleOptions): ((socketPath: string)
     if (result.status === 0) {
       return true;
     }
-    const answer = `${result.stderr ?? ''}`;
+    const answer = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     if (answer.includes('does not exist')) {
       return false;
     }
