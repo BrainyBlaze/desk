@@ -232,12 +232,36 @@ describe('the daemon resolves its moor binary instead of trusting the variable',
   });
 
   it('never yields the bare name "moor" for the daemon to exec', () => {
-    // Reading the variable raw used to fall back to a bare name, which hands the
-    // exec to whatever PATH resolves first and defers the failure to the first
-    // provision. Whatever the environment, the daemon must get an absolute path.
-    const resolved = resolveDaemonConfig({} as NodeJS.ProcessEnv).moorBinPath;
-    expect(resolved).not.toBe('moor');
-    expect(isAbsolute(resolved)).toBe(true);
+    // Reading the variable raw used to fall back to a bare name, which hands
+    // the exec to whatever PATH resolves first and defers the failure to the
+    // first provision. Today the resolver goes further: with no attested
+    // binary anywhere (fresh checkout, empty PATH) it THROWS fail-closed —
+    // an absolute attested path or nothing, never a bare name.
+    const dir = mkdtempSync(join(tmpdir(), 'desk-moorbin-'));
+    try {
+      const attested = join(dir, 'moor');
+      writeFileSync(
+        attested,
+        '#!/bin/sh\n[ "$1" = --version ] && { echo "moor 0.1.0"; exit 0; }\nexit 0\n',
+        { mode: 0o755 }
+      );
+      const resolved = resolveDaemonConfig({ PATH: dir } as NodeJS.ProcessEnv).moorBinPath;
+      expect(resolved).not.toBe('moor');
+      expect(isAbsolute(resolved)).toBe(true);
+      // With an empty environment the resolver either finds the bundled
+      // release binary (an absolute attested path — present on developer
+      // machines) or refuses outright (fresh checkout/CI). BOTH outcomes
+      // prove the invariant: a bare name is never yielded.
+      try {
+        const bare = resolveDaemonConfig({ PATH: join(dir, 'empty') } as NodeJS.ProcessEnv).moorBinPath;
+        expect(bare).not.toBe('moor');
+        expect(isAbsolute(bare)).toBe(true);
+      } catch (error) {
+        expect(String(error)).toMatch(/no attested moor binary/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('accepts an executable override and passes it through', () => {
@@ -252,8 +276,22 @@ describe('the daemon resolves its moor binary instead of trusting the variable',
 
 describe('nonce plumbing (child identity end to end)', () => {
   it('resolveDaemonConfig reads DESK_DAEMON_NONCE into healthNonce', () => {
-    expect(resolveDaemonConfig({ DESK_DAEMON_NONCE: 'n-123' } as NodeJS.ProcessEnv).healthNonce).toBe('n-123');
-    expect(resolveDaemonConfig({} as NodeJS.ProcessEnv).healthNonce).toBeUndefined();
+    // An attested fixture keeps the resolver satisfied on a fresh checkout —
+    // this test is about the UNRELATED nonce field, not bin resolution.
+    const dir = mkdtempSync(join(tmpdir(), 'desk-nonce-bin-'));
+    try {
+      const fixture = join(dir, 'moor');
+      writeFileSync(
+        fixture,
+        '#!/bin/sh\n[ "$1" = --version ] && { echo "moor 0.1.0"; exit 0; }\nexit 0\n',
+        { mode: 0o755 }
+      );
+      const env = { DESK_MOOR_BIN: fixture } as NodeJS.ProcessEnv;
+      expect(resolveDaemonConfig({ ...env, DESK_DAEMON_NONCE: 'n-123' }).healthNonce).toBe('n-123');
+      expect(resolveDaemonConfig(env).healthNonce).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('the real health endpoint echoes the nonce once ready', async () => {
