@@ -713,7 +713,7 @@ verify_moor_binary() {
 download_and_verify_moor() {
   local destination="$1"
   download_file "$MOOR_RELEASE_BASE/$MOOR_ASSET" "$destination"
-  chmod 0755 -- "$destination"
+  chmod 0755 "$destination"
   verify_moor_binary "$destination" "$MOOR_ASSET"
 }
 

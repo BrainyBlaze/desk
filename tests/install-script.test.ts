@@ -210,6 +210,29 @@ describe('installer lifecycle', () => {
     expect(help.stdout).toContain('Desk fixture help');
   }, 20_000);
 
+  it('uses chmod arguments accepted by BSD hosts', () => {
+    const value = fixture();
+    const chmod = join(value.binDir, 'chmod');
+    writeFileSync(
+      chmod,
+      `#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  if [ "$argument" = "--" ]; then
+    printf 'BSD chmod does not accept -- here\\n' >&2
+    exit 64
+  fi
+done
+exec /bin/chmod "$@"
+`
+    );
+    chmodSync(chmod, 0o755);
+
+    const result = value.run();
+
+    expect(result.status, result.stderr).toBe(0);
+  }, 20_000);
+
   it('rejects a non-runnable bundled moor before activating the release', () => {
     const value = fixture();
     const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'broken' } });
