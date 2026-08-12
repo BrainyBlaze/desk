@@ -21,6 +21,7 @@ import {
   moorGenerationEnvKey,
   moorLaunchChannelEnvKey
 } from './moorLaunchChannel.js';
+import { sessionTerminalEnv } from '../../shared/sessionTerminalEnv.js';
 
 export interface MoorSpawnOptions {
   binPath: string;
@@ -86,13 +87,19 @@ export function spawnMoorMaster(options: MoorSpawnOptions): MoorSpawnResult {
   const invoked = options.argv0 ?? options.binPath;
   const generationValue = String(options.generation);
 
+  const inherited = withoutStaleCarriers(options.env ?? process.env);
   const child = spawn(options.binPath, options.args, {
     ...(options.argv0 === undefined ? {} : { argv0: options.argv0 }),
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     detached: options.detached ?? false,
     stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
     env: {
-      ...withoutStaleCarriers(options.env ?? process.env),
+      ...inherited,
+      // The terminal identity and locale the session child is entitled to
+      // (desk#45, desk#51). The holder passes application environment through
+      // unchanged (§4.7), so this is the one place that can compose it for
+      // EVERY session kind. Only absent keys are filled in.
+      ...sessionTerminalEnv(inherited),
       [moorLaunchChannelEnvKey(invoked)]: String(LAUNCH_CHANNEL_FD),
       [moorGenerationEnvKey(invoked)]: generationValue,
       [MOOR_SESSION_GENERATION]: generationValue,
