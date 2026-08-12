@@ -492,7 +492,12 @@ export class SessionManager {
     // that actually accepts a connection; a refused connect means the owner
     // is gone and the stale node is ours to replace.
     if (opts.detached === true && existsSync(opts.sockPath)) {
-      if (await socketHasListener(opts.sockPath)) {
+      const probe = await probeSocketListener(opts.sockPath);
+      if (probe !== 'dead') {
+        // 'listener' — a live owner; 'unknown' — POSSIBLY a live owner that
+        // was too slow to accept (desk#42): reclaiming on uncertainty
+        // destroys a live session's rendezvous irreversibly. Refuse the
+        // spawn instead; a later attempt under lower load will see the truth.
         return { ok: false, reason: 'spawn-failed' };
       }
       // No listener: the previous master is gone but its socket NODE survived —
@@ -928,11 +933,22 @@ export class SessionManager {
         };
       }
       if (existsSync(sockPath)) {
-        if (await socketHasListener(sockPath)) {
+        const probe = await probeSocketListener(sockPath);
+        if (probe === 'listener') {
           return {
             ok: false,
             reason: 'session-live',
             error: `session ${sessionId} still has a listening master`
+          };
+        }
+        if (probe === 'unknown') {
+          // Silence is not death (desk#42): never delete a rendezvous whose
+          // owner might merely be slow. The retire fails closed and can be
+          // retried when the probe can actually decide.
+          return {
+            ok: false,
+            reason: 'retire-failed',
+            error: `session ${sessionId} liveness is indeterminate under load — refusing to remove its socket`
           };
         }
         try {
@@ -1084,21 +1100,36 @@ export class SessionManager {
 }
 
 /**
- * True when a unix socket path has a live listener. A stale node left by a
- * dead master refuses the connection (ECONNREFUSED); anything else that is
- * not a successful connect is treated as "no listener" so a permission or
- * path error can never masquerade as a live foreign owner.
+ * Tri-state liveness probe for a unix socket path. 'listener' — a connect
+ * succeeded, the owner is alive. 'dead' — the owner is PROVEN gone: only an
+ * explicit ECONNREFUSED (bound node, nobody accepting) or ENOENT (no node)
+ * counts. 'unknown' — everything else, including a timeout: a live master
+ * under host load can simply be slow to accept, and silence proves nothing.
+ * Callers MUST treat 'unknown' as possibly-live and MUST NOT destroy state
+ * on it.
  */
-async function socketHasListener(path: string, timeoutMs = 250): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+type SocketProbeResult = 'listener' | 'dead' | 'unknown';
+
+async function probeSocketListener(path: string, timeoutMs = 2000): Promise<SocketProbeResult> {
+  return new Promise<SocketProbeResult>((resolve) => {
     const socket = createConnection({ path });
-    const settle = (result: boolean): void => {
+    const settle = (result: SocketProbeResult): void => {
       socket.removeAllListeners();
       socket.destroy();
       resolve(result);
     };
-    socket.setTimeout(timeoutMs, () => settle(false));
-    socket.once('connect', () => settle(true));
-    socket.once('error', () => settle(false));
+    // desk#42 (directly observed on the re-provisioned main-3): a live holder
+    // under host load blew the old 250 ms budget, the boolean probe answered
+    // "no listener", and the reclaim path unlinked the rendezvous socket of a
+    // RUNNING session — permanently, since a deleted unix-socket path cannot
+    // be re-linked. A probe can prove death only by an explicit refusal;
+    // silence proves nothing. Timeout therefore maps to 'unknown', and only
+    // ECONNREFUSED or ENOENT count as 'dead'.
+    socket.setTimeout(timeoutMs, () => settle('unknown'));
+    socket.once('connect', () => settle('listener'));
+    socket.once('error', (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      settle(code === 'ECONNREFUSED' || code === 'ENOENT' ? 'dead' : 'unknown');
+    });
   });
 }
