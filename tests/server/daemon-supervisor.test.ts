@@ -544,6 +544,28 @@ describe('attestMoorBinary (#10 protocol/build attestation)', () => {
     ).toMatchObject({ ok: false });
   });
 
+  it('attests a REAL binary under any filename: the spec derives the answer from the invoked basename (desk#40)', () => {
+    // No injected probe here — this exercises the DEFAULT probe. The moor
+    // spec (§3) answers `<invoked-basename> <version>`, so a candidate named
+    // anything but `moor` (an operator's DESK_MOOR_BIN=/opt/tools/moor-v1)
+    // must still attest via the canonical-basename probe path.
+    const root = mkdtempSync(join(tmpdir(), 'moor-attest-real-'));
+    try {
+      const argvSensitive = join(root, 'moor-v1');
+      writeFileSync(argvSensitive, '#!/bin/sh\nprintf \'%s 0.1.0\\n\' "$(basename "$0")"\n');
+      chmodSync(argvSensitive, 0o755);
+      expect(attestMoorBinary(argvSensitive)).toEqual({ ok: true });
+
+      // A wrong-version binary still fails under the same real probe.
+      const impostor = join(root, 'moor-old');
+      writeFileSync(impostor, '#!/bin/sh\nprintf \'%s 0.0.9\\n\' "$(basename "$0")"\n');
+      chmodSync(impostor, 0o755);
+      expect(attestMoorBinary(impostor)).toMatchObject({ ok: false });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects nonzero exit, spawn failure, and a hung probe fail-closed', () => {
     expect(attestMoorBinary('/x', () => ({ status: 64, stdout: '' }))).toMatchObject({
       ok: false,

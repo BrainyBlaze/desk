@@ -5,10 +5,21 @@
 // The default is UID-keyed: a global /tmp/desk-moor collides across OS users
 // on a shared host (and a foreign-owned directory there would be an ambush).
 
-import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve as resolvePath } from 'node:path';
 import { findPackageRoot } from './packageRoot.js';
 
 export function resolveMoorSocketRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -115,16 +126,40 @@ export function attestMoorBinary(
 }
 
 function defaultVersionProbe(path: string): { status: number | null; stdout: string; error?: Error } {
-  const result = spawnSync(path, ['--version'], {
-    encoding: 'utf8',
-    timeout: 3_000,
-    stdio: ['ignore', 'pipe', 'ignore']
-  });
-  return {
-    status: result.status,
-    stdout: result.stdout ?? '',
-    ...(result.error === undefined ? {} : { error: result.error })
-  };
+  // The moor spec (§3) derives the --version answer from the INVOKED
+  // basename, so probing a candidate under any other filename (an operator's
+  // DESK_MOOR_BIN=/opt/tools/moor-v1) would answer `moor-v1 0.1.0` and fail
+  // the fixed-literal attestation on the exact attested build (desk#40).
+  // Probe through a canonical-basename symlink in a private temp directory:
+  // execve of `<tmp>/moor` makes the binary see the canonical name. If the
+  // symlink cannot be made, fall back to probing the path directly — exact
+  // for every path whose basename is already `moor`.
+  let probePath = path;
+  let linkDir: string | undefined;
+  try {
+    linkDir = mkdtempSync(join(tmpdir(), '.moor-attest-'));
+    const link = join(linkDir, 'moor');
+    symlinkSync(resolvePath(path), link);
+    probePath = link;
+  } catch {
+    probePath = path;
+  }
+  try {
+    const result = spawnSync(probePath, ['--version'], {
+      encoding: 'utf8',
+      timeout: 3_000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout ?? '',
+      ...(result.error === undefined ? {} : { error: result.error })
+    };
+  } finally {
+    if (linkDir !== undefined) {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+  }
 }
 
 /**

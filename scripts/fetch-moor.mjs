@@ -191,8 +191,15 @@ export async function fetchMoor({
     );
   }
   mkdirSync(dirname(outfile), { recursive: true });
-  const staging = `${outfile}.tmp-${process.pid}`;
+  // Stage in a private temp DIRECTORY under the CANONICAL basename: the moor
+  // spec (§3) derives the --version answer from the invoked basename, so a
+  // probe of `moor.tmp-<pid>` would answer `moor.tmp-<pid> 0.1.0` and fail
+  // attestation on every real binary (desk#40). Probing `<dir>/moor` keeps
+  // attest-before-promote AND the canonical answer.
+  const stagingDir = join(dirname(outfile), `.moor-stage-${process.pid}`);
+  const staging = join(stagingDir, 'moor');
   try {
+    mkdirSync(stagingDir, { recursive: true });
     writeFileSync(staging, bytes);
     chmodSync(staging, 0o755);
     const attested = attest(staging);
@@ -201,7 +208,7 @@ export async function fetchMoor({
     }
     renameSync(staging, outfile); // atomic: no partial binary is ever active
   } finally {
-    rmSync(staging, { force: true });
+    rmSync(stagingDir, { recursive: true, force: true });
   }
   return { outfile, version: pin.version, triple, sha256: digest };
 }

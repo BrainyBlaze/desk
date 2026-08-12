@@ -94,6 +94,24 @@ describe('moor acquirer × reviewed release contract (b57e094)', () => {
     expect(() => moorTargetTriple({ platform: 'linux', arch: 'ia32' })).toThrow(/unsupported CPU/);
   });
 
+  it('DEFAULT attestation passes on an argv0-sensitive real binary: staging must use the canonical basename (desk#40)', async () => {
+    // No injected attest — the default probe runs the staged file. The moor
+    // spec (§3) answers `<invoked-basename> <version>`, so staging under any
+    // name but `moor` (e.g. `moor.tmp-<pid>`) would answer the wrong string
+    // and reject every real asset.
+    const root = mkdtempSync(join(tmpdir(), 'moor-argv0-'));
+    try {
+      const triple = 'x86_64-unknown-linux-musl';
+      const bytes = Buffer.from('#!/bin/sh\nprintf \'%s 0.1.0\\n\' "$(basename "$0")"\n');
+      const baseUrl = writeFixture(root, pinFor({ [triple]: bytes }), { [triple]: bytes });
+      const result = await fetchMoor({ root, triple, baseUrl });
+      expect(result).toMatchObject({ triple, version: 'v0.1.0' });
+      expect(readFileSync(join(root, 'libexec', 'moor'))).toEqual(bytes);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('downloads, verifies, installs atomically, and attests over the candidate override', async () => {
     const root = mkdtempSync(join(tmpdir(), 'moor-fetch-'));
     try {
