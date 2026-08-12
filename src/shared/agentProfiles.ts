@@ -10,7 +10,6 @@
 // spawn rewrite in server/agentHostLaunch.ts. Shared stays a leaf: structural
 // params only, no core type imports.
 
-import { join } from 'node:path';
 import { shellQuote } from './shell.js';
 import {
   AGENT_PROVIDER_ENTRIES,
@@ -58,7 +57,8 @@ export function isProfileProvider(value: unknown): value is ProfileProviderId {
 
 /** The Desk-owned credential directory for a profile. */
 export function profileRoot(profileId: string, homeDir: string): string {
-  return join(homeDir, '.config', 'desk', 'profiles', profileId);
+  const root = homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir;
+  return `${root}/.config/desk/profiles/${profileId}`;
 }
 
 /**
