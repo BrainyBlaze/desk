@@ -8,6 +8,7 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -18,6 +19,32 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { createInstallManifest } from '../../scripts/create-release-assets.mjs';
 
 export const INSTALLER = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'install.sh');
+
+const MOOR_REPOSITORY = 'https://github.com/BrainyBlaze/moor';
+const MOOR_VERSION = 'v0.1.0';
+const MOOR_COMMIT = 'f'.repeat(40);
+const MOOR_ASSETS = {
+  'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
+  'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
+  'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
+  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64',
+  'x86_64-pc-windows-msvc': 'moor-0.1.0-windows-x64.exe',
+  'aarch64-pc-windows-msvc': 'moor-0.1.0-windows-arm64.exe'
+} as const;
+
+interface MoorTargetPin {
+  asset: string;
+  size: number;
+  sha256: string;
+}
+
+interface MoorPin {
+  schemaVersion: 1;
+  repository: typeof MOOR_REPOSITORY;
+  version: typeof MOOR_VERSION;
+  commit: string;
+  targets: Record<keyof typeof MOOR_ASSETS, MoorTargetPin>;
+}
 
 function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -35,10 +62,18 @@ function runChecked(command: string, args: string[], cwd: string): void {
   }
 }
 
-function platformTarget(): { target: string; libc: string } {
+function platformTarget(): { target: string; libc: string; moorTarget: keyof typeof MOOR_ASSETS } {
   const os = process.platform === 'darwin' ? 'darwin' : 'linux';
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  return { target: `${os}-${arch}`, libc: os === 'darwin' ? 'system' : 'glibc' };
+  const moorTarget =
+    os === 'darwin'
+      ? arch === 'arm64'
+        ? 'aarch64-apple-darwin'
+        : 'x86_64-apple-darwin'
+      : arch === 'arm64'
+        ? 'aarch64-unknown-linux-musl'
+        : 'x86_64-unknown-linux-musl';
+  return { target: `${os}-${arch}`, libc: os === 'darwin' ? 'system' : 'glibc', moorTarget };
 }
 
 export interface InstallerRunOptions {
@@ -51,6 +86,7 @@ export class InstallerFixture {
   readonly deskHome = join(this.root, 'desk-home');
   readonly binDir = join(this.root, 'bin');
   readonly releaseDir = join(this.root, 'release');
+  readonly moorReleaseDir = join(this.root, 'moor-release');
   readonly userHome = join(this.root, 'user-home');
   readonly outside = join(this.root, 'outside');
   readonly configDir = join(this.userHome, '.config', 'desk');
@@ -58,14 +94,57 @@ export class InstallerFixture {
     readFileSync(new URL('../../scripts/distribution/toolchains.json', import.meta.url), 'utf8')
   );
   readonly target = platformTarget();
+  readonly moorPin: MoorPin;
 
   constructor() {
-    for (const path of [this.deskHome, this.binDir, this.releaseDir, this.userHome, this.outside, this.configDir]) {
+    for (const path of [
+      this.deskHome,
+      this.binDir,
+      this.releaseDir,
+      this.moorReleaseDir,
+      this.userHome,
+      this.outside,
+      this.configDir
+    ]) {
       mkdirSync(path, { recursive: true });
     }
     writeFileSync(join(this.configDir, 'preserved.txt'), 'keep\n');
+    this.moorPin = this.createMoorRelease();
     this.createCachedToolchains();
     this.createRelease();
+  }
+
+  private createMoorRelease(): MoorPin {
+    const source = `#!/usr/bin/env bash
+set -euo pipefail
+[ "\${1:-}" = "--version" ] || exit 96
+case "\${DESK_INSTALLER_FIXTURE_MOOR_MODE:-valid}" in
+  valid) printf 'moor 0.1.0\\n' ;;
+  broken) exit 97 ;;
+  wrong-version) printf 'moor 9.9.9\\n' ;;
+  hanging) exec sleep 10 ;;
+  *) exit 98 ;;
+esac
+`;
+    const targets = {} as MoorPin['targets'];
+    for (const [target, asset] of Object.entries(MOOR_ASSETS) as Array<
+      [keyof typeof MOOR_ASSETS, string]
+    >) {
+      const path = join(this.moorReleaseDir, asset);
+      executable(path, source);
+      targets[target] = {
+        asset,
+        size: statSync(path).size,
+        sha256: sha256(path)
+      };
+    }
+    return {
+      schemaVersion: 1,
+      repository: MOOR_REPOSITORY,
+      version: MOOR_VERSION,
+      commit: MOOR_COMMIT,
+      targets
+    };
   }
 
   private createCachedToolchains(): void {
@@ -104,26 +183,14 @@ if [ "$resolved_node" != "$own_node" ]; then
 fi
 if [ "\${1:-}" = "--version" ]; then printf '10.9.8\\n'; exit 0; fi
 if [ "\${1:-}" = "ci" ]; then exit 0; fi
-if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build:distribution" ]; then
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build:application" ]; then
   mkdir -p dist/cli libexec
   printf '%s\\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'case "\${1:-help}" in' '  help) printf "Desk fixture help\\n" ;;' '  *) printf "Desk fixture command: %s\\n" "\${1:-}" ;;' 'esac' > dist/cli/main.js
   printf '%s\\n' '#!/usr/bin/env bash' 'exit 0' > libexec/desk-standalone
-  case "\${DESK_INSTALLER_FIXTURE_MOOR_MODE:-valid}" in
-    valid)
-      printf '%s\\n' '#!/usr/bin/env bash' 'if [ "\${1:-}" = "--version" ]; then printf "moor 0.1.0\\n"; exit 0; fi' 'exit 64' > libexec/moor
-      ;;
-    broken)
-      printf '%s\\n' '#!/usr/bin/env bash' 'exit 73' > libexec/moor
-      ;;
-    missing)
-      rm -f libexec/moor
-      ;;
-    *)
-      exit 93
-      ;;
-  esac
   chmod +x dist/cli/main.js libexec/desk-standalone
-  [ ! -e libexec/moor ] || chmod +x libexec/moor
+  if [ "\${DESK_INSTALLER_FIXTURE_BUILD_MOOR_MODE:-}" = "tamper" ]; then
+    printf X | dd of=libexec/moor bs=1 seek=10 count=1 conv=notrunc 2>/dev/null
+  fi
   exit 0
 fi
 printf 'unexpected fake npm invocation: %s\\n' "$*" >&2
@@ -195,6 +262,11 @@ exit 92
     chmodSync(sourceRoot, 0o775);
     writeFileSync(join(sourceRoot, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
     writeFileSync(join(sourceRoot, 'package-lock.json'), '{}\n');
+    mkdirSync(join(sourceRoot, 'scripts', 'distribution'), { recursive: true });
+    writeFileSync(
+      join(sourceRoot, 'scripts', 'distribution', 'moor-pin.json'),
+      `${JSON.stringify(this.moorPin, null, 2)}\n`
+    );
     chmodSync(join(sourceRoot, 'package.json'), 0o664);
     symlinkSync('package.json', join(sourceRoot, 'package-link.json'));
     const sourceAsset = 'desk-v0.3.0-source.tar.gz';
@@ -205,7 +277,8 @@ exit 92
       version: 'v0.3.0',
       sourceAsset,
       sourceSha256: sha256(sourcePath),
-      toolchains: this.toolchains
+      toolchains: this.toolchains,
+      moor: this.moorPin
     });
     const manifestPath = join(this.releaseDir, 'desk-install-manifest.json');
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -243,6 +316,7 @@ exit 92
         DESK_BIN_DIR: this.binDir,
         DESK_VERSION: 'v0.3.0',
         DESK_RELEASE_BASE_URL: `file://${this.releaseDir}`,
+        DESK_MOOR_RELEASE_BASE_URL: `file://${this.moorReleaseDir}`,
         ...options.env
       },
       encoding: 'utf8',
@@ -256,6 +330,10 @@ exit 92
 
   launcher(): string {
     return join(this.binDir, 'desk');
+  }
+
+  moorAssetPath(): string {
+    return join(this.moorReleaseDir, this.moorPin.targets[this.target.moorTarget].asset);
   }
 
   releaseInstances(): string[] {

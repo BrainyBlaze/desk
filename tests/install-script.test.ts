@@ -43,7 +43,10 @@ describe('source-backed installer contract', () => {
       'resolve_release_version',
       'download_release_metadata',
       'validate_install_manifest',
+      'validate_staged_moor_pin',
       'download_and_verify_asset',
+      'download_and_verify_moor',
+      'probe_moor_binary',
       'ensure_node_toolchain',
       'ensure_bun_toolchain',
       'acquire_install_lock',
@@ -58,6 +61,11 @@ describe('source-backed installer contract', () => {
     expect(source).not.toMatch(/tmux/i);
     expect(source).not.toMatch(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/u);
     expect(source).toContain('PATH="$root/bin:$PATH" "$root/bin/npm" --version');
+    expect(source).toContain('"$NODE_ROOT/bin/npm" run build:application');
+    expect(source).not.toContain('"$NODE_ROOT/bin/npm" run build:distribution');
+    expect(source).not.toMatch(/cargo\s+(?:build|install)/);
+    expect(source).not.toContain('vendor/moor');
+    expect(source).toContain('curl -fsSL --retry 3 --connect-timeout 30 --max-time 60');
   });
 
   it('has valid Bash syntax', () => {
@@ -179,9 +187,20 @@ describe('installer lifecycle', () => {
     expect(readlinkSync(join(value.deskHome, 'current'))).toMatch(/^releases\/v0\.3\.0\//);
     expect(value.releaseInstances()).toHaveLength(1);
     const release = realpathSync(join(value.deskHome, 'current'));
+    expect(readFileSync(join(release, 'libexec', 'moor'))).toEqual(readFileSync(value.moorAssetPath()));
     const moor = spawnSync(join(release, 'libexec', 'moor'), ['--version'], { encoding: 'utf8' });
     expect(moor.status, moor.stderr).toBe(0);
     expect(moor.stdout.trim()).toBe('moor 0.1.0');
+    expect(JSON.parse(readFileSync(join(release, '.desk-release'), 'utf8'))).toMatchObject({
+      schemaVersion: 2,
+      moor: {
+        repository: value.moorPin.repository,
+        version: value.moorPin.version,
+        commit: value.moorPin.commit,
+        target: value.target.moorTarget,
+        ...value.moorPin.targets[value.target.moorTarget]
+      }
+    });
 
     const help = spawnSync(value.launcher(), ['help'], {
       env: { ...process.env, DESK_HOME: value.deskHome },
@@ -196,10 +215,116 @@ describe('installer lifecycle', () => {
     const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'broken' } });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/bundled moor.*version probe/i);
+    expect(result.stderr).toMatch(/Moor.*exact version probe/i);
     expect(existsSync(value.launcher())).toBe(false);
     expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);
+
+  it('rejects a Moor asset that reports the wrong version before activation', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'wrong-version' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*exact version probe/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('bounds the Moor identity probe and leaves no activated release when it hangs', () => {
+    const value = fixture();
+    const started = Date.now();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'hanging' } });
+
+    expect(result.status).not.toBe(0);
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(result.stderr).toMatch(/Moor.*exact version probe/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 12_000);
+
+  it('checks the Moor byte length before SHA-256 and activation', () => {
+    const value = fixture();
+    appendFileSync(value.moorAssetPath(), 'tampered');
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*size mismatch/i);
+    expect(result.stderr).not.toMatch(/Moor.*checksum mismatch/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('rejects same-length Moor bytes whose SHA-256 differs', () => {
+    const value = fixture();
+    const path = value.moorAssetPath();
+    const bytes = readFileSync(path);
+    bytes[bytes.length - 2] ^= 1;
+    writeFileSync(path, bytes);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*checksum mismatch/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('rejects a Desk manifest that disagrees with the committed Moor pin', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: { targets: Record<string, { sha256: string }> };
+    };
+    manifest.moor.targets[value.target.moorTarget].sha256 = '0'.repeat(64);
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*committed pin/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('rejects a missing Moor target even when the Desk checksums are updated', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: { targets: Record<string, unknown> };
+    };
+    delete manifest.moor.targets['aarch64-pc-windows-msvc'];
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/invalid Moor target set/i);
+    expect(existsSync(value.launcher())).toBe(false);
+  });
+
+  it('rejects a caller-controlled network origin for Moor candidate bytes', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_MOOR_RELEASE_BASE_URL: 'https://invalid.example/moor' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*only.*absolute local file/i);
+    expect(existsSync(value.launcher())).toBe(false);
+  });
+
+  it('rejects build-time Moor tampering and preserves the active release', () => {
+    const value = fixture();
+    const installed = value.run();
+    expect(installed.status, installed.stderr).toBe(0);
+    const activeTarget = readlinkSync(join(value.deskHome, 'current'));
+
+    const result = value.run({
+      env: { DESK_INSTALLER_FIXTURE_BUILD_MOOR_MODE: 'tamper' }
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor checksum mismatch.*staged/i);
+    expect(readlinkSync(join(value.deskHome, 'current'))).toBe(activeTarget);
+    expect(value.releaseInstances()).toHaveLength(1);
+  }, 30_000);
 
   it('reinstalls the same version into a new immutable instance and retains the previous one', () => {
     const value = fixture();
