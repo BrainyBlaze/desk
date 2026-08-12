@@ -443,6 +443,13 @@ export function buildAgentCommand(
     }
     return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
   }
+  if (session.agent === 'grok') {
+    const args = ['grok'];
+    if (session.resume) {
+      args.push('--session', shellQuote(session.resume));
+    }
+    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
+  }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }
 

@@ -1,6 +1,6 @@
 export type AgentKind = 'agent' | 'shell';
 export type AgentSessionIdShape = 'uuid' | 'opencode' | 'opaque';
-export type AgentHooksStyle = 'claude' | 'codex' | 'plugin' | 'qwen' | 'kimi';
+export type AgentHooksStyle = 'claude' | 'codex' | 'plugin' | 'qwen' | 'kimi' | 'grok';
 
 export interface AgentDescriptor {
   id: string;
@@ -77,6 +77,16 @@ export const AGENTS = [
     sessionIdShape: 'opaque',
     profileEnvVar: 'KIMI_CODE_HOME',
     hooks: 'kimi'
+  },
+  {
+    id: 'grok',
+    label: 'grok',
+    kind: 'agent',
+    terminalProducer: 'grok-hooks',
+    native: false,
+    sessionIdField: 'session_id',
+    sessionIdShape: 'opaque',
+    hooks: 'grok'
   },
   {
     id: 'bash',

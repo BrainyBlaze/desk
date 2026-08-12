@@ -9,6 +9,7 @@ describe('session agent options', () => {
       'opencode',
       'qwen',
       'kimi',
+      'grok',
       'bash'
     ]);
   });
@@ -19,6 +20,7 @@ describe('session agent options', () => {
     expect(supportsBypassPermissions('opencode')).toBe(true);
     expect(supportsBypassPermissions('qwen')).toBe(false);
     expect(supportsBypassPermissions('kimi')).toBe(true);
+    expect(supportsBypassPermissions('grok')).toBe(false);
     expect(supportsBypassPermissions('bash')).toBe(false);
   });
 
@@ -28,6 +30,7 @@ describe('session agent options', () => {
     expect(supportsNativeUi('opencode', false)).toBe(true);
     expect(supportsNativeUi('qwen', false)).toBe(false);
     expect(supportsNativeUi('kimi', false)).toBe(false);
+    expect(supportsNativeUi('grok', false)).toBe(false);
     expect(supportsNativeUi('bash', false)).toBe(false);
     expect(supportsNativeUi('', false)).toBe(false);
   });

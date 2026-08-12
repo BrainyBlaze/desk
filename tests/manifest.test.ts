@@ -403,7 +403,7 @@ groups:
     });
   });
 
-  it('constructs shell commands for qwen and kimi', () => {
+  it('constructs shell commands for qwen, kimi and grok', () => {
     const manifest = parseDeskManifest(`
 projects:
   - id: sample
@@ -420,6 +420,11 @@ projects:
             sessionId: kimi
             agent: kimi
             resume: kimi-session-abc
+          - name: grok
+            sessionId: grok
+            agent: grok
+            bypassPermissions: true
+            resume: a1b2c3d4e5f6
 `);
     const commands = buildSessionSpecs(manifest, { homeDir: '/workspace' }).map((session) => session.command);
     expect(commands[0]).toContain("DESK_SESSION_ID='qwen' DESK_AGENT='qwen' qwen");
@@ -428,6 +433,9 @@ projects:
     expect(commands[1]).toContain("DESK_SESSION_ID='kimi' DESK_AGENT='kimi' kimi");
     expect(commands[1]).toContain("--session 'kimi-session-abc'");
     expect(commands[1]).not.toContain('--yolo');
+    expect(commands[2]).toContain("DESK_SESSION_ID='grok' DESK_AGENT='grok' grok");
+    expect(commands[2]).toContain("--session 'a1b2c3d4e5f6'");
+    expect(commands[2]).not.toContain('--yolo');
   });
 
   it('constructs shell commands for supported agents', () => {

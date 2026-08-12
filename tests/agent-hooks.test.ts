@@ -140,6 +140,15 @@ describe('agent hook configuration generation', () => {
         hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep-claude' }] }] }
       });
       writeFileSync(claudePath, operatorClaudeSettings);
+      const grokPath = join(home, '.grok', 'user-settings.json');
+      mkdirSync(dirname(grokPath), { recursive: true });
+      writeFileSync(
+        grokPath,
+        JSON.stringify({
+          apiKey: 'keep-key',
+          hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep-grok' }] }] }
+        })
+      );
 
       const installed = installAgentHooks({ homeDir: home });
       installAgentHooks({ homeDir: home });
@@ -166,6 +175,13 @@ describe('agent hook configuration generation', () => {
       expect(JSON.stringify(claude).match(/desk-agent-event/g)?.length).toBe(15);
 
       expect(readFileSync(installed.opencodePluginPath, 'utf8')).toContain('/api/agent-event');
+
+      const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
+      expect(grok.apiKey).toBe('keep-key');
+      expect(JSON.stringify(grok)).toContain('echo keep-grok');
+      expect(JSON.stringify(grok)).toContain('desk-agent-event');
+      expect(JSON.stringify(grok)).toContain('UserPromptSubmit');
+      expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(6);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -292,6 +292,7 @@ function runHooksCommand(target: string | undefined, options: Map<string, string
   console.log(`installed ${installed.opencodePluginPath}`);
   report(installed.qwenSettingsPath);
   console.log(`installed ${installed.kimiConfigPath}`);
+  report(installed.grokSettingsPath);
   console.log('codex note: non-managed command hooks may require trust before they fire');
   return skipped.size > 0 ? 1 : 0;
 }

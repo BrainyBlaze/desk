@@ -66,6 +66,7 @@ export interface InstalledAgentHooks {
   opencodePluginPath: string;
   qwenSettingsPath: string;
   kimiConfigPath: string;
+  grokSettingsPath: string;
   /** Config paths that were NOT written because their existing content was
    *  malformed JSON (a .bak was made). The caller must report these honestly. */
   skipped: string[];
@@ -192,6 +193,22 @@ export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string
       Stop: hook('Stop'),
       StopFailure: hook('StopFailure'),
       SessionEnd: hook('SessionEnd')
+    }
+  };
+}
+
+export function buildGrokHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
+  const hook = (event: string): HookGroup[] => [
+    { hooks: [{ type: 'command', command: command(shimPath, 'grok', event), timeout: 10 }] }
+  ];
+  return {
+    hooks: {
+      SessionStart: hook('SessionStart'),
+      UserPromptSubmit: hook('UserPromptSubmit'),
+      PreToolUse: hook('PreToolUse'),
+      PostToolUse: hook('PostToolUse'),
+      Notification: hook('Notification'),
+      Stop: hook('Stop')
     }
   };
 }
@@ -419,8 +436,21 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   }
   const kimiConfigPath = join(homeDir, '.kimi-code', 'config.toml');
   appendKimiHooks(kimiConfigPath, shimPath);
+  const grokSettingsPath = join(homeDir, '.grok', 'user-settings.json');
+  if (mergeHookConfig(grokSettingsPath, buildGrokHooksSettings(shimPath), shimPath) === 'skipped-malformed') {
+    skipped.push(grokSettingsPath);
+  }
 
-  return { shimPath, codexHooksPath, claudeSettingsPath, opencodePluginPath, qwenSettingsPath, kimiConfigPath, skipped };
+  return {
+    shimPath,
+    codexHooksPath,
+    claudeSettingsPath,
+    opencodePluginPath,
+    qwenSettingsPath,
+    kimiConfigPath,
+    grokSettingsPath,
+    skipped
+  };
 }
 
 function appendKimiHooks(path: string, shimPath: string): void {
