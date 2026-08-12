@@ -42,7 +42,15 @@ jobs:
           test_tmp=$(mktemp -d /var/tmp/desk-vitest.XXXXXX)
           trap 'rm -rf "$test_tmp"' EXIT
           TMPDIR="$test_tmp" RUN_REAL_JOIN=1 npm test
-      - run: npm run build:distribution
+      # Same pin gate as the fetch step: build:distribution re-invokes
+      # fetch:moor (fail-closed without a pin), so before the first pinned
+      # moor release CI proves the APPLICATION build only.
+      - name: Build distribution (pinned moor + application)
+        if: ${{ hashFiles('scripts/distribution/moor-pin.json') != '' }}
+        run: npm run build:distribution
+      - name: Build application (no pinned moor release yet)
+        if: ${{ hashFiles('scripts/distribution/moor-pin.json') == '' }}
+        run: npm run build:application
       - name: Probe bundled moor
         if: ${{ hashFiles('scripts/distribution/moor-pin.json') != '' }}
         run: test "$(./libexec/moor --version)" = 'moor 0.1.0'
