@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, Socket as NetSocket, type Server } from 'node:net';
+import { moorLaunchChannelEnvKey } from '../../src/server/runtime/moorLaunchChannel.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const pidfileOf = (sessionPath: string): string => `${sessionPath}.holder-pid`;
@@ -16,7 +17,7 @@ function readChannelToEof(fd: number): Promise<void> {
 }
 
 async function launcher(sessionPath: string): Promise<void> {
-  const selector = Number(process.env.DESK_MOOR_LAUNCH_CHANNEL);
+  const selector = Number(process.env[moorLaunchChannelEnvKey(process.execPath)]);
   await readChannelToEof(selector);
   const child = spawn(
     process.execPath,

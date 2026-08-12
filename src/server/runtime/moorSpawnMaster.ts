@@ -1,20 +1,25 @@
-// Supervised moor holder launch (#9, moor private.rs:333-358 + unix.rs launch
+// Supervised moor holder launch (#9, moor private.rs + unix.rs launch
 // channel). Desk delivers exactly one 32-byte private launch record over an
-// inherited fd named by DESK_MOOR_LAUNCH_CHANNEL (decimal fd number), closes it
-// (EOF), and sets BOTH generation carriers — the invocation-derived
-// <BASENAME>_GENERATION and DESK_SESSION_GENERATION — to the record's canonical
-// decimal generation. The holder validates all three against each other and
-// strips them; a missing selector means unsupervised generation 1 (OB-18), so
-// every carrier here is load-bearing.
+// inherited fd named by the invocation-derived <BASENAME>_LAUNCH_CHANNEL
+// selector (decimal fd number, spec §10.1.1), closes it (EOF), and sets BOTH
+// moor generation carriers — the invocation-derived <BASENAME>_GENERATION and
+// the fixed child-visible MOOR_SESSION_GENERATION (§10.1) — to the record's
+// canonical decimal generation. The holder validates all three against each
+// other and strips them; a missing selector means unsupervised generation 1
+// (OB-18), so every carrier here is load-bearing. Desk's OWN
+// DESK_SESSION_GENERATION is set from the same source value but is opaque
+// application env to moor: never validated or stripped by the holder, it
+// rides through to the session child for Desk's hooks/agent-host fencing.
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Writable } from 'node:stream';
 import {
-  DESK_MOOR_LAUNCH_CHANNEL,
   DESK_SESSION_GENERATION,
+  MOOR_SESSION_GENERATION,
   encodeMoorLaunchRecord,
-  moorGenerationEnvKey
+  moorGenerationEnvKey,
+  moorLaunchChannelEnvKey
 } from './moorLaunchChannel.js';
 
 export interface MoorSpawnOptions {
@@ -51,8 +56,12 @@ const LAUNCH_CHANNEL_FD = 3;
 const SUPERVISION_CARRIERS = [
   'ATCH_GENERATION',
   'MOOR_GENERATION',
+  'MOOR_LAUNCH_CHANNEL',
+  MOOR_SESSION_GENERATION,
   DESK_SESSION_GENERATION,
-  DESK_MOOR_LAUNCH_CHANNEL
+  // The pre-decoupling Desk-branded selector name: no live producer sets it
+  // anymore, but an inherited stale one is still a conflicting authority.
+  'DESK_MOOR_LAUNCH_CHANNEL'
 ];
 
 function withoutStaleCarriers(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -84,8 +93,9 @@ export function spawnMoorMaster(options: MoorSpawnOptions): MoorSpawnResult {
     stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
     env: {
       ...withoutStaleCarriers(options.env ?? process.env),
-      [DESK_MOOR_LAUNCH_CHANNEL]: String(LAUNCH_CHANNEL_FD),
+      [moorLaunchChannelEnvKey(invoked)]: String(LAUNCH_CHANNEL_FD),
       [moorGenerationEnvKey(invoked)]: generationValue,
+      [MOOR_SESSION_GENERATION]: generationValue,
       [DESK_SESSION_GENERATION]: generationValue
     }
   });

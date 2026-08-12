@@ -29,8 +29,10 @@ import { MoorCodec, type MoorMessage } from '../../src/shared/moorWire/codec.js'
 import { crc32c } from '../../src/shared/moorWire/crc32c.js';
 import { MoorKind } from '../../src/shared/moorWire/messages.js';
 import {
+  MOOR_SESSION_GENERATION,
   decodeMoorLaunchRecord,
-  moorGenerationEnvKey
+  moorGenerationEnvKey,
+  moorLaunchChannelEnvKey
 } from '../../src/server/runtime/moorLaunchChannel.js';
 
 const HEARTBEAT_MS = Number(process.env.FAKE_MOOR_HEARTBEAT_MS ?? 1000);
@@ -260,9 +262,12 @@ function parseStart(argv: string[]): { storeDir: string | undefined; sessionPath
 
 async function launcher(argv: string[]): Promise<never> {
   const { storeDir, sessionPath, command } = parseStart(argv);
-  const selector = process.env.DESK_MOOR_LAUNCH_CHANNEL;
+  // The selector key derives from THIS process's invoked name (spec §10.1.1) —
+  // the fake models an independent moor holder with zero Desk vocabulary.
+  const selectorKey = moorLaunchChannelEnvKey(process.execPath);
+  const selector = process.env[selectorKey];
   if (selector === undefined || String(Number.parseInt(selector, 10)) !== selector) {
-    fail('launcher: missing/malformed DESK_MOOR_LAUNCH_CHANNEL');
+    fail(`launcher: missing/malformed ${selectorKey}`);
   }
   const bytes = await readChannelToEof(Number.parseInt(selector, 10));
   // The PRODUCTION decoder is the launch-record truth: full 32-byte layout,
@@ -274,8 +279,11 @@ async function launcher(argv: string[]): Promise<never> {
     fail(`launcher: ${(error as Error).message}`);
   }
   const expected = String(generation);
-  if (process.env.DESK_SESSION_GENERATION !== expected) {
-    fail('launcher: DESK_SESSION_GENERATION does not match the record');
+  // The fixed child-visible carrier (spec §10.1). The holder validates ONLY
+  // its own carriers: any DESK_* variable is opaque application env that must
+  // pass through untouched (the spawn-master tests assert that passthrough).
+  if (process.env[MOOR_SESSION_GENERATION] !== expected) {
+    fail('launcher: MOOR_SESSION_GENERATION does not match the record');
   }
   // The second carrier is EXACTLY the invocation-derived key for this binary
   // (a stray *_GENERATION from another name is a conflicting authority).
@@ -303,7 +311,7 @@ async function launcher(argv: string[]): Promise<never> {
   }
 
   const holderEnv: NodeJS.ProcessEnv = { ...process.env };
-  delete holderEnv.DESK_MOOR_LAUNCH_CHANNEL;
+  delete holderEnv[selectorKey];
   const child = spawn(
     process.execPath,
     [

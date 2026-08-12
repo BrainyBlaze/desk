@@ -1,37 +1,49 @@
 // #9 integration seam: supervised moor holder launch. Desk must deliver ONE
-// 32-byte private launch record over an inherited fd named by
-// DESK_MOOR_LAUNCH_CHANNEL (decimal fd number), close it (EOF), and set BOTH
-// generation env carriers — <BASENAME>_GENERATION and DESK_SESSION_GENERATION —
-// to the record's canonical decimal generation (moor private.rs:333-358).
-// Verified against a real child process standing in for the moor launcher.
+// 32-byte private launch record over an inherited fd named by the
+// invocation-derived <BASENAME>_LAUNCH_CHANNEL selector (decimal fd number,
+// spec §10.1.1), close it (EOF), and set the moor generation carriers —
+// <BASENAME>_GENERATION and the fixed MOOR_SESSION_GENERATION — plus Desk's
+// own opaque DESK_SESSION_GENERATION, all to the record's canonical decimal
+// generation. Verified against a real child process standing in for the moor
+// launcher.
 import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  DESK_MOOR_LAUNCH_CHANNEL,
   DESK_SESSION_GENERATION,
+  MOOR_SESSION_GENERATION,
   decodeMoorLaunchRecord,
-  moorGenerationEnvKey
+  moorGenerationEnvKey,
+  moorLaunchChannelEnvKey
 } from '../src/server/runtime/moorLaunchChannel.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 
 /**
- * Fake moor launcher: reads the launch channel fd named by the selector env to
- * EOF, records what it saw (bytes + env carriers) as JSON, exits 0. Exits 1 if
- * the selector is missing or unreadable.
+ * Fake moor launcher: finds the single *_LAUNCH_CHANNEL selector in its
+ * environment (deriving nothing — so the test can assert the exact key Desk
+ * produced), reads that fd to EOF, records what it saw (selector key + bytes +
+ * env carriers) as JSON, exits 0. Exits 1 if the selector is missing,
+ * ambiguous, or unreadable — so a stale second selector surviving the strip
+ * fails the spawn itself.
  */
 const PROBE_SOURCE = `
 const { readFileSync, writeFileSync } = require('node:fs');
 const out = process.argv[2];
 try {
-  const selector = process.env.DESK_MOOR_LAUNCH_CHANNEL;
+  const launchKeys = Object.keys(process.env).filter((key) => key.endsWith('_LAUNCH_CHANNEL'));
+  if (launchKeys.length !== 1) {
+    throw new Error('expected exactly one *_LAUNCH_CHANNEL selector, got ' + JSON.stringify(launchKeys));
+  }
+  const selectorKey = launchKeys[0];
+  const selector = process.env[selectorKey];
   const fd = Number(selector);
   const record = readFileSync(fd); // reads to EOF — hangs unless Desk closed the write side
   const generationKeys = Object.keys(process.env).filter((key) => key.endsWith('_GENERATION'));
   const environment = {};
   for (const key of generationKeys) environment[key] = process.env[key];
   writeFileSync(out, JSON.stringify({
+    selectorKey,
     selector,
     recordHex: Buffer.from(record).toString('hex'),
     recordLength: record.length,
@@ -45,6 +57,7 @@ try {
 `;
 
 interface ProbeReport {
+  selectorKey?: string;
   selector?: string;
   recordHex?: string;
   recordLength?: number;
@@ -88,27 +101,33 @@ describe('spawnMoorMaster', () => {
     }
   });
 
-  it('delivers exactly one 32-byte record over the selector fd and closes it', async () => {
+  it('delivers exactly one 32-byte record over the derived selector fd and closes it', async () => {
     const report = await runProbe('/opt/desk/libexec/moor', 7);
     expect(report.failed).toBeUndefined();
+    expect(report.selectorKey).toBe('MOOR_LAUNCH_CHANNEL');
     expect(report.recordLength).toBe(32);
     const record = decodeMoorLaunchRecord(Buffer.from(report.recordHex!, 'hex'));
     expect(record.generation).toBe(7);
   });
 
-  it('sets both generation carriers to the canonical decimal record generation', async () => {
+  it('sets every generation carrier to the canonical decimal record generation', async () => {
     const report = await runProbe('/opt/desk/libexec/moor', 42);
     expect(report.environment).toMatchObject({
       [moorGenerationEnvKey('/opt/desk/libexec/moor')]: '42', // MOOR_GENERATION
+      [MOOR_SESSION_GENERATION]: '42',
       [DESK_SESSION_GENERATION]: '42'
     });
     expect(report.environment!['MOOR_GENERATION']).toBe('42');
   });
 
-  it('derives the invocation env key from the spawned basename, not a fixed name', async () => {
+  it('derives the invocation keys from the spawned basename, not a fixed name', async () => {
     const report = await runProbe('/usr/local/bin/holderx', 9);
+    expect(report.selectorKey).toBe(moorLaunchChannelEnvKey('/usr/local/bin/holderx'));
+    expect(report.selectorKey).toBe('HOLDERX_LAUNCH_CHANNEL');
     expect(report.environment!['HOLDERX_GENERATION']).toBe('9');
     expect(report.environment!['MOOR_GENERATION']).toBeUndefined();
+    // The fixed child-visible carrier does NOT follow the invoked name.
+    expect(report.environment![MOOR_SESSION_GENERATION]).toBe('9');
     expect(report.environment![DESK_SESSION_GENERATION]).toBe('9');
   });
 
@@ -167,15 +186,22 @@ describe('spawnMoorMaster', () => {
   });
 
   it('strips exactly the known supervision carriers and preserves application env', async () => {
+    // Stale carriers from every era Desk has ever set — including the
+    // pre-decoupling DESK_MOOR_LAUNCH_CHANNEL: had it survived, the probe
+    // would see TWO *_LAUNCH_CHANNEL keys and fail the launch itself.
     const report = await runProbe('/usr/local/bin/moor', 23, {
       ATCH_GENERATION: '99',
       MY_TOOL_GENERATION: '77',
+      MOOR_SESSION_GENERATION: '99',
       DESK_SESSION_GENERATION: '99',
       DESK_MOOR_LAUNCH_CHANNEL: '9'
     });
+    expect(report.failed).toBeUndefined();
+    expect(report.selectorKey).toBe('MOOR_LAUNCH_CHANNEL');
     expect(report.environment).toEqual({
       MOOR_GENERATION: '23',
       MY_TOOL_GENERATION: '77',
+      MOOR_SESSION_GENERATION: '23',
       DESK_SESSION_GENERATION: '23'
     });
     expect(Number.parseInt(report.selector!, 10)).toBeGreaterThanOrEqual(3);

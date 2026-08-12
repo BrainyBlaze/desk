@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DESK_MOOR_LAUNCH_CHANNEL,
   DESK_SESSION_GENERATION,
+  MOOR_SESSION_GENERATION,
   MoorLaunchChannelError,
   MoorLaunchResultDecoder,
   decodeMoorLaunchRecord,
   decodeMoorLaunchResult,
   encodeMoorLaunchRecord,
-  moorGenerationEnvKey
+  moorGenerationEnvKey,
+  moorLaunchChannelEnvKey
 } from '../src/server/runtime/moorLaunchChannel.js';
 
 const nonzero = (length: number, value: number): Uint8Array => new Uint8Array(length).fill(value);
@@ -177,9 +178,28 @@ describe('Moor launch result sequence', () => {
 });
 
 describe('Moor generation environment carriers', () => {
-  it('exports the two literal Desk carrier keys', () => {
-    expect(DESK_MOOR_LAUNCH_CHANNEL).toBe('DESK_MOOR_LAUNCH_CHANNEL');
+  it('exports the fixed moor carrier and the distinct Desk application key', () => {
+    // The moor child-visible carrier is a FIXED literal (spec §10.1) — never
+    // derived — and the Desk application variable is a genuinely different
+    // name that moor treats as opaque environment.
+    expect(MOOR_SESSION_GENERATION).toBe('MOOR_SESSION_GENERATION');
     expect(DESK_SESSION_GENERATION).toBe('DESK_SESSION_GENERATION');
+    expect(MOOR_SESSION_GENERATION).not.toBe(DESK_SESSION_GENERATION);
+  });
+
+  it.each([
+    ['/usr/local/bin/moor', 'MOOR_LAUNCH_CHANNEL'],
+    ['moor-copy', 'MOOR_COPY_LAUNCH_CHANNEL'],
+    ['', 'MOOR_LAUNCH_CHANNEL']
+  ])('derives the launch selector for %s as %s', (invoked, expected) => {
+    expect(moorLaunchChannelEnvKey(invoked)).toBe(expected);
+  });
+
+  it('caps the launch-selector basename at 112 transformed bytes (spec §10.1.1)', () => {
+    const long = new Uint8Array(200).fill(0x61);
+    const key = moorLaunchChannelEnvKey(long);
+    expect(key).toHaveLength(127);
+    expect(key).toBe(`${'A'.repeat(112)}_LAUNCH_CHANNEL`);
   });
 
   it.each([

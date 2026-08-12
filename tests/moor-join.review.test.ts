@@ -22,10 +22,10 @@ import {
   type MoorCommit
 } from '../src/server/runtime/moorStore.js';
 import {
-  DESK_MOOR_LAUNCH_CHANNEL,
-  DESK_SESSION_GENERATION,
+  MOOR_SESSION_GENERATION,
   encodeMoorLaunchRecord,
-  moorGenerationEnvKey
+  moorGenerationEnvKey,
+  moorLaunchChannelEnvKey
 } from '../src/server/runtime/moorLaunchChannel.js';
 
 const FAKE = fileURLToPath(new URL('./helpers/fake-moor-holder.ts', import.meta.url));
@@ -93,8 +93,8 @@ function launchFakeWithRecord(
   for (const key of Object.keys(env)) {
     if (key.endsWith('_GENERATION')) delete env[key];
   }
-  env[DESK_MOOR_LAUNCH_CHANNEL] = '3';
-  env[DESK_SESSION_GENERATION] = String(GENERATION);
+  env[moorLaunchChannelEnvKey(process.execPath)] = '3';
+  env[MOOR_SESSION_GENERATION] = String(GENERATION);
   env[carrierKey] = String(GENERATION);
   const child = spawn(
     process.execPath,

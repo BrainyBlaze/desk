@@ -1,7 +1,14 @@
-export const DESK_MOOR_LAUNCH_CHANNEL = 'DESK_MOOR_LAUNCH_CHANNEL';
+// Moor's fixed child-visible semantic carrier (moor spec §10.1): read
+// name-agnostically by a semantic producer inside the session child, so it is
+// a FIXED literal, never derived from the holder's invoked name.
+export const MOOR_SESSION_GENERATION = 'MOOR_SESSION_GENERATION';
+// Desk's OWN application variable (hooks/agent-host fencing). Moor never
+// names, validates, strips, or injects it — it rides the child environment as
+// opaque application env. Genuinely distinct from the moor carrier above.
 export const DESK_SESSION_GENERATION = 'DESK_SESSION_GENERATION';
 
 const GENERATION_SUFFIX = '_GENERATION';
+const LAUNCH_CHANNEL_SUFFIX = '_LAUNCH_CHANNEL';
 const LAUNCH_RECORD_MAGIC = Uint8Array.of(0x4d, 0x4f, 0x4f, 0x52, 0x4c, 0x43, 0x48, 0x33, 1);
 const LAUNCH_RESULT_MAGIC = Uint8Array.of(0x4d, 0x4f, 0x52, 0x52, 1);
 
@@ -194,14 +201,41 @@ export function moorGenerationEnvKey(
   invokedPath: string | Uint8Array,
   platform: string = process.platform
 ): string {
+  return moorEnvKey(invokedPath, GENERATION_SUFFIX, platform);
+}
+
+/**
+ * The launch-channel selector key (moor spec §10.1.1): derived from the
+ * INVOKED basename exactly like the generation carrier, because the external
+ * launcher sets it by the name it invokes — a `moor-copy` invocation must
+ * yield the same key on both sides.
+ */
+export function moorLaunchChannelEnvKey(
+  invokedPath: string | Uint8Array,
+  platform: string = process.platform
+): string {
+  return moorEnvKey(invokedPath, LAUNCH_CHANNEL_SUFFIX, platform);
+}
+
+// One derivation for every invocation-derived carrier, frozen by moor spec
+// §10.1.1: the transformed basename portion is capped at 127 - len(suffix)
+// BYTES (112 for _LAUNCH_CHANNEL, 116 for _GENERATION) BEFORE the suffix is
+// appended — a suffix-aware cap, not a cap on the finished key, so both sides
+// truncate identically (moor private.rs environment_key does take(127 -
+// suffix.len()) over the raw basename bytes).
+function moorEnvKey(
+  invokedPath: string | Uint8Array,
+  suffix: string,
+  platform: string
+): string {
   const raw = typeof invokedPath === 'string' ? Buffer.from(invokedPath) : invokedPath;
   const basename = fileName(raw, platform) ?? Uint8Array.of(0x6d, 0x6f, 0x6f, 0x72);
-  const maximum = 127 - GENERATION_SUFFIX.length;
+  const maximum = 127 - suffix.length;
   let key = '';
   for (const byte of basename.subarray(0, maximum)) {
     key += asciiAlphanumeric(byte) ? String.fromCharCode(toAsciiUppercase(byte)) : '_';
   }
-  return key + GENERATION_SUFFIX;
+  return key + suffix;
 }
 
 // Mirrors the holder's own basename derivation: Rust Path::file_name on the

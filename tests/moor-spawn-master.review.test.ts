@@ -53,11 +53,12 @@ describe('spawnMoorMaster adversarial review', () => {
         probePath,
         `
 const { readFileSync, writeFileSync } = require('node:fs');
-readFileSync(Number(process.env.DESK_MOOR_LAUNCH_CHANNEL));
+readFileSync(Number(process.env.MOOR_LAUNCH_CHANNEL));
 writeFileSync(process.argv[2], JSON.stringify({
   ATCH_GENERATION: process.env.ATCH_GENERATION,
   APPLICATION_GENERATION: process.env.APPLICATION_GENERATION,
   MOOR_GENERATION: process.env.MOOR_GENERATION,
+  MOOR_SESSION_GENERATION: process.env.MOOR_SESSION_GENERATION,
   DESK_SESSION_GENERATION: process.env.DESK_SESSION_GENERATION
 }));
 `
@@ -87,6 +88,7 @@ writeFileSync(process.argv[2], JSON.stringify({
       expect(environment).toEqual({
         APPLICATION_GENERATION: 'preserve-me',
         MOOR_GENERATION: '23',
+        MOOR_SESSION_GENERATION: '23',
         DESK_SESSION_GENERATION: '23'
       });
     } finally {
