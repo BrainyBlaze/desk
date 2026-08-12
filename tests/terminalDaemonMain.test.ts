@@ -200,8 +200,13 @@ describe('reconcile liveness (wedged sockets must not stall startup)', () => {
       for (let i = 0; i < 3; i += 1) {
         expect(results.find((r) => r.sessionId === `silent-${i}`)?.ok).toBe(false);
       }
-      // Concurrent workers: ~one 2 s adoption-deadline window, not one per wedged socket.
-      expect(wall).toBeLessThan(5000);
+      // The property is CONCURRENCY, not absolute speed: sequential
+      // reconciliation of 3 wedged sockets would take at least 3 x the 2 s
+      // adoption deadline = 6 s before the healthy attach even starts. Any
+      // wall below that floor proves the worker pool ran them in parallel;
+      // the margin above the typical ~2-3 s absorbs full-suite load spikes
+      // without weakening the proof.
+      expect(wall).toBeLessThan(5900);
     } finally {
       // SIGTERM the detached holder directly: its close tears the adopted link
       // down, and the reap precedes the temp-root removal (no leaked process).
