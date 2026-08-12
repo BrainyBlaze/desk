@@ -14,7 +14,6 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -22,12 +21,26 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PIN_RELATIVE_PATH = join('scripts', 'distribution', 'moor-pin.json');
 export const MOOR_ATTESTED_VERSION = 'moor 0.1.0';
+export const MOOR_PIN_SCHEMA_VERSION = 1;
+/** The ONLY repository production assets may come from. */
+export const MOOR_RELEASE_REPOSITORY = 'https://github.com/BrainyBlaze/moor';
+/** The ratified 6-key target matrix — a pin must cover EXACTLY these. */
+export const MOOR_TARGETS = Object.freeze([
+  'x86_64-unknown-linux-musl',
+  'aarch64-unknown-linux-musl',
+  'x86_64-apple-darwin',
+  'aarch64-apple-darwin',
+  'x86_64-pc-windows-msvc',
+  'aarch64-pc-windows-msvc'
+]);
+const DOWNLOAD_DEADLINE_MS = 60_000;
+const MAX_ASSET_BYTES = 64 * 1024 * 1024; // no holder build approaches this
 
 /**
  * The canonical target key for a host — the ratified 6-key matrix (no libc
@@ -61,18 +74,36 @@ export function readMoorPin(root = DEFAULT_ROOT) {
     );
   }
   const pin = JSON.parse(readFileSync(path, 'utf8'));
+  if (pin.schemaVersion !== MOOR_PIN_SCHEMA_VERSION) {
+    throw new Error(`moor pin schemaVersion ${pin.schemaVersion} is not the supported ${MOOR_PIN_SCHEMA_VERSION}`);
+  }
   if (typeof pin.version !== 'string' || pin.version.length === 0) {
     throw new Error('moor pin is missing a release version');
   }
-  if (typeof pin.repository !== 'string' || pin.repository.length === 0) {
-    throw new Error('moor pin is missing the release repository');
+  if (typeof pin.commit !== 'string' || !/^[0-9a-f]{40}$/.test(pin.commit)) {
+    throw new Error('moor pin is missing the exact 40-hex release commit');
   }
-  if (pin.targets === null || typeof pin.targets !== 'object' || Object.keys(pin.targets).length === 0) {
+  if (pin.repository !== MOOR_RELEASE_REPOSITORY) {
+    // Production assets come from exactly one place — any other repository
+    // string in a committed pin is a supply-chain red flag, not a config.
+    throw new Error(`moor pin repository must be ${MOOR_RELEASE_REPOSITORY}, got ${pin.repository}`);
+  }
+  if (pin.targets === null || typeof pin.targets !== 'object') {
     throw new Error('moor pin carries no targets — fail closed, nothing to download');
   }
+  const keys = Object.keys(pin.targets).sort();
+  const expected = [...MOOR_TARGETS].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new Error(
+      `moor pin must cover exactly the ratified 6-target matrix; got [${keys.join(', ')}]`
+    );
+  }
   for (const [triple, target] of Object.entries(pin.targets)) {
-    if (typeof target?.asset !== 'string' || target.asset.length === 0) {
-      throw new Error(`moor pin target ${triple} is missing its asset name`);
+    if (typeof target?.asset !== 'string' || target.asset.length === 0 || target.asset.includes('/')) {
+      throw new Error(`moor pin target ${triple} is missing a plain asset filename`);
+    }
+    if (!Number.isSafeInteger(target?.size) || target.size <= 0 || target.size > MAX_ASSET_BYTES) {
+      throw new Error(`moor pin target ${triple} is missing a sane byte size`);
     }
     if (typeof target?.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(target.sha256)) {
       throw new Error(`moor pin target ${triple} is missing a valid sha256`);
@@ -88,20 +119,34 @@ export function assetUrl(pin, triple, baseUrl = process.env.DESK_MOOR_RELEASE_BA
     throw new Error(`moor pin has no target for this host triple: ${triple}`);
   }
   if (baseUrl !== undefined && baseUrl.length > 0) {
+    // Explicit override for tests/candidate mirrors ONLY: https or file.
+    if (!baseUrl.startsWith('https://') && !baseUrl.startsWith('file://')) {
+      throw new Error('DESK_MOOR_RELEASE_BASE_URL must be https:// or file://');
+    }
     return `${baseUrl.replace(/\/$/, '')}/${target.asset}`;
   }
-  return `${pin.repository.replace(/\/$/, '').replace(/\.git$/, '')}/releases/download/${pin.version}/${target.asset}`;
+  return `${pin.repository}/releases/download/${pin.version}/${target.asset}`;
 }
 
 async function download(url) {
   if (url.startsWith('file://')) {
     return readFileSync(fileURLToPath(url));
   }
-  const response = await fetch(url, { redirect: 'follow' });
+  if (!url.startsWith('https://')) {
+    throw new Error(`moor downloads are https-only (or an explicit file:// test override): ${url}`);
+  }
+  const response = await fetch(url, {
+    redirect: 'follow',
+    signal: AbortSignal.timeout(DOWNLOAD_DEADLINE_MS)
+  });
   if (!response.ok) {
     throw new Error(`download failed: HTTP ${response.status} for ${url}`);
   }
-  return Buffer.from(await response.arrayBuffer());
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > MAX_ASSET_BYTES) {
+    throw new Error(`downloaded asset exceeds the ${MAX_ASSET_BYTES}-byte cap — refusing`);
+  }
+  return bytes;
 }
 
 export async function fetchMoor({
@@ -118,6 +163,11 @@ export async function fetchMoor({
   }
   const url = assetUrl(pin, triple, baseUrl);
   const bytes = await download(url);
+  if (bytes.length !== target.size) {
+    throw new Error(
+      `moor asset size mismatch for ${triple}: downloaded ${bytes.length} bytes, pinned ${target.size} — refusing to install`
+    );
+  }
   const digest = createHash('sha256').update(bytes).digest('hex');
   if (digest !== target.sha256) {
     throw new Error(
