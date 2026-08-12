@@ -31,29 +31,21 @@ jobs:
       # exist before the suite runs, not at packaging time. libexec/moor is
       # gitignored, so without this step every real-binary test skips silently
       # and the daemon↔moor seam ships with no automated coverage at all.
-      - name: Fetch the bundled moor for the integration suite
-        # Gated on the committed pin: before the first pinned moor release
-        # exists there is nothing to verify-download, and the native E2E
-        # suite skips itself when libexec/moor is absent.
-        if: ${{ hashFiles('scripts/distribution/moor-pin.json') != '' }}
-        run: npm run fetch:moor
       - name: Test
         run: |
           test_tmp=$(mktemp -d /var/tmp/desk-vitest.XXXXXX)
           trap 'rm -rf "$test_tmp"' EXIT
           TMPDIR="$test_tmp" RUN_REAL_JOIN=1 npm test
-      # Same pin gate as the fetch step: build:distribution re-invokes
-      # fetch:moor (fail-closed without a pin), so before the first pinned
-      # moor release CI proves the APPLICATION build only.
-      - name: Build distribution (pinned moor + application)
-        if: ${{ hashFiles('scripts/distribution/moor-pin.json') != '' }}
-        run: npm run build:distribution
-      - name: Build application (no pinned moor release yet)
-        if: ${{ hashFiles('scripts/distribution/moor-pin.json') == '' }}
+      # Ordinary PR/push CI never performs network acquisition of the moor
+      # binary: the fetch pipeline (pin validation, download, sha256, atomic
+      # install, attestation) is fully proven by tests/fetch-moor.test.ts
+      # over a local file:// fixture, and PRODUCTION byte acquisition + the
+      # real probe live deliberately in the gated release workflow — so a
+      # pin-introducing PR never depends on already-promoted bytes, and CI
+      # runs are immune to network/rate-limit flakes. The native E2E suite
+      # skips itself when libexec/moor is absent.
+      - name: Build application
         run: npm run build:application
-      - name: Probe bundled moor
-        if: ${{ hashFiles('scripts/distribution/moor-pin.json') != '' }}
-        run: test "$(./libexec/moor --version)" = 'moor 0.1.0'
       - run: npm run smoke:serve-modes
       - name: Restore and verify the Node CLI after runtime smoke
         run: npm run build
