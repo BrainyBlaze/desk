@@ -174,13 +174,13 @@ export async function main(argv: string[]): Promise<number> {
     }
 
     if (args.command === 'status') {
-      printStatus(desk.sessions);
+      await printStatus(desk.sessions);
       return 0;
     }
 
     if (args.command === 'up') {
       if (args.manifestPath) {
-        return await runPlan(planDeskUp(desk.sessions), args.dryRun);
+        return await runPlan(await planDeskUp(desk.sessions), args.dryRun);
       }
       return await requestDeskUp(args.dryRun);
     }

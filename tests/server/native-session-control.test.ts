@@ -392,12 +392,34 @@ describe('createNativeChannelsTransport', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ sessionId: 'shell', text: '\r' });
   });
 
-  it('sessionRunning reads the flag-aware running set', () => {
-    const runningSpy = vi.spyOn(runner, 'runningSessionSet').mockReturnValue(new Set(['shell']));
+  it('sessionLiveness is the daemon authority, and unreachable stays indeterminate', async () => {
+    // The bodies are the daemon's real envelopes, whole: a verdict is read
+    // from a validated descriptor and from this route's own negative, so an
+    // abbreviated mock here would be testing a daemon that does not exist.
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(String(url)).toContain('/control/moor-status?sessionId=');
+      if (String(url).includes('sessionId=shell')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({ ok: true, generation: 4, wallStartMs: 1786560739350, pid: 77, running: true })
+        };
+      }
+      if (String(url).includes('sessionId=ghost')) {
+        return {
+          ok: false,
+          status: 404,
+          text: async () => JSON.stringify({ ok: false, error: 'session has no live moor link' })
+        };
+      }
+      throw new Error('connect ECONNREFUSED');
+    });
+    vi.stubGlobal('fetch', fetchMock);
     const transport = createNativeChannelsTransport();
-    expect(transport.sessionRunning('shell')).toBe(true);
-    expect(transport.sessionRunning('agentdesk-g-ghost-def')).toBe(false);
-    expect(runningSpy).toHaveBeenCalled();
+    expect(await transport.sessionLiveness('shell')).toBe('verified-live');
+    expect(await transport.sessionLiveness('ghost')).toBe('stale');
+    expect(await transport.sessionLiveness('offline')).toBe('indeterminate');
   });
 
   it('falls back to the tmuxSession as the daemon key for an unknown session', async () => {

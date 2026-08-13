@@ -31,6 +31,18 @@ export interface CompleteProviderSessionLaunchRequest {
   generation: number;
 }
 
+/**
+ * The exact negative envelope `/control/moor-status` emits when a session has
+ * no live adopted moor link.
+ *
+ * It lives here, next to the client, because it is a two-sided contract: the
+ * route emits it and callers read it to tell the authority's own "this session
+ * is gone" apart from any other 404 (an old daemon without the route, a proxy,
+ * a generic not-found page). Two copies of the literal would drift, and the
+ * drift would surface as callers quietly deciding a live session is absent.
+ */
+export const MOOR_STATUS_NO_LIVE_LINK_ERROR = 'session has no live moor link';
+
 /** Derive the daemon's HTTP control origin from its websocket endpoint. */
 export function daemonHttpBase(env: NodeJS.ProcessEnv = process.env): string {
   const url = new URL(env.DESK_DAEMON_URL ?? 'ws://127.0.0.1:5178');

@@ -79,6 +79,7 @@ import {
   type MoorEventDiagnostic
 } from './moorEventObserver.js';
 import type { MoorStatus } from '../../shared/moorWire/messages.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../shared/daemonControlClient.js';
 import type {
   HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
@@ -1535,7 +1536,10 @@ export function createDaemonControlHandler(
           // beginRetire), and its wallStart is the holder's own start clock.
           const status = daemon.moorSessionStatus(sessionId);
           if (status === undefined) {
-            sendJson(res, 404, { ok: false, error: 'session has no live moor link' });
+            // The shared literal, not a local copy: callers tell this negative
+            // verdict apart from any other 404 by its exact wording, and a
+            // reworded copy would read to them as "some proxy said not-found".
+            sendJson(res, 404, { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR });
             return;
           }
           sendJson(res, 200, {
