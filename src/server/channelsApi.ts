@@ -30,6 +30,7 @@ import {
   ensureUploadFileBucket,
   listChannelMembers,
   listChannels,
+  resolveUnreadSummaries,
   readChannelDetail,
   readChannelMessages,
   readThread,
@@ -443,9 +444,26 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
   try {
     if (req.method === 'GET' && url.pathname === '/api/channels/state') {
       const since = Number(url.searchParams.get('since') ?? '0') || 0;
+      let seen: Record<string, string> | null = null;
+      const seenRaw = url.searchParams.get('seen');
+      if (seenRaw !== null && seenRaw.length <= 16384) {
+        try {
+          const parsed = JSON.parse(seenRaw) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            seen = Object.fromEntries(
+              Object.entries(parsed as Record<string, unknown>).filter(
+                (entry): entry is [string, string] => typeof entry[1] === 'string'
+              )
+            );
+          }
+        } catch {
+          seen = null;
+        }
+      }
+      const channels = listChannels(home);
       sendJson(res, 200, {
         home,
-        channels: listChannels(home),
+        channels: seen === null ? channels : resolveUnreadSummaries(home, channels, seen),
         delivery: await engine.lifecycleStates(),
         activity: engine.listActivity(since).slice(-100),
         activitySeq: engine.latestActivitySeq(),

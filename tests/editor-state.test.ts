@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { closeTab, duplicateName, moveTab, openTab, tabDropTargetIndex, tabLabels } from '../src/web/editor/editorState';
 
 describe('openTab', () => {
-  it('appends a new path and activates it', () => {
-    expect(openTab(['/a'], '/a', '/b')).toEqual({ tabs: ['/a', '/b'], active: '/b' });
+  it('prepends a new path and activates it', () => {
+    expect(openTab(['/a'], '/a', '/b')).toEqual({ tabs: ['/b', '/a'], active: '/b' });
   });
 
   it('activates an already-open path without duplicating', () => {
