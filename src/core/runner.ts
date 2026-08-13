@@ -360,21 +360,39 @@ export async function attachSession(
 }
 
 export function findSession(sessions: SessionSpec[], query: string): SessionSpec {
-  const matches = sessions.filter(
+  // Exact identity WINS (desk#57). Mixing the substring convenience into the
+  // same precedence as the exact rules made an unambiguous session
+  // unaddressable as soon as a neighbour's id contained its name: `claude-1`
+  // is a substring of `claude-10`, so every operator command targeting
+  // `claude-1` failed with "multiple sessions match" while the daemon
+  // answered for it happily. A fleet hits this the moment it reaches ten
+  // sessions of one kind.
+  const exact = sessions.filter(
     (session) =>
-      session.name === query ||
-      session.sessionId === query ||
-      session.resume === query ||
-      session.sessionId.includes(query)
+      session.name === query || session.sessionId === query || session.resume === query
   );
-
-  if (matches.length === 1) {
-    return matches[0]!;
+  if (exact.length === 1) {
+    return exact[0]!;
   }
-  if (matches.length === 0) {
+  if (exact.length > 1) {
+    // Genuinely ambiguous: two sessions really do carry this identifier.
+    throw new Error(
+      `multiple sessions match ${query}: ${exact.map((session) => session.sessionId).join(', ')}`
+    );
+  }
+  // No exact identity — fall back to the substring convenience.
+  const partial = sessions.filter((session) => session.sessionId.includes(query));
+  if (partial.length === 1) {
+    return partial[0]!;
+  }
+  if (partial.length === 0) {
     throw new Error(`no session matches ${query}`);
   }
-  throw new Error(`multiple sessions match ${query}: ${matches.map((session) => session.name).join(', ')}`);
+  throw new Error(
+    `${query} is not an exact session name or id and matches several: ${partial
+      .map((session) => session.sessionId)
+      .join(', ')}`
+  );
 }
 
 export function printStatus(
