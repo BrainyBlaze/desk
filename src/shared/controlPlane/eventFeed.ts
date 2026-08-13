@@ -159,13 +159,17 @@ const readRequestSchema = z
   .strictObject({
     ids: z.array(identifierSchema).max(1_000).optional(),
     all: z.boolean().optional(),
-    kinds: z.array(eventKindSchema).max(DESK_EVENT_KINDS.length).optional()
+    kinds: z.array(eventKindSchema).max(DESK_EVENT_KINDS.length).optional(),
+    /** mark every channel-message posted into this thread parent read (resolved
+        to ids server-side; never stored in the journal record) */
+    thread: identifierSchema.optional()
   })
   .superRefine((value, context) => {
     if (
       value.all !== true &&
       (value.ids === undefined || value.ids.length === 0) &&
-      (value.kinds === undefined || value.kinds.length === 0)
+      (value.kinds === undefined || value.kinds.length === 0) &&
+      value.thread === undefined
     ) {
       context.addIssue({
         code: 'custom',

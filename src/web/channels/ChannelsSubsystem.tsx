@@ -1502,6 +1502,9 @@ export function ChannelsSubsystem({
     setThreadParent(parentId);
     threadRef.current = parentId;
     setThreadMessages([]);
+    // The thread pane is the read surface for its replies — acknowledge their
+    // event cards so they leave the drawer's threads queue.
+    void markEventsRead({ thread: parentId }).catch(report);
     void refreshThread(channel, parentId);
   }
 
