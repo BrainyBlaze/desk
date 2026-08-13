@@ -27,7 +27,13 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PIN_RELATIVE_PATH = join('scripts', 'distribution', 'moor-pin.json');
 export const MOOR_ATTESTED_VERSION = 'moor 0.1.0';
-export const MOOR_PIN_SCHEMA_VERSION = 1;
+// v2 (desk#60): the pin carries the candidate's `coverage` verbatim. The
+// version MOVED rather than the field being added quietly, so a pin written
+// before this — which cannot say which lanes verified it — is rejected by name
+// instead of being read as though its closure were full.
+export const MOOR_PIN_SCHEMA_VERSION = 2;
+/** The closure labels the release assembler is allowed to state. */
+export const MOOR_CLOSURE_LABELS = Object.freeze(['full-matrix', 'hosted-only', 'partial']);
 /** The ONLY repository production assets may come from. */
 export const MOOR_RELEASE_REPOSITORY = 'https://github.com/BrainyBlaze/moor';
 /** The ratified 6-key target matrix — a pin must cover EXACTLY these. */
@@ -65,6 +71,77 @@ export function moorTargetTriple({ platform = process.platform, arch = process.a
   }
 }
 
+/**
+ * Validate the candidate coverage the pin inherits from the release manifest.
+ * The two shapes are mirrored from the assembler exactly: a full matrix states
+ * its label and nothing else, and a narrowed closure MUST name every lane it
+ * could not verify — a narrowed claim with no list is unfalsifiable, which is
+ * worse than no claim at all.
+ */
+function validatePinCoverage(coverage) {
+  if (coverage === null || typeof coverage !== 'object' || Array.isArray(coverage)) {
+    throw new Error('moor pin carries no coverage — it cannot state which lanes verified this candidate');
+  }
+  if (!MOOR_CLOSURE_LABELS.includes(coverage.requiredClosure)) {
+    throw new Error(
+      `moor pin requiredClosure must be one of [${MOOR_CLOSURE_LABELS.join(', ')}]; got ${JSON.stringify(coverage.requiredClosure)}`
+    );
+  }
+  const full = coverage.requiredClosure === 'full-matrix';
+  const keys = Object.keys(coverage).sort();
+  const expected = full ? ['requiredClosure'] : ['requiredClosure', 'unverified'];
+  if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
+    throw new Error(
+      full
+        ? `moor pin full-matrix coverage must carry exactly [requiredClosure]; got [${keys.join(', ')}]`
+        : `moor pin narrowed coverage must carry exactly [${expected.join(', ')}]; got [${keys.join(', ')}]`
+    );
+  }
+  if (full) return;
+  if (!Array.isArray(coverage.unverified) || coverage.unverified.length === 0) {
+    throw new Error(
+      'moor pin narrowed coverage must list every unverified lane — a narrowed closure that names nothing cannot be checked'
+    );
+  }
+  for (const entry of coverage.unverified) {
+    const entryKeys = Object.keys(entry ?? {}).sort();
+    const expectedEntry = ['gate', 'lane', 'target'];
+    if (entryKeys.length !== expectedEntry.length || entryKeys.some((key, i) => key !== expectedEntry[i])) {
+      throw new Error(
+        `moor pin unverified entry must carry exactly [${expectedEntry.join(', ')}]; got [${entryKeys.join(', ')}]`
+      );
+    }
+    if (!MOOR_TARGETS.includes(entry.target)) {
+      throw new Error(`moor pin unverified entry names a target outside the ratified matrix: ${JSON.stringify(entry.target)}`);
+    }
+    for (const field of ['gate', 'lane']) {
+      if (typeof entry[field] !== 'string' || entry[field].trim().length === 0) {
+        throw new Error(`moor pin unverified entry has an empty ${field}`);
+      }
+    }
+  }
+}
+
+/**
+ * Installing a narrowed candidate is an OPERATOR decision, never a default: a
+ * pin whose closure is not the full matrix is refused unless the operator says
+ * so by name, and the refusal names every lane that was never verified so the
+ * decision is made against facts rather than a label.
+ */
+export function assertCoverageAcceptable(
+  pin,
+  { allowNarrowed = process.env.DESK_MOOR_ALLOW_NARROWED_COVERAGE === '1' } = {}
+) {
+  if (pin.coverage.requiredClosure === 'full-matrix' || allowNarrowed) return;
+  const lanes = pin.coverage.unverified
+    .map((entry) => `${entry.target}/${entry.gate}/${entry.lane}`)
+    .join(', ');
+  throw new Error(
+    `moor pin closure is ${pin.coverage.requiredClosure}, not full-matrix: these lanes never verified this candidate — ${lanes}. ` +
+      'Set DESK_MOOR_ALLOW_NARROWED_COVERAGE=1 to install it anyway.'
+  );
+}
+
 /** Parse + structurally validate the pin document. Fail-closed on anything off. */
 export function readMoorPin(root = DEFAULT_ROOT) {
   const path = join(root, PIN_RELATIVE_PATH);
@@ -77,7 +154,7 @@ export function readMoorPin(root = DEFAULT_ROOT) {
   // EXACT key sets: an unknown key is either a typo silently ignored (a
   // pinned field that never actually pins) or smuggled data — both rejected.
   const topKeys = Object.keys(pin).sort();
-  const expectedTop = ['commit', 'repository', 'schemaVersion', 'targets', 'version'];
+  const expectedTop = ['commit', 'coverage', 'repository', 'schemaVersion', 'targets', 'version'];
   if (topKeys.length !== expectedTop.length || topKeys.some((key, i) => key !== expectedTop[i])) {
     throw new Error(`moor pin must carry exactly [${expectedTop.join(', ')}]; got [${topKeys.join(', ')}]`);
   }
@@ -95,6 +172,7 @@ export function readMoorPin(root = DEFAULT_ROOT) {
     // string in a committed pin is a supply-chain red flag, not a config.
     throw new Error(`moor pin repository must be ${MOOR_RELEASE_REPOSITORY}, got ${pin.repository}`);
   }
+  validatePinCoverage(pin.coverage);
   if (pin.targets === null || typeof pin.targets !== 'object') {
     throw new Error('moor pin carries no targets — fail closed, nothing to download');
   }
@@ -173,6 +251,7 @@ export async function fetchMoor({
   attest = defaultAttestation
 } = {}) {
   const pin = readMoorPin(root);
+  assertCoverageAcceptable(pin);
   const target = pin.targets[triple];
   if (target === undefined) {
     throw new Error(`moor pin has no target for this host triple: ${triple}`);
