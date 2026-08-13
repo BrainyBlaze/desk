@@ -167,7 +167,12 @@ Built-in agent values:
 - `codex`
 - `claude`
 - `opencode`
+- `qwen`
+- `kimi`
+- `grok`
 - `bash`
+
+`bypassPermissions` applies to `codex`, `claude`, `opencode`, and `kimi`; it is a manifest error on `qwen` and `grok` (which have no bypass flag) and silently ignored on `bash`. Agent profiles are available for `codex` and `claude` only. See [Agent integrations](/agent-integrations) for each agent's resume-id format, hook file, and credentials.
 
 For project sessions, `cwd` is optional because the project root is inherited. Root-level groups need `cwd` unless the session uses a command that handles its own directory.
 

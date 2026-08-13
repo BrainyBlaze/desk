@@ -49,13 +49,15 @@ Hover a group row and click **Add session**:
   <img src="/images/modal-add-session.png" alt="Add session modal" />
 </Frame>
 
-- **Agent** — `codex`, `claude`, `opencode`, `bash`, or a custom command.
+- **Agent** — `codex`, `claude`, `opencode`, `qwen`, `kimi`, `grok`, `bash`, or a custom command.
 - **Profile** — which provider account the session runs under, for agents that
   support it. `Ambient account` uses whatever the CLI is already logged into;
   pick a named profile to run this session under a specific account. The **+**
   beside the picker creates one without losing what you have typed here.
 - **UI mode** — `terminal` (the CLI's own TUI, the default) or `native` (Desk's
-  chat surface, marked experimental).
+  chat surface, marked experimental). Native is offered only for the SDK-backed
+  agents (`codex`, `claude`, `opencode`); `qwen`, `kimi`, and `grok` are
+  terminal-only.
 - **Bypass permissions** — for agent CLIs that support it, launches the
   session with the agent's permission prompts disabled. Leave it off for
   agents you want to approve actions interactively.

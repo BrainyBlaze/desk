@@ -3,7 +3,7 @@
 <p align="center"><strong>Native chat UI for coding-agent fleets, with terminal multiplexing, an IDE/CDE, and Slack-style agent channels.</strong></p>
 
 <p align="center">
-  Keep Claude Code, OpenAI Codex, OpenCode, and custom agents alive in durable atch sessions.
+  Keep Claude Code, OpenAI Codex, OpenCode, Qwen Code, Kimi Code, Grok, and custom agents alive in durable atch sessions.
   SDK-backed agents open in Desk's native chat surface by default, with the
   terminal multiplexer available when you need the raw TUI. Run the whole
   fleet from one cockpit: native agent transcripts, terminals, a full IDE with
@@ -131,7 +131,7 @@ desk serve --dev      # Vite development server on http://127.0.0.1:5173
 </details>
 
 Open the printed URL and add your first agent from the sidebar — pick a
-directory, choose `codex`, `claude`, `opencode`, or any command, and Desk
+directory, choose an agent (or any command), and Desk
 launches it under atch. SDK-backed agents open in the native chat surface by
 default; use the session editor to switch the session to terminal UI when you
 need a raw terminal, custom command, or interactive TUI-only command. Or declare
@@ -148,6 +148,10 @@ Optional, per subsystem:
 - **Claude Code** — install per Anthropic's docs, log in once.
 - **OpenCode** — install per the OpenCode docs, sign in once; Desk launches it
   with its own config dir and resumes sessions like the others.
+- **Qwen Code / Kimi Code / Grok** — optional terminal agents. Install each
+  CLI and add a provider credential (Grok runs under Bun). Run
+  `desk hooks install` so Desk can report their state. See
+  [Agent integrations](docs/agent-integrations.md) for per-agent details.
 - **GitHub CLI** — `gh auth login` powers the GitHub card, PR info, and
   open-on-GitHub actions (everything degrades gracefully without it).
 - **Projects subsystem** — the gh token additionally needs the `project`
