@@ -42,6 +42,7 @@ describe('source-backed installer contract', () => {
       'ensure_macos_tooling',
       'resolve_release_version',
       'download_release_metadata',
+      'require_matching_release_generation',
       'validate_install_manifest',
       'validate_staged_moor_pin',
       'download_and_verify_asset',
@@ -467,6 +468,27 @@ exec /bin/chmod "$@"
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/manifest is invalid/i);
+    expect(existsSync(value.launcher())).toBe(false);
+  });
+
+  // Every Desk release published so far carries the pre-Moor manifest: schemaVersion 1
+  // and no `moor` key. The installer served from `main` speaks schemaVersion 2 only, so
+  // it meets that shape on every real host. Reported as issue #37. A generation gap is
+  // not corruption, and telling the operator the manifest is "invalid" sends them
+  // hunting a tampered release instead of the installer that ships with their release.
+  it('names the installer/release generation gap instead of calling a pre-Moor manifest invalid', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as Record<string, unknown>;
+    delete manifest.moor;
+    manifest.schemaVersion = 1;
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/schemaVersion 1/);
+    expect(result.stderr).toMatch(/requires 2/);
+    expect(result.stderr).toContain('raw.githubusercontent.com/BrainyBlaze/desk/v0.3.0/install.sh');
     expect(existsSync(value.launcher())).toBe(false);
   });
 
