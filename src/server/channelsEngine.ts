@@ -3,6 +3,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync
 import { join } from 'node:path';
 
 import {
+  isShellAgent,
   mentionsHuman,
   resolveTargets,
   type ChannelMember,
@@ -1469,8 +1470,18 @@ export class ChannelsEngine {
     // queue item(s) for the durability layer's per-file renames.
     const deliveredSeqs = digest ? digestItems.map((item) => item.seq) : [next.seq];
     const notificationId = digest ? `digest-${deliveredSeqs.join('-')}-${next.messageId}` : next.messageId;
-    const native = this.sessionInfo(runtime.sessionId)?.uiMode === 'native';
-    const needsTerminalVerify = next.kind === 'prompt' && !native;
+    const info = this.sessionInfo(runtime.sessionId);
+    const native = info?.uiMode === 'native';
+    // A shell member is not an agent. It never reports `working`, has no input
+    // box an Enter could be eaten by and no structural approval menu, so the
+    // verify cycle can never find the positive evidence it looks for — while
+    // the shell DOES echo the paste, so the pane always changes. Running it
+    // therefore produced `submit-stuck-submit` for every prompt to a shell by
+    // construction: a false failure that blocked the queue and buried real
+    // incidents (desk#48). There is no submit to verify here, so we do not
+    // pretend either way; the outcome is recorded as submit-not-applicable.
+    const shell = isShellAgent(info?.agent);
+    const needsTerminalVerify = next.kind === 'prompt' && !native && !shell;
     // Prompts held a long time (busy agent, dead session, restarts) carry
     // a staleness note so the agent weighs them against newer context.
     const ageMs = this.now() - Date.parse(next.queuedAt);
@@ -1566,7 +1577,7 @@ export class ChannelsEngine {
       // hold the drain lock.
       this.background('submit verification', () => this.verifySubmitted(runtime, preFingerprint, deliveredSeqs));
     } else {
-      this.setSubmitState(runtime, 'submitted', deliveredSeqs);
+      this.setSubmitState(runtime, shell ? 'submit-not-applicable' : 'submitted', deliveredSeqs);
     }
     return true;
   }

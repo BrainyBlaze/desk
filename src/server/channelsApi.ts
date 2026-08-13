@@ -159,6 +159,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
         case 'delivery-ack-timeout':
           confirmDelivered(home, sessionId, context.seq);
           break;
+        // Non-agent (shell) session: nothing to verify, and nothing failed —
+        // the item leaves the queue as .delivered, never as .stuck-*.
+        case 'submit-not-applicable':
+          confirmDelivered(home, sessionId, context.seq);
+          break;
         case 'submit-stuck-paste':
           markStuck(home, sessionId, context.seq, 'paste');
           break;

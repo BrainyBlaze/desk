@@ -9,6 +9,7 @@ const KIND_LABEL: Record<DeliveryEventKind, string> = {
   delivering: 'delivering',
   submitted: 'submitted',
   'delivery-ack-timeout': 'ack-timeout',
+  'submit-not-applicable': 'delivered (shell)',
   'submit-stuck-paste': 'stuck-paste',
   'submit-stuck-submit': 'stuck-submit',
   'submit-stuck-unobservable': 'stuck-unobs',

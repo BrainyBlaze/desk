@@ -1149,6 +1149,106 @@ describe('ChannelsEngine delivery gating', () => {
     stuck.dispose();
   });
 
+  it('never classifies a shell (bash) member onboarding prompt as submit-stuck-submit', async () => {
+    // desk#48 — a bash session is not an agent: it never reports "working", has
+    // no input box and no structural approval menu, so the agent-shaped verify
+    // cycle can never observe positive evidence. Before the fix EVERY prompt to
+    // a shell member landed on submit-stuck-submit by construction (the shell
+    // echoes the paste, so the pane always changes), which blocks the queue and
+    // writes a false .stuck-submit ack-file next to genuine incidents.
+    let pane = '$ ';
+    const enters: string[] = [];
+    const shell = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      enterVerifyDelayMs: 1,
+      verifyCycles: 3,
+      sessionInfo: () => ({ sessionName: 'bash-1', agent: 'bash' }),
+      sendText: async () => {
+        // a shell echoes whatever is pasted onto its prompt line
+        pane = '$ You have been added to the desk channel #qa-room as @bash-1';
+        return true;
+      },
+      sendEnter: async (session) => {
+        enters.push(session);
+        return true;
+      },
+      sessionRunning: () => true,
+      capturePane: async () => pane,
+      // real ack-file lifecycle (mirrors channelsApi) so the durable outcome is
+      // the one the operator actually sees on disk
+      onSubmitStateChange: (session, state, ctx) => {
+        if (state === 'delivering') {
+          claimDelivering(home, session, ctx.seq);
+        } else if (state.startsWith('submit-stuck-')) {
+          markStuck(home, session, ctx.seq, state.slice('submit-stuck-'.length) as 'paste' | 'submit' | 'unobservable');
+        } else {
+          confirmDelivered(home, session, ctx.seq);
+        }
+      }
+    });
+    shell.enqueuePrompt(
+      'tmux-a',
+      'qa-room',
+      buildOnboardingPrompt({
+        channel: 'qa-room',
+        goal: 'manual QA',
+        handle: 'bash-1',
+        members: [member('bash-2', 'tmux-b', 'bash')],
+        messageCount: 0,
+        home
+      }),
+      'onboard-qa-room'
+    );
+    await waitFor(async () => {
+      const state = (await shell.inspectSession('tmux-a')).submitState;
+      return state !== undefined && state !== 'delivering';
+    });
+    const diagnostic = await shell.inspectSession('tmux-a');
+    expect(diagnostic.submitState).not.toBe('submit-stuck-submit');
+    expect(diagnostic.submitState?.startsWith('submit-stuck-')).toBe(false);
+    // and not an agent-shaped success verdict either — a shell has no submit
+    // to verify, so the outcome names exactly that
+    expect(diagnostic.submitState).toBe('submit-not-applicable');
+    expect(diagnostic.deliveryStatus).not.toBe('submit-stuck');
+    expect(diagnostic.deliveryBlocked).toBe(false);
+    expect(diagnostic.blockedReason).toBeUndefined();
+    // no false stuck record on disk (the issue's headline symptom)
+    expect(listStuckItems(home, 'tmux-a')).toEqual([]);
+    // and no agent-shaped Enter pumping into a shell that already ran the line
+    expect(enters).toEqual([]);
+    shell.dispose();
+  });
+
+  it('still verifies submit for an assistant-CLI session (the shell exemption is agent-specific)', async () => {
+    // Guard for desk#48's fix: skipping verification is keyed on the session's
+    // agent being a shell, NOT on sessionInfo merely being wired — a claude
+    // session with an eaten Enter must still be classified submit-stuck-submit.
+    let pane = '❯ ';
+    const agentSession = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      enterVerifyDelayMs: 1,
+      verifyCycles: 3,
+      sessionInfo: () => ({ sessionName: 'claude-1', agent: 'claude' }),
+      sendText: async () => {
+        pane = '❯ wedged prompt';
+        return true;
+      },
+      sendEnter: async () => true,
+      sessionRunning: () => true,
+      capturePane: async () => pane
+    });
+    agentSession.enqueuePrompt('tmux-a', 'qa-room', '@alpha submit stuck', 'onboard-qa-room');
+    await waitFor(async () => (await agentSession.inspectSession('tmux-a')).submitState === 'submit-stuck-submit');
+    expect(await agentSession.inspectSession('tmux-a')).toMatchObject({
+      submitState: 'submit-stuck-submit',
+      deliveryBlocked: true,
+      blockedReason: 'submit-stuck-submit'
+    });
+    agentSession.dispose();
+  });
+
   it('marks submitState submitted as soon as the agent goes busy', async () => {
     let activity: 'idle' | 'working' = 'idle';
     const ok = new ChannelsEngine({

@@ -161,6 +161,13 @@ export interface ChannelActivityEvent {
  *  - `delivery-ack-timeout` — legacy persisted/historical state retained for
  *    fail-closed repair and event timelines. The live runtime no longer emits
  *    delivery ACK outcomes.
+ *  - `submit-not-applicable` — the receiving session is not an agent (a shell),
+ *    so there is no submit to verify: no activity to go `working`, no input box
+ *    an Enter could be eaten by, no approval menu. The paste reached the pane
+ *    and the shell ran the line; every agent-shaped verdict — `submitted` as
+ *    much as `submit-stuck-*` — would be a claim about evidence that cannot
+ *    exist. Terminal and NOT a failure: it never blocks the queue and its
+ *    ack-file is `.delivered`, not `.stuck-*`.
  * The on-disk ack-file durability layer keys its `.delivering/.delivered/
  * .stuck-*` renames on these transitions.
  */
@@ -168,9 +175,22 @@ export type SubmitState =
   | 'delivering'
   | 'submitted'
   | 'delivery-ack-timeout'
+  | 'submit-not-applicable'
   | 'submit-stuck-paste'
   | 'submit-stuck-submit'
   | 'submit-stuck-unobservable';
+
+/**
+ * Agents whose sessions are a bare shell rather than an assistant CLI. They
+ * produce no canonical activity, so agent-shaped submit verification (see
+ * SubmitState) has no evidence to read and must not be run against them.
+ */
+const SHELL_AGENTS = new Set(['bash']);
+
+/** True when a session's agent is a plain shell rather than an assistant CLI. */
+export function isShellAgent(agent: string | undefined): boolean {
+  return agent !== undefined && SHELL_AGENTS.has(agent);
+}
 
 /** Why a session's queue is currently held (ops-console diagnostic). */
 // This runtime list is deliberately exhaustive: lifecycle refusal, drain
