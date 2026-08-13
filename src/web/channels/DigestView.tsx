@@ -5,8 +5,8 @@ import { channelsState } from './channelsClient.js';
 import { buildAwayDigest, buildInboxItems, type InboxItem } from './channelsModel.js';
 
 /**
- * while-away digest — a returning-operator summary. Unread-per-channel comes
- * from the channel list (messageCount) vs the seen pointer (buildAwayDigest);
+ * while-away digest — a returning-operator summary. Unread-per-channel is the
+ * server-resolved unreadCount already present on the polled summaries;
  * "needs your reply" comes from the activity feed (the needs-reply items it
  * self-fetches). Clicking a channel selects it; a needs-reply item navigates to
  * the message. No new persistence — a view over data the hub already holds.
@@ -15,14 +15,12 @@ export function DigestView({
   open,
   onClose,
   channels,
-  seenCounts,
   onSelectChannel,
   onNavigate
 }: {
   open: boolean;
   onClose: () => void;
-  channels: { name: string; messageCount: number }[];
-  seenCounts: Record<string, number>;
+  channels: { name: string; unreadCount?: number }[];
   onSelectChannel: (channel: string) => void;
   onNavigate: (channel: string, messageId?: string) => void;
 }): JSX.Element | null {
@@ -52,7 +50,7 @@ export function DigestView({
     return null;
   }
 
-  const digest = buildAwayDigest(channels, seenCounts);
+  const digest = buildAwayDigest(channels);
   const totalUnread = digest.reduce((sum, entry) => sum + entry.unread, 0);
   const allClear = digest.length === 0 && needsReply.length === 0;
 
