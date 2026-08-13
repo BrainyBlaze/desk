@@ -15,6 +15,8 @@ import type { Duplex } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { readManifestFile, resolveManifestPath } from '../../core/config.js';
+import { buildSessionSpecs } from '../../core/manifest.js';
 import { ensurePrivateSocketRoot } from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -104,12 +106,24 @@ import {
   authorizeProviderSessionReset,
   type ProviderSessionResetResult as ProviderSessionAuthorizationResetResult
 } from '../providerSessionReset.js';
-import { readProviderSessionBinding } from '../providerSessionBinding.js';
+import {
+  bindProviderSessionIdentity,
+  readProviderSessionBinding,
+  replaceProviderSessionIdentity
+} from '../providerSessionBinding.js';
 import {
   archiveMoorGenerationStores,
   readMoorGenerationExitEvidence,
   type MoorGenerationExitEvidence
 } from './moorGenerationStores.js';
+import {
+  verifyProviderSessionEvidence,
+  type ProviderSessionEvidenceResult
+} from '../providerSessionEvidence.js';
+import {
+  FileProviderSessionContinuityLedger,
+  type ProviderSessionContinuityProvider
+} from './providerSessionContinuityLedger.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -160,6 +174,8 @@ export interface TerminalDaemonOptions {
   homeDir?: string;
   /** Injectable worker admission policy for deterministic composition tests. */
   supervisor?: WorkerSupervisor;
+  /** Injectable durable evidence verifier for boundary-failure tests. */
+  verifyProviderSessionEvidence?: typeof verifyProviderSessionEvidence;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -210,6 +226,53 @@ export type ProviderSessionResetResult =
       error: string;
     };
 
+export interface ObserveProviderSessionIdentityInput {
+  deskSessionId: string;
+  provider: ProviderSessionContinuityProvider;
+  providerSessionId: string;
+  generation: number;
+  launchProof: string;
+  hook: string;
+}
+
+export interface RebindProviderSessionInput {
+  deskSessionId: string;
+  targetProviderSessionId: string;
+}
+
+export type ProviderSessionContinuityMutationResult =
+  | {
+      ok: true;
+      kind: 'bound' | 'matching' | 'rebound' | 'already-rebound';
+      provider: ProviderSessionContinuityProvider;
+      providerSessionId: string;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'provider-session-not-found'
+        | 'provider-session-agent-mismatch'
+        | 'provider-session-id-invalid'
+        | 'provider-session-id-conflict'
+        | 'provider-session-mismatch'
+        | 'provider-session-provider-mismatch'
+        | 'provider-session-generation-mismatch'
+        | 'provider-session-not-live'
+        | 'provider-session-proof-invalid'
+        | 'provider-session-start-required'
+        | 'provider-session-evidence-missing'
+        | 'provider-session-evidence-stale'
+        | 'provider-session-evidence-invalid'
+        | 'provider-session-rebind-required'
+        | 'provider-session-transition-missing'
+        | 'provider-session-transition-mismatch'
+        | 'provider-session-store-failed';
+      error: string;
+      currentProviderSessionId?: string;
+      targetProviderSessionId?: string;
+      action?: string;
+    };
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
   /** Spawn + attach the moor holder for a session (CREATE contract). */
@@ -232,6 +295,14 @@ export interface TerminalDaemon {
   completeProviderSessionLaunch(
     input: CompleteProviderSessionLaunchInput
   ): CompleteProviderSessionLaunchResult;
+  /** Validate and reconcile one launch-scoped provider hook identity. */
+  observeProviderSessionIdentity(
+    input: ObserveProviderSessionIdentityInput
+  ): Promise<ProviderSessionContinuityMutationResult>;
+  /** Explicitly authorize the exact current pending provider transition. */
+  rebindProviderSession(
+    input: RebindProviderSessionInput
+  ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
   /**
@@ -317,18 +388,53 @@ export interface TerminalDaemon {
 
 /** Assemble the durable terminal daemon + mount its binary WS bridge (additive). */
 export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDaemon {
+  const now = options.now ?? Date.now;
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
   const providerLaunchLedger = new FileProviderSessionLaunchLedger(
     join(options.homeRoot, '_engine', 'provider-session-launch.ndjson')
   );
+  const providerContinuityLedger = new FileProviderSessionContinuityLedger(
+    join(options.homeRoot, '_engine', 'provider-session-continuity.ndjson')
+  );
+  const evidenceVerifier =
+    options.verifyProviderSessionEvidence ?? verifyProviderSessionEvidence;
+  const continuityQueues = new Map<string, Promise<void>>();
+  const runProviderContinuity = async <T>(
+    deskSessionId: string,
+    operation: () => Promise<T> | T
+  ): Promise<T> => {
+    const prior = continuityQueues.get(deskSessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = prior.catch(() => undefined).then(() => gate);
+    continuityQueues.set(deskSessionId, tail);
+    await prior.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (continuityQueues.get(deskSessionId) === tail) {
+        continuityQueues.delete(deskSessionId);
+      }
+    }
+  };
+  const rebindAction = (
+    deskSessionId: string,
+    providerSessionId: string
+  ): string =>
+    `desk rebind-provider-session ${deskSessionId} --to ${providerSessionId} --force`;
   const providerProvisionFailure = (
-    detail: ProviderSessionProvisionRecoveryDetail
+    detail: ProviderSessionProvisionRecoveryDetail,
+    action?: string
   ): SessionSpawnPreallocationResult => ({
     ok: false,
     reason: 'provider-session-identity-missing',
-    detail
+    detail,
+    ...(action === undefined ? {} : { action })
   });
-  const preallocateProviderSession = (
+  const authorizeProviderSessionLaunch = (
     context: SessionSpawnPreallocationContext,
     spec: TerminalDaemonSessionSpec
   ): SessionSpawnPreallocationResult => {
@@ -423,12 +529,61 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     if (claim.ok) return { ok: true };
     return providerProvisionFailure(claim.reason);
   };
+  const preallocateProviderSession = (
+    context: SessionSpawnPreallocationContext,
+    spec: TerminalDaemonSessionSpec
+  ): Promise<SessionSpawnPreallocationResult> | SessionSpawnPreallocationResult => {
+    if (
+      context.subject.kind !== 'agent' ||
+      (context.subject.provider !== 'claude' &&
+        context.subject.provider !== 'codex')
+    ) {
+      return authorizeProviderSessionLaunch(context, spec);
+    }
+    const provider = context.subject.provider;
+    return runProviderContinuity(context.sessionId, () => {
+      try {
+        const launchAuthorization = providerLaunchLedger.current(
+          context.sessionId
+        );
+        const pending = providerContinuityLedger.pending(context.sessionId);
+        if (
+          launchAuthorization?.state === 'prepared' &&
+          pending !== undefined
+        ) {
+          return providerProvisionFailure('reset-incomplete');
+        }
+        if (pending !== undefined) {
+          return providerProvisionFailure(
+            'provider-session-rebind-required',
+            rebindAction(
+              context.sessionId,
+              pending.observedProviderSessionId
+            )
+          );
+        }
+        const authorized = authorizeProviderSessionLaunch(context, spec);
+        if (!authorized.ok) return authorized;
+        const issued = providerContinuityLedger.issueLaunchProof({
+          deskSessionId: context.sessionId,
+          provider,
+          generation: context.nextGeneration,
+          issuedAt: now()
+        });
+        return {
+          ok: true,
+          launchContext: { providerLaunchProof: issued.launchProof }
+        };
+      } catch {
+        return providerProvisionFailure('continuity-store-failed');
+      }
+    });
+  };
   const eventJournal = new FileDeskEventJournal(
     join(options.homeRoot, '_engine', 'desk-events.ndjson')
   );
   let intakeStore: FileIntakeStore | undefined;
   let intakeDependencies: FileIntakeStoreDependencies | undefined;
-  const now = options.now ?? Date.now;
   const hookInstallationProbe =
     options.hookInstallationProbe ?? probeHookInstallation;
   let ready = false;
@@ -909,6 +1064,392 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     });
   };
 
+  type ContinuityFailure = Extract<
+    ProviderSessionContinuityMutationResult,
+    { ok: false }
+  >;
+  const continuityFailure = (
+    reason: ContinuityFailure['reason'],
+    error: string,
+    detail: Partial<
+      Pick<
+        ContinuityFailure,
+        'currentProviderSessionId' | 'targetProviderSessionId' | 'action'
+      >
+    > = {}
+  ): ContinuityFailure => ({ ok: false, reason, error, ...detail });
+  const bindingFailure = (
+    failure: Extract<
+      ReturnType<typeof readProviderSessionBinding>,
+      { ok: false }
+    >
+  ): ContinuityFailure => continuityFailure(failure.code, failure.error);
+  const evidenceFailure = (
+    failure: Extract<ProviderSessionEvidenceResult, { ok: false }>
+  ): ContinuityFailure => {
+    const reason =
+      failure.code === 'evidence-not-found'
+        ? 'provider-session-evidence-missing'
+        : failure.code === 'evidence-stale'
+          ? 'provider-session-evidence-stale'
+          : 'provider-session-evidence-invalid';
+    return continuityFailure(reason, failure.error);
+  };
+  const selectedProviderSession = (deskSessionId: string) => {
+    const manifestPath = options.manifestPath ?? resolveManifestPath();
+    const homeDir = options.homeDir ?? homedir();
+    return buildSessionSpecs(readManifestFile(manifestPath), { homeDir }).find(
+      (candidate) => candidate.sessionId === deskSessionId
+    );
+  };
+  const verifyEvidence = async (input: {
+    deskSessionId: string;
+    provider: ProviderSessionContinuityProvider;
+    providerSessionId: string;
+    notBeforeMs: number;
+  }): Promise<ProviderSessionEvidenceResult | ContinuityFailure> => {
+    const selected = selectedProviderSession(input.deskSessionId);
+    if (!selected) {
+      return continuityFailure(
+        'provider-session-not-found',
+        `Desk session not found: ${input.deskSessionId}`
+      );
+    }
+    if (selected.agent !== input.provider) {
+      return continuityFailure(
+        'provider-session-agent-mismatch',
+        `Desk session ${input.deskSessionId} is not configured for ${input.provider}`
+      );
+    }
+    return evidenceVerifier({
+      provider: input.provider,
+      providerSessionId: input.providerSessionId,
+      selected: {
+        cwd: selected.cwd,
+        ...(selected.profileId === undefined
+          ? {}
+          : { profileId: selected.profileId })
+      },
+      homeDir: options.homeDir ?? homedir(),
+      notBeforeMs: input.notBeforeMs
+    });
+  };
+  const finishObservedLaunch = (
+    input: CompleteProviderSessionLaunchInput
+  ): ContinuityFailure | undefined => {
+    const completed = providerLaunchLedger.complete(input);
+    if (completed.ok) return undefined;
+    return continuityFailure(
+      'provider-session-store-failed',
+      `provider launch completion failed: ${completed.reason}`
+    );
+  };
+  const observeProviderSessionIdentity = (
+    input: ObserveProviderSessionIdentityInput
+  ): Promise<ProviderSessionContinuityMutationResult> =>
+    runProviderContinuity(input?.deskSessionId ?? '', async () => {
+      try {
+        if (
+          !input ||
+          !isSafeDaemonSessionId(input.deskSessionId) ||
+          (input.provider !== 'claude' && input.provider !== 'codex') ||
+          !isValidProviderSessionId(input.provider, input.providerSessionId) ||
+          !Number.isSafeInteger(input.generation) ||
+          input.generation < 2 ||
+          typeof input.launchProof !== 'string' ||
+          typeof input.hook !== 'string'
+        ) {
+          return continuityFailure(
+            'provider-session-id-invalid',
+            'Invalid provider session observation'
+          );
+        }
+        const binding = readProviderSessionBinding({
+          deskSessionId: input.deskSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!binding.ok) return bindingFailure(binding);
+        if (binding.provider !== input.provider) {
+          return continuityFailure(
+            'provider-session-provider-mismatch',
+            `Desk session ${input.deskSessionId} is configured for ${binding.provider}, not ${input.provider}`
+          );
+        }
+        if (ledger.current(input.deskSessionId) !== input.generation) {
+          return continuityFailure(
+            'provider-session-generation-mismatch',
+            'Provider observation generation is not current'
+          );
+        }
+        const status = router.sessions.moorStatus(input.deskSessionId);
+        if (
+          status === undefined ||
+          status.generation !== input.generation ||
+          !status.running
+        ) {
+          return continuityFailure(
+            'provider-session-not-live',
+            'Provider observation has no exact live adopted Moor generation'
+          );
+        }
+        const proof = providerContinuityLedger.verifyLaunchProof({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          generation: input.generation,
+          launchProof: input.launchProof
+        });
+        if (!proof.ok) {
+          return continuityFailure(
+            'provider-session-proof-invalid',
+            'Provider launch proof is missing or invalid'
+          );
+        }
+        if (
+          binding.providerSessionId !== input.providerSessionId &&
+          input.hook !== 'SessionStart'
+        ) {
+          return continuityFailure(
+            'provider-session-start-required',
+            'Only SessionStart may establish or change provider session identity'
+          );
+        }
+        const evidence = await verifyEvidence({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          providerSessionId: input.providerSessionId,
+          notBeforeMs: proof.issuedAt
+        });
+        if (!evidence.ok) {
+          return 'reason' in evidence ? evidence : evidenceFailure(evidence);
+        }
+        if (binding.providerSessionId === null) {
+          const persisted = await bindProviderSessionIdentity({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            ...(options.manifestPath === undefined
+              ? {}
+              : { manifestPath: options.manifestPath }),
+            ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+          });
+          if (!persisted.ok) {
+            return continuityFailure(persisted.code, persisted.error);
+          }
+          const completionFailure = finishObservedLaunch({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            generation: input.generation
+          });
+          if (completionFailure) return completionFailure;
+          return {
+            ok: true,
+            kind: 'bound',
+            provider: input.provider,
+            providerSessionId: input.providerSessionId
+          };
+        }
+        if (binding.providerSessionId === input.providerSessionId) {
+          const completionFailure = finishObservedLaunch({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            generation: input.generation
+          });
+          if (completionFailure) return completionFailure;
+          return {
+            ok: true,
+            kind: 'matching',
+            provider: input.provider,
+            providerSessionId: input.providerSessionId
+          };
+        }
+        providerContinuityLedger.stageTransition({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          generation: input.generation,
+          expectedProviderSessionId: binding.providerSessionId,
+          observedProviderSessionId: input.providerSessionId,
+          evidencePath: evidence.evidencePath
+        });
+        return continuityFailure(
+          'provider-session-rebind-required',
+          'The running provider session differs from the durable Desk binding',
+          {
+            currentProviderSessionId: binding.providerSessionId,
+            targetProviderSessionId: input.providerSessionId,
+            action: rebindAction(
+              input.deskSessionId,
+              input.providerSessionId
+            )
+          }
+        );
+      } catch {
+        return continuityFailure(
+          'provider-session-store-failed',
+          'Provider session continuity operation failed'
+        );
+      }
+    });
+
+  const rebindProviderSession = (
+    input: RebindProviderSessionInput
+  ): Promise<ProviderSessionContinuityMutationResult> =>
+    runProviderContinuity(input?.deskSessionId ?? '', async () => {
+      try {
+        if (
+          !input ||
+          !isSafeDaemonSessionId(input.deskSessionId) ||
+          typeof input.targetProviderSessionId !== 'string'
+        ) {
+          return continuityFailure(
+            'provider-session-id-invalid',
+            'Invalid provider session rebind request'
+          );
+        }
+        const transition = providerContinuityLedger.currentTransition(
+          input.deskSessionId
+        );
+        if (
+          transition === undefined ||
+          transition.state === 'cancelled-by-reset'
+        ) {
+          return continuityFailure(
+            'provider-session-transition-missing',
+            'No pending provider session transition exists'
+          );
+        }
+        if (
+          transition.observedProviderSessionId !==
+          input.targetProviderSessionId
+        ) {
+          return continuityFailure(
+            'provider-session-transition-mismatch',
+            'Requested provider session does not match the current transition'
+          );
+        }
+        if (
+          !isValidProviderSessionId(
+            transition.provider,
+            input.targetProviderSessionId
+          ) ||
+          ledger.current(input.deskSessionId) !== transition.generation
+        ) {
+          return continuityFailure(
+            'provider-session-generation-mismatch',
+            'Provider transition generation is not current'
+          );
+        }
+        const status = router.sessions.moorStatus(input.deskSessionId);
+        if (
+          status === undefined ||
+          status.generation !== transition.generation ||
+          !status.running
+        ) {
+          return continuityFailure(
+            'provider-session-not-live',
+            'Provider rebind has no exact live adopted Moor generation'
+          );
+        }
+        const proof = providerContinuityLedger.proofContext(
+          input.deskSessionId
+        );
+        if (
+          proof === undefined ||
+          proof.provider !== transition.provider ||
+          proof.generation !== transition.generation
+        ) {
+          return continuityFailure(
+            'provider-session-proof-invalid',
+            'Provider transition has no exact launch proof context'
+          );
+        }
+        const binding = readProviderSessionBinding({
+          deskSessionId: input.deskSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!binding.ok) return bindingFailure(binding);
+        if (binding.provider !== transition.provider) {
+          return continuityFailure(
+            'provider-session-provider-mismatch',
+            'Provider transition does not match the configured provider'
+          );
+        }
+        if (
+          binding.providerSessionId !== transition.expectedProviderSessionId &&
+          binding.providerSessionId !== transition.observedProviderSessionId
+        ) {
+          return continuityFailure(
+            'provider-session-mismatch',
+            'Durable provider session changed outside the pending transition'
+          );
+        }
+        const evidence = await verifyEvidence({
+          deskSessionId: input.deskSessionId,
+          provider: transition.provider,
+          providerSessionId: transition.observedProviderSessionId,
+          notBeforeMs: proof.issuedAt
+        });
+        if (!evidence.ok) {
+          return 'reason' in evidence ? evidence : evidenceFailure(evidence);
+        }
+        if (transition.state === 'resolved') {
+          if (
+            binding.providerSessionId !== transition.observedProviderSessionId
+          ) {
+            return continuityFailure(
+              'provider-session-mismatch',
+              'Resolved transition no longer matches the durable binding'
+            );
+          }
+          return {
+            ok: true,
+            kind: 'already-rebound',
+            provider: transition.provider,
+            providerSessionId: transition.observedProviderSessionId
+          };
+        }
+        const replaced = await replaceProviderSessionIdentity({
+          deskSessionId: input.deskSessionId,
+          provider: transition.provider,
+          expectedProviderSessionId: transition.expectedProviderSessionId,
+          providerSessionId: transition.observedProviderSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!replaced.ok) {
+          return continuityFailure(replaced.code, replaced.error);
+        }
+        providerContinuityLedger.resolveTransition({
+          deskSessionId: input.deskSessionId,
+          transitionId: transition.transitionId,
+          targetProviderSessionId: transition.observedProviderSessionId
+        });
+        return {
+          ok: true,
+          kind:
+            replaced.kind === 'already-replaced'
+              ? 'already-rebound'
+              : 'rebound',
+          provider: transition.provider,
+          providerSessionId: transition.observedProviderSessionId
+        };
+      } catch {
+        return continuityFailure(
+          'provider-session-store-failed',
+          'Provider session continuity operation failed'
+        );
+      }
+    });
+
   return {
     router,
     async provision(sessionId, spec) {
@@ -996,9 +1537,39 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       const result = await router.sessions.resetForProviderSession(
         sessionId,
         socketPath(sessionId),
-        (generation) => {
+        (generation) => runProviderContinuity(sessionId, async () => {
           const observer = eventObservers.get(sessionId);
           if (observer) stopEventObserver(observer);
+          const pending = providerContinuityLedger.pending(sessionId);
+          if (pending !== undefined) {
+            const binding = readProviderSessionBinding({
+              deskSessionId: sessionId,
+              ...(options.manifestPath === undefined
+                ? {}
+                : { manifestPath: options.manifestPath }),
+              ...(options.homeDir === undefined
+                ? {}
+                : { homeDir: options.homeDir })
+            });
+            const launchAuthorization = providerLaunchLedger.current(sessionId);
+            if (
+              !binding.ok ||
+              binding.provider !== pending.provider ||
+              pending.generation !== generation ||
+              (binding.providerSessionId !== pending.expectedProviderSessionId &&
+                binding.providerSessionId !== pending.observedProviderSessionId &&
+                !(
+                  binding.providerSessionId === null &&
+                  launchAuthorization?.state === 'prepared'
+                ))
+            ) {
+              return {
+                ok: false as const,
+                reason: 'provider-session-store-failed' as const,
+                error: 'Pending provider transition does not match reset state'
+              };
+            }
+          }
           return authorizeProviderSessionReset(
             {
               deskSessionId: sessionId,
@@ -1010,9 +1581,35 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
                 ? {}
                 : { homeDir: options.homeDir })
             },
-            { ledger: providerLaunchLedger }
+            {
+              ledger: providerLaunchLedger,
+              ...(pending === undefined
+                ? {}
+                : {
+                    afterBindingCleared: (authorization: {
+                      authorizationId: string;
+                    }) => {
+                      const current = providerContinuityLedger.pending(
+                        sessionId
+                      );
+                      if (
+                        current === undefined ||
+                        current.transitionId !== pending.transitionId
+                      ) {
+                        throw new Error(
+                          'pending provider transition changed during reset'
+                        );
+                      }
+                      providerContinuityLedger.cancelTransitionByReset({
+                        deskSessionId: sessionId,
+                        transitionId: pending.transitionId,
+                        resetAuthorizationId: authorization.authorizationId
+                      });
+                    }
+                  })
+            }
           );
-        }
+        })
       );
       if (!result.ok) return result;
       return result.value;
@@ -1020,6 +1617,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     completeProviderSessionLaunch(input) {
       return providerLaunchLedger.complete(input);
     },
+    observeProviderSessionIdentity,
+    rebindProviderSession,
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
@@ -1208,6 +1807,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       intakeStore = undefined;
       eventJournal.close();
       providerLaunchLedger.close();
+      providerContinuityLedger.close();
     }
   };
 }
@@ -1327,6 +1927,8 @@ export function createDaemonControlHandler(
     | 'retireGeneration'
     | 'resetProviderSession'
     | 'completeProviderSessionLaunch'
+    | 'observeProviderSessionIdentity'
+    | 'rebindProviderSession'
     | 'input'
     | 'tail'
     | 'clearSessionLog'
@@ -1527,7 +2129,9 @@ export function createDaemonControlHandler(
                 ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` to finish the interrupted reset`
                 : detail === 'authorization-consumed'
                   ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` after confirming the prior provider process is stopped`
-                  : undefined;
+                  : 'action' in ens && typeof ens.action === 'string'
+                    ? ens.action
+                    : undefined;
             sendJson(res, 503, {
               ok: false,
               error: `${ens.reason}${
@@ -1685,6 +2289,96 @@ export function createDaemonControlHandler(
             return;
           }
           sendJson(res, 200, { ok: true, kind: result.kind });
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/provider-session/observe'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (
+            Object.keys(body).sort().join(',') !==
+              'deskSessionId,generation,hook,launchProof,provider,providerSessionId' ||
+            !isSafeDaemonSessionId(body.deskSessionId) ||
+            (body.provider !== 'claude' && body.provider !== 'codex') ||
+            typeof body.providerSessionId !== 'string' ||
+            !isValidProviderSessionId(
+              body.provider,
+              body.providerSessionId
+            ) ||
+            !Number.isSafeInteger(body.generation) ||
+            (body.generation as number) < 2 ||
+            typeof body.launchProof !== 'string' ||
+            typeof body.hook !== 'string' ||
+            body.hook.length === 0 ||
+            body.hook.length > 128
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              reason: 'provider-session-observation-invalid',
+              error: 'invalid provider session observation'
+            });
+            return;
+          }
+          const result = await daemon.observeProviderSessionIdentity({
+            deskSessionId: body.deskSessionId,
+            provider: body.provider,
+            providerSessionId: body.providerSessionId,
+            generation: body.generation as number,
+            launchProof: body.launchProof,
+            hook: body.hook
+          });
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found'
+                ? 404
+                : result.reason === 'provider-session-store-failed'
+                  ? 500
+                  : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/provider-session/rebind'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (
+            Object.keys(body).sort().join(',') !==
+              'sessionId,targetProviderSessionId' ||
+            !isSafeDaemonSessionId(body.sessionId) ||
+            typeof body.targetProviderSessionId !== 'string'
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              reason: 'provider-session-rebind-invalid',
+              error: 'invalid provider session rebind request'
+            });
+            return;
+          }
+          const result = await daemon.rebindProviderSession({
+            deskSessionId: body.sessionId,
+            targetProviderSessionId: body.targetProviderSessionId
+          });
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found' ||
+              result.reason === 'provider-session-transition-missing'
+                ? 404
+                : result.reason === 'provider-session-store-failed'
+                  ? 500
+                  : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
           return;
         }
         if (

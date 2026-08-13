@@ -7,7 +7,8 @@ import {
   type ReadProviderSessionBindingInput
 } from './providerSessionBinding.js';
 import {
-  FileProviderSessionLaunchLedger
+  FileProviderSessionLaunchLedger,
+  type ProviderSessionLaunchAuthorization
 } from './runtime/providerSessionLaunchLedger.js';
 
 export type ProviderSessionResetResult =
@@ -44,6 +45,9 @@ interface ProviderSessionResetDependencies {
   clearBinding?: (
     input: ClearProviderSessionIdentityInput
   ) => Promise<ClearProviderSessionIdentityResult>;
+  afterBindingCleared?: (
+    authorization: ProviderSessionLaunchAuthorization
+  ) => void | Promise<void>;
 }
 
 export async function authorizeProviderSessionReset(
@@ -89,7 +93,15 @@ export async function authorizeProviderSessionReset(
       current = dependencies.ledger.current(input.deskSessionId);
     }
 
+    const clearedPrepared =
+      binding.providerSessionId === null &&
+      current?.state === 'prepared' &&
+      current.provider === binding.provider &&
+      current.generation === input.generation
+        ? current
+        : undefined;
     const prepared =
+      clearedPrepared ??
       dependencies.ledger.resumeRecoveredPrepared({
         deskSessionId: input.deskSessionId,
         provider: binding.provider,
@@ -113,6 +125,7 @@ export async function authorizeProviderSessionReset(
     if (!cleared.ok) {
       return { ok: false, reason: cleared.code, error: cleared.error };
     }
+    await dependencies.afterBindingCleared?.(prepared);
     const authorized = dependencies.ledger.authorize(
       prepared.authorizationId
     );

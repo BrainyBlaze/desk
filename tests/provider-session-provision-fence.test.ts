@@ -9,6 +9,7 @@ import {
   WorkerSupervisor
 } from '../src/shared/runtime/workerSupervisor.js';
 import { FileProviderSessionLaunchLedger } from '../src/server/runtime/providerSessionLaunchLedger.js';
+import { FileProviderSessionContinuityLedger } from '../src/server/runtime/providerSessionContinuityLedger.js';
 import {
   createTerminalDaemon,
   type TerminalDaemon
@@ -214,6 +215,40 @@ function daemonFor(
     const replayed = new FileProviderSessionLaunchLedger(ledgerPath);
     expect(replayed.current('alpha')).toEqual(prepared);
     replayed.close();
+  });
+
+  it('reports reset-incomplete when a prepared reset still has a durable pending transition', async () => {
+    const { root, manifestPath, ledgerPath } = fixture();
+    const launchLedger = new FileProviderSessionLaunchLedger(ledgerPath, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    launchLedger.prepare({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      expectedPriorBinding: PRIOR_ID,
+      generation: 7
+    });
+    launchLedger.close();
+    const continuityLedger = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson')
+    );
+    continuityLedger.stageTransition({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      generation: 7,
+      expectedProviderSessionId: PRIOR_ID,
+      observedProviderSessionId: NEXT_ID,
+      evidencePath: '/safe/codex/next.jsonl'
+    });
+    continuityLedger.close();
+
+    const daemon = daemonFor(root, manifestPath);
+    await expect(provisionAtGeneration(daemon, 7, PRIOR_ID)).resolves.toEqual({
+      ok: false,
+      reason: 'provider-session-identity-missing',
+      detail: 'reset-incomplete'
+    });
+    daemon.dispose();
   });
 
   it('claims one authorized fresh launch for the exact next generation and never reuses it', async () => {

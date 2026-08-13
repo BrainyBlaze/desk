@@ -162,6 +162,58 @@ describe('provider-session reset transaction crash recovery', () => {
     ledger.close();
   });
 
+  it('keeps the exact authorization prepared until post-clear continuity work is durable', async () => {
+    const { root, manifestPath, ledgerPath } = fixture();
+    const seen: string[] = [];
+    const ledger = new FileProviderSessionLaunchLedger(ledgerPath, {
+      createAuthorizationId: () => 'authorization-continuity'
+    });
+
+    await expect(
+      authorizeProviderSessionReset(
+        { deskSessionId: 'alpha', generation: 3, manifestPath, homeDir: root },
+        {
+          ledger,
+          afterBindingCleared: async (authorization) => {
+            seen.push(authorization.authorizationId);
+            throw new Error('continuity append failed');
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: 'provider-session-store-failed'
+    });
+    expect(ledger.current('alpha')).toMatchObject({
+      authorizationId: 'authorization-continuity',
+      state: 'prepared'
+    });
+    expect(
+      readProviderSessionBinding({ deskSessionId: 'alpha', manifestPath, homeDir: root })
+    ).toMatchObject({ ok: true, providerSessionId: null });
+
+    await expect(
+      authorizeProviderSessionReset(
+        { deskSessionId: 'alpha', generation: 3, manifestPath, homeDir: root },
+        {
+          ledger,
+          afterBindingCleared: async (authorization) => {
+            seen.push(authorization.authorizationId);
+          }
+        }
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      authorizationId: 'authorization-continuity',
+      state: 'authorized'
+    });
+    expect(seen).toEqual([
+      'authorization-continuity',
+      'authorization-continuity'
+    ]);
+    ledger.close();
+  });
+
   it('completes a bound claimed launch before superseding it with a new reset', async () => {
     const { root, manifestPath, ledgerPath } = fixture();
     const ids = ['authorization-1', 'authorization-2'];

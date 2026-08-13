@@ -18,6 +18,7 @@ import {
   moorLaunchChannelEnvKey
 } from '../src/server/runtime/moorLaunchChannel.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
+import { DESK_PROVIDER_LAUNCH_PROOF } from '../src/shared/providerSessionIdentity.js';
 
 /**
  * Fake moor launcher: finds the single *_LAUNCH_CHANNEL selector in its
@@ -49,13 +50,15 @@ try {
   for (const key of ['TERM', 'COLORTERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'LC_TERMINAL', 'LANG']) {
     if (process.env[key] !== undefined) terminalEnv[key] = process.env[key];
   }
+  const providerLaunchProof = process.env['${DESK_PROVIDER_LAUNCH_PROOF}'];
   writeFileSync(out, JSON.stringify({
     selectorKey,
     selector,
     recordHex: Buffer.from(record).toString('hex'),
     recordLength: record.length,
     environment,
-    terminalEnv
+    terminalEnv,
+    providerLaunchProof
   }));
   process.exit(0);
 } catch (error) {
@@ -66,6 +69,7 @@ try {
 
 interface ProbeReport {
   terminalEnv?: Record<string, string>;
+  providerLaunchProof?: string;
   selectorKey?: string;
   selector?: string;
   recordHex?: string;
@@ -77,7 +81,8 @@ interface ProbeReport {
 async function runProbe(
   binPath: string,
   generation: number,
-  extraEnv: NodeJS.ProcessEnv = {}
+  extraEnv: NodeJS.ProcessEnv = {},
+  providerLaunchProof?: string
 ): Promise<ProbeReport> {
   const root = mkdtempSync(join(tmpdir(), 'moor-spawn-'));
   try {
@@ -88,7 +93,8 @@ async function runProbe(
       argv0: binPath,
       args: [join(root, 'probe.cjs'), reportPath],
       generation,
-      env: { PATH: process.env.PATH ?? '', ...extraEnv }
+      env: { PATH: process.env.PATH ?? '', ...extraEnv },
+      ...(providerLaunchProof === undefined ? {} : { providerLaunchProof })
     });
     const exitCode = await new Promise<number>((resolve, reject) => {
       child.once('error', reject);
@@ -214,6 +220,21 @@ describe('spawnMoorMaster', () => {
       DESK_SESSION_GENERATION: '23'
     });
     expect(Number.parseInt(report.selector!, 10)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('scrubs ambient provider launch proof and injects only the explicit proof', async () => {
+    const inherited = await runProbe('/usr/local/bin/moor', 24, {
+      [DESK_PROVIDER_LAUNCH_PROOF]: 'ambient-forgery'
+    });
+    expect(inherited.providerLaunchProof).toBeUndefined();
+
+    const authorized = await runProbe(
+      '/usr/local/bin/moor',
+      25,
+      { [DESK_PROVIDER_LAUNCH_PROOF]: 'ambient-forgery' },
+      'daemon-issued-proof'
+    );
+    expect(authorized.providerLaunchProof).toBe('daemon-issued-proof');
   });
 
   it('delivers the composed terminal identity and locale to the child (desk#45, desk#51)', async () => {

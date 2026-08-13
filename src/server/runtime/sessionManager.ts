@@ -80,7 +80,9 @@ export type ProviderSessionProvisionRecoveryDetail =
   | 'binding-mismatch'
   | 'invalid-provider-session-id'
   | 'session-not-found'
-  | 'agent-mismatch';
+  | 'agent-mismatch'
+  | 'provider-session-rebind-required'
+  | 'continuity-store-failed';
 
 export interface SessionSpawnPreallocationContext {
   sessionId: string;
@@ -90,11 +92,15 @@ export interface SessionSpawnPreallocationContext {
 }
 
 export type SessionSpawnPreallocationResult =
-  | { ok: true }
+  | {
+      ok: true;
+      launchContext?: { providerLaunchProof: string };
+    }
   | {
       ok: false;
       reason: 'provider-session-identity-missing';
       detail: ProviderSessionProvisionRecoveryDetail;
+      action?: string;
     };
 
 export type PreallocateSessionSpawn = (
@@ -1199,6 +1205,7 @@ export class SessionManager {
       }
     }
     const subject = opts.subject ?? { kind: 'terminal' };
+    let launchContext: Extract<SessionSpawnPreallocationResult, { ok: true }>['launchContext'];
     if (opts.preallocateSpawn !== undefined) {
       const decision = await opts.preallocateSpawn({
         sessionId,
@@ -1210,6 +1217,7 @@ export class SessionManager {
         subject
       });
       if (!decision.ok) return decision;
+      launchContext = decision.launchContext;
     }
     const ens = this.ensure(sessionId, opts.geometry, subject);
     if (!ens.ok) return ens;
@@ -1245,6 +1253,9 @@ export class SessionManager {
           binPath: opts.binPath,
           args,
           generation: ens.generation,
+          ...(launchContext === undefined
+            ? {}
+            : { providerLaunchProof: launchContext.providerLaunchProof }),
           ...(opts.env === undefined ? {} : { env: opts.env })
         }));
       } catch {

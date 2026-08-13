@@ -25,8 +25,14 @@ import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
 import type { DeskSessionDraft } from '../core/types.js';
-import { requestProviderSessionReset } from '../shared/daemonControlClient.js';
-import { isProviderSessionProvider } from '../shared/providerSessionIdentity.js';
+import {
+  requestProviderSessionRebind,
+  requestProviderSessionReset
+} from '../shared/daemonControlClient.js';
+import {
+  isProviderSessionProvider,
+  isValidProviderSessionId
+} from '../shared/providerSessionIdentity.js';
 
 const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat for agent fleets
 
@@ -45,6 +51,8 @@ Usage: desk <command> [options]
                                             Print recent output of a session
   reset-provider-session <name|sessionId> --force
                                             Authorize one fresh provider launch
+  rebind-provider-session <name|sessionId> --to ID --force
+                                            Adopt a proven manual provider resume
   hooks install [--home DIR]                 Install global agent event hooks
   agent-host                                Run the native UI adapter host (spawned by desk; not user-facing)
   terminal-daemon                           Run the moor terminal daemon (spawned by desk serve; not user-facing)
@@ -92,7 +100,8 @@ const COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
   ['up', new Set(['--file', '-f', '--dry-run'])],
   ['attach', new Set(['--file', '-f'])],
   ['capture', new Set(['--file', '-f', '--lines'])],
-  ['reset-provider-session', new Set(['--force'])]
+  ['reset-provider-session', new Set(['--force'])],
+  ['rebind-provider-session', new Set(['--force', '--to'])]
 ]);
 
 async function runCli(argv: string[]): Promise<number> {
@@ -244,6 +253,68 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    if (args.command === 'rebind-provider-session') {
+      if (!args.target) {
+        throw new Error(
+          'rebind-provider-session requires a session name or sessionId'
+        );
+      }
+      if (!args.force) {
+        throw new Error('rebind-provider-session requires --force');
+      }
+      const targetProviderSessionId = args.options.get('to');
+      if (!targetProviderSessionId) {
+        throw new Error('rebind-provider-session requires --to');
+      }
+      if (
+        isValidProviderSessionId('claude', args.target) ||
+        isValidProviderSessionId('codex', args.target) ||
+        isValidProviderSessionId('opencode', args.target)
+      ) {
+        throw new Error(
+          'rebind-provider-session target must be a session name or sessionId'
+        );
+      }
+      const session = findSession(desk.sessions, args.target);
+      if (args.target !== session.name && args.target !== session.sessionId) {
+        throw new Error(
+          'rebind-provider-session target must be a session name or sessionId'
+        );
+      }
+      if (session.agent !== 'claude' && session.agent !== 'codex') {
+        throw new Error(
+          `Desk session ${session.sessionId} is not configured for Claude or Codex`
+        );
+      }
+      if (!isValidProviderSessionId(session.agent, targetProviderSessionId)) {
+        throw new Error(`Invalid ${session.agent} provider session id for --to`);
+      }
+      const result = await requestProviderSessionRebind({
+        sessionId: session.sessionId,
+        targetProviderSessionId
+      });
+      if (!result.ok) {
+        throw new Error(
+          result.error ??
+            `provider-session rebind failed for Desk session ${session.sessionId}`
+        );
+      }
+      if (
+        (result.body?.kind !== 'rebound' &&
+          result.body?.kind !== 'already-rebound') ||
+        result.body.provider !== session.agent ||
+        result.body.providerSessionId !== targetProviderSessionId
+      ) {
+        throw new Error(
+          'terminal daemon returned an invalid provider-session rebind receipt'
+        );
+      }
+      console.log(
+        `rebound ${session.name} (${session.sessionId}) to ${targetProviderSessionId}`
+      );
+      return 0;
+    }
+
     throw new Error(`unknown command ${args.command}`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -308,6 +379,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       ? new Set(['group', 'group-label', 'name', 'cwd', 'command', 'agent', 'resume'])
       : command === 'hooks'
         ? new Set(['home'])
+        : command === 'rebind-provider-session'
+          ? new Set(['to'])
         : new Set<string>();
 
   while (args.length > 0) {

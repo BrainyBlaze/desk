@@ -1666,6 +1666,80 @@ select:focus {
   height: 100%;
 }
 
+.subsystemSurfaceInner {
+  display: flex;
+  flex-direction: column;
+}
+
+.providerContinuityBanners {
+  display: grid;
+  gap: 1px;
+  flex: none;
+  max-height: 35%;
+  overflow: auto;
+  background: var(--desk-error);
+  border-bottom: 1px solid var(--desk-error);
+}
+
+.providerContinuityBanner {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--desk-text);
+  background: var(--desk-bg-elevated);
+  font-size: 12px;
+}
+
+.providerContinuityBanner > svg {
+  color: var(--desk-error);
+  margin-top: 1px;
+}
+
+.providerContinuityBannerBody {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.providerContinuityBannerBody strong {
+  color: var(--desk-error);
+}
+
+.providerContinuityBannerBody small,
+.providerContinuityAction {
+  overflow-wrap: anywhere;
+}
+
+.providerContinuityBannerBody small {
+  color: var(--desk-text-dim);
+}
+
+.providerContinuityAction {
+  color: var(--desk-accent);
+  user-select: text;
+}
+
+.providerContinuityCopy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--desk-text);
+  background: transparent;
+  border: 1px solid var(--desk-line);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.providerContinuityCopy:hover {
+  color: var(--desk-accent);
+  border-color: var(--desk-accent);
+}
+
 .panelResizeHandle {
   position: relative;
   flex: 0 0 5px;

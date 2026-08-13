@@ -184,4 +184,154 @@ describe('desk CLI native lifecycle', () => {
       })
     );
   });
+
+  it('requires --force and --to for explicit provider-session rebind', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(
+      (await run(['rebind-provider-session', 'alpha', '--to', '22222222-2222-4222-8222-222222222222'])).stderr
+    ).toContain('rebind-provider-session requires --force');
+    expect(
+      (await run(['rebind-provider-session', 'alpha', '--force'])).stderr
+    ).toContain('rebind-provider-session requires --to');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a provider id as the Desk rebind target', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await run([
+      'rebind-provider-session',
+      '11111111-1111-4111-8111-111111111111',
+      '--to',
+      '22222222-2222-4222-8222-222222222222',
+      '--force'
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('target must be a session name or sessionId');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('submits only the exact Desk id and target provider id for rebind', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          kind: 'rebound',
+          provider: 'codex',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await run([
+      'rebind-provider-session',
+      'alpha',
+      '--to',
+      '22222222-2222-4222-8222-222222222222',
+      '--force'
+    ]);
+
+    expect(result.code).toBe(0);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      sessionId: 'alpha',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222'
+    });
+    expect(String(init.body)).not.toContain('expectedProviderSessionId');
+    expect(String(init.body)).not.toContain('11111111-1111-4111-8111-111111111111');
+  });
+
+  it('prefers an exact session name when fuzzy neighbors exist', async () => {
+    writeFileSync(
+      join(dir, '.config', 'desk', 'desk.yml'),
+      `groups:
+  - id: main
+    sessions:
+      - name: alpha-worker
+        cwd: /tmp
+        agent: codex
+        resume: 11111111-1111-4111-8111-111111111111
+        sessionId: desk-neighbor
+      - name: alpha
+        cwd: /tmp
+        agent: codex
+        resume: 11111111-1111-4111-8111-111111111111
+        sessionId: desk-exact
+`
+    );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          kind: 'rebound',
+          provider: 'codex',
+          providerSessionId: '22222222-2222-4222-8222-222222222222'
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(
+      (
+        await run([
+          'rebind-provider-session',
+          'alpha',
+          '--to',
+          '22222222-2222-4222-8222-222222222222',
+          '--force'
+        ])
+      ).code
+    ).toBe(0);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      sessionId: 'desk-exact',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222'
+    });
+  });
+
+  it('accepts retry-safe already-rebound success and preserves semantic rejection', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            kind: 'already-rebound',
+            provider: 'codex',
+            providerSessionId: '22222222-2222-4222-8222-222222222222'
+          }),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            reason: 'provider-session-transition-mismatch',
+            error: 'requested target is not pending'
+          }),
+          { status: 409 }
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const args = [
+      'rebind-provider-session',
+      'alpha',
+      '--to',
+      '22222222-2222-4222-8222-222222222222',
+      '--force'
+    ];
+
+    expect((await run(args)).code).toBe(0);
+    const rejected = await run(args);
+    expect(rejected.code).toBe(1);
+    expect(rejected.stderr).toContain('requested target is not pending');
+  });
 });

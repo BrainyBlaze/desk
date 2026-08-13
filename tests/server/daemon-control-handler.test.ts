@@ -18,6 +18,8 @@ interface DaemonMock {
   provision: ReturnType<typeof vi.fn>;
   resetProviderSession: ReturnType<typeof vi.fn>;
   completeProviderSessionLaunch: ReturnType<typeof vi.fn>;
+  observeProviderSessionIdentity: ReturnType<typeof vi.fn>;
+  rebindProviderSession: ReturnType<typeof vi.fn>;
   retire: ReturnType<typeof vi.fn>;
   retireGeneration: ReturnType<typeof vi.fn>;
   input: ReturnType<typeof vi.fn>;
@@ -85,6 +87,18 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     completeProviderSessionLaunch: vi.fn().mockReturnValue({
       ok: true,
       kind: 'completed'
+    }),
+    observeProviderSessionIdentity: vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'matching',
+      provider: 'codex',
+      providerSessionId: '11111111-1111-4111-8111-111111111111'
+    }),
+    rebindProviderSession: vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'rebound',
+      provider: 'codex',
+      providerSessionId: '22222222-2222-4222-8222-222222222222'
     }),
     retire: vi.fn().mockResolvedValue({ ok: true }),
     retireGeneration: vi.fn().mockResolvedValue({ ok: true }),
@@ -608,6 +622,82 @@ describe('daemon control handler', () => {
       body: { ok: true, kind: 'completed' }
     });
     expect(daemon.completeProviderSessionLaunch).toHaveBeenCalledWith(body);
+  });
+
+  it('forwards an exact provider observation without echoing its launch proof', async () => {
+    const daemon = daemonMock();
+    const body = {
+      deskSessionId: 'sess-a',
+      provider: 'codex',
+      providerSessionId: '11111111-1111-4111-8111-111111111111',
+      generation: 8,
+      launchProof: 'A'.repeat(43),
+      hook: 'SessionStart'
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/observe',
+      body
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.observeProviderSessionIdentity).toHaveBeenCalledWith(body);
+    expect(JSON.stringify(result.body)).not.toContain(body.launchProof);
+  });
+
+  it('preserves typed rebind-required observation details without echoing proof', async () => {
+    const daemon = daemonMock();
+    daemon.observeProviderSessionIdentity.mockResolvedValue({
+      ok: false,
+      reason: 'provider-session-rebind-required',
+      error: 'manual resume detected',
+      currentProviderSessionId: '11111111-1111-4111-8111-111111111111',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222',
+      action:
+        'desk rebind-provider-session sess-a --to 22222222-2222-4222-8222-222222222222 --force'
+    });
+    const launchProof = 'B'.repeat(43);
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/observe',
+      {
+        deskSessionId: 'sess-a',
+        provider: 'codex',
+        providerSessionId: '22222222-2222-4222-8222-222222222222',
+        generation: 8,
+        launchProof,
+        hook: 'SessionStart'
+      }
+    );
+
+    expect(result.status).toBe(409);
+    expect(result.body?.reason).toBe('provider-session-rebind-required');
+    expect(JSON.stringify(result.body)).not.toContain(launchProof);
+  });
+
+  it('forwards only session id and exact target for provider rebind', async () => {
+    const daemon = daemonMock();
+    const body = {
+      sessionId: 'sess-a',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222'
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/rebind',
+      body
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.rebindProviderSession).toHaveBeenCalledWith({
+      deskSessionId: body.sessionId,
+      targetProviderSessionId: body.targetProviderSessionId
+    });
   });
 
   it.each([
