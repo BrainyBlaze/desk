@@ -87,7 +87,7 @@ export function deskEventView(event: DeskEvent): DeskEventView {
         // A message that names the operator is a request; one that does not is
         // ambient traffic, and styling both alike is how a feed becomes noise.
         tone: event.mentionsOperator ? 'warn' : 'muted',
-        label: event.mentionsOperator ? '@HUMAN PING' : 'MESSAGE',
+        label: event.mentionsOperator ? '@HUMAN PING' : event.thread === undefined ? 'MESSAGE' : 'THREAD REPLY',
         detail: event.message,
         sessionId: event.sessionId,
         target: {
@@ -123,8 +123,9 @@ function exitDetail(exit: { code: number | null; signal: string | null }): strin
   return typeof exit.code === 'number' ? `exit ${exit.code}` : undefined;
 }
 
-/** The drawer's filter axis. `needs-you` is the actionable subset. */
-export type EventFilter = 'all' | 'unread' | 'needs-you' | DeskEventKind;
+/** The drawer's filter axis. `needs-you` is the actionable subset; `threads`
+    is the channel messages posted as a thread reply. */
+export type EventFilter = 'all' | 'unread' | 'needs-you' | 'threads' | DeskEventKind;
 
 export function filterEvents(events: readonly DeskEvent[], filter: EventFilter): DeskEvent[] {
   switch (filter) {
@@ -134,6 +135,8 @@ export function filterEvents(events: readonly DeskEvent[], filter: EventFilter):
       return events.filter((event) => !event.read);
     case 'needs-you':
       return events.filter((event) => deskEventView(event).actionable);
+    case 'threads':
+      return events.filter((event) => event.kind === 'channel-message' && event.thread !== undefined && !event.read);
     default:
       return events.filter((event) => event.kind === filter);
   }
@@ -143,6 +146,7 @@ export const EVENT_FILTER_LABELS: Record<EventFilter, string> = {
   all: 'all',
   unread: 'unread',
   'needs-you': 'needs you',
+  threads: 'threads',
   'agent-blocked': 'blocked',
   'agent-idle': 'turns',
   'agent-error': 'errors',
@@ -158,6 +162,7 @@ export const EVENT_FILTER_ORDER: EventFilter[] = [
   'needs-you',
   'agent-blocked',
   'channel-message',
+  'threads',
   'agent-error',
   'agent-idle',
   'agent-recovered',
