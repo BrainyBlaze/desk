@@ -289,4 +289,39 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(diagnostics.length).toBe(1);
     expect(diagnostics[0]).toMatch(/COMPACTION_GAP/);
   });
+
+  it('treats committed structural corruption as terminal on the FIRST read', async () => {
+    const root = await readyStore();
+    const { diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 20,
+      maxConsecutiveReadFailures: 3,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    // This commit is readable and self-consistent at the commit-record layer,
+    // but its selected body is not a valid event snapshot. With no valid
+    // fallback slot, the store has established corruption rather than an I/O
+    // outage, so retrying cannot change the answer.
+    const body = encoder.encode('{"v":2}\n');
+    await writeSlot(
+      root,
+      0,
+      body,
+      commitRecord({ slot: 0, bytes: body, index: 2n, start: 1n, end: 1n })
+    );
+
+    await waitFor(
+      () => terminalCount() === 1 || availability.length > 0,
+      'terminal corruption decision'
+    );
+    expect(terminalCount()).toBe(1);
+    expect(availability).toEqual([]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatch(/CORRUPT/);
+  });
 });
