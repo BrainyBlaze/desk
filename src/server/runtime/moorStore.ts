@@ -487,7 +487,7 @@ function validLifecycle(bytes: Uint8Array, commit: MoorCommit): boolean {
   const text = decoder.decode(bytes);
   const line = text.slice(0, -1);
   if (line.includes('\n')) return false;
-  const value = canonicalObject(line, 20);
+  const value = canonicalJsonObject(line, 20);
   const keys = Object.keys(value);
   if (keys.length < 13 || !matchesSchemaRange(value, LIFECYCLE_BASE, 0, 13)) return false;
   if (!matchesSchemaRange(value, LIFECYCLE_END, 13, keys.length)) return false;
@@ -519,15 +519,20 @@ function canonicalObject(line: string, maximumMembers: number): Record<string, u
   if (match === null || !validTimestamp(match[1]!)) corrupt('invalid canonical timestamp');
   const valueStart = match.index + match[0].lastIndexOf(':') + 1;
   const normalized = `${line.slice(0, valueStart)}0${line.slice(valueStart + match[1]!.length)}`;
-  const parsed = JSON.parse(normalized) as unknown;
+  canonicalJsonObject(normalized, maximumMembers);
+  const actual = JSON.parse(line) as unknown;
+  if (!isObject(actual)) corrupt('JSON record is not an object');
+  return actual;
+}
+
+function canonicalJsonObject(line: string, maximumMembers: number): Record<string, unknown> {
+  const parsed = JSON.parse(line) as unknown;
   if (!isObject(parsed) || Object.keys(parsed).length > maximumMembers) {
     corrupt('JSON record is not a bounded object');
   }
   const encoded = uppercaseEscapes(JSON.stringify(parsed));
-  if (encoded !== normalized) corrupt('JSON record is not canonical');
-  const actual = JSON.parse(line) as unknown;
-  if (!isObject(actual)) corrupt('JSON record is not an object');
-  return actual;
+  if (encoded !== line) corrupt('JSON record is not canonical');
+  return parsed;
 }
 
 function matchesSchema(value: Record<string, unknown>, schema: string): boolean {

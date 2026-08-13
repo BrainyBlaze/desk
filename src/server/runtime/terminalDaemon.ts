@@ -103,6 +103,7 @@ import {
   type ProviderSessionResetResult as ProviderSessionAuthorizationResetResult
 } from '../providerSessionReset.js';
 import { readProviderSessionBinding } from '../providerSessionBinding.js';
+import { archiveMoorGenerationStores } from './moorGenerationStores.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -824,11 +825,15 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         geometry: spec.geometry,
         subject: spec.subject,
         preallocateSpawn: (context) => preallocateProviderSession(context, spec),
-        // The holder itself creates and commits the -T store during launch;
-        // Desk only NAMES the per-generation directory here and observes it
-        // after the launcher reports ready.
-        prepareSpawn: ({ generation }) => {
+        // The ledger allocation is durable before this hook. Preserve the
+        // predecessor's evidence with independent generation-scoped copies.
+        // Stable companions stay nlink-one so Moor can retain lifecycle-derived
+        // paths, remove stable .log/.events/.exit in that order, then remove the
+        // predecessor's -T event store and -S instrument stage. The independent
+        // archive remains readable; each holder still creates its own -T store.
+        prepareSpawn: async ({ generation }) => {
           observedGeneration = generation;
+          await archiveMoorGenerationStores(sessionPath, generation);
           storeDir = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
           return { storeDir };
         },

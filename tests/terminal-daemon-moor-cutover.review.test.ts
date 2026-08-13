@@ -920,7 +920,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     const eventTmpRoot = join(home, '\ufffd');
     const socketRoot = join(home, 'socket');
     mkdirSync(eventTmpRoot, { recursive: true });
-    mkdirSync(socketRoot, { recursive: true });
+    mkdirSync(socketRoot, { recursive: true, mode: 0o700 });
     process.env.TMPDIR = eventTmpRoot;
     const daemon = createTerminalDaemon({
       homeRoot: home,
