@@ -439,7 +439,12 @@ projects:
     expect(commands[1]).toContain("DESK_SESSION_ID='claude'");
     expect(commands[1]).not.toContain('DESK_TMUX_SESSION');
     expect(commands[1]).not.toContain('tmux display-message');
-    expect(commands[1]).toContain("DESK_AGENT='claude' claude");
+    // Claude's terminal defaults to the classic renderer with mouse capture
+    // off so desk's xterm owns scroll/selection/right-click; the env sits
+    // between the Desk identity and the binary.
+    expect(commands[1]).toContain(
+      "DESK_AGENT='claude' CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 CLAUDE_CODE_DISABLE_MOUSE=1 claude"
+    );
     // `--settings` points at DESK'S OWN file, never at the operator's. The
     // retired form inlined a JSON blob carrying terminal-bell settings and
     // hooks of a schema the route now rejects; this one names a file Desk

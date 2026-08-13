@@ -30,6 +30,11 @@ import { OPENCODE_PROVIDER_SESSION_ENV_VAR } from './agentState/producerEmit.js'
 
 const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'profiles', 'groups', 'projects']);
 
+/** Env that makes claude's terminal behave like a plain scrollback terminal
+    inside desk's xterm: classic main-screen renderer + no mouse capture, so the
+    host owns line-scroll, selection and right-click (the `/tui default` shape). */
+const CLAUDE_TERMINAL_ENV = 'CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 CLAUDE_CODE_DISABLE_MOUSE=1';
+
 export class ManifestValidationError extends Error {
   readonly code = 'manifest-invalid';
 
@@ -397,10 +402,15 @@ export function buildAgentCommand(
       args.push('--dangerously-skip-permissions');
     }
     const baseCommand = args.join(' ');
+    // Default claude's terminal to the classic main-screen renderer with mouse
+    // capture off (the `/tui default` shape), so desk's xterm owns scrollback,
+    // text selection and right-click natively. The alt-screen fullscreen TUI
+    // otherwise page-scrolls on the wheel and eats click-drag selection.
+    const claudeEnv = env ? `${env} ${CLAUDE_TERMINAL_ENV}` : CLAUDE_TERMINAL_ENV;
     if (session.resume) {
-      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(env, baseCommand, session.resume)}`;
+      return `cd ${shellQuote(cwd)} && ${buildClaudeResumeCommand(claudeEnv, baseCommand, session.resume)}`;
     }
-    return `cd ${shellQuote(cwd)} && ${env} ${baseCommand}`;
+    return `cd ${shellQuote(cwd)} && ${claudeEnv} ${baseCommand}`;
   }
   if (session.agent === 'codex') {
     const args = ['codex'];
