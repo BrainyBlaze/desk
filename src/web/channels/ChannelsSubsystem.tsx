@@ -1443,6 +1443,25 @@ export function ChannelsSubsystem({
       return;
     }
     if (navTarget.thread) {
+      const parent = navTarget.thread;
+      // Bring the message that OWNS the thread into the feed, then land the
+      // cursor on the specific reply inside the open thread pane.
+      if (!detail.messages.some((message) => message.id === parent)) {
+        let cancelled = false;
+        void loadAroundMessage(detail.name, parent).then((loaded) => {
+          if (cancelled) {
+            return;
+          }
+          if (!loaded) {
+            setCursorId(id);
+            setNavTarget(null);
+          }
+        });
+        return () => {
+          cancelled = true;
+        };
+      }
+      dispatchFeed({ type: 'NAVIGATE', messageId: parent });
       setCursorId(id);
       setNavTarget(null);
       return;
@@ -2098,6 +2117,10 @@ export function ChannelsSubsystem({
     };
   }, [filtering, selected, allMessages, report]);
   const threadParentMessage = threadParent ? detail?.messages.find((message) => message.id === threadParent) ?? null : null;
+  const threadPaneMessages = useMemo(
+    () => (threadParentMessage ? [threadParentMessage, ...threadMessages] : threadMessages),
+    [threadParentMessage, threadMessages]
+  );
 
   // Feed the keydown listener the current data + actions (read at event time).
   // `blocked` is true whenever an overlay/modal owns the keyboard so j/k/s/t/g-u
@@ -2738,7 +2761,7 @@ export function ChannelsSubsystem({
                               anchorId) followed by the replies. */}
                           <MessageList
                             channel={detail.name}
-                            messages={threadParentMessage ? [threadParentMessage, ...threadMessages] : threadMessages}
+                            messages={threadPaneMessages}
                             handles={handles}
                             threadParentId={threadParent}
                             anchorId={threadParent ?? undefined}
