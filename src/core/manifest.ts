@@ -451,10 +451,21 @@ export function buildAgentCommand(
     if (session.bypassPermissions && launch.bypassFlag) {
       args.push(launch.bypassFlag);
     }
-    if (session.resume) {
-      args.push(launch.resumeFlag, shellQuote(session.resume));
+    if (!session.resume) {
+      return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
     }
-    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
+    // A resume id is a HINT, not a guarantee: qwen mints a fresh session id on
+    // every launch and only persists a resumable session after the first
+    // message, so a pane restarted before any input carries an id the CLI
+    // rejects. Without this the CLI exits and the pane dies silently; instead
+    // keep it open with the id and a way to start fresh (mirrors claude).
+    const resumeArg = shellQuote(session.resume);
+    args.push(launch.resumeFlag, resumeArg);
+    const diagnostics =
+      `printf 'desk: %s resume failed with exit %s; leaving pane open — run \`%s\` to start a fresh session\\n' ` +
+      `${shellQuote(session.agent)} "$desk_resume_status" ${shellQuote(session.agent)} >&2; ` +
+      `printf 'desk: resume id: %s\\n' ${resumeArg} >&2;`;
+    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}; ${resumeFailureGuard('desk_resume_status', diagnostics)}`;
   }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }
@@ -507,11 +518,19 @@ function profileCommandPrefix(session: DeskSession, homeDir: string): string {
 
 function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string): string {
   const resumeArg = shellQuote(resume);
-  return [
-    `${env} ${baseCommand} --resume ${resumeArg}`,
-    'desk_claude_resume_status=$?',
-    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi`
-  ].join('; ');
+  const diagnostics =
+    `printf '%s\\n' "desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics" >&2; ` +
+    `printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2;`;
+  return `${env} ${baseCommand} --resume ${resumeArg}; ${resumeFailureGuard('desk_claude_resume_status', diagnostics)}`;
+}
+
+/**
+ * The shared resume-failure guard: capture the launch's exit status, and on any
+ * non-zero exit print the caller's diagnostics and drop to an interactive shell
+ * so the pane stays alive instead of vanishing. One skeleton, per-agent message.
+ */
+function resumeFailureGuard(statusVar: string, diagnostics: string): string {
+  return `${statusVar}=$?; if [ "$${statusVar}" -ne 0 ]; then ${diagnostics} exec "\${SHELL:-/bin/sh}"; fi`;
 }
 
 // shellQuote now lives in ../shared/shell.ts (single audited copy).

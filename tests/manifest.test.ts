@@ -435,6 +435,29 @@ projects:
     expect(commands[2]).toContain("DESK_SESSION_ID='grok' DESK_AGENT='grok' grok");
     expect(commands[2]).toContain("--session 'a1b2c3d4e5f6'");
     expect(commands[2]).not.toContain('--yolo');
+    // every resume launch is guarded: a rejected id keeps the pane alive.
+    for (const i of [0, 1, 2]) {
+      expect(commands[i]).toContain('desk_resume_status=$?');
+      expect(commands[i]).toContain('exec "${SHELL:-/bin/sh}"');
+      expect(commands[i]).toContain('to start a fresh session');
+    }
+  });
+
+  it('does not wrap a resume guard around a fresh (no-resume) launch', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: qwen
+            sessionId: qwen
+            agent: qwen
+`);
+    const command = buildSessionSpecs(manifest, { homeDir: '/workspace' })[0].command;
+    expect(command).not.toContain('desk_resume_status');
+    expect(command).not.toContain('exec "${SHELL:-/bin/sh}"');
   });
 
   it('keeps silently ignoring bypassPermissions on shell sessions as before', () => {
