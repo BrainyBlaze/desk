@@ -19,6 +19,30 @@ import {
 
 const roots: string[] = [];
 
+const MOOR_TARGETS = {
+  'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
+  'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
+  'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
+  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64',
+  'x86_64-pc-windows-msvc': 'moor-0.1.0-windows-x64.exe',
+  'aarch64-pc-windows-msvc': 'moor-0.1.0-windows-arm64.exe'
+} as const;
+
+function fixtureMoorPin() {
+  return {
+    schemaVersion: 1,
+    repository: 'https://github.com/BrainyBlaze/moor',
+    version: 'v0.1.0',
+    commit: 'b'.repeat(40),
+    targets: Object.fromEntries(
+      Object.entries(MOOR_TARGETS).map(([target, asset], index) => [
+        target,
+        { asset, size: index + 1, sha256: (index + 1).toString(16).repeat(64) }
+      ])
+    )
+  };
+}
+
 function run(command: string, args: string[], cwd: string): string {
   const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
   if (result.status !== 0) {
@@ -34,18 +58,22 @@ function createRepository(): string {
   mkdirSync(join(root, 'node_modules', 'fixture'), { recursive: true });
   mkdirSync(join(root, 'dist'), { recursive: true });
   mkdirSync(join(root, 'libexec'), { recursive: true });
-  mkdirSync(join(root, 'vendor', 'atch'), { recursive: true });
+  mkdirSync(join(root, 'vendor', 'moor', 'src'), { recursive: true });
   writeFileSync(join(root, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
   writeFileSync(join(root, 'README.md'), 'fixture\n');
   writeFileSync(join(root, 'node_modules', 'fixture', 'tracked.txt'), 'exclude\n');
   writeFileSync(join(root, 'dist', 'tracked.txt'), 'exclude\n');
   writeFileSync(join(root, 'libexec', 'desk-standalone'), 'exclude\n');
-  writeFileSync(join(root, 'libexec', 'atch'), 'exclude\n');
-  writeFileSync(join(root, 'vendor', 'atch', 'PROVENANCE.json'), '{}\n');
-  writeFileSync(join(root, 'vendor', 'atch', 'atch.c'), '/* vendored source */\n');
+  writeFileSync(join(root, 'libexec', 'moor'), 'exclude\n');
+  writeFileSync(join(root, 'vendor', 'moor', 'PROVENANCE.json'), '{}\n');
+  writeFileSync(join(root, 'vendor', 'moor', 'src', 'main.rs'), '// vendored source\n');
   writeFileSync(
     join(root, 'scripts', 'distribution', 'toolchains.json'),
     readFileSync(new URL('../scripts/distribution/toolchains.json', import.meta.url))
+  );
+  writeFileSync(
+    join(root, 'scripts', 'distribution', 'moor-pin.json'),
+    `${JSON.stringify(fixtureMoorPin(), null, 2)}\n`
   );
   run('git', ['init', '-q'], root);
   run('git', ['add', '.'], root);
@@ -72,7 +100,8 @@ describe('release asset generation', () => {
     }
   });
 
-  it('creates a schema-versioned manifest without caller-controlled origins', () => {
+  it('creates a schema-versioned manifest with the exact Moor pin projection', () => {
+    const moor = fixtureMoorPin();
     const manifest = createInstallManifest({
       version: 'v0.3.0',
       sourceAsset: 'desk-v0.3.0-source.tar.gz',
@@ -81,17 +110,52 @@ describe('release asset generation', () => {
         schemaVersion: 1,
         node: { version: '22.23.1', npmVersion: '10.9.8', targets: {} },
         bun: { version: '1.3.14', tag: 'bun-v1.3.14', targets: {} }
-      }
+      },
+      moor
     });
 
     expect(manifest).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       version: 'v0.3.0',
       source: { asset: 'desk-v0.3.0-source.tar.gz', sha256: 'a'.repeat(64) },
       node: { version: '22.23.1', npmVersion: '10.9.8' },
-      bun: { version: '1.3.14', tag: 'bun-v1.3.14' }
+      bun: { version: '1.3.14', tag: 'bun-v1.3.14' },
+      moor
     });
-    expect(JSON.stringify(manifest)).not.toMatch(/url|origin/i);
+    expect(manifest.moor).not.toBe(moor);
+    expect(manifest.moor.repository).toBe('https://github.com/BrainyBlaze/moor');
+  });
+
+  it('rejects a Moor pin with unknown fields or nonliteral target assets', () => {
+    const moor = fixtureMoorPin();
+    expect(() =>
+      createInstallManifest({
+        version: 'v0.3.0',
+        sourceAsset: 'desk-v0.3.0-source.tar.gz',
+        sourceSha256: 'a'.repeat(64),
+        toolchains: {
+          schemaVersion: 1,
+          node: { version: '22.23.1', npmVersion: '10.9.8', targets: {} },
+          bun: { version: '1.3.14', tag: 'bun-v1.3.14', targets: {} }
+        },
+        moor: { ...moor, url: 'https://invalid.example' }
+      })
+    ).toThrow(/moor.*keys/i);
+
+    moor.targets['x86_64-unknown-linux-musl'].asset = 'moor-0.1.0-linux-arm64';
+    expect(() =>
+      createInstallManifest({
+        version: 'v0.3.0',
+        sourceAsset: 'desk-v0.3.0-source.tar.gz',
+        sourceSha256: 'a'.repeat(64),
+        toolchains: {
+          schemaVersion: 1,
+          node: { version: '22.23.1', npmVersion: '10.9.8', targets: {} },
+          bun: { version: '1.3.14', tag: 'bun-v1.3.14', targets: {} }
+        },
+        moor
+      })
+    ).toThrow(/moor.*asset/i);
   });
 
   it('writes deterministic source, manifest, and checksum assets from clean committed source', () => {
@@ -121,9 +185,33 @@ describe('release asset generation', () => {
 
     const listing = run('tar', ['-tzf', join(first, 'desk-v0.3.0-source.tar.gz')], root);
     expect(listing).toContain('desk-v0.3.0/README.md');
-    expect(listing).toContain('desk-v0.3.0/vendor/atch/PROVENANCE.json');
-    expect(listing).toContain('desk-v0.3.0/vendor/atch/atch.c');
+    expect(listing).toContain('desk-v0.3.0/scripts/distribution/moor-pin.json');
+    expect(listing).not.toMatch(/(?:^|\/)vendor\/moor(?:\/|$)/m);
     expect(listing).not.toMatch(/(?:^|\/)(?:\.git|node_modules|dist|libexec)(?:\/|$)/m);
+  });
+
+  it('reads release metadata from the exact archived ref rather than working-tree HEAD', () => {
+    const root = createRepository();
+    const releasedRef = run('git', ['rev-parse', 'HEAD'], root).trim();
+    const newerPin = fixtureMoorPin();
+    newerPin.commit = 'c'.repeat(40);
+    writeFileSync(
+      join(root, 'scripts', 'distribution', 'moor-pin.json'),
+      `${JSON.stringify(newerPin, null, 2)}\n`
+    );
+    run('git', ['add', 'scripts/distribution/moor-pin.json'], root);
+    run(
+      'git',
+      ['-c', 'user.name=Desk Tests', '-c', 'user.email=desk-tests@example.invalid', 'commit', '-qm', 'new pin'],
+      root
+    );
+    const outDir = join(mkdtempSync(join(tmpdir(), 'desk-release-output-')), 'assets');
+    roots.push(outDir.slice(0, -'/assets'.length));
+
+    writeReleaseAssets({ root, version: 'v0.3.0', outDir, ref: releasedRef });
+
+    const manifest = JSON.parse(readFileSync(join(outDir, 'desk-install-manifest.json'), 'utf8'));
+    expect(manifest.moor.commit).toBe('b'.repeat(40));
   });
 
   it('refuses dirty or untracked checkout state instead of packaging local artifacts', () => {

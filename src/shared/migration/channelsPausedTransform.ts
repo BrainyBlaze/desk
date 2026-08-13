@@ -1,6 +1,6 @@
 // Channels operator-pause store transform (spec §10). Re-keys the paused-sessions
 // store (channelsPaused.ts, <home>/_engine/paused.json) from the legacy
-// tmuxSession to the atch-native sessionId via the canonical tmuxSession→sessionId
+// tmuxSession to the daemon-native sessionId via the canonical tmuxSession→sessionId
 // map the manifest transform mints.
 //
 // Pure + structural (no src/server import): the product adapter reads/writes the

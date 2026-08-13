@@ -179,7 +179,7 @@ describe('provider-session reset transaction crash recovery', () => {
       deskSessionId: 'alpha',
       provider: 'codex',
       currentGeneration: 0,
-      nextGeneration: 1
+      nextGeneration: 2 // OB-18: the fresh supervised claim owns generation 2
     });
     await clearProviderSessionIdentity({
       deskSessionId: 'alpha',
@@ -198,13 +198,13 @@ describe('provider-session reset transaction crash recovery', () => {
 
     await expect(
       authorizeProviderSessionReset(
-        { deskSessionId: 'alpha', generation: 1, manifestPath, homeDir: root },
+        { deskSessionId: 'alpha', generation: 2, manifestPath, homeDir: root },
         { ledger }
       )
     ).resolves.toEqual({
       ok: true,
       authorizationId: 'authorization-2',
-      generation: 1,
+      generation: 2,
       state: 'authorized'
     });
     expect(ledger.current('alpha')).toMatchObject({
@@ -213,7 +213,7 @@ describe('provider-session reset transaction crash recovery', () => {
       state: 'authorized'
     });
     expect(readFileSync(ledgerPath, 'utf8')).toContain(
-      '"authorizationId":"authorization-1","deskSessionId":"alpha","provider":"codex","expectedPriorBinding":"11111111-1111-4111-8111-111111111111","generation":1,"state":"completed"'
+      '"authorizationId":"authorization-1","deskSessionId":"alpha","provider":"codex","expectedPriorBinding":"11111111-1111-4111-8111-111111111111","generation":2,"state":"completed"'
     );
     ledger.close();
   });

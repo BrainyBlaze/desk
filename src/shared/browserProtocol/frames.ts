@@ -3,7 +3,7 @@
 // browser tab. Pure module (src/shared): no server/web imports.
 //
 // Each WS binary message IS exactly one frame (WS preserves message boundaries),
-// so there is no magic/reassembly like the atch wire needs — just a 2-byte
+// so there is no magic/reassembly like the legacy wire needed — just a 2-byte
 // header (version, type) + a typed payload. A SUBSCRIBE assigns a compact u32
 // `channelId` (returned in SUBSCRIBE_ACK); every subsequent frame routes by
 // channelId instead of repeating the session/surface strings on the hot path.
@@ -19,7 +19,7 @@ export const BP_MAX_FRAME_BYTES = 1 << 20; // 1 MiB
 export const BP_SNAP_CHUNK = 256 * 1024;
 /** Input payload cap per frame. */
 export const BP_MAX_INPUT_BYTES = 1 << 16; // 64 KiB
-/** Query request/reply byte cap (parity with the atch wire MAX_TERMINAL_REPLY). */
+/** Query request/reply byte cap (parity with the legacy wire MAX_TERMINAL_REPLY). */
 export const BP_MAX_QUERY_BYTES = 256;
 /** channelId 0 is reserved for connection-level frames (HEARTBEAT, conn ERROR). */
 export const BP_CONN_CHANNEL = 0;

@@ -1,6 +1,6 @@
 // Daemon socket/RPC server integration (spec §3.2/§3.7). Starts the real
 // unix-socket daemon around DaemonCore, drives it over a client socket, and
-// checks the single-instance lock. Node stdlib only — no atch binary.
+// checks the single-instance lock. Node stdlib only — no moor binary.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { connect, type Socket } from 'node:net';
@@ -104,7 +104,7 @@ describe('daemon server — RPC over a real unix socket (§3.2)', () => {
     await c.ready();
     const ensure = await c.call('ensure', { sessionId: 'web-1', rows: 40, cols: 120 });
     expect(ensure.ok).toBe(true);
-    expect((ensure.result as { generation: number }).generation).toBe(1);
+    expect((ensure.result as { generation: number }).generation).toBe(2);
 
     const list = await c.call('list');
     expect((list.result as unknown[]).length).toBe(1);

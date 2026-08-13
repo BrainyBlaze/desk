@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createTerminalRoutes } from '../../src/server/routes/terminalRoutes.js';
 
-const ENV_KEYS = ['DESK_ATCH_NATIVE', 'DESK_DAEMON_URL'] as const;
+const ENV_KEYS = ['DESK_DAEMON_URL'] as const;
 const saved: Record<string, string | undefined> = {};
 for (const key of ENV_KEYS) saved[key] = process.env[key];
 afterEach(() => {
@@ -44,7 +44,6 @@ async function invoke(body: unknown): Promise<{ status: number; payload: any }> 
 
 describe('terminal-capture native proxy', () => {
   it('proxies the ranged read to /control/tail on the SAME request shape and adds totalAvailable', async () => {
-    process.env.DESK_ATCH_NATIVE = '1';
     process.env.DESK_DAEMON_URL = 'ws://127.0.0.1:59998';
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -62,7 +61,6 @@ describe('terminal-capture native proxy', () => {
   });
 
   it('preserves the daemon 404 for an unknown session (client-addressable, not a 500)', async () => {
-    process.env.DESK_ATCH_NATIVE = '1';
     process.env.DESK_DAEMON_URL = 'ws://127.0.0.1:59998';
     vi.stubGlobal(
       'fetch',
@@ -78,7 +76,6 @@ describe('terminal-capture native proxy', () => {
   });
 
   it('surfaces a daemon failure as a 500 with the error, never a silent empty capture', async () => {
-    process.env.DESK_ATCH_NATIVE = '1';
     process.env.DESK_DAEMON_URL = 'ws://127.0.0.1:59998';
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('daemon down')));
     const { status, payload } = await invoke({ sessionId: 'sess-web', rows: 5, offset: 0 });

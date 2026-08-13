@@ -21,8 +21,6 @@ import {
 } from '../controlPlane/index.js';
 import { InMemoryCmdCache } from '../delivery/index.js';
 import { type BpFrame } from '../browserProtocol/index.js';
-import { type RawFrame } from '../atchWire/codec.js';
-import { type RecordEnvelope } from '../atchWire/messages.js';
 import { WorkerSupervisor } from './workerSupervisor.js';
 import { type EmulatorFactory } from './emulatorPort.js';
 import { SessionRuntime } from './sessionRuntime.js';
@@ -36,8 +34,9 @@ export interface DaemonCoreDeps {
   now: () => number;
   /** Route a browser frame to a session's surface (the socket shell wires the WS). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
-  /** Send a frame to a session's atch master. */
-  sendMaster: (sessionId: string, frame: RawFrame) => void;
+  /** Typed master-bound sends, routed to the session's attached holder link. */
+  sendMasterInput: (sessionId: string, bytes: Uint8Array, binary: boolean, surfaceId: number) => void;
+  sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
   workingLeaseMs?: number;
   openToolLeaseMs?: number;
   initialAgentHealth?: (
@@ -165,7 +164,10 @@ export class DaemonCore {
       cmdCache: this.cmdCache,
       now: this.d.now,
       sendBrowser: (channelId, frame) => this.d.sendBrowser(sessionId, channelId, frame),
-      sendMaster: (frame) => this.d.sendMaster(sessionId, frame),
+      sendMasterInput: (bytes, binary, surfaceId) =>
+        this.d.sendMasterInput(sessionId, bytes, binary, surfaceId),
+      sendMasterResize: (rows, cols, surfaceId) =>
+        this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
       onExit: (exit) => {
         this.authority.markExited(sessionId, generation, {
           code: exit.code,
@@ -177,7 +179,7 @@ export class DaemonCore {
   }
 
   /**
-   * Re-adopt a session whose atch master SURVIVED a daemon restart: create the
+   * Re-adopt a session whose moor holder SURVIVED a daemon restart: create the
    * runtime at the ledger's durable CURRENT generation without allocating. The
    * surviving master owns exactly that generation — an ensure() here would
    * allocate current+1 and the fence would reject every frame in both
@@ -263,6 +265,26 @@ export class DaemonCore {
     return this.authority.markExited(sessionId, generation, exit, observedAt);
   }
 
+  /** §8 CPR source: the authoritative emulator's cursor, if the session lives. */
+  cursor(sessionId: string): { row: number; col: number } | undefined {
+    return this.sessions.get(sessionId)?.runtime.cursor();
+  }
+
+  /** Fan a child-exit push to the session's subscribed browser surfaces. */
+  emitExit(sessionId: string, code: number, signal = 0): void {
+    this.sessions.get(sessionId)?.runtime.emitExit(code, signal);
+  }
+
+  /** §10: verified-live heartbeat evidence lapsed (false) or returned (true). */
+  observeHolderLiveness(
+    sessionId: string,
+    generation: number,
+    live: boolean,
+    detail?: string
+  ): AuthorityMutationResult {
+    return this.authority.observeHolderLiveness(sessionId, generation, live, detail);
+  }
+
   assessAgentHealth(
     sessionId: string,
     generation: number,
@@ -323,8 +345,9 @@ export class DaemonCore {
   }
 
   // ---- routing to a session's runtime ---------------------------------------
-  onMasterRecord(sessionId: string, rec: RecordEnvelope): void {
-    this.sessions.get(sessionId)?.runtime.onMasterRecord(rec);
+  /** Moor-native child output: absolute byte offset + raw bytes (§6.1). */
+  onMoorOutput(sessionId: string, bytes: Uint8Array, offset: bigint): void {
+    this.sessions.get(sessionId)?.runtime.onMoorOutput(bytes, offset);
   }
 
   /** Apply non-durable terminal parser state before an attach becomes usable. */

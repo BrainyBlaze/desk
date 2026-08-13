@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  atchCommandFor,
+  moorCommandFor,
   attachSession,
   planDeskUp,
   restartSession,
@@ -29,7 +29,7 @@ projects:
   return [{ type: 'start', session: spec }];
 }
 
-describe('runPlan atch-native lifecycle', () => {
+describe('runPlan moor-native lifecycle', () => {
   let errors: string[];
 
   afterEach(() => {
@@ -45,7 +45,7 @@ describe('runPlan atch-native lifecycle', () => {
     await expect(runPlan(plan, false, { control })).resolves.toBe(0);
     expect(control).toHaveBeenCalledWith('/control/provision', {
       sessionId: 'terminal-session',
-      command: atchCommandFor(plan[0]!.session),
+      command: moorCommandFor(plan[0]!.session),
       geometry: { rows: 24, cols: 80 },
       subject: { kind: 'terminal' }
     });
@@ -184,21 +184,21 @@ describe('runPlan atch-native lifecycle', () => {
 
     expect(
       planDeskUp([session], {
-        env: { DESK_ATCH_SOCKET_ROOT: '/run/desk' },
-        probeSession: (path) => path === '/run/desk/terminal-session.sock'
+        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
+        probeSession: (path) => path === '/run/desk/terminal-session'
       })
     ).toEqual([{ type: 'preserve', session }]);
   });
 
-  it('uses a zero-byte atch push probe and rejects stale sockets', () => {
+  it('uses a zero-byte moor push probe and rejects stale sockets', () => {
     const session = terminalPlan()[0]!.session;
     const spawn = vi
       .fn()
       .mockReturnValueOnce({ status: 0 })
       .mockReturnValueOnce({ status: 1 });
     const options = {
-      atchBinPath: '/release/libexec/atch',
-      env: { DESK_ATCH_SOCKET_ROOT: '/run/desk' },
+      moorBinPath: '/release/libexec/moor',
+      env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
       spawn: spawn as never
     };
 
@@ -206,10 +206,37 @@ describe('runPlan atch-native lifecycle', () => {
     expect(runningSessionSet([session], options)).toEqual(new Set());
     expect(spawn).toHaveBeenNthCalledWith(
       1,
-      '/release/libexec/atch',
-      ['push', '/run/desk/terminal-session.sock'],
+      '/release/libexec/moor',
+      ['push', '/run/desk/terminal-session'],
       expect.objectContaining({ input: '' })
     );
+  });
+
+  it('classifies every real probe answer: only a live holder counts (desk#50)', () => {
+    // The four answers moor 237a62c actually gives, captured in a real
+    // install. Exit code cannot separate them — all three refusals exit 1 —
+    // and the refusal that proves LIFE arrives on stdout, so the probe reads
+    // both streams and requires positive proof.
+    const session = terminalPlan()[0]!.session;
+    const answer = (status: number, stdout: string, stderr = '') => ({ status, stdout, stderr });
+    const probe = (result: unknown) =>
+      runningSessionSet([session], {
+        moorBinPath: '/release/libexec/moor',
+        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
+        spawn: vi.fn().mockReturnValue(result) as never
+      });
+
+    // Accepted push — a holder took the bytes.
+    expect(probe(answer(0, ''))).toEqual(new Set(['terminal-session']));
+    // The daemon holds the §7.3 lease: the normal state of a session in use.
+    expect(probe(answer(1, 'moor: input lease is busy\n'))).toEqual(new Set(['terminal-session']));
+    expect(probe(answer(1, '', 'moor: input lease is busy\n'))).toEqual(new Set(['terminal-session']));
+    // The rendezvous outlived its holder — a tombstone, not a session.
+    expect(probe(answer(1, "moor: session '/run/desk/terminal-session' is not running\n"))).toEqual(new Set());
+    // No rendezvous at all.
+    expect(probe(answer(1, "moor: session '/run/desk/terminal-session' does not exist\n"))).toEqual(new Set());
+    // The probe could not run: unobservable is never claimed alive.
+    expect(probe({ error: new Error('ENOENT'), status: null })).toEqual(new Set());
   });
 
   it('probes the daemon then attaches the shipped binary to the durable socket', async () => {
@@ -221,8 +248,8 @@ describe('runPlan atch-native lifecycle', () => {
       attachSession(session, {
         control,
         spawn: spawn as never,
-        atchBinPath: '/release/libexec/atch',
-        env: { DESK_ATCH_SOCKET_ROOT: '/run/desk' }
+        moorBinPath: '/release/libexec/moor',
+        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' }
       })
     ).resolves.toBe(0);
     expect(control).toHaveBeenCalledWith('/control/tail', {
@@ -231,8 +258,8 @@ describe('runPlan atch-native lifecycle', () => {
       offset: 0
     });
     expect(spawn).toHaveBeenCalledWith(
-      '/release/libexec/atch',
-      ['attach', '/run/desk/terminal-session.sock'],
+      '/release/libexec/moor',
+      ['attach', '/run/desk/terminal-session'],
       expect.objectContaining({ stdio: 'inherit' })
     );
   });

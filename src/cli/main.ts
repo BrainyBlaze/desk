@@ -47,7 +47,7 @@ Usage: desk <command> [options]
                                             Authorize one fresh provider launch
   hooks install [--home DIR]                 Install global agent event hooks
   agent-host                                Run the native UI adapter host (spawned by desk; not user-facing)
-  terminal-daemon                           Run the atch terminal daemon (spawned by desk serve; not user-facing)
+  terminal-daemon                           Run the moor terminal daemon (spawned by desk serve; not user-facing)
   channels <list|read|post> …               Agent messaging channels (desk channels help)
   config                                    Print the active config path
   help                                      Show this help
@@ -397,7 +397,7 @@ if (isCliEntry) {
   if (cliArgs[0] === 'channels') {
     process.exitCode = await runChannelsCli(cliArgs.slice(1));
   } else if (cliArgs[0] === 'terminal-daemon') {
-    // The atch terminal daemon: spawned + supervised by `desk serve`
+    // The moor terminal daemon: spawned + supervised by `desk serve`
     // (daemonSupervisor). Runs until SIGINT/SIGTERM; a fatal
     // start error exits non-zero so the supervisor's bounded restart sees it.
     try {

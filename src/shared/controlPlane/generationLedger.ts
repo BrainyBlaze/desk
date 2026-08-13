@@ -23,15 +23,35 @@ export class GenerationLedger {
   constructor(private readonly store: GenerationLedgerStore) {}
 
   /**
-   * Allocate the next generation for a (possibly-reused) sessionId: max+1,
-   * strictly monotonic, tombstone-surviving. The daemon MUST fsync this (inside
+   * Allocate the next generation for a (possibly-reused) sessionId: strictly
+   * monotonic, tombstone-surviving. The daemon MUST fsync this (inside
    * `store.write`) BEFORE it writes the master's registry file and BEFORE it
    * spawns any child — so a crash never reissues a generation (§4.8.1).
+   *
+   * OB-18: generation 1 is reserved for UNSUPERVISED holders, so the FIRST
+   * supervised allocation of a lineage is 2 (the moor launch record refuses
+   * anything below). Existing lineages (max >= 1) advance by one as ever, so
+   * no durable store needs migration.
    */
   allocate(sessionId: string): number {
-    const next = this.store.read(sessionId) + 1;
+    const next = this.next(sessionId);
     this.store.write(sessionId, next);
     return next;
+  }
+
+  /**
+   * The generation the NEXT allocate() will return, without committing it —
+   * preallocation fences must see exactly the value the spawn will own.
+   * Exhaustion fails BEFORE any commit: generations are u32 and never wrap.
+   */
+  next(sessionId: string): number {
+    const prior = this.store.read(sessionId);
+    if (prior >= 0xffff_ffff) {
+      throw new Error(
+        `generation space exhausted for session ${sessionId}: u32 generations never wrap`
+      );
+    }
+    return prior === 0 ? 2 : prior + 1;
   }
 
   /** The current (last-allocated) generation — what the §6.3 fence compares against. */

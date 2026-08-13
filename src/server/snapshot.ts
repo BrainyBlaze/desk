@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveAtchSocketRoot } from '../shared/atchPaths.js';
+import { resolveMoorSocketRoot } from '../shared/moorPaths.js';
 import { readManifestFile, resolveManifestPath } from '../core/config.js';
 import { buildSessionSpecs, parseDeskManifest } from '../core/manifest.js';
 import {
@@ -13,12 +13,12 @@ import { buildDeskViewModel } from '../ui/model.js';
 import type { DeskGroupSeed, DeskProjectSeed, DeskViewModel } from '../ui/model.js';
 import type { DeskManifest, SessionSpec } from '../core/types.js';
 
-/** The running set, keyed by durable sessionId (atch socket probe). */
+/** The running set, keyed by durable sessionId (moor socket probe). */
 function runningSessionsFor(sessions: readonly SessionSpec[]): Set<string> {
-  const socketRoot = resolveAtchSocketRoot();
+  const socketRoot = resolveMoorSocketRoot();
   const running = new Set<string>();
   for (const session of sessions) {
-    if (existsSync(join(socketRoot, `${session.sessionId}.sock`))) {
+    if (existsSync(join(socketRoot, session.sessionId))) { // moor rendezvous: no suffix
       running.add(session.sessionId);
     }
   }

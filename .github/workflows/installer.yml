@@ -4,12 +4,13 @@ on:
   pull_request:
     paths:
       - 'install.sh'
-      - 'scripts/build-atch.mjs'
+      - 'scripts/fetch-moor.mjs'
       - 'scripts/create-release-assets.mjs'
       - 'scripts/distribution/**'
-      - 'vendor/atch/**'
-      - 'tests/atch-distribution-contract.test.ts'
+      - 'tests/moor-distribution-contract.test.ts'
       - 'tests/install-script.test.ts'
+      - 'tests/release-assets.test.ts'
+      - 'tests/server-architecture.test.ts'
       - 'tests/helpers/installerFixture.ts'
       - '.github/workflows/installer.yml'
   workflow_dispatch:
@@ -36,6 +37,8 @@ jobs:
           node-version: 22.23.1
           cache: npm
       - run: npm ci
+      - name: Verify installer and release behavior with local Moor fixtures
+        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts
       # The fixture version always mirrors package.json (create-release-assets
       # refuses any other), so a version bump can never break this matrix.
       - name: Resolve the fixture version
@@ -47,6 +50,38 @@ jobs:
         env:
           FIXTURE_VERSION: ${{ steps.fixver.outputs.value }}
         run: |
+          # This matrix intentionally fails at the corrupted Node checksum. The
+          # synthetic pin only makes the Desk manifest/source schema complete;
+          # successful Moor acquisition is exercised by the local-fixture tests.
+          if [ ! -f scripts/distribution/moor-pin.json ]; then
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { writeFileSync } from 'node:fs';
+          const assets = {
+            'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
+            'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
+            'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
+            'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64',
+            'x86_64-pc-windows-msvc': 'moor-0.1.0-windows-x64.exe',
+            'aarch64-pc-windows-msvc': 'moor-0.1.0-windows-arm64.exe'
+          };
+          const bytes = Buffer.from('installer-negative-fixture\n');
+          const sha256 = createHash('sha256').update(bytes).digest('hex');
+          const pin = {
+            schemaVersion: 1,
+            repository: 'https://github.com/BrainyBlaze/moor',
+            version: 'v0.1.0',
+            commit: 'b'.repeat(40),
+            targets: Object.fromEntries(Object.entries(assets).map(([target, asset]) => [
+              target,
+              { asset, size: bytes.length, sha256 }
+            ]))
+          };
+          writeFileSync('scripts/distribution/moor-pin.json', `${JSON.stringify(pin, null, 2)}\n`);
+          NODE
+          git add scripts/distribution/moor-pin.json
+          git -c user.name=desk-ci -c user.email=desk-ci@invalid commit -m 'Add installer negative-path Moor fixture'
+          fi
           npm run release:assets -- --version "$FIXTURE_VERSION" --out-dir "$RUNNER_TEMP/installer-release"
           node --input-type=module - "$RUNNER_TEMP/installer-release" "$FIXTURE_VERSION" <<'NODE'
           import { createHash } from 'node:crypto';
@@ -88,11 +123,7 @@ jobs:
           node-version: 22.23.1
           cache: npm
       - run: npm ci
-      - name: Build and probe bundled atch
-        run: |
-          npm run build:atch
-          make -C vendor/atch CC=cc STATIC_FLAG= security-storage-test
-          file libexec/atch
-          file libexec/atch | grep -F "${{ matrix.arch }}"
-          ./libexec/atch --version | grep -F 'atch - version 1.6-bb1,'
-      - run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts
+      - name: Verify installer and release behavior with local Moor fixtures
+        # The slower Intel runner can exceed Vitest 3's fork-RPC deadline even
+        # after every assertion passes. Threads preserve the same test coverage.
+        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts --pool=threads

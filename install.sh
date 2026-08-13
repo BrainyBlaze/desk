@@ -9,7 +9,9 @@ REPO="BrainyBlaze/desk"
 NODE_VERSION="22.23.1"
 NPM_VERSION="10.9.8"
 BUN_VERSION="1.3.14"
-ATCH_VERSION="1.6-bb1"
+MOOR_VERSION="0.1.0"
+MOOR_RELEASE_VERSION="v${MOOR_VERSION}"
+MOOR_REPOSITORY="https://github.com/BrainyBlaze/moor"
 PYTHON_MIN_VERSION="3.6"
 LOCK_TOKEN=""
 LOCK_OWNED=0
@@ -24,9 +26,15 @@ OS_TAG=""
 ARCH_TAG=""
 HOST_LIBC=""
 TARGET=""
+MOOR_TARGET=""
 VERSION=""
 VERSION_EXPLICIT=0
 RELEASE_BASE=""
+MOOR_RELEASE_BASE=""
+MOOR_COMMIT=""
+MOOR_ASSET=""
+MOOR_SIZE=""
+MOOR_SHA=""
 LAUNCHER_DIR=""
 LAUNCHER_PATH=""
 PREVIOUS_RELEASE=""
@@ -90,6 +98,15 @@ validate_requested_inputs() {
     case "$DESK_RELEASE_BASE_URL" in *'?'*|*'#'*|*'@'*) die "DESK_RELEASE_BASE_URL contains forbidden URL syntax." ;; esac
     [ -n "${DESK_VERSION:-}" ] || die "DESK_VERSION is required with DESK_RELEASE_BASE_URL."
   fi
+  if [ -n "${DESK_MOOR_RELEASE_BASE_URL:-}" ]; then
+    case "$DESK_MOOR_RELEASE_BASE_URL" in
+      file:///*) ;;
+      *) die "Moor release override supports only an absolute local file:// directory." ;;
+    esac
+    case "$DESK_MOOR_RELEASE_BASE_URL" in
+      *'?'*|*'#'*|*'@'*) die "Moor release override contains forbidden URL syntax." ;;
+    esac
+  fi
 }
 
 is_nonnegative_integer() {
@@ -125,6 +142,13 @@ detect_target() {
     fi
   fi
   TARGET="${OS_TAG}-${ARCH_TAG}"
+  case "$TARGET" in
+    linux-x64) MOOR_TARGET="x86_64-unknown-linux-musl" ;;
+    linux-arm64) MOOR_TARGET="aarch64-unknown-linux-musl" ;;
+    darwin-x64) MOOR_TARGET="x86_64-apple-darwin" ;;
+    darwin-arm64) MOOR_TARGET="aarch64-apple-darwin" ;;
+    *) die "unsupported Moor target for $TARGET" ;;
+  esac
 }
 
 detect_package_manager() {
@@ -409,7 +433,7 @@ current_release_version() {
   "$PYTHON_BIN" - "$release/.desk-release" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
-if data.get("schemaVersion") != 1 or data.get("managedBy") != "desk-installer": raise SystemExit(1)
+if data.get("schemaVersion") not in (1,2) or data.get("managedBy") != "desk-installer": raise SystemExit(1)
 print(data["version"])
 PY
 }
@@ -483,7 +507,7 @@ download_file() {
     https://*|file:///*) ;;
     *) die "refusing non-HTTPS/non-local download: $url" ;;
   esac
-  curl -fsSL --retry 3 --connect-timeout 30 "$url" -o "$destination"
+  curl -fsSL --retry 3 --connect-timeout 30 --max-time 60 "$url" -o "$destination"
 }
 
 checksum_entry() {
@@ -533,22 +557,35 @@ expected_bun_sha() {
 }
 
 validate_install_manifest() {
-  local values manifest_node_sha manifest_bun_sha sums_source
-  values="$($PYTHON_BIN - "$INSTALL_MANIFEST_FILE" "$VERSION" "$TARGET" "$HOST_LIBC" <<'PY'
+  local values manifest_node_sha manifest_bun_sha sums_source manifest_moor_target
+  values="$($PYTHON_BIN - "$INSTALL_MANIFEST_FILE" "$VERSION" "$TARGET" "$HOST_LIBC" "$MOOR_TARGET" "$MOOR_REPOSITORY" "$MOOR_RELEASE_VERSION" <<'PY'
 import json, re, sys
-path, version, target, host_libc=sys.argv[1:]
+path, version, target, host_libc, moor_target, expected_repository, expected_moor_version=sys.argv[1:]
 asset_re=re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 digest_re=re.compile(r"[0-9a-f]{64}")
+commit_re=re.compile(r"[0-9a-f]{40}")
 def exact(obj, keys, label):
     if not isinstance(obj, dict) or set(obj) != set(keys): raise SystemExit(f"invalid {label} keys")
-with open(path, encoding="utf-8") as f: data=json.load(f)
-exact(data, ["schemaVersion","version","source","node","bun"], "manifest")
-if data["schemaVersion"] != 1 or data["version"] != version: raise SystemExit("manifest schema/version mismatch")
+def reject_duplicates(pairs):
+    result={}
+    for key, value in pairs:
+        if key in result: raise SystemExit(f"duplicate JSON key: {key}")
+        result[key]=value
+    return result
+with open(path, encoding="utf-8") as f: data=json.load(f, object_pairs_hook=reject_duplicates)
+exact(data, ["schemaVersion","version","source","node","bun","moor"], "manifest")
+if data["schemaVersion"] != 2 or data["version"] != version: raise SystemExit("manifest schema/version mismatch")
 exact(data["source"], ["asset","sha256"], "source")
 exact(data["node"], ["version","npmVersion","targets"], "node")
 exact(data["bun"], ["version","tag","targets"], "bun")
+exact(data["moor"], ["schemaVersion","repository","version","commit","targets"], "Moor pin")
 if data["node"]["version"]!="22.23.1" or data["node"]["npmVersion"]!="10.9.8": raise SystemExit("unexpected Node/npm pin")
 if data["bun"]["version"]!="1.3.14" or data["bun"]["tag"]!="bun-v1.3.14": raise SystemExit("unexpected Bun pin")
+moor=data["moor"]
+if moor["schemaVersion"] != 1 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
+    raise SystemExit("unexpected Moor release identity")
+if not isinstance(moor["commit"], str) or commit_re.fullmatch(moor["commit"]) is None:
+    raise SystemExit("invalid Moor commit")
 source=data["source"]
 if source["asset"] != f"desk-{version}-source.tar.gz": raise SystemExit("unexpected source asset")
 for value in (source["asset"],):
@@ -566,11 +603,39 @@ for kind in ("node","bun"):
         if asset_re.fullmatch(entry["asset"]) is None or digest_re.fullmatch(entry["sha256"]) is None: raise SystemExit(f"invalid {kind}.{name} asset")
 if host_libc != ("glibc" if target.startswith("linux-") else "system"):
     raise SystemExit(f"unsupported libc {host_libc} for {target}; no compatible Node toolchain is published")
+moor_assets={
+    "x86_64-unknown-linux-musl":"moor-0.1.0-linux-x64",
+    "aarch64-unknown-linux-musl":"moor-0.1.0-linux-arm64",
+    "x86_64-apple-darwin":"moor-0.1.0-macos-x64",
+    "aarch64-apple-darwin":"moor-0.1.0-macos-arm64",
+    "x86_64-pc-windows-msvc":"moor-0.1.0-windows-x64.exe",
+    "aarch64-pc-windows-msvc":"moor-0.1.0-windows-arm64.exe",
+}
+if set(moor["targets"]) != set(moor_assets): raise SystemExit("invalid Moor target set")
+for name, expected_asset in moor_assets.items():
+    entry=moor["targets"][name]
+    exact(entry, ["asset","size","sha256"], f"Moor {name}")
+    if entry["asset"] != expected_asset: raise SystemExit(f"invalid Moor {name} asset")
+    if type(entry["size"]) is not int or entry["size"] <= 0 or entry["size"] > 64 * 1024 * 1024:
+        raise SystemExit(f"invalid Moor {name} size")
+    if digest_re.fullmatch(entry["sha256"]) is None: raise SystemExit(f"invalid Moor {name} digest")
+if moor_target not in moor_assets: raise SystemExit(f"unsupported Moor target {moor_target}")
 node=data["node"]["targets"][target]; bun=data["bun"]["targets"][target]
-print("\t".join([source["asset"],source["sha256"],node["asset"],node["sha256"],bun["asset"],bun["sha256"]]))
+selected=moor["targets"][moor_target]
+print("\t".join([
+    source["asset"],source["sha256"],node["asset"],node["sha256"],bun["asset"],bun["sha256"],
+    moor["repository"],moor["version"],moor["commit"],moor_target,selected["asset"],str(selected["size"]),selected["sha256"]
+]))
 PY
 )" || die "release install manifest is invalid for $TARGET/$HOST_LIBC."
-  IFS=$'\t' read -r SOURCE_ASSET SOURCE_SHA NODE_ASSET NODE_SHA BUN_ASSET BUN_SHA <<<"$values"
+  IFS=$'\t' read -r SOURCE_ASSET SOURCE_SHA NODE_ASSET NODE_SHA BUN_ASSET BUN_SHA \
+    MOOR_REPOSITORY MOOR_RELEASE_VERSION MOOR_COMMIT manifest_moor_target MOOR_ASSET MOOR_SIZE MOOR_SHA <<<"$values"
+  [ "$manifest_moor_target" = "$MOOR_TARGET" ] || die "manifest selected an unexpected Moor target."
+  if [ -n "${DESK_MOOR_RELEASE_BASE_URL:-}" ]; then
+    MOOR_RELEASE_BASE="${DESK_MOOR_RELEASE_BASE_URL%/}"
+  else
+    MOOR_RELEASE_BASE="${MOOR_REPOSITORY}/releases/download/${MOOR_RELEASE_VERSION}"
+  fi
   manifest_node_sha="$(expected_node_sha)"
   manifest_bun_sha="$(expected_bun_sha)"
   [ "$NODE_SHA" = "$manifest_node_sha" ] || die "manifest Node checksum does not match the pinned $TARGET toolchain."
@@ -584,6 +649,72 @@ download_and_verify_asset() {
   download_file "$url" "$destination"
   actual="$(sha256_file "$destination")"
   [ "$actual" = "$expected" ] || die "checksum mismatch for $label (expected $expected, got $actual)."
+}
+
+validate_staged_moor_pin() {
+  "$PYTHON_BIN" - "$1" "$INSTALL_MANIFEST_FILE" <<'PY'
+import json, sys
+pin_path, manifest_path=sys.argv[1:]
+def reject_duplicates(pairs):
+    result={}
+    for key, value in pairs:
+        if key in result: raise SystemExit(f"duplicate JSON key: {key}")
+        result[key]=value
+    return result
+with open(pin_path, encoding="utf-8") as f: source=f.read()
+pin=json.loads(source, object_pairs_hook=reject_duplicates)
+if json.dumps(pin, indent=2, ensure_ascii=True)+"\n" != source:
+    raise SystemExit("committed Moor pin is not canonical JSON")
+with open(manifest_path, encoding="utf-8") as f:
+    manifest=json.load(f, object_pairs_hook=reject_duplicates)
+if manifest.get("moor") != pin:
+    raise SystemExit("Desk manifest Moor metadata differs from the committed pin")
+PY
+}
+
+moor_file_size() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import os, sys
+print(os.path.getsize(sys.argv[1]))
+PY
+}
+
+probe_moor_binary() {
+  "$PYTHON_BIN" - "$1" "$MOOR_VERSION" <<'PY'
+import os, signal, subprocess, sys
+path, version=sys.argv[1:]
+process=subprocess.Popen(
+    [path, "--version"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    start_new_session=True,
+)
+try:
+    stdout, stderr=process.communicate(timeout=3)
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.communicate()
+    raise SystemExit(1)
+expected=f"moor {version}\n".encode("ascii")
+if process.returncode != 0 or stdout != expected or stderr != b"": raise SystemExit(1)
+PY
+}
+
+verify_moor_binary() {
+  local path="$1" label="$2" actual_size actual_sha
+  actual_size="$(moor_file_size "$path")"
+  [ "$actual_size" = "$MOOR_SIZE" ] || die "Moor size mismatch for $label (expected $MOOR_SIZE, got $actual_size)."
+  actual_sha="$(sha256_file "$path")"
+  [ "$actual_sha" = "$MOOR_SHA" ] || die "Moor checksum mismatch for $label (expected $MOOR_SHA, got $actual_sha)."
+  probe_moor_binary "$path" || die "Moor asset failed its exact version probe within 3 seconds: $label"
+}
+
+download_and_verify_moor() {
+  local destination="$1"
+  download_file "$MOOR_RELEASE_BASE/$MOOR_ASSET" "$destination"
+  chmod 0755 "$destination"
+  verify_moor_binary "$destination" "$MOOR_ASSET"
 }
 
 safe_extract() {
@@ -764,13 +895,20 @@ ensure_bun_toolchain() {
 }
 
 build_release() {
-  local archive extract source_root install_id version_dir final runtime_path atch_output
+  local archive extract source_root install_id version_dir final runtime_path downloaded_moor
   archive="$WORK_DIR/$SOURCE_ASSET"
   download_and_verify_asset "$RELEASE_BASE/$SOURCE_ASSET" "$archive" "$SOURCE_SHA" "$SOURCE_ASSET"
   extract="$WORK_DIR/source-extract"
   safe_extract "$archive" tar "$extract" || die "unsafe or invalid Desk source archive: $SOURCE_ASSET"
   source_root="$extract/desk-$VERSION"
   [ -f "$source_root/package.json" ] || die "Desk source archive root mismatch: expected desk-$VERSION"
+  [ -f "$source_root/scripts/distribution/moor-pin.json" ] || die "Desk source archive has no committed Moor pin."
+  validate_staged_moor_pin "$source_root/scripts/distribution/moor-pin.json" || \
+    die "Desk release Moor metadata does not match its committed pin."
+  downloaded_moor="$WORK_DIR/moor"
+  download_and_verify_moor "$downloaded_moor"
+  mkdir -p -- "$source_root/libexec"
+  mv -- "$downloaded_moor" "$source_root/libexec/moor"
   install_id="$(date +%Y%m%d%H%M%S)-$$-${RANDOM:-0}"
   version_dir="$DESK_HOME/releases/$VERSION"
   mkdir -p -- "$version_dir"
@@ -780,25 +918,39 @@ build_release() {
   (
     cd "$STAGED_RELEASE"
     PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" ci
-    PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" run build:distribution
+    PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" run build:application
   )
   [ -x "$STAGED_RELEASE/dist/cli/main.js" ] || die "distribution build did not produce dist/cli/main.js."
   [ -x "$STAGED_RELEASE/libexec/desk-standalone" ] || die "distribution build did not produce libexec/desk-standalone."
-  [ -x "$STAGED_RELEASE/libexec/atch" ] || die "distribution build did not produce bundled atch."
-  if ! atch_output="$("$STAGED_RELEASE/libexec/atch" --version 2>/dev/null)"; then
-    die "bundled atch failed its version probe."
-  fi
-  case "$atch_output" in
-    "atch - version $ATCH_VERSION,"*) ;;
-    *) die "bundled atch returned an unexpected version probe: $atch_output" ;;
-  esac
+  [ -x "$STAGED_RELEASE/libexec/moor" ] || die "application build removed the verified Moor asset."
+  verify_moor_binary "$STAGED_RELEASE/libexec/moor" "staged $MOOR_ASSET"
   mkdir -p -- "$STAGED_RELEASE/runtime"
   runtime_path="$NODE_ROOT/bin/node"
   ln -s -- "$runtime_path" "$STAGED_RELEASE/runtime/node"
-  "$PYTHON_BIN" - "$STAGED_RELEASE/.desk-release" "$VERSION" "$install_id" "$TARGET" "$HOST_LIBC" "$SOURCE_SHA" <<'PY'
+  "$PYTHON_BIN" - "$STAGED_RELEASE/.desk-release" "$VERSION" "$install_id" "$TARGET" "$HOST_LIBC" "$SOURCE_SHA" \
+    "$MOOR_REPOSITORY" "$MOOR_RELEASE_VERSION" "$MOOR_COMMIT" "$MOOR_TARGET" "$MOOR_ASSET" "$MOOR_SIZE" "$MOOR_SHA" <<'PY'
 import json, os, sys
-path,version,install_id,target,libc,source_sha=sys.argv[1:]
-data={"schemaVersion":1,"managedBy":"desk-installer","version":version,"installId":install_id,"target":target,"libc":libc,"sourceSha256":source_sha,"nodeVersion":"22.23.1","bunVersion":"1.3.14"}
+path,version,install_id,target,libc,source_sha,moor_repository,moor_version,moor_commit,moor_target,moor_asset,moor_size,moor_sha=sys.argv[1:]
+data={
+    "schemaVersion":2,
+    "managedBy":"desk-installer",
+    "version":version,
+    "installId":install_id,
+    "target":target,
+    "libc":libc,
+    "sourceSha256":source_sha,
+    "nodeVersion":"22.23.1",
+    "bunVersion":"1.3.14",
+    "moor":{
+        "repository":moor_repository,
+        "version":moor_version,
+        "commit":moor_commit,
+        "target":moor_target,
+        "asset":moor_asset,
+        "size":int(moor_size),
+        "sha256":moor_sha,
+    },
+}
 with open(path,"x",encoding="utf-8") as f: json.dump(data,f,sort_keys=True,indent=2); f.write("\n")
 os.chmod(path,0o600)
 PY
@@ -1059,7 +1211,7 @@ for version in os.listdir(releases):
         try:
             with open(manifest,encoding="utf-8") as f: data=json.load(f)
         except Exception as error: raise SystemExit(f"invalid release ownership manifest: {path}: {error}")
-        if data.get("schemaVersion")!=1 or data.get("managedBy")!="desk-installer" or data.get("installId")!=install_id or data.get("version")!=version:
+        if data.get("schemaVersion") not in (1,2) or data.get("managedBy")!="desk-installer" or data.get("installId")!=install_id or data.get("version")!=version:
             raise SystemExit(f"invalid release ownership: {path}")
         if os.path.realpath(path) not in keep: shutil.rmtree(path)
     if not os.listdir(version_path): os.rmdir(version_path)
@@ -1121,7 +1273,7 @@ for version in os.listdir(releases):
         path=os.path.join(version_path,install_id); manifest=os.path.join(path,".desk-release")
         if not os.path.isdir(path) or not os.path.isfile(manifest): raise SystemExit("unidentified release instance: "+path)
         with open(manifest,encoding="utf-8") as f: data=json.load(f)
-        if data.get("schemaVersion")!=1 or data.get("managedBy")!="desk-installer" or data.get("version")!=version or data.get("installId")!=install_id:
+        if data.get("schemaVersion") not in (1,2) or data.get("managedBy")!="desk-installer" or data.get("version")!=version or data.get("installId")!=install_id:
             raise SystemExit("invalid release ownership: "+path)
 for root, dirs, files in os.walk(releases):
     if os.stat(root).st_uid != uid: raise SystemExit("unowned release path: "+root)

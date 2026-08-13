@@ -19,9 +19,6 @@ import {
   type EmulatorPort,
   type EmulatorEvent
 } from '../src/shared/runtime/index.js';
-import { ByteWriter, type RawFrame } from '../src/shared/atchWire/codec.js';
-import { EventType, RecordType } from '../src/shared/atchWire/frames.js';
-import { type RecordEnvelope } from '../src/shared/atchWire/messages.js';
 
 class FakeEmu implements EmulatorPort {
   written: number[] = [];
@@ -52,7 +49,7 @@ function makeCore(
   }> = {}
 ) {
   const browserOut: { sessionId: string; channelId: number; frame: BpFrame }[] = [];
-  const masterOut: { sessionId: string; frame: RawFrame }[] = [];
+  const masterOut: { sessionId: string; bytes: Uint8Array; binary: boolean; surfaceId: number }[] = [];
   const clock = { t: 1000 };
   const deps: DaemonCoreDeps = {
     ledger: new GenerationLedger(new InMemoryGenerationLedger()),
@@ -60,7 +57,9 @@ function makeCore(
     emulatorFactory: { create: () => new FakeEmu() },
     now: () => clock.t,
     sendBrowser: (sessionId, channelId, frame) => browserOut.push({ sessionId, channelId, frame }),
-    sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame }),
+    sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
+      masterOut.push({ sessionId, bytes, binary, surfaceId }),
+    sendMasterResize: () => {},
     ...(over.initialAgentHealth === undefined
       ? {}
       : { initialAgentHealth: over.initialAgentHealth }),
@@ -70,14 +69,6 @@ function makeCore(
   };
   return { core: new DaemonCore(deps), browserOut, masterOut, clock };
 }
-
-const output = (offset: bigint, seq: bigint, text: string): RecordEnvelope => ({
-  record_type: RecordType.OUTPUT,
-  record_seq: seq,
-  generation: 1,
-  output_offset: offset,
-  body: new TextEncoder().encode(text)
-});
 
 const agentSubject = {
   kind: 'agent',
@@ -89,7 +80,7 @@ const agentSubject = {
 const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnvelope => ({
   schemaVersion: AGENT_STATE_SCHEMA_VERSION,
   sessionId: 's1',
-  generation: 1,
+  generation: 2,
   provider: 'codex',
   mode: 'terminal',
   producer: 'codex-hooks',
@@ -104,12 +95,12 @@ const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnve
 });
 
 describe('DaemonCore — ensure / registry (§3.2)', () => {
-  it('ensure creates a session at ledger-allocated generation 1, idempotently', () => {
+  it('ensure creates a session at ledger-allocated generation 2 (OB-18: 1 is reserved for unsupervised), idempotently', () => {
     const { core } = makeCore();
     const a = core.ensure('s1', { rows: 40, cols: 120 });
-    expect(a).toEqual({ ok: true, generation: 1, created: true });
+    expect(a).toEqual({ ok: true, generation: 2, created: true });
     const b = core.ensure('s1', { rows: 40, cols: 120 });
-    expect(b).toEqual({ ok: true, generation: 1, created: false }); // idempotent
+    expect(b).toEqual({ ok: true, generation: 2, created: false }); // idempotent
     expect(core.sessionCount).toBe(1);
   });
 
@@ -154,7 +145,7 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
 
     expect(core.ensure('s1', { rows: 1, cols: 1 }, agentSubject)).toEqual({
       ok: true,
-      generation: 1,
+      generation: 2,
       created: true
     });
     expect(core.stateSnapshot('s1')).toMatchObject({
@@ -177,10 +168,10 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
 
   it('THE fence property end-to-end: recreate after retire gets a higher generation', () => {
     const { core } = makeCore();
-    expect(core.ensure('s1', { rows: 1, cols: 1 }).generation).toBe(1);
+    expect(core.ensure('s1', { rows: 1, cols: 1 }).generation).toBe(2);
     core.retire('s1'); // session ends — registry gone, ledger tombstone kept
     const recreated = core.ensure('s1', { rows: 1, cols: 1 });
-    expect(recreated).toEqual({ ok: true, generation: 2, created: true }); // NOT reset to 1
+    expect(recreated).toEqual({ ok: true, generation: 3, created: true }); // NOT reset to the fresh-lineage 2
   });
 
   it('retire frees a slot so a capped-out session can be admitted', () => {
@@ -193,12 +184,12 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
 });
 
 describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
-  it('routes master output to the session and out to its subscribers', () => {
+  it('routes moor child output to the session and out to its subscribers', () => {
     const { core, browserOut } = makeCore();
     core.ensure('s1', { rows: 40, cols: 120 });
     const ch = core.subscribe('s1', 'main', 40, 120);
     browserOut.length = 0;
-    core.onMasterRecord('s1', output(0n, 1n, 'hi'));
+    core.onMoorOutput('s1', new TextEncoder().encode('hi'), 0n);
     expect(browserOut).toHaveLength(1);
     expect(browserOut[0]).toMatchObject({ sessionId: 's1', channelId: ch });
   });
@@ -206,7 +197,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('accepts one canonical agent event and never reapplies its duplicate', () => {
     const { core } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     expect(core.stateSnapshot('s1')?.subject).toMatchObject({
       kind: 'agent',
       activity: 'unknown'
@@ -237,7 +228,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       onStateTransition: (transition) => transitions.push(transition)
     });
     core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     core.ingestAgentState(agentEvent());
     const before = core.stateSnapshot('s1')!;
 
@@ -250,7 +241,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     expect(core.stateSnapshot('s1')).toEqual(before);
 
     expect(
-      core.assessAgentHealth('s1', 1, {
+      core.assessAgentHealth('s1', 2, {
         status: 'degraded',
         reason: 'hook-not-installed',
         detail: 'desk hook config is absent'
@@ -279,17 +270,10 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('projects process EXIT immediately and clears agent activity evidence', () => {
     const { core } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     core.ingestAgentState(agentEvent());
 
-    const body = new ByteWriter().u8(EventType.EXIT).u32(23).u16(15).take();
-    core.onMasterRecord('s1', {
-      record_type: RecordType.EVENT,
-      record_seq: 1n,
-      generation: 1,
-      output_offset: 0n,
-      body
-    });
+    core.markExited('s1', 2, { code: 23, signal: '15' });
 
     expect(core.stateSnapshot('s1')).toMatchObject({
       lifecycle: 'exited',
@@ -340,11 +324,12 @@ describe('DaemonCore — terminal output is never agent-state evidence', () => {
       emulatorFactory: { create: () => emu },
       now: () => 1000,
       sendBrowser: () => {},
-      sendMaster: () => {},
+      sendMasterInput: () => {},
+      sendMasterResize: () => {},
       onSemanticEvent: (sessionId, event) => seen.push({ sessionId, event })
     } as DaemonCoreDeps);
     expect(core.ensure('s1', { rows: 24, cols: 80 }, agentSubject).ok).toBe(true);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     core.ingestAgentState(agentEvent({ facts: [{ kind: 'activity', activity: 'idle' }] }));
     const before = core.stateSnapshot('s1');
 
@@ -356,35 +341,40 @@ describe('DaemonCore — terminal output is never agent-state evidence', () => {
 
 describe('DaemonCore — restore (re-adopt a surviving master after daemon restart)', () => {
   function coreOverLedger(ledger: GenerationLedger) {
-    const masterOut: { sessionId: string; frame: RawFrame }[] = [];
+    const masterOut: { sessionId: string; bytes: Uint8Array; binary: boolean; surfaceId: number }[] = [];
     const core = new DaemonCore({
       ledger,
       supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
       emulatorFactory: { create: () => new FakeEmu() },
       now: () => 1000,
       sendBrowser: () => {},
-      sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame })
+      sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
+        masterOut.push({ sessionId, bytes, binary, surfaceId }),
+      sendMasterResize: () => {}
     });
     return { core, masterOut };
   }
 
   it('adopts the durable CURRENT generation without allocating (ensure would fence the master out)', () => {
     const store = new InMemoryGenerationLedger();
-    // The ORIGINAL daemon spawned the master at generation 1.
+    // The ORIGINAL daemon spawned the master at generation 2 (OB-18: 1 reserved for unsupervised).
     new GenerationLedger(store).allocate('s1');
 
     // A RESTARTED daemon over the same durable store re-adopts, never allocates.
     const ledger = new GenerationLedger(store);
     const { core, masterOut } = coreOverLedger(ledger);
     const restored = core.restore('s1', { rows: 24, cols: 80 });
-    expect(restored).toEqual({ ok: true, generation: 1 });
-    expect(ledger.current('s1')).toBe(1); // NOT bumped — the surviving master owns 1
+    expect(restored).toEqual({ ok: true, generation: 2 });
+    expect(ledger.current('s1')).toBe(2); // NOT bumped — the surviving master owns 2
 
-    // Frames the runtime sends to the master carry the ADOPTED generation, so
-    // the master's fence accepts them; an ensure() would have stamped 2.
+    // Master-bound sends route through the installed link, which the manager
+    // constructs at the ADOPTED generation — the wire fence lives there; the
+    // core's job is exact routing of the typed send.
     core.injectInput('s1', new TextEncoder().encode('hi'));
     expect(masterOut).toHaveLength(1);
-    expect(masterOut[0].frame.generation).toBe(1);
+    expect(masterOut[0].sessionId).toBe('s1');
+    expect(new TextDecoder().decode(masterOut[0].bytes)).toBe('hi');
+    expect(masterOut[0].surfaceId).toBe(0);
   });
 
   it('fails closed when the ledger has no durable generation for the socket', () => {
@@ -401,7 +391,7 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
 
   it('ensure AFTER a retire still allocates a HIGHER generation than the restored one', () => {
     const store = new InMemoryGenerationLedger();
-    new GenerationLedger(store).allocate('s1'); // original spawn: 1
+    new GenerationLedger(store).allocate('s1'); // original spawn: 2 (OB-18)
     const ledger = new GenerationLedger(store);
     const { core } = coreOverLedger(ledger);
     expect(core.restore('s1', { rows: 24, cols: 80 }).ok).toBe(true);
@@ -409,7 +399,7 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
     const recreated = core.ensure('s1', { rows: 24, cols: 80 });
     expect(recreated.ok).toBe(true);
     if (recreated.ok) {
-      expect(recreated.generation).toBe(2); // the tombstone still advances (§4.8.1)
+      expect(recreated.generation).toBe(3); // the tombstone still advances (§4.8.1)
     }
   });
 });

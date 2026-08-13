@@ -1,9 +1,9 @@
 // Daemon-owned native agent-host lifecycle (spec §6.9 / §3.6, C14). Pure state
-// machine. atch is TERMINAL-ONLY (§5.2 C14: "native is not atch's") — it spawns
+// machine. the holder is TERMINAL-ONLY (§5.2 C14: "native is not the holder's") — it spawns
 // PTY sessions and nothing else. NATIVE (non-PTY) sessions are supervised by the
 // DAEMON's agent-host: the daemon spawns/watches the host process, maps its
 // AgentSurface command-results to the control-plane `native-fsm` source, and
-// applies a restart policy. This module is the contract the atch C lane needs so
+// applies a restart policy. This module is the contract the holder lane needs so
 // it does NOT try to own native lifecycle (which breaks its terminal-only tests).
 //
 // The daemon drives real host processes over the stable socket (§3.6); here we

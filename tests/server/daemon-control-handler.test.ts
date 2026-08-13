@@ -56,6 +56,10 @@ function invoke(
       setHeader() {
         /* sendJson sets content-type; irrelevant to these assertions */
       },
+      once() {
+        /* mutation-barrier release listeners; the mock resolves on end() */
+        return res;
+      },
       end(payload?: string) {
         resolve({ status, body: payload ? (JSON.parse(payload) as Captured['body']) : undefined });
       }
@@ -149,6 +153,9 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     readEvents: vi.fn().mockReturnValue(0),
     clearEvents: vi.fn().mockReturnValue(0),
     isReady: vi.fn().mockReturnValue(true),
+    isDraining: vi.fn().mockReturnValue(false),
+    enterMutation: vi.fn((_abort: () => void) => () => undefined),
+    moorSessionStatus: vi.fn().mockReturnValue(undefined),
     health: vi.fn().mockReturnValue({ status: 'healthy' })
   };
 }
@@ -194,6 +201,29 @@ const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnve
 });
 
 describe('daemon control handler', () => {
+  it('serves the adopted moor status as wire truth and 404s without a live link (#8)', async () => {
+    const daemon = daemonMock();
+    daemon.moorSessionStatus = vi.fn().mockReturnValue({
+      generation: 2,
+      wallStart: 1_755_000_000_000n,
+      pid: 4321,
+      running: true
+    });
+    const hit = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
+    expect(hit).toEqual({
+      status: 200,
+      body: { ok: true, generation: 2, wallStartMs: 1_755_000_000_000, pid: 4321, running: true }
+    });
+    expect(daemon.moorSessionStatus).toHaveBeenCalledWith('sess-a');
+
+    daemon.moorSessionStatus = vi.fn().mockReturnValue(undefined);
+    const miss = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
+    expect(miss).toMatchObject({ status: 404, body: { ok: false } });
+
+    const bad = await invoke(daemon, 'GET', '/control/moor-status?sessionId=../evil');
+    expect(bad).toMatchObject({ status: 400 });
+  });
+
   it('provisions a session and returns ok', async () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {

@@ -339,7 +339,6 @@ describe('sessions route native edit identity', () => {
         ].join('\n') + '\n'
       );
       process.env.HOME = home;
-      process.env.DESK_ATCH_NATIVE = '1';
       process.env.DESK_DAEMON_URL = 'ws://127.0.0.1:5178';
 
       // The daemon is DOWN — irrelevant, because a durable sessionId survives

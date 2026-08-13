@@ -342,7 +342,7 @@ function cwdMatchesResolved(left: string, right: string): boolean {
 }
 
 export async function killSessionTargets(targets: Array<SessionSpec | string>): Promise<{ ok: boolean; error?: string }> {
-  // A session's atch master is keyed by sessionId; retire via the daemon so a
+  // A session's moor holder is keyed by sessionId; retire via the daemon so a
   // delete leaves no orphan master. A bare-string target retires best-effort;
   // retire is idempotent, so an unknown session is a harmless no-op.
   const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId)))];
@@ -710,7 +710,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
         // (possible for a legacy entry without a persisted sessionId) must retire
         // the master under its OLD identity, BEFORE the manifest edit commits. If
         // it can't be retired (e.g. daemon down), abort — neither orphan the old
-        // atch master nor desync the manifest against a still-running master.
+        // moor holder nor desync the manifest against a still-running master.
         const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
         if (!staleGuard.ok) {
           return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };

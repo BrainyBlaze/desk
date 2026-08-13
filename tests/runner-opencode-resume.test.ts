@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
 import {
-  atchCommandFor,
+  moorCommandFor,
   planDeskUp,
   runPlan,
   startSession
@@ -64,7 +64,7 @@ describe('opencode launch continuity', () => {
       expect(control).toHaveBeenCalledOnce();
       expect(control.mock.calls[0]![1]).toMatchObject({
         sessionId: spec.sessionId,
-        command: atchCommandFor(spec)
+        command: moorCommandFor(spec)
       });
       expect(existsSync(markerPath)).toBe(false);
     } finally {
@@ -94,7 +94,7 @@ describe('opencode launch continuity', () => {
       expect(spec.command).toContain("--session 'ses_12a31855dffeHTCs6tcfOmsddP'");
       expect(control.mock.calls[0]![1]).toMatchObject({
         sessionId: spec.sessionId,
-        command: atchCommandFor(spec)
+        command: moorCommandFor(spec)
       });
     } finally {
       rmSync(root, { force: true, recursive: true });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionSpec } from '../../src/core/types.js';
 import * as runner from '../../src/core/runner.js';
 import {
-  atchCommandFor,
+  moorCommandFor,
   createNativeChannelsTransport,
   provisionNativeSession,
   restartSessionNativeAware,
@@ -22,7 +22,7 @@ const baseSpec: SessionSpec = {
   uiMode: 'terminal'
 };
 
-const ENV_KEYS = ['DESK_ATCH_NATIVE', 'DESK_DAEMON_URL'] as const;
+const ENV_KEYS = ['DESK_DAEMON_URL'] as const;
 const saved: Record<string, string | undefined> = {};
 afterEach(() => {
   for (const key of ENV_KEYS) {
@@ -37,13 +37,13 @@ function setEnv(key: (typeof ENV_KEYS)[number], value: string | undefined) {
   else process.env[key] = value;
 }
 
-describe('atchCommandFor', () => {
+describe('moorCommandFor', () => {
   it('runs the command in its cwd, matching tmux new-session -c cwd command', () => {
-    expect(atchCommandFor(baseSpec)).toEqual(['sh', '-c', "cd '/tmp/work' || exit 1\nbash"]);
+    expect(moorCommandFor(baseSpec)).toEqual(['sh', '-c', "cd '/tmp/work' || exit 1\nbash"]);
   });
 
   it('single-quote-escapes a cwd containing a quote', () => {
-    expect(atchCommandFor({ ...baseSpec, cwd: "/tmp/o'brien" })).toEqual([
+    expect(moorCommandFor({ ...baseSpec, cwd: "/tmp/o'brien" })).toEqual([
       'sh',
       '-c',
       "cd '/tmp/o'\\''brien' || exit 1\nbash"
@@ -51,7 +51,7 @@ describe('atchCommandFor', () => {
   });
 
   it('falls back to the login shell when there is no command', () => {
-    expect(atchCommandFor({ ...baseSpec, command: '' })).toEqual(['sh', '-c', 'cd \'/tmp/work\' || exit 1\n"${SHELL:-bash}"']);
+    expect(moorCommandFor({ ...baseSpec, command: '' })).toEqual(['sh', '-c', 'cd \'/tmp/work\' || exit 1\n"${SHELL:-bash}"']);
   });
 });
 
@@ -179,7 +179,7 @@ describe('provisionNativeSession', () => {
 
 
   it('surfaces a non-2xx daemon response as an error, not a silent ok', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => JSON.stringify({ ok: false, error: 'atch provision refused: cap-exceeded' }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => JSON.stringify({ ok: false, error: 'moor provision refused: cap-exceeded' }) });
     vi.stubGlobal('fetch', fetchMock);
     const result = await provisionNativeSession(baseSpec);
     expect(result.ok).toBe(false);
@@ -197,7 +197,6 @@ describe('provisionNativeSession', () => {
 
 describe('startSessionNativeAware', () => {
   it('provisions via the daemon when the flag is on', async () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
     vi.stubGlobal('fetch', fetchMock);
     const result = await startSessionNativeAware(baseSpec);
@@ -209,7 +208,6 @@ describe('startSessionNativeAware', () => {
 
 describe('restartSessionNativeAware', () => {
   it('retires then provisions via the daemon (same sessionId) when the flag is on', async () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
     const urls: string[] = [];
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       urls.push(url);
@@ -225,7 +223,6 @@ describe('restartSessionNativeAware', () => {
   });
 
   it('does not provision if the retire fails (fail-closed)', async () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 503, text: async () => '{"ok":false,"error":"boom"}' });
     vi.stubGlobal('fetch', fetchMock);
     const result = await restartSessionNativeAware(baseSpec);
@@ -412,26 +409,30 @@ describe('createNativeChannelsTransport', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('agentdesk-g-orphan-xyz');
   });
 
-  it('sessionCreatedAt reads the socket stat in epoch seconds and null when absent', async () => {
+  it('sessionCreatedAt is the adopted holder wallStart in epoch seconds and null without a live link', async () => {
     stubDesk();
-    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const root = mkdtempSync(join(tmpdir(), 'desk-sock-root-'));
-    const savedRoot = process.env.DESK_ATCH_SOCKET_ROOT;
-    try {
-      process.env.DESK_ATCH_SOCKET_ROOT = root;
-      writeFileSync(join(root, 'shell.sock'), '');
-      const transport = createNativeChannelsTransport();
-      const created = await transport.sessionCreatedAt('shell');
-      expect(created).not.toBeNull();
-      expect(Math.abs((created ?? 0) - Math.floor(Date.now() / 1000))).toBeLessThan(60);
-      expect(await transport.sessionCreatedAt('agentdesk-g-ghost-999')).toBeNull();
-    } finally {
-      if (savedRoot === undefined) delete process.env.DESK_ATCH_SOCKET_ROOT;
-      else process.env.DESK_ATCH_SOCKET_ROOT = savedRoot;
-      rmSync(root, { recursive: true, force: true });
-    }
+    const startedMs = Date.now() - 5_000;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/control/moor-status')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({ ok: true, generation: 2, wallStartMs: startedMs, pid: 42, running: true })
+        };
+      }
+      return { ok: false, status: 404, text: async () => '{"ok":false}' };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = createNativeChannelsTransport();
+    // #8: wire truth — the holder's own wallStart clock, never a socket stat.
+    expect(await transport.sessionCreatedAt('shell')).toBe(Math.floor(startedMs / 1000));
+    const statusCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/control/moor-status'));
+    expect(String(statusCall?.[0])).toContain('sessionId=shell');
+
+    // No live adopted link (daemon 404) → unobservable, никаких fs-догадок.
+    fetchMock.mockResolvedValue({ ok: false, status: 404, text: async () => '{"ok":false}' } as never);
+    expect(await transport.sessionCreatedAt('agentdesk-g-ghost-999')).toBeNull();
   });
 });
 
@@ -461,7 +462,6 @@ describe('retireStaleIdentityForEdit (fail-closed guard)', () => {
 
 
   it('is a no-op (ok) when the identity is unchanged', async () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     expect(await retireStaleIdentityForEdit(oldSpec, { ...baseSpec, sessionId: 'shell', model: 'x' })).toEqual({ ok: true });
@@ -469,7 +469,6 @@ describe('retireStaleIdentityForEdit (fail-closed guard)', () => {
   });
 
   it('retires the OLD identity and reports ok when the daemon accepts it', async () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
     vi.stubGlobal('fetch', fetchMock);
     expect(await retireStaleIdentityForEdit(oldSpec, renamed)).toEqual({ ok: true });
@@ -478,7 +477,6 @@ describe('retireStaleIdentityForEdit (fail-closed guard)', () => {
   });
 
   it('reports NOT-ok when the retire fails, so the caller aborts the edit (fail closed)', async () => {
-    setEnv('DESK_ATCH_NATIVE', '1');
     const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     vi.stubGlobal('fetch', fetchMock);
     const result = await retireStaleIdentityForEdit(oldSpec, renamed);

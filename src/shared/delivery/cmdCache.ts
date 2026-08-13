@@ -4,7 +4,7 @@
 // Each command STEP (body or submit) gets a stable `stepKey`. A retry re-sends
 // the SAME stepKey; the cache decides whether to (a) return the cached ACKED
 // result (dedupe), (b) re-issue an ambiguous PREPARED/WRITTEN step (safe because
-// the atch master is idempotent by key within the generation), or (c) REFUSE
+// the moor holder is idempotent by key within the generation), or (c) REFUSE
 // because the entry aged past the retry horizon (fail-closed — a replay whose
 // dedupe proof is gone must not risk a double-submit). The guarantee is
 // "deduped retries within the retained generation", NOT exactly-once.

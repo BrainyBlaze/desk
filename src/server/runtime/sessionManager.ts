@@ -1,11 +1,11 @@
 // SessionManager (spec §3.2/§7.1) — the server-side composition that makes the
 // daemon a complete session pipe: DaemonCore (pure registry) + a per-session
-// MasterClient (the atch-master link) + browser fan-out. Ensures a session,
+// the moor master link + browser fan-out. Ensures a session,
 // attaches to its master socket, and wires master frames → SessionRuntime →
-// browser and browser input → master. Node net lives only in MasterClient; the
+// browser and browser input → master. Node net lives only in the moor client; the
 // DaemonCore stays pure and is driven through its callbacks (no layering break).
 //
-// Testable against a fake v3 master today; the real atch binary drops in behind
+// Testable against a fake v3 master today; the real moor binary drops in behind
 // the same socket path once its master speaks v3.
 
 import { createConnection } from 'node:net';
@@ -25,12 +25,12 @@ import {
   type SessionStateSnapshot
 } from '../../shared/controlPlane/index.js';
 import { type BpFrame } from '../../shared/browserProtocol/index.js';
-import { MasterClient } from './masterClient.js';
-import { SpawnMasterError, spawnMaster } from './spawnMaster.js';
-import { Role } from '../../shared/atchWire/frames.js';
+import { MoorMasterClient, posixMoorIdentity } from './moorMasterClient.js';
+import type { MoorStatus } from '../../shared/moorWire/messages.js';
+import { spawnMoorMaster } from './moorSpawnMaster.js';
 import { spawn } from 'node:child_process';
-import { existsSync, unlinkSync } from 'node:fs';
-import { type AtchEvent } from './atchEvents.js';
+import { existsSync, lstatSync, unlinkSync } from 'node:fs';
+import { type MoorSessionEvent } from './moorEventObserver.js';
 
 interface KillCommandSpec {
   binPath: string;
@@ -94,7 +94,10 @@ export type PreallocateSessionSpawn = (
 ) => SessionSpawnPreallocationResult | Promise<SessionSpawnPreallocationResult>;
 
 export type SessionSpawnResult =
-  | EnsureResult
+  | (EnsureResult & {
+      /** OB-39: the holder's ATTACH_ACK descriptor for a successful moor join. */
+      moorStatus?: MoorStatus;
+    })
   | { ok: false; reason: 'spawn-failed' | 'attach-failed' }
   | Exclude<SessionSpawnPreallocationResult, { ok: true }>;
 
@@ -111,7 +114,7 @@ export interface TerminalObservationSnapshot {
   updatedAt: number;
 }
 
-export type AtchObservationResult =
+export type MoorObservationResult =
   | {
       ok: true;
       observation: TerminalObservationSnapshot;
@@ -216,11 +219,48 @@ export interface SessionManagerDeps {
   onStateTransition?: DaemonCoreDeps['onStateTransition'];
 }
 
+/**
+ * The session's holder link: the typed master-bound surface the runtime sends
+ * through. The link owns the wire (supervised moor frames) so neither the
+ * runtime nor the core ever sees an encoded frame.
+ */
+export interface SessionMasterLink {
+  sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number): void;
+  sendResize(rows: number, cols: number, surfaceId: number): void;
+  close(): void;
+  /**
+   * §9 wire terminate over the LIVE link — identity+generation+incarnation
+   * fenced by the holder, so a stale request can never kill a successor.
+   * Resolves the holder's outcome; a deadline expiry rejects (indeterminate).
+   */
+  terminateHolder?(opts?: {
+    force?: boolean;
+  }): Promise<'terminated' | 'already-gone' | 'refused' | 'indeterminate' | 'failed'>;
+  /** §7.4 graceful release of the owned input lease. */
+  releaseLease?(): Promise<'released' | 'refused'>;
+  /**
+   * §10.2.13 committed-log clear at the observed frontier. Success has TWO
+   * normative shapes — cleared and already-empty-or-disabled; refused is a
+   * COMPLETED holder decision, distinct from an indeterminate submission
+   * (deadline, transport loss, malformed response).
+   */
+  clearHolderLog?(): Promise<HolderLogClearOutcome>;
+}
+
+/** The full §10.2.13 result algebra a control-plane consumer branches on. */
+export type HolderLogClearOutcome =
+  | 'cleared'
+  | 'already-clear'
+  | 'refused'
+  | 'indeterminate';
+
 export class SessionManager {
   private readonly core: DaemonCore;
   private readonly ledger: GenerationLedger;
   private readonly now: () => number;
-  private readonly masters = new Map<string, MasterClient>();
+  private readonly masters = new Map<string, SessionMasterLink>();
+  /** OB-39: the last adopted ATTACH_ACK descriptor per session (holder truth). */
+  private readonly moorStatuses = new Map<string, MoorStatus>();
   private readonly terminalObservations = new Map<string, TerminalObservationSnapshot>();
   /** Per-session teardown for a tracked FOREGROUND child (kill it on retire). */
   private readonly cleanups = new Map<string, () => void>();
@@ -256,8 +296,11 @@ export class SessionManager {
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
       sendBrowser: deps.sendBrowser,
-      // sendMaster routes to the session's attached master client, if any.
-      sendMaster: (sessionId, frame) => this.masters.get(sessionId)?.send(frame),
+      // Typed master-bound sends route to the session's attached holder link.
+      sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
+        this.masters.get(sessionId)?.sendInput(bytes, binary, surfaceId),
+      sendMasterResize: (sessionId, rows, cols, surfaceId) =>
+        this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -283,137 +326,331 @@ export class SessionManager {
   }
 
   /**
-   * Re-adopt a SURVIVING atch master after a daemon restart: restore the
-   * session at its durable ledger generation (never allocate — the master owns
-   * exactly that generation), attach over its socket, and register the
-   * detached-master kill command so a later retire kills the master instead of
-   * orphaning it. Fails closed (and rolls the restore back) when the attach
-   * fails or the ledger has no generation for the sessionId.
+   * Re-adopt a SURVIVING moor holder after a daemon restart: restore the
+   * session at its durable ledger generation (never allocate — the holder owns
+   * exactly that generation, and the native client fences the adoption on it),
+   * attach over the moor rendezvous, and register the detached-holder kill
+   * command first so a close racing the attach can never leave an adopted-but-
+   * unkillable holder. The adopted ATTACH_ACK status rides on the result — it
+   * is the OB-39 event-store authority for restart reconciliation. Fails
+   * closed (and rolls the restore back WITHOUT killing: the holder may be
+   * healthy and merely rejecting us) when the attach fails.
    */
-  async restoreAndAttach(
+  async restoreAndAttachMoor(
     sessionId: string,
     opts: {
-      sockPath: string;
+      /** Moor rendezvous path — `<root>/<sessionId>`, no suffix. */
+      sessionPath: string;
       geometry: { rows: number; cols: number };
-      /** The detached-master stop command (e.g. `atch kill -f SOCK`). */
+      /** The detached-holder stop command (e.g. `moor kill -f SESSION`). */
       killSpec: DetachedKillSpec;
-      ackTimeoutMs?: number;
       subject?: SessionRegistration['subject'];
+      /** §10 verified-live window override (default: the spec's 15 s). */
+      livenessWindowMs?: number;
     }
-  ): Promise<RestoreResult | { ok: false; reason: 'attach-failed' }> {
-    const restored = this.core.restore(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
+  ): Promise<
+    | (RestoreResult & { moorStatus?: MoorStatus })
+    | { ok: false; reason: 'attach-failed' }
+  > {
+    const restored = this.core.restore(
+      sessionId,
+      opts.geometry,
+      opts.subject ?? { kind: 'terminal' }
+    );
     if (!restored.ok) return restored;
     this.ensureTerminalObservation(sessionId, restored.generation);
     const token = Symbol('restore-op');
     this.owners.set(sessionId, token); // stale prior-op callbacks go inert
-    // Register the kill command BEFORE the attach so a close that races the
-    // attach's success can never leave an attached-but-unkillable master; the
-    // attach itself only validates (it never closes a healthy master).
     this.detachedKills.set(sessionId, {
       ...opts.killSpec,
       generation: restored.generation,
-      sockPath: opts.sockPath
+      sockPath: opts.sessionPath
     });
     let attached = false;
     try {
-      // The ACK generation MUST equal the restored ledger generation — the
-      // runtime stamps frames with it; any other ACK would split the fence.
-      attached = await this.attachMaster(sessionId, opts.sockPath, opts.geometry, {
-        expectGeneration: restored.generation,
+      // The native client fences the WHOLE §3/§6 exchange on the restored
+      // ledger generation — a holder carrying any other generation fails the
+      // attach instead of splitting the fence.
+      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, opts.geometry, {
+        generation: restored.generation,
         stillValid: () => this.owners.get(sessionId) === token,
-        ...(opts.ackTimeoutMs !== undefined ? { ackTimeoutMs: opts.ackTimeoutMs } : {})
+        ...(opts.livenessWindowMs === undefined
+          ? {}
+          : { livenessWindowMs: opts.livenessWindowMs })
       });
     } catch {
       attached = false;
     }
     if (!attached) {
-      // Roll back WITHOUT running the kill: a failed attach means we could not
-      // adopt the master, not license to destroy it (it may be healthy and
-      // rejecting us). Idempotent against a racing close-retire.
+      // Defensive, GENERATION-BOUND clear: adoption publishes authority only
+      // after its final commit, so normally there is nothing to remove here.
+      // If one is present anyway, it survives ONLY when it PROVABLY belongs to
+      // another (successor) generation — an unattributable or same-generation
+      // descriptor left behind by this failed restore is never authority.
+      const stale = this.moorStatuses.get(sessionId);
+      const successorAuthority =
+        stale !== undefined &&
+        Number.isInteger(stale.generation) &&
+        stale.generation !== restored.generation;
+      if (stale !== undefined && !successorAuthority) {
+        this.moorStatuses.delete(sessionId);
+      }
       this.detachedKills.delete(sessionId);
       this.core.retire(sessionId);
       this.dropTerminalObservation(sessionId, restored.generation);
       return { ok: false, reason: 'attach-failed' };
     }
-    return restored;
+    const moorStatus = this.moorStatuses.get(sessionId);
+    return moorStatus === undefined ? restored : { ...restored, moorStatus };
   }
 
   /**
-   * Attach to a session's atch master over its socket: connect, do the v3
-   * controller handshake, and resolve ONLY on a validated ATTACH_ACK — a
-   * written handshake is not an accepted one (the master may reject, error,
-   * or close). With `expectGeneration`, an ACK carrying any other generation
-   * fails the attach: the core runtime stamps frames with the restored ledger
-   * generation, so adopting a different ACK generation would split the fence
-   * (core INPUT at N, MasterClient RESIZE at M). A socket close AFTER a
-   * successful attach retires the session; a close DURING the attach only
-   * fails the attach — the master may be healthy and merely rejecting us, so
-   * it must not be retired/killed.
+   * Attach to a session's MOOR holder: supervised handshake at the
+   * ledger-allocated generation (the frozen client enforces the §6 prefix,
+   * identity, generation scope, and lease). Installs a MoorMasterLink whose
+   * input path honors §7.3 one-in-flight by coalescing bytes queued behind
+   * the outstanding request and flushing them on its receipt.
    */
-  async attachMaster(
+  async moorAttachMaster(
     sessionId: string,
-    sockPath: string,
+    sessionPath: string,
     geometry: { rows: number; cols: number },
-    opts: { expectGeneration?: number; ackTimeoutMs?: number; stillValid?: () => boolean } = {}
+    opts: { generation: number; stillValid?: () => boolean; livenessWindowMs?: number }
   ): Promise<boolean> {
     if (!this.core.hasLiveSession(sessionId)) return false;
+    let link: SessionMasterLink | undefined;
     let attached = false;
+    /** §6: parser preamble work must DRAIN before adoption is complete. */
     let terminalStateReady: Promise<boolean> = Promise.resolve(true);
-    let settle: (ok: boolean) => void = () => undefined;
-    const acked = new Promise<boolean>((resolve) => {
-      let settled = false;
-      settle = (ok) => {
-        if (!settled) {
-          settled = true;
-          resolve(ok);
-        }
-      };
-    });
-    const client = new MasterClient(sockPath, {
-      onRecord: (rec) => this.core.onMasterRecord(sessionId, rec),
-      onTerminalState: (preamble) => {
-        terminalStateReady = terminalStateReady
-          .then((ready) => (ready ? this.core.onMasterTerminalState(sessionId, preamble) : false))
-          .catch(() => false);
-      },
-      onAttachAck: (ack) => {
-        const generation = (ack as { generation: number }).generation;
-        const generationMatches = opts.expectGeneration === undefined || generation === opts.expectGeneration;
-        void terminalStateReady.then(
-          (ready) => settle(ready && generationMatches),
-          () => settle(false)
-        );
-      },
-      onError: () => settle(false),
-      onClose: () => {
-        settle(false);
-        // Identity-bound: only the CURRENTLY-installed client's close retires;
-        // a replaced client's late close must not tear down its successor.
-        if (attached && this.masters.get(sessionId) === client) {
-          this.retire(sessionId);
-        }
+    /** Frozen adoption order: no replay/live OUTPUT may touch the emulator
+     *  before the preamble drains — buffer until the barrier passes. */
+    let preambleDrained = false;
+    const bufferedOutput: Array<{ bytes: Uint8Array; offset: bigint; sequence: bigint }> = [];
+    /** §10 liveness episode: monotonically scoped so a LATE probe result can
+     *  never mutate a restored or replaced episode. */
+    let livenessEpisode = 0;
+    let livenessEpisodeResolved = true;
+    let armLivenessProbe: (episode: number) => void = () => undefined;
+    /** Bytes queued behind the outstanding §7.3 input request. */
+    let inputQueue: Uint8Array[] = [];
+    const flushQueue = (client: MoorMasterClient): void => {
+      if (inputQueue.length === 0) return;
+      const total = inputQueue.reduce((sum, part) => sum + part.length, 0);
+      const coalesced = new Uint8Array(total);
+      let offset = 0;
+      for (const part of inputQueue) {
+        coalesced.set(part, offset);
+        offset += part.length;
       }
-    });
+      inputQueue = [];
+      try {
+        client.sendInput(coalesced);
+      } catch {
+        // Lease lost or link closed between receipt and flush: the queued
+        // bytes cannot be delivered; the caller-visible state is the closed/
+        // observer link, which every later send reports.
+      }
+    };
+    const client: MoorMasterClient = new MoorMasterClient(
+      sessionPath,
+      opts.generation,
+      {
+        onOutput: (output) => {
+          if (!preambleDrained) {
+            bufferedOutput.push({
+              bytes: output.bytes.slice(),
+              offset: output.offset,
+              sequence: output.sequence
+            });
+            return;
+          }
+          this.core.onMoorOutput(sessionId, output.bytes, output.offset);
+          // Consumption is DELIVERY: acknowledge only after the record
+          // actually reached the authoritative emulator, never at receipt —
+          // an acked-but-undelivered record could be permanently dropped.
+          try {
+            client.ackOutput(output.sequence);
+          } catch {
+            /* link closed mid-batch: nothing to acknowledge */
+          }
+        },
+        onTerminalState: (preamble: Uint8Array) => {
+          terminalStateReady = terminalStateReady
+            .then((ready) =>
+              ready ? this.core.onMasterTerminalState(sessionId, preamble) : false
+            )
+            .catch(() => false);
+        },
+        onInputReceipt: () => flushQueue(client),
+        // §8 query arbitration: this controller is the lease-owning VT viewer
+        // — the sole 250 ms responder. Cursor position (class 05) is
+        // viewer-only and comes from the authoritative emulator (1-based on
+        // the wire). Desk did NOT inject the terminal identity, so every
+        // other class is honestly left to the holder's own
+        // synthesis-or-silence rule.
+        onQuery: (query) => {
+          if (query.class !== 5) return;
+          const cursor = this.core.cursor(sessionId);
+          if (cursor === undefined) return;
+          try {
+            client.sendQueryReply(
+              query.correlation,
+              5,
+              new TextEncoder().encode(`\u001b[${cursor.row + 1};${cursor.col + 1}R`)
+            );
+          } catch {
+            // Lease or link lost between query and reply: §8 silence.
+          }
+        },
+        onClose: () => {
+          // Identity-bound: only the CURRENTLY-installed link's close retires.
+          if (attached && link !== undefined && this.masters.get(sessionId) === link) {
+            this.retire(sessionId);
+          }
+        },
+        // §10 (OB-30): losing the 15 s verified-live window never proves the
+        // holder is gone — no teardown. The session becomes INDETERMINATE
+        // immediately and STAYS indeterminate until the fresh bounded
+        // IDENTITY probe (HELLO/HELLO_ACK on a new connection, identity +
+        // generation fenced by the decoder) either completes an authenticated
+        // exchange (→ restore) or positively establishes listener absence
+        // (→ close, which retires through the identity-bound onClose). A
+        // heartbeat alone NEVER clears the degradation — it only re-arms the
+        // probe. Every application is fenced by the link identity AND a
+        // monotonic episode token, so a late probe result can neither mutate
+        // a successor nor re-degrade a later episode.
+        onLivenessLost: () => {
+          if (!attached || link === undefined || this.masters.get(sessionId) !== link) return;
+          livenessEpisode += 1;
+          livenessEpisodeResolved = false;
+          this.core.observeHolderLiveness(sessionId, opts.generation, false, 'probe-pending');
+          armLivenessProbe(livenessEpisode);
+        },
+        onLivenessRestored: () => {
+          if (!attached || link === undefined || this.masters.get(sessionId) !== link) return;
+          if (livenessEpisodeResolved) return;
+          armLivenessProbe(livenessEpisode);
+        }
+      },
+      // NOTE deliberately NO autoAckOutput: with the preamble barrier
+      // buffering records, a receipt-time ack would confirm consumption
+      // before delivery — the watermark is acknowledged manually above,
+      // strictly after core delivery.
+      opts.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs }
+    );
+    armLivenessProbe = (episode: number): void => {
+      void probeMoorHolder(sessionPath, opts.generation).then((outcome) => {
+        // Fenced twice: only the CURRENT link's CURRENT unresolved episode may
+        // consume a probe result.
+        if (this.masters.get(sessionId) !== link) return;
+        if (episode !== livenessEpisode || livenessEpisodeResolved) return;
+        if (outcome === 'authenticated-live') {
+          // A completed authenticated exchange — the ONLY thing that restores.
+          livenessEpisodeResolved = true;
+          this.core.observeHolderLiveness(sessionId, opts.generation, true);
+          return;
+        }
+        if (outcome === 'absent') {
+          // Listener absence positively established: the holder is gone; the
+          // identity-bound onClose retires this exact link.
+          livenessEpisodeResolved = true;
+          client.close();
+          return;
+        }
+        this.core.observeHolderLiveness(sessionId, opts.generation, false, 'probe-indeterminate');
+      });
+    };
+    let adopted: MoorStatus;
     try {
       await client.connect();
+      adopted = await client.attach({ columns: geometry.cols, rows: geometry.rows, requestLease: true });
     } catch {
+      client.close();
       return false;
     }
-    client.handshake({ role: Role.CONTROLLER, sessionId, rows: geometry.rows, cols: geometry.cols });
-    const timeoutMs = opts.ackTimeoutMs ?? 5_000;
-    const timer = setTimeout(() => settle(false), timeoutMs);
-    timer.unref?.();
-    const ok = await acked;
-    clearTimeout(timer);
+    // The §6 preamble precedes the ACK on the wire, so every parser write is
+    // already CHAINED; adoption completes only after that work drains clean —
+    // and only then does buffered replay/live output reach the emulator, in
+    // arrival order. A failed drain discards the buffer with the connection.
+    if (!(await terminalStateReady)) {
+      client.close();
+      return false;
+    }
+    preambleDrained = true;
+    let deliveredWatermark = 0n;
+    for (const pending of bufferedOutput.splice(0)) {
+      this.core.onMoorOutput(sessionId, pending.bytes, pending.offset);
+      deliveredWatermark = pending.sequence;
+    }
+    if (deliveredWatermark > 0n) {
+      try {
+        client.ackOutput(deliveredWatermark); // one coalesced ack per released buffer
+      } catch {
+        /* link closed: nothing to acknowledge */
+      }
+    }
     // Re-check AFTER the await: a concurrent retire may have torn the session
-    // down while the ACK was in flight — installing the client then would
-    // resurrect a retired session with its teardown already consumed.
-    if (!ok || (opts.stillValid !== undefined && !opts.stillValid()) || !this.core.hasLiveSession(sessionId)) {
+    // down while the attach prefix was in flight.
+    if ((opts.stillValid !== undefined && !opts.stillValid()) || !this.core.hasLiveSession(sessionId)) {
       client.close();
       return false;
     }
     attached = true;
-    this.masters.set(sessionId, client);
+    link = {
+      sendInput: (bytes) => {
+        try {
+          client.sendInput(bytes);
+        } catch (error) {
+          if (error instanceof Error && /in flight/.test(error.message)) {
+            inputQueue.push(bytes.slice());
+            return;
+          }
+          // Not attached / no lease: drop — the session state already says so.
+        }
+      },
+      sendResize: (rows, cols) => {
+        try {
+          client.sendResize(cols, rows);
+        } catch {
+          // Observer or closed link: geometry stays local-only.
+        }
+      },
+      close: () => client.close(),
+      terminateHolder: async (terminateOpts) => {
+        const result = await client.terminate(
+          terminateOpts?.force === undefined ? {} : { force: terminateOpts.force }
+        );
+        switch (result.outcome) {
+          case 0:
+            return 'terminated';
+          case 1:
+            return 'already-gone';
+          case 2:
+            return 'refused';
+          case 4:
+            return 'failed';
+          default:
+            return 'indeterminate';
+        }
+      },
+      releaseLease: () => client.releaseLease(),
+      clearHolderLog: async () => {
+        // §10.2.13 outcome algebra: 0 cleared, 1 already-empty-or-disabled
+        // (BOTH are success), 2 refused (a completed holder decision).
+        // Anything else — deadline, transport loss, malformed result — threw
+        // before this point and maps to indeterminate at the caller.
+        const result = await client.clearLog();
+        switch (result.outcome) {
+          case 0:
+            return 'cleared';
+          case 1:
+            return 'already-clear';
+          default:
+            return 'refused';
+        }
+      }
+    };
+    this.masters.set(sessionId, link);
     const snapshot = this.core.stateSnapshot(sessionId);
     if (snapshot === undefined || this.core.markRunning(sessionId, snapshot.generation).kind === 'rejected') {
       this.masters.delete(sessionId);
@@ -421,39 +658,56 @@ export class SessionManager {
       client.close();
       return false;
     }
+    // The adopted descriptor becomes observable ONLY after the final
+    // markRunning commit: a failed adoption never publishes authority, so no
+    // failure path can leak a descriptor without a live adopted link.
+    this.moorStatuses.set(sessionId, adopted);
     return true;
   }
 
   /**
-   * Ensure a session, SPAWN its atch master with the ledger generation injected
-   * as ATCH_GENERATION (§4.8.1 spawn contract), then attach. The generation the
-   * master will own is exactly the durable-ledger value the daemon allocated, so
-   * the fence is consistent across the join. Returns the ensure result.
+   * Ensure a session, SPAWN its supervised moor holder, and attach natively.
+   *
+   * The moor contract this encodes:
+   * - the ledger generation travels as the fd-3 launch record plus both env
+   *   carriers (spawnMoorMaster), never as bare env supervision;
+   * - the launcher awaits store adoption → ready internally, so its EXIT 0 is
+   *   the readiness signal — there is no socket polling;
+   * - the rendezvous is `<root>/<sessionId>` (no suffix), published by rename,
+   *   so a listener-less leftover node is a reclaimable tombstone exactly as
+   *   before, and a live listener is a foreign holder to refuse;
+   * - teardown is the moor `kill` command via the same confirmed-kill records.
    */
-  async spawnAndAttach(
+  async spawnAndAttachMoor(
     sessionId: string,
     opts: {
       binPath: string;
-      args: string[];
-      env?: NodeJS.ProcessEnv;
-      sockPath: string;
+      /** Interpreter/loader argv BEFORE the moor CLI (empty for the native binary). */
+      binArgs?: string[];
+      /** The moor rendezvous path `<root>/<sessionId>` — no `.sock` suffix. */
+      sessionPath: string;
+      /** The child command line (moor start operands after the session path). */
+      command: string[];
       geometry: { rows: number; cols: number };
+      env?: NodeJS.ProcessEnv;
+      /** Launcher-completion budget (adoption → ready happens inside it). */
       readyTimeoutMs?: number;
-      /** The launcher forks a detached master and exits (e.g. `atch start`). */
-      detached?: boolean;
-      /** For a detached master, the command to stop the session on retire (e.g. `atch kill -f NAME`). */
       killSpec?: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
       preallocateSpawn?: PreallocateSessionSpawn;
-      prepareSpawn?: PrepareSessionSpawn;
+      /** Prepare the per-generation `-T` committed-store directory. */
+      prepareSpawn?: (input: {
+        sessionId: string;
+        generation: number;
+      }) => Promise<{ storeDir?: string }> | { storeDir?: string };
+      /** §10 verified-live window override (default: the spec's 15 s). */
+      livenessWindowMs?: number;
     }
   ): Promise<SessionSpawnResult> {
     const pending = this.inflight.get(sessionId);
-    if (pending !== undefined) {
-      return pending;
-    }
+    if (pending !== undefined) return pending;
     const operation = this.runSerializedLifecycle(sessionId, () =>
-      this.doSpawnAndAttach(sessionId, opts)
+      this.doSpawnAndAttachMoor(sessionId, opts)
     ).finally(() => {
       this.inflight.delete(sessionId);
     });
@@ -461,69 +715,81 @@ export class SessionManager {
     return operation;
   }
 
-  private async doSpawnAndAttach(
+  private async doSpawnAndAttachMoor(
     sessionId: string,
-    opts: {
-      binPath: string;
-      args: string[];
-      env?: NodeJS.ProcessEnv;
-      sockPath: string;
-      geometry: { rows: number; cols: number };
-      readyTimeoutMs?: number;
-      detached?: boolean;
-      killSpec?: DetachedKillSpec;
-      subject?: SessionRegistration['subject'];
-      preallocateSpawn?: PreallocateSessionSpawn;
-      prepareSpawn?: PrepareSessionSpawn;
-    }
+    opts: Parameters<SessionManager['spawnAndAttachMoor']>[1]
   ): Promise<SessionSpawnResult> {
     if (this.core.hasLiveSession(sessionId) && this.masters.has(sessionId)) {
-      return this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' }); // already provisioned AND attached — idempotent no-op
+      return this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
     }
-    // Foreign-socket preflight BEFORE any durable allocation: ensure() would
-    // advance the ledger to N+1 over a surviving generation-N master, fencing
-    // it out of every future reconcile even though we never touch it.
-    // spawnMaster repeats this check as the race-closing second gate.
-    //
-    // The test is whether a master is LISTENING, not whether the file exists.
-    // A master that dies leaves its socket node behind, and treating that
-    // leftover as a live owner wedges the session permanently: every later
-    // start refuses until a human deletes the file. Refuse only for a socket
-    // that actually accepts a connection; a refused connect means the owner
-    // is gone and the stale node is ours to replace.
-    if (opts.detached === true && existsSync(opts.sockPath)) {
-      const probe = await probeSocketListener(opts.sockPath);
-      if (probe !== 'dead') {
-        // 'listener' — a live owner; 'unknown' — POSSIBLY a live owner that
-        // was too slow to accept (desk#42): reclaiming on uncertainty
-        // destroys a live session's rendezvous irreversibly. Refuse the
-        // spawn instead; a later attempt under lower load will see the truth.
+    // A launch this daemon cannot tear down must not happen — and the refusal
+    // must precede EVERY effect: no rendezvous mutation, no stateful
+    // preallocation hook (the provider path consumes an authorization there),
+    // no durable allocation. (The type stays optional only so the refusal is
+    // observable behavior, not a compile error.)
+    if (opts.killSpec === undefined) {
+      return { ok: false, reason: 'spawn-failed' };
+    }
+    // The rendezvous path IS the §1.2 canonical session identity: a
+    // noncanonical spelling would spawn a holder Desk can never attach to —
+    // refuse it before any allocation or launch, as a result, not a throw.
+    try {
+      posixMoorIdentity(opts.sessionPath);
+    } catch {
+      return { ok: false, reason: 'spawn-failed' };
+    }
+    // Foreign-rendezvous preflight BEFORE any durable allocation (same wedge
+    // logic as ever), with the no-follow type/identity fence: only a SOCKET
+    // node can be a moor tombstone. Anything else at the path — a regular
+    // file, directory, or symlink — is foreign data this daemon must never
+    // delete; staleness must be POSITIVE (socket + no listener), not assumed.
+    let rendezvousNode: ReturnType<typeof lstatSync> | undefined;
+    try {
+      rendezvousNode = lstatSync(opts.sessionPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         return { ok: false, reason: 'spawn-failed' };
       }
-      // No listener: the previous master is gone but its socket NODE survived —
-      // e.g. a reboot that killed every holder yet kept /tmp (WSL preserves it
-      // across restarts). This tombstone is not an owner, and both atch's own
-      // bind() ("session is already running") and spawnMaster's existence gate
-      // refuse an existing node regardless of liveness — so without removing it
-      // here the session can NEVER respawn until a human deletes the file, which
-      // is exactly the permanent wedge the comment above forbids. Reclaim it.
-      // The root is private (0700, this user) and the spawn is serialized per
-      // sessionId (inflight), so no concurrent owner can appear in the gap.
+    }
+    if (rendezvousNode !== undefined) {
+      if (!rendezvousNode.isSocket()) {
+        return { ok: false, reason: 'spawn-failed' };
+      }
+      // Staleness must be POSITIVE: only a refused connect proves the owner is
+      // gone. A live listener or ANY indeterminate outcome (permissions,
+      // timeout) preserves the node and refuses the spawn.
+      if ((await probeRendezvous(opts.sessionPath)) !== 'stale') {
+        return { ok: false, reason: 'spawn-failed' };
+      }
+      // TOCTOU identity fence: re-lstat immediately before unlink and require
+      // the SAME socket (dev+inode+type) the probe judged stale — a node
+      // republished in the probe window is not ours to delete.
       try {
-        unlinkSync(opts.sockPath);
+        const recheck = lstatSync(opts.sessionPath);
+        if (
+          !recheck.isSocket() ||
+          recheck.dev !== rendezvousNode.dev ||
+          recheck.ino !== rendezvousNode.ino
+        ) {
+          return { ok: false, reason: 'spawn-failed' };
+        }
+        unlinkSync(opts.sessionPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           return { ok: false, reason: 'spawn-failed' };
         }
+        // ENOENT: the tombstone vanished on its own — the path is free.
       }
     }
     const subject = opts.subject ?? { kind: 'terminal' };
     if (opts.preallocateSpawn !== undefined) {
-      const currentGeneration = this.ledger.current(sessionId);
       const decision = await opts.preallocateSpawn({
         sessionId,
-        currentGeneration,
-        nextGeneration: currentGeneration + 1,
+        currentGeneration: this.ledger.current(sessionId),
+        // The fence must see EXACTLY the generation the spawn will own
+        // (OB-18: a fresh lineage allocates 2), or the provider claim
+        // contract is broken before the real allocation.
+        nextGeneration: this.ledger.next(sessionId),
         subject
       });
       if (!decision.ok) return decision;
@@ -532,18 +798,10 @@ export class SessionManager {
     if (!ens.ok) return ens;
     const token = Symbol('spawn-op');
     this.owners.set(sessionId, token);
-    let spawnArgs = opts.args;
-    let spawnEnv = opts.env;
+    let storeDir: string | undefined;
     if (opts.prepareSpawn !== undefined) {
       try {
-        const prepared = await opts.prepareSpawn({
-          sessionId,
-          generation: ens.generation,
-          args: [...opts.args],
-          env: { ...opts.env }
-        });
-        spawnArgs = prepared.args ?? spawnArgs;
-        spawnEnv = { ...spawnEnv, ...prepared.env };
+        ({ storeDir } = await opts.prepareSpawn({ sessionId, generation: ens.generation }));
       } catch {
         if (this.owners.get(sessionId) === token) this.owners.delete(sessionId);
         if (ens.created) {
@@ -553,37 +811,68 @@ export class SessionManager {
         return { ok: false, reason: 'spawn-failed' };
       }
     }
-    let child: Awaited<ReturnType<typeof spawnMaster>>['child'];
-    try {
-      ({ child } = await spawnMaster({
-        binPath: opts.binPath,
-        args: spawnArgs,
-        env: spawnEnv,
-        sockPath: opts.sockPath,
-        generation: ens.generation,
-        readyTimeoutMs: opts.readyTimeoutMs,
-        detached: opts.detached
-      }));
-    } catch (error) {
-      // The master never came up. Run the kill ONLY when this operation could
-      // have created one (SpawnMasterError.ownershipPossible): a clean-exit
-      // timeout may have half-forked a master, but a pre-existing socket or a
-      // nonzero launcher exit is a FOREIGN or never-forked master — killing
-      // there would destroy someone else's session. Then free the slot THIS
-      // call allocated so provision never leaks capacity.
-      const ownershipPossible = error instanceof SpawnMasterError ? error.ownershipPossible : true;
-      if (opts.detached === true && opts.killSpec !== undefined && ownershipPossible) {
-        // Register FIRST, then attempt to confirmed completion: a failed or
-        // unconfirmed cleanup RETAINS the record so a later control retire can
-        // finish the job (a half-forked master may surface its socket late).
+    const args = [
+      ...(opts.binArgs ?? []),
+      'start',
+      ...(storeDir === undefined ? [] : ['-T', storeDir]),
+      opts.sessionPath,
+      ...opts.command
+    ];
+    // Launch + readiness: the moor launcher validates the record, forks the
+    // holder, awaits store adoption then ready, and exits 0 — or reports the
+    // failure with a nonzero exit leaving no published rendezvous behind.
+    const ready = await new Promise<'ready' | 'failed' | 'timeout'>((resolve) => {
+      let launcher: ReturnType<typeof spawnMoorMaster>['child'];
+      try {
+        ({ child: launcher } = spawnMoorMaster({
+          binPath: opts.binPath,
+          args,
+          generation: ens.generation,
+          ...(opts.env === undefined ? {} : { env: opts.env })
+        }));
+      } catch {
+        resolve('failed');
+        return;
+      }
+      const timer = setTimeout(() => {
+        try {
+          launcher.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        resolve('timeout');
+      }, opts.readyTimeoutMs ?? 10_000);
+      timer.unref?.();
+      launcher.once('error', () => {
+        clearTimeout(timer);
+        resolve('failed');
+      });
+      launcher.once('exit', (code: number | null) => {
+        clearTimeout(timer);
+        resolve(code === 0 ? 'ready' : 'failed');
+      });
+    });
+    if (ready !== 'ready') {
+      // A clean nonzero exit means the launcher itself rolled back (no
+      // rendezvous is left behind) — a kill is needed only if one is visible.
+      // A TIMEOUT means the holder's fate is UNCERTAIN even when the path is
+      // absent at this instant: the launcher may have forked a holder that
+      // publishes late. Retain the kill record unconditionally there and arm
+      // a bounded reaper for a late publication — instantaneous absence must
+      // never drop the only teardown authority.
+      const uncertain = ready === 'timeout';
+      if (uncertain || existsSync(opts.sessionPath)) {
         const record = {
           ...opts.killSpec,
           generation: ens.generation,
-          sockPath: opts.sockPath,
+          sockPath: opts.sessionPath,
           mustConfirm: true
         };
         this.detachedKills.set(sessionId, record);
-        await this.confirmKill(sessionId, record, 5_000);
+        const confirmed = await this.confirmKill(sessionId, record, 5_000);
+        if (uncertain && !confirmed.ok) {
+          this.armLatePublicationReaper(sessionId, record);
+        }
       }
       if (ens.created) {
         this.core.retire(sessionId);
@@ -591,45 +880,135 @@ export class SessionManager {
       }
       return { ok: false, reason: 'spawn-failed' };
     }
-    if (opts.detached) {
-      // A detached master: the launcher exits normally (do NOT retire on that);
-      // teardown is the kill command, if provided.
-      if (opts.killSpec !== undefined) {
-        this.detachedKills.set(sessionId, {
-          ...opts.killSpec,
-          generation: ens.generation,
-          sockPath: opts.sockPath
-        });
-      }
-    } else {
-      // A tracked foreground child: retire when it exits, kill it on retire.
-      // Token-bound: after retire + immediate respawn, the OLD child's late
-      // exit must not retire the successor session.
-      this.cleanups.set(sessionId, () => {
-        if (child.exitCode === null) child.kill();
-      });
-      child.once('exit', () => {
-        if (this.owners.get(sessionId) === token) {
-          this.retire(sessionId);
-        }
+    if (opts.killSpec !== undefined) {
+      this.detachedKills.set(sessionId, {
+        ...opts.killSpec,
+        generation: ens.generation,
+        sockPath: opts.sessionPath
       });
     }
-    // The ACK must carry exactly the generation this daemon injected at spawn
-    // (§4.8.1) — anything else is a fenced/foreign master, not a success.
-    const attached = await this.attachMaster(sessionId, opts.sockPath, opts.geometry, {
-      expectGeneration: ens.generation,
-      stillValid: () => this.owners.get(sessionId) === token
+    const attached = await this.moorAttachMaster(sessionId, opts.sessionPath, opts.geometry, {
+      generation: ens.generation,
+      stillValid: () => this.owners.get(sessionId) === token,
+      ...(opts.livenessWindowMs === undefined
+        ? {}
+        : { livenessWindowMs: opts.livenessWindowMs })
     });
     if (!attached) {
-      // Kill ONLY the master this operation spawned — foreground child OR the
-      // detached master it registered — wait for its socket to vanish, clear
-      // every teardown entry this op made (no stale detachedKills), and free
-      // the slot if this call allocated it. Never report ok for an unattached
-      // session.
       await this.teardownFailedSpawn(sessionId, ens.created);
       return { ok: false, reason: 'attach-failed' };
     }
-    return ens;
+    const moorStatus = this.moorStatuses.get(sessionId);
+    return moorStatus === undefined ? ens : { ...ens, moorStatus };
+  }
+
+  /** OB-39: the last adopted ATTACH_ACK descriptor, if this session joined moor. */
+  moorStatus(sessionId: string): MoorStatus | undefined {
+    return this.moorStatuses.get(sessionId);
+  }
+
+  /**
+   * Shutdown fence: settle every in-flight spawn/lifecycle operation that
+   * could still INSTALL a master link. Called after the control plane stops
+   * admitting new work, so once this resolves the master map is final and
+   * the lease handover snapshot below cannot miss a late grant.
+   */
+  async awaitInflightSpawns(): Promise<void> {
+    await Promise.allSettled([...this.inflight.values()]);
+  }
+
+  /**
+   * Shutdown link closure (AFTER the awaited lease handover): every viewer
+   * connection is closed so the departing process leaves no half-open
+   * sockets. The map is cleared FIRST — each link's onClose retires only
+   * while it is still the registered link, so this mass closure detaches
+   * without retiring: the holders survive the daemon by design.
+   */
+  closeAllLinks(): void {
+    const links = [...this.masters.values()];
+    this.masters.clear();
+    this.moorStatuses.clear();
+    for (const link of links) {
+      try {
+        link.close();
+      } catch {
+        // Already torn down.
+      }
+    }
+  }
+
+  /**
+   * §7.4 graceful handover on daemon departure: release every owned lease AND
+   * WAIT for the released results (each bounded by the client's 2 s release
+   * deadline) so the holders — which SURVIVE this daemon — can grant the next
+   * incarnation a fresh lease immediately instead of waiting out the 10 s
+   * responsiveness expiry. Every outcome is reported to the caller:
+   * 'refused' is the holder's completed decision, 'indeterminate' a release
+   * whose result never arrived — neither is silently dropped.
+   */
+  async releaseAllLeases(): Promise<
+    Array<{ sessionId: string; outcome: 'released' | 'refused' | 'indeterminate' }>
+  > {
+    const owners = [...this.masters.entries()].filter(
+      ([, link]) => link.releaseLease !== undefined
+    );
+    return Promise.all(
+      owners.map(async ([sessionId, link]) => {
+        try {
+          return { sessionId, outcome: await link.releaseLease!() };
+        } catch {
+          return { sessionId, outcome: 'indeterminate' as const };
+        }
+      })
+    );
+  }
+
+  /**
+   * §10.2.13: clear the surviving holder's committed log at the frontier this
+   * controller observed. The FULL algebra is preserved for the control-plane
+   * caller: 'no-link' (nothing attached that could clear), the holder's own
+   * cleared / already-clear / refused decisions, and 'indeterminate' when a
+   * submission got no valid complete result (deadline, transport loss,
+   * malformed echo) — nothing may be assumed about it.
+   */
+  async clearHolderLog(
+    sessionId: string
+  ): Promise<HolderLogClearOutcome | 'no-link'> {
+    const link = this.masters.get(sessionId);
+    if (link?.clearHolderLog === undefined) return 'no-link';
+    try {
+      return await link.clearHolderLog();
+    } catch {
+      return 'indeterminate';
+    }
+  }
+
+  /**
+   * Bounded late-publication reaper for a TIMED-OUT launch: the holder may
+   * surface its rendezvous after the launcher was killed. While the record is
+   * still the CURRENT one for the session, watch the path; the moment it
+   * appears, run the confirmed kill. Past the window the record simply stays
+   * registered (retriable by control retire) — it is never dropped here.
+   */
+  private armLatePublicationReaper(
+    sessionId: string,
+    record: DetachedKillRecord,
+    windowMs = 5_000
+  ): void {
+    const deadline = Date.now() + windowMs;
+    const tick = async (): Promise<void> => {
+      if (this.detachedKills.get(sessionId) !== record) return; // superseded
+      if (existsSync(record.sockPath)) {
+        await this.confirmKill(sessionId, record, 5_000);
+        return;
+      }
+      if (Date.now() < deadline) {
+        const timer = setTimeout(() => void tick(), 100);
+        timer.unref?.();
+      }
+    };
+    const timer = setTimeout(() => void tick(), 100);
+    timer.unref?.();
   }
 
   /**
@@ -640,6 +1019,9 @@ export class SessionManager {
    * teardown path at all (fail closed on the record, not just the verdict).
    */
   private async teardownFailedSpawn(sessionId: string, createdSlot: boolean): Promise<void> {
+    // No moorStatuses clear here: adoption publishes authority only AFTER its
+    // final markRunning commit, so a failed spawn never published one — and a
+    // session-wide delete could erase a racing successor's authority.
     const cleanup = this.cleanups.get(sessionId);
     this.cleanups.delete(sessionId);
     cleanup?.(); // foreground child kill (sync)
@@ -711,11 +1093,11 @@ export class SessionManager {
     return this.core.historyText(sessionId, rows, offset);
   }
 
-  observeAtchEvent(
+  observeMoorEvent(
     sessionId: string,
     generation: number,
-    event: AtchEvent
-  ): AtchObservationResult {
+    event: MoorSessionEvent
+  ): MoorObservationResult {
     if (!this.core.hasLiveSession(sessionId)) {
       return { ok: false, reason: 'session-not-found' };
     }
@@ -771,6 +1153,12 @@ export class SessionManager {
           { code: event.code, signal: null },
           at
         );
+        // Cutover parity: an APPLIED exit transition also pushes an explicit
+        // EXIT frame to every subscribed browser surface — replayed or
+        // duplicate exits (authority noop/rejected) never re-announce.
+        if (authority.kind === 'applied') {
+          this.core.emitExit(sessionId, event.code);
+        }
         next.exit = { code: event.code, at };
         break;
     }
@@ -842,11 +1230,34 @@ export class SessionManager {
     opts: { timeoutMs?: number } = {}
   ): Promise<{ ok: boolean; error?: string }> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
+    await this.terminateOverLiveLink(sessionId);
     const kill = this.beginRetire(sessionId);
     if (kill === undefined) {
       return { ok: true };
     }
     return this.confirmKill(sessionId, kill, timeoutMs);
+  }
+
+  /**
+   * §9 wire terminate as the FIRST retire step when the link is live: the
+   * holder fences identity+generation+incarnation atomically, exits its child
+   * gracefully (5 s, then escalates per §12.4), and unlinks its rendezvous on
+   * TERMINATED/ALREADY_GONE. This is not a fallback pair with the CLI kill —
+   * the wire path serves a LIVE adopted link, the CLI kill serves a detached
+   * record, and the CLI confirm after a wire-terminated holder is an
+   * idempotent double-check that observes an already-unlinked rendezvous. An
+   * indeterminate/failed wire outcome changes nothing: the confirmed-kill
+   * machinery below still owns the truth.
+   */
+  private async terminateOverLiveLink(sessionId: string): Promise<void> {
+    const link = this.masters.get(sessionId);
+    if (link?.terminateHolder === undefined) return;
+    try {
+      await link.terminateHolder();
+    } catch {
+      // Deadline/link loss: outcome indeterminate — nothing may be assumed,
+      // and nothing is: the confirmed kill decides.
+    }
   }
 
   /**
@@ -894,6 +1305,7 @@ export class SessionManager {
       };
     }
 
+    if (snapshot !== undefined) await this.terminateOverLiveLink(sessionId);
     const kill = snapshot === undefined ? retainedKill : this.beginRetire(sessionId);
     if (kill === undefined) {
       return { ok: true };
@@ -933,22 +1345,11 @@ export class SessionManager {
         };
       }
       if (existsSync(sockPath)) {
-        const probe = await probeSocketListener(sockPath);
-        if (probe === 'listener') {
+        if (await socketHasListener(sockPath)) {
           return {
             ok: false,
             reason: 'session-live',
             error: `session ${sessionId} still has a listening master`
-          };
-        }
-        if (probe === 'unknown') {
-          // Silence is not death (desk#42): never delete a rendezvous whose
-          // owner might merely be slow. The retire fails closed and can be
-          // retried when the probe can actually decide.
-          return {
-            ok: false,
-            reason: 'retire-failed',
-            error: `session ${sessionId} liveness is indeterminate under load — refusing to remove its socket`
           };
         }
         try {
@@ -1014,8 +1415,8 @@ export class SessionManager {
     }
     const killed = await runKillCommand(kill, timeoutMs); // bounded: a hung kill fails, never blocks forever
     if (!killed.ok) {
-      // A known, previously attached master can die before `atch kill` connects,
-      // leaving a stale socket that makes kill exit 1. `atch rm` is the safe
+      // A known, previously attached master can die before `moor kill` connects,
+      // leaving a stale socket that makes kill exit 1. `moor rm` is the safe
       // discriminator here: it removes only a refused/dead socket and refuses a
       // live listener. Never use it for an already-uncertain half-forked master,
       // whose socket may not have surfaced yet.
@@ -1042,7 +1443,7 @@ export class SessionManager {
     const gone = await waitForSocketGone(kill.sockPath, timeoutMs);
     if (!gone) {
       kill.mustConfirm = true;
-      return { ok: false, error: `atch socket still present after kill: ${kill.sockPath}` }; // record retained
+      return { ok: false, error: `moor socket still present after kill: ${kill.sockPath}` }; // record retained
     }
     if (this.detachedKills.get(sessionId) === kill) {
       this.detachedKills.delete(sessionId);
@@ -1059,6 +1460,8 @@ export class SessionManager {
     this.owners.delete(sessionId); // any deferred old-operation callback goes stale
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
+    // Generation-bound authority dies with the link it was adopted from.
+    this.moorStatuses.delete(sessionId);
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup !== undefined) cleanup();
     this.cleanups.delete(sessionId);
@@ -1100,36 +1503,79 @@ export class SessionManager {
 }
 
 /**
- * Tri-state liveness probe for a unix socket path. 'listener' — a connect
- * succeeded, the owner is alive. 'dead' — the owner is PROVEN gone: only an
- * explicit ECONNREFUSED (bound node, nobody accepting) or ENOENT (no node)
- * counts. 'unknown' — everything else, including a timeout: a live master
- * under host load can simply be slow to accept, and silence proves nothing.
- * Callers MUST treat 'unknown' as possibly-live and MUST NOT destroy state
- * on it.
+ * True when a unix socket path has a live listener. A stale node left by a
+ * dead master refuses the connection (ECONNREFUSED); anything else that is
+ * not a successful connect is treated as "no listener" so a permission or
+ * path error can never masquerade as a live foreign owner.
  */
-type SocketProbeResult = 'listener' | 'dead' | 'unknown';
+/**
+ * Tri-valued moor-rendezvous liveness: 'live' on a successful connect,
+ * 'stale' ONLY on POSITIVE staleness (ECONNREFUSED — a socket nobody
+ * listens on — or ENOENT — the node vanished), and 'indeterminate' for
+ * everything else (EACCES, timeouts, resource errors). Indeterminate
+ * evidence must PRESERVE the node: deleting on a permission error would
+ * unlink a live foreign holder this daemon merely cannot reach.
+ */
+/**
+ * §10 bounded IDENTITY probe: a fresh connection running the HELLO/HELLO_ACK
+ * exchange — the decoder fences the canonical identity and the generation
+ * scope, so 'authenticated-live' means the SAME session's holder answered.
+ * 'absent' is a positively-established missing listener (connection refused /
+ * no rendezvous object). Everything else — timeout, handshake failure,
+ * identity or generation mismatch — is 'indeterminate': nothing may be
+ * assumed, per OB-30.
+ */
+async function probeMoorHolder(
+  sessionPath: string,
+  generation: number
+): Promise<'authenticated-live' | 'absent' | 'indeterminate'> {
+  const probe = new MoorMasterClient(sessionPath, generation);
+  try {
+    await probe.connect();
+  } catch (error) {
+    probe.close();
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ECONNREFUSED' || code === 'ENOENT' ? 'absent' : 'indeterminate';
+  }
+  try {
+    await probe.authenticate();
+    return 'authenticated-live';
+  } catch {
+    return 'indeterminate';
+  } finally {
+    probe.close();
+  }
+}
 
-async function probeSocketListener(path: string, timeoutMs = 2000): Promise<SocketProbeResult> {
-  return new Promise<SocketProbeResult>((resolve) => {
+async function probeRendezvous(
+  path: string,
+  timeoutMs = 250
+): Promise<'live' | 'stale' | 'indeterminate'> {
+  return new Promise((resolve) => {
     const socket = createConnection({ path });
-    const settle = (result: SocketProbeResult): void => {
+    const settle = (result: 'live' | 'stale' | 'indeterminate'): void => {
       socket.removeAllListeners();
       socket.destroy();
       resolve(result);
     };
-    // desk#42 (directly observed on the re-provisioned main-3): a live holder
-    // under host load blew the old 250 ms budget, the boolean probe answered
-    // "no listener", and the reclaim path unlinked the rendezvous socket of a
-    // RUNNING session — permanently, since a deleted unix-socket path cannot
-    // be re-linked. A probe can prove death only by an explicit refusal;
-    // silence proves nothing. Timeout therefore maps to 'unknown', and only
-    // ECONNREFUSED or ENOENT count as 'dead'.
-    socket.setTimeout(timeoutMs, () => settle('unknown'));
-    socket.once('connect', () => settle('listener'));
-    socket.once('error', (error) => {
-      const code = (error as NodeJS.ErrnoException).code;
-      settle(code === 'ECONNREFUSED' || code === 'ENOENT' ? 'dead' : 'unknown');
+    socket.setTimeout(timeoutMs, () => settle('indeterminate'));
+    socket.once('connect', () => settle('live'));
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      settle(error.code === 'ECONNREFUSED' || error.code === 'ENOENT' ? 'stale' : 'indeterminate');
     });
+  });
+}
+
+async function socketHasListener(path: string, timeoutMs = 250): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ path });
+    const settle = (result: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs, () => settle(false));
+    socket.once('connect', () => settle(true));
+    socket.once('error', () => settle(false));
   });
 }
