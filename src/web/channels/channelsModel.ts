@@ -9,6 +9,7 @@ import type {
   ReactionRef,
   ViewFilter
 } from './channelsClient.js';
+import type { WindowReason } from './feedPosition.js';
 
 /** Pure view-model helpers for the channels subsystem (unit-tested). */
 
@@ -227,12 +228,9 @@ export interface DigestEntry {
  * first. Pure + tested — the digest view renders this plus the activity-derived
  * needs-reply items it self-fetches.
  */
-export function buildAwayDigest(
-  channels: { name: string; messageCount: number }[],
-  seenCounts: Record<string, number>
-): DigestEntry[] {
+export function buildAwayDigest(channels: { name: string; unreadCount?: number }[]): DigestEntry[] {
   return channels
-    .map((channel) => ({ channel: channel.name, unread: Math.max(0, channel.messageCount - (seenCounts[channel.name] ?? 0)) }))
+    .map((channel) => ({ channel: channel.name, unread: channel.unreadCount ?? 0 }))
     .filter((entry) => entry.unread > 0)
     .sort((a, b) => b.unread - a.unread);
 }
@@ -355,23 +353,9 @@ export interface MessageGroup {
 
 export type MessageListRow =
   | { kind: 'day'; key: string; dayLabel: string; groupIndex: number }
-  | { kind: 'new-divider'; key: string; messageId: string; groupIndex: number; messageIndex: number }
   | { kind: 'message'; key: string; message: ChannelMessage; groupIndex: number; messageIndex: number; grouped: boolean };
 
-export interface MessageVirtualItem {
-  index: number;
-  start: number;
-  end: number;
-}
 
-export interface ReadProgressVirtualMetrics {
-  scrollOffset: number;
-  viewportHeight: number;
-  scrollHeight: number;
-  bottomPx: number;
-  programmatic?: boolean;
-  mode?: 'settled' | 'scrolled-past';
-}
 
 /** Groups messages by calendar day for separators. */
 export function groupMessagesByDay(messages: ChannelMessage[], now = new Date()): MessageGroup[] {
@@ -394,11 +378,12 @@ export function groupMessagesByDay(messages: ChannelMessage[], now = new Date())
   return groups;
 }
 
-/** Flat row model for the virtualized MessageList. Keeps the rendered order
- * testable without relying on DOM scans or nested map structure. */
+
+/** Flat row model for the in-flow MessageList: day separators + messages.
+ * The NEW divider is a zero-height overlay in the renderer, never a row. */
 export function buildMessageListRows(
   messages: ChannelMessage[],
-  options: { newDividerId?: string | null; now?: Date; compact?: boolean } = {}
+  options: { now?: Date; compact?: boolean } = {}
 ): MessageListRow[] {
   const rows: MessageListRow[] = [];
   const groups = groupMessagesByDay(messages, options.now);
@@ -407,9 +392,6 @@ export function buildMessageListRows(
     rows.push({ kind: 'day', key: `day:${group.dayKey}`, dayLabel: group.dayLabel, groupIndex });
     for (let messageIndex = 0; messageIndex < group.messages.length; messageIndex += 1) {
       const message = group.messages[messageIndex]!;
-      if (options.newDividerId === message.id) {
-        rows.push({ kind: 'new-divider', key: `new:${message.id}`, messageId: message.id, groupIndex, messageIndex });
-      }
       rows.push({
         kind: 'message',
         key: `msg:${message.id}`,
@@ -421,53 +403,6 @@ export function buildMessageListRows(
     }
   }
   return rows;
-}
-
-export function findMessageRowIndex(rows: MessageListRow[], messageId: string | null | undefined): number {
-  if (!messageId) {
-    return -1;
-  }
-  return rows.findIndex((row) => row.kind === 'message' && row.message.id === messageId);
-}
-
-function lastMessageIdFromRows(rows: MessageListRow[]): string | null {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index]!;
-    if (row.kind === 'message') {
-      return row.message.id;
-    }
-  }
-  return null;
-}
-
-/** Read-progress derivation for virtualized rows. It replaces the old
- * querySelectorAll('[data-msg-id]') scan with virtual item geometry. */
-export function readProgressFromVirtualRows(
-  rows: MessageListRow[],
-  virtualItems: MessageVirtualItem[],
-  metrics: ReadProgressVirtualMetrics
-): string | null {
-  if (metrics.programmatic) {
-    return null;
-  }
-  if (metrics.mode !== 'scrolled-past') {
-    const fromBottom = metrics.scrollHeight - metrics.scrollOffset - metrics.viewportHeight;
-    if (fromBottom <= metrics.bottomPx) {
-      return lastMessageIdFromRows(rows);
-    }
-  }
-  let readId: string | null = null;
-  const limit = metrics.mode === 'scrolled-past' ? metrics.scrollOffset : metrics.scrollOffset + metrics.viewportHeight - 4;
-  for (const item of [...virtualItems].sort((a, b) => a.index - b.index)) {
-    if (item.end > limit) {
-      break;
-    }
-    const row = rows[item.index];
-    if (row?.kind === 'message') {
-      readId = row.message.id;
-    }
-  }
-  return readId;
 }
 
 export function dayLabel(time: Date, now = new Date()): string {
@@ -487,27 +422,8 @@ export function messageClock(timestamp: string): string {
   return timestamp.slice(11, 16) || timestamp;
 }
 
-/** Unread count for a channel from its summary + the viewer's seen entry.
- * Mirrors the sidebar badge math: no seen entry => everything is unread; the
- * pointer sitting on the last message => zero; otherwise total minus the count
- * already read. Pure so the switch-in re-anchor gate and the badge share it. */
-export function channelUnreadCount(
-  messageCount: number,
-  lastMessageId: string | null | undefined,
-  seen: { id: string; count: number } | undefined
-): number {
-  if (!seen) {
-    return messageCount;
-  }
-  if (lastMessageId && seen.id === lastMessageId) {
-    return 0;
-  }
-  return Math.max(0, messageCount - seen.count);
-}
-
 export interface ChannelSeenEntry {
   id: string;
-  count: number;
 }
 
 export function channelInitialLoadSince(
@@ -932,7 +848,84 @@ export function buildQuoteReply(message: { author: string; body: string }): stri
   return `> @${message.author}:\n${quoted}\n\n`;
 }
 
-export function mergeChannelWindow(current: ChannelDetail, fetched: ChannelDetail): ChannelDetail {
+/** Hard cap on the loaded window — the in-flow feed renders every row, so the
+    window must stay bounded no matter how far the operator scrolls. */
+export const WINDOW_CAP = 150;
+
+function capWindow(detail: ChannelDetail, reason: WindowReason): ChannelDetail {
+  const excess = detail.messages.length - WINDOW_CAP;
+  if (excess <= 0) {
+    return detail;
+  }
+  if (reason === 'older') {
+    return { ...detail, messages: detail.messages.slice(0, WINDOW_CAP), hasNewer: true };
+  }
+  return {
+    ...detail,
+    messages: detail.messages.slice(excess),
+    startIndex: detail.startIndex + excess,
+    hasOlder: true
+  };
+}
+
+/**
+ * The single entry point for every loaded-window mutation. Reasons carry the
+ * merge semantics: pages ('older'/'newer') dedup-splice onto the matching edge,
+ * 'poll' reconciles by id and can never wipe a loaded window with an empty
+ * fetch, replace reasons ('init'/'around'/'jump') adopt the fetched window.
+ * Every path is capped at WINDOW_CAP.
+ */
+export function applyWindow(current: ChannelDetail | null, fetched: ChannelDetail, reason: WindowReason): ChannelDetail {
+  if (!current || current.messages.length === 0 || reason === 'init' || reason === 'around' || reason === 'jump') {
+    return capWindow({ ...fetched }, reason);
+  }
+  const meta = {
+    goal: fetched.goal,
+    members: fetched.members,
+    files: fetched.files,
+    total: fetched.total,
+    firstMessageAt: fetched.firstMessageAt,
+    lastMessageAt: fetched.lastMessageAt
+  };
+  if (fetched.messages.length === 0) {
+    if (reason === 'older') {
+      return { ...current, ...meta, hasOlder: fetched.hasOlder };
+    }
+    if (reason === 'newer') {
+      return { ...current, ...meta, hasNewer: fetched.hasNewer };
+    }
+    return { ...current, ...meta };
+  }
+  if (reason === 'older' || reason === 'newer') {
+    const known = new Set(current.messages.map((message) => message.id));
+    const fresh = fetched.messages.filter((message) => !known.has(message.id));
+    if (reason === 'older') {
+      return capWindow(
+        {
+          ...current,
+          ...meta,
+          messages: [...fresh, ...current.messages],
+          startIndex: fetched.startIndex,
+          hasOlder: fetched.hasOlder
+        },
+        reason
+      );
+    }
+    return capWindow(
+      {
+        ...current,
+        ...meta,
+        messages: [...current.messages, ...fresh],
+        hasNewer: fetched.hasNewer,
+        contentRevision: fetched.contentRevision
+      },
+      reason
+    );
+  }
+  return capWindow(reconcileById(current, fetched), reason);
+}
+
+function reconcileById(current: ChannelDetail, fetched: ChannelDetail): ChannelDetail {
   const meta = {
     goal: fetched.goal,
     members: fetched.members,

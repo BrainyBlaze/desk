@@ -20,10 +20,8 @@ import {
   composerInputHeightFromTopResize,
   channelInitialLoadSince,
   channelShouldReanchorCachedDetail,
-  channelUnreadCount,
   dayLabel,
   decorateMentions,
-  findMessageRowIndex,
   filterAddableAgentCandidates,
   filterMessages,
   firstUnreadId,
@@ -42,10 +40,9 @@ import {
   nextMentionId,
   parseMessageLink,
   parseMessageTime,
-  readProgressFromVirtualRows,
   reactionsForMessage,
   restoreScrollChannelForSelection,
-  mergeChannelWindow,
+  applyWindow,
   shouldSwitchChannelForNavigation,
   sortFeatured,
   toSearchOptions,
@@ -283,32 +280,22 @@ describe('unread + filter', () => {
     expect(filterMessages(messages, '  ')).toHaveLength(2);
   });
 
-  it('channelUnreadCount tracks unread badges without driving navigation', () => {
-    // never opened (no seen entry) -> everything is unread for the badge
-    expect(channelUnreadCount(5, 'm5', undefined)).toBe(5);
-    // caught up: pointer sits on the last message -> zero unread
-    expect(channelUnreadCount(5, 'm5', { id: 'm5', count: 5 })).toBe(0);
-    // new arrived while away: read 5 of 7 -> 2 unread
-    expect(channelUnreadCount(7, 'm7', { id: 'm5', count: 5 })).toBe(2);
-    // stale seen count never yields a negative unread
-    expect(channelUnreadCount(3, 'm3', { id: 'm9', count: 9 })).toBe(0);
-  });
 
   it('requests an initial window around the read pointer when unread messages exist', () => {
     const channel = { messageCount: 7, lastMessage: { id: 'm7' } };
-    expect(channelInitialLoadSince(channel, { id: 'm5', count: 5 })).toBe('m5');
-    expect(channelInitialLoadSince(channel, { id: 'm6', count: 6 })).toBe('m6');
-    expect(channelInitialLoadSince(channel, { id: 'm7', count: 7 })).toBeNull();
-    expect(channelInitialLoadSince(channel, { id: 'stale-high', count: 99 })).toBe('stale-high');
+    expect(channelInitialLoadSince(channel, { id: 'm5' })).toBe('m5');
+    expect(channelInitialLoadSince(channel, { id: 'm6' })).toBe('m6');
+    expect(channelInitialLoadSince(channel, { id: 'm7' })).toBeNull();
+    expect(channelInitialLoadSince(channel, { id: 'stale-high' })).toBe('stale-high');
     expect(channelInitialLoadSince(channel, undefined)).toBeNull();
   });
 
   it('reanchors cached detail only when newer unread messages arrived while away', () => {
     const channel = { messageCount: 7, lastMessage: { id: 'm7' } };
 
-    expect(channelShouldReanchorCachedDetail(channel, { id: 'm5', count: 5 })).toBe(true);
-    expect(channelShouldReanchorCachedDetail(channel, { id: 'm7', count: 7 })).toBe(false);
-    expect(channelShouldReanchorCachedDetail(channel, { id: 'stale-high', count: 99 })).toBe(true);
+    expect(channelShouldReanchorCachedDetail(channel, { id: 'm5' })).toBe(true);
+    expect(channelShouldReanchorCachedDetail(channel, { id: 'm7' })).toBe(false);
+    expect(channelShouldReanchorCachedDetail(channel, { id: 'stale-high' })).toBe(true);
     expect(channelShouldReanchorCachedDetail(channel, undefined)).toBe(false);
   });
 });
@@ -620,23 +607,19 @@ describe('adjacentMessageId (j/k keyboard nav)', () => {
 });
 
 describe('buildAwayDigest (while-away digest)', () => {
-  it('reports per-channel unread (messageCount - seen), drops read channels, most-unread first', () => {
-    const channels = [
-      { name: 'ops', messageCount: 10 },
-      { name: 'design', messageCount: 5 },
-      { name: 'quiet', messageCount: 3 }
-    ];
-    const digest = buildAwayDigest(channels, { ops: 4, quiet: 3 });
+  it('reports per-channel unread from the server-resolved counts, most-unread first', () => {
+    const digest = buildAwayDigest([
+      { name: 'ops', unreadCount: 6 },
+      { name: 'design', unreadCount: 5 },
+      { name: 'quiet', unreadCount: 0 },
+      { name: 'never-polled' }
+    ]);
     expect(digest).toEqual([
-      { channel: 'design', unread: 5 }, // never read → all 5 unread, biggest
-      { channel: 'ops', unread: 6 }
-    ].sort((a, b) => b.unread - a.unread));
-    expect(digest.map((entry) => entry.channel)).toEqual(['ops', 'design']); // 6 before 5; quiet (3-3=0) dropped
+      { channel: 'ops', unread: 6 },
+      { channel: 'design', unread: 5 }
+    ]);
   });
 
-  it('floors unread at 0 when seen exceeds count (stale seen pointer)', () => {
-    expect(buildAwayDigest([{ name: 'ops', messageCount: 2 }], { ops: 9 })).toEqual([]);
-  });
 });
 
 describe('messageMatchesFilter (saved views)', () => {
@@ -727,107 +710,21 @@ describe('deep-link + quote-reply', () => {
   });
 });
 
-describe('MessageList virtualization helpers (slice C)', () => {
+describe('MessageList row model', () => {
   const messages = [
-    msg('a', '2026-06-18 10:00:00', 'first', 'codex'),
-    msg('b', '2026-06-18 10:02:00', 'second', 'codex'),
-    msg('c', '2026-06-19 10:00:00', 'third', 'claude')
+    msg('a', '2026-06-18 10:00:00'),
+    msg('b', '2026-06-18 10:02:00'),
+    msg('c', '2026-06-19 09:00:00')
   ];
 
-  it('buildMessageListRows flattens days, NEW divider, and messages in render order with stable keys', () => {
-    const rows = buildMessageListRows(messages, { newDividerId: 'b', now: new Date(2026, 5, 19, 12, 0, 0) });
-
-    expect(rows.map((row) => row.kind)).toEqual(['day', 'message', 'new-divider', 'message', 'day', 'message']);
-    expect(rows.map((row) => row.key)).toEqual(['day:2026-5-18', 'msg:a', 'new:b', 'msg:b', 'day:2026-5-19', 'msg:c']);
-    expect(rows[0]).toMatchObject({ kind: 'day', dayLabel: 'Yesterday' });
-    expect(rows[4]).toMatchObject({ kind: 'day', dayLabel: 'Today' });
-    expect(rows[1]).toMatchObject({ kind: 'message', grouped: false });
-    expect(rows[3]).toMatchObject({ kind: 'message', grouped: true });
-  });
-
-  it('findMessageRowIndex targets message rows only', () => {
-    const rows = buildMessageListRows(messages, { newDividerId: 'b', now: new Date(2026, 5, 19, 12, 0, 0) });
-
-    expect(findMessageRowIndex(rows, 'b')).toBe(3);
-    expect(findMessageRowIndex(rows, 'missing')).toBe(-1);
-  });
-
-  it('readProgressFromVirtualRows reports the last message when scrolled to bottom', () => {
+  it('builds day separators + message rows in render order (no divider rows)', () => {
     const rows = buildMessageListRows(messages, { now: new Date(2026, 5, 19, 12, 0, 0) });
-
-    expect(
-      readProgressFromVirtualRows(rows, [], {
-        scrollOffset: 476,
-        viewportHeight: 500,
-        scrollHeight: 1000,
-        bottomPx: 24
-      })
-    ).toBe('c');
-  });
-
-  it('readProgressFromVirtualRows ignores separators and reports the last fully visible message', () => {
-    const rows = buildMessageListRows(messages, { newDividerId: 'b', now: new Date(2026, 5, 19, 12, 0, 0) });
-
-    expect(
-      readProgressFromVirtualRows(
-        rows,
-        [
-          { index: 0, start: 0, end: 24 },
-          { index: 1, start: 24, end: 104 },
-          { index: 2, start: 104, end: 128 },
-          { index: 3, start: 128, end: 208 }
-        ],
-        { scrollOffset: 128, viewportHeight: 400, scrollHeight: 1000, bottomPx: 24 }
-      )
-    ).toBe('b');
-    expect(
-      readProgressFromVirtualRows(
-        rows,
-        [
-          { index: 0, start: 0, end: 24 },
-          { index: 1, start: 24, end: 104 }
-        ],
-        { scrollOffset: 128, viewportHeight: 400, scrollHeight: 1000, bottomPx: 24, programmatic: true }
-      )
-    ).toBeNull();
-  });
-
-  it('scrolled-past mode acks only rows whose bottom edge passed the viewport top', () => {
-    const rows = buildMessageListRows(messages, { now: new Date(2026, 5, 19, 12, 0, 0) });
-    const items = [
-      { index: 0, start: 0, end: 24 },
-      { index: 1, start: 24, end: 104 },
-      { index: 2, start: 104, end: 128 },
-      { index: 3, start: 128, end: 208 }
-    ];
-
-    expect(
-      readProgressFromVirtualRows(rows, items, {
-        scrollOffset: 128,
-        viewportHeight: 400,
-        scrollHeight: 1000,
-        bottomPx: 24,
-        mode: 'scrolled-past'
-      })
-    ).toBe('b');
-  });
-
-  it('scrolled-past mode never fast-acks the whole window at the bottom', () => {
-    const rows = buildMessageListRows(messages, { now: new Date(2026, 5, 19, 12, 0, 0) });
-
-    expect(
-      readProgressFromVirtualRows(rows, [{ index: 0, start: 476, end: 976 }], {
-        scrollOffset: 476,
-        viewportHeight: 500,
-        scrollHeight: 976,
-        bottomPx: 24,
-        mode: 'scrolled-past'
-      })
-    ).toBeNull();
+    expect(rows.map((row) => row.kind)).toEqual(['day', 'message', 'message', 'day', 'message']);
+    expect(rows.filter((row) => row.kind === 'message').map((row) => row.message.id)).toEqual(['a', 'b', 'c']);
   });
 });
 
-describe('mergeChannelWindow', () => {
+describe('applyWindow poll reconcile', () => {
   const window = (ids: string[], overrides: Partial<ChannelDetail> = {}): ChannelDetail => ({
     name: 'dev',
     goal: 'g',
@@ -845,7 +742,7 @@ describe('mergeChannelWindow', () => {
   it('appends new tail messages while keeping prepended older pages', () => {
     const current = window(['m1', 'm2', 'm3', 'm4'], { hasOlder: true, startIndex: 0, total: 6 });
     const fetched = window(['m3', 'm4', 'm5', 'm6'], { hasOlder: true, startIndex: 2, total: 6, contentRevision: 'rev-b' });
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
     expect(merged.startIndex).toBe(0);
     expect(merged.hasOlder).toBe(true);
@@ -856,7 +753,7 @@ describe('mergeChannelWindow', () => {
     const current = window(['m1', 'm2', 'm3', 'm4']);
     const fetched = window(['m1', 'm3', 'm4'], { total: 3, contentRevision: 'rev-b' });
     fetched.messages[1] = { ...fetched.messages[1], body: 'edited' };
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm3', 'm4']);
     expect(merged.messages[1].body).toBe('edited');
     expect(merged.total).toBe(3);
@@ -865,7 +762,7 @@ describe('mergeChannelWindow', () => {
   it('keeps the loaded older bound on a tail-unchanged reconcile instead of widening history backward', () => {
     const current = window(['m5', 'm6'], { startIndex: 4, total: 6 });
     const fetched = window(['m1', 'm2', 'm3', 'm4', 'm5', 'm6'], { total: 6, contentRevision: 'rev-b' });
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m5', 'm6']);
     expect(merged.startIndex).toBe(4);
     expect(merged.contentRevision).toBe('rev-b');
@@ -874,7 +771,7 @@ describe('mergeChannelWindow', () => {
   it('recomputes startIndex from the fetched window when history shrank above the reader', () => {
     const current = window(['m5', 'm6'], { startIndex: 4, total: 6 });
     const fetched = window(['m3', 'm4', 'm5', 'm6'], { total: 4, contentRevision: 'rev-b' });
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m5', 'm6']);
     expect(merged.startIndex).toBe(2);
     expect(merged.total).toBe(4);
@@ -883,7 +780,7 @@ describe('mergeChannelWindow', () => {
   it('keeps a disjoint reader window and flips hasNewer instead of yanking to the tail', () => {
     const current = window(['m1', 'm2'], { hasNewer: true, total: 90 });
     const fetched = window(['m80', 'm81'], { startIndex: 79, total: 92, contentRevision: 'rev-b' });
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2']);
     expect(merged.hasNewer).toBe(true);
     expect(merged.total).toBe(92);
@@ -893,7 +790,7 @@ describe('mergeChannelWindow', () => {
   it('clamps startIndex when prefix deletions shrink the absolute range', () => {
     const current = window(['m1', 'm2', 'm3'], { total: 3 });
     const fetched = window(['m3'], { startIndex: 0, total: 1, contentRevision: 'rev-b' });
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
     expect(merged.startIndex).toBe(0);
   });
@@ -902,14 +799,14 @@ describe('mergeChannelWindow', () => {
     const current = window(['m1', 'm2', 'm3']);
     const fetched = window(['m2', 'm3', 'm4'], { startIndex: 1, total: 4, contentRevision: 'rev-b' });
     fetched.messages = [{ ...current.messages[1] }, { ...current.messages[2] }, fetched.messages[2]];
-    const merged = mergeChannelWindow(current, fetched);
+    const merged = applyWindow(current, fetched, 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4']);
     expect(merged.messages[1]).toBe(current.messages[1]);
     expect(merged.messages[2]).toBe(current.messages[2]);
   });
 
   it('replaces an empty window with the fetched one', () => {
-    const merged = mergeChannelWindow(window([]), window(['m1'], { contentRevision: 'rev-b' }));
+    const merged = applyWindow(window([]), window(['m1'], { contentRevision: 'rev-b' }), 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1']);
     expect(merged.contentRevision).toBe('rev-b');
   });

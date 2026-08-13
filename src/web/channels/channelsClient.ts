@@ -50,6 +50,10 @@ export interface ChannelSummary {
   messageCount: number;
   threadReplyCount: number;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
+  /** server-resolved unread against the reader's seen id (present when the
+   *  state poll carried a seen map) */
+  unreadCount?: number;
+  firstUnreadId?: string | null;
   /** Opaque content-addressed revision of the channel's root conversation.
    *  Changes on ANY mutation the count/last-id/preview signature can miss —
    *  a mid-history delete, or an in-place edit of an existing message. Compare
@@ -81,6 +85,10 @@ export interface ChannelDetail {
   firstMessageAt?: string;
   /** protocol timestamp of the channel's most recent message (last activity) */
   lastMessageAt?: string;
+  /** first message after the reader's `since` pointer (since windows only) */
+  firstUnreadId?: string | null;
+  /** messages after the `since` pointer (since windows only) */
+  unreadCount?: number;
   /** Matches ChannelSummary.contentRevision for the same root conversation, so
    *  the poll can reconcile a loaded detail against the freshly polled summary
    *  by equality even when the tail signature is unchanged. */
@@ -147,8 +155,9 @@ export interface ChannelsState {
   passiveOwner?: number;
 }
 
-export async function channelsState(since = 0): Promise<ChannelsState> {
-  return readJson(fetch(`/api/channels/state?since=${since}`));
+export async function channelsState(since = 0, seen?: Record<string, string>): Promise<ChannelsState> {
+  const seenArg = seen ? `&seen=${encodeURIComponent(JSON.stringify(seen))}` : '';
+  return readJson(fetch(`/api/channels/state?since=${since}${seenArg}`));
 }
 
 export async function channelsDetail(name: string, since?: string | null): Promise<ChannelDetail> {
