@@ -319,6 +319,46 @@ exec /bin/chmod "$@"
     expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);
 
+  it('refuses a narrowed release closure — the end user has no approval switch (desk#60)', () => {
+    // install.sh serves end users, who cannot weigh which release lanes went
+    // unverified. Accepting a narrowed candidate is a developer decision taken
+    // explicitly through fetch-moor; the installer has no flag for it at all.
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: { coverage: Record<string, unknown> };
+    };
+    manifest.moor.coverage = {
+      requiredClosure: 'partial',
+      unverified: [
+        { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' }
+      ]
+    };
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/full-matrix/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('refuses a true legacy v1 Moor pin that cannot state its coverage (desk#60)', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: Record<string, unknown>;
+    };
+    manifest.moor.schemaVersion = 1;
+    delete manifest.moor.coverage;
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
   it('rejects a missing Moor target even when the Desk checksums are updated', () => {
     const value = fixture();
     const manifest = value.readManifest() as {

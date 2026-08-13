@@ -30,10 +30,11 @@ const MOOR_TARGETS = {
 
 function fixtureMoorPin() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repository: 'https://github.com/BrainyBlaze/moor',
     version: 'v0.1.0',
     commit: 'b'.repeat(40),
+    coverage: { requiredClosure: 'full-matrix' },
     targets: Object.fromEntries(
       Object.entries(MOOR_TARGETS).map(([target, asset], index) => [
         target,

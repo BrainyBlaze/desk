@@ -16,6 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
+import { MOOR_PIN_SCHEMA_VERSION } from './fetch-moor.mjs';
 
 const releaseTagPattern = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
 const digestPattern = /^[0-9a-f]{64}$/;
@@ -67,10 +68,35 @@ function validateExactKeys(value, keys, label) {
 }
 
 export function validateMoorPin(moor) {
-  validateExactKeys(moor, ['schemaVersion', 'repository', 'version', 'commit', 'targets'], 'Moor pin');
-  if (moor.schemaVersion !== 1) {
-    throw new Error('Moor pin schemaVersion must be 1');
+  // desk#60: the pin carries the release manifest's coverage, so a candidate
+  // whose closure was narrowed cannot be published as though the full frozen
+  // matrix stood behind it. A legacy v1 pin cannot state that at all and is
+  // refused by name — a release asset must never be built from a pin that
+  // cannot say what verified it.
+  // The version is checked BEFORE the key set, or a legacy pin — which is
+  // missing `coverage` precisely because it predates it — reports a generic
+  // key mismatch and hides the one fact that matters.
+  if (moor?.schemaVersion !== MOOR_PIN_SCHEMA_VERSION) {
+    throw new Error(
+      moor.schemaVersion === 1
+        ? 'Moor pin schemaVersion 1 predates release coverage: re-project it from the release manifest'
+        : `Moor pin schemaVersion must be ${MOOR_PIN_SCHEMA_VERSION}`
+    );
   }
+  validateExactKeys(
+    moor,
+    ['schemaVersion', 'repository', 'version', 'commit', 'coverage', 'targets'],
+    'Moor pin'
+  );
+  // A published release is a full-matrix claim. A narrowed candidate may be
+  // installed by a developer who accepts it explicitly, but it is never baked
+  // into release assets end users receive.
+  if (moor.coverage?.requiredClosure !== 'full-matrix') {
+    throw new Error(
+      `Moor pin closure must be full-matrix to publish a release; got ${JSON.stringify(moor.coverage?.requiredClosure)}`
+    );
+  }
+  validateExactKeys(moor.coverage, ['requiredClosure'], 'Moor pin coverage');
   if (moor.repository !== MOOR_REPOSITORY || moor.version !== MOOR_VERSION) {
     throw new Error(`Moor pin must select ${MOOR_REPOSITORY} ${MOOR_VERSION}`);
   }

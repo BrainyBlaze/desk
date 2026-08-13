@@ -602,12 +602,26 @@ if data["schemaVersion"] != int(expected_schema) or data["version"] != version: 
 exact(data["source"], ["asset","sha256"], "source")
 exact(data["node"], ["version","npmVersion","targets"], "node")
 exact(data["bun"], ["version","tag","targets"], "bun")
-exact(data["moor"], ["schemaVersion","repository","version","commit","targets"], "Moor pin")
+exact(data["moor"], ["schemaVersion","repository","version","commit","coverage","targets"], "Moor pin")
 if data["node"]["version"]!="22.23.1" or data["node"]["npmVersion"]!="10.9.8": raise SystemExit("unexpected Node/npm pin")
 if data["bun"]["version"]!="1.3.14" or data["bun"]["tag"]!="bun-v1.3.14": raise SystemExit("unexpected Bun pin")
 moor=data["moor"]
-if moor["schemaVersion"] != 1 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
+if moor["schemaVersion"] != 2 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
     raise SystemExit("unexpected Moor release identity")
+# desk#60: the installer serves END USERS, who cannot weigh which release lanes
+# went unverified. It therefore has no approval switch at all and refuses any
+# closure but the full frozen matrix -- accepting a narrowed candidate is a
+# developer decision, taken explicitly through fetch-moor, never a default an
+# end user is handed silently.
+coverage=moor["coverage"]
+if not isinstance(coverage, dict) or "requiredClosure" not in coverage:
+    raise SystemExit("Moor pin states no release coverage")
+# The closure is judged BEFORE the key set: a narrowed pin legitimately carries
+# an extra `unverified` list, and complaining about its shape would hide the
+# real reason it is refused.
+if coverage["requiredClosure"] != "full-matrix":
+    raise SystemExit("Moor release closure is not full-matrix: this candidate was not verified on the whole release matrix")
+exact(coverage, ["requiredClosure"], "Moor pin coverage")
 if not isinstance(moor["commit"], str) or commit_re.fullmatch(moor["commit"]) is None:
     raise SystemExit("invalid Moor commit")
 source=data["source"]
