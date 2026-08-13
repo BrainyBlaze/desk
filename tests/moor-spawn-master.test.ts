@@ -42,12 +42,20 @@ try {
   const generationKeys = Object.keys(process.env).filter((key) => key.endsWith('_GENERATION'));
   const environment = {};
   for (const key of generationKeys) environment[key] = process.env[key];
+  // The terminal identity/locale Desk composes for the child (desk#45/#51):
+  // captured from the SAME spawned process, so a refactor of the env spread
+  // cannot silently stop delivering it.
+  const terminalEnv = {};
+  for (const key of ['TERM', 'COLORTERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'LC_TERMINAL', 'LANG']) {
+    if (process.env[key] !== undefined) terminalEnv[key] = process.env[key];
+  }
   writeFileSync(out, JSON.stringify({
     selectorKey,
     selector,
     recordHex: Buffer.from(record).toString('hex'),
     recordLength: record.length,
-    environment
+    environment,
+    terminalEnv
   }));
   process.exit(0);
 } catch (error) {
@@ -57,6 +65,7 @@ try {
 `;
 
 interface ProbeReport {
+  terminalEnv?: Record<string, string>;
   selectorKey?: string;
   selector?: string;
   recordHex?: string;
@@ -205,6 +214,43 @@ describe('spawnMoorMaster', () => {
       DESK_SESSION_GENERATION: '23'
     });
     expect(Number.parseInt(report.selector!, 10)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('delivers the composed terminal identity and locale to the child (desk#45, desk#51)', async () => {
+    // The verifier found the gap this closes: the old harness captured only
+    // *_GENERATION keys, so nothing asserted that the env Desk composes at the
+    // spawn seam actually REACHES the spawned process. This drives the real
+    // spawnMoorMaster with a daemonized-style environment (no TERM, no locale
+    // — exactly what systemd/docker/the installer hand a daemon).
+    const report = await runProbe('/opt/desk/libexec/moor', 31, {
+      TERM: undefined,
+      LANG: undefined,
+      LC_ALL: undefined,
+      LC_CTYPE: undefined
+    } as NodeJS.ProcessEnv);
+    expect(report.terminalEnv).toMatchObject({
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      TERM_PROGRAM: 'desk',
+      TERM_PROGRAM_VERSION: '0',
+      LC_TERMINAL: 'desk',
+      LANG: 'C.UTF-8'
+    });
+  });
+
+  it('never overrides a terminal identity or locale the operator already set', async () => {
+    const report = await runProbe('/opt/desk/libexec/moor', 33, {
+      TERM: 'screen-256color',
+      TERM_PROGRAM: 'iTerm.app',
+      TERM_PROGRAM_VERSION: '3.5.0',
+      LANG: 'de_DE.UTF-8'
+    });
+    expect(report.terminalEnv).toMatchObject({
+      TERM: 'screen-256color',
+      TERM_PROGRAM: 'iTerm.app',
+      TERM_PROGRAM_VERSION: '3.5.0',
+      LANG: 'de_DE.UTF-8'
+    });
   });
 
   it('names the selector fd it actually wired', async () => {
