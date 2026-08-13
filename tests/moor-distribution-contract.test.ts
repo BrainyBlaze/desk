@@ -23,12 +23,14 @@ import {
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VENDOR = join(ROOT, 'vendor', 'moor');
 const BUNDLED = join(ROOT, 'libexec', 'moor');
+const REQUIRED_VENDOR_COMMIT = '237a62cbb7fa1abd9c4416cd08b99a57760d2bb5';
 
 describe('moor distribution contract — provenance-pinned vendor snapshot', () => {
   it('carries a provenance that names the fork, the frozen commit, and the version', () => {
     const provenance = readProvenance(VENDOR);
     expect(provenance.repository).toBe(EXPECTED_REPOSITORY);
     expect(provenance.commit).toBe(EXPECTED_COMMIT);
+    expect(provenance.commit).toBe(REQUIRED_VENDOR_COMMIT);
     expect(provenance.version).toBe(EXPECTED_VERSION);
     expect(provenance.license).toBe('MIT OR Apache-2.0');
     expect(provenance.snapshotDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -62,11 +64,15 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
     const builder = readFileSync(join(ROOT, 'scripts', 'build-moor.mjs'), 'utf8');
     expect(builder).toContain("'--bin', 'moor'");
     expect(existsSync(join(ROOT, 'libexec', 'atch'))).toBe(false);
-    // HONEST PIN of the upstream state at 93d593a: the vendored manifest
-    // still DECLARES upstream's dual-name compatibility bin target. Its
-    // removal is tracked in https://github.com/BrainyBlaze/moor/issues/25 —
-    // when upstream lands it, revendor/repin and FLIP this expectation.
-    expect(manifest).toContain('name = "atch"');
+    expect(manifest).not.toContain('name = "atch"');
+  });
+
+  it('the vendored holder consumes the supervisor-independent carriers Desk emits', () => {
+    const runtime = readFileSync(join(VENDOR, 'src', 'runtime', 'private.rs'), 'utf8');
+    expect(runtime).toContain('environment_key(invoked, "_LAUNCH_CHANNEL")');
+    expect(runtime).toContain('std::env::var_os("MOOR_SESSION_GENERATION")');
+    expect(runtime).not.toContain('std::env::var_os("DESK_MOOR_LAUNCH_CHANNEL")');
+    expect(runtime).not.toContain('std::env::var_os("DESK_SESSION_GENERATION")');
   });
 });
 

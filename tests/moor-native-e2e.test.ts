@@ -1,5 +1,5 @@
 // NATIVE moor E2E (the authorized real-binary gate): the REAL Rust holder
-// built from /home/dev/projects/desk/moor @ 93d593a driven through the REAL
+// bundled by Desk from its provenance-pinned vendor snapshot and driven through the REAL
 // Desk stack — daemon provision with full OB-39 descriptor authority, restart
 // re-adoption + reconcile, §9 wire terminate, §7.4 lease release, §10.2.13
 // log clear, and the binary's root/alias fences. Skips cleanly when the
@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTerminalDaemon } from '../src/server/runtime/terminalDaemon.js';
 import {
@@ -21,8 +22,8 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
 
-const NATIVE_BIN =
-  process.env.DESK_MOOR_NATIVE_BIN ?? '/home/dev/.cargo/shared-target/debug/moor';
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const NATIVE_BIN = process.env.DESK_MOOR_NATIVE_BIN ?? join(ROOT, 'libexec', 'moor');
 const HAVE_BINARY = existsSync(NATIVE_BIN);
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;

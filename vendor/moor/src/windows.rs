@@ -107,6 +107,56 @@ impl BootstrapRecord {
     }
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectoryCause {
+    Missing = 1,
+    NotDirectory = 2,
+    NotSearchable = 3,
+    Io = 4,
+}
+
+#[cfg(any(windows, test))]
+impl DirectoryCause {
+    #[cfg(windows)]
+    fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::NotDirectory => "not-directory",
+            Self::NotSearchable => "not-searchable",
+            Self::Io => "io-error",
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn directory_failure_record(nonce: [u8; 16], cause: DirectoryCause) -> [u8; 56] {
+    let mut record = [0; 56];
+    record[..12].copy_from_slice(b"MOORCWD1\x01\0\0\0");
+    record[12..28].copy_from_slice(&nonce);
+    record[28] = cause as u8;
+    record
+}
+
+#[cfg(any(windows, test))]
+fn directory_failure(bytes: &[u8], nonce: [u8; 16]) -> Option<DirectoryCause> {
+    crate::return_if!(
+        bytes.len() != 56 || bytes[..12] != *b"MOORCWD1\x01\0\0\0",
+        None
+    );
+    crate::return_if!(
+        bytes[12..28] != nonce || bytes[29..].iter().any(|byte| *byte != 0),
+        None
+    );
+    match bytes[28] {
+        1 => Some(DirectoryCause::Missing),
+        2 => Some(DirectoryCause::NotDirectory),
+        3 => Some(DirectoryCause::NotSearchable),
+        4 => Some(DirectoryCause::Io),
+        _ => None,
+    }
+}
+
 #[doc(hidden)]
 pub fn bootstrap_command(kind: u8, nonce: [u8; 16]) -> [u8; 17] {
     let mut out = [0; 17];
@@ -152,7 +202,9 @@ fn exact_descriptor_semantics(
 
 #[cfg(test)]
 mod descriptor_semantics_tests {
-    use super::exact_descriptor_semantics;
+    use super::{
+        DirectoryCause, directory_failure, directory_failure_record, exact_descriptor_semantics,
+    };
 
     #[test]
     fn exact_dacl_semantics_ignore_order_and_reject_every_difference() {
@@ -182,14 +234,36 @@ mod descriptor_semantics_tests {
         assert!(!matches(&[expected[0], (0, 2, 0x1f01ff, 42)], true, true));
         assert!(!matches(&[expected[0], (1, 0, 0x1f01ff, 42)], true, true));
     }
+
+    #[test]
+    fn bootstrap_directory_failure_is_nonce_bound_and_closed() {
+        let nonce = [7; 16];
+        for cause in [
+            DirectoryCause::Missing,
+            DirectoryCause::NotDirectory,
+            DirectoryCause::NotSearchable,
+            DirectoryCause::Io,
+        ] {
+            let record = directory_failure_record(nonce, cause);
+            assert_eq!(directory_failure(&record, nonce), Some(cause));
+            assert_eq!(directory_failure(&record, [8; 16]), None);
+        }
+        let mut record = directory_failure_record(nonce, DirectoryCause::Missing);
+        for at in [0, 28, 55] {
+            record[at] ^= 0xff;
+            assert_eq!(directory_failure(&record, nonce), None, "byte {at}");
+            record[at] ^= 0xff;
+        }
+    }
 }
 
 #[cfg(windows)]
 #[allow(unused_unsafe)]
 mod native {
     use super::{
-        BootstrapRecord, Marker, Result, accept_bootstrap_command, bootstrap_command,
-        cim_boot_identity, exact_descriptor_semantics, wtf8_decode, wtf8_encode,
+        BootstrapRecord, DirectoryCause, Marker, Result, accept_bootstrap_command,
+        bootstrap_command, cim_boot_identity, directory_failure, directory_failure_record,
+        exact_descriptor_semantics, wtf8_decode, wtf8_encode,
     };
     use crate::{
         cli::{CreateMode, Options},
@@ -241,6 +315,13 @@ mod native {
         AsPseudoConsole, Child, Command as SpawnCommand, CreationFlags, Job, SpawnOptions,
         Stdio as SpawnStdio,
     };
+    use windows_sys::Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
+        Storage::FileSystem::{
+            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+            FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+        },
+    };
     use windows_sys::Win32::{
         Foundation::*,
         Security::*,
@@ -248,6 +329,7 @@ mod native {
         System::{
             Console::*,
             Diagnostics::{Debug::*, ToolHelp::*},
+            IO::IO_STATUS_BLOCK,
             JobObjects::*,
             LibraryLoader::*,
             Memory::*,
@@ -309,13 +391,15 @@ mod native {
         )?;
         Ok(Some(code))
     }
-    const BOOTSTRAP_SELECTOR: &str = "DESK_MOOR_BOOTSTRAP";
-    const BOOTSTRAP_CONTROL: &str = "DESK_MOOR_BOOTSTRAP_CONTROL";
-    const BOOTSTRAP_RESULT: &str = "DESK_MOOR_BOOTSTRAP_RESULT";
-    const BOOTSTRAP_STDERR: &str = "DESK_MOOR_BOOTSTRAP_STDERR";
-    const BOOTSTRAP_INSTRUMENT: &str = "DESK_MOOR_BOOTSTRAP_INSTRUMENT";
-    const INSTRUMENT_CHANNEL: &str = "DESK_MOOR_INSTRUMENT_CHANNEL";
-    const INSTRUMENT_NONCE: &str = "DESK_MOOR_INSTRUMENT_NONCE";
+    const BOOTSTRAP_SELECTOR: &str = "MOOR_BOOTSTRAP";
+    const BOOTSTRAP_CONTROL: &str = "MOOR_BOOTSTRAP_CONTROL";
+    const BOOTSTRAP_RESULT: &str = "MOOR_BOOTSTRAP_RESULT";
+    const BOOTSTRAP_STDERR: &str = "MOOR_BOOTSTRAP_STDERR";
+    const BOOTSTRAP_INSTRUMENT: &str = "MOOR_BOOTSTRAP_INSTRUMENT";
+    const BOOTSTRAP_DIRECTORY: &str = "MOOR_BOOTSTRAP_DIRECTORY";
+    const INSTRUMENT_CHANNEL: &str = "MOOR_INSTRUMENT_CHANNEL";
+    const INSTRUMENT_NONCE: &str = "MOOR_INSTRUMENT_NONCE";
+    const SEMANTIC_TOKEN: &str = "MOOR_SESSION_SEMANTIC_TOKEN";
     fn path_buffer(what: &str, mut fill: impl FnMut(*mut u16, u32) -> u32) -> Result<PathBuf> {
         let size = fill(ptr::null_mut(), 0);
         check(size != 0, what)?;
@@ -471,6 +555,16 @@ mod native {
             )
         }
     }
+    fn directory_cause(error: &io::Error) -> DirectoryCause {
+        match error.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_INVALID_NAME) => {
+                DirectoryCause::Missing
+            }
+            Some(ERROR_DIRECTORY) => DirectoryCause::NotDirectory,
+            Some(ERROR_ACCESS_DENIED) => DirectoryCause::NotSearchable,
+            _ => DirectoryCause::Io,
+        }
+    }
     fn read_reparse(path: &Path, share: u32) -> Result<File> {
         OpenOptions::new()
             .read(true)
@@ -497,9 +591,8 @@ mod native {
         Ok(info)
     }
     fn launch_reporter() -> LaunchReporter<File> {
-        let selected =
-            std::env::var_os("DESK_MOOR_DETACHED_HOLDER").as_deref() == Some(OsStr::new("1"));
-        unsafe { std::env::remove_var("DESK_MOOR_DETACHED_HOLDER") };
+        let selected = std::env::var_os("MOOR_DETACHED_HOLDER").as_deref() == Some(OsStr::new("1"));
+        unsafe { std::env::remove_var("MOOR_DETACHED_HOLDER") };
         let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
         let output =
             (selected && !handle.is_null() && unsafe { GetFileType(handle) } == FILE_TYPE_PIPE)
@@ -717,11 +810,16 @@ mod native {
             validate(&path, sid().unwrap(), "FA", true).unwrap();
             fs::remove_dir(path).unwrap();
         }
+
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/unit/windows_event.rs"
+        ));
     }
     fn pipe_descriptor(
         sid: &str,
     ) -> Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
-        let (descriptor, _) = descriptor(sid, "0x12019b")?;
+        let (descriptor, _) = descriptor(sid, "0x12019f")?;
         unsafe {
             BorrowedSecurityDescriptor::from_ptr((&*descriptor as *const SecurityDescriptor).cast())
         }
@@ -894,6 +992,8 @@ mod native {
         let holder_pid =
             u32::try_from(selector_decimal(holder)?).map_err(|_| "invalid holder pid")?;
         let command = std::env::args_os().skip(1).collect::<Vec<_>>();
+        let semantic_token = std::env::var_os(SEMANTIC_TOKEN);
+        unsafe { std::env::remove_var(SEMANTIC_TOKEN) };
         require(!command.is_empty(), "empty bootstrap command")?;
         unsafe {
             let required =
@@ -913,9 +1013,22 @@ mod native {
                     .all(|(at, handle)| handle.is_null() || !raw[..at].contains(handle)),
                 "aliased bootstrap handles",
             )?;
+            if let Some(directory) = std::env::var_os(BOOTSTRAP_DIRECTORY) {
+                std::env::remove_var(BOOTSTRAP_DIRECTORY);
+                if let Err(error) = std::env::set_current_dir(directory) {
+                    result.write(
+                        &directory_failure_record(nonce, directory_cause(&error)),
+                        "report rejected working directory",
+                    )?;
+                    return Ok(1);
+                }
+            }
             let (program, args) = command.split_first().unwrap();
             let mut requested = SpawnCommand::new(program);
-            requested.args(args).env_remove(INSTRUMENT_NONCE);
+            requested
+                .args(args)
+                .env_remove(INSTRUMENT_NONCE)
+                .env_remove(SEMANTIC_TOKEN);
             transfer_handles!(requested;
                 INSTRUMENT_CHANNEL => instrument.as_ref(), "instrumentation channel"
             );
@@ -924,6 +1037,9 @@ mod native {
                     INSTRUMENT_NONCE,
                     format!("{:032x}", u128::from_be_bytes(instrument_nonce)),
                 );
+            }
+            if let Some(token) = semantic_token {
+                requested.env(SEMANTIC_TOKEN, token);
             }
             if let Some(handle) = &stderr {
                 requested.stderr(win(
@@ -1142,12 +1258,13 @@ mod native {
 
     crate::schema!(struct Instrument fields; path: PathBuf, file: File, identity: [u8; 24], digest: [u8; 32], read: Pipe, write: Pipe);
     crate::schema!(struct Bootstrap derive [Default] fields; child: Option<Child>, control: Pipe, result: Pipe, nonce: [u8; 16]);
+    crate::schema!(struct EventTarget fields; path: PathBuf, present: bool, guards: Vec<File>);
     crate::schema!(struct Native derive [Default] fields; marker: PathBuf, stage_root: PathBuf, sid: String,
         generation: u32, options: Options, incarnation: [u8; 16], semantic_token: [u8; 16], synthetic: u8,
         conpty: Pseudo, job: Option<Job>, bootstrap: Bootstrap, process: Handle, pid: u32,
         early_exit: Option<u32>, birth: [u8; 16],
         input: Pipe, output: Pipe, instrument: Option<Instrument>, stderr: Handle, ready: LaunchReporter<File>,
-        identity: [u8; 25], artifacts: Option<PreparedArtifacts>);
+        identity: [u8; 25], event: Option<EventTarget>, artifacts: Option<PreparedArtifacts>);
     impl Bootstrap {
         fn exchange(&self, kind: u8) -> Result<()> {
             let (write, read, rejected) = match kind {
@@ -1171,8 +1288,8 @@ mod native {
         fn prepare_storage(&mut self, marker_identity: [u8; 24]) -> Result<()> {
             self.identity = session_identity(marker_identity);
             let start = (now(), unsafe { GetTickCount64() }, boot_identity());
-            let event_path = self.options.events.as_deref().map(absolute).transpose()?;
-            let event_identity = event_path.as_deref().map(|path| os_bytes(path.as_os_str()));
+            let event_path = self.event.as_ref().map(|target| target.path.as_path());
+            let event_identity = event_path.map(|path| os_bytes(path.as_os_str()));
             let instrument_identity = self
                 .instrument
                 .as_ref()
@@ -1188,7 +1305,7 @@ mod native {
                 start,
                 ArtifactConfig {
                     marker: &self.marker,
-                    event_path: event_path.as_deref(),
+                    event_path,
                     encoding: "windows-wtf8",
                     event_identity: event_identity.as_deref(),
                     instrument_identity: instrument_identity.as_deref(),
@@ -1206,6 +1323,7 @@ mod native {
             }
             artifacts.status.extend_from_slice(&self.birth);
             self.artifacts = Some(artifacts);
+            self.event = None;
             Ok(())
         }
         fn launch(
@@ -1283,13 +1401,26 @@ mod native {
                 let executable = std::env::current_exe().map_err(string)?;
                 let mut bootstrap = SpawnCommand::new(executable);
                 bootstrap.args(command);
+                bootstrap.env_remove(BOOTSTRAP_DIRECTORY);
                 if let Some(directory) = &self.options.directory {
-                    bootstrap.current_dir(directory);
+                    // The bootstrap is single-threaded and performs the one
+                    // authoritative directory change in its own process before
+                    // resolving the requested executable. The parent never
+                    // mutates its process-wide cwd, and no check/use pathname
+                    // gap exists between acceptance and child inheritance.
+                    bootstrap.env(BOOTSTRAP_DIRECTORY, directory);
                 }
                 bootstrap
                     .env_remove(BOOTSTRAP_SELECTOR)
                     .env_remove(INSTRUMENT_CHANNEL)
-                    .env_remove(INSTRUMENT_NONCE);
+                    .env_remove(INSTRUMENT_NONCE)
+                    .env_remove(SEMANTIC_TOKEN);
+                if self.semantic_token != [0; 16] {
+                    bootstrap.env(
+                        SEMANTIC_TOKEN,
+                        format!("{:032x}", u128::from_be_bytes(self.semantic_token)),
+                    );
+                }
                 bootstrap.env(
                     BOOTSTRAP_SELECTOR,
                     format!(
@@ -1321,6 +1452,18 @@ mod native {
                 }
                 let endpoint = &self.bootstrap;
                 let identity = endpoint.result.record::<56>(false, "bootstrap identity")?;
+                if let Some(cause) = directory_failure(&identity, endpoint.nonce) {
+                    let directory = self
+                        .options
+                        .directory
+                        .as_deref()
+                        .expect("directory failure");
+                    return Err(format!(
+                        "could not enter {} ({})",
+                        name::render(directory.as_os_str()),
+                        cause.label()
+                    ));
+                }
                 let record = BootstrapRecord::decode(&identity, endpoint.nonce)
                     .ok_or("bootstrap identity was invalid")?;
                 let process = Handle::owned(record.process as HANDLE);
@@ -1557,6 +1700,191 @@ mod native {
             GetFullPathNameW(wide(path.as_os_str()).as_ptr(), size, out, ptr::null_mut())
         })
     }
+    fn event_rejection(path: &Path, cause: &str) -> String {
+        format!(
+            "event store rejected: {} ({cause})",
+            name::render(path.as_os_str())
+        )
+    }
+    fn event_component(path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+    fn event_component_cause(error: &io::Error) -> &'static str {
+        match error.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => "missing",
+            Some(ERROR_DIRECTORY) => "not-directory",
+            Some(ERROR_ACCESS_DENIED) => "not-searchable",
+            _ => "io-error",
+        }
+    }
+    fn event_attributes(handle: &File) -> Result<u32> {
+        let info: FILE_ATTRIBUTE_TAG_INFO = unsafe {
+            file_info(
+                handle.as_raw_handle(),
+                FileAttributeTagInfo,
+                "inspect event path component",
+            )?
+        };
+        Ok(info.FileAttributes)
+    }
+    fn event_target(operand: &Path, root: &Path) -> Result<EventTarget> {
+        let reject = |cause| event_rejection(operand, cause);
+        let event = absolute(operand).map_err(|_| reject("io-error"))?;
+        let root_handle =
+            event_component(root).map_err(|error| reject(event_component_cause(&error)))?;
+        let root_identity = unsafe { file_identity(root_handle.as_raw_handle()) }
+            .map_err(|_| reject("io-error"))?;
+        let mut all = event.components();
+        let base: PathBuf = all.by_ref().take(root.components().count()).collect();
+        let mut components = all.peekable();
+        crate::ensure!(components.peek().is_some(), reject("outside-root"));
+        let mut prefix = PathBuf::new();
+        let mut guards = vec![root_handle];
+        for component in base.components() {
+            prefix.push(component.as_os_str());
+            if !prefix.is_absolute() {
+                continue;
+            }
+            let handle = event_component(&prefix).map_err(|_| reject("outside-root"))?;
+            let attributes = event_attributes(&handle).map_err(|_| reject("io-error"))?;
+            crate::ensure!(
+                attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+                reject("reparse-point")
+            );
+            crate::ensure!(
+                attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                reject("outside-root")
+            );
+            guards.push(handle);
+        }
+        let base_handle = guards.last().ok_or_else(|| reject("outside-root"))?;
+        let base_identity = unsafe { file_identity(base_handle.as_raw_handle()) }
+            .map_err(|_| reject("io-error"))?;
+        crate::ensure!(root_identity == base_identity, reject("outside-root"));
+        let mut current = base;
+        let mut present = true;
+        while let Some(component) = components.next() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(reject("outside-root"));
+            };
+            current.push(name);
+            let handle = match event_component(&current) {
+                Ok(handle) => handle,
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && components.peek().is_none() =>
+                {
+                    present = false;
+                    break;
+                }
+                Err(error) => return Err(reject(event_component_cause(&error))),
+            };
+            let attributes = event_attributes(&handle).map_err(|_| reject("io-error"))?;
+            crate::ensure!(
+                attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+                reject("reparse-point")
+            );
+            crate::ensure!(
+                attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                reject("not-directory")
+            );
+            guards.push(handle);
+        }
+        Ok(EventTarget {
+            path: operand.to_owned(),
+            present,
+            guards,
+        })
+    }
+    fn validate_event(target: &EventTarget, user: &str) -> Result<()> {
+        crate::return_if!(!target.present, Ok(()));
+        let reject = |cause| event_rejection(&target.path, cause);
+        let selector = SecurityInformation::Owner | SecurityInformation::Dacl;
+        let actual = wrappers::GetSecurityInfo(
+            target.guards.last().unwrap(),
+            SeObjectType::SE_FILE_OBJECT,
+            selector,
+        )
+        .map_err(|_| reject("io-error"))?;
+        let (expected, _) = descriptor(user, "FA").map_err(|_| reject("io-error"))?;
+        crate::ensure!(
+            actual
+                .owner()
+                .zip(expected.owner())
+                .is_some_and(|(a, b)| a == b),
+            reject("wrong-owner")
+        );
+        crate::ensure!(
+            descriptor_matches(&actual, &expected).map_err(|_| reject("io-error"))?,
+            reject("broad-dacl")
+        );
+        Ok(())
+    }
+    fn materialize_event(
+        target: &mut EventTarget,
+        user: &str,
+        after_create: impl FnOnce(&Path),
+    ) -> Result<()> {
+        crate::return_if!(target.present, validate_event(target, user));
+        let rejected = event_rejection(&target.path, "identity-changed");
+        let mut name = target
+            .path
+            .file_name()
+            .ok_or_else(|| rejected.clone())?
+            .encode_wide()
+            .collect::<Vec<_>>();
+        let length = u16::try_from(name.len().saturating_mul(2)).map_err(|_| rejected.clone())?;
+        let unicode = UNICODE_STRING {
+            Length: length,
+            MaximumLength: length,
+            Buffer: name.as_mut_ptr(),
+        };
+        let (descriptor, _) = descriptor(user, "FA").map_err(|_| rejected.clone())?;
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: target.guards.last().unwrap().as_raw_handle(),
+            ObjectName: &unicode,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: (&*descriptor as *const SecurityDescriptor).cast(),
+            SecurityQualityOfService: ptr::null(),
+        };
+        let (mut raw, mut status) = (INVALID_HANDLE_VALUE, IO_STATUS_BLOCK::default());
+        let result = unsafe {
+            NtCreateFile(
+                &mut raw,
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+                &attributes,
+                &mut status,
+                ptr::null(),
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_CREATE,
+                FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                ptr::null(),
+                0,
+            )
+        };
+        let handle = unsafe { Handle::owned(raw) };
+        crate::ensure!(
+            result == STATUS_SUCCESS && !handle.is_null(),
+            rejected.clone()
+        );
+        after_create(&target.path);
+        target.guards.push(handle.into_file());
+        let attributes =
+            event_attributes(target.guards.last().unwrap()).map_err(|_| rejected.clone())?;
+        crate::ensure!(
+            attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)
+                == FILE_ATTRIBUTE_DIRECTORY,
+            rejected.clone()
+        );
+        target.present = true;
+        validate_event(target, user).map_err(|_| rejected)?;
+        Ok(())
+    }
     fn os_string(bytes: &[u8]) -> Result<OsString> {
         wtf8_decode(bytes).map(|wide| OsString::from_wide(&wide))
     }
@@ -1755,7 +2083,7 @@ mod native {
         let mut command = SpawnCommand::new(std::env::current_exe().map_err(string)?);
         command
             .args(std::env::args_os().skip(1))
-            .env("DESK_MOOR_DETACHED_HOLDER", "1")
+            .env("MOOR_DETACHED_HOLDER", "1")
             .stdout(SpawnStdio::piped());
         let flags = CreationFlags::DETACHED_PROCESS | CreationFlags::NEW_PROCESS_GROUP;
         let mut child = win(
@@ -1854,16 +2182,15 @@ mod native {
         child_environment(invoked, path)?;
         let user = sid()?;
         let stage_root = root(invoked)?;
-        if let Some(event) = options.events.as_deref().map(absolute).transpose()? {
-            let namespace = path
-                .parent()
-                .ok_or_else(|| "session has no parent".to_string())?;
-            require(
-                event.starts_with(namespace),
-                "event store is outside the session root",
-            )?;
-            validate(&event, user, "FA", true)?;
-        }
+        let event = options
+            .events
+            .as_deref()
+            .map(|operand| -> Result<EventTarget> {
+                let mut target = event_target(operand, &stage_root)?;
+                materialize_event(&mut target, user, |_| {})?;
+                Ok(target)
+            })
+            .transpose()?;
         let random = random_array::<64>()?;
         let generation = launch_generation(invoked)?;
         ready.generation = generation;
@@ -1887,6 +2214,7 @@ mod native {
             semantic_token: semantic,
             synthetic,
             ready,
+            event,
             ..Native::default()
         };
         let listener = match host.launch(&marker, &command, random[32..48].try_into().unwrap()) {
@@ -1910,10 +2238,14 @@ mod native {
                     1
                 };
                 host.ready.notice(3, result);
-                eprintln!("{}: {error}", name::program(invoked));
                 return if result == 127 {
+                    // 127 returns Ok, bypassing the common run()->report()
+                    // layer, so this path owns its single diagnostic.
+                    eprintln!("{}: {error}", name::program(invoked));
                     Ok(127)
                 } else {
+                    // status 1 propagates as Err; the common report layer
+                    // prints it exactly once. Printing here too would double it.
                     Err(error.into())
                 };
             }
@@ -1926,15 +2258,11 @@ mod native {
         session: &OsStr,
         invoked: &OsStr,
     ) -> Result<PathBuf> {
-        if let Some(event) = options
-            .events
-            .as_deref()
-            .filter(|event| !event.is_absolute())
-        {
-            return Err(format!(
-                "event store rejected: {} (not-absolute)",
-                name::render(event.as_os_str())
-            ));
+        if let Some(event) = options.events.as_deref() {
+            if !event.is_absolute() {
+                return Err(event_rejection(event, "not-absolute"));
+            }
+            event_target(event, &root(invoked)?)?;
         }
         resolve(session, invoked)
     }

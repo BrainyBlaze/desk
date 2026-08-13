@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const EXPECTED_REPOSITORY = 'https://github.com/BrainyBlaze/moor.git';
-export const EXPECTED_COMMIT = '93d593aa5b2825e2638d98a0a2406046060e0c77';
+export const EXPECTED_COMMIT = '237a62cbb7fa1abd9c4416cd08b99a57760d2bb5';
 export const EXPECTED_VERSION = '0.1.0';
 
 export function snapshotDigest(root) {

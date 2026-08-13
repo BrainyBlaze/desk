@@ -337,14 +337,15 @@ pub fn supervised_generation(
     read: impl FnOnce(&OsStr) -> Result<u32>,
 ) -> Result<(u32, bool)> {
     let key = environment_key(invoked, "_GENERATION");
-    let selector = std::env::var_os("DESK_MOOR_LAUNCH_CHANNEL");
+    let launch_channel_key = environment_key(invoked, "_LAUNCH_CHANNEL");
+    let selector = std::env::var_os(&launch_channel_key);
     let first = std::env::var_os(&key);
-    let second = std::env::var_os("DESK_SESSION_GENERATION");
+    let second = std::env::var_os("MOOR_SESSION_GENERATION");
     unsafe {
-        std::env::remove_var("DESK_MOOR_LAUNCH_CHANNEL");
+        std::env::remove_var(&launch_channel_key);
         if clear_supervised || selector.is_none() {
             std::env::remove_var(&key);
-            std::env::remove_var("DESK_SESSION_GENERATION");
+            std::env::remove_var("MOOR_SESSION_GENERATION");
         }
     }
     let Some(selector) = selector else {
@@ -626,10 +627,20 @@ pub fn holder_artifacts(
         let event = config
             .event_path
             .map(|path| {
-                config
-                    .event_store
-                    .take()
-                    .map_or_else(|| create(path, Kind::Event, event_header().as_bytes()), Ok)
+                config.event_store.take().map_or_else(
+                    || {
+                        // The event target is caller-supplied, so its creation
+                        // failure reports the frozen closure §6.2 row rather
+                        // than a generic store message.
+                        create(path, Kind::Event, event_header().as_bytes()).map_err(|_| {
+                            format!(
+                                "event store rejected: {} (io-error)",
+                                crate::name::render(path.as_os_str())
+                            )
+                        })
+                    },
+                    Ok,
+                )
             })
             .transpose()?;
         let log = (config.log_cap != 0)
