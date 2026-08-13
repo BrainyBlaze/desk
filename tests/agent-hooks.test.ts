@@ -187,6 +187,9 @@ describe('agent hook configuration generation', () => {
       expect(kimi).toContain('echo keep-kimi');
       expect(kimi.match(/desk-agent-event/g)?.length).toBe(10);
       expect(kimi.match(/timeout = 10/g)?.length).toBe(10);
+      for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'Stop', 'StopFailure', 'SessionEnd']) {
+        expect(kimi).toContain(`event = "${event}"`);
+      }
 
       const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
       const qwenTimeouts = Object.values(qwen.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
@@ -194,6 +197,9 @@ describe('agent hook configuration generation', () => {
         .flatMap((group) => group.hooks.map((hook) => hook.timeout));
       expect(qwenTimeouts).toHaveLength(10);
       expect(new Set(qwenTimeouts)).toEqual(new Set([10_000]));
+      expect(Object.keys(qwen.hooks)).toEqual(
+        expect.arrayContaining(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'Stop', 'StopFailure', 'SessionEnd'])
+      );
 
       const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
       expect(grok.apiKey).toBe('keep-key');
@@ -478,6 +484,55 @@ describe('read-only hook probe', () => {
       // `recorded`, never `trusted`: only evidence the authority accepted may
       // raise confidence that far.
       expect(probeHookInstallation('codex', home)).toMatchObject({ trust: 'recorded' });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('probe and merge maintenance for the new terminal agents', () => {
+  it('reports qwen/grok/kimi hooks installed after install and uninstalled before', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-probe-newagents-'));
+    try {
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+      mkdirSync(join(home, '.grok'), { recursive: true });
+      mkdirSync(join(home, '.kimi-code'), { recursive: true });
+
+      expect(probeHookInstallation('qwen', home)).toMatchObject({ installed: false });
+      expect(probeHookInstallation('grok', home)).toMatchObject({ installed: false });
+      expect(probeHookInstallation('kimi', home)).toMatchObject({ installed: false });
+
+      installAgentHooks({ homeDir: home });
+
+      expect(probeHookInstallation('qwen', home)).toMatchObject({ installed: true });
+      expect(probeHookInstallation('grok', home)).toMatchObject({ installed: true });
+      expect(probeHookInstallation('kimi', home)).toMatchObject({ installed: true });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('prunes a desk hook for an event that is no longer installed', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-prune-'));
+    try {
+      mkdirSync(join(home, '.grok'), { recursive: true });
+      const installed = installAgentHooks({ homeDir: home });
+      const grokPath = installed.grokSettingsPath;
+      // Simulate a hook desk installed for a since-retired event, pointing at
+      // the CURRENT shim, plus an operator hook that must survive.
+      const config = JSON.parse(readFileSync(grokPath, 'utf8'));
+      config.hooks.Notification = [
+        { hooks: [{ type: 'command', command: `'${installed.shimPath}' --agent 'grok' --event 'Notification'`, timeout: 10 }] }
+      ];
+      config.hooks.SessionEnd = [{ hooks: [{ type: 'command', command: 'echo operator-owns-this' }] }];
+      writeFileSync(grokPath, JSON.stringify(config, null, 2));
+
+      installAgentHooks({ homeDir: home });
+
+      const after = JSON.parse(readFileSync(grokPath, 'utf8'));
+      expect(after.hooks.Notification).toBeUndefined();
+      expect(JSON.stringify(after.hooks.SessionEnd)).toContain('echo operator-owns-this');
+      expect(JSON.stringify(after).match(/desk-agent-event/g)?.length).toBe(7);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

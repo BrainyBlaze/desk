@@ -33,7 +33,13 @@ afterEach(() => {
  * Runs the emitted shim with `fetch` replaced by a recorder, so the assertion
  * is made against the bytes the shim would really send.
  */
-function runHook(event: string, input: string, extraEnv: Record<string, string> = {}): void {
+function runHook(
+  event: string,
+  input: string,
+  extraEnv: Record<string, string> = {},
+  agent = 'claude',
+  sessionId = 'work-claude'
+): void {
   // The shim ships verbatim — its shebang is only valid at byte zero, so the
   // recorder is preloaded rather than prepended. Testing a doctored copy would
   // defeat the point of a wire test.
@@ -49,12 +55,12 @@ globalThis.fetch = async (url, init) => {
 };
 `
   );
-  const result = spawnSync(process.execPath, ['--import', recorderPath, shimPath, '--event', event, '--agent', 'claude'], {
+  const result = spawnSync(process.execPath, ['--import', recorderPath, shimPath, '--event', event, '--agent', agent], {
     input,
     env: {
       ...process.env,
       HOME: home,
-      DESK_SESSION_ID: 'work-claude',
+      DESK_SESSION_ID: sessionId,
       DESK_SESSION_GENERATION: '5',
       DESK_PRODUCER_STATE_DIR: join(home, 'producers'),
       ...extraEnv
@@ -365,3 +371,43 @@ describe('a long tool keeps the session working', () => {
     expect(result.envelope.correlation).toBeUndefined();
   });
 });
+
+describe('the new terminal agents map through the shared claude facts path', () => {
+  it('turns a grok PostToolUse into a tool-end fact and grok Stop into idle', () => {
+    runHook(
+      'PostToolUse',
+      JSON.stringify({ tool_call_id: 'call_1', session_id: '69057f6fab27' }),
+      {},
+      'grok',
+      'work-grok'
+    );
+    const toolEnvelope = observationEnvelope(posted()[0], { observedAt: 1 });
+    expect(toolEnvelope.kind).toBe('envelope');
+    if (toolEnvelope.kind !== 'envelope') return;
+    expect(() => parseAgentStateEnvelope(toolEnvelope.envelope)).not.toThrow();
+    expect(toolEnvelope.envelope.producer).toBe('grok-hooks');
+    expect(toolEnvelope.envelope.facts).toEqual([{ kind: 'tool', phase: 'end' }]);
+
+    runHook('Stop', JSON.stringify({ session_id: '69057f6fab27' }), {}, 'grok', 'work-grok');
+    const stopEnvelope = observationEnvelope(posted().at(-1)!, { observedAt: 2 });
+    expect(stopEnvelope.kind).toBe('envelope');
+    if (stopEnvelope.kind !== 'envelope') return;
+    expect(stopEnvelope.envelope.facts).toEqual([{ kind: 'activity', activity: 'idle' }]);
+  });
+
+  it('reads a kimi tool id from tool_call_id so its intervals form', () => {
+    runHook(
+      'PostToolUse',
+      JSON.stringify({ tool_call_id: 'kc_9', session_id: 'session_abc' }),
+      {},
+      'kimi',
+      'work-kimi'
+    );
+    const envelope = observationEnvelope(posted()[0], { observedAt: 1 });
+    expect(envelope.kind).toBe('envelope');
+    if (envelope.kind !== 'envelope') return;
+    expect(envelope.envelope.producer).toBe('kimi-hooks');
+    expect(envelope.envelope.facts).toEqual([{ kind: 'tool', phase: 'end' }]);
+  });
+});
+

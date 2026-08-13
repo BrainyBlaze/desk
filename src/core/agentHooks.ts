@@ -717,9 +717,49 @@ function mergeHookConfigLocked(
   for (const [event, desiredGroups] of Object.entries(desired.hooks)) {
     mergedHooks[event] = mergeHookGroups(mergedHooks[event], desiredGroups, currentShimPath);
   }
+  // Prune Desk's own hooks for events we no longer install. Without this, an
+  // event dropped from an agent's set (e.g. grok's Notification) leaves an
+  // orphaned desk hook firing a retired schema forever, because the loop above
+  // only ever visits DESIRED events. Operator-authored hooks are untouched.
+  for (const event of Object.keys(mergedHooks)) {
+    if (event in desired.hooks) {
+      continue;
+    }
+    const pruned = pruneDeskHooks(mergedHooks[event], currentShimPath);
+    if (pruned === undefined) {
+      delete mergedHooks[event];
+    } else {
+      mergedHooks[event] = pruned;
+    }
+  }
 
   writeJsonIfChanged(path, { ...current, hooks: mergedHooks });
   return 'merged';
+}
+
+/**
+ * Strip Desk-owned hooks from an event's groups, keeping operator hooks. Returns
+ * undefined when nothing operator-authored remains, so the caller drops the now
+ * Desk-only event key entirely instead of leaving an empty array behind.
+ */
+function pruneDeskHooks(existing: unknown, currentShimPath: string): unknown[] | undefined {
+  if (!Array.isArray(existing)) {
+    return undefined;
+  }
+  const groups: unknown[] = [];
+  for (const group of existing) {
+    if (!isRecord(group) || !Array.isArray(group.hooks)) {
+      groups.push(group);
+      continue;
+    }
+    const hooks = group.hooks.filter(
+      (hook) => !(isRecord(hook) && typeof hook.command === 'string' && hook.command.includes(DESK_SHIM_BASENAME))
+    );
+    if (hooks.length > 0) {
+      groups.push({ ...group, hooks });
+    }
+  }
+  return groups.length > 0 ? groups : undefined;
 }
 
 /**
@@ -740,10 +780,7 @@ function isStaleDeskHook(hook: unknown, currentShimPath: string, desiredGroups?:
   if (!hook.command.includes(currentShimPath)) {
     return true;
   }
-  if (desiredGroups === undefined) {
-    return false;
-  }
-  return !desiredGroups.some((group) => group.hooks.some((desired) => isSameHook(hook, desired)));
+  return false;
 }
 
 function mergeHookGroups(
