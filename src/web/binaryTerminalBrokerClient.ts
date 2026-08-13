@@ -26,6 +26,7 @@
  */
 import {
   BP_CONN_CHANNEL,
+  BpError,
   BpFrameType,
   BpInputFlag,
   decodeBpFrame,
@@ -73,6 +74,14 @@ interface BinarySurface {
   awaitingAck: boolean;
   /** Latest size not yet sent (socket connecting / channel not yet open). */
   pendingResize?: { cols: number; rows: number };
+  /**
+   * Keystrokes/paste bytes typed before channelId was assigned (socket still
+   * connecting, or SUBSCRIBE_ACK still in flight). Queued in order and
+   * flushed whole once the channel opens — the focus/attach race must never
+   * silently swallow input (desk#46). Bounded by MAX_PENDING_INPUT_BYTES so a
+   * stalled SUBSCRIBE can't accumulate keystrokes forever.
+   */
+  pendingInput?: { bytes: Uint8Array; binary: boolean }[];
 }
 
 const OPEN = 1;
@@ -81,6 +90,12 @@ const RECONNECT_MAX = 5;
 // dead (a half-open TCP still reports OPEN). The server beacons periodically, so
 // two missed beacons = dead. Mirrors the string-JSON broker's watchdog.
 const HEARTBEAT_TIMEOUT_MS = 30_000;
+// Bound on pendingInput (desk#46): a stalled SUBSCRIBE or a large paste
+// landing before the channel opens must not grow the queue without limit. On
+// overflow the whole stale queue is dropped and reported through onError
+// (PAYLOAD_TOO_LARGE, the same code an oversized wire payload would raise)
+// rather than silently discarded or replayed out of order later.
+const MAX_PENDING_INPUT_BYTES = 64 * 1024;
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -158,10 +173,49 @@ export class BinaryTerminalBrokerClient {
 
   private sendInputBytes(surfaceId: string, bytes: Uint8Array, binary: boolean): void {
     const surface = this.surfaces.get(surfaceId);
-    if (!surface || !surface.visible || !this.connected || surface.channelId === undefined) {
-      return; // no live, visible channel to carry it
+    if (!surface || !surface.visible) {
+      return; // no visible surface to carry it
+    }
+    if (surface.channelId === undefined) {
+      // The socket is still connecting, or the SUBSCRIBE_ACK for this surface
+      // is still in flight: there is no channelId to address a frame to yet.
+      // A user who focuses the terminal and starts typing immediately lands
+      // here — buffer in order (bounded) rather than dropping the keystroke;
+      // onSubscribeAck flushes this queue the moment the channel opens (desk#46).
+      this.bufferPendingInput(surface, bytes, binary);
+      return;
     }
     this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
+  }
+
+  /**
+   * Queue input for a surface with no open channel yet, bounded by
+   * MAX_PENDING_INPUT_BYTES so a stalled SUBSCRIBE can't accumulate forever.
+   * On overflow the whole stale queue is dropped and the surface is told via
+   * onError — never silently discarded and never grown without limit.
+   */
+  private bufferPendingInput(surface: BinarySurface, bytes: Uint8Array, binary: boolean): void {
+    const pending = surface.pendingInput ?? [];
+    const currentBytes = pending.reduce((sum, entry) => sum + entry.bytes.length, 0);
+    if (currentBytes + bytes.length > MAX_PENDING_INPUT_BYTES) {
+      surface.pendingInput = undefined;
+      surface.handlers.onError?.(BpError.PAYLOAD_TOO_LARGE);
+      return; // drop the whole stale queue plus this chunk — never replay a partial, reordered tail
+    }
+    pending.push({ bytes, binary });
+    surface.pendingInput = pending;
+  }
+
+  /** Flush input buffered while the channel was not yet open, in order. */
+  private flushInput(surface: BinarySurface): void {
+    const pending = surface.pendingInput;
+    if (!pending || pending.length === 0 || surface.channelId === undefined) {
+      return;
+    }
+    surface.pendingInput = undefined;
+    for (const { bytes, binary } of pending) {
+      this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
+    }
   }
 
   sendResize(surfaceId: string, cols: number, rows: number): void {
@@ -351,6 +405,10 @@ export class BinaryTerminalBrokerClient {
     }
     surface.channelId = undefined;
     surface.resync = undefined;
+    // Input queued for the channel being closed belongs to that channel's
+    // context (hide, unsubscribe, or resync) — never replay it into whatever
+    // channel a future (re)subscribe opens (desk#46).
+    surface.pendingInput = undefined;
   }
 
   /** A gap / stale-baseline made this surface dirty: rebaseline via re-subscribe. */
@@ -423,6 +481,7 @@ export class BinaryTerminalBrokerClient {
       // showing no Reconnect affordance.
       if (surface) {
         surface.awaitingAck = false;
+        surface.pendingInput = undefined; // never replay into whatever channel comes next
       }
       return;
     }
@@ -432,6 +491,8 @@ export class BinaryTerminalBrokerClient {
     this.channelToSurface.set(channelId, surfaceId);
     // A resize requested before the channel opened flushes now.
     this.flushResize(surface);
+    // Keystrokes typed during the SUBSCRIBE round-trip flush now, in order (desk#46).
+    this.flushInput(surface);
   }
 
   private onSnapshot(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>): void {

@@ -157,21 +157,63 @@ describe('binary terminal broker client (§7.4)', () => {
     expect([...b.output[0]]).toEqual([66]); // sb correctly aligned
   });
 
-  it('sends INPUT only from a visible, ACKed channel; drops it before the ACK', () => {
+  it('sends INPUT only from a visible channel; buffers it before the ACK and flushes on open (desk#46)', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
-    client.sendInput('s1', 'x'); // no channel yet → dropped
+    client.sendInput('s1', 'x'); // no channel yet → buffered, not dropped
     expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0);
     socket.deliver(ack(5));
     client.sendInput('s1', 'hi');
     client.sendBinary('s1', Uint8Array.of(0x1b, 0x5b, 0x41));
     const inputs = socket.ofType(BpFrameType.INPUT);
-    expect(inputs).toHaveLength(2);
-    expect(inputs[0]).toMatchObject({ channelId: 5, binary: false });
-    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('hi');
-    expect(inputs[1]).toMatchObject({ channelId: 5, binary: true });
-    expect([...inputs[1].bytes]).toEqual([0x1b, 0x5b, 0x41]);
+    expect(inputs).toHaveLength(3);
+    expect(inputs[0]).toMatchObject({ channelId: 5, binary: false }); // the pre-ACK 'x' flushed first, in order
+    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('x');
+    expect(inputs[1]).toMatchObject({ channelId: 5, binary: false });
+    expect(new TextDecoder().decode(inputs[1].bytes)).toBe('hi');
+    expect(inputs[2]).toMatchObject({ channelId: 5, binary: true });
+    expect([...inputs[2].bytes]).toEqual([0x1b, 0x5b, 0x41]);
+  });
+
+  it('buffers keystrokes typed before the SUBSCRIBE ACK and flushes them in order (desk#46)', () => {
+    // The user clicks into a freshly opened terminal and starts typing within
+    // the SUBSCRIBE round-trip — channelId is still undefined. Every keystroke
+    // must survive, in order, once the ACK assigns the channel; none may be
+    // silently dropped the way a bare "no channel yet" guard would drop them.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    for (const ch of 'printf') {
+      client.sendInput('s1', ch); // one keystroke at a time, all pre-ACK
+    }
+    expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0); // nothing sendable yet, but nothing lost either
+    socket.deliver(ack(5));
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    const received = inputs.map((f) => new TextDecoder().decode(f.bytes)).join('');
+    expect(received).toBe('printf'); // every keystroke arrived, in order — none dropped
+  });
+
+  it('bounds the pre-ACK input queue: an oversized backlog is dropped and reported, not grown forever (desk#46)', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    // 64 KiB budget: two 40 KiB chunks blow it on the second push.
+    client.sendBinary('s1', new Uint8Array(40 * 1024));
+    client.sendBinary('s1', new Uint8Array(40 * 1024));
+    expect(cap.error).toEqual([BpError.PAYLOAD_TOO_LARGE]); // reported, not silently discarded
+    socket.deliver(ack(5));
+    expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0); // the stale queue was dropped, never replayed
+  });
+
+  it('discards buffered pre-ACK input when the surface is hidden before the ACK arrives (desk#46)', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    client.sendInput('s1', 'stale'); // buffered, awaiting ACK
+    client.setVisibility('s1', false); // hidden before the ACK — that channel context is gone
+    socket.deliver(ack(5)); // ACK for the now-released channel; must not resurrect old input
+    expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0);
   });
 
   it('buffers a pre-ACK resize and flushes it once the channel opens', () => {
