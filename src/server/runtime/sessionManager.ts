@@ -431,6 +431,13 @@ export class SessionManager {
     let livenessEpisode = 0;
     let livenessEpisodeResolved = true;
     let armLivenessProbe: (episode: number) => void = () => undefined;
+    /**
+     * Did a bounded identity probe POSITIVELY establish that nothing is
+     * listening? Only then may this link's close retire the session. Every
+     * other close — refused late keepalive, write error, transport reset —
+     * leaves the holder's fate unknown, and unknown must never mean dead.
+     */
+    let absenceProven = false;
     /** Bytes queued behind the outstanding §7.3 input request. */
     let inputQueue: Uint8Array[] = [];
     const flushQueue = (client: MoorMasterClient): void => {
@@ -503,10 +510,32 @@ export class SessionManager {
           }
         },
         onClose: () => {
-          // Identity-bound: only the CURRENTLY-installed link's close retires.
-          if (attached && link !== undefined && this.masters.get(sessionId) === link) {
+          // Identity-bound: only the CURRENTLY-installed link is ours to act on.
+          if (!attached || link === undefined || this.masters.get(sessionId) !== link) return;
+          if (absenceProven) {
+            // The bounded identity probe positively established that nothing
+            // is listening: the holder really is gone, so the session ends.
             this.retire(sessionId);
+            return;
           }
+          // Any OTHER close proves nothing about the holder. A late keepalive
+          // refused after a processing pause, a write error, a transport
+          // reset — the child is almost certainly still running, and killing
+          // it here is how thirteen healthy agents died at 21:26 on
+          // 2026-08-13: a ~7 s pause let the lease lapse, moor refused the
+          // overdue keepalive and closed the link, and this branch read that
+          // as death. Losing a link is a DETACH: forget it, mark the holder
+          // indeterminate, and let the probe decide. Nothing is retired and
+          // nothing is killed on evidence this weak.
+          this.masters.delete(sessionId);
+          // Generation-bound authority dies with the link it was adopted from.
+          this.moorStatuses.delete(sessionId);
+          this.core.observeHolderLiveness(
+            sessionId,
+            opts.generation,
+            false,
+            'controller-link-closed'
+          );
         },
         // §10 (OB-30): losing the 15 s verified-live window never proves the
         // holder is gone — no teardown. The session becomes INDETERMINATE
@@ -551,9 +580,12 @@ export class SessionManager {
           return;
         }
         if (outcome === 'absent') {
-          // Listener absence positively established: the holder is gone; the
-          // identity-bound onClose retires this exact link.
+          // Listener absence positively established: the holder is gone. This
+          // is the ONLY route to retirement — the flag is what separates a
+          // proven absence from every other reason a socket may close, and
+          // onClose refuses to retire without it.
           livenessEpisodeResolved = true;
+          absenceProven = true;
           client.close();
           return;
         }
