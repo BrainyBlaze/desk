@@ -7,6 +7,7 @@
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
 
+import type { RetireReason as SessionRetireReason } from '../../shared/runtime/daemonCore.js';
 import { daemonControl, daemonControlGet, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
 import { loadDeskCached, runningSessionSet } from '../../core/runner.js';
 import type { SessionSpec } from '../../core/types.js';
@@ -46,9 +47,19 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
   );
 }
 
-/** Retire a session's moor holder via the daemon (KILL contract). */
-export function retireNativeSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
-  return toOkResult(daemonControl('/control/retire', { sessionId }));
+/**
+ * Retire a session's moor holder via the daemon (KILL contract).
+ *
+ * desk#59 — the CAUSE travels with the request. The route is only transport:
+ * only the caller knows whether this is an operator restarting the session, a
+ * kill switch, or a generic control retire, and a cause dropped here is a cause
+ * the record can never recover.
+ */
+export function retireNativeSession(
+  sessionId: string,
+  reason: SessionRetireReason
+): Promise<{ ok: boolean; error?: string }> {
+  return toOkResult(daemonControl('/control/retire', { sessionId, reason }));
 }
 
 /**
@@ -90,7 +101,7 @@ export async function retireStaleIdentityForEdit(
   if (stale === undefined) {
     return { ok: true };
   }
-  const retired = await retireNativeSession(stale);
+  const retired = await retireNativeSession(stale, 'stale-identity-after-edit');
   if (retired.ok) {
     return { ok: true };
   }
@@ -104,7 +115,9 @@ export function startSessionNativeAware(spec: SessionSpec): Promise<{ ok: boolea
 
 /** Restart a session: awaited daemon retire, then provision. */
 export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok: boolean; error?: string }> {
-  const retired = await retireNativeSession(spec.sessionId);
+  // An operator restart is not a generic control retire: the record must be
+  // able to say the session ended because someone rebooted it.
+  const retired = await retireNativeSession(spec.sessionId, 'operator-reboot');
   if (!retired.ok) {
     return retired;
   }

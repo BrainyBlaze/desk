@@ -120,6 +120,109 @@ describe('FileDeskEventJournal', () => {
     restarted.close();
   });
 
+  it('carries exit provenance through journal, restart replay and compaction (desk#59)', () => {
+    // The whole point of desk#59 is that the record can still answer "who
+    // ended this session, how did the child die, and what could observation
+    // not establish" AFTER a restart. A field that survives in memory but is
+    // dropped by replay or compaction answers nothing.
+    const before = canonicalAgentSnapshot('agent-a', { activity: 'working', now: 20_000, revision: 40 });
+    const retired = {
+      ...canonicalAgentSnapshot('agent-a', { activity: 'unknown', now: 21_000, revision: 41 }),
+      lifecycle: 'exited' as const,
+      lifecycleSince: 21_000,
+      exit: {
+        at: 21_000,
+        code: null,
+        signal: null,
+        origin: 'retired' as const,
+        reason: 'master-link-closed',
+        outcome: { kind: 'unknown' as const },
+        diagnostic: { code: 'moor-event-drain-unobservable' as const }
+      }
+    };
+    const strengthened = {
+      ...retired,
+      revision: 42,
+      updatedAt: 21_028,
+      exit: {
+        at: 21_028,
+        code: 143,
+        signal: '15',
+        origin: 'observed' as const,
+        reason: null,
+        outcome: { kind: 'signalled' as const, signal: 15 },
+        diagnostic: null
+      }
+    };
+
+    // Compact aggressively so the round trip actually exercises rewriting.
+    const journal = new FileDeskEventJournal(path, { now: () => now, compactEveryRecords: 1 });
+    journal.appendTransition(transition(before, retired, { cause: 'lifecycle-exited', revision: 41 }));
+    now += 1;
+    journal.appendTransition(
+      transition(retired, strengthened, { cause: 'lifecycle-exited', revision: 42 })
+    );
+    journal.close();
+
+    const restarted = new FileDeskEventJournal(path, { now: () => now, compactEveryRecords: 1 });
+    const audited = restarted.auditTransitions();
+
+    expect(audited.at(-2)?.to.exit).toMatchObject({
+      origin: 'retired',
+      reason: 'master-link-closed',
+      outcome: { kind: 'unknown' },
+      diagnostic: { code: 'moor-event-drain-unobservable' }
+    });
+    // And the correction that replaced the placeholder is still visible as its
+    // own transition, not silently folded into the first.
+    expect(audited.at(-1)?.to.exit).toMatchObject({
+      origin: 'observed',
+      code: 143,
+      signal: '15',
+      outcome: { kind: 'signalled', signal: 15 }
+    });
+    restarted.close();
+  });
+
+  it('ages exit provenance out of the audit ring in order, never selectively (desk#59)', () => {
+    // The audit ring is bounded, so a death's transition is not kept forever.
+    // What matters is that eviction is plain FIFO: the record is not dropped
+    // BECAUSE it carries provenance, and an operator reading the ring sees
+    // either the whole transition or none of it -- never a half-answer that
+    // says a session exited without saying how.
+    const journal = new FileDeskEventJournal(path, { now: () => now, maxTransitions: 2 });
+    const before = canonicalAgentSnapshot('agent-a', { activity: 'working', now: 20_000, revision: 40 });
+    const exited = {
+      ...canonicalAgentSnapshot('agent-a', { activity: 'unknown', now: 21_000, revision: 41 }),
+      lifecycle: 'exited' as const,
+      lifecycleSince: 21_000,
+      exit: {
+        at: 21_000,
+        code: null,
+        signal: null,
+        origin: 'retired' as const,
+        reason: 'confirmed-holder-absence',
+        outcome: { kind: 'unknown' as const },
+        diagnostic: null
+      }
+    };
+    journal.appendTransition(transition(before, exited, { cause: 'lifecycle-exited', revision: 41 }));
+    expect(journal.auditTransitions().at(-1)?.to.exit).toMatchObject({
+      reason: 'confirmed-holder-absence'
+    });
+
+    // Two newer transitions push it past the bound.
+    now += 1;
+    journal.appendTransition(idleTransition(42));
+    now += 1;
+    journal.appendTransition(idleTransition(43));
+
+    const audited = journal.auditTransitions();
+    expect(audited).toHaveLength(2);
+    expect(audited.some((entry) => entry.to.exit !== null)).toBe(false);
+    journal.close();
+  });
+
   it('retains non-visible transitions for audit without fabricating feed items', () => {
     const journal = new FileDeskEventJournal(path);
     const idle = canonicalAgentSnapshot('agent-a', {

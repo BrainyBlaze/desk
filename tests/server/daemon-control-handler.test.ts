@@ -506,14 +506,21 @@ describe('daemon control handler', () => {
 
   it('retires a session (200 only after the awaited kill reports done)', async () => {
     const daemon = daemonMock();
-    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    const result = await invoke(daemon, 'POST', '/control/retire', {
+      sessionId: 'sess-a',
+      reason: 'control-retire'
+    });
     expect(result).toEqual({ status: 200, body: { ok: true } });
-    expect(daemon.retire).toHaveBeenCalledWith('sess-a');
+    // desk#59: the cause travels with the request and reaches the daemon.
+    expect(daemon.retire).toHaveBeenCalledWith('sess-a', 'control-retire');
   });
 
   it('surfaces a failed kill as non-2xx, never a silent success', async () => {
     const daemon = { ...daemonMock(), retire: vi.fn().mockResolvedValue({ ok: false, error: 'kill command exited 1' }) };
-    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    const result = await invoke(daemon, 'POST', '/control/retire', {
+      sessionId: 'sess-a',
+      reason: 'control-retire'
+    });
     expect(result.status).toBe(502);
     expect(result.body?.error).toContain('kill command exited 1');
   });
@@ -1159,5 +1166,28 @@ describe('isSafeDaemonSessionId', () => {
     for (const id of ['../escape', 'has/slash', 'has space', '', 'a', 42, null, undefined]) {
       expect(isSafeDaemonSessionId(id)).toBe(false);
     }
+  });
+});
+
+describe('the retire cause is part of the request (desk#59)', () => {
+  it('refuses a retire that names no cause instead of inventing one', async () => {
+    // The route is transport: only the caller knows whether this is an
+    // operator reboot, a deletion, or a generic control retire. Accepting a
+    // causeless request would relabel all of them as one, which is exactly the
+    // confident-but-wrong record this issue exists to remove.
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    expect(result.status).toBe(400);
+    expect(daemon.retire).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cause outside the closed vocabulary', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/retire', {
+      sessionId: 'sess-a',
+      reason: 'because-i-said-so'
+    });
+    expect(result.status).toBe(400);
+    expect(daemon.retire).not.toHaveBeenCalled();
   });
 });

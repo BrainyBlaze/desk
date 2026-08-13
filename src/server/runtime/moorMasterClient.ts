@@ -5,9 +5,12 @@
 // - §3 identity exchange: supervised HELLO at the ledger-allocated generation
 //   scope; the holder's HELLO_ACK proves identity+generation and adopts the
 //   incarnation. Scope 0 (discovery) is never emitted here.
-// - §6 attach order, exact: TERMINAL_STATE (exactly once, before ATTACH_ACK) →
-//   ATTACH_ACK → optional LEASE_RESULT → GAP/OUTPUT replay baseline → live.
-//   A missing, second, or post-ACK preamble is refused (conformance §17).
+// - §4.5/§6 recovery order: HELLO → viewer LEASE_REQUEST(resume) while
+//   unattached → rotated token → ATTACH without the fresh bit → ordinary
+//   terminal preamble/replay. Fresh attach remains TERMINAL_STATE (exactly
+//   once, before ATTACH_ACK) → ATTACH_ACK → optional LEASE_RESULT → replay.
+//   A missing/second preamble, changed recovery incarnation, or retained GAP
+//   crossing the delivered cursor fails this connection closed.
 // - Deadline table: identity exchange and adoption must complete within 2 s or
 //   the connection closes.
 // - §1.2 canonical session identity is an INPUT, distinct from the transport
@@ -36,6 +39,18 @@ export interface MoorAttachOptions {
   nonVt?: boolean;
 }
 
+/** Immutable, exact-holder state that makes a lost controller link resumable. */
+export interface MoorReconnectSnapshot {
+  output: { sequence: bigint; incarnation: Uint8Array };
+  lease?: {
+    epoch: number;
+    incarnation: Uint8Array;
+    token: Uint8Array;
+    nextRequestId: bigint;
+    pendingInput?: { requestId: bigint; bytes: Uint8Array; surfaceId?: number };
+  };
+}
+
 type Holder<T extends MoorHolderMessage['type']> = Extract<MoorHolderMessage, { type: T }>;
 
 export interface MoorMasterClientHandlers {
@@ -46,6 +61,12 @@ export interface MoorMasterClientHandlers {
   onOutput?: (output: Holder<'output'>) => void;
   onGap?: (gap: Holder<'gap'>) => void;
   onInputReceipt?: (receipt: Holder<'input-receipt'>) => void;
+  /** Exact prior request whose lease continuity could not be proved. */
+  onInputContinuityLost?: (pending: {
+    requestId: bigint;
+    bytes: Uint8Array;
+    surfaceId?: number;
+  }) => void;
   onTerminateResult?: (result: Holder<'terminate-result'>) => void;
   onLeaseResult?: (result: Holder<'lease-result'>) => void;
   onLogClearResult?: (result: Holder<'log-clear-result'>) => void;
@@ -90,6 +111,12 @@ export interface MoorMasterClientOptions {
    * below a valid cursor are validated for continuity but not delivered again.
    */
   resumeCursor?: { sequence: bigint; incarnation?: Uint8Array };
+  /** Exact viewer lease tuple retained from the prior controller link. */
+  resumeLease?: MoorReconnectSnapshot['lease'];
+  /** Recovery cannot safely retain one emulator across a new holder incarnation. */
+  requireSameIncarnation?: boolean;
+  /** Refuse a retained-tail GAP that would leave the existing emulator stale. */
+  requireReplayContinuity?: boolean;
   /** §10 liveness window (default 15 000 ms without HEARTBEAT). */
   livenessWindowMs?: number;
 }
@@ -176,6 +203,7 @@ type Phase =
   | 'connecting'
   | 'connected'
   | 'hello-sent'
+  | 'resume-pending'
   | 'adopted'
   | 'preamble'
   | 'lease-pending'
@@ -193,10 +221,15 @@ export class MoorMasterClient {
   /** Reconnect cursor as requested (before incarnation/high-water validation). */
   private readonly resumeSequence: bigint;
   private readonly resumeIncarnation: Uint8Array | undefined;
+  private readonly resumeLease: MoorReconnectSnapshot['lease'] | undefined;
+  private readonly requireSameIncarnation: boolean;
+  private readonly requireReplayContinuity: boolean;
   /** The cursor actually in force after HELLO_ACK incarnation reconciliation. */
   private effectiveResume = 0n;
   /** True once a LEASE_KEEPALIVE was actually emitted for the current grant. */
   private keepaliveEmitted = false;
+  private attachLeaseMode: 'fresh' | 'resumed' | 'none' = 'none';
+  private continuity: 'none' | 'resumed' | 'fresh' | 'observer' = 'none';
   private phase: Phase = 'created';
   private incarnation: Uint8Array | undefined;
   private status: MoorStatus | undefined;
@@ -207,7 +240,9 @@ export class MoorMasterClient {
   private lease: { epoch: number; token: Uint8Array } | undefined;
   private keepalive: NodeJS.Timeout | undefined;
   /** §7.3 one-input-in-flight: the exact request the next receipt must match — retained bytes make the safe identical retry possible. */
-  private pendingInput: { requestId: bigint; epoch: number; bytes: Uint8Array } | undefined;
+  private pendingInput:
+    | { requestId: bigint; epoch: number; bytes: Uint8Array; surfaceId?: number }
+    | undefined;
   /** §6.1 output continuity: next record sequence and byte offset. */
   private expectedSequence = 1n;
   private expectedOffset = 0n;
@@ -215,6 +250,8 @@ export class MoorMasterClient {
   private highestReceived = 0n;
   /** The cumulative consumption watermark already acknowledged to the holder. */
   private lastAcked = 0n;
+  /** Highest fully validated record suppressed as already delivered before reconnect. */
+  private highestSuppressed = 0n;
   /** The frozen baseline's discarded-prefix GAP, expected exactly once (§6.1). */
   private baselineGap: { last: bigint } | undefined;
   /** §10: verified-live evidence; invalidated after 15 s without HEARTBEAT. */
@@ -242,6 +279,13 @@ export class MoorMasterClient {
         timer: NodeJS.Timeout;
       }
     | undefined;
+  private pendingViewerLease:
+    | {
+        resolve: (outcome: 'granted' | 'busy') => void;
+        reject: (error: Error) => void;
+        timer: NodeJS.Timeout;
+      }
+    | undefined;
   private pendingLogClear:
     | {
         /** The submitted observed frontier — the result's prior must echo it. */
@@ -251,6 +295,8 @@ export class MoorMasterClient {
         timer: NodeJS.Timeout;
       }
     | undefined;
+  /** Captured before teardown clears the live lease/input fields. */
+  private lastReconnectSnapshot: MoorReconnectSnapshot | undefined;
 
   constructor(
     private readonly sockPath: string,
@@ -296,6 +342,38 @@ export class MoorMasterClient {
     }
     this.resumeSequence = resume;
     this.resumeIncarnation = resumeIncarnation?.slice();
+    const resumeLease = options.resumeLease;
+    if (resumeLease !== undefined) {
+      if (
+        !Number.isInteger(resumeLease.epoch) ||
+        resumeLease.epoch <= 0 ||
+        resumeLease.incarnation.length !== 16 ||
+        resumeLease.token.length !== 16 ||
+        resumeLease.nextRequestId <= 0n ||
+        resumeLease.nextRequestId > U64_MAX + 1n
+      ) {
+        throw new Error('moor controller resume lease snapshot is invalid');
+      }
+      this.resumeLease = {
+        epoch: resumeLease.epoch,
+        incarnation: resumeLease.incarnation.slice(),
+        token: resumeLease.token.slice(),
+        nextRequestId: resumeLease.nextRequestId,
+        ...(resumeLease.pendingInput === undefined
+          ? {}
+          : {
+              pendingInput: {
+                requestId: resumeLease.pendingInput.requestId,
+                bytes: resumeLease.pendingInput.bytes.slice(),
+                ...(resumeLease.pendingInput.surfaceId === undefined
+                  ? {}
+                  : { surfaceId: resumeLease.pendingInput.surfaceId })
+              }
+            })
+      };
+    }
+    this.requireSameIncarnation = options.requireSameIncarnation ?? false;
+    this.requireReplayContinuity = options.requireReplayContinuity ?? false;
     this.h = handlers;
   }
 
@@ -384,7 +462,49 @@ export class MoorMasterClient {
     return this.preambleBytes;
   }
 
-  sendInput(bytes: Uint8Array): void {
+  get leaseContinuity(): 'none' | 'resumed' | 'fresh' | 'observer' {
+    return this.continuity;
+  }
+
+  get attached(): boolean {
+    return this.phase === 'attached' && this.sock !== null;
+  }
+
+  /** A defensive reconnect copy remains available after this link closes. */
+  reconnectSnapshot(): MoorReconnectSnapshot | undefined {
+    const snapshot =
+      this.phase === 'closed' ? this.lastReconnectSnapshot : this.captureReconnectSnapshot();
+    if (snapshot === undefined) return undefined;
+    return {
+      output: {
+        sequence: snapshot.output.sequence,
+        incarnation: snapshot.output.incarnation.slice()
+      },
+      ...(snapshot.lease === undefined
+        ? {}
+        : {
+            lease: {
+              epoch: snapshot.lease.epoch,
+              incarnation: snapshot.lease.incarnation.slice(),
+              token: snapshot.lease.token.slice(),
+              nextRequestId: snapshot.lease.nextRequestId,
+              ...(snapshot.lease.pendingInput === undefined
+                ? {}
+                : {
+                    pendingInput: {
+                      requestId: snapshot.lease.pendingInput.requestId,
+                      bytes: snapshot.lease.pendingInput.bytes.slice(),
+                      ...(snapshot.lease.pendingInput.surfaceId === undefined
+                        ? {}
+                        : { surfaceId: snapshot.lease.pendingInput.surfaceId })
+                    }
+                  })
+            }
+          })
+    };
+  }
+
+  sendInput(bytes: Uint8Array, surfaceId?: number): void {
     this.requireAttached();
     this.requireLease();
     if (this.pendingInput !== undefined) {
@@ -399,7 +519,12 @@ export class MoorMasterClient {
     }
     const requestId = this.nextRequestId++;
     const epoch = this.lease!.epoch;
-    this.pendingInput = { requestId, epoch, bytes: bytes.slice() };
+    this.pendingInput = {
+      requestId,
+      epoch,
+      bytes: bytes.slice(),
+      ...(surfaceId === undefined ? {} : { surfaceId })
+    };
     try {
       this.request({ type: 'input', epoch, requestId, bytes });
     } catch (error) {
@@ -528,6 +653,24 @@ export class MoorMasterClient {
     });
   }
 
+  /** Upgrade an attached observer in phase O without replaying another baseline. */
+  acquireViewerLease(): Promise<'granted' | 'busy'> {
+    this.requireAttached();
+    if (this.lease !== undefined) return Promise.resolve('granted');
+    if (this.pendingViewerLease !== undefined) {
+      return Promise.reject(new Error('a viewer lease request is already in flight'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingViewerLease = undefined;
+        reject(new Error('viewer lease request deadline expired'));
+      }, 2_000);
+      timer.unref?.();
+      this.pendingViewerLease = { resolve, reject, timer };
+      this.request({ type: 'lease-request', operation: 'fresh', role: 'viewer' });
+    });
+  }
+
   /**
    * §10.2.13 log clear, fenced on the adopted incarnation and the SELECTED
    * log commit index this client observed in the newest status — the holder
@@ -638,6 +781,7 @@ export class MoorMasterClient {
   /** The single close transition: idempotent, rejects pending work. */
   private teardown(reason: Error): void {
     if (this.phase === 'closed') return;
+    this.lastReconnectSnapshot = this.captureReconnectSnapshot();
     this.phase = 'closed';
     this.live = false;
     if (this.deadline !== undefined) {
@@ -663,14 +807,51 @@ export class MoorMasterClient {
     const authenticating = this.pendingAuthenticate;
     this.pendingAuthenticate = undefined;
     authenticating?.reject(reason);
-    for (const slot of [this.pendingTerminate, this.pendingRelease, this.pendingLogClear]) {
+    for (const slot of [
+      this.pendingTerminate,
+      this.pendingRelease,
+      this.pendingViewerLease,
+      this.pendingLogClear
+    ]) {
       if (slot === undefined) continue;
       clearTimeout(slot.timer);
       slot.reject(reason);
     }
     this.pendingTerminate = undefined;
     this.pendingRelease = undefined;
+    this.pendingViewerLease = undefined;
     this.pendingLogClear = undefined;
+  }
+
+  private captureReconnectSnapshot(): MoorReconnectSnapshot | undefined {
+    const incarnation = this.incarnation;
+    if (incarnation === undefined) return undefined;
+    const outputSequence = this.lastAcked > this.effectiveResume ? this.lastAcked : this.effectiveResume;
+    const lease = this.lease;
+    return {
+      output: { sequence: outputSequence, incarnation: incarnation.slice() },
+      ...(lease === undefined
+        ? {}
+        : {
+            lease: {
+              epoch: lease.epoch,
+              incarnation: incarnation.slice(),
+              token: lease.token.slice(),
+              nextRequestId: this.nextRequestId,
+              ...(this.pendingInput === undefined
+                ? {}
+                : {
+                    pendingInput: {
+                      requestId: this.pendingInput.requestId,
+                      bytes: this.pendingInput.bytes.slice(),
+                      ...(this.pendingInput.surfaceId === undefined
+                        ? {}
+                        : { surfaceId: this.pendingInput.surfaceId })
+                    }
+                  })
+            }
+          })
+    };
   }
 
   private onData(chunk: Buffer): void {
@@ -692,6 +873,12 @@ export class MoorMasterClient {
     // delivered batch, only when the watermark actually advanced.
     if (this.autoAck && this.phase === 'attached' && this.highestReceived > this.lastAcked) {
       this.lastAcked = this.highestReceived;
+      this.request({ type: 'output-ack', sequence: this.lastAcked });
+    } else if (this.phase === 'attached' && this.highestSuppressed > this.lastAcked) {
+      // A prior ACK may have been lost with the old socket. Suppressed replay
+      // is still decoded and continuity-validated, so consuming it again is
+      // safe and must advance the holder's retained-output watermark.
+      this.lastAcked = this.highestSuppressed;
       this.request({ type: 'output-ack', sequence: this.lastAcked });
     }
   }
@@ -727,11 +914,16 @@ export class MoorMasterClient {
         // to a DIFFERENT incarnation is void — everything is new. An unbound
         // (or same-incarnation) cursor stays in force and is checked against
         // the ACK high-water below.
-        this.effectiveResume =
+        const incarnationChanged =
           this.resumeIncarnation !== undefined &&
-          !bytesEqual(this.resumeIncarnation, decoded.incarnation)
-            ? 0n
-            : this.resumeSequence;
+          !bytesEqual(this.resumeIncarnation, decoded.incarnation);
+        if (incarnationChanged && this.requireSameIncarnation) {
+          throw new MoorWireError(
+            'BAD_SEQUENCE',
+            'recovery holder incarnation changed while the prior emulator remains authoritative'
+          );
+        }
+        this.effectiveResume = incarnationChanged ? 0n : this.resumeSequence;
         this.phase = 'adopted';
         this.h.onHelloAck?.(decoded);
         const authenticating = this.pendingAuthenticate;
@@ -749,13 +941,30 @@ export class MoorMasterClient {
         if (pending === undefined) {
           throw new MoorWireError('BAD_SEQUENCE', 'HELLO_ACK without a pending attach or authenticate');
         }
-        this.request({
-          type: 'attach',
-          columns: pending.options.columns,
-          rows: pending.options.rows,
-          requestLease: pending.options.requestLease,
-          nonVt: pending.options.nonVt ?? false
-        });
+        const resumeLease = this.resumeLease;
+        if (resumeLease !== undefined) {
+          if (!bytesEqual(resumeLease.incarnation, decoded.incarnation)) {
+            if (this.requireSameIncarnation) {
+              throw new MoorWireError(
+                'BAD_SEQUENCE',
+                'recovery lease belongs to another holder incarnation'
+              );
+            }
+            this.sendAttach('fresh');
+            return;
+          }
+          this.phase = 'resume-pending';
+          this.request({
+            type: 'lease-request',
+            operation: 'resume',
+            role: 'viewer',
+            epoch: resumeLease.epoch,
+            incarnation: resumeLease.incarnation,
+            token: resumeLease.token
+          });
+          return;
+        }
+        this.sendAttach(pending.options.requestLease ? 'fresh' : 'none');
         return;
       }
       case 'terminal-state': {
@@ -802,10 +1011,24 @@ export class MoorMasterClient {
         // its LEASE_RESULT arrives the attach is incomplete: the deadline keeps
         // running, the promise stays pending, and no replay/live frame may
         // overtake the slot.
-        if (this.pendingAttach?.options.requestLease === true) {
+        if (this.attachLeaseMode === 'fresh') {
           this.phase = 'lease-pending';
           this.h.onAttachAck?.(decoded.status);
           return;
+        }
+        if (this.attachLeaseMode === 'resumed') {
+          if (
+            this.lease === undefined ||
+            !decoded.status.ownsLease ||
+            decoded.status.leaseEpoch !== this.lease.epoch
+          ) {
+            throw new MoorWireError(
+              'BAD_SEQUENCE',
+              'ATTACH_ACK does not preserve the resumed viewer lease'
+            );
+          }
+          this.keepaliveEmitted = false;
+          this.scheduleKeepalive();
         }
         this.phase = 'attached';
         this.live = true; // the authenticated exchange is verified-live evidence
@@ -821,6 +1044,75 @@ export class MoorMasterClient {
         return;
       }
       case 'lease-result': {
+        if (this.phase === 'resume-pending') {
+          const resume = this.resumeLease!;
+          if (decoded.role !== 0) {
+            throw new MoorWireError('BAD_SEQUENCE', 'viewer resume received a non-viewer result');
+          }
+          if (decoded.outcome === 1) {
+            if (decoded.epoch !== resume.epoch) {
+              throw new MoorWireError('BAD_SEQUENCE', 'resumed lease epoch changed');
+            }
+            this.lease = { epoch: decoded.epoch, token: decoded.token.slice() };
+            this.nextRequestId = resume.nextRequestId;
+            this.pendingInput =
+              resume.pendingInput === undefined
+                ? undefined
+                : {
+                    requestId: resume.pendingInput.requestId,
+                    epoch: resume.epoch,
+                    bytes: resume.pendingInput.bytes.slice(),
+                    ...(resume.pendingInput.surfaceId === undefined
+                      ? {}
+                      : { surfaceId: resume.pendingInput.surfaceId })
+                  };
+            this.continuity = 'resumed';
+            this.h.onLeaseResult?.(decoded);
+            this.sendAttach('resumed');
+            return;
+          }
+          if (decoded.outcome === 3) {
+            this.continuity = 'none';
+            if (resume.pendingInput !== undefined) {
+              this.h.onInputContinuityLost?.({
+                requestId: resume.pendingInput.requestId,
+                bytes: resume.pendingInput.bytes.slice(),
+                ...(resume.pendingInput.surfaceId === undefined
+                  ? {}
+                  : { surfaceId: resume.pendingInput.surfaceId })
+              });
+            }
+            this.h.onLeaseResult?.(decoded);
+            this.sendAttach('fresh');
+            return;
+          }
+          throw new MoorWireError('BAD_SEQUENCE', 'invalid result for viewer lease resume');
+        }
+        if (this.phase === 'attached' && this.pendingViewerLease !== undefined) {
+          const pending = this.pendingViewerLease;
+          this.pendingViewerLease = undefined;
+          clearTimeout(pending.timer);
+          if (decoded.role !== 0 || (decoded.outcome !== 0 && decoded.outcome !== 3)) {
+            const error = new MoorWireError(
+              'BAD_SEQUENCE',
+              'fresh attached viewer lease received an invalid result'
+            );
+            pending.reject(error);
+            throw error;
+          }
+          if (decoded.outcome === 3) {
+            pending.resolve('busy');
+            return;
+          }
+          this.lease = { epoch: decoded.epoch, token: decoded.token.slice() };
+          this.nextRequestId = 1n;
+          this.keepaliveEmitted = false;
+          this.continuity = 'fresh';
+          this.scheduleKeepalive();
+          this.h.onLeaseResult?.(decoded);
+          pending.resolve('granted');
+          return;
+        }
         // Standalone slot first: §7.4 — LEASE_RELEASE always receives a
         // LEASE_RESULT. Released (02) invalidates the local grant; refused
         // (03) reports not-held/mismatch WITHOUT holder mutation. Any other
@@ -902,6 +1194,9 @@ export class MoorMasterClient {
           this.nextRequestId = 1n;
           this.keepaliveEmitted = false; // no keepalive has been sent for this grant yet
           this.scheduleKeepalive();
+          this.continuity = 'fresh';
+        } else {
+          this.continuity = 'observer';
         }
         const pending = this.pendingAttach;
         this.pendingAttach = undefined;
@@ -970,6 +1265,7 @@ export class MoorMasterClient {
         // §6.1 reconnect: a controller with an existing cursor discards
         // duplicate record sequences instead of re-delivering them.
         if (decoded.sequence > this.effectiveResume) this.h.onOutput?.(decoded);
+        else this.highestSuppressed = decoded.sequence;
         return;
       }
       case 'gap': {
@@ -991,6 +1287,12 @@ export class MoorMasterClient {
         }
         this.baselineGap = undefined;
         this.expectedSequence = decoded.last + 1n;
+        if (this.requireReplayContinuity && decoded.last > this.effectiveResume) {
+          throw new MoorWireError(
+            'BAD_SEQUENCE',
+            `retained replay gap ends at ${decoded.last} beyond delivered cursor ${this.effectiveResume}`
+          );
+        }
         // A gap wholly at or below the reconnect cursor names records the
         // previous connection already consumed — nothing to report.
         if (decoded.last > this.effectiveResume) this.h.onGap?.(decoded);
@@ -1135,6 +1437,22 @@ export class MoorMasterClient {
     if (!valid) {
       throw new MoorWireError('BAD_SEQUENCE', `${kind} is not legal in connection phase ${this.phase}`);
     }
+  }
+
+  private sendAttach(mode: 'fresh' | 'resumed' | 'none'): void {
+    const pending = this.pendingAttach;
+    if (pending === undefined) {
+      throw new MoorWireError('BAD_SEQUENCE', 'cannot send ATTACH without a pending adoption');
+    }
+    this.attachLeaseMode = mode;
+    this.phase = 'adopted';
+    this.request({
+      type: 'attach',
+      columns: pending.options.columns,
+      rows: pending.options.rows,
+      requestLease: mode === 'fresh',
+      nonVt: pending.options.nonVt ?? false
+    });
   }
 
   private fail(error: unknown): void {

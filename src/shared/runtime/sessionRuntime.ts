@@ -29,7 +29,7 @@ export interface SessionRuntimeDeps {
    * receive; the session manager's installed link owns the wire encoding
    * (moor supervised frames), so no wire type leaks into the runtime.
    */
-  sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => void;
+  sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
   onExit?: (exit: { code: number; signal: number }) => void;
 }
@@ -134,8 +134,8 @@ export class SessionRuntime {
   }
 
   /** Forward browser input to the master (§7.6, two channels). */
-  onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): void {
-    this.d.sendMasterInput(bytes, binary, channelId);
+  onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    return this.d.sendMasterInput(bytes, binary, channelId) !== false;
   }
 
   /**
@@ -146,7 +146,7 @@ export class SessionRuntime {
    * app enabled the mode (DECSET 2004), so multi-line text does not submit per
    * newline in a TUI, while a plain shell never sees stray escape codes.
    */
-  injectInput(bytes: Uint8Array, paste = false): void {
+  injectInput(bytes: Uint8Array, paste = false): boolean {
     let data = bytes;
     if (paste && this.d.emulator.bracketedPaste?.() === true) {
       const open = new TextEncoder().encode('\x1b[200~');
@@ -156,7 +156,7 @@ export class SessionRuntime {
       data.set(bytes, open.length);
       data.set(close, open.length + bytes.length);
     }
-    this.d.sendMasterInput(data, false, 0);
+    return this.d.sendMasterInput(data, false, 0) !== false;
   }
 
   /**

@@ -347,7 +347,7 @@ export async function killSessionTargets(targets: Array<SessionSpec | string>): 
   // retire is idempotent, so an unknown session is a harmless no-op.
   const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId)))];
   for (const sessionId of ids) {
-    const retired = await retireNativeSession(sessionId);
+    const retired = await retireNativeSession(sessionId, 'session-deleted');
     if (!retired.ok) {
       return retired;
     }
@@ -742,7 +742,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           newSpec,
           homeDir: homedir(),
           wasRunning,
-          retire: () => retireNativeSession(oldSpec.sessionId),
+          retire: () => retireNativeSession(oldSpec.sessionId, 'stale-identity-after-edit'),
           commit: () =>
             commitManifestIfUnchanged(manifestPath, manifestSource, next),
           startTarget: async () => {

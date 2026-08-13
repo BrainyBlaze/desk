@@ -39,6 +39,7 @@ import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
+import { isRetireReason, type RetireReason } from '../../shared/runtime/daemonCore.js';
 import {
   FileIntakeStore,
   type FileIntakeStoreDependencies
@@ -218,7 +219,7 @@ export interface TerminalDaemon {
    * immediately after, and a stale socket would be adopted at the old
    * generation. A failed kill is a failure, never a silent 200.
    */
-  retire(sessionId: string): Promise<{ ok: boolean; error?: string }>;
+  retire(sessionId: string, reason: RetireReason): Promise<{ ok: boolean; error?: string }>;
   /** Retire exactly one native generation without touching a successor. */
   retireGeneration(
     sessionId: string,
@@ -435,7 +436,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   let mutationDrainWaiters: Array<() => void> = [];
   let scheduleMoorObserverCleanup = (
     _sessionId: string,
-    _generation: number
+    _generation: number,
+    _origin: 'observed' | 'retired'
   ): void => {};
   const replayingMoorTransitions = new Set<string>();
   const moorTransitionKey = (sessionId: string, generation: number): string =>
@@ -486,9 +488,14 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         eventJournal.appendTransition(transition);
       }
       if (transition.cause === 'lifecycle-exited') {
+        // desk#59: an OBSERVED exit already carries the truth, so its observer
+        // may stop at once. A RETIRED placeholder is Desk tearing the session
+        // down without knowing how the child died — stopping there is what
+        // discarded the evidence, so that path drains first.
         scheduleMoorObserverCleanup(
           transition.sessionId,
-          transition.generation
+          transition.generation,
+          transition.to.exit?.origin === 'observed' ? 'observed' : 'retired'
         );
       }
     },
@@ -658,6 +665,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     /** The per-generation committed event-store DIRECTORY. */
     path: string;
     observer: MoorEventObserver;
+    /**
+     * desk#59 — the ONE final drain for this registration. Both the retired
+     * transition's microtask and the awaited control wrapper join this same
+     * promise, so the store is read exactly once no matter who asks first.
+     */
+    drainPromise?: Promise<void>;
   }
   const eventObservers = new Map<string, EventObserver>();
   const reportMoorDiagnostic = (
@@ -729,6 +742,51 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       }
     };
   };
+  /**
+   * desk#59 — stop an observer only AFTER one last bounded read of its store.
+   *
+   * Moor commits the lifecycle before it unlinks, so at teardown the exit
+   * record is routinely already committed and unread. Stopping first threw it
+   * away and left the session recorded as "someone retired it", with no cause
+   * of death — the exact blindness that made live agent deaths untraceable.
+   *
+   * The registration is rechecked AFTER the awaited drain: a successor
+   * generation may have claimed this sessionId while we were reading, and a
+   * stale observer must never unregister or speak for it.
+   */
+  const drainAndStopEventObserver = (observer: EventObserver): Promise<void> => {
+    // Memoized per registration: a concurrent wrapper and transition must not
+    // read the store twice, and the caller that arrives second must await the
+    // work the first one already started rather than skipping it.
+    observer.drainPromise ??= runFinalDrain(observer);
+    return observer.drainPromise;
+  };
+
+  const runFinalDrain = async (observer: EventObserver): Promise<void> => {
+    const outcome = await observer.observer.drain();
+    if (outcome === 'unobservable') {
+      // Durable first: stderr does not survive the daemon, and a blindness
+      // nobody can read afterwards is the defect this issue exists to fix.
+      // The refinement is generation-fenced and touches ONLY the diagnostic —
+      // the reason that initiated this retirement stays exactly as recorded.
+      // Recheck the registration AFTER the await: a successor may have claimed
+      // this session id while we were reading, and a stale observer must never
+      // annotate it.
+      if (eventObservers.get(observer.sessionId) === observer) {
+        router.sessions.refineExitDiagnostic(observer.sessionId, observer.generation, {
+          code: 'moor-event-drain-unobservable'
+        });
+      }
+      reportMoorDiagnostic(
+        { sessionId: observer.sessionId, generation: observer.generation, path: observer.path },
+        { code: 'tailer-io', message: 'final drain could not read the committed store' }
+      );
+    }
+    if (eventObservers.get(observer.sessionId) === observer) {
+      eventObservers.delete(observer.sessionId);
+    }
+  };
+
   const stopEventObserver = (observer: EventObserver): void => {
     observer.observer.stop();
     if (eventObservers.get(observer.sessionId) === observer) {
@@ -775,7 +833,19 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           return;
         }
         stopEventObserver(registered);
-        void router.sessions.retireGenerationAwaited(sessionId, generation);
+        // desk#59: this retirement is caused by the observer failing, not by an
+        // operator. Letting it fall through to the default control-retire
+        // reason writes a lie into the record.
+        void router.sessions
+          .retireGenerationAwaited(sessionId, generation, { reason: 'observer-terminal' })
+          .then(() => {
+            // The reason says WHO ended it; the diagnostic says what
+            // observation lost. Both are recorded, neither overwrites the
+            // other.
+            router.sessions.refineExitDiagnostic(sessionId, generation, {
+              code: 'moor-event-observer-terminal'
+            });
+          });
       }
     });
     const observer = { sessionId, generation, path, observer: storeObserver };
@@ -807,14 +877,19 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     }
     return observer;
   };
-  scheduleMoorObserverCleanup = (sessionId, generation): void => {
+  scheduleMoorObserverCleanup = (sessionId, generation, origin): void => {
     queueMicrotask(() => {
       const observer = eventObservers.get(sessionId);
-      if (observer?.generation === generation) {
-        // §11.6: observation stops here; the PUBLISHED store belongs to the
-        // holder's own retirement cleanup — Desk never deletes it.
+      if (observer?.generation !== generation) return;
+      // §11.6: observation stops here; the PUBLISHED store belongs to the
+      // holder's own retirement cleanup — Desk never deletes it.
+      if (origin === 'observed') {
         stopEventObserver(observer);
+        return;
       }
+      // The synchronous link-close path retires without going through the
+      // control wrapper, so this is the ONLY final read it ever gets.
+      void drainAndStopEventObserver(observer);
     });
   };
 
@@ -863,7 +938,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         const generation = observedGeneration;
         const authority = resolveStoreAuthority(status, handedOffDir);
         if (!authority.ok) {
-          await router.sessions.retireGenerationAwaited(sessionId, generation);
+          await router.sessions.retireGenerationAwaited(sessionId, generation, {
+            reason: 'store-authority-refused'
+          });
           throw new Error(authority.error);
         }
         try {
@@ -873,26 +950,29 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           // is not provisioned — tear the fresh holder down. Store cleanup
           // belongs to the holder's own retirement (§11.6); Desk deletes
           // nothing it merely named.
-          await router.sessions.retireGenerationAwaited(sessionId, generation);
+          await router.sessions.retireGenerationAwaited(sessionId, generation, {
+            reason: 'observer-start-failed'
+          });
           throw error;
         }
       }
       return result;
     },
-    async retire(sessionId) {
+    async retire(sessionId, reason) {
       const observer = eventObservers.get(sessionId);
-      const result = await router.sessions.retireAwaited(sessionId);
-      if (result.ok && observer) stopEventObserver(observer);
+      const result = await router.sessions.retireAwaited(sessionId, { reason });
+      // desk#59: the drain runs AFTER the retire, so the placeholder already
+      // exists and the holder's real exit can strengthen it in place.
+      if (result.ok && observer) await drainAndStopEventObserver(observer);
       return result;
     },
     async retireGeneration(sessionId, generation) {
       const observer = eventObservers.get(sessionId);
-      const result = await router.sessions.retireGenerationAwaited(
-        sessionId,
-        generation
-      );
+      const result = await router.sessions.retireGenerationAwaited(sessionId, generation, {
+        reason: 'control-retire'
+      });
       if (result.ok && observer?.generation === generation) {
-        stopEventObserver(observer);
+        await drainAndStopEventObserver(observer);
       }
       return result;
     },
@@ -1492,7 +1572,14 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
             return;
           }
-          const retired = await daemon.retire(body.sessionId);
+          // desk#59: the cause is part of the request, not something the
+          // transport invents. An unknown or absent cause is refused rather
+          // than silently relabelled as a generic control retire.
+          if (!isRetireReason(body.reason)) {
+            sendJson(res, 400, { ok: false, error: 'invalid retire reason' });
+            return;
+          }
+          const retired = await daemon.retire(body.sessionId, body.reason);
           if (!retired.ok) {
             sendJson(res, 502, { ok: false, error: retired.error ?? 'retire failed' });
             return;

@@ -324,7 +324,11 @@ describe('terminal daemon Moor cutover adversarial review', () => {
       })
     ).rejects.toThrow('moor event store could not be observed');
 
-    expect(retire).toHaveBeenCalledWith('sess-1', 2);
+    expect(retire).toHaveBeenCalledWith('sess-1', 2, {
+      // desk#59: the record must name what actually ended the session —
+      // here, an observer that could not be started at all.
+      reason: 'observer-start-failed'
+    });
     expect(existsSync(storeDir)).toBe(false);
     daemon.dispose();
   });
@@ -393,7 +397,11 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     );
 
     expect(reconcileMoorEvents).toHaveBeenCalledWith('sess-1', 9);
-    expect(retireGenerationAwaited).toHaveBeenCalledWith('sess-1', 9);
+    // desk#59: the retirement must carry WHY it happened, so the resulting
+    // exit record names the reconcile failure instead of anonymous nulls.
+    expect(retireGenerationAwaited).toHaveBeenCalledWith('sess-1', 9, {
+      reason: 'moor-reconcile-failed'
+    });
     expect(result).toMatchObject({ sessionId: 'sess-1', ok: false });
   });
 
@@ -594,7 +602,10 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     await waitFor(() => diagnostics.length > 0, 'terminal observer diagnostic');
     await waitFor(() => retire.mock.calls.length > 0, 'retirement attempt');
 
-    expect(retire).toHaveBeenCalledWith('sess-1', 2);
+    expect(retire).toHaveBeenCalledWith('sess-1', 2, {
+      // An observer that died mid-life is not an operator retire either.
+      reason: 'observer-terminal'
+    });
     expect(existsSync(storeDir)).toBe(true);
     daemon.dispose();
   });
@@ -905,7 +916,10 @@ describe('terminal daemon Moor cutover adversarial review', () => {
       expect(sessionWideRetire).not.toHaveBeenCalled();
       expect(exactGenerationRetire).toHaveBeenCalledWith(
         'sess-1',
-        rejectedGeneration
+        rejectedGeneration,
+        // desk#59: the refusal names itself — the store authority could not be
+        // trusted — instead of masquerading as an operator retire.
+        { reason: 'store-authority-refused' }
       );
       expect(daemon.router.sessions.stateSnapshot('sess-1')).toMatchObject({
         generation: successorGeneration,

@@ -394,7 +394,7 @@ export class AgentStateAuthority {
   markExited(
     sessionId: string,
     generation: number,
-    exit: Pick<SessionExit, 'code' | 'signal'>,
+    exit: Required<Pick<SessionExit, 'code' | 'signal' | 'origin' | 'reason' | 'outcome' | 'diagnostic'>>,
     observedAt?: number
   ): AuthorityMutationResult {
     const record = this.sessions.get(sessionId);
@@ -407,7 +407,21 @@ export class AgentStateAuthority {
       return { kind: 'rejected', reason: 'invalid-observation' };
     }
     if (record!.snapshot.lifecycle === 'exited') {
-      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      // desk#59: a `retired` exit is a PLACEHOLDER written by Desk's own
+      // teardown, which knows nothing about how the child died. The holder's
+      // real exit routinely lands milliseconds later; it must be allowed to
+      // replace the placeholder, or the cause of death is lost forever. An
+      // already `observed` exit is the truth and is never downgraded.
+      if (record!.snapshot.exit?.origin !== 'retired' || exit.origin !== 'observed') {
+        return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      }
+      const correctedAt = Math.max(
+        observedAt === undefined ? this.safeNow() : Math.floor(observedAt),
+        record!.snapshot.updatedAt
+      );
+      const before = clone(record!.snapshot);
+      record!.snapshot.exit = { ...exit, at: correctedAt };
+      return this.commit(record!, before, 'lifecycle-exited', correctedAt);
     }
     const at =
       observedAt === undefined
@@ -428,6 +442,46 @@ export class AgentStateAuthority {
       record!.snapshot.subject.wait = null;
       record!.snapshot.subject.evidence = null;
     }
+    return this.commit(record!, from, 'lifecycle-exited', at);
+  }
+
+  /**
+   * desk#59 — record what OBSERVATION failed to establish, without touching why
+   * the session was retired.
+   *
+   * The initiating reason and a failed final drain are independent facts: a
+   * session retired because its link closed, whose store then could not be
+   * read, is BOTH of those things. Overwriting one with the other would trade a
+   * known cause for a known blindness. So this refines exactly one field, once:
+   * `diagnostic` may go from absent/null to an exact code and never back, and
+   * origin, reason and outcome are left untouched. Observed truth is never
+   * annotated this way, and the generation fence keeps a successor out.
+   */
+  refineExitDiagnostic(
+    sessionId: string,
+    generation: number,
+    diagnostic: NonNullable<SessionExit['diagnostic']>,
+    observedAt?: number
+  ): AuthorityMutationResult {
+    const record = this.sessions.get(sessionId);
+    const rejected = this.guardSession(record, generation);
+    if (rejected !== undefined) return rejected;
+    const exit = record!.snapshot.exit;
+    if (
+      exit === null ||
+      record!.snapshot.lifecycle !== 'exited' ||
+      exit.origin !== 'retired' ||
+      // Monotonic: an existing diagnostic is never downgraded or replaced.
+      (exit.diagnostic !== null && exit.diagnostic !== undefined)
+    ) {
+      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+    }
+    const at = Math.max(
+      observedAt === undefined ? this.safeNow() : Math.floor(observedAt),
+      record!.snapshot.updatedAt
+    );
+    const from = clone(record!.snapshot);
+    record!.snapshot.exit = { ...exit, diagnostic };
     return this.commit(record!, from, 'lifecycle-exited', at);
   }
 

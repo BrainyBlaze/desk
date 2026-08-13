@@ -7,6 +7,7 @@
 // itself, so no sidecar offset file survives restarts. Any gap/corruption is
 // terminal for this observer — report a diagnostic and stop, never resync.
 
+import type { MoorExitOutcome } from '../../shared/controlPlane/contract.js';
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
 import {
@@ -19,12 +20,52 @@ import {
   type MoorEventRecord
 } from './moorStore.js';
 
+/** The raw ending, tag preserved. Anything the grammar did not prove is unknown. */
+function exitOutcome(value: Record<string, unknown>): MoorExitOutcome {
+  if (value.ended === 'exited' && typeof value.code === 'number') {
+    return { kind: 'exited', code: value.code };
+  }
+  if (value.ended === 'signalled' && typeof value.signal === 'number') {
+    return { kind: 'signalled', signal: value.signal };
+  }
+  if (
+    value.ended === 'terminated' &&
+    typeof value.code === 'number' &&
+    (value.method === 'graceful' || value.method === 'forced')
+  ) {
+    return { kind: 'terminated', code: value.code, method: value.method };
+  }
+  return { kind: 'unknown' };
+}
+
+/**
+ * The legacy numeric view, derived at the edge and never persisted as the whole
+ * truth: exited passes its code through, signalled follows the POSIX shell
+ * 128+signal convention, terminated reports the holder's code, and an
+ * unprovable ending has no honest number -- it reports 0 only because the
+ * browser EXIT frame has no way to say "unknown".
+ */
+function legacyExitCode(outcome: MoorExitOutcome): number {
+  switch (outcome.kind) {
+    case 'exited':
+      return outcome.code;
+    case 'signalled':
+      return 128 + outcome.signal;
+    case 'terminated':
+      return outcome.code;
+    case 'unknown':
+      return 0;
+  }
+}
+
 /** Desk-facing session event — the discriminated shape the router consumes. */
 export type MoorSessionEvent =
   | { ts: number; type: 'ready' }
   | { ts: number; type: 'state'; state: 'busy' | 'idle'; title: string }
   | { ts: number; type: 'link'; uri: string }
-  | { ts: number; type: 'exit'; code: number };
+  | { ts: number; type: 'exit'; code: number; outcome: MoorExitOutcome };
+
+export type { MoorExitOutcome } from '../../shared/controlPlane/contract.js';
 
 
 export type MoorEventDiagnosticCode =
@@ -74,6 +115,12 @@ export interface MoorEventObserverOptions {
   onTerminal?: () => void;
 }
 
+/**
+ * desk#59 — the final drain is bounded. Reading the committed store is a local
+ * filesystem operation, so a read that has not settled in this long is stuck,
+ * and holding teardown open for it trades one lost record for a hung session.
+ */
+const DEFAULT_DRAIN_DEADLINE_MS = 2_000;
 const DEFAULT_POLL_INTERVAL_MS = 200;
 
 /**
@@ -132,15 +179,13 @@ function mapRecord(record: MoorEventRecord): MoorSessionEvent | undefined {
     case 'link':
       return { ts, type: 'link', uri: typeof value.uri === 'string' ? value.uri : '' };
     case 'exit': {
-      // exited → code as-is; signalled → 128+signal (POSIX shell convention);
-      // terminated → the holder-reported code.
-      const code =
-        value.ended === 'signalled'
-          ? 128 + (typeof value.signal === 'number' ? value.signal : 0)
-          : typeof value.code === 'number'
-            ? value.code
-            : 0;
-      return { ts, type: 'exit', code };
+      // The store has already validated the record against the canonical
+      // grammar, so each ending carries exactly its own fields. The tagged
+      // outcome is what Desk persists; `code` stays only as the legacy numeric
+      // view (exited passthrough, signalled 128+signal) that older consumers
+      // and the browser EXIT frame still read.
+      const outcome = exitOutcome(value);
+      return { ts, type: 'exit', code: legacyExitCode(outcome), outcome };
     }
     default:
       // Unknown-but-valid event types (future moor additions) are skipped: the
@@ -156,6 +201,8 @@ export class MoorEventObserver {
   private started = false;
   private stopped = false;
   private polling = false;
+  /** desk#59 — fences a drain read that completes after its own deadline. */
+  private drainEpoch = 0;
 
   constructor(options: MoorEventObserverOptions) {
     if (
@@ -194,6 +241,74 @@ export class MoorEventObserver {
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
+    }
+  }
+
+  /**
+   * desk#59 — one last bounded read of the committed store, then stop.
+   *
+   * The holder commits its lifecycle before unlinking, so at teardown the exit
+   * record is routinely already on disk while Desk has not read it yet.
+   * Stopping the observer at that moment discards the only evidence of how the
+   * child died, which is why a retired session could never say more than
+   * "someone retired it".
+   *
+   * The drain cancels further scheduling, serializes with any poll already in
+   * flight (never running two readers over one cursor), performs AT MOST one
+   * read, and never re-schedules. It reports whether the store could be read:
+   * an unreadable or corrupt store yields `unobservable`, which the caller
+   * must record as explicit retired provenance rather than an invented exit.
+   */
+  async drain(deadlineMs = DEFAULT_DRAIN_DEADLINE_MS): Promise<'drained' | 'unobservable'> {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    // Serialize with the in-flight poll instead of racing it: two readers over
+    // one cursor could deliver the same records twice or skip a commit. Bounded
+    // by a deadline, because teardown must not hang on a reader that never
+    // settles: a stuck store would otherwise hold the session's retirement open
+    // forever.
+    const deadline = Date.now() + deadlineMs;
+    while (this.polling) {
+      if (Date.now() >= deadline) {
+        this.stop();
+        return 'unobservable';
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    if (this.stopped) return 'drained';
+    this.polling = true;
+    // The epoch fences a read that completes AFTER the deadline: its records
+    // must not be delivered into a session everyone has already finished
+    // tearing down.
+    const epoch = ++this.drainEpoch;
+    try {
+      const snapshot = await Promise.race([
+        this.readSnapshot(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('final drain deadline reached')), Math.max(0, deadline - Date.now())).unref?.()
+        )
+      ]);
+      if (epoch !== this.drainEpoch) return 'unobservable';
+      if (
+        this.cursor === undefined ||
+        snapshot.commitIndex !== this.cursor.commitIndex ||
+        !equalBytes(snapshot.commitHash, this.cursor.commitHash)
+      ) {
+        const result = eventsAfterMoorCursor(snapshot, this.cursor);
+        this.cursor = result.cursor;
+        this.deliver(result.events, 'live');
+      }
+      return 'drained';
+    } catch (error) {
+      // The store could not be proved: report it and say so honestly. No
+      // lifecycle is invented from an unreadable store.
+      this.options.onDiagnostic(describe(error));
+      return 'unobservable';
+    } finally {
+      this.polling = false;
+      this.stop();
     }
   }
 

@@ -151,7 +151,7 @@ export class DaemonServer {
         return r.ok ? { ok: true, result: { generation: r.generation, created: r.created } } : { ok: false, errorCode: 'cap-exceeded', errorMessage: 'MAX_LIVE_WORKERS reached' };
       }
       case 'retire':
-        this.core.retire(String(p.sessionId));
+        this.core.retire(String(p.sessionId), 'control-retire');
         return { ok: true, result: { retired: true } };
       case 'list':
         return { ok: true, result: this.core.list() };

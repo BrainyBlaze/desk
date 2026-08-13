@@ -185,6 +185,127 @@ describe('MoorEventObserver', () => {
     expect(seen[1]!.event).toMatchObject({ type: 'exit', code: 143 });
   });
 
+  it('preserves the raw Moor outcome instead of folding it to one number (desk#59)', async () => {
+    // The observer used to collapse {ended, signal, code} into a single
+    // number before the event ever entered Desk, so a SIGTERM death and a
+    // child that exited 143 on its own became indistinguishable -- and the
+    // durable record could no longer say which happened. The tagged outcome
+    // must survive to the durable model; the legacy number is derived only at
+    // the browser compatibility boundary.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [',"ended":"signalled","signal":15', { kind: 'signalled', signal: 15 }],
+      [',"ended":"exited","code":7', { kind: 'exited', code: 7 }],
+      [
+        ',"ended":"terminated","code":0,"method":"graceful"',
+        { kind: 'terminated', code: 0, method: 'graceful' }
+      ]
+    ];
+    for (const [tail, expected] of cases) {
+      const root = await makeStore();
+      const body = eventBody([event('exit', 1, 1n, 'transition', tail)]);
+      await writeSlot(root, 0, body, commitRecord({ slot: 0, bytes: body, index: 1n, start: 1n, end: 2n }));
+
+      const { seen, handlers } = collector();
+      await startObserver(root, handlers);
+      expect(seen[0]!.event).toMatchObject({ type: 'exit', outcome: expected });
+    }
+  });
+
+  it('drains a committed exit that landed after the last poll (desk#59)', async () => {
+    // The holder commits its lifecycle BEFORE unlinking, so at teardown the
+    // exit is routinely already on disk and unread. Stopping the observer at
+    // that moment is what discarded the cause of death.
+    const root = await makeStore();
+    const first = eventBody([event('ready', 1, 1n)]);
+    await writeSlot(root, 0, first, commitRecord({ slot: 0, bytes: first, index: 1n, start: 1n, end: 2n }));
+
+    const { seen, handlers } = collector();
+    const observer = await startObserver(root, handlers);
+    expect(seen).toHaveLength(1);
+
+    // Written after the observer's last read, exactly like a real death.
+    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')]);
+    await writeSlot(root, 1, second, commitRecord({ slot: 1, bytes: second, index: 2n, start: 1n, end: 3n }));
+
+    await expect(observer.drain()).resolves.toBe('drained');
+    expect(seen.at(-1)!.event).toMatchObject({
+      type: 'exit',
+      outcome: { kind: 'signalled', signal: 15 }
+    });
+  });
+
+  it('performs at most one store read when two callers drain concurrently (desk#59)', async () => {
+    // The control wrapper and the transition microtask can both ask. Reading
+    // twice over one cursor would deliver the same exit twice or skip a commit.
+    const root = await makeStore();
+    const first = eventBody([event('ready', 1, 1n)]);
+    await writeSlot(root, 0, first, commitRecord({ slot: 0, bytes: first, index: 1n, start: 1n, end: 2n }));
+
+    const { seen, handlers } = collector();
+    const observer = await startObserver(root, handlers);
+
+    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')]);
+    await writeSlot(root, 1, second, commitRecord({ slot: 1, bytes: second, index: 2n, start: 1n, end: 3n }));
+
+    await Promise.all([observer.drain(), observer.drain()]);
+
+    expect(seen.filter((entry) => entry.event.type === 'exit')).toHaveLength(1);
+  });
+
+  it('a stopped observer drains nothing — why the retired path must drain BEFORE stopping', async () => {
+    // The daemon schedules stopEventObserver on EVERY lifecycle-exited
+    // transition, including the retired placeholder that beginRetire emits
+    // synchronously. That microtask runs while retireAwaited is still awaiting
+    // the kill, so by the time the control path drains, the observer is
+    // already stopped and the drain returns without reading anything. This
+    // pins the mechanism: whoever stops first wins, and the exit is lost.
+    const root = await makeStore();
+    const first = eventBody([event('ready', 1, 1n)]);
+    await writeSlot(root, 0, first, commitRecord({ slot: 0, bytes: first, index: 1n, start: 1n, end: 2n }));
+
+    const { seen, handlers } = collector();
+    const observer = await startObserver(root, handlers);
+
+    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')]);
+    await writeSlot(root, 1, second, commitRecord({ slot: 1, bytes: second, index: 2n, start: 1n, end: 3n }));
+
+    // Pinned deliberately: stopping first is irreversible, so the retired
+    // teardown path schedules the drain instead of a bare stop, and the
+    // control wrapper joins that same memoized work.
+    observer.stop();
+    await observer.drain();
+
+    expect(seen.some((entry) => entry.event.type === 'exit')).toBe(false);
+  });
+
+  it('gives up on a drain that will not settle instead of hanging teardown (desk#59)', async () => {
+    // Reading the committed store is a local filesystem operation: a read that
+    // has not settled is stuck, and holding a session's retirement open for it
+    // trades one lost record for a session that never finishes dying.
+    const root = await makeStore();
+    const body = eventBody([event('ready', 1, 1n)]);
+    await writeSlot(root, 0, body, commitRecord({ slot: 0, bytes: body, index: 1n, start: 1n, end: 2n }));
+
+    const { handlers } = collector();
+    const observer = await startObserver(root, handlers);
+
+    await expect(observer.drain(0)).resolves.toBe('unobservable');
+  });
+
+  it('reports an unreadable store as unobservable instead of inventing an exit (desk#59)', async () => {
+    const root = await makeStore();
+    const body = eventBody([event('ready', 1, 1n)]);
+    await writeSlot(root, 0, body, commitRecord({ slot: 0, bytes: body, index: 1n, start: 1n, end: 2n }));
+
+    const { seen, handlers } = collector();
+    const observer = await startObserver(root, handlers);
+    await rm(root, { recursive: true, force: true });
+
+    await expect(observer.drain()).resolves.toBe('unobservable');
+    // Nothing was fabricated for the missing evidence.
+    expect(seen.some((entry) => entry.event.type === 'exit')).toBe(false);
+  });
+
   it('fails closed on commit-index rollback: diagnostic, polling stops, no silent reset', async () => {
     const root = await makeStore();
     const first = eventBody([event('ready', 1, 1n)]);
