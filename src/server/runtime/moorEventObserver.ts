@@ -4,8 +4,11 @@
 // snapshot read is the replay phase (retained records, snapshots first), each
 // poll re-runs commit selection and advances the cursor for live records.
 // Cursor state is in-memory only: replay-vs-live is derived from the read
-// itself, so no sidecar offset file survives restarts. Any gap/corruption is
-// terminal for this observer — report a diagnostic and stop, never resync.
+// itself, so no sidecar offset file survives restarts. A gap or corruption of
+// COMMITTED CONTENT is terminal for this observer — report a diagnostic and
+// stop, never resync. A failure to READ the store is a different claim: it
+// says the directory was unreachable this instant, not that the session ended,
+// so it gets a bounded number of consecutive attempts first.
 
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -68,6 +71,12 @@ export interface MoorEventObserverOptions {
     bodyHash: Uint8Array;
   };
   pollIntervalMs?: number;
+  /**
+   * How many CONSECUTIVE store reads may fail before the observer gives up.
+   * Any successful read clears the count. Bounded on purpose: a store that is
+   * genuinely gone must still end the observer, just not on the first stumble.
+   */
+  maxConsecutiveReadFailures?: number;
   onEvent: (event: MoorSessionEvent, context: MoorEventContext) => void;
   onDiagnostic: (diagnostic: string) => void;
   /** The observer stopped TERMINALLY (gap/corruption/identity) after start. */
@@ -75,6 +84,14 @@ export interface MoorEventObserverOptions {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 200;
+
+/**
+ * Five consecutive failures at the default 200 ms interval means the store has
+ * been unreadable for a full second before the session is declared unobservable
+ * — long enough to ride out an interrupted syscall or a directory in flux,
+ * short enough that a truly vanished store is still noticed promptly.
+ */
+const DEFAULT_MAX_CONSECUTIVE_READ_FAILURES = 5;
 
 /**
  * The moor binary's OWN event-store root (unix.rs `root(invoked)`):
@@ -156,6 +173,8 @@ export class MoorEventObserver {
   private started = false;
   private stopped = false;
   private polling = false;
+  /** Consecutive failed store reads; any successful read resets it to zero. */
+  private readFailures = 0;
 
   constructor(options: MoorEventObserverOptions) {
     if (
@@ -164,6 +183,15 @@ export class MoorEventObserver {
     ) {
       // A zero/negative interval is a hot poll loop, not a configuration.
       throw new Error('moor event observer poll interval must be a positive integer');
+    }
+    if (
+      options.maxConsecutiveReadFailures !== undefined &&
+      (!Number.isSafeInteger(options.maxConsecutiveReadFailures) ||
+        options.maxConsecutiveReadFailures <= 0)
+    ) {
+      // A zero budget would retire on a failure the observer never even
+      // attempted to repeat — that is the defect this bound exists to fix.
+      throw new Error('moor event observer read-failure budget must be a positive integer');
     }
     this.options = options;
   }
@@ -252,7 +280,32 @@ export class MoorEventObserver {
     if (this.stopped || this.polling) return;
     this.polling = true;
     try {
-      const snapshot = await this.readSnapshot();
+      let snapshot;
+      try {
+        snapshot = await this.readSnapshot();
+      } catch (error) {
+        // A failed READ is a statement about reachability, not about committed
+        // content — an interrupted syscall, a directory momentarily out of
+        // reach, a store caught mid-commit. Retrying can genuinely succeed, so
+        // it does, a bounded number of times, each attempt reported. The one
+        // exception is an identity/frontier mismatch: that store was read
+        // perfectly well and belongs to somebody else, and no number of
+        // re-reads will make it ours.
+        if (error instanceof MoorStoreError && error.code === 'GENERATION_MISMATCH') throw error;
+        this.options.onDiagnostic(describe(error));
+        this.readFailures += 1;
+        if (
+          this.readFailures <
+          (this.options.maxConsecutiveReadFailures ?? DEFAULT_MAX_CONSECUTIVE_READ_FAILURES)
+        ) {
+          this.schedule();
+          return;
+        }
+        this.stop();
+        this.options.onTerminal?.();
+        return;
+      }
+      this.readFailures = 0;
       if (
         this.cursor !== undefined &&
         snapshot.commitIndex === this.cursor.commitIndex &&
@@ -266,7 +319,8 @@ export class MoorEventObserver {
       this.deliver(result.events, 'live');
       if (!result.streamExhausted) this.schedule();
     } catch (error) {
-      // Terminal: a gap, rollback, generation change, or corrupt store must
+      // Terminal: a gap, rollback, generation change, or corrupt store is a
+      // COMPLETED decision about content that was read successfully, and must
       // never be skipped over. Report, stop, and SIGNAL the owner — a live
       // session with no lifecycle observer is not an operable state.
       this.options.onDiagnostic(describe(error));
