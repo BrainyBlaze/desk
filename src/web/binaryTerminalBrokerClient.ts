@@ -85,8 +85,14 @@ interface BinarySurface {
    * MAX_PENDING_INPUT_AGE_MS — see bufferPendingInput (desk#46).
    */
   pendingInput?: { bytes: Uint8Array; binary: boolean }[];
+  /** Total payload bytes in pendingInput; maintained incrementally. */
+  pendingInputBytes?: number;
   /** Wall-clock time the oldest entry in pendingInput was queued. */
   pendingInputSince?: number;
+  /** Clears and visibly rejects a queue that never reaches an open channel. */
+  pendingInputTimer?: ReturnType<typeof setTimeout>;
+  /** Once a pending window is rejected, suppress its tail until an ACK opens a fresh window. */
+  pendingInputRejected?: boolean;
 }
 
 const OPEN = 1;
@@ -109,9 +115,9 @@ const TEXT_ENCODER = new TextEncoder();
 export class BinaryTerminalBrokerClient {
   private socket: BinaryBrokerSocket | undefined;
   private readonly surfaces = new Map<string, BinarySurface>(); // surfaceId -> surface
-  private readonly channelToSurface = new Map<number, string>(); // channelId -> surfaceId
+  private readonly channelToSurface = new Map<number, BinarySurface>(); // channelId -> exact surface incarnation
   /** Surfaces whose SUBSCRIBE is outstanding, in send order (FIFO ack pairing). */
-  private readonly pendingAcks: string[] = [];
+  private readonly pendingAcks: BinarySurface[] = [];
   private connected = false;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -210,29 +216,60 @@ export class BinaryTerminalBrokerClient {
    * buffered.
    */
   private bufferPendingInput(surface: BinarySurface, bytes: Uint8Array, binary: boolean): void {
+    if (bytes.length === 0 || surface.pendingInputRejected) {
+      return;
+    }
     const now = Date.now();
     const pending = surface.pendingInput ?? [];
-    const currentBytes = pending.reduce((sum, entry) => sum + entry.bytes.length, 0);
+    const currentBytes = surface.pendingInputBytes ?? 0;
     const age = surface.pendingInputSince === undefined ? 0 : now - surface.pendingInputSince;
-    const expired = pending.length > 0 && age > MAX_PENDING_INPUT_AGE_MS;
+    const expired = pending.length > 0 && age >= MAX_PENDING_INPUT_AGE_MS;
     const oversizedChunk = bytes.length > MAX_PENDING_INPUT_BYTES;
     const byteOverflow = currentBytes + bytes.length > MAX_PENDING_INPUT_BYTES;
     if (oversizedChunk || expired || byteOverflow) {
-      surface.pendingInput = undefined;
-      surface.pendingInputSince = undefined;
-      if (oversizedChunk || !expired) {
-        surface.handlers.onError?.(BpError.PAYLOAD_TOO_LARGE);
-      } else {
-        surface.handlers.onClientError(PENDING_INPUT_EXPIRED_MESSAGE);
-      }
-      if (oversizedChunk) {
-        return; // this one chunk can never fit the budget on its own — drop it too, already reported
-      }
+      this.rejectPendingInput(surface, expired ? 'expired' : 'overflow');
+      return;
     }
     if (!surface.pendingInput) {
       surface.pendingInputSince = now;
+      surface.pendingInputTimer = setTimeout(() => {
+        surface.pendingInputTimer = undefined;
+        if (
+          this.surfaces.get(surface.surfaceId) === surface &&
+          surface.pendingInput?.length
+        ) {
+          this.rejectPendingInput(surface, 'expired');
+        }
+      }, MAX_PENDING_INPUT_AGE_MS);
     }
     (surface.pendingInput ??= []).push({ bytes, binary });
+    surface.pendingInputBytes = currentBytes + bytes.length;
+  }
+
+  private rejectPendingInput(surface: BinarySurface, reason: 'overflow' | 'expired'): void {
+    if (surface.pendingInputRejected) {
+      return;
+    }
+    this.clearPendingInput(surface, false);
+    surface.pendingInputRejected = true;
+    if (reason === 'overflow') {
+      surface.handlers.onError?.(BpError.PAYLOAD_TOO_LARGE);
+    } else {
+      surface.handlers.onClientError(PENDING_INPUT_EXPIRED_MESSAGE);
+    }
+  }
+
+  private clearPendingInput(surface: BinarySurface, resetRejection = true): void {
+    if (surface.pendingInputTimer) {
+      clearTimeout(surface.pendingInputTimer);
+      surface.pendingInputTimer = undefined;
+    }
+    surface.pendingInput = undefined;
+    surface.pendingInputBytes = undefined;
+    surface.pendingInputSince = undefined;
+    if (resetRejection) {
+      surface.pendingInputRejected = false;
+    }
   }
 
   /** Flush input buffered while the channel was not yet open, in order. */
@@ -247,15 +284,13 @@ export class BinaryTerminalBrokerClient {
     // late channel finally opened.
     if (
       surface.pendingInputSince !== undefined &&
-      Date.now() - surface.pendingInputSince > MAX_PENDING_INPUT_AGE_MS
+      Date.now() - surface.pendingInputSince >= MAX_PENDING_INPUT_AGE_MS
     ) {
-      surface.pendingInput = undefined;
-      surface.pendingInputSince = undefined;
+      this.clearPendingInput(surface);
       surface.handlers.onClientError(PENDING_INPUT_EXPIRED_MESSAGE);
       return;
     }
-    surface.pendingInput = undefined;
-    surface.pendingInputSince = undefined;
+    this.clearPendingInput(surface);
     for (const { bytes, binary } of pending) {
       this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
     }
@@ -434,7 +469,7 @@ export class BinaryTerminalBrokerClient {
   /** Send a SUBSCRIBE and enqueue the surface for FIFO ack pairing. */
   private sendSubscribe(surface: BinarySurface): void {
     surface.awaitingAck = true;
-    this.pendingAcks.push(surface.surfaceId);
+    this.pendingAcks.push(surface);
     this.sendFrame({
       type: BpFrameType.SUBSCRIBE,
       sessionId: surface.sessionId,
@@ -457,8 +492,7 @@ export class BinaryTerminalBrokerClient {
     // Input queued for the channel being closed belongs to that channel's
     // context (hide, unsubscribe, or resync) — never replay it into whatever
     // channel a future (re)subscribe opens.
-    surface.pendingInput = undefined;
-    surface.pendingInputSince = undefined;
+    this.clearPendingInput(surface);
   }
 
   /** A gap / stale-baseline made this surface dirty: rebaseline via re-subscribe. */
@@ -521,14 +555,13 @@ export class BinaryTerminalBrokerClient {
   }
 
   private onSubscribeAck(channelId: number): void {
-    const surfaceId = this.pendingAcks.shift();
-    if (surfaceId === undefined) {
+    const surface = this.pendingAcks.shift();
+    if (surface === undefined) {
       return; // stray ack with no outstanding subscribe
     }
-    const surface = this.surfaces.get(surfaceId);
     // The surface was unsubscribed (or hidden) while its ACK was in flight: we
     // now own a channel with no live consumer — release it server-side.
-    if (!surface || !surface.visible) {
+    if (this.surfaces.get(surface.surfaceId) !== surface || !surface.visible) {
       if (this.connected) {
         this.sendFrame({ type: BpFrameType.UNSUBSCRIBE, channelId });
       }
@@ -537,25 +570,26 @@ export class BinaryTerminalBrokerClient {
       // refuses to re-subscribe while `awaitingAck` is true, so the cell would
       // come back with no channel, silently swallowing every keystroke and
       // showing no Reconnect affordance.
-      if (surface) {
-        surface.awaitingAck = false;
-        surface.pendingInput = undefined; // never replay into whatever channel comes next
-        surface.pendingInputSince = undefined;
-      }
+      surface.awaitingAck = false;
+      this.clearPendingInput(surface);
       return;
     }
     surface.channelId = channelId;
     surface.awaitingAck = false;
     surface.resync = new SubscriptionResync();
-    this.channelToSurface.set(channelId, surfaceId);
+    this.channelToSurface.set(channelId, surface);
     // A resize requested before the channel opened flushes now.
     this.flushResize(surface);
     // Keystrokes typed during the SUBSCRIBE round-trip flush now, in order.
-    this.flushInput(surface);
+    if (surface.pendingInputRejected) {
+      this.clearPendingInput(surface);
+    } else {
+      this.flushInput(surface);
+    }
   }
 
   private onSnapshot(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>): void {
-    const surface = this.channelToSurface.get(channelId) && this.surfaces.get(this.channelToSurface.get(channelId)!);
+    const surface = this.surfaceOf(channelId);
     if (!surface || !surface.resync) {
       return;
     }
@@ -601,11 +635,11 @@ export class BinaryTerminalBrokerClient {
     // A connection-channel ERROR right after a SUBSCRIBE is that subscribe
     // failing (e.g. ghost session): pair it FIFO so the queue stays aligned.
     if (channelId === BP_CONN_CHANNEL) {
-      const surfaceId = this.pendingAcks.shift();
-      if (surfaceId !== undefined) {
-        const surface = this.surfaces.get(surfaceId);
-        if (surface) {
-          surface.awaitingAck = false;
+      const surface = this.pendingAcks.shift();
+      if (surface !== undefined) {
+        surface.awaitingAck = false;
+        this.clearPendingInput(surface);
+        if (this.surfaces.get(surface.surfaceId) === surface) {
           surface.handlers.onError?.(code);
         }
         return;
@@ -620,8 +654,8 @@ export class BinaryTerminalBrokerClient {
   }
 
   private surfaceOf(channelId: number): BinarySurface | undefined {
-    const surfaceId = this.channelToSurface.get(channelId);
-    return surfaceId === undefined ? undefined : this.surfaces.get(surfaceId);
+    const surface = this.channelToSurface.get(channelId);
+    return surface && this.surfaces.get(surface.surfaceId) === surface ? surface : undefined;
   }
 
   private notifyConnection(up: boolean): void {
