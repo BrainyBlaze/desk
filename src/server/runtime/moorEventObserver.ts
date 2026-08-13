@@ -299,10 +299,9 @@ export class MoorEventObserver {
         // reach, a store caught mid-commit. Retrying can genuinely succeed. A
         // bounded initial run is reported attempt-by-attempt; after that the
         // observer is explicitly unavailable and quietly probes for recovery.
-        // The one exception is an identity/frontier mismatch: that store was
-        // read perfectly well and belongs to somebody else, and no number of
-        // re-reads will make it ours.
-        if (error instanceof MoorStoreError && error.code === 'GENERATION_MISMATCH') throw error;
+        // Any authoritative content or trust-boundary decision stays terminal;
+        // only the store reader's explicit unavailability result may retry.
+        if (!(error instanceof MoorStoreError) || error.code !== 'UNAVAILABLE') throw error;
         const message = describe(error);
         const threshold =
           this.options.maxConsecutiveReadFailures ?? DEFAULT_MAX_CONSECUTIVE_READ_FAILURES;

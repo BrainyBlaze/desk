@@ -12,6 +12,7 @@ export enum MoorStoreKind {
 
 export type MoorStoreErrorCode =
   | 'CORRUPT'
+  | 'UNAVAILABLE'
   | 'GENERATION_MISMATCH'
   | 'COMPACTION_GAP'
   | 'CURSOR_AHEAD';
@@ -87,10 +88,25 @@ const EXIT_LIMIT = 4 << 20;
 const EVENT_END = 1n << 53n;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const decoder = new TextDecoder('utf-8', { fatal: true });
+const UNAVAILABLE_ERRNO_CODES = new Set([
+  'EACCES',
+  'EAGAIN',
+  'EBUSY',
+  'EINTR',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOENT',
+  'ENOMEM',
+  'EPERM',
+  'ESTALE',
+  'ETIMEDOUT'
+]);
 
 interface CandidateRead {
   readonly candidate?: MoorStoreSnapshot;
   readonly generationMismatch: boolean;
+  readonly unavailable?: boolean;
 }
 
 const EVENT_SCHEMAS: Readonly<Record<string, string>> = {
@@ -148,9 +164,6 @@ export async function readMoorStoreSnapshot(
     requireProtected(pathDirectory, 0o700, true);
     requireSameFile(pathDirectory, openedDirectory);
 
-    const slotFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
-    for (const name of SLOT_NAMES) slots.push(await open(join(directory, name), slotFlags));
-
     const entries = await readdir(directory);
     if (
       entries.length !== SLOT_NAMES.length ||
@@ -159,6 +172,9 @@ export async function readMoorStoreSnapshot(
     ) {
       corrupt('store directory must contain exactly four slots');
     }
+
+    const slotFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+    for (const name of SLOT_NAMES) slots.push(await open(join(directory, name), slotFlags));
     for (let index = 0; index < SLOT_NAMES.length; index += 1) {
       const path = join(directory, SLOT_NAMES[index]!);
       const [pathMetadata, handleMetadata] = await Promise.all([lstat(path), slots[index]!.stat()]);
@@ -172,6 +188,9 @@ export async function readMoorStoreSnapshot(
     ]);
     const candidates = reads.flatMap((read) => (read.candidate === undefined ? [] : [read.candidate]));
     if (candidates.length === 0) {
+      if (reads.some((read) => read.unavailable)) {
+        throw new MoorStoreError('UNAVAILABLE', 'Moor store is temporarily unreadable');
+      }
       if (reads.some((read) => read.generationMismatch)) {
         throw new MoorStoreError(
           'GENERATION_MISMATCH',
@@ -193,9 +212,18 @@ export async function readMoorStoreSnapshot(
     return copySnapshot(candidates[0]!);
   } catch (error) {
     if (error instanceof MoorStoreError) throw error;
-    throw new MoorStoreError('CORRUPT', 'failed to open or validate Moor store', {
-      cause: error
-    });
+    const code = errnoCode(error);
+    if (code === 'ELOOP' || code === 'ENOTDIR') {
+      throw new MoorStoreError('CORRUPT', 'Moor store path violates the filesystem trust boundary', {
+        cause: error
+      });
+    }
+    if (code !== undefined && UNAVAILABLE_ERRNO_CODES.has(code)) {
+      throw new MoorStoreError('UNAVAILABLE', 'failed to read Moor store', {
+        cause: error
+      });
+    }
+    throw new MoorStoreError('CORRUPT', 'failed to validate Moor store', { cause: error });
   } finally {
     await Promise.allSettled([...slots, ...(directoryHandle === undefined ? [] : [directoryHandle])].map((file) => file.close()));
   }
@@ -412,8 +440,14 @@ async function readCandidate(
       candidate: { commit: copyCommit(commit), bytes: bytes.slice() },
       generationMismatch: false
     };
-  } catch {
-    return { generationMismatch: false };
+  } catch (error) {
+    const code = errnoCode(error);
+    return {
+      generationMismatch: false,
+      unavailable:
+        (error instanceof MoorStoreError && error.code === 'UNAVAILABLE') ||
+        (code !== undefined && UNAVAILABLE_ERRNO_CODES.has(code))
+    };
   }
 }
 
@@ -647,7 +681,9 @@ async function readExact(file: FileHandle, length: number): Promise<Uint8Array> 
   let offset = 0;
   while (offset < length) {
     const read = await file.read(bytes, offset, length - offset, offset);
-    if (read.bytesRead === 0) throw new Error('unexpected EOF');
+    if (read.bytesRead === 0) {
+      throw new MoorStoreError('UNAVAILABLE', 'Moor store slot changed while it was read');
+    }
     offset += read.bytesRead;
   }
   return bytes;
@@ -768,4 +804,9 @@ function isZero(bytes: Uint8Array): boolean {
 
 function corrupt(message: string): never {
   throw new MoorStoreError('CORRUPT', message);
+}
+
+function errnoCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  return typeof error.code === 'string' ? error.code : undefined;
 }
