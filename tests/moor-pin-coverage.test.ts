@@ -36,6 +36,44 @@ const CONTRACT_ASSETS: Record<string, string> = {
   'aarch64-pc-windows-msvc': 'moor-aarch64-pc-windows-msvc.exe'
 };
 
+// Workflow 31750058794, immutable artifact 9200843447 at f1bd230bdaf0a7a476f4069a95a2cee77996ab48.
+// Keep this literal so Desk's own deferred-triple constant cannot make the witness self-confirming.
+const AUTHORITATIVE_HOSTED_ONLY_COVERAGE = {
+  requiredClosure: 'hosted-only',
+  unverified: [
+    {
+      target: 'x86_64-pc-windows-msvc',
+      gate: 'compatibility',
+      lane: 'windows-10-1809-x64'
+    },
+    {
+      target: 'x86_64-pc-windows-msvc',
+      gate: 'compatibility',
+      lane: 'windows-server-2019-x64'
+    },
+    {
+      target: 'x86_64-pc-windows-msvc',
+      gate: 'native-conformance',
+      lane: 'windows-10-1809-x64'
+    },
+    {
+      target: 'x86_64-pc-windows-msvc',
+      gate: 'native-conformance',
+      lane: 'windows-server-2019-x64'
+    },
+    {
+      target: 'x86_64-unknown-linux-musl',
+      gate: 'compatibility',
+      lane: 'wsl1-ubuntu-22.04-x64'
+    },
+    {
+      target: 'x86_64-unknown-linux-musl',
+      gate: 'compatibility',
+      lane: 'wsl2-ubuntu-22.04-x64'
+    }
+  ]
+} as const;
+
 function pinWith(coverage: unknown, overrides: Record<string, unknown> = {}) {
   const pin: Record<string, unknown> = {
     schemaVersion: MOOR_PIN_SCHEMA_VERSION,
@@ -223,20 +261,9 @@ describe('moor pin coverage (desk#60)', () => {
     ).toThrow(/contradicts its own list/);
   });
 
-  it('accepts the whole deferred set as hosted-only', () => {
-    const parse = (triple: string) => {
-      const [target, gate, lane] = triple.split('/');
-      return { target, gate, lane };
-    };
-    const pin = readMoorPin(
-      write(
-        pinWith({
-          requiredClosure: 'hosted-only',
-          unverified: MOOR_DEFERRED_TRIPLES.map(parse)
-        })
-      )
-    );
-    expect(pin.coverage.unverified).toHaveLength(6);
+  it('preserves the authoritative hosted-only candidate coverage verbatim', () => {
+    const pin = readMoorPin(write(pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE)));
+    expect(pin.coverage).toEqual(AUTHORITATIVE_HOSTED_ONLY_COVERAGE);
   });
 
   it('refuses an unverified entry that is not a real matrix triple', () => {
@@ -274,6 +301,22 @@ describe('narrowed coverage is an operator decision (desk#60)', () => {
 
   it('installs a narrowed candidate only when the operator says so by name', () => {
     const pin = readMoorPin(write(pinWith(narrowed)));
+    expect(() => assertCoverageAcceptable(pin, { allowNarrowed: true })).not.toThrow();
+  });
+
+  it('refuses the authoritative hosted-only candidate unless explicitly approved', () => {
+    const pin = readMoorPin(write(pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE)));
+    let diagnostic = '';
+    try {
+      assertCoverageAcceptable(pin, { allowNarrowed: false });
+    } catch (error) {
+      diagnostic = String(error);
+    }
+
+    expect(diagnostic).toContain('not full-matrix');
+    for (const entry of AUTHORITATIVE_HOSTED_ONLY_COVERAGE.unverified) {
+      expect(diagnostic).toContain(`${entry.target}/${entry.gate}/${entry.lane}`);
+    }
     expect(() => assertCoverageAcceptable(pin, { allowNarrowed: true })).not.toThrow();
   });
 
@@ -340,23 +383,11 @@ describe('the release builder refuses a pin that cannot state its closure (desk#
     expect(() => validateMoorPin(legacy)).toThrow(/predates release coverage/);
   });
 
-  it('refuses to publish a release from a narrowed candidate', async () => {
+  it('refuses to publish the authoritative hosted-only candidate', async () => {
     const { validateMoorPin } = await import('../scripts/create-release-assets.mjs');
     // A developer may install a narrowed candidate deliberately; end users must
     // never receive one baked into a release asset.
-    const narrowed = {
-      schemaVersion: MOOR_PIN_SCHEMA_VERSION,
-      repository: MOOR_RELEASE_REPOSITORY,
-      version: 'v0.1.0',
-      commit: 'b'.repeat(40),
-      coverage: {
-        requiredClosure: 'partial',
-        unverified: [
-          { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' }
-        ]
-      },
-      targets: {}
-    };
+    const narrowed = pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE);
     expect(() => validateMoorPin(narrowed)).toThrow(/full-matrix/);
   });
 });
@@ -387,8 +418,8 @@ describe('the public fetch path refuses fail-open approval (desk#60)', () => {
     }
   );
 
-  it('still refuses a narrowed candidate when approval is simply absent', async () => {
-    write(pinWith(narrowed));
+  it('still refuses the authoritative hosted-only candidate when approval is absent', async () => {
+    write(pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE));
     await expect(fetchMoor({ root })).rejects.toThrow(/not full-matrix/);
   });
 });
