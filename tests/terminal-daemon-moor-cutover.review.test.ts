@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request, type IncomingMessage } from 'node:http';
@@ -487,6 +487,8 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     });
     await Promise.resolve();
 
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.lifecycle).toBe('exited');
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.exit?.code).toBe(0);
     expect(existsSync(storeDir)).toBe(true);
     writeFileSync(join(storeDir, 'body.0'), 'corrupt');
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -494,7 +496,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     daemon.dispose();
   });
 
-  it('retires a live session when its event observer stops on terminal store failure', async () => {
+  it('keeps a live session and restores observation after persistent store unavailability', async () => {
     const diagnostics: string[] = [];
     const daemon = createTerminalDaemon({
       homeRoot: home,
@@ -502,10 +504,10 @@ describe('terminal daemon Moor cutover adversarial review', () => {
       moorSocketRoot: home,
       httpServer: new FakeUpgradeServer(),
       moorEventPollIntervalMs: 10,
-      onMoorEventDiagnostic: ({ diagnostic }) => diagnostics.push(diagnostic.message)
+      onMoorEventDiagnostic: ({ diagnostic }) => diagnostics.push(diagnostic.code)
     });
     let storeDir = '';
-    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
+    const spawn = vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
       async (sessionId, options) => {
         const ensured = daemon.router.sessions.ensure(
           sessionId,
@@ -518,7 +520,9 @@ describe('terminal daemon Moor cutover adversarial review', () => {
           generation: ensured.generation
         });
         storeDir = prepared!.storeDir!;
-        const frontier = writeMoorStore(storeDir, ensured.generation, options.sessionPath);
+        const frontier = writeMoorStore(storeDir, ensured.generation, options.sessionPath, [
+          '{\"type\":\"ready\",\"ts\":2,\"epoch\":0,\"seq\":0,\"kind\":\"transition\"}\n'
+        ]);
         return {
           ...ensured,
           moorStatus: fakeMoorStatus(
@@ -530,20 +534,39 @@ describe('terminal daemon Moor cutover adversarial review', () => {
         };
       }
     );
+    const retire = vi.spyOn(daemon.router.sessions, 'retireGenerationAwaited');
 
-    await daemon.provision('sess-1', {
+    const provisioned = await daemon.provision('sess-1', {
       command: ['bash'],
       geometry: { rows: 24, cols: 80 },
       subject: { kind: 'terminal' }
     });
-    expect(daemon.router.sessions.stateSnapshot('sess-1')).toBeDefined();
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.lifecycle).not.toBe('exited');
 
-    rmSync(storeDir, { recursive: true, force: true });
-    await waitFor(() => diagnostics.length > 0, 'terminal observer diagnostic');
-    await waitFor(() => {
-      const snapshot = daemon.router.sessions.stateSnapshot('sess-1');
-      return snapshot === undefined || snapshot.lifecycle === 'exited';
-    }, 'session retirement');
+    const unavailableStore = `${storeDir}.unavailable`;
+    renameSync(storeDir, unavailableStore);
+    await waitFor(
+      () => diagnostics.includes('observer-unavailable'),
+      'explicit observer-unavailable diagnostic'
+    );
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(retire).not.toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(diagnostics.filter((code) => code === 'observer-unavailable')).toHaveLength(1);
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.generation).toBe(provisioned.generation);
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.lifecycle).not.toBe('exited');
+
+    renameSync(unavailableStore, storeDir);
+    await waitFor(
+      () => diagnostics.includes('observer-recovered'),
+      'observer recovery after the store returns'
+    );
+    expect(retire).not.toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(diagnostics.filter((code) => code === 'observer-recovered')).toHaveLength(1);
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.generation).toBe(provisioned.generation);
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.lifecycle).not.toBe('exited');
     daemon.dispose();
   });
 
@@ -558,6 +581,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
       onMoorEventDiagnostic: ({ diagnostic }) => diagnostics.push(diagnostic.message)
     });
     let storeDir = '';
+    let observedGeneration = 0;
     vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
       async (sessionId, options) => {
         const ensured = daemon.router.sessions.ensure(
@@ -566,6 +590,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
           options.subject ?? { kind: 'terminal' }
         );
         if (!ensured.ok) return ensured;
+        observedGeneration = ensured.generation;
         const prepared = await options.prepareSpawn?.({
           sessionId,
           generation: ensured.generation
@@ -598,7 +623,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
       subject: { kind: 'terminal' }
     });
 
-    writeFileSync(join(storeDir, 'body.0'), 'corrupt');
+    writeMoorStore(storeDir, observedGeneration, join(home, 'different-session'));
     await waitFor(() => diagnostics.length > 0, 'terminal observer diagnostic');
     await waitFor(() => retire.mock.calls.length > 0, 'retirement attempt');
 

@@ -823,12 +823,27 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       },
       onDiagnostic: (message) =>
         reportMoorDiagnostic(diagnosticIdentity, { code: 'tailer-io', message }),
+      onAvailabilityChange: (availability) => {
+        const registered = eventObservers.get(sessionId);
+        if (registered === undefined || registered.observer !== storeObserver) return;
+        reportMoorDiagnostic(diagnosticIdentity, {
+          code:
+            availability.status === 'unavailable'
+              ? 'observer-unavailable'
+              : 'observer-recovered',
+          message:
+            availability.status === 'unavailable'
+              ? `event-store observation unavailable after ${availability.consecutiveReadFailures} consecutive read failures: ${availability.message}`
+              : 'event-store observation recovered'
+        });
+      },
       onTerminal: () => {
-        // A live session with no lifecycle observer is not operable — but a
-        // STALE observer's late terminal callback must never touch a
-        // successor: everything is guarded by the current registration, the
-        // retirement is exact-generation, and the store is left in place
-        // (§11.6: cleanup of a published store belongs to the holder).
+        // This callback carries an authoritative cursor/identity/content
+        // contradiction, never mere store unreadability. A STALE observer's
+        // late terminal callback must never touch a successor: everything is
+        // guarded by the current registration, the retirement is
+        // exact-generation, and the store is left in place (§11.6: cleanup
+        // of a published store belongs to the holder).
         const registered = eventObservers.get(sessionId);
         if (registered === undefined || registered.observer !== storeObserver) {
           return;

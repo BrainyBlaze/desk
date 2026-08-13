@@ -8,7 +8,8 @@
 // COMMITTED CONTENT is terminal for this observer — report a diagnostic and
 // stop, never resync. A failure to READ the store is a different claim: it
 // says the directory was unreachable this instant, not that the session ended,
-// so it gets a bounded number of consecutive attempts first.
+// so a bounded number of consecutive failures marks observation unavailable;
+// polling continues until the same store becomes readable again.
 
 import type { MoorExitOutcome } from '../../shared/controlPlane/contract.js';
 import { createHash } from 'node:crypto';
@@ -78,6 +79,8 @@ export type MoorEventDiagnosticCode =
   | 'line-too-long'
   | 'unterminated-line'
   | 'tailer-io'
+  | 'observer-unavailable'
+  | 'observer-recovered'
   | 'consumer-error';
 
 export interface MoorEventDiagnostic {
@@ -89,6 +92,10 @@ export interface MoorEventContext {
   phase: 'replay' | 'live';
   kind: 'transition' | 'snapshot';
 }
+
+export type MoorEventObserverAvailability =
+  | { status: 'unavailable'; consecutiveReadFailures: number; message: string }
+  | { status: 'available' };
 
 export interface MoorEventObserverOptions {
   directory: string;
@@ -113,14 +120,16 @@ export interface MoorEventObserverOptions {
   };
   pollIntervalMs?: number;
   /**
-   * How many CONSECUTIVE store reads may fail before the observer gives up.
-   * Any successful read clears the count. Bounded on purpose: a store that is
-   * genuinely gone must still end the observer, just not on the first stumble.
+   * How many CONSECUTIVE store reads may fail before observation is declared
+   * unavailable. Any successful read clears the count and restores available
+   * state; unavailability never claims that the holder or session died.
    */
   maxConsecutiveReadFailures?: number;
   onEvent: (event: MoorSessionEvent, context: MoorEventContext) => void;
   onDiagnostic: (diagnostic: string) => void;
-  /** The observer stopped TERMINALLY (gap/corruption/identity) after start. */
+  /** Availability transitions caused only by failed/successful store reads. */
+  onAvailabilityChange?: (availability: MoorEventObserverAvailability) => void;
+  /** The observer stopped on an authoritative cursor/identity/content contradiction. */
   onTerminal?: () => void;
 }
 
@@ -134,9 +143,9 @@ const DEFAULT_POLL_INTERVAL_MS = 200;
 
 /**
  * Five consecutive failures at the default 200 ms interval means the store has
- * been unreadable for a full second before the session is declared unobservable
- * — long enough to ride out an interrupted syscall or a directory in flux,
- * short enough that a truly vanished store is still noticed promptly.
+ * been unreadable for a full second before observation is declared unavailable.
+ * Polling then continues so the same observer can recover without replacing or
+ * retiring the holder.
  */
 const DEFAULT_MAX_CONSECUTIVE_READ_FAILURES = 5;
 
@@ -220,6 +229,7 @@ export class MoorEventObserver {
   private polling = false;
   /** Consecutive failed store reads; any successful read resets it to zero. */
   private readFailures = 0;
+  private unavailable = false;
   /** desk#59 — fences a drain read that completes after its own deadline. */
   private drainEpoch = 0;
 
@@ -236,9 +246,9 @@ export class MoorEventObserver {
       (!Number.isSafeInteger(options.maxConsecutiveReadFailures) ||
         options.maxConsecutiveReadFailures <= 0)
     ) {
-      // A zero budget would retire on a failure the observer never even
-      // attempted to repeat — that is the defect this bound exists to fix.
-      throw new Error('moor event observer read-failure budget must be a positive integer');
+      // A zero threshold cannot distinguish a transient read stumble from a
+      // persistent observation outage.
+      throw new Error('moor event observer read-failure threshold must be a positive integer');
     }
     this.options = options;
   }
@@ -401,26 +411,37 @@ export class MoorEventObserver {
       } catch (error) {
         // A failed READ is a statement about reachability, not about committed
         // content — an interrupted syscall, a directory momentarily out of
-        // reach, a store caught mid-commit. Retrying can genuinely succeed, so
-        // it does, a bounded number of times, each attempt reported. The one
-        // exception is an identity/frontier mismatch: that store was read
-        // perfectly well and belongs to somebody else, and no number of
+        // reach, a store caught mid-commit. Retrying can genuinely succeed. A
+        // bounded initial run is reported attempt-by-attempt; after that the
+        // observer is explicitly unavailable and quietly probes for recovery.
+        // The one exception is an identity/frontier mismatch: that store was
+        // read perfectly well and belongs to somebody else, and no number of
         // re-reads will make it ours.
         if (error instanceof MoorStoreError && error.code === 'GENERATION_MISMATCH') throw error;
-        this.options.onDiagnostic(describe(error));
-        this.readFailures += 1;
-        if (
-          this.readFailures <
-          (this.options.maxConsecutiveReadFailures ?? DEFAULT_MAX_CONSECUTIVE_READ_FAILURES)
-        ) {
-          this.schedule();
-          return;
+        const message = describe(error);
+        const threshold =
+          this.options.maxConsecutiveReadFailures ?? DEFAULT_MAX_CONSECUTIVE_READ_FAILURES;
+        if (!this.unavailable) {
+          this.options.onDiagnostic(message);
+          this.readFailures += 1;
+          if (this.readFailures >= threshold) {
+            this.readFailures = threshold;
+            this.unavailable = true;
+            this.notifyAvailability({
+              status: 'unavailable',
+              consecutiveReadFailures: threshold,
+              message
+            });
+          }
         }
-        this.stop();
-        this.options.onTerminal?.();
+        this.schedule();
         return;
       }
       this.readFailures = 0;
+      if (this.unavailable) {
+        this.unavailable = false;
+        this.notifyAvailability({ status: 'available' });
+      }
       if (
         this.cursor !== undefined &&
         snapshot.commitIndex === this.cursor.commitIndex &&
@@ -434,10 +455,10 @@ export class MoorEventObserver {
       this.deliver(result.events, 'live');
       if (!result.streamExhausted) this.schedule();
     } catch (error) {
-      // Terminal: a gap, rollback, generation change, or corrupt store is a
-      // COMPLETED decision about content that was read successfully, and must
-      // never be skipped over. Report, stop, and SIGNAL the owner — a live
-      // session with no lifecycle observer is not an operable state.
+      // Terminal: a cursor gap/rollback or generation, identity, or frontier
+      // contradiction is a COMPLETED decision about content that was read
+      // successfully, and must never be skipped over. Report, stop, and signal
+      // the owner; mere read unavailability never reaches this path.
       this.options.onDiagnostic(describe(error));
       this.stop();
       this.options.onTerminal?.();
@@ -457,6 +478,14 @@ export class MoorEventObserver {
         // it and keep delivering the remaining committed records.
         this.options.onDiagnostic(describe(error));
       }
+    }
+  }
+
+  private notifyAvailability(availability: MoorEventObserverAvailability): void {
+    try {
+      this.options.onAvailabilityChange?.(availability);
+    } catch (error) {
+      this.options.onDiagnostic(`observer availability callback failed: ${describe(error)}`);
     }
   }
 }
