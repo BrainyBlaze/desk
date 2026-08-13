@@ -66,6 +66,44 @@ export const MOOR_TARGETS = Object.freeze([
 const DOWNLOAD_DEADLINE_MS = 60_000;
 const MAX_ASSET_BYTES = 64 * 1024 * 1024; // no holder build approaches this
 
+function parseJsonRejectingDuplicateKeys(source) {
+  const value = JSON.parse(source);
+  // JSON.parse establishes the grammar first; this token walk retains object
+  // members that the parsed value would collapse before exact-key validation.
+  const tokens = source.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g) ?? [];
+  let tokenIndex = 0;
+  const visitValue = () => {
+    const token = tokens[tokenIndex++];
+    if (token === '[') {
+      if (tokens[tokenIndex] === ']') {
+        tokenIndex += 1;
+        return;
+      }
+      while (true) {
+        visitValue();
+        if (tokens[tokenIndex++] === ']') return;
+      }
+    }
+    if (token !== '{') return;
+    const keys = new Set();
+    if (tokens[tokenIndex] === '}') {
+      tokenIndex += 1;
+      return;
+    }
+    while (true) {
+      const key = JSON.parse(tokens[tokenIndex++]);
+      if (keys.has(key)) throw new Error(`duplicate JSON key: ${key}`);
+      keys.add(key);
+      tokenIndex += 1; // colon; JSON.parse above already established valid syntax
+      visitValue();
+      if (tokens[tokenIndex++] === '}') return;
+    }
+  };
+
+  visitValue();
+  return value;
+}
+
 /**
  * The canonical target key for a host — the ratified 6-key matrix (no libc
  * detection: linux ships one static-musl binary per CPU that also serves
@@ -196,7 +234,7 @@ export function readMoorPin(root = DEFAULT_ROOT) {
       `no pinned moor release: ${PIN_RELATIVE_PATH} is absent — the moor release lane has not published/pinned yet`
     );
   }
-  const pin = JSON.parse(readFileSync(path, 'utf8'));
+  const pin = parseJsonRejectingDuplicateKeys(readFileSync(path, 'utf8'));
   // The schema version is diagnosed FIRST: a real pre-coverage pin carries both
   // the old version and no coverage, and reporting that as a generic key-set
   // mismatch hides the one fact the operator needs — that the pin predates

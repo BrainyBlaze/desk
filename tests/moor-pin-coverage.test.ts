@@ -41,7 +41,7 @@ function pinWith(coverage: unknown, overrides: Record<string, unknown> = {}) {
     schemaVersion: MOOR_PIN_SCHEMA_VERSION,
     repository: MOOR_RELEASE_REPOSITORY,
     version: 'v0.1.0',
-    commit: 'b57e094'.padEnd(40, '0'),
+    commit: 'f1bd230bdaf0a7a476f4069a95a2cee77996ab48',
     coverage,
     targets: Object.fromEntries(
       (MOOR_TARGETS as readonly string[]).map((triple) => {
@@ -65,8 +65,12 @@ function pinWith(coverage: unknown, overrides: Record<string, unknown> = {}) {
 let root: string;
 
 function write(pin: unknown): string {
+  return writeSource(JSON.stringify(pin));
+}
+
+function writeSource(source: string): string {
   mkdirSync(join(root, 'scripts', 'distribution'), { recursive: true });
-  writeFileSync(join(root, PIN_RELATIVE_PATH), JSON.stringify(pin));
+  writeFileSync(join(root, PIN_RELATIVE_PATH), source);
   return root;
 }
 
@@ -114,6 +118,17 @@ describe('moor pin coverage (desk#60)', () => {
     expect(() => readMoorPin(write(pinWith({ requiredClosure: 'mostly' })))).toThrow(
       /requiredClosure/
     );
+  });
+
+  it.each([
+    ['literal', '"requiredClosure":"hosted-only","requiredClosure":"full-matrix"'],
+    ['escaped', '"required\\u0043losure":"hosted-only","requiredClosure":"full-matrix"']
+  ])('refuses %s duplicate coverage discriminators before JSON parsing can collapse them', (_label, duplicate) => {
+    const source = JSON.stringify(pinWith({ requiredClosure: 'full-matrix' })).replace(
+      '"requiredClosure":"full-matrix"',
+      duplicate
+    );
+    expect(() => readMoorPin(writeSource(source))).toThrow(/duplicate JSON key: requiredClosure/);
   });
 
   it('refuses full-matrix that still lists unverified lanes', () => {

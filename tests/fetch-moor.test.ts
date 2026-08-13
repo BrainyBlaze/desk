@@ -1,5 +1,5 @@
 // Binding tests for the moor acquirer against the reviewed release contract
-// (moor repo docs/release-manifest-v1.md @ b57e094): the Desk pin projection's
+// (moor repo docs/release-manifest-v1.md @ f1bd230): the Desk pin projection's
 // exact key sets, the six literal v0.1.0 asset filenames, the production URL
 // derivation, and the fail-closed download/verify/install pipeline over an
 // explicit file:// fixture base (the contract's candidate-override mechanism).
@@ -41,7 +41,7 @@ function pinFor(bytesByTarget: Record<string, Buffer>) {
     // exercise the full frozen matrix, so they carry the full-matrix closure.
     coverage: { requiredClosure: 'full-matrix' },
     version: 'v0.1.0',
-    commit: 'b57e094'.padEnd(40, '0'),
+    commit: 'f1bd230bdaf0a7a476f4069a95a2cee77996ab48',
     targets: Object.fromEntries(
       (MOOR_TARGETS as readonly string[]).map((triple) => {
         const bytes = bytesByTarget[triple] ?? Buffer.from(`binary for ${triple}`);
@@ -70,7 +70,7 @@ function writeFixture(root: string, pin: unknown, bytesByTarget: Record<string, 
   return pathToFileURL(assets).href;
 }
 
-describe('moor acquirer × reviewed release contract (b57e094)', () => {
+describe('moor acquirer × reviewed release contract (f1bd230)', () => {
   it('accepts the contract pin projection and derives the production URL exactly', () => {
     const root = mkdtempSync(join(tmpdir(), 'moor-pin-'));
     try {
