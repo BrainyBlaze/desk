@@ -529,7 +529,7 @@ button.statusSegment:hover {
   opacity: 0.45;
 }
 
-/* Toast stack — above modals (z 12) and the drawer (z 9): always on top. */
+/* Toast stack — above modals (z 45) and the drawer (z 9): always on top. */
 .toastStack {
   position: fixed;
   top: 92px;
@@ -1045,7 +1045,7 @@ select:focus {
 }
 
 /* Portalled to <body>: fixed in viewport space at the trigger rect, above the
-   modal scrim (z 12) so it is never clipped by the modal frame or body overflow.
+   modal scrim (z 45) so it is never clipped by the modal frame or body overflow.
    Inline styles set left/top/width; right is cleared so width wins. */
 .deskSelectPanelPortal {
   position: fixed;
@@ -1434,10 +1434,15 @@ select:focus {
   box-shadow: none;
 }
 
+/* The modal layer. A dialog owns the pointer while it is open, so its scrim
+   must outrank every in-surface overlay it shares .deskContent's stacking
+   context with — the responsive sidebar drawer (z 24) and its scrim (z 20),
+   the engine console overlay (z 40), the mention popover (z 30). Only the
+   toast stack (z 50) and the portalled select panel (z 1000) stay above it. */
 .modalScrim {
   position: absolute;
   inset: 0;
-  z-index: 12;
+  z-index: 45;
   display: grid;
   place-items: center;
   padding: 24px;
