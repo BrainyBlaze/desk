@@ -956,6 +956,60 @@ export function MessageList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cursorId, rows]);
 
+  // Lists with no reducer (thread pane, filtered view) bring the cursor into
+  // view themselves. A one-shot rAF loses the race twice — an unrelated
+  // re-render cancels it, and late markdown heights drift the row after it — so
+  // re-assert until the row's position holds. Restarts only on a genuine cursor
+  // change; a mid-flight re-render must not abort it.
+  const cursorScrollRafRef = useRef<number | null>(null);
+  const cursorScrolledRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (onFeedEvent) {
+      return;
+    }
+    if (!cursorId) {
+      cursorScrolledRef.current = null;
+      return;
+    }
+    if (cursorScrolledRef.current === cursorId || !rowElementById(cursorId)) {
+      return;
+    }
+    cursorScrolledRef.current = cursorId;
+    if (cursorScrollRafRef.current !== null) {
+      window.cancelAnimationFrame(cursorScrollRafRef.current);
+    }
+    let frames = 0;
+    let lastTop = Number.NaN;
+    let stable = 0;
+    const settle = (): void => {
+      cursorScrollRafRef.current = null;
+      const el = rowElementById(cursorId);
+      if (!el) {
+        return;
+      }
+      scrollToMessage(cursorId, 'center');
+      const top = Math.round(el.getBoundingClientRect().top);
+      stable = Math.abs(top - lastTop) <= 1 ? stable + 1 : 0;
+      lastTop = top;
+      frames += 1;
+      if (stable >= 3 || frames >= 20) {
+        return;
+      }
+      cursorScrollRafRef.current = window.requestAnimationFrame(settle);
+    };
+    settle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cursorId, rows, onFeedEvent]);
+
+  useEffect(
+    () => () => {
+      if (cursorScrollRafRef.current !== null) {
+        window.cancelAnimationFrame(cursorScrollRafRef.current);
+      }
+    },
+    []
+  );
+
   const renderVirtualRow = (row: MessageListRow): JSX.Element => {
     if (row.kind === 'day') {
       return (
