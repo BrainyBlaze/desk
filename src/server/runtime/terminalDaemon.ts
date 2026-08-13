@@ -103,7 +103,11 @@ import {
   type ProviderSessionResetResult as ProviderSessionAuthorizationResetResult
 } from '../providerSessionReset.js';
 import { readProviderSessionBinding } from '../providerSessionBinding.js';
-import { archiveMoorGenerationStores } from './moorGenerationStores.js';
+import {
+  archiveMoorGenerationStores,
+  readMoorGenerationExitEvidence,
+  type MoorGenerationExitEvidence
+} from './moorGenerationStores.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -237,6 +241,8 @@ export interface TerminalDaemon {
   tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
   /** Latest generation-bound terminal observation, independent of semantic authority. */
   terminalObservation(sessionId: string): TerminalObservationSnapshot | undefined;
+  /** Retained predecessor lifecycle exits, newest generation first. */
+  moorExitEvidence(sessionId: string): Promise<readonly MoorGenerationExitEvidence[]>;
   /** Re-open a surviving generation's event sink after daemon restart. */
   reconcileMoorEvents(sessionId: string, generation: number): Promise<boolean>;
   /** §10.2.13 committed-log clear over the live moor link — full result algebra. */
@@ -927,6 +933,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     terminalObservation(sessionId) {
       return router.sessions.terminalObservation(sessionId);
     },
+    moorExitEvidence(sessionId) {
+      return readMoorGenerationExitEvidence(socketPath(sessionId));
+    },
     async reconcileMoorEvents(sessionId, generation) {
       // Restart reconciliation re-observes the surviving holder's committed
       // event store for the ADOPTED generation under the SAME OB-39 authority
@@ -1227,6 +1236,7 @@ export function createDaemonControlHandler(
     | 'clearSessionLog'
     | 'moorSessionStatus'
     | 'terminalObservation'
+    | 'moorExitEvidence'
     | 'agentEndpoint'
     | 'activateAgentEndpoint'
     | 'agentEvent'
@@ -1656,11 +1666,16 @@ export function createDaemonControlHandler(
             return;
           }
           const observation = daemon.terminalObservation(sessionId);
-          if (observation === undefined) {
+          const exitEvidence = await daemon.moorExitEvidence(sessionId);
+          if (observation === undefined && exitEvidence.length === 0) {
             sendJson(res, 404, { ok: false, error: `no such session: ${sessionId}` });
             return;
           }
-          sendJson(res, 200, { ok: true, observation });
+          sendJson(res, 200, {
+            ok: true,
+            observation: observation ?? null,
+            exitEvidence
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/agent-event') {

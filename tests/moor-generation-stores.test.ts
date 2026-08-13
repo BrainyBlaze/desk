@@ -17,10 +17,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { IncomingMessage } from 'node:http';
-import type { Duplex } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { PassThrough, type Duplex } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createTerminalDaemon } from '../src/server/runtime/terminalDaemon.js';
+import {
+  createDaemonControlHandler,
+  createTerminalDaemon
+} from '../src/server/runtime/terminalDaemon.js';
 import {
   archiveMoorGenerationStores,
   MOOR_GENERATION_STORE_RETENTION,
@@ -45,6 +48,31 @@ class FakeUpgradeServer {
   }
 }
 
+function readTerminalObservation(
+  daemon: ReturnType<typeof createTerminalDaemon>,
+  sessionId: string
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const handler = createDaemonControlHandler(daemon);
+  const request = new PassThrough() as IncomingMessage & PassThrough;
+  request.method = 'GET';
+  request.url = `/control/terminal-observation?sessionId=${encodeURIComponent(sessionId)}`;
+  request.headers = {};
+  return new Promise((resolve) => {
+    let status = 0;
+    const response = {
+      set statusCode(value: number) {
+        status = value;
+      },
+      setHeader() {},
+      end(payload: string) {
+        resolve({ status, body: JSON.parse(payload) as Record<string, unknown> });
+      }
+    } as unknown as ServerResponse;
+    handler(request, response);
+    request.end();
+  });
+}
+
 const encoder = new TextEncoder();
 
 function sessionIdentity(sessionPath: string): Uint8Array {
@@ -65,6 +93,19 @@ function lifecycleBody(
   const allocatedGeneration = generation === 1 ? 'null' : String(generation);
   return encoder.encode(
     `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}","generation":${allocatedGeneration},"wire_generation":${generation},"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"0","ended":"exited","code":${exitCode}}\n`
+  );
+}
+
+function signalledLifecycleBody(
+  sessionPath: string,
+  generation: number,
+  signal = 15
+): Uint8Array {
+  const identity = Buffer.from(sessionIdentity(sessionPath)).toString('base64');
+  const nonce = Buffer.alloc(16).toString('base64');
+  const allocatedGeneration = generation === 1 ? 'null' : String(generation);
+  return encoder.encode(
+    `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}","generation":${allocatedGeneration},"wire_generation":${generation},"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"0","ended":"signalled","signal":${signal}}\n`
   );
 }
 
@@ -218,7 +259,7 @@ describe('generation-scoped Moor companion retention', () => {
   it('hands stable independent copies to the Moor launcher, whose cleanup leaves archive evidence readable', async () => {
     const sessionId = 'codex-2';
     const sessionPath = join(root, sessionId);
-    const priorExit = lifecycleBody(sessionPath, 6);
+    const priorExit = signalledLifecycleBody(sessionPath, 6);
     const priorLog = encoder.encode('generation-six-output\n');
     writeStore(`${sessionPath}.exit`, 3, 6, priorExit);
     writeStore(`${sessionPath}.log`, 2, 6, priorLog);
@@ -263,6 +304,18 @@ describe('generation-scoped Moor companion retention', () => {
     expect(readFileSync(`${sessionPath}.6.exit/body.0`)).toEqual(Buffer.from(priorExit));
     expect(readFileSync(`${sessionPath}.6.log/body.0`)).toEqual(Buffer.from(priorLog));
     expect(`${sessionPath}.6.exit`).not.toBe(`${sessionPath}.7.exit`);
+    daemon.markReady();
+    const diagnostic = await readTerminalObservation(daemon, sessionId);
+    expect(diagnostic.status).toBe(200);
+    expect(diagnostic.body.exitEvidence).toEqual([
+      {
+        generation: 6,
+        startWallMs: '1',
+        endWallMs: '2',
+        outputEnd: '0',
+        outcome: { ended: 'signalled', signal: 15 }
+      }
+    ]);
     daemon.dispose();
   });
 

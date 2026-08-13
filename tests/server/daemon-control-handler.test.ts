@@ -23,6 +23,7 @@ interface DaemonMock {
   input: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
   terminalObservation: ReturnType<typeof vi.fn>;
+  moorExitEvidence: ReturnType<typeof vi.fn>;
   agentEndpoint: ReturnType<typeof vi.fn>;
   agentEvent: ReturnType<typeof vi.fn>;
   agentStates: ReturnType<typeof vi.fn>;
@@ -101,6 +102,7 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
       exit: null,
       updatedAt: 1100
     }),
+    moorExitEvidence: vi.fn().mockResolvedValue([]),
     agentEndpoint: vi.fn().mockReturnValue({
       kind: 'accepted',
       registration: agentEndpoint(),
@@ -790,7 +792,69 @@ describe('daemon control handler', () => {
       activity: 'working',
       title: 'Building'
     });
+    expect(result.body?.exitEvidence).toEqual([]);
     expect(daemon.terminalObservation).toHaveBeenCalledWith('sess-a');
+    expect(daemon.moorExitEvidence).toHaveBeenCalledWith('sess-a');
+  });
+
+  it('surfaces archived exits without overwriting the live remote observation', async () => {
+    const daemon = daemonMock();
+    const liveObservation = {
+      sessionId: 'sess-a',
+      generation: 7,
+      ready: false,
+      readyAt: 1200,
+      activity: 'idle',
+      activityAt: 1300,
+      title: 'Successor',
+      link: null,
+      exit: { code: 143, at: 1400 },
+      updatedAt: 1400
+    };
+    const exitEvidence = [
+      {
+        generation: 6,
+        startWallMs: '1',
+        endWallMs: '2',
+        outputEnd: '0',
+        outcome: { ended: 'signalled', signal: 15 }
+      }
+    ];
+    daemon.terminalObservation.mockReturnValue(liveObservation);
+    daemon.moorExitEvidence.mockResolvedValue(exitEvidence);
+
+    const result = await invoke(
+      daemon,
+      'GET',
+      '/control/terminal-observation?sessionId=sess-a'
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: true, observation: liveObservation, exitEvidence });
+  });
+
+  it('surfaces archived exits after the in-memory observation is gone', async () => {
+    const daemon = daemonMock();
+    const exitEvidence = [
+      {
+        generation: 6,
+        startWallMs: '1',
+        endWallMs: '2',
+        outputEnd: '0',
+        outcome: { ended: 'exited', code: 137 }
+      }
+    ];
+    daemon.terminalObservation.mockReturnValue(undefined);
+    daemon.moorExitEvidence.mockResolvedValue(exitEvidence);
+
+    const result = await invoke(
+      daemon,
+      'GET',
+      '/control/terminal-observation?sessionId=sess-a'
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: true, observation: null, exitEvidence });
   });
 
   it('rejects invalid observation ids and 404s unknown sessions', async () => {

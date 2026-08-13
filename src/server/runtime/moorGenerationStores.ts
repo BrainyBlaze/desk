@@ -27,6 +27,23 @@ const COPY_BUFFER_SIZE = 64 * 1024;
 type StoreSlot = (typeof STORE_SLOTS)[number];
 type CompanionKind = 'exit' | 'log';
 
+export type MoorGenerationExitOutcome =
+  | { readonly ended: 'exited'; readonly code: number }
+  | { readonly ended: 'signalled'; readonly signal: number }
+  | {
+      readonly ended: 'terminated';
+      readonly code: number;
+      readonly method: 'graceful' | 'forced';
+    };
+
+export interface MoorGenerationExitEvidence {
+  readonly generation: number;
+  readonly startWallMs: string;
+  readonly endWallMs: string;
+  readonly outputEnd: string;
+  readonly outcome: MoorGenerationExitOutcome;
+}
+
 interface FileIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
@@ -334,6 +351,41 @@ function validateLifecycle(snapshot: MoorStoreSnapshot, expected: Uint8Array): v
   }
 }
 
+function decodeExitEvidence(
+  snapshot: MoorStoreSnapshot,
+  generation: number
+): MoorGenerationExitEvidence {
+  const value = JSON.parse(
+    new TextDecoder('utf-8', { fatal: true }).decode(snapshot.bytes)
+  ) as Record<string, unknown>;
+  const { start_wall_ms: startWallMs, end_wall_ms: endWallMs, output_end: outputEnd } =
+    value;
+  if (
+    typeof startWallMs !== 'string' ||
+    typeof endWallMs !== 'string' ||
+    typeof outputEnd !== 'string'
+  ) {
+    throw new Error('Moor lifecycle manifest has invalid exit evidence');
+  }
+
+  let outcome: MoorGenerationExitOutcome;
+  if (value.ended === 'exited' && typeof value.code === 'number') {
+    outcome = { ended: 'exited', code: value.code };
+  } else if (value.ended === 'signalled' && typeof value.signal === 'number') {
+    outcome = { ended: 'signalled', signal: value.signal };
+  } else if (
+    value.ended === 'terminated' &&
+    typeof value.code === 'number' &&
+    (value.method === 'graceful' || value.method === 'forced')
+  ) {
+    outcome = { ended: 'terminated', code: value.code, method: value.method };
+  } else {
+    throw new Error('Moor lifecycle manifest has invalid exit outcome');
+  }
+
+  return { generation, startWallMs, endWallMs, outputEnd, outcome };
+}
+
 async function validateNormalStore(
   parent: ParentBinding,
   state: StoreState,
@@ -541,7 +593,7 @@ async function validateCommittedGeneration(
   parent: ParentBinding,
   archive: ArchiveGeneration,
   sessionIdentity: Uint8Array
-): Promise<void> {
+): Promise<MoorStoreSnapshot> {
   if (archive.exit === undefined) {
     throw new Error(`Moor log archive has no lifecycle owner: ${safePath(archive.log?.path ?? String(archive.generation))}`);
   }
@@ -550,6 +602,7 @@ async function validateCommittedGeneration(
   if (archive.log !== undefined) {
     await validateNormalStore(parent, archive.log, MoorStoreKind.Log, archive.generation);
   }
+  return exit.snapshot;
 }
 
 async function validateCommittedInventory(
@@ -1147,6 +1200,49 @@ async function pruneArchives(
     validateLifecycle(exit.snapshot, sessionIdentity);
     await pruneStore(parent, archive.exit!, exit.snapshot, archive.generation, 'exit', options);
   }
+}
+
+/** Read committed predecessor exits newest-first without consulting stable stores. */
+export async function readMoorGenerationExitEvidence(
+  sessionPath: string
+): Promise<MoorGenerationExitEvidence[]> {
+  const platform = process.platform;
+  const sessionIdentity = posixMoorIdentity(sessionPath);
+  const initialParent = await openBoundParent(dirname(sessionPath), undefined, platform);
+  const parentIdentity = initialParent.identity;
+  try {
+    await readInventory(initialParent, sessionPath, U32_MAX);
+  } finally {
+    await initialParent.handle.close();
+  }
+
+  return withFileLock(
+    moorGenerationArchiveLockPath(sessionPath),
+    async () => {
+      const parent = await openBoundParent(
+        dirname(sessionPath),
+        parentIdentity,
+        platform
+      );
+      try {
+        const { inventory } = await readInventory(parent, sessionPath, U32_MAX);
+        const generations = [...inventory.keys()].sort((left, right) => right - left);
+        const evidence: MoorGenerationExitEvidence[] = [];
+        for (const generation of generations) {
+          const snapshot = await validateCommittedGeneration(
+            parent,
+            inventory.get(generation)!,
+            sessionIdentity
+          );
+          evidence.push(decodeExitEvidence(snapshot, generation));
+        }
+        return evidence;
+      } finally {
+        await parent.handle.close();
+      }
+    },
+    { notFoundMessage: 'Moor parent directory disappeared while reading exit evidence' }
+  );
 }
 
 /**
