@@ -1,5 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -51,6 +52,8 @@ describe('channels storage API endpoints', () => {
 
   afterEach(() => {
     resetChannelsRuntime();
+    vi.restoreAllMocks();
+    syncBuiltinESMExports();
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
@@ -114,6 +117,34 @@ describe('channels storage API endpoints', () => {
     expect(changedState.body.channels[0].contentRevision).not.toBe(revision);
     expect(changedDetail.body.contentRevision).toBe(changedState.body.channels[0].contentRevision);
   });
+
+  it.runIf(process.platform === 'linux')(
+    'exposes a bounded identity diagnostic while the engine remains active',
+    async () => {
+      resetChannelsRuntime();
+      rmSync(join(home, '_engine', 'engine.pid'), { force: true });
+      const originalReadFileSync = fs.readFileSync;
+      vi.spyOn(fs, 'readFileSync').mockImplementation(((path, options) => {
+        if (path === `/proc/${process.pid}/stat`) {
+          throw Object.assign(new Error('sensitive proc failure'), { code: 'EIO' });
+        }
+        return originalReadFileSync(path, options as never);
+      }) as typeof fs.readFileSync);
+      syncBuiltinESMExports();
+      initChannelsRuntime({ home });
+
+      const state = await callChannelsApi('GET', '/api/channels/state');
+      const diagnostics = await callChannelsApi('GET', '/api/channels/engine');
+      expect(state.body).toMatchObject({
+        passive: false,
+        lockError: 'channels engine ownership: process identity read failed (EIO)'
+      });
+      expect(diagnostics.body).toMatchObject({
+        passive: false,
+        lockError: 'channels engine ownership: process identity read failed (EIO)'
+      });
+    }
+  );
 
   it('persists pause/resume actions through both the paused endpoint and engine action endpoint', async () => {
     const paused = await callChannelsApi('POST', '/api/channels/paused', {

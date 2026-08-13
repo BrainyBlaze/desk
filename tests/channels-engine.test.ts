@@ -1750,7 +1750,10 @@ describe('ChannelsEngine delivery gating', () => {
     });
 
     expect(engine.passive).toBe(true);
-    expect(engine.lockError).toMatch(/engine\.pid/i);
+    expect(engine.lockError).toBe(
+      'channels engine ownership: pidfile read failed (EISDIR)'
+    );
+    expect(engine.lockError).not.toContain(lockedHome);
     engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-lock-corrupt', 'human', '@alpha hi') }, members);
     await flush();
     expect(pushed).toHaveLength(0);

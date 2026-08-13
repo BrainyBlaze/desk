@@ -474,6 +474,8 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         activitySeq: engine.latestActivitySeq(),
         // another live desk process owns dispatch for this channels home
         passive: engine.passive,
+        // bounded ownership diagnostic, including degraded OS identity on an active nonce-backed claim
+        lockError: engine.lockError,
         // the owning process's pid, so the UI can name the owner + offer recovery
         passiveOwner: engine.passiveOwnerPid
       });
@@ -487,6 +489,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       sendJson(res, 200, {
         home,
         passive: engine.passive,
+        lockError: engine.lockError,
         pumpAlive: engine.pumpAlive(),
         totalQueued: sessions.reduce((sum, session) => sum + session.queueDepth, 0),
         sessions,
