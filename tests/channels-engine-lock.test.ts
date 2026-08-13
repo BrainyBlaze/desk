@@ -23,6 +23,7 @@ import {
   parseLinuxPidStat,
   type ChannelsEngineOptions
 } from '../src/server/channelsEngine.js';
+import { startChannelsOwner } from './helpers/channels-owner-process.js';
 
 const CHANNELS_ENGINE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/server/channelsEngine.ts')).href;
 
@@ -369,6 +370,29 @@ function createEngine(home: string, overrides: Partial<ChannelsEngineOptions> = 
     pidScopeReader: () => linuxScope(),
     ...overrides
   });
+}
+
+function createProductionEngine(home: string): ChannelsEngine {
+  return new ChannelsEngine({
+    home,
+    pumpIntervalMs: 1_000_000,
+    sendText: async () => true,
+    capturePane: async () => null,
+    sendEnter: async () => true
+  });
+}
+
+function waitForLinuxProcessState(pid: number, expected: string, timeoutMs: number): string | null {
+  const deadline = Date.now() + timeoutMs;
+  const waitCell = new Int32Array(new SharedArrayBuffer(4));
+  do {
+    const probe = defaultPidStateReader(pid);
+    if (probe.status === 'known' && probe.value === expected) {
+      return probe.value;
+    }
+    Atomics.wait(waitCell, 0, 0, 5);
+  } while (Date.now() < deadline);
+  return null;
 }
 
 describe('channels engine process identity', () => {
@@ -840,6 +864,136 @@ describe('channels engine owner lock', () => {
     }
   }, 20_000);
 
+  it.runIf(process.platform === 'linux')(
+    'refuses a live versioned owner then reclaims its actual zombie process record',
+    async () => {
+      const lockPath = join(home, '_engine', 'engine.pid');
+      const owner = startChannelsOwner(home);
+      let contender: ChannelsEngine | undefined;
+      let successor: ChannelsEngine | undefined;
+      try {
+        const witness = await owner.ready;
+        const acquired = parseVersionedPidRecord(witness.record);
+        expect(acquired).toMatchObject({
+          pid: witness.pid,
+          nonce: expect.stringMatching(/^[0-9a-f]{32}$/),
+          scope: expect.any(Object)
+        });
+        expect(typeof acquired?.starttime).toBe('bigint');
+
+        contender = createProductionEngine(home);
+        expect(contender.passive).toBe(true);
+        expect(contender.passiveOwnerPid).toBe(witness.pid);
+        expect(readFileSync(lockPath, 'utf8')).toBe(witness.record);
+        contender.dispose();
+        contender = undefined;
+
+        expect(owner.child.kill('SIGKILL')).toBe(true);
+        expect(waitForLinuxProcessState(witness.pid, 'Z', 5_000)).toBe('Z');
+
+        successor = createProductionEngine(home);
+        expect(successor.passive).toBe(false);
+        const rewritten = parseVersionedPidRecord(readFileSync(lockPath, 'utf8'));
+        expect(rewritten).toMatchObject({
+          pid: process.pid,
+          nonce: expect.stringMatching(/^[0-9a-f]{32}$/),
+          scope: expect.any(Object)
+        });
+        expect(typeof rewritten?.starttime).toBe('bigint');
+        const ownerExit = await owner.exit;
+        expect(ownerExit).toMatchObject({ code: null, signal: 'SIGKILL' });
+      } finally {
+        contender?.dispose();
+        successor?.dispose();
+        if (owner.child.exitCode === null && owner.child.signalCode === null) {
+          owner.child.kill('SIGKILL');
+        }
+        await owner.exit;
+      }
+    },
+    20_000
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'keeps an actual zombie legacy record passive because its recorded scope is unknown',
+    async () => {
+      const lockPath = join(home, '_engine', 'engine.pid');
+      const owner = startChannelsOwner(home, 'legacy-two-line');
+      let contender: ChannelsEngine | undefined;
+      let successor: ChannelsEngine | undefined;
+      try {
+        const witness = await owner.ready;
+        expect(witness.record).toMatch(new RegExp(`^${witness.pid}\\n[0-9]+\\n$`));
+
+        contender = createProductionEngine(home);
+        expect(contender.passive).toBe(true);
+        expect(contender.passiveOwnerPid).toBe(witness.pid);
+        contender.dispose();
+        contender = undefined;
+
+        expect(owner.child.kill('SIGKILL')).toBe(true);
+        expect(waitForLinuxProcessState(witness.pid, 'Z', 5_000)).toBe('Z');
+
+        successor = createProductionEngine(home);
+        expect(successor.passive).toBe(true);
+        expect(successor.passiveOwnerPid).toBe(witness.pid);
+        expect(successor.lockError).toBe(
+          'channels engine ownership: process scope validation failed (MISSING_LOCK_SCOPE)'
+        );
+        expect(readFileSync(lockPath, 'utf8')).toBe(witness.record);
+        expect(await owner.exit).toMatchObject({ code: null, signal: 'SIGKILL' });
+      } finally {
+        contender?.dispose();
+        successor?.dispose();
+        if (owner.child.exitCode === null && owner.child.signalCode === null) {
+          owner.child.kill('SIGKILL');
+        }
+        await owner.exit;
+        rmSync(lockPath, { force: true });
+      }
+    },
+    20_000
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'reclaims a real acquired record when the recorded pid has been recycled',
+    async () => {
+      const lockPath = join(home, '_engine', 'engine.pid');
+      const owner = startChannelsOwner(home);
+      let successor: ChannelsEngine | undefined;
+      try {
+        const witness = await owner.ready;
+        const recorded = parseVersionedPidRecord(witness.record);
+        expect(typeof recorded?.starttime).toBe('bigint');
+        await owner.release();
+
+        successor = new ChannelsEngine({
+          home,
+          pumpIntervalMs: 1_000_000,
+          sendText: async () => true,
+          capturePane: async () => null,
+          sendEnter: async () => true,
+          pidAlive: () => true,
+          pidStateReader: () => 'S',
+          pidStarttimeReader: (pid) =>
+            pid === witness.pid ? (recorded?.starttime ?? 0n) + 1n : 9_999n
+        });
+
+        expect(successor.passive).toBe(false);
+        expect(parseVersionedPidRecord(readFileSync(lockPath, 'utf8'))).toMatchObject({
+          pid: process.pid,
+          starttime: 9_999n
+        });
+      } finally {
+        successor?.dispose();
+        if (owner.child.exitCode === null && owner.child.signalCode === null) {
+          await owner.release();
+        }
+      }
+    },
+    20_000
+  );
+
   it('reclaims a foreign nonce after an exact-scope starttime mismatch', () => {
     const lockPath = join(home, '_engine', 'engine.pid');
     writeFileSync(lockPath, scopedPidRecord({ starttime: 18_446_744_073_709_551_615n }));
@@ -917,9 +1071,30 @@ describe('channels engine owner lock', () => {
   });
 
   it.each([
-    ['terminal state', { pidAlive: () => true, pidStateReader: () => 'Z', pidStarttimeReader: () => 42n }],
-    ['local ESRCH', { pidAlive: () => false, pidStateReader: () => null, pidStarttimeReader: () => 42n }],
-    ['local starttime mismatch', { pidAlive: () => true, pidStateReader: () => 'S', pidStarttimeReader: () => 99n }]
+    [
+      'terminal state',
+      {
+        pidAlive: () => true,
+        pidStateReader: () => 'Z',
+        pidStarttimeReader: (pid: number) => (pid === 100 ? 42n : 99n)
+      }
+    ],
+    [
+      'local ESRCH',
+      {
+        pidAlive: () => false,
+        pidStateReader: () => null,
+        pidStarttimeReader: (pid: number) => (pid === 100 ? 42n : 99n)
+      }
+    ],
+    [
+      'local starttime mismatch',
+      {
+        pidAlive: () => true,
+        pidStateReader: () => 'S',
+        pidStarttimeReader: () => 99n
+      }
+    ]
   ])('never reclaims a legacy record from namespace-local %s evidence', (_label, evidence) => {
     const lockPath = join(home, '_engine', 'engine.pid');
     const record = '100\n42\n';
@@ -938,13 +1113,15 @@ describe('channels engine owner lock', () => {
     }
   });
 
-  it('never treats a same-pid legacy record as this process from a local starttime match', () => {
+  it('keeps a matching live same-pid legacy owner passive', () => {
     const lockPath = join(home, '_engine', 'engine.pid');
     const record = '200\n42\n';
     writeFileSync(lockPath, record);
 
     const engine = createEngine(home, {
       pidScopeReader: () => linuxScope(),
+      pidAlive: () => true,
+      pidStateReader: () => 'S',
       pidStarttimeReader: () => 42n
     });
     try {
@@ -953,6 +1130,62 @@ describe('channels engine owner lock', () => {
       expect(engine.lockError).toBe(
         'channels engine ownership: process scope validation failed (MISSING_LOCK_SCOPE)'
       );
+      expect(readFileSync(lockPath, 'utf8')).toBe(record);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it('keeps a terminal legacy record passive without consulting local scope or pid probes', () => {
+    const lockPath = join(home, '_engine', 'engine.pid');
+    const record = '100\n42\n';
+    writeFileSync(lockPath, record);
+    const forbiddenScopeProbe = vi.fn(() => {
+      throw new Error('must not infer legacy scope from the current process');
+    });
+    const forbiddenPidProbe = vi.fn(() => {
+      throw new Error('must not inspect a pid without current scope');
+    });
+
+    const engine = createEngine(home, {
+      pidScopeReader: forbiddenScopeProbe,
+      pidAlive: forbiddenPidProbe,
+      pidStateReader: forbiddenPidProbe,
+      pidStarttimeReader: forbiddenPidProbe
+    });
+    try {
+      expect(engine.passive).toBe(true);
+      expect(engine.passiveOwnerPid).toBe(100);
+      expect(engine.lockError).toBe(
+        'channels engine ownership: process scope validation failed (MISSING_LOCK_SCOPE)'
+      );
+      expect(forbiddenScopeProbe).not.toHaveBeenCalled();
+      expect(forbiddenPidProbe).not.toHaveBeenCalled();
+      expect(readFileSync(lockPath, 'utf8')).toBe(record);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it('keeps a live legacy owner passive without using an unreadable start time', () => {
+    const lockPath = join(home, '_engine', 'engine.pid');
+    const record = '100\n42\n';
+    writeFileSync(lockPath, record);
+    const starttimeProbe = vi.fn(() => null);
+
+    const engine = createEngine(home, {
+      pidScopeReader: () => linuxScope(),
+      pidAlive: () => true,
+      pidStateReader: () => 'S',
+      pidStarttimeReader: starttimeProbe
+    });
+    try {
+      expect(engine.passive).toBe(true);
+      expect(engine.passiveOwnerPid).toBe(100);
+      expect(engine.lockError).toBe(
+        'channels engine ownership: process scope validation failed (MISSING_LOCK_SCOPE)'
+      );
+      expect(starttimeProbe).not.toHaveBeenCalled();
       expect(readFileSync(lockPath, 'utf8')).toBe(record);
     } finally {
       engine.dispose();
@@ -1963,11 +2196,13 @@ describe('channels engine owner lock', () => {
     }
   });
 
-  it('explains why a legacy same-pid record cannot prove ownership', () => {
+  it('keeps a live one-line legacy owner passive without recyclable identity evidence', () => {
     const lockPath = join(home, '_engine', 'engine.pid');
     writeFileSync(lockPath, '200\n');
 
     const engine = createEngine(home, {
+      pidAlive: () => true,
+      pidStateReader: () => 'S',
       pidStarttimeReader: () => 99n
     });
     try {

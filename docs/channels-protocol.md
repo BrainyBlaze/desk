@@ -290,8 +290,10 @@ operating-system exception messages. Legacy one-line pid and two-line
 pid/start-time records remain readable, but they contain no boot/PID-namespace
 binding and therefore never become active or reclaim solely from local PID
 evidence; an operator must remove such an abandoned record after independently
-confirming that no Desk owner uses the shared home. Lock creation,
-inspection, and stale reclamation are serialized by
+confirming that no Desk owner uses the shared home.
+Passive servers reject message-producing HTTP requests with 503 before append,
+so a post is never acknowledged and marked seen without a delivery owner. Lock
+creation, inspection, and stale reclamation are serialized by
 `_engine/engine.pid.acquire.lock`, a deliberately non-expiring filesystem
 mutex: its ordinary critical section is synchronous and short-lived, while a
 crash inside that exact window leaves dispatch explicitly fail-closed for

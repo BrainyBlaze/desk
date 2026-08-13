@@ -12,6 +12,7 @@ import {
 } from '../src/server/channelsApi.js';
 import { listPausedSessions } from '../src/server/channelsPaused.js';
 import { appendMessage, createChannel, editMessage } from '../src/server/channelsStore.js';
+import { startChannelsOwner } from './helpers/channels-owner-process.js';
 
 interface ApiResult {
   handled: boolean;
@@ -144,6 +145,40 @@ describe('channels storage API endpoints', () => {
         lockError: 'channels engine ownership: process identity read failed (EIO)'
       });
     }
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'refuses a post before append when another live process owns delivery',
+    async () => {
+      resetChannelsRuntime();
+      rmSync(join(home, '_engine', 'engine.pid'), { force: true });
+      createChannel(home, 'ops', 'goal');
+      const owner = startChannelsOwner(home);
+      try {
+        const witness = await owner.ready;
+        const runtime = initChannelsRuntime({ home });
+        expect(runtime.engine.passive).toBe(true);
+        expect(runtime.engine.passiveOwnerPid).toBe(witness.pid);
+
+        const posted = await callChannelsApi('POST', '/api/channels/post', {
+          channel: 'ops',
+          body: 'must not be acknowledged without a delivery owner'
+        });
+        expect(posted.status).toBe(503);
+        expect(posted.body).toMatchObject({
+          ok: false,
+          passive: true,
+          passiveOwner: witness.pid
+        });
+        expect(posted.body.error).toMatch(/passive/i);
+
+        const detail = await callChannelsApi('GET', '/api/channels/channel?name=ops');
+        expect(detail.body.messages).toEqual([]);
+      } finally {
+        await owner.release();
+      }
+    },
+    20_000
   );
 
   it('persists pause/resume actions through both the paused endpoint and engine action endpoint', async () => {

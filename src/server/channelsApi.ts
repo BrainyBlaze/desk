@@ -440,6 +440,21 @@ function resolveConversationFile(thread: unknown): string {
   return `thread-${thread}.md`;
 }
 
+function rejectPassiveDeliveryWrite(res: ServerResponse, engine: ChannelsEngine): boolean {
+  if (!engine.passive) {
+    return false;
+  }
+  const owner = engine.passiveOwnerPid;
+  sendJson(res, 503, {
+    ok: false,
+    error: `channels engine is passive${owner === undefined ? '' : `; process ${owner} owns delivery`}`,
+    passive: true,
+    passiveOwner: owner,
+    lockError: engine.lockError
+  });
+  return true;
+}
+
 export async function handleChannelsRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   if (!url.pathname.startsWith('/api/channels/')) {
     return false;
@@ -825,6 +840,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/post') {
       const body = await readJsonBody(req);
+      if (rejectPassiveDeliveryWrite(res, engine)) {
+        return true;
+      }
       const channel = requireChannel(body.channel);
       const author = resolveAuthor(home, channel, body);
       const appended = await appendMessage(home, channel, {
@@ -842,6 +860,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/share') {
       const body = await readJsonBody(req);
+      if (rejectPassiveDeliveryWrite(res, engine)) {
+        return true;
+      }
       const fromChannel = requireChannel(body.fromChannel);
       const toChannel = requireChannel(body.toChannel);
       const messageId = requireString(body.messageId, 'messageId');
