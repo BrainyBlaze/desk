@@ -73,6 +73,21 @@ export type DaemonAgentStateIntakeResult =
     })
   | Exclude<AgentStateIntakeResult, { kind: 'accepted' }>;
 
+/**
+ * desk#59 — every teardown names itself, so an exit record can say WHO ended
+ * the session. Deaths that Desk causes are otherwise indistinguishable from a
+ * child that died on its own, which is exactly the ambiguity that made live
+ * agent deaths untraceable.
+ */
+export type RetireReason =
+  | 'control-retire'          // an explicit /control retire RPC
+  | 'restore-superseded'      // a newer generation took the slot during restore
+  | 'master-link-closed'      // the adopted moor link closed
+  | 'spawn-prepare-failed'    // prepareSpawn threw before the master existed
+  | 'spawn-failed'            // the master never came up
+  | 'spawn-aborted'           // the spawn op was abandoned mid-flight
+  | 'moor-reconcile-failed';  // the surviving holder's event store was unobservable
+
 export class DaemonCore {
   private readonly d: DaemonCoreDeps;
   private readonly sessions = new Map<string, SessionEntry>();
@@ -171,7 +186,9 @@ export class DaemonCore {
       onExit: (exit) => {
         this.authority.markExited(sessionId, generation, {
           code: exit.code,
-          signal: exit.signal === 0 ? null : String(exit.signal)
+          signal: exit.signal === 0 ? null : String(exit.signal),
+          origin: 'observed',
+          reason: null
         });
       }
     });
@@ -203,15 +220,22 @@ export class DaemonCore {
     return { ok: true, generation };
   }
 
+             // the daemon is shutting down
+
   /**
    * Retire a session (it ended). Frees the supervisor slot + disposes the
    * emulator; the ledger tombstone is DELIBERATELY kept so a recreate gets a
    * higher generation (§4.8.1).
    */
-  retire(sessionId: string): void {
+  retire(sessionId: string, reason: RetireReason): void {
     const entry = this.sessions.get(sessionId);
     if (entry !== undefined) {
-      this.authority.markExited(sessionId, entry.generation, { code: null, signal: null });
+      this.authority.markExited(sessionId, entry.generation, {
+        code: null,
+        signal: null,
+        origin: 'retired',
+        reason
+      });
     }
     this.sessions.delete(sessionId);
     this.d.supervisor.release(sessionId);
@@ -259,7 +283,13 @@ export class DaemonCore {
   markExited(
     sessionId: string,
     generation: number,
-    exit: { code: number | null; signal: string | null },
+    exit: {
+      code: number | null;
+      signal: string | null;
+      /** desk#59 — an exit must say whether it was seen or merely assumed. */
+      origin: 'observed' | 'retired';
+      reason: RetireReason | null;
+    },
     observedAt?: number
   ): AuthorityMutationResult {
     return this.authority.markExited(sessionId, generation, exit, observedAt);

@@ -17,7 +17,8 @@ import {
   type DaemonAgentStateIntakeResult,
   type DaemonCoreDeps,
   type EnsureResult,
-  type RestoreResult
+  type RestoreResult,
+  type RetireReason
 } from '../../shared/runtime/daemonCore.js';
 import {
   type AuthorityMutationResult,
@@ -396,7 +397,7 @@ export class SessionManager {
         this.moorStatuses.delete(sessionId);
       }
       this.detachedKills.delete(sessionId);
-      this.core.retire(sessionId);
+      this.core.retire(sessionId, 'restore-superseded');
       this.dropTerminalObservation(sessionId, restored.generation);
       return { ok: false, reason: 'attach-failed' };
     }
@@ -505,7 +506,7 @@ export class SessionManager {
         onClose: () => {
           // Identity-bound: only the CURRENTLY-installed link's close retires.
           if (attached && link !== undefined && this.masters.get(sessionId) === link) {
-            this.retire(sessionId);
+            this.retire(sessionId, 'master-link-closed');
           }
         },
         // §10 (OB-30): losing the 15 s verified-live window never proves the
@@ -805,7 +806,7 @@ export class SessionManager {
       } catch {
         if (this.owners.get(sessionId) === token) this.owners.delete(sessionId);
         if (ens.created) {
-          this.core.retire(sessionId);
+          this.core.retire(sessionId, 'spawn-prepare-failed');
           this.dropTerminalObservation(sessionId, ens.generation);
         }
         return { ok: false, reason: 'spawn-failed' };
@@ -875,7 +876,7 @@ export class SessionManager {
         }
       }
       if (ens.created) {
-        this.core.retire(sessionId);
+        this.core.retire(sessionId, 'spawn-failed');
         this.dropTerminalObservation(sessionId, ens.generation);
       }
       return { ok: false, reason: 'spawn-failed' };
@@ -1034,7 +1035,7 @@ export class SessionManager {
     }
     if (createdSlot) {
       const generation = this.terminalObservations.get(sessionId)?.generation;
-      this.core.retire(sessionId);
+      this.core.retire(sessionId, 'spawn-aborted');
       if (generation !== undefined) this.dropTerminalObservation(sessionId, generation);
     }
   }
@@ -1150,7 +1151,7 @@ export class SessionManager {
         authority = this.core.markExited(
           sessionId,
           generation,
-          { code: event.code, signal: null },
+          { code: event.code, signal: null, origin: 'observed', reason: null },
           at
         );
         // Cutover parity: an APPLIED exit transition also pushes an explicit
@@ -1205,8 +1206,8 @@ export class SessionManager {
    * record after a successful fire-and-forget kill is harmless: the next
    * control retire sees the socket already gone and reads clean.
    */
-  retire(sessionId: string): void {
-    const kill = this.beginRetire(sessionId);
+  retire(sessionId: string, reason: RetireReason = 'control-retire'): void {
+    const kill = this.beginRetire(sessionId, reason);
     if (kill !== undefined) {
       void runKillCommand(kill); // best effort — no caller to report to
     }
@@ -1227,11 +1228,11 @@ export class SessionManager {
 
   private async retireAwaitedUnlocked(
     sessionId: string,
-    opts: { timeoutMs?: number } = {}
+    opts: { timeoutMs?: number; reason?: RetireReason } = {}
   ): Promise<{ ok: boolean; error?: string }> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
     await this.terminateOverLiveLink(sessionId);
-    const kill = this.beginRetire(sessionId);
+    const kill = this.beginRetire(sessionId, opts.reason ?? 'control-retire');
     if (kill === undefined) {
       return { ok: true };
     }
@@ -1267,7 +1268,7 @@ export class SessionManager {
   async retireGenerationAwaited(
     sessionId: string,
     expectedGeneration: number,
-    opts: { timeoutMs?: number } = {}
+    opts: { timeoutMs?: number; reason?: RetireReason } = {}
   ): Promise<RetireGenerationResult> {
     return this.runSerializedLifecycle(sessionId, () =>
       this.retireGenerationAwaitedUnlocked(
@@ -1281,7 +1282,7 @@ export class SessionManager {
   private async retireGenerationAwaitedUnlocked(
     sessionId: string,
     expectedGeneration: number,
-    opts: { timeoutMs?: number } = {}
+    opts: { timeoutMs?: number; reason?: RetireReason } = {}
   ): Promise<RetireGenerationResult> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
     const snapshot = this.stateSnapshot(sessionId);
@@ -1306,7 +1307,10 @@ export class SessionManager {
     }
 
     if (snapshot !== undefined) await this.terminateOverLiveLink(sessionId);
-    const kill = snapshot === undefined ? retainedKill : this.beginRetire(sessionId);
+    const kill =
+      snapshot === undefined
+        ? retainedKill
+        : this.beginRetire(sessionId, opts.reason ?? 'control-retire');
     if (kill === undefined) {
       return { ok: true };
     }
@@ -1456,7 +1460,7 @@ export class SessionManager {
    * slot. PEEKS the kill record without consuming it — consumption is the
    * confirming caller's decision.
    */
-  private beginRetire(sessionId: string): DetachedKillRecord | undefined {
+  private beginRetire(sessionId: string, reason: RetireReason): DetachedKillRecord | undefined {
     this.owners.delete(sessionId); // any deferred old-operation callback goes stale
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
@@ -1465,7 +1469,7 @@ export class SessionManager {
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup !== undefined) cleanup();
     this.cleanups.delete(sessionId);
-    this.core.retire(sessionId);
+    this.core.retire(sessionId, reason);
     return this.detachedKills.get(sessionId);
   }
 

@@ -299,7 +299,17 @@ const policySchema = z.strictObject({
 const exitSchema = z.strictObject({
   at: timestampSchema,
   code: z.number().int().nullable(),
-  signal: boundedText(64).nullable()
+  signal: boundedText(64).nullable(),
+  /**
+   * desk#59 — who ended the session. `observed` means the child's own exit
+   * reached us and code/signal are the truth; `retired` means Desk tore the
+   * session down and knows nothing about how the child died. Optional ONLY so
+   * that exits journalled before this field existed still parse: their
+   * provenance is genuinely unknown and must not be invented.
+   */
+  origin: z.enum(['observed', 'retired']).optional(),
+  /** Which call site retired the session (`retired` only). */
+  reason: boundedText(120).nullable().optional()
 });
 
 const snapshotSchema = z

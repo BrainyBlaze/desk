@@ -394,7 +394,7 @@ export class AgentStateAuthority {
   markExited(
     sessionId: string,
     generation: number,
-    exit: Pick<SessionExit, 'code' | 'signal'>,
+    exit: Required<Pick<SessionExit, 'code' | 'signal' | 'origin' | 'reason'>>,
     observedAt?: number
   ): AuthorityMutationResult {
     const record = this.sessions.get(sessionId);
@@ -407,7 +407,21 @@ export class AgentStateAuthority {
       return { kind: 'rejected', reason: 'invalid-observation' };
     }
     if (record!.snapshot.lifecycle === 'exited') {
-      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      // desk#59: a `retired` exit is a PLACEHOLDER written by Desk's own
+      // teardown, which knows nothing about how the child died. The holder's
+      // real exit routinely lands milliseconds later; it must be allowed to
+      // replace the placeholder, or the cause of death is lost forever. An
+      // already `observed` exit is the truth and is never downgraded.
+      if (record!.snapshot.exit?.origin !== 'retired' || exit.origin !== 'observed') {
+        return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      }
+      const correctedAt = Math.max(
+        observedAt === undefined ? this.safeNow() : Math.floor(observedAt),
+        record!.snapshot.updatedAt
+      );
+      const before = clone(record!.snapshot);
+      record!.snapshot.exit = { ...exit, at: correctedAt };
+      return this.commit(record!, before, 'lifecycle-exited', correctedAt);
     }
     const at =
       observedAt === undefined

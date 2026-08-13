@@ -393,7 +393,11 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     );
 
     expect(reconcileMoorEvents).toHaveBeenCalledWith('sess-1', 9);
-    expect(retireGenerationAwaited).toHaveBeenCalledWith('sess-1', 9);
+    // desk#59: the retirement must carry WHY it happened, so the resulting
+    // exit record names the reconcile failure instead of anonymous nulls.
+    expect(retireGenerationAwaited).toHaveBeenCalledWith('sess-1', 9, {
+      reason: 'moor-reconcile-failed'
+    });
     expect(result).toMatchObject({ sessionId: 'sess-1', ok: false });
   });
 
