@@ -157,21 +157,50 @@ describe('binary terminal broker client (§7.4)', () => {
     expect([...b.output[0]]).toEqual([66]); // sb correctly aligned
   });
 
-  it('sends INPUT only from a visible, ACKed channel; drops it before the ACK', () => {
+  it('sends INPUT only from a visible, ACKed channel; buffers it before the ACK', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
-    client.sendInput('s1', 'x'); // no channel yet → dropped
+    client.sendInput('s1', 'x'); // no channel yet → buffered, not dropped
     expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0);
     socket.deliver(ack(5));
     client.sendInput('s1', 'hi');
     client.sendBinary('s1', Uint8Array.of(0x1b, 0x5b, 0x41));
     const inputs = socket.ofType(BpFrameType.INPUT);
-    expect(inputs).toHaveLength(2);
+    // The buffered pre-ACK keystroke flushes first, in order, ahead of the two
+    // sent after the channel opened.
+    expect(inputs).toHaveLength(3);
     expect(inputs[0]).toMatchObject({ channelId: 5, binary: false });
-    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('hi');
-    expect(inputs[1]).toMatchObject({ channelId: 5, binary: true });
-    expect([...inputs[1].bytes]).toEqual([0x1b, 0x5b, 0x41]);
+    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('x');
+    expect(inputs[1]).toMatchObject({ channelId: 5, binary: false });
+    expect(new TextDecoder().decode(inputs[1].bytes)).toBe('hi');
+    expect(inputs[2]).toMatchObject({ channelId: 5, binary: true });
+    expect([...inputs[2].bytes]).toEqual([0x1b, 0x5b, 0x41]);
+  });
+
+  it('buffers every keystroke typed during the focus/attach race and flushes it in order on ACK (desk#46)', () => {
+    // Regression for desk#46: a user who clicks into a session terminal and
+    // types immediately — before the SUBSCRIBE round-trip completes and
+    // channelId is assigned — must never have those keystrokes silently
+    // vanish. `printf ...` arriving at the shell as `pintf ...` is exactly
+    // this: characters typed in the pre-ACK window were dropped in
+    // sendInputBytes because surface.channelId was still undefined.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    // Type "printf" one keystroke at a time, exactly as xterm's onData fires
+    // per character, all before the ACK for the SUBSCRIBE lands.
+    for (const ch of 'printf') {
+      client.sendInput('s1', ch);
+    }
+    expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0); // nothing sent yet — still buffered
+    socket.deliver(ack(42));
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    const received = inputs.map((f) => new TextDecoder().decode(f.bytes)).join('');
+    expect(received).toBe('printf'); // every keystroke arrived, in order, none dropped
+    for (const frame of inputs) {
+      expect(frame.channelId).toBe(42);
+    }
   });
 
   it('buffers a pre-ACK resize and flushes it once the channel opens', () => {

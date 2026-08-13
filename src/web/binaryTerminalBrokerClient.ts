@@ -73,6 +73,13 @@ interface BinarySurface {
   awaitingAck: boolean;
   /** Latest size not yet sent (socket connecting / channel not yet open). */
   pendingResize?: { cols: number; rows: number };
+  /**
+   * Keystrokes/paste bytes typed before channelId was assigned (socket still
+   * connecting, or SUBSCRIBE_ACK still in flight). Queued in order and
+   * flushed whole once the channel opens — the focus/attach race must never
+   * silently swallow input (desk#46).
+   */
+  pendingInput?: { bytes: Uint8Array; binary: boolean }[];
 }
 
 const OPEN = 1;
@@ -158,10 +165,31 @@ export class BinaryTerminalBrokerClient {
 
   private sendInputBytes(surfaceId: string, bytes: Uint8Array, binary: boolean): void {
     const surface = this.surfaces.get(surfaceId);
-    if (!surface || !surface.visible || !this.connected || surface.channelId === undefined) {
-      return; // no live, visible channel to carry it
+    if (!surface || !surface.visible) {
+      return; // no visible surface to carry it
+    }
+    if (surface.channelId === undefined) {
+      // The socket is still connecting, or the SUBSCRIBE_ACK for this surface
+      // is still in flight: there is no channelId to address a frame to yet.
+      // A user who focuses the terminal and starts typing immediately lands
+      // here — buffer in order rather than dropping the keystroke; onSubscribeAck
+      // flushes this queue the moment the channel opens (desk#46).
+      (surface.pendingInput ??= []).push({ bytes, binary });
+      return;
     }
     this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
+  }
+
+  /** Flush input buffered while the channel was not yet open, in order. */
+  private flushInput(surface: BinarySurface): void {
+    const pending = surface.pendingInput;
+    if (!pending || pending.length === 0 || surface.channelId === undefined) {
+      return;
+    }
+    surface.pendingInput = undefined;
+    for (const { bytes, binary } of pending) {
+      this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
+    }
   }
 
   sendResize(surfaceId: string, cols: number, rows: number): void {
@@ -351,6 +379,10 @@ export class BinaryTerminalBrokerClient {
     }
     surface.channelId = undefined;
     surface.resync = undefined;
+    // Input queued for the channel being closed belongs to that channel's
+    // context (hide, unsubscribe, or resync) — never replay it into whatever
+    // channel a future (re)subscribe opens.
+    surface.pendingInput = undefined;
   }
 
   /** A gap / stale-baseline made this surface dirty: rebaseline via re-subscribe. */
@@ -423,6 +455,7 @@ export class BinaryTerminalBrokerClient {
       // showing no Reconnect affordance.
       if (surface) {
         surface.awaitingAck = false;
+        surface.pendingInput = undefined; // never replay into whatever channel comes next
       }
       return;
     }
@@ -432,6 +465,8 @@ export class BinaryTerminalBrokerClient {
     this.channelToSurface.set(channelId, surfaceId);
     // A resize requested before the channel opened flushes now.
     this.flushResize(surface);
+    // Keystrokes typed during the SUBSCRIBE round-trip flush now, in order.
+    this.flushInput(surface);
   }
 
   private onSnapshot(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>): void {
