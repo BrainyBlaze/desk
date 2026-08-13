@@ -212,6 +212,23 @@ describe('MoorMasterClient', () => {
     expect(() => new MoorMasterClient('/tmp/never', 0, {})).toThrowError(/generation/i);
   });
 
+  it('close while connecting rejects the connect and prevents a late socket install', async () => {
+    const holder = new FakeHolder();
+    await holder.listen();
+    const client = new MoorMasterClient(holder.sockPath, GENERATION);
+    cleanups.push(() => {
+      client.close();
+      holder.close();
+    });
+
+    const connecting = client.connect();
+    client.close();
+
+    await expect(connecting).rejects.toThrow(/closed/i);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(client.connect()).rejects.toThrow(/closed/i);
+  });
+
   it('validates the canonical identity: derived POSIX must be resolved, injected tags checked', () => {
     expect(() => new MoorMasterClient('relative/path', GENERATION, {})).toThrowError(/IDENTITY/);
     expect(() => new MoorMasterClient('/tmp/../etc/sock', GENERATION, {})).toThrowError(/IDENTITY/);

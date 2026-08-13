@@ -8,6 +8,7 @@ import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import { GenerationLedger } from '../src/shared/controlPlane/generationLedger.js';
 import { InMemoryGenerationLedger, MOOR_LIVENESS_REASON } from '../src/shared/controlPlane/index.js';
+import { BpError, BpFrameType } from '../src/shared/browserProtocol/index.js';
 import { WorkerSupervisor } from '../src/shared/runtime/workerSupervisor.js';
 import { DEFAULT_SUPERVISOR_CONFIG } from '../src/shared/runtime/workerSupervisor.js';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
@@ -105,11 +106,19 @@ class EmptyEmulator implements EmulatorPort {
 class ExpiringLeaseHolder {
   private server: Server | undefined;
   private readonly sockets = new Set<Socket>();
+  private readonly connectionState = new Map<number, { socket: Socket; codec: MoorCodec }>();
   readonly identity: Uint8Array;
   connections = 0;
   terminateRequests = 0;
   childAlive = true;
   readonly inputs: string[] = [];
+  readonly inputRequests: Array<{
+    connection: number;
+    epoch: number;
+    requestId: bigint;
+    bytes: number;
+  }> = [];
+  readonly resizes: Array<{ connection: number; columns: number; rows: number }> = [];
   leaseDeadline = 0;
   private firstRefusedResolve!: () => void;
   readonly firstRefused = new Promise<void>((resolve) => { this.firstRefusedResolve = resolve; });
@@ -174,8 +183,10 @@ class ExpiringLeaseHolder {
     this.sockets.add(socket);
     const inbound = new MoorCodec();
     const outbound = new MoorCodec();
+    this.connectionState.set(connection, { socket, codec: outbound });
     socket.on('close', () => {
       this.sockets.delete(socket);
+      this.connectionState.delete(connection);
       if (connection === 1) this.firstConnectionClosedResolve();
       if (connection === 2) this.recoveryConnectionClosedResolve();
       if (connection === 3) this.recoveryAttemptClosedResolve();
@@ -285,10 +296,63 @@ class ExpiringLeaseHolder {
         this.childAlive = false;
         return;
       case MoorKind.INPUT:
-        this.inputs.push(new TextDecoder().decode(message.payload.subarray(13)));
+        {
+          const view = new DataView(
+            message.payload.buffer,
+            message.payload.byteOffset,
+            message.payload.byteLength
+          );
+          const bytes = message.payload.subarray(13);
+          this.inputs.push(new TextDecoder().decode(bytes));
+          this.inputRequests.push({
+            connection,
+            epoch: view.getUint32(0, true),
+            requestId: view.getBigUint64(4, true),
+            bytes: bytes.length
+          });
+        }
         this.inputReceivedResolve();
         return;
+      case MoorKind.RESIZE: {
+        const view = new DataView(
+          message.payload.buffer,
+          message.payload.byteOffset,
+          message.payload.byteLength
+        );
+        this.resizes.push({
+          connection,
+          columns: view.getUint16(4, true),
+          rows: view.getUint16(6, true)
+        });
+        return;
+      }
     }
+  }
+
+  acknowledgeLatestInput(connection: number): void {
+    let input: (typeof this.inputRequests)[number] | undefined;
+    for (let index = this.inputRequests.length - 1; index >= 0; index -= 1) {
+      if (this.inputRequests[index]!.connection === connection) {
+        input = this.inputRequests[index];
+        break;
+      }
+    }
+    const state = this.connectionState.get(connection);
+    if (input === undefined || state === undefined) throw new Error('no input to acknowledge');
+    this.send(
+      state.socket,
+      state.codec,
+      MoorKind.INPUT_RECEIPT,
+      joined(
+        integer(input.epoch, 4),
+        integer(input.requestId, 8),
+        integer(GENERATION, 4),
+        connection === 1 ? INCARNATION : this.recoveryIncarnation,
+        integer(BigInt(input.bytes), 8),
+        Uint8Array.of(0),
+        integer(0, 2)
+      )
+    );
   }
 
   allowRecovery(): void {
@@ -301,8 +365,182 @@ class ExpiringLeaseHolder {
   }
 }
 
+async function settleSocketIo(turns = 4): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+async function startRecoveryHarness(): Promise<{
+  holder: ExpiringLeaseHolder;
+  manager: SessionManager;
+  channelId: number;
+  browserErrors: number[];
+  enterRecovery: () => Promise<void>;
+  close: () => Promise<void>;
+}> {
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  const root = mkdtempSync(join(tmpdir(), 'desk-link-handoff-'));
+  const sessionPath = join(root, 'session');
+  const holder = new ExpiringLeaseHolder(sessionPath);
+  await holder.listen();
+  const ledger = new GenerationLedger(new InMemoryGenerationLedger());
+  expect(ledger.allocate('session')).toBe(GENERATION);
+  const browserErrors: number[] = [];
+  const manager = new SessionManager({
+    ledger,
+    supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+    emulatorFactory: { create: () => new EmptyEmulator() },
+    now: () => Date.now(),
+    sendBrowser: (_sessionId, _channelId, frame) => {
+      if (frame.type === BpFrameType.ERROR) browserErrors.push(frame.code);
+    }
+  });
+  const restored = await manager.restoreAndAttachMoor('session', {
+    sessionPath,
+    geometry: { rows: 24, cols: 80 },
+    killSpec: { binPath: '/usr/bin/true', args: [] }
+  });
+  expect(restored.ok).toBe(true);
+  const channelId = manager.subscribe('session', 'main', 24, 80)!;
+  return {
+    holder,
+    manager,
+    channelId,
+    browserErrors,
+    enterRecovery: async () => {
+      await vi.advanceTimersByTimeAsync(3_001);
+      await holder.firstRefused;
+      await holder.firstConnectionClosed;
+      await holder.recoveryConnected;
+      await holder.recoveryHelloSeen;
+    },
+    close: async () => {
+      manager.closeAllLinks();
+      await holder.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+}
+
 describe('SessionManager controller-link recovery', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('preserves recovery input age after transfer to the attached client queue', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      const queuedAt = Date.now();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('must-expire-from-original-age')
+        )
+      ).toBe(true);
+      vi.setSystemTime(queuedAt + 9_000);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
+
+      vi.setSystemTime(queuedAt + 10_001);
+      harness.holder.acknowledgeLatestInput(3);
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
+      expect(harness.browserErrors).toEqual([BpError.STALE_LEASE]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('unsubscribe removes input already transferred to the attached client queue', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      await harness.enterRecovery();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('cancel-before-delivery')
+        )
+      ).toBe(true);
+
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
+
+      harness.manager.unsubscribeChannel(harness.channelId);
+      harness.holder.acknowledgeLatestInput(3);
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('expires recovery input at the exact ten-second boundary before install', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      await harness.enterRecovery();
+      const queuedAt = Date.now();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('exact-boundary')
+        )
+      ).toBe(true);
+
+      vi.setSystemTime(queuedAt + 10_000);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual([]);
+      expect(harness.browserErrors).toEqual([BpError.STALE_LEASE]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('applies only the newest recovery resize after viewer lease acquisition', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      await harness.enterRecovery();
+      expect(harness.manager.onBrowserResizeByChannel(harness.channelId, 30, 100)).toBe(true);
+      expect(harness.manager.onBrowserResizeByChannel(harness.channelId, 40, 120)).toBe(true);
+
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.resizes).toEqual([{ connection: 3, columns: 120, rows: 40 }]);
+    } finally {
+      await harness.close();
+    }
+  });
 
   it('survives a granted viewer lease expiring during an event-loop gap and re-adopts the exact generation', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });

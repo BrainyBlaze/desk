@@ -233,7 +233,8 @@ export interface SessionManagerDeps {
  * runtime nor the core ever sees an encoded frame.
  */
 export interface SessionMasterLink {
-  sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number): boolean;
+  sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number, queuedAt: number): boolean;
+  cancelQueuedInput(surfaceId: number): void;
   sendResize(rows: number, cols: number, surfaceId: number): void;
   close(): void;
   /**
@@ -284,6 +285,7 @@ interface MoorRecoverySlot {
   }>;
   inputBytes: number;
   observer?: boolean;
+  pendingResize?: { rows: number; cols: number; surfaceId: number };
 }
 
 const RECOVERY_BACKOFF_MS = [0, 100, 250, 500, 1_000, 2_000] as const;
@@ -486,7 +488,7 @@ export class SessionManager {
     const flushQueue = (client: MoorMasterClient): void => {
       const next = inputQueue.shift();
       if (next === undefined) return;
-      if (this.now() - next.queuedAt > RECOVERY_INPUT_MAX_AGE_MS) {
+      if (this.now() - next.queuedAt >= RECOVERY_INPUT_MAX_AGE_MS) {
         this.sendStaleLease(sessionId, next.surfaceId);
         flushQueue(client);
         return;
@@ -707,7 +709,7 @@ export class SessionManager {
     }
     attached = true;
     link = {
-      sendInput: (bytes, _binary, surfaceId) => {
+      sendInput: (bytes, _binary, surfaceId, queuedAt) => {
         try {
           client.sendInput(bytes, surfaceId);
           return true;
@@ -715,11 +717,14 @@ export class SessionManager {
           if (error instanceof Error && /in flight/.test(error.message)) {
             const queuedBytes = inputQueue.reduce((sum, pending) => sum + pending.bytes.length, 0);
             if (queuedBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) return false;
-            inputQueue.push({ bytes: bytes.slice(), surfaceId, queuedAt: this.now() });
+            inputQueue.push({ bytes: bytes.slice(), surfaceId, queuedAt });
             return true;
           }
           return false;
         }
+      },
+      cancelQueuedInput: (surfaceId) => {
+        inputQueue = inputQueue.filter((pending) => pending.surfaceId !== surfaceId);
       },
       sendResize: (rows, cols) => {
         try {
@@ -823,7 +828,10 @@ export class SessionManager {
       inputQueue: [...(previous?.inputQueue ?? []), ...input.queuedInput],
       inputBytes:
         (previous?.inputBytes ?? 0) +
-        input.queuedInput.reduce((sum, pending) => sum + pending.bytes.length, 0)
+        input.queuedInput.reduce((sum, pending) => sum + pending.bytes.length, 0),
+      ...(previous?.pendingResize === undefined
+        ? {}
+        : { pendingResize: { ...previous.pendingResize } })
     };
     this.recoveries.set(input.sessionId, slot);
     void this.runControllerRecovery(slot, slot.episode).catch((error) => {
@@ -898,12 +906,16 @@ export class SessionManager {
     slot: MoorRecoverySlot,
     link: SessionMasterLink | undefined
   ): void {
+    if (link !== undefined && slot.pendingResize !== undefined) {
+      const resize = slot.pendingResize;
+      link.sendResize(resize.rows, resize.cols, resize.surfaceId);
+    }
     for (const pending of slot.inputQueue.splice(0)) {
       slot.inputBytes -= pending.bytes.length;
       if (
-        this.now() - pending.queuedAt > RECOVERY_INPUT_MAX_AGE_MS ||
+        this.now() - pending.queuedAt >= RECOVERY_INPUT_MAX_AGE_MS ||
         link === undefined ||
-        !link.sendInput(pending.bytes, pending.binary, pending.surfaceId)
+        !link.sendInput(pending.bytes, pending.binary, pending.surfaceId, pending.queuedAt)
       ) {
         this.sendStaleLease(slot.sessionId, pending.surfaceId);
       }
@@ -1010,7 +1022,7 @@ export class SessionManager {
     surfaceId: number
   ): boolean {
     const link = this.masters.get(sessionId);
-    if (link !== undefined) return link.sendInput(bytes, binary, surfaceId);
+    if (link !== undefined) return link.sendInput(bytes, binary, surfaceId, this.now());
     const recovery = this.recoveries.get(sessionId);
     if (recovery === undefined || !this.recoveryCurrent(recovery, recovery.episode)) return false;
     // Control-plane input must answer synchronously; it cannot claim success
@@ -1475,12 +1487,23 @@ export class SessionManager {
         return false;
       });
     }
+    if (sessionId !== undefined) this.masters.get(sessionId)?.cancelQueuedInput(channelId);
     this.core.unsubscribeChannel(channelId);
   }
 
   /** Route a browser RESIZE by channelId (ownership validated by the router). */
   onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
-    return this.core.onBrowserResizeByChannel(channelId, rows, cols);
+    const sessionId = this.core.sessionOfChannel(channelId);
+    if (sessionId === undefined || !this.core.onBrowserResizeByChannel(channelId, rows, cols)) {
+      return false;
+    }
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
+      recovery.geometry.rows = rows;
+      recovery.geometry.cols = cols;
+      recovery.pendingResize = { rows, cols, surfaceId: channelId };
+    }
+    return true;
   }
 
   /** Route a browser VISIBILITY by channelId. */

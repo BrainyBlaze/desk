@@ -257,6 +257,7 @@ export class MoorMasterClient {
   /** §10: verified-live evidence; invalidated after 15 s without HEARTBEAT. */
   private live = false;
   private livenessTimer: NodeJS.Timeout | undefined;
+  private pendingConnect: { reject: (error: Error) => void } | undefined;
   private pendingAttach:
     | { options: MoorAttachOptions; resolve: (status: MoorStatus) => void; reject: (error: Error) => void }
     | undefined;
@@ -385,14 +386,19 @@ export class MoorMasterClient {
     this.phase = 'connecting';
     return new Promise((resolve, reject) => {
       const sock = connect(this.sockPath);
-      sock.once('error', (error) => {
-        if (this.phase === 'connecting') {
-          this.phase = 'closed';
-          reject(error);
-        }
-      });
+      this.sock = sock;
+      this.pendingConnect = { reject };
+      const onConnectError = (error: Error): void => {
+        if (this.phase === 'connecting' && this.sock === sock) this.teardown(error);
+      };
+      sock.once('error', onConnectError);
       sock.once('connect', () => {
-        this.sock = sock;
+        if (this.phase !== 'connecting' || this.sock !== sock) {
+          sock.destroy();
+          return;
+        }
+        sock.off('error', onConnectError);
+        this.pendingConnect = undefined;
         this.phase = 'connected';
         sock.on('data', (chunk: Buffer) => this.onData(chunk));
         sock.on('error', () => this.teardown(new Error('moor holder connection errored')));
@@ -798,6 +804,9 @@ export class MoorMasterClient {
     }
     this.lease = undefined;
     this.pendingInput = undefined;
+    const connecting = this.pendingConnect;
+    this.pendingConnect = undefined;
+    connecting?.reject(reason);
     const sock = this.sock;
     this.sock = null;
     sock?.destroy();
