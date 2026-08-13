@@ -414,7 +414,9 @@ export interface ResolveTargetOptions {
  *  - no mentions -> every agent except the author
  *  - @channel broadcasts to every agent except the author
  *  - named agent mentions restrict delivery to those agents
- *  - mentions that do not name an agent deliver to no agents
+ *  - mentions that name only humans of this channel deliver to no agents
+ *  - mentions that name NOBODY in this channel are prose about outsiders, not
+ *    an addressing decision: the message broadcasts as if unmentioned (desk#44)
  *
  * Thread replies:
  *  - no mentions -> the parent-message author only
@@ -429,6 +431,7 @@ export function resolveTargets(author: string, body: string, members: ChannelMem
   const supervisors = agents.filter((member) => member.supervisor === true);
   const mentions = new Set(extractMentions(body).map((mention) => mention.toLowerCase()));
   const agentNames = new Set(members.filter((member) => member.type !== 'human').map((member) => member.name.toLowerCase()));
+  const memberNames = new Set(members.map((member) => member.name.toLowerCase()));
 
   const mergeSupervisors = (result: ChannelMember[]): ChannelMember[] => {
     if (supervisors.length === 0) {
@@ -463,9 +466,15 @@ export function resolveTargets(author: string, body: string, members: ChannelMem
   if (mentionsKnownAgent) {
     return mergeSupervisors(agents.filter((member) => mentions.has(member.name.toLowerCase())));
   }
-  if (mentions.size > 0) {
+  if (mentions.size > 0 && [...mentions].some((mention) => memberNames.has(mention))) {
+    // At least one mention names somebody who is in this channel (a human, or
+    // the author themselves). That IS an addressing decision, so honour it even
+    // when it leaves no agent to notify.
     return mergeSupervisors([]);
   }
+  // Either there are no mentions at all, or every mention is a stranger to this
+  // channel. A stranger handle is a reference to someone outside — it must not
+  // silently cancel delivery, so the message broadcasts like an unmentioned one.
   return agents;
 }
 

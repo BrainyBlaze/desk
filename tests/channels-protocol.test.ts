@@ -97,9 +97,42 @@ describe('mentions', () => {
     expect(resolveTargets('human', 'ping @agent-a and @agent-b', members).map((m) => m.name)).toEqual(['agent-a', 'agent-b']);
     expect(resolveTargets('agent-b', '@agent-b self-ping @human', members).map((m) => m.name)).toEqual([]);
     expect(resolveTargets('human', 'ping @human only', members).map((m) => m.name)).toEqual([]);
-    expect(resolveTargets('human', 'ping @not-a-member only', members).map((m) => m.name)).toEqual([]);
     expect(mentionsHuman('@human look at this')).toBe(true);
     expect(mentionsHuman('plain message')).toBe(false);
+  });
+});
+
+describe('resolveTargets: mentions that name nobody in the channel (desk#44)', () => {
+  const members = [member('agent-a'), member('agent-b', 'agent-cli'), member('human', 'human')];
+
+  it('broadcasts when every mention is a stranger to this channel', () => {
+    // `@asher` is an external person referenced in prose, not an addressing
+    // decision about channel members. It must not cancel delivery.
+    expect(resolveTargets('human', 'ping @asher about the follow-up', members).map((m) => m.name)).toEqual([
+      'agent-a',
+      'agent-b'
+    ]);
+    expect(resolveTargets('human', 'ping @not-a-member only', members).map((m) => m.name)).toEqual([
+      'agent-a',
+      'agent-b'
+    ]);
+    // Several strangers at once is still no addressing decision.
+    expect(resolveTargets('agent-a', 'cc @asher @dana', members).map((m) => m.name)).toEqual(['agent-b']);
+  });
+
+  it('still restricts delivery as soon as ONE mention names a member', () => {
+    // A stranger riding along with a real member must not widen delivery.
+    expect(resolveTargets('human', '@agent-b and also @asher', members).map((m) => m.name)).toEqual(['agent-b']);
+    // A human member is a member: addressing them is a real decision that
+    // deliberately excludes agents, and must stay a zero-agent delivery.
+    expect(resolveTargets('human', '@human and @asher', members).map((m) => m.name)).toEqual([]);
+    // Self-ping: the author is a member, so this is addressed, not stray.
+    expect(resolveTargets('agent-b', '@agent-b self-ping @asher', members).map((m) => m.name)).toEqual([]);
+  });
+
+  it('broadcasts stranger-only mentions in a channel that has no agents to hear it', () => {
+    const soloHuman = [member('human', 'human')];
+    expect(resolveTargets('human', 'ping @asher', soloHuman).map((m) => m.name)).toEqual([]);
   });
 });
 
@@ -113,10 +146,17 @@ describe('resolveTargets with supervisor members', () => {
     expect(names).toEqual(['agent-b', 'supe']);
   });
 
-  it('a supervisor gets a message that mentions only unknown handles', () => {
-    // Mentions-only-humans/unknowns normally deliver to nobody; supe must still receive it.
+  it('a supervisor gets a message that mentions only the human member', () => {
+    // Human-only mentions deliver to no worker; supe must still receive it.
     const members = [member('agent-a'), supervisor('supe'), member('human', 'human')];
-    expect(resolveTargets('human', 'ping @not-a-member', members).map((m) => m.name)).toEqual(['supe']);
+    expect(resolveTargets('agent-a', 'ping @human', members).map((m) => m.name)).toEqual(['supe']);
+  });
+
+  it('stranger-only mentions broadcast, and the supervisor is not double-added', () => {
+    // desk#44: `@not-a-member` names nobody here, so this is an unaddressed
+    // message — it broadcasts, and supe is already inside that broadcast.
+    const members = [member('agent-a'), supervisor('supe'), member('human', 'human')];
+    expect(resolveTargets('human', 'ping @not-a-member', members).map((m) => m.name)).toEqual(['agent-a', 'supe']);
   });
 
   it('a supervisor is not double-added on @channel or empty-mentions broadcasts', () => {
@@ -130,7 +170,9 @@ describe('resolveTargets with supervisor members', () => {
   it('a supervisor never receives their own message', () => {
     const members = [member('agent-a'), supervisor('supe'), member('human', 'human')];
     // supe posts; the author is excluded from `agents`, so supervisors[] is empty, no self-delivery.
-    expect(resolveTargets('supe', 'silence check @not-here', members).map((m) => m.name)).toEqual([]);
+    // `@not-here` names nobody, so this broadcasts — to everyone but supe.
+    expect(resolveTargets('supe', 'silence check @not-here', members).map((m) => m.name)).toEqual(['agent-a']);
+    expect(resolveTargets('supe', 'silence check @human', members).map((m) => m.name)).toEqual([]);
     expect(resolveTargets('supe', 'plain message', members).map((m) => m.name)).toEqual(['agent-a']);
   });
 

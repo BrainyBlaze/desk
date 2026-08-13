@@ -273,6 +273,22 @@ describe('ChannelsEngine delivery gating', () => {
     expect(sent).toEqual([]);
   });
 
+  it('delivers a message whose only mentions name nobody in the channel (desk#44)', async () => {
+    // The live defect: `@asher` is an external person, no channel member matches,
+    // and the message was dropped to zero recipients with no trace anywhere.
+    engine.handleMessage(
+      {
+        channel: 'ops',
+        file: 'root.md',
+        message: message('msg-unknown-mention-1', 'human', 'proceed with 1-2-3, and ping @asher about the follow-up')
+      },
+      multiMembers
+    );
+    await waitFor(() => sent.length === 2);
+    expect(sent.map((entry) => entry.session).sort()).toEqual(['tmux-a', 'tmux-b']);
+    expect(sent[0].text).toContain('notificationId:msg-unknown-mention-1');
+  });
+
   it('routes an unmentioned thread reply only to the thread parent author', async () => {
     createChannel(home, 'ops', 'ops channel');
     const parent = await appendMessage(home, 'ops', { author: 'alpha', body: 'root question' });

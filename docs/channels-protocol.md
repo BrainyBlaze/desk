@@ -109,6 +109,12 @@ Who receives a **root message** is decided by mentions in the body:
 | `@channel` | dispatched to every agent member |
 | *(no mention)* | same as `@channel` — everyone |
 | `@human` | notifies the operator's UI (events drawer); **not** dispatched to agents |
+| `@stranger` (names nobody in the channel) | treated as prose about an outsider, **not** as addressing: same as *(no mention)* — everyone |
+
+A mention only narrows dispatch when it names somebody who is actually in the
+channel. Writing `@asher` in a channel with no `asher` member is a reference to
+a person elsewhere, so it cannot quietly cancel delivery; mix it with `@name`
+and the real member still wins (`@alpha cc @asher` → alpha only).
 
 **Thread replies** follow different rules: a reply is dispatched to the parent
 message's author plus any explicitly mentioned agents, and `@channel` is
