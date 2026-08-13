@@ -26,6 +26,7 @@
  */
 import {
   BP_CONN_CHANNEL,
+  BpError,
   BpFrameType,
   BpInputFlag,
   decodeBpFrame,
@@ -54,6 +55,8 @@ export interface BinarySurfaceHandlers {
   onExit?: (code: number, signal: number) => void;
   /** Protocol-level error for this surface (a BpError code). */
   onError?: (code: number) => void;
+  /** Client-side failure that has no browser-protocol error code. */
+  onClientError: (message: string) => void;
   /** broker connection up/down — drives the per-cell reconnect UI */
   onConnectionChange?: (up: boolean) => void;
 }
@@ -74,12 +77,16 @@ interface BinarySurface {
   /** Latest size not yet sent (socket connecting / channel not yet open). */
   pendingResize?: { cols: number; rows: number };
   /**
-   * Keystrokes/paste bytes typed before channelId was assigned (socket still
-   * connecting, or SUBSCRIBE_ACK still in flight). Queued in order and
-   * flushed whole once the channel opens — the focus/attach race must never
-   * silently swallow input (desk#46).
+   * Keystrokes/paste bytes typed while there is no open channel — socket still
+   * connecting, SUBSCRIBE_ACK still in flight, or a transport drop mid-reconnect
+   * (forgetChannels deliberately leaves this alone: a short reconnect blip
+   * must not eat what the user typed during it). Queued in order and flushed
+   * whole once a channel opens. Bounded by MAX_PENDING_INPUT_BYTES /
+   * MAX_PENDING_INPUT_AGE_MS — see bufferPendingInput (desk#46).
    */
   pendingInput?: { bytes: Uint8Array; binary: boolean }[];
+  /** Wall-clock time the oldest entry in pendingInput was queued. */
+  pendingInputSince?: number;
 }
 
 const OPEN = 1;
@@ -88,6 +95,14 @@ const RECONNECT_MAX = 5;
 // dead (a half-open TCP still reports OPEN). The server beacons periodically, so
 // two missed beacons = dead. Mirrors the string-JSON broker's watchdog.
 const HEARTBEAT_TIMEOUT_MS = 30_000;
+// Bounds on pendingInput so a stalled channel/reconnect can't accumulate
+// keystrokes forever: either budget blown drops the whole stale queue (never
+// silently — see bufferPendingInput) rather than growing without limit or
+// replaying ancient input into a channel that opens minutes later.
+const MAX_PENDING_INPUT_BYTES = 64 * 1024;
+const MAX_PENDING_INPUT_AGE_MS = 10_000;
+const PENDING_INPUT_EXPIRED_MESSAGE =
+  `terminal input queue expired after ${MAX_PENDING_INPUT_AGE_MS / 1000} seconds before the channel opened`;
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -168,16 +183,56 @@ export class BinaryTerminalBrokerClient {
     if (!surface || !surface.visible) {
       return; // no visible surface to carry it
     }
-    if (surface.channelId === undefined) {
-      // The socket is still connecting, or the SUBSCRIBE_ACK for this surface
-      // is still in flight: there is no channelId to address a frame to yet.
-      // A user who focuses the terminal and starts typing immediately lands
-      // here — buffer in order rather than dropping the keystroke; onSubscribeAck
-      // flushes this queue the moment the channel opens (desk#46).
-      (surface.pendingInput ??= []).push({ bytes, binary });
+    const socket = this.socket;
+    if (surface.channelId === undefined || !socket || socket.readyState !== OPEN) {
+      // The socket is still connecting/closing, the SUBSCRIBE_ACK for this
+      // surface is still in flight, or a transport drop is mid-reconnect:
+      // there is no open channel/transport pair that can carry this frame. A
+      // user who focuses the terminal and starts typing immediately lands here
+      // — buffer in order rather than dropping the keystroke; onSubscribeAck
+      // flushes this queue the moment a channel opens (desk#46).
+      this.bufferPendingInput(surface, bytes, binary);
       return;
     }
     this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
+  }
+
+  /**
+   * Queue input for a surface with no open channel, bounded so a stalled
+   * SUBSCRIBE or a long reconnect can't accumulate forever. On overflow
+   * (cumulative bytes over MAX_PENDING_INPUT_BYTES, or the oldest entry older
+   * than MAX_PENDING_INPUT_AGE_MS) the whole stale queue is dropped and the
+   * surface is told through the appropriate visible handler: protocol
+   * PAYLOAD_TOO_LARGE for a byte overflow, or a local client error when the
+   * queue expires. It never grows without bound or silently flushes ancient
+   * keystrokes into whatever channel eventually opens. A single chunk that
+   * alone exceeds the byte budget (an oversized paste) is dropped and never
+   * buffered.
+   */
+  private bufferPendingInput(surface: BinarySurface, bytes: Uint8Array, binary: boolean): void {
+    const now = Date.now();
+    const pending = surface.pendingInput ?? [];
+    const currentBytes = pending.reduce((sum, entry) => sum + entry.bytes.length, 0);
+    const age = surface.pendingInputSince === undefined ? 0 : now - surface.pendingInputSince;
+    const expired = pending.length > 0 && age > MAX_PENDING_INPUT_AGE_MS;
+    const oversizedChunk = bytes.length > MAX_PENDING_INPUT_BYTES;
+    const byteOverflow = currentBytes + bytes.length > MAX_PENDING_INPUT_BYTES;
+    if (oversizedChunk || expired || byteOverflow) {
+      surface.pendingInput = undefined;
+      surface.pendingInputSince = undefined;
+      if (oversizedChunk || !expired) {
+        surface.handlers.onError?.(BpError.PAYLOAD_TOO_LARGE);
+      } else {
+        surface.handlers.onClientError(PENDING_INPUT_EXPIRED_MESSAGE);
+      }
+      if (oversizedChunk) {
+        return; // this one chunk can never fit the budget on its own — drop it too, already reported
+      }
+    }
+    if (!surface.pendingInput) {
+      surface.pendingInputSince = now;
+    }
+    (surface.pendingInput ??= []).push({ bytes, binary });
   }
 
   /** Flush input buffered while the channel was not yet open, in order. */
@@ -186,7 +241,21 @@ export class BinaryTerminalBrokerClient {
     if (!pending || pending.length === 0 || surface.channelId === undefined) {
       return;
     }
+    // The ACK is the consumption boundary, so enforce the age budget here too.
+    // A lone key can otherwise sit past the limit with no later append to run
+    // bufferPendingInput's age check, then be replayed merely because a very
+    // late channel finally opened.
+    if (
+      surface.pendingInputSince !== undefined &&
+      Date.now() - surface.pendingInputSince > MAX_PENDING_INPUT_AGE_MS
+    ) {
+      surface.pendingInput = undefined;
+      surface.pendingInputSince = undefined;
+      surface.handlers.onClientError(PENDING_INPUT_EXPIRED_MESSAGE);
+      return;
+    }
     surface.pendingInput = undefined;
+    surface.pendingInputSince = undefined;
     for (const { bytes, binary } of pending) {
       this.sendFrame({ type: BpFrameType.INPUT, channelId: surface.channelId, binary, bytes });
     }
@@ -232,6 +301,12 @@ export class BinaryTerminalBrokerClient {
       this.socket = undefined;
     }
     this.connected = false;
+    // Closing the transport invalidates every server-assigned channel
+    // immediately. The old socket's eventual close callback is identity-fenced
+    // and may never run, so clear the channel ids synchronously; pending input
+    // deliberately survives forgetChannels and is flushed only after the new
+    // SUBSCRIBE_ACK assigns a replacement channel.
+    this.forgetChannels();
     // Clear `connecting` too: forceReconnect can fire while a socket is still
     // mid-CONNECTING (wake-from-sleep fans out online + visibilitychange +
     // pulse), and we just orphaned that socket above — its close handler bails
@@ -383,6 +458,7 @@ export class BinaryTerminalBrokerClient {
     // context (hide, unsubscribe, or resync) — never replay it into whatever
     // channel a future (re)subscribe opens.
     surface.pendingInput = undefined;
+    surface.pendingInputSince = undefined;
   }
 
   /** A gap / stale-baseline made this surface dirty: rebaseline via re-subscribe. */
@@ -400,6 +476,14 @@ export class BinaryTerminalBrokerClient {
       surface.channelId = undefined;
       surface.resync = undefined;
       surface.awaitingAck = false;
+      // Deliberately NOT clearing pendingInput here: this path runs when the
+      // transport is reset (socket 'close' or forceReconnect), while the
+      // surface itself remains live, visible, and bound to the same session.
+      // A short reconnect blip must not eat what the user typed during it.
+      // Continuity is bounded (bufferPendingInput's byte/age caps), so a
+      // stalled reconnect still can't accumulate input forever; a deliberate
+      // close (hide/unsubscribe/resync) goes through closeChannel instead,
+      // which does drop it — that context really is gone.
     }
   }
 
@@ -456,6 +540,7 @@ export class BinaryTerminalBrokerClient {
       if (surface) {
         surface.awaitingAck = false;
         surface.pendingInput = undefined; // never replay into whatever channel comes next
+        surface.pendingInputSince = undefined;
       }
       return;
     }

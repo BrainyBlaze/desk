@@ -51,6 +51,7 @@ interface Captured {
   snapshot: string[];
   exit: { code: number; signal: number }[];
   error: number[];
+  clientError: string[];
   connection: boolean[];
 }
 
@@ -60,10 +61,11 @@ function handlers(cap: Captured): BinarySurfaceHandlers {
     onSnapshot: (t) => cap.snapshot.push(t),
     onExit: (code, signal) => cap.exit.push({ code, signal }),
     onError: (code) => cap.error.push(code),
+    onClientError: (message) => cap.clientError.push(message),
     onConnectionChange: (up) => cap.connection.push(up)
   };
 }
-const blank = (): Captured => ({ output: [], snapshot: [], exit: [], error: [], connection: [] });
+const blank = (): Captured => ({ output: [], snapshot: [], exit: [], error: [], clientError: [], connection: [] });
 
 describe('binary terminal broker client (§7.4)', () => {
   let socket: FakeSocket;
@@ -201,6 +203,159 @@ describe('binary terminal broker client (§7.4)', () => {
     for (const frame of inputs) {
       expect(frame.channelId).toBe(42);
     }
+  });
+
+  it('drops a single oversized pre-channel chunk and reports it via onError instead of buffering it unbounded', () => {
+    // Bound #1 (bytes): a paste larger than the whole budget must never be
+    // queued at all — buffering it "just this once" would defeat the cap.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    const huge = 'a'.repeat(70 * 1024); // > the 64 KiB budget, on its own
+    client.sendInput('s1', huge);
+    expect(cap.error).toEqual([BpError.PAYLOAD_TOO_LARGE]); // visible, not silent
+    client.sendInput('s1', 'ok'); // small enough — starts a fresh buffer
+    socket.deliver(ack(11));
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    expect(inputs).toHaveLength(1); // the oversized chunk never flushes
+    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('ok');
+  });
+
+  it('drops the whole stale queue once cumulative pre-channel input exceeds the byte budget', () => {
+    // Bound #1 (bytes), accumulated across several chunks — e.g. repeated
+    // pastes while a subscribe or reconnect is stuck.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    const chunk = 'x'.repeat(20 * 1024); // 20 KiB
+    client.sendInput('s1', chunk); // 20 KiB buffered
+    client.sendInput('s1', chunk); // 40 KiB buffered
+    client.sendInput('s1', chunk); // 60 KiB buffered — still under the 64 KiB cap
+    expect(cap.error).toEqual([]);
+    client.sendInput('s1', chunk); // would push to 80 KiB → overflow
+    expect(cap.error).toEqual([BpError.PAYLOAD_TOO_LARGE]);
+    expect(cap.clientError).toEqual([]);
+    socket.deliver(ack(12));
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    // Only the chunk that triggered (and survived) the overflow flushes — the
+    // three stale chunks queued before it are gone, never silently replayed.
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0].bytes.length).toBe(20 * 1024);
+  });
+
+  it('drops the stale queue once the oldest pre-channel entry exceeds the age budget', () => {
+    // Bound #2 (age): a subscribe/reconnect stuck for longer than 10s must not
+    // let ancient keystrokes silently ride in on whatever channel eventually opens.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    client.sendInput('s1', 'a'); // buffered at t=0
+    vi.advanceTimersByTime(10_001); // older than the 10s budget
+    client.sendInput('s1', 'b'); // the age check fires on this push
+    expect(cap.error).toEqual([]);
+    expect(cap.clientError).toEqual(['terminal input queue expired after 10 seconds before the channel opened']);
+    socket.deliver(ack(13));
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    expect(inputs).toHaveLength(1);
+    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('b'); // 'a' is gone, not replayed
+  });
+
+  it('rejects aged pending input when the ACK itself arrives after the age budget', () => {
+    // The age fence must apply at consumption as well as append time. A user
+    // may type once and then receive no further input event before a very late
+    // ACK; without this check the ancient key flushes merely because nothing
+    // else arrived to trigger bufferPendingInput's append-time fence.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    client.sendInput('s1', 'ancient');
+    vi.advanceTimersByTime(10_001);
+
+    socket.deliver(ack(14));
+
+    expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0);
+    expect(cap.error).toEqual([]);
+    expect(cap.clientError).toEqual(['terminal input queue expired after 10 seconds before the channel opened']);
+  });
+
+  it('survives a transport drop even for input already buffered before the drop, then flushes on the new channel (bounded continuity)', () => {
+    // Deliberate decision: forgetChannels() (transport 'close') does NOT clear
+    // pendingInput — a short reconnect blip must not eat what the user typed
+    // mid-reconnect, unlike an explicit hide/unsubscribe/resync (closeChannel),
+    // which does drop it. This must hold even for input that was ALREADY
+    // buffered (awaiting an ACK that never arrives) at the moment the socket
+    // drops — that is exactly what forgetChannels touches. Continuity is safe
+    // only because it is bounded by the same byte/age caps exercised above.
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen(); // SUBSCRIBE sent, no ACK yet — no channel
+    client.sendInput('s1', 'p'); // typed before the ACK ever lands — buffered
+    socket.fireClose(); // transport drops before that ACK arrives (forgetChannels runs)
+    client.sendInput('s1', 'm'); // more typed while still down
+    expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0); // nothing sent on the dead socket
+    const first = socket;
+    socket = new FakeSocket();
+    vi.advanceTimersByTime(2000); // backoff fires, builds the new socket
+    socket.fireOpen();
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1); // fresh re-subscribe
+    socket.deliver(ack(2)); // new channel opens
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    expect(inputs).toHaveLength(2);
+    // 'p' (buffered before the drop) survives forgetChannels and flushes
+    // ahead of 'm' (buffered during the reconnect) — order preserved, nothing lost.
+    expect(inputs.map((f) => new TextDecoder().decode(f.bytes)).join('')).toBe('pm');
+    expect(inputs.every((f) => f.channelId === 2)).toBe(true);
+    expect(first.ofType(BpFrameType.INPUT)).toHaveLength(0); // never replayed onto the dead socket
+    expect(cap.error).toEqual([]); // well within both bounds — no overflow
+  });
+
+  it('buffers input typed after forceReconnect invalidates the old channel but before the replacement opens', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    socket.deliver(ack(7));
+    const first = socket;
+
+    const replacement = new FakeSocket();
+    replacement.readyState = 0; // CONNECTING: real WebSocket cannot send yet
+    socket = replacement;
+    client.forceReconnect();
+    client.sendInput('s1', 'during-reconnect');
+    expect(first.ofType(BpFrameType.INPUT)).toHaveLength(0);
+    expect(replacement.ofType(BpFrameType.INPUT)).toHaveLength(0);
+
+    replacement.readyState = 1;
+    replacement.fireOpen();
+    expect(replacement.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
+    replacement.deliver(ack(8));
+
+    const inputs = replacement.ofType(BpFrameType.INPUT);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0].channelId).toBe(8);
+    expect(new TextDecoder().decode(inputs[0].bytes)).toBe('during-reconnect');
+  });
+
+  it("buffers input while the assigned channel's socket is CLOSING and preserves order through resubscribe", () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    socket.deliver(ack(7));
+    const first = socket;
+
+    first.readyState = 2; // CLOSING, before the close callback invalidates channel 7
+    client.sendInput('s1', 'a');
+    expect(first.ofType(BpFrameType.INPUT)).toHaveLength(0);
+
+    first.fireClose();
+    client.sendInput('s1', 'b');
+    socket = new FakeSocket();
+    vi.advanceTimersByTime(2000);
+    socket.fireOpen();
+    socket.deliver(ack(8));
+
+    const inputs = socket.ofType(BpFrameType.INPUT);
+    expect(inputs.map((frame) => new TextDecoder().decode(frame.bytes)).join('')).toBe('ab');
+    expect(inputs.every((frame) => frame.channelId === 8)).toBe(true);
   });
 
   it('buffers a pre-ACK resize and flushes it once the channel opens', () => {
