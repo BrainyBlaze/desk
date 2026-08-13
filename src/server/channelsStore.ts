@@ -92,6 +92,9 @@ export interface ChannelSummary {
   /** Opaque content-addressed revision of the root conversation. */
   contentRevision: string;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
+  /** unread resolution against the reader's seen id (present when a seen map was supplied) */
+  unreadCount?: number;
+  firstUnreadId?: string | null;
 }
 
 export interface ChannelFileEntry {
@@ -120,6 +123,10 @@ export interface ChannelDetail {
   firstMessageAt?: string;
   /** protocol timestamp of the channel's most recent message (last activity) */
   lastMessageAt?: string;
+  /** first message after the reader's `since` pointer (since windows only) */
+  firstUnreadId?: string | null;
+  /** messages after the `since` pointer (since windows only) */
+  unreadCount?: number;
 }
 
 /** A contiguous slice of a channel's messages plus its boundary flags. */
@@ -131,6 +138,14 @@ export interface MessageWindow {
   /** absolute index of the first sliced message in the full conversation —
    *  lets the client compute an absolute read-count from a windowed position */
   startIndex: number;
+  /** id of the first message after the `since` pointer; null when fully read
+   *  or the channel is empty (only populated on `since` windows) */
+  firstUnreadId?: string | null;
+  /** messages after the `since` pointer (only populated on `since` windows) */
+  unreadCount?: number;
+  /** whether the supplied `since` id was found — false means the pointer is
+   *  stale and the whole channel counted as unread */
+  sinceResolved?: boolean;
 }
 
 export interface ChannelSearchOptions {
@@ -209,15 +224,39 @@ export function sliceMessages(all: ChannelMessage[], opts: MessageSliceOpts): Me
 
   // Initial window: anchor on the first unread (after `since`), else the newest.
   let start = Math.max(0, total - limit);
-  if (opts.since) {
-    const seenIndex = all.findIndex((message) => message.id === opts.since);
-    if (seenIndex !== -1 && seenIndex < total - 1) {
+  let firstUnreadId: string | null = null;
+  let unreadCount = 0;
+  let sinceResolved = true;
+  const since = opts.since != null && opts.since !== '' ? opts.since : undefined;
+  if (since !== undefined) {
+    const seenIndex = all.findIndex((message) => message.id === since);
+    sinceResolved = seenIndex !== -1;
+    if (sinceResolved) {
       const firstUnread = seenIndex + 1;
-      start = Math.max(0, firstUnread - (opts.contextAbove ?? 0));
+      firstUnreadId = all[firstUnread]?.id ?? null;
+      unreadCount = firstUnreadId === null ? 0 : total - firstUnread;
+      if (seenIndex < total - 1) {
+        start = Math.max(0, firstUnread - (opts.contextAbove ?? 0));
+      }
+    } else {
+      firstUnreadId = null;
+      unreadCount = total;
     }
   }
   const end = Math.min(total, start + limit);
-  return { messages: all.slice(start, end), hasOlder: start > 0, hasNewer: end < total, total, startIndex: start };
+  const window: MessageWindow = {
+    messages: all.slice(start, end),
+    hasOlder: start > 0,
+    hasNewer: end < total,
+    total,
+    startIndex: start
+  };
+  if (since !== undefined) {
+    window.firstUnreadId = firstUnreadId;
+    window.unreadCount = unreadCount;
+    window.sinceResolved = sinceResolved;
+  }
+  return window;
 }
 
 const CONVERSATION_FILE = /^(root|thread-msg-[A-Za-z0-9-]+)\.md$/;
@@ -375,6 +414,51 @@ export function listChannels(home = resolveChannelsHome()): ChannelSummary[] {
     }
   }
   return summaries.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const unreadMemo = new Map<string, { fingerprint: string; seenId: string; firstUnreadId: string | null; unreadCount: number }>();
+
+/**
+ * Stamp per-reader unread resolution onto summaries. Seen-at-tail costs
+ * nothing; a reader genuinely behind costs one parse per (file, seenId)
+ * change, memoized until either moves.
+ */
+export function resolveUnreadSummaries(
+  home: string,
+  summaries: ChannelSummary[],
+  seen: Record<string, string>
+): ChannelSummary[] {
+  return summaries.map((summary) => {
+    const seenId = seen[summary.name];
+    if (seenId === undefined) {
+      return { ...summary, unreadCount: summary.messageCount, firstUnreadId: null };
+    }
+    if (summary.lastMessage === undefined || summary.lastMessage.id === seenId) {
+      return { ...summary, unreadCount: 0, firstUnreadId: null };
+    }
+    const rootFile = join(home, summary.name, 'root.md');
+    try {
+      const fingerprint = fileFingerprint(rootFile);
+      const memoKey = summaryCacheKey(home, summary.name);
+      const cached = unreadMemo.get(memoKey);
+      if (cached && cached.fingerprint === fingerprint && cached.seenId === seenId) {
+        return { ...summary, unreadCount: cached.unreadCount, firstUnreadId: cached.firstUnreadId };
+      }
+      const { messages } = parseConversation(readStableRoot(rootFile).text);
+      const window = sliceMessages(messages, { since: seenId, limit: 1 });
+      const resolved = {
+        fingerprint,
+        seenId,
+        firstUnreadId: window.firstUnreadId ?? null,
+        unreadCount: window.unreadCount ?? 0
+      };
+      unreadMemo.set(memoKey, resolved);
+      return { ...summary, unreadCount: resolved.unreadCount, firstUnreadId: resolved.firstUnreadId };
+    } catch (error) {
+      console.error(`[desk-channels] unread resolution failed for #${summary.name}: ${String(error)}`);
+      return summary;
+    }
+  });
 }
 
 export function createChannel(home: string, name: string, goal: string): void {
@@ -609,7 +693,9 @@ export function readChannelDetail(home: string, channel: string, opts?: MessageS
     total: window.total,
     startIndex: window.startIndex,
     firstMessageAt: messages[0]?.timestamp,
-    lastMessageAt: messages[messages.length - 1]?.timestamp
+    lastMessageAt: messages[messages.length - 1]?.timestamp,
+    firstUnreadId: window.firstUnreadId,
+    unreadCount: window.unreadCount
   };
 }
 
