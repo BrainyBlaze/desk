@@ -191,13 +191,14 @@ const threadReply = (mentionsOperator = false): DeskEvent =>
   }) as DeskEvent;
 
 describe('thread replies as events', () => {
-  it('the threads filter keeps only UNREAD channel messages posted into a thread', () => {
-    const unreadReply = threadReply(false);
-    const readReply = { ...threadReply(false), id: 'evt-7', read: true } as DeskEvent;
-    const events = [channel(false), unreadReply, readReply, idle()];
-    expect(filterEvents(events, 'threads').map((e) => e.id)).toEqual(['evt-6']);
-    // channel-message (root + thread, read or not) stays a full log
-    expect(filterEvents(events, 'channel-message')).toHaveLength(3);
+  it('threads and channels are disjoint filters over the same log', () => {
+    const rootRead = { ...channel(false), id: 'evt-7', read: true } as DeskEvent;
+    const replyRead = { ...threadReply(false), id: 'evt-8', read: true } as DeskEvent;
+    const events = [channel(false), rootRead, threadReply(false), replyRead, idle()];
+    // threads = every thread reply, read or not (a plain filter, no clearing)
+    expect(filterEvents(events, 'threads').map((e) => e.id)).toEqual(['evt-6', 'evt-8']);
+    // channels = root messages only, so no card lands in both tabs
+    expect(filterEvents(events, 'channel-message').map((e) => e.id)).toEqual(['evt-5', 'evt-7']);
   });
 
   it('labels a thread reply distinctly from a root message, ping still wins', () => {
