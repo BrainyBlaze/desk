@@ -623,7 +623,6 @@ describe('daemon moor title recovery', () => {
     vi.spyOn(second.router.sessions, 'moorAttachMaster').mockResolvedValue(true);
     const restored = await second.router.sessions.restoreAndAttachMoor(sessionId, {
       sessionPath,
-      geometry: { rows: 24, cols: 80 },
       killSpec: { binPath: '/bin/true', args: [] },
       subject
     });

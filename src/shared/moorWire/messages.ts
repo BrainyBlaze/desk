@@ -30,6 +30,18 @@ export const MoorKind = {
   LOG_CLEAR_RESULT: 26
 } as const;
 
+/**
+ * Moor geometry (wire schema §4, OB-19): both dimensions zero means PRESERVE
+ * BOTH — the holder keeps the child's current pty size and the child is never
+ * told anything. Exactly one zero is HALF_SPECIFIED_GEOMETRY and changes
+ * nothing. This is the encoding a controller uses when it does not know the
+ * session's size, which is precisely the position a daemon is in when it
+ * re-adopts a holder that outlived it: the status descriptor (§5) carries no
+ * rows/cols, so there is nothing to read and nothing honest to send.
+ */
+export const MOOR_PRESERVE_GEOMETRY: { readonly rows: 0; readonly cols: 0 } =
+  Object.freeze({ rows: 0, cols: 0 } as const);
+
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const WIDE_MAX = 1 << 20;
 const ZERO_16 = new Uint8Array(16);

@@ -46,6 +46,7 @@ import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../src/shared/daemonControlClien
 import { shellQuote } from '../src/shared/shell.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
+import { FileSessionGeometryStore } from '../src/server/runtime/fileSessionGeometryStore.js';
 import { fileURLToPath } from 'node:url';
 
 const FAKE_MOOR = fileURLToPath(new URL('./helpers/fake-moor-holder.ts', import.meta.url));
@@ -204,7 +205,7 @@ describe('reconcile liveness (wedged sockets must not stall startup)', () => {
       const { manager } = makeManager(store);
       const daemon = { router: { sessions: manager } } as never;
       const started = Date.now();
-      const results = await reconcileExistingSessions(daemon, targets, '/usr/bin/true', { rows: 24, cols: 80 });
+      const results = await reconcileExistingSessions(daemon, targets, '/usr/bin/true');
       const wall = Date.now() - started;
       expect(results.find((r) => r.sessionId === 'healthy')?.ok).toBe(true);
       for (let i = 0; i < 3; i += 1) {
@@ -480,6 +481,159 @@ describe('startTerminalDaemonServer socket root', () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// desk#62 — a daemon restart must not write a geometry no session has onto a
+// live child. The daemon cannot ask the holder how big the child's pty is (the
+// moor status descriptor, wire schema §5, carries no rows/cols), so the only
+// honest sources are a durable record of what a real client measured and the
+// wire's own "preserve both" encoding (§4/OB-19: columns and rows both zero).
+// ---------------------------------------------------------------------------
+
+/** Mirrors the fake holder's witness path (the helper is a script, not importable). */
+const geometryWitness = (sessionPath: string): string => `${sessionPath}.geometry-witness`;
+
+const witnessLines = (sessionPath: string): string[] => {
+  const path = geometryWitness(sessionPath);
+  return existsSync(path)
+    ? readFileSync(path, 'utf8').split('\n').filter((line) => line.length > 0)
+    : [];
+};
+
+function makeManagerWithGeometry(
+  store: InMemoryGenerationLedger,
+  geometryStore: FileSessionGeometryStore
+): { manager: SessionManager; created: Array<{ rows: number; cols: number }> } {
+  const created: Array<{ rows: number; cols: number }> = [];
+  const manager = new SessionManager({
+    ledger: new GenerationLedger(store),
+    supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+    emulatorFactory: {
+      create: (opts) => {
+        created.push({ rows: opts.rows, cols: opts.cols });
+        return new FakeEmu();
+      }
+    },
+    now: () => 1000,
+    sendBrowser: () => {},
+    sessionGeometry: geometryStore
+  });
+  return { manager, created };
+}
+
+describe('re-adoption never invents a geometry (desk#62)', () => {
+  it('the reconcile pass hands restoreAndAttachMoor no geometry at all', async () => {
+    const restoreAndAttachMoor = vi.fn().mockResolvedValue({ ok: true, generation: 2 });
+    const daemon = { router: { sessions: { restoreAndAttachMoor } } } as never;
+
+    await reconcileExistingSessions(
+      daemon,
+      [{ sessionId: 'a', sockPath: '/r/a', subject: { kind: 'terminal' } }],
+      '/opt/moor'
+    );
+
+    // Not "a better default" — NO geometry. The reconcile pass has no
+    // knowledge of any session's size, so it must assert none.
+    const opts = restoreAndAttachMoor.mock.calls[0][1] as Record<string, unknown>;
+    expect(Object.keys(opts)).not.toContain('geometry');
+  });
+
+  it('a session a client measured comes back at THAT size, and the ATTACH still asserts nothing on the live child', async () => {
+    // CASE 1 of 2: geometry WAS known before the restart. This is the defect —
+    // the daemon discarded knowledge it already had and wrote 24x80 over it.
+    const dir = mkdtempSync(join(tmpdir(), 'desk-geo-known-'));
+    const sock = join(dir, 'measured');
+    const geometryPath = join(dir, '_engine', 'session-geometry.ndjson');
+    await spawnFakeMoorHolder(
+      sock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: dir }), 'measured.events'),
+      2,
+      ['sleep', '30'],
+      dir
+    );
+    const targets = [
+      { sessionId: 'measured', sockPath: sock, subject: { kind: 'terminal' } as const }
+    ];
+    const ledgerStore = new InMemoryGenerationLedger();
+    new GenerationLedger(ledgerStore).allocate('measured'); // durable generation 2
+    try {
+      // --- daemon incarnation 1: a real surface measures 100x48 -------------
+      const first = new FileSessionGeometryStore(geometryPath);
+      const one = makeManagerWithGeometry(ledgerStore, first);
+      await reconcileExistingSessions(
+        { router: { sessions: one.manager } } as never,
+        targets,
+        '/usr/bin/true'
+      );
+      const channelId = one.manager.subscribe('measured', 'surface-1', 48, 100);
+      expect(channelId).not.toBeUndefined();
+      expect(one.manager.onBrowserResizeByChannel(channelId!, 48, 100)).toBe(true);
+      await waitFor(() => witnessLines(sock).includes('resize 100x48'));
+      one.manager.closeAllLinks(); // the daemon departs; the holder survives
+      first.close();
+
+      // --- daemon incarnation 2: it comes back ------------------------------
+      const second = new FileSessionGeometryStore(geometryPath);
+      const two = makeManagerWithGeometry(ledgerStore, second);
+      const results = await reconcileExistingSessions(
+        { router: { sessions: two.manager } } as never,
+        targets,
+        '/usr/bin/true'
+      );
+      expect(results).toEqual([{ sessionId: 'measured', ok: true }]);
+
+      // The restored session is the size a client actually measured — NOT the
+      // 24x80 the daemon used to invent.
+      expect(two.created).toEqual([{ rows: 48, cols: 100 }]);
+      // And nothing was written onto the live child: both re-adopting ATTACHes
+      // carry moor's preserve pair, so the pty keeps the size it already has.
+      expect(witnessLines(sock).filter((line) => line.startsWith('attach '))).toEqual([
+        'attach 0x0',
+        'attach 0x0'
+      ]);
+      second.close();
+    } finally {
+      await killFakeMoorHolder(sock);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('a session no client ever measured is re-adopted with preserve geometry, so its child keeps the size it has', async () => {
+    // CASE 2 of 2: geometry was NEVER known — no browser has ever rendered
+    // this session, and none is attached at restart. Nothing can know better,
+    // so the daemon must assert nothing rather than resize the child to a
+    // value it made up. This is the case no client-side mitigation can reach.
+    const dir = mkdtempSync(join(tmpdir(), 'desk-geo-unknown-'));
+    const sock = join(dir, 'unmeasured');
+    await spawnFakeMoorHolder(
+      sock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: dir }), 'unmeasured.events'),
+      2,
+      ['sleep', '30'],
+      dir
+    );
+    const ledgerStore = new InMemoryGenerationLedger();
+    new GenerationLedger(ledgerStore).allocate('unmeasured');
+    try {
+      const geometryStore = new FileSessionGeometryStore(
+        join(dir, '_engine', 'session-geometry.ndjson')
+      );
+      const { manager } = makeManagerWithGeometry(ledgerStore, geometryStore);
+      const results = await reconcileExistingSessions(
+        { router: { sessions: manager } } as never,
+        [{ sessionId: 'unmeasured', sockPath: sock, subject: { kind: 'terminal' } }],
+        '/usr/bin/true'
+      );
+      expect(results).toEqual([{ sessionId: 'unmeasured', ok: true }]);
+      expect(witnessLines(sock)).toEqual(['attach 0x0']);
+      manager.closeAllLinks();
+      geometryStore.close();
+    } finally {
+      await killFakeMoorHolder(sock);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe('reconcileExistingSessions', () => {

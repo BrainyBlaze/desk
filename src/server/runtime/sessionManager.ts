@@ -34,7 +34,7 @@ import {
   posixMoorIdentity,
   type MoorReconnectSnapshot
 } from './moorMasterClient.js';
-import type { MoorStatus } from '../../shared/moorWire/messages.js';
+import { MOOR_PRESERVE_GEOMETRY, type MoorStatus } from '../../shared/moorWire/messages.js';
 import { spawnMoorMaster } from './moorSpawnMaster.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, unlinkSync } from 'node:fs';
@@ -226,6 +226,8 @@ export interface SessionManagerDeps {
   now: () => number;
   /** Deliver a browser frame to a session's surface (the web-server WS wires this). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
+  /** desk#62 — durable last-measured geometry per session (see DaemonCoreDeps). */
+  sessionGeometry?: DaemonCoreDeps['sessionGeometry'];
   workingLeaseMs?: DaemonCoreDeps['workingLeaseMs'];
   openToolLeaseMs?: DaemonCoreDeps['openToolLeaseMs'];
   initialAgentHealth?: DaemonCoreDeps['initialAgentHealth'];
@@ -347,6 +349,7 @@ export class SessionManager {
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterResize: (sessionId, rows, cols, surfaceId) =>
         this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId),
+      ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -387,7 +390,6 @@ export class SessionManager {
     opts: {
       /** Moor rendezvous path — `<root>/<sessionId>`, no suffix. */
       sessionPath: string;
-      geometry: { rows: number; cols: number };
       /** The detached-holder stop command (e.g. `moor kill -f SESSION`). */
       killSpec: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
@@ -398,11 +400,7 @@ export class SessionManager {
     | (RestoreResult & { moorStatus?: MoorStatus })
     | { ok: false; reason: 'attach-failed' }
   > {
-    const restored = this.core.restore(
-      sessionId,
-      opts.geometry,
-      opts.subject ?? { kind: 'terminal' }
-    );
+    const restored = this.core.restore(sessionId, opts.subject ?? { kind: 'terminal' });
     if (!restored.ok) return restored;
     this.ensureTerminalObservation(sessionId, restored.generation);
     const token = Symbol('restore-op');
@@ -417,7 +415,13 @@ export class SessionManager {
       // The native client fences the WHOLE §3/§6 exchange on the restored
       // ledger generation — a holder carrying any other generation fails the
       // attach instead of splitting the fence.
-      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, opts.geometry, {
+      // desk#62: PRESERVE geometry. The daemon does not know this child's pty
+      // size — the ATTACH_ACK status descriptor (wire schema §5) does not carry
+      // one — so the adopting ATTACH asserts nothing and the holder leaves the
+      // running child exactly as it is. The wire field is mandatory; §4/OB-19
+      // gives it an encoding that means "do not change", and that is the only
+      // one that cannot shrink a live terminal.
+      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, MOOR_PRESERVE_GEOMETRY, {
         generation: restored.generation,
         stillValid: () => this.owners.get(sessionId) === token,
         ...(opts.livenessWindowMs === undefined

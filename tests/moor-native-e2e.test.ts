@@ -259,7 +259,6 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       cleanups.push(() => second.dispose());
       const restored = await second.router.sessions.restoreAndAttachMoor('native-r', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: { binPath: NATIVE_BIN, args: ['kill', '-f', sessionPath] }
       });
       expect(restored).toMatchObject({ ok: true, generation: 2 });
