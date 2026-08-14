@@ -479,8 +479,9 @@ export class AgentStateAuthority {
    * read, is BOTH of those things. Overwriting one with the other would trade a
    * known cause for a known blindness. So this refines exactly one field, once:
    * `diagnostic` may go from absent/null to an exact code and never back, and
-   * origin, reason and outcome are left untouched. Observed truth is never
-   * annotated this way, and the generation fence keeps a successor out.
+   * origin, reason and outcome are left untouched. Observed child-exit truth
+   * may only be annotated when its authenticated final output could not be
+   * delivered; the generation fence keeps a successor out.
    */
   refineExitDiagnostic(
     sessionId: string,
@@ -492,10 +493,12 @@ export class AgentStateAuthority {
     const rejected = this.guardSession(record, generation);
     if (rejected !== undefined) return rejected;
     const exit = record!.snapshot.exit;
+    const observedOutputTruncation =
+      exit?.origin === 'observed' && diagnostic.code === 'moor-final-output-truncated';
     if (
       exit === null ||
       record!.snapshot.lifecycle !== 'exited' ||
-      exit.origin !== 'retired' ||
+      (exit.origin !== 'retired' && !observedOutputTruncation) ||
       // Monotonic: an existing diagnostic is never downgraded or replaced.
       (exit.diagnostic !== null && exit.diagnostic !== undefined)
     ) {

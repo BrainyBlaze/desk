@@ -22,6 +22,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createTerminalDaemon, provisionSessions, runTerminalDaemon, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
 import { moorEventStoreDir, moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
+import { MoorStoreKind } from '../src/server/runtime/moorStore.js';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { readProviderSessionBinding } from '../src/server/providerSessionBinding.js';
 
@@ -82,7 +83,10 @@ function moorCommitRecord(
   generation: number,
   index: bigint,
   end: bigint,
-  body: Uint8Array
+  body: Uint8Array,
+  kind = MoorStoreKind.Event,
+  epoch = 0,
+  start = 0n
 ): Uint8Array {
   const record = new Uint8Array(92);
   const view = new DataView(record.buffer);
@@ -90,16 +94,53 @@ function moorCommitRecord(
   record[8] = 1;
   record[9] = slot;
   record[10] = slot;
-  record[11] = 1; // MoorStoreKind.Event
+  record[11] = kind;
   view.setUint32(12, generation, true);
-  view.setUint32(16, 0, true); // epoch 0
+  view.setUint32(16, epoch, true);
   view.setBigUint64(24, index, true);
   view.setBigUint64(32, BigInt(body.length), true);
-  view.setBigUint64(40, 0n, true); // start = first_retained
+  view.setBigUint64(40, start, true);
   view.setBigUint64(48, end, true); // end = next_seq
   record.set(createHash('sha256').update(body).digest(), 56);
   view.setUint32(88, crc32c(record.subarray(0, 88)), true);
   return record;
+}
+
+function writeCurrentExitStore(
+  sessionPath: string,
+  generation: number,
+  code: number,
+  outputEnd = 0n
+): void {
+  const identity = Buffer.from(moorStoreIdentity(sessionPath)).toString('base64');
+  const nonce = Buffer.alloc(16).toString('base64');
+  const body = encoder.encode(
+    `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}",` +
+      `"generation":${generation},"wire_generation":${generation},` +
+      `"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1",` +
+      `"boot_id":"${nonce}","path_encoding":"posix-bytes",` +
+      `"event_path":null,"instrument_path":null,"end_wall_ms":"2",` +
+      `"output_end":"${outputEnd}","ended":"exited","code":${code}}\n`
+  );
+  const directory = `${sessionPath}.exit`;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(join(directory, 'body.0'), body, { mode: 0o600 });
+  writeFileSync(
+    join(directory, 'commit.0'),
+    moorCommitRecord(
+      0,
+      generation,
+      2n,
+      outputEnd,
+      body,
+      MoorStoreKind.Exit,
+      1,
+      outputEnd
+    ),
+    { mode: 0o600 }
+  );
+  writeFileSync(join(directory, 'body.1'), new Uint8Array(), { mode: 0o600 });
+  writeFileSync(join(directory, 'commit.1'), new Uint8Array(), { mode: 0o600 });
 }
 
 /**
@@ -688,6 +729,7 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
       store.append('state', 2, ',"state":"busy","title":"work","truncated":false');
       store.append('state', 3, ',"state":"idle","title":"done","truncated":false');
       store.append('exit', 4, ',"ended":"exited","code":0');
+      writeCurrentExitStore(sessionPath, 2, 0);
       vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
         fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
       );

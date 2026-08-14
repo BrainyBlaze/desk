@@ -24,6 +24,7 @@ export interface SessionRuntimeDeps {
   now: () => number;
   /** Deliver a frame to one browser channel (surface WS). */
   sendBrowser: (channelId: number, frame: BpFrame) => void;
+  onSubscriberFailure?: (channelId: number) => void;
   /**
    * Typed master-bound operations. The runtime states WHAT the child must
    * receive; the session manager's installed link owns the wire encoding
@@ -39,6 +40,27 @@ interface Subscriber {
   rows: number;
   cols: number;
   visible: boolean;
+  ready: boolean;
+  activation?: Promise<void>;
+}
+
+interface OutputDelivery {
+  offset: bigint;
+  bytes: Uint8Array;
+  promise: Promise<void>;
+}
+
+interface TerminalStateDelivery {
+  bytes: Uint8Array;
+  promise: Promise<void>;
+}
+
+interface PendingExit {
+  code: number;
+  signal: number;
+  outputEnd: bigint;
+  promise: Promise<void>;
+  resolve: () => void;
 }
 
 export class SessionRuntime {
@@ -48,6 +70,15 @@ export class SessionRuntime {
   private nextChannelId = 1;
   /** Byte high-water of output emitted (snapshot baseline offset, §7.4). */
   private outputOffset = 0n;
+  /** Session-scoped Moor delivery frontier; survives individual client attempts. */
+  private outputDelivery: OutputDelivery | undefined;
+  /** All emulator work shares one session frontier, including attach preambles. */
+  private authoritativeWork: Promise<void> | undefined;
+  private terminalStateDelivery: TerminalStateDelivery | undefined;
+  private exitFenced = false;
+  private exitDelivery: Promise<void> | undefined;
+  private pendingExit: PendingExit | undefined;
+  private disposed = false;
   /** Geometry revision; bumps on resize so stale-revision frames are discardable. */
   private revision = 0;
 
@@ -60,9 +91,31 @@ export class SessionRuntime {
    * Restore connection-local terminal parser modes during ATTACH. These bytes are
    * not child PTY output: they do not advance outputOffset or fan out to browsers.
    */
-  async applyTerminalState(preamble: Uint8Array): Promise<void> {
+  applyTerminalState(preamble: Uint8Array): void | Promise<void> {
+    if (this.disposed) return;
+    const pendingPreamble = this.terminalStateDelivery;
+    if (pendingPreamble !== undefined) {
+      if (!this.sameBytes(pendingPreamble.bytes, preamble)) {
+        return pendingPreamble.promise.then(() => this.applyTerminalState(preamble));
+      }
+      return pendingPreamble.promise;
+    }
+    const pendingWork = this.authoritativeWork;
+    if (pendingWork !== undefined) {
+      return pendingWork.then(() => this.applyTerminalState(preamble));
+    }
     this.d.emulator.write(preamble);
-    await this.d.emulator.flush?.();
+    const draining = this.d.emulator.flush?.();
+    if (draining === undefined) return;
+    const delivery = Promise.resolve(draining);
+    this.terminalStateDelivery = { bytes: preamble.slice(), promise: delivery };
+    this.trackAuthoritativeWork(delivery);
+    void delivery.then(() => {
+      if (this.terminalStateDelivery?.promise === delivery) {
+        this.terminalStateDelivery = undefined;
+      }
+    }, () => undefined);
+    return delivery;
   }
 
   /** Authoritative-emulator cursor (0-based; the §8 CPR consumer maps to 1-based). */
@@ -76,65 +129,278 @@ export class SessionRuntime {
    * The moor event stream folds a signalled end into its exit code upstream,
    * so `signal` is 0 unless a caller can still distinguish one.
    */
-  emitExit(code: number, signal = 0): void {
-    for (const channelId of this.subscribers.keys()) {
-      this.d.sendBrowser(channelId, { type: BpFrameType.EXIT, channelId, code, signal });
+  emitExit(code: number, outputEnd: bigint, signal = 0): void | Promise<void> {
+    if (this.disposed || this.exitFenced) return this.exitDelivery;
+    const pending = this.pendingExit;
+    if (pending !== undefined) {
+      if (
+        pending.code !== code ||
+        pending.signal !== signal ||
+        pending.outputEnd !== outputEnd
+      ) {
+        throw new Error('conflicting Moor session exit boundary');
+      }
+      return pending.promise;
     }
+    if (outputEnd < this.outputOffset) {
+      throw new Error(
+        `Moor session exit boundary ${outputEnd} precedes delivered output ${this.outputOffset}`
+      );
+    }
+    let resolve!: () => void;
+    const delivery = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.pendingExit = { code, signal, outputEnd, promise: delivery, resolve };
+    this.exitDelivery = delivery;
+    this.completeExitIfReady();
+    return delivery;
   }
 
   /**
    * Moor-native child output (§6.1 OUTPUT): absolute byte offset + raw bytes.
    * Feeds the authoritative emulator and fans out to every subscribed surface.
    */
-  onMoorOutput(bytes: Uint8Array, offset: bigint): void {
-    this.d.emulator.write(bytes);
-    this.outputOffset = offset + BigInt(bytes.length);
-    for (const channelId of this.subscribers.keys()) {
-      this.d.sendBrowser(channelId, {
-        type: BpFrameType.OUTPUT,
-        channelId,
-        generation: this.d.generation,
-        revision: this.revision,
-        offset,
-        bytes
-      });
+  onMoorOutput(bytes: Uint8Array, offset: bigint): void | Promise<void> {
+    if (this.disposed) return;
+    if (this.exitFenced) throw new Error('Moor output after session exit');
+    const end = offset + BigInt(bytes.length);
+    if (this.pendingExit !== undefined && end > this.pendingExit.outputEnd) {
+      throw new Error(
+        `Moor output ending at ${end} crosses session exit boundary ${this.pendingExit.outputEnd}`
+      );
     }
+    if (end <= this.outputOffset) return;
+
+    const pending = this.outputDelivery;
+    if (pending !== undefined) {
+      if (pending.offset === offset) {
+        if (!this.sameBytes(pending.bytes, bytes)) {
+          throw new Error(`conflicting Moor output at offset ${offset}`);
+        }
+        return pending.promise;
+      }
+      return pending.promise.then(() => this.onMoorOutput(bytes, offset));
+    }
+
+    this.d.emulator.write(bytes);
+    const deliver = (): void => {
+      if (this.disposed) return;
+      this.outputOffset = end;
+      for (const [channelId, subscriber] of this.subscribers) {
+        if (!subscriber.ready) continue;
+        this.sendSubscriber(channelId, {
+          type: BpFrameType.OUTPUT,
+          channelId,
+          generation: this.d.generation,
+          revision: this.revision,
+          offset,
+          bytes
+        });
+      }
+      for (const [channelId, subscriber] of this.subscribers) {
+        if (!subscriber.ready) this.scheduleSubscriberActivation(channelId, subscriber);
+      }
+      this.completeExitIfReady();
+    };
+    const draining = this.d.emulator.flush?.();
+    if (draining === undefined) {
+      deliver();
+      return;
+    }
+    const delivery = draining.then(deliver);
+    this.outputDelivery = { offset, bytes, promise: delivery };
+    this.trackAuthoritativeWork(delivery);
+    void delivery.then(() => {
+      if (this.outputDelivery?.promise === delivery) this.outputDelivery = undefined;
+    }, () => undefined);
+    return delivery;
   }
 
   // ---- browser → daemon (§7.4/§7.6) -----------------------------------------
   /**
    * Subscribe a surface: assign a channelId, ACK it, and emit the baseline
-   * SNAPSHOT at the current output offset (§7.4). Returns the channelId.
+   * SNAPSHOT at the current output offset (§7.4). Returns whether the runtime
+   * admitted the subscriber.
    */
-  subscribe(surfaceId: string, rows: number, cols: number, assignedChannelId?: number): number {
+  subscribe(surfaceId: string, rows: number, cols: number, assignedChannelId?: number): boolean {
     // The daemon allocates a GLOBALLY-unique channelId (so frames that carry only
     // channelId route unambiguously); fall back to a local counter when called
     // directly (e.g. unit tests).
     const channelId = assignedChannelId ?? this.nextChannelId++;
-    this.subscribers.set(channelId, { surfaceId, rows, cols, visible: true });
-    this.d.sendBrowser(channelId, {
+    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
+    const subscriber: Subscriber = { surfaceId, rows, cols, visible: true, ready: false };
+    this.subscribers.set(channelId, subscriber);
+    if (!this.sendSubscriber(channelId, {
       type: BpFrameType.SUBSCRIBE_ACK,
       channelId,
       generation: this.d.generation,
       revision: this.revision
-    });
-    this.d.sendBrowser(channelId, {
+    })) return false;
+    this.scheduleSubscriberActivation(channelId, subscriber);
+    return this.subscribers.get(channelId) === subscriber;
+  }
+
+  private scheduleSubscriberActivation(channelId: number, subscriber: Subscriber): void {
+    if (
+      this.subscribers.get(channelId) !== subscriber ||
+      subscriber.ready ||
+      subscriber.activation !== undefined
+    ) {
+      return;
+    }
+    const frontier = this.authoritativeWork;
+    if (frontier === undefined) {
+      this.activateSubscriber(channelId, subscriber);
+      return;
+    }
+    const activation = frontier.then(
+      () => {
+        if (subscriber.activation !== activation) return;
+        subscriber.activation = undefined;
+        this.scheduleSubscriberActivation(channelId, subscriber);
+      },
+      () => {
+        if (subscriber.activation !== activation) return;
+        subscriber.activation = undefined;
+        if (this.subscribers.get(channelId) === subscriber) this.failSubscriber(channelId);
+      }
+    );
+    subscriber.activation = activation;
+  }
+
+  private activateSubscriber(channelId: number, subscriber: Subscriber): void {
+    if (this.subscribers.get(channelId) !== subscriber) return;
+    let text: string;
+    try {
+      text = this.d.emulator.serialize();
+    } catch {
+      this.failSubscriber(channelId);
+      return;
+    }
+    subscriber.ready = true;
+    this.sendSubscriber(channelId, {
       type: BpFrameType.SNAPSHOT,
       channelId,
       generation: this.d.generation,
       revision: this.revision,
       offset: this.outputOffset,
-      text: this.d.emulator.serialize()
+      text
     });
-    return channelId;
+  }
+
+  private sendSubscriber(channelId: number, frame: BpFrame): boolean {
+    try {
+      this.d.sendBrowser(channelId, frame);
+      return true;
+    } catch {
+      this.failSubscriber(channelId);
+      return false;
+    }
+  }
+
+  private failSubscriber(channelId: number): void {
+    this.subscribers.delete(channelId);
+    try {
+      this.d.onSubscriberFailure?.(channelId);
+    } catch {
+      // Browser-local cleanup must not poison authoritative output consumption.
+    }
+  }
+
+  private sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] !== right[index]) return false;
+    }
+    return true;
+  }
+
+  private trackAuthoritativeWork(work: Promise<void>): void {
+    this.authoritativeWork = work;
+    void work.then(() => {
+      if (this.authoritativeWork === work) {
+        this.authoritativeWork = undefined;
+        this.completeExitIfReady();
+      }
+    }, () => undefined);
+  }
+
+  private completeExitIfReady(): void {
+    const pending = this.pendingExit;
+    if (
+      pending === undefined ||
+      this.disposed ||
+      this.authoritativeWork !== undefined ||
+      this.outputOffset !== pending.outputEnd
+    ) {
+      return;
+    }
+    this.finishPendingExit(pending);
+  }
+
+  private finishPendingExit(pending: PendingExit): void {
+    this.exitFenced = true;
+    this.pendingExit = undefined;
+    for (const [channelId, subscriber] of this.subscribers) {
+      if (!subscriber.ready) this.activateSubscriber(channelId, subscriber);
+    }
+    for (const channelId of this.subscribers.keys()) {
+      this.sendSubscriber(channelId, {
+        type: BpFrameType.EXIT,
+        channelId,
+        code: pending.code,
+        signal: pending.signal
+      });
+    }
+    pending.resolve();
+  }
+
+  pendingAuthoritativeWork(): Promise<void> | undefined {
+    return this.authoritativeWork;
+  }
+
+  hasPendingExitBoundary(): boolean {
+    return this.pendingExit !== undefined;
+  }
+
+  truncatePendingExit(): { outputOffset: bigint; outputEnd: bigint } | undefined {
+    const pending = this.pendingExit;
+    if (pending === undefined || this.disposed || this.authoritativeWork !== undefined) {
+      return undefined;
+    }
+    const truncated = { outputOffset: this.outputOffset, outputEnd: pending.outputEnd };
+    this.finishPendingExit(pending);
+    return truncated;
   }
 
   unsubscribe(channelId: number): void {
     this.subscribers.delete(channelId);
   }
 
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.subscribers.clear();
+    this.txns.clear();
+    this.outputDelivery = undefined;
+    this.authoritativeWork = undefined;
+    this.terminalStateDelivery = undefined;
+    this.pendingExit?.resolve();
+    this.pendingExit = undefined;
+    this.d.emulator.dispose();
+  }
+
   /** Forward browser input to the master (§7.6, two channels). */
   onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    if (
+      this.disposed ||
+      this.pendingExit !== undefined ||
+      this.exitFenced ||
+      !this.subscribers.has(channelId)
+    ) {
+      return false;
+    }
     return this.d.sendMasterInput(bytes, binary, channelId) !== false;
   }
 
@@ -147,6 +413,7 @@ export class SessionRuntime {
    * newline in a TUI, while a plain shell never sees stray escape codes.
    */
   injectInput(bytes: Uint8Array, paste = false): boolean {
+    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
     let data = bytes;
     if (paste && this.d.emulator.bracketedPaste?.() === true) {
       const open = new TextEncoder().encode('\x1b[200~');
@@ -187,18 +454,19 @@ export class SessionRuntime {
    * resize) is the §7.5 refinement layered above; here the frame carries the
    * session generation so the master's fence accepts it.
    */
-  onBrowserResize(channelId: number, rows: number, cols: number): void {
+  onBrowserResize(channelId: number, rows: number, cols: number): boolean {
+    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
     const sub = this.subscribers.get(channelId);
-    if (sub !== undefined) {
-      sub.rows = rows;
-      sub.cols = cols;
-    }
+    if (sub === undefined) return false;
+    sub.rows = rows;
+    sub.cols = cols;
     this.d.emulator.resize(rows, cols);
     // Geometry is controller-owned: bump the revision locally (the moor holder
     // never echoes geometry back; the legacy echo path may still overwrite
     // this with its own counter until it is removed with the old runtime).
     this.revision += 1;
     this.d.sendMasterResize(rows, cols, channelId);
+    return true;
   }
 
   /** Browser surface visibility (§3.3/§7.4) — drives worker residency + lease candidacy. */

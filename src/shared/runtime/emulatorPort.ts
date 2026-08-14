@@ -33,7 +33,8 @@ export interface EmulatorPort {
   write(bytes: Uint8Array): void;
   /**
    * Await pending parser work when the adapter parses writes asynchronously.
-   * Attach-time terminal state must drain before input delivery can inspect it.
+   * Attach-time terminal state must drain before input delivery can inspect it;
+   * output must drain before the holder receives its consumption watermark.
    */
   flush?(): Promise<void>;
   /** Apply a geometry change (rows × cols). */

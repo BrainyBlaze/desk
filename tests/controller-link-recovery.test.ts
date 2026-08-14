@@ -8,7 +8,7 @@ import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import { GenerationLedger } from '../src/shared/controlPlane/generationLedger.js';
 import { InMemoryGenerationLedger, MOOR_LIVENESS_REASON } from '../src/shared/controlPlane/index.js';
-import { BpError, BpFrameType } from '../src/shared/browserProtocol/index.js';
+import { BpError, BpFrameType, type BpFrame } from '../src/shared/browserProtocol/index.js';
 import { WorkerSupervisor } from '../src/shared/runtime/workerSupervisor.js';
 import { DEFAULT_SUPERVISOR_CONFIG } from '../src/shared/runtime/workerSupervisor.js';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
@@ -53,7 +53,8 @@ function statusPayload(
     last: 0n,
     start: 0n,
     end: 0n
-  }
+  },
+  running = true
 ): Uint8Array {
   const tail = new Uint8Array(69);
   const view = new DataView(tail.buffer);
@@ -61,7 +62,13 @@ function statusPayload(
   view.setBigUint64(8, replay.last, true);
   view.setBigUint64(16, replay.start, true);
   view.setBigUint64(24, replay.end, true);
-  view.setUint8(32, (replay.first <= 1n && replay.start === 0n ? 0x01 : 0) | 0x10 | 0x20 | 0x40);
+  view.setUint8(
+    32,
+    (replay.first <= 1n && replay.start === 0n ? 0x01 : 0) |
+      0x10 |
+      0x20 |
+      (running ? 0x40 : 0)
+  );
   view.setUint32(33, 1, true);
   return joined(
     wide(identity),
@@ -92,6 +99,10 @@ function leaseResumedPayload(): Uint8Array {
   return joined(Uint8Array.of(1, 0, 0, 0), integer(1, 4), new Uint8Array(16).fill(0xe5));
 }
 
+function leaseRefusedPayload(): Uint8Array {
+  return joined(Uint8Array.of(3, 1, 0, 0), integer(1, 4), new Uint8Array(16));
+}
+
 class EmptyEmulator implements EmulatorPort {
   readonly writes: Uint8Array[] = [];
   write(bytes: Uint8Array): void { this.writes.push(bytes.slice()); }
@@ -103,6 +114,123 @@ class EmptyEmulator implements EmulatorPort {
   dispose(): void {}
 }
 
+class BlockingRecoveryEmulator extends EmptyEmulator {
+  private flushCount = 0;
+  private recoveryFlushStartedResolve!: () => void;
+  readonly recoveryFlushStarted = new Promise<void>((resolve) => {
+    this.recoveryFlushStartedResolve = resolve;
+  });
+  private recoveryDrainResolve!: () => void;
+  private readonly recoveryDrain = new Promise<void>((resolve) => {
+    this.recoveryDrainResolve = resolve;
+  });
+
+  flush(): Promise<void> {
+    this.flushCount += 1;
+    if (this.flushCount === 1) return Promise.resolve();
+    this.recoveryFlushStartedResolve();
+    return this.recoveryDrain;
+  }
+
+  releaseRecoveryFlush(): void {
+    this.recoveryDrainResolve();
+  }
+}
+
+class RejectingOutputEmulator extends EmptyEmulator {
+  private flushCount = 0;
+
+  flush(): Promise<void> {
+    this.flushCount += 1;
+    return this.flushCount === 1
+      ? Promise.resolve()
+      : Promise.reject(new Error('flush boom'));
+  }
+}
+
+class BlockingRecoveryReplayEmulator extends EmptyEmulator {
+  private flushCount = 0;
+  private replayFlushStartedResolve!: () => void;
+  readonly replayFlushStarted = new Promise<void>((resolve) => {
+    this.replayFlushStartedResolve = resolve;
+  });
+  private replayDrainResolve!: () => void;
+  private readonly replayDrain = new Promise<void>((resolve) => {
+    this.replayDrainResolve = resolve;
+  });
+
+  flush(): Promise<void> {
+    this.flushCount += 1;
+    if (this.flushCount <= 2) return Promise.resolve();
+    this.replayFlushStartedResolve();
+    return this.replayDrain;
+  }
+
+  releaseReplayFlush(): void {
+    this.replayDrainResolve();
+  }
+}
+
+class LateCompletingReplayEmulator extends EmptyEmulator {
+  private flushCount = 0;
+  private replayFlushStartedResolve!: () => void;
+  readonly replayFlushStarted = new Promise<void>((resolve) => {
+    this.replayFlushStartedResolve = resolve;
+  });
+  private replayDrainResolve!: () => void;
+  private readonly replayDrain = new Promise<void>((resolve) => {
+    this.replayDrainResolve = resolve;
+  });
+
+  flush(): Promise<void> {
+    this.flushCount += 1;
+    if (this.flushCount === 3) this.replayFlushStartedResolve();
+    if (this.flushCount === 3 || this.flushCount === 5) return this.replayDrain;
+    return Promise.resolve();
+  }
+
+  releaseReplayFlush(): void {
+    this.replayDrainResolve();
+  }
+
+  override serialize(): string {
+    return new TextDecoder().decode(joined(...this.writes));
+  }
+}
+
+class BlockingOutputEmulator extends EmptyEmulator {
+  flushCount = 0;
+  failNextSerialize = false;
+  private readonly outputFlushResolvers: Array<() => void> = [];
+  private firstOutputFlushStartedResolve!: () => void;
+  readonly firstOutputFlushStarted = new Promise<void>((resolve) => {
+    this.firstOutputFlushStartedResolve = resolve;
+  });
+
+  flush(): Promise<void> {
+    this.flushCount += 1;
+    if (this.flushCount === 1) return Promise.resolve();
+    if (this.flushCount === 2) this.firstOutputFlushStartedResolve();
+    return new Promise<void>((resolve) => {
+      this.outputFlushResolvers.push(resolve);
+    });
+  }
+
+  releaseOutputFlush(): void {
+    const resolve = this.outputFlushResolvers.shift();
+    if (resolve === undefined) throw new Error('no output flush is pending');
+    resolve();
+  }
+
+  override serialize(): string {
+    if (this.failNextSerialize) {
+      this.failNextSerialize = false;
+      throw new Error('serialize boom');
+    }
+    return new TextDecoder().decode(joined(...this.writes));
+  }
+}
+
 class ExpiringLeaseHolder {
   private server: Server | undefined;
   private readonly sockets = new Set<Socket>();
@@ -112,6 +240,7 @@ class ExpiringLeaseHolder {
   terminateRequests = 0;
   childAlive = true;
   readonly inputs: string[] = [];
+  readonly outputAcks: bigint[] = [];
   readonly inputRequests: Array<{
     connection: number;
     epoch: number;
@@ -146,6 +275,19 @@ class ExpiringLeaseHolder {
   readonly postFailureRetryConnected = new Promise<void>((resolve) => {
     this.postFailureRetryConnectedResolve = resolve;
   });
+  private postFailureRetryAttachedResolve!: () => void;
+  readonly postFailureRetryAttached = new Promise<void>((resolve) => {
+    this.postFailureRetryAttachedResolve = resolve;
+  });
+  private secondRecoveryAttemptConnectedResolve!: () => void;
+  readonly secondRecoveryAttemptConnected = new Promise<void>((resolve) => {
+    this.secondRecoveryAttemptConnectedResolve = resolve;
+  });
+  private secondResumeRefusedResolve!: () => void;
+  readonly secondResumeRefused = new Promise<void>((resolve) => {
+    this.secondResumeRefusedResolve = resolve;
+  });
+  private resumeRefusals = 0;
   private recoveryHello: (() => void) | undefined;
   private recoveryHelloSeenResolve!: () => void;
   readonly recoveryHelloSeen = new Promise<void>((resolve) => {
@@ -164,7 +306,10 @@ class ExpiringLeaseHolder {
     readonly sessionPath: string,
     private readonly disappearOnRefusal = false,
     private readonly recoveryIncarnation = INCARNATION,
-    private readonly unsafeRecoveryGap = false
+    private readonly unsafeRecoveryGap = false,
+    private readonly refuseLeaseResume = false,
+    private readonly attachReplayBurst = false,
+    private readonly recoveryReplayBurst = false
   ) {
     this.identity = identityFor(sessionPath);
   }
@@ -180,6 +325,7 @@ class ExpiringLeaseHolder {
     if (connection === 2) this.recoveryConnectedResolve();
     if (connection === 3) this.recoveryAttemptConnectedResolve();
     if (connection === 4) this.postFailureRetryConnectedResolve();
+    if (connection === 5) this.secondRecoveryAttemptConnectedResolve();
     this.sockets.add(socket);
     const inbound = new MoorCodec();
     const outbound = new MoorCodec();
@@ -230,6 +376,49 @@ class ExpiringLeaseHolder {
         }
         return;
       case MoorKind.ATTACH:
+        if (
+          (connection === 1 && this.attachReplayBurst) ||
+          (connection >= 3 && this.recoveryReplayBurst)
+        ) {
+          const replayBytes =
+            connection === 1
+              ? [new TextEncoder().encode('a'), new TextEncoder().encode('b')]
+              : [new TextEncoder().encode('r')];
+          const frames = [
+            codec.encode(GENERATION, MoorKind.TERMINAL_STATE, integer(0, 2)),
+            codec.encode(
+              GENERATION,
+              MoorKind.ATTACH_ACK,
+              statusPayload(
+                this.identity,
+                connection === 1 ? INCARNATION : this.recoveryIncarnation,
+                {
+                first: 1n,
+                last: BigInt(replayBytes.length),
+                start: 0n,
+                  end: BigInt(replayBytes.length)
+                }
+              )
+            ),
+            ...(message.payload[4]! & 1
+              ? [codec.encode(GENERATION, MoorKind.LEASE_RESULT, leaseGrantPayload())]
+              : []),
+            ...replayBytes.map((bytes, index) =>
+              codec.encode(
+                GENERATION,
+                MoorKind.OUTPUT,
+                joined(integer(BigInt(index + 1), 8), integer(BigInt(index), 8), bytes)
+              )
+            )
+          ];
+          socket.write(joined(...frames));
+          if (connection === 1) this.leaseDeadline = Date.now() + 1_000;
+          else {
+            this.recoveryAttachedResolve();
+            if (connection === 5) this.postFailureRetryAttachedResolve();
+          }
+          return;
+        }
         this.send(socket, codec, MoorKind.TERMINAL_STATE, integer(0, 2));
         this.send(
           socket,
@@ -273,7 +462,14 @@ class ExpiringLeaseHolder {
         return;
       case MoorKind.LEASE_REQUEST:
         if (message.payload[0] === 1) {
-          this.send(socket, codec, MoorKind.LEASE_RESULT, leaseResumedPayload());
+          if (this.refuseLeaseResume) this.resumeRefusals += 1;
+          this.send(
+            socket,
+            codec,
+            MoorKind.LEASE_RESULT,
+            this.refuseLeaseResume ? leaseRefusedPayload() : leaseResumedPayload()
+          );
+          if (this.resumeRefusals === 2) this.secondResumeRefusedResolve();
         }
         return;
       case MoorKind.LEASE_KEEPALIVE:
@@ -294,6 +490,15 @@ class ExpiringLeaseHolder {
       case MoorKind.TERMINATE:
         this.terminateRequests += 1;
         this.childAlive = false;
+        return;
+      case MoorKind.OUTPUT_ACK:
+        this.outputAcks.push(
+          new DataView(
+            message.payload.buffer,
+            message.payload.byteOffset,
+            message.payload.byteLength
+          ).getBigUint64(0, true)
+        );
         return;
       case MoorKind.INPUT:
         {
@@ -355,6 +560,22 @@ class ExpiringLeaseHolder {
     );
   }
 
+  sendOutput(
+    connection: number,
+    sequence: bigint,
+    offset: bigint,
+    bytes: Uint8Array
+  ): void {
+    const state = this.connectionState.get(connection);
+    if (state === undefined) throw new Error('connection is not open');
+    this.send(
+      state.socket,
+      state.codec,
+      MoorKind.OUTPUT,
+      joined(integer(sequence, 8), integer(offset, 8), bytes)
+    );
+  }
+
   allowRecovery(): void {
     this.recoveryHello?.();
   }
@@ -371,35 +592,48 @@ async function settleSocketIo(turns = 4): Promise<void> {
   }
 }
 
-async function startRecoveryHarness(): Promise<{
+async function startRecoveryHarness(
+  createEmulator: () => EmulatorPort = () => new EmptyEmulator(),
+  createHolder: (sessionPath: string) => ExpiringLeaseHolder = (sessionPath) =>
+    new ExpiringLeaseHolder(sessionPath),
+  duringRestore?: (holder: ExpiringLeaseHolder) => Promise<void>
+): Promise<{
   holder: ExpiringLeaseHolder;
   manager: SessionManager;
   channelId: number;
   browserErrors: number[];
+  browserFrames: Array<{ channelId: number; frame: BpFrame }>;
+  failBrowserChannel: (channelId: number) => void;
   enterRecovery: () => Promise<void>;
   close: () => Promise<void>;
 }> {
   vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
   const root = mkdtempSync(join(tmpdir(), 'desk-link-handoff-'));
   const sessionPath = join(root, 'session');
-  const holder = new ExpiringLeaseHolder(sessionPath);
+  const holder = createHolder(sessionPath);
   await holder.listen();
   const ledger = new GenerationLedger(new InMemoryGenerationLedger());
   expect(ledger.allocate('session')).toBe(GENERATION);
   const browserErrors: number[] = [];
+  const browserFrames: Array<{ channelId: number; frame: BpFrame }> = [];
+  const failingBrowserChannels = new Set<number>();
   const manager = new SessionManager({
     ledger,
     supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
-    emulatorFactory: { create: () => new EmptyEmulator() },
+    emulatorFactory: { create: createEmulator },
     now: () => Date.now(),
     sendBrowser: (_sessionId, _channelId, frame) => {
+      if (failingBrowserChannels.has(_channelId)) throw new Error('browser send boom');
+      browserFrames.push({ channelId: _channelId, frame });
       if (frame.type === BpFrameType.ERROR) browserErrors.push(frame.code);
     }
   });
-  const restored = await manager.restoreAndAttachMoor('session', {
+  const restoring = manager.restoreAndAttachMoor('session', {
     sessionPath,
     killSpec: { binPath: '/usr/bin/true', args: [] }
   });
+  if (duringRestore !== undefined) await duringRestore(holder);
+  const restored = await restoring;
   expect(restored.ok).toBe(true);
   const channelId = manager.subscribe('session', 'main', 24, 80)!;
   return {
@@ -407,6 +641,8 @@ async function startRecoveryHarness(): Promise<{
     manager,
     channelId,
     browserErrors,
+    browserFrames,
+    failBrowserChannel: (failedChannelId) => failingBrowserChannels.add(failedChannelId),
     enterRecovery: async () => {
       await vi.advanceTimersByTimeAsync(3_001);
       await holder.firstRefused;
@@ -424,6 +660,512 @@ async function startRecoveryHarness(): Promise<{
 
 describe('SessionManager controller-link recovery', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('bounds recovery while the authoritative emulator is not draining', async () => {
+    const emulator = new BlockingRecoveryEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('must-expire')
+        )
+      ).toBe(true);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttemptConnected;
+      await emulator.recoveryFlushStarted;
+      let recoveryAttemptClosed = false;
+      void harness.holder.recoveryAttemptClosed.then(() => {
+        recoveryAttemptClosed = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(2_001);
+      await settleSocketIo();
+
+      expect(recoveryAttemptClosed).toBe(true);
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+      expect(harness.browserErrors).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settleSocketIo(8);
+      expect(harness.holder.connections).toBe(3);
+      expect(emulator.writes).toHaveLength(2);
+      expect(harness.browserErrors).toHaveLength(2);
+
+      emulator.releaseRecoveryFlush();
+      await harness.holder.postFailureRetryConnected;
+      await harness.holder.secondRecoveryAttemptConnected;
+      await settleSocketIo(12);
+      expect(harness.holder.connections).toBe(5);
+      expect(emulator.writes).toHaveLength(3);
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('bounds recovery through post-ack replay before publishing the recovered master', async () => {
+    const emulator = new BlockingRecoveryReplayEmulator();
+    const harness = await startRecoveryHarness(
+      () => emulator,
+      (sessionPath) =>
+        new ExpiringLeaseHolder(
+          sessionPath,
+          false,
+          INCARNATION,
+          false,
+          false,
+          false,
+          true
+        )
+    );
+    try {
+      await harness.enterRecovery();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('must-stay-queued')
+        )
+      ).toBe(true);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttemptConnected;
+      await harness.holder.recoveryAttached;
+      await emulator.replayFlushStarted;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual([]);
+      expect(harness.manager.stateSnapshot('session')).toMatchObject({
+        generation: GENERATION,
+        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+      });
+
+      await vi.advanceTimersByTimeAsync(2_001);
+      await harness.holder.recoveryAttemptClosed;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual([]);
+      expect(harness.browserErrors).toEqual([]);
+      expect(harness.manager.stateSnapshot('session')).toMatchObject({
+        generation: GENERATION,
+        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settleSocketIo(8);
+      expect(harness.holder.connections).toBe(3);
+      expect(harness.browserErrors).toHaveLength(1);
+
+      emulator.releaseReplayFlush();
+      await harness.holder.postFailureRetryConnected;
+      await harness.holder.secondRecoveryAttemptConnected;
+      await harness.holder.postFailureRetryAttached;
+      await settleSocketIo(12);
+      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
+      expect(harness.holder.outputAcks).toEqual([1n]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('applies a late replay completion only once across the timed-out attempt and retry', async () => {
+    const emulator = new LateCompletingReplayEmulator();
+    const harness = await startRecoveryHarness(
+      () => emulator,
+      (sessionPath) =>
+        new ExpiringLeaseHolder(
+          sessionPath,
+          false,
+          INCARNATION,
+          false,
+          false,
+          false,
+          true
+        )
+    );
+    try {
+      await harness.enterRecovery();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('after-timeout')
+        )
+      ).toBe(true);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttemptConnected;
+      await emulator.replayFlushStarted;
+
+      await vi.advanceTimersByTimeAsync(2_001);
+      await harness.holder.recoveryAttemptClosed;
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settleSocketIo(8);
+      expect(harness.holder.connections).toBe(3);
+
+      emulator.releaseReplayFlush();
+      await harness.holder.postFailureRetryConnected;
+      await harness.holder.secondRecoveryAttemptConnected;
+      await harness.holder.postFailureRetryAttached;
+      await settleSocketIo(12);
+
+      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
+      expect(harness.holder.outputAcks).toEqual([1n]);
+      expect(harness.holder.inputs).toEqual([]);
+      expect(harness.browserErrors).toHaveLength(1);
+
+      const lateChannel = harness.manager.subscribe('session', 'late', 24, 80)!;
+      const snapshot = harness.browserFrames
+        .filter(({ channelId }) => channelId === lateChannel)
+        .map(({ frame }) => frame)
+        .find((frame) => frame.type === BpFrameType.SNAPSHOT);
+      expect(snapshot).toMatchObject({
+        type: BpFrameType.SNAPSHOT,
+        offset: 1n,
+        text: 'r'
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('reports a retained input continuity loss only once across recovery retries', async () => {
+    const emulator = new BlockingRecoveryEmulator();
+    const harness = await startRecoveryHarness(
+      () => emulator,
+      (sessionPath) => new ExpiringLeaseHolder(sessionPath, false, INCARNATION, false, true)
+    );
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttemptConnected;
+      await emulator.recoveryFlushStarted;
+      await settleSocketIo();
+      expect(harness.browserErrors).toEqual([BpError.INPUT_UNAVAILABLE]);
+
+      await vi.advanceTimersByTimeAsync(2_001);
+      await harness.holder.recoveryAttemptClosed;
+      await vi.advanceTimersByTimeAsync(101);
+      emulator.releaseRecoveryFlush();
+      await harness.holder.postFailureRetryConnected;
+      await harness.holder.secondRecoveryAttemptConnected;
+      await harness.holder.secondResumeRefused;
+      await settleSocketIo();
+
+      expect(harness.browserErrors).toEqual([BpError.INPUT_UNAVAILABLE]);
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps a rejecting output frontier indeterminate without an unhandled rejection', async () => {
+    const emulator = new RejectingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('rejected'));
+      await harness.holder.firstConnectionClosed;
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settleSocketIo(8);
+
+      expect(harness.holder.outputAcks).toEqual([]);
+      expect(harness.holder.connections).toBe(1);
+      expect(unhandled).toEqual([]);
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      expect(errorLog).toHaveBeenCalledWith(
+        '[desk] moor async message handler failed: flush boom'
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      errorLog.mockRestore();
+      await harness.close();
+    }
+  });
+
+  it('acknowledges output only after the authoritative emulator drains it', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('a'));
+      harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('b'));
+      await settleSocketIo();
+
+      expect(emulator.flushCount).toBe(2);
+      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('a');
+      expect(harness.holder.outputAcks).toEqual([]);
+
+      emulator.releaseOutputFlush();
+      await settleSocketIo();
+
+      expect(emulator.flushCount).toBe(3);
+      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('ab');
+      expect(harness.holder.outputAcks).toEqual([1n]);
+
+      emulator.releaseOutputFlush();
+      await settleSocketIo();
+
+      expect(harness.holder.outputAcks).toEqual([1n, 2n]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('isolates a throwing browser subscriber from output consumption and healthy fanout', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      const healthyChannel = harness.manager.subscribe('session', 'healthy', 24, 80)!;
+      harness.failBrowserChannel(harness.channelId);
+
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('x'));
+      await emulator.firstOutputFlushStarted;
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+      expect(harness.holder.outputAcks).toEqual([1n]);
+      expect(harness.manager.sessionOfChannel(harness.channelId)).toBeUndefined();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('blind-input')
+        )
+      ).toBe(false);
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          healthyChannel,
+          false,
+          new TextEncoder().encode('healthy-input')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['healthy-input']);
+
+      harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
+      await settleSocketIo();
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+
+      expect(harness.holder.outputAcks).toEqual([1n, 2n]);
+      const healthyText = harness.browserFrames
+        .filter(
+          ({ channelId, frame }) =>
+            channelId === healthyChannel && frame.type === BpFrameType.OUTPUT
+        )
+        .map(({ frame }) =>
+          frame.type === BpFrameType.OUTPUT ? new TextDecoder().decode(frame.bytes) : ''
+        )
+        .join('');
+      expect(healthyText).toBe('xy');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('isolates a delayed snapshot serialization failure from output consumption', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('x'));
+      await emulator.firstOutputFlushStarted;
+
+      const failedChannel = harness.manager.subscribe('session', 'failed-snapshot', 24, 80)!;
+      emulator.failNextSerialize = true;
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+
+      expect(harness.holder.outputAcks).toEqual([1n]);
+      expect(harness.manager.sessionOfChannel(failedChannel)).toBeUndefined();
+
+      harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
+      await settleSocketIo();
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+
+      expect(harness.holder.outputAcks).toEqual([1n, 2n]);
+      const healthyText = harness.browserFrames
+        .filter(
+          ({ channelId, frame }) =>
+            channelId === harness.channelId && frame.type === BpFrameType.OUTPUT
+        )
+        .map(({ frame }) =>
+          frame.type === BpFrameType.OUTPUT ? new TextDecoder().decode(frame.bytes) : ''
+        )
+        .join('');
+      expect(healthyText).toBe('xy');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('seals queued child input when a validated exit boundary begins final output drain', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('A')
+        )
+      ).toBe(true);
+      await harness.holder.inputReceived;
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('B')
+        )
+      ).toBe(true);
+
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('x'));
+      await emulator.firstOutputFlushStarted;
+      expect(
+        harness.manager.observeMoorEvent('session', GENERATION, {
+          ts: Date.now() / 1_000,
+          type: 'exit',
+          code: 0,
+          outcome: { kind: 'exited', code: 0 },
+          outputEnd: 1n
+        })
+      ).toMatchObject({ ok: true, authority: { kind: 'applied' } });
+
+      expect(harness.browserErrors).toEqual([BpError.INPUT_UNAVAILABLE]);
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('after-exit')
+        )
+      ).toBe(false);
+      const resizeCount = harness.holder.resizes.length;
+      expect(harness.manager.onBrowserResizeByChannel(harness.channelId, 30, 100)).toBe(false);
+
+      harness.holder.acknowledgeLatestInput(1);
+      await settleSocketIo(8);
+      expect(harness.holder.inputs).toEqual(['A']);
+      expect(harness.holder.resizes).toHaveLength(resizeCount);
+
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+      expect(
+        harness.browserFrames
+          .filter(({ channelId }) => channelId === harness.channelId)
+          .map(({ frame }) => frame.type)
+      ).toContain(BpFrameType.EXIT);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps a subscribe snapshot atomic with a pending output parser drain', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('x'));
+      await emulator.firstOutputFlushStarted;
+
+      const lateChannel = harness.manager.subscribe('session', 'late', 24, 80)!;
+      const lateFrames = (): BpFrame[] =>
+        harness.browserFrames
+          .filter(({ channelId }) => channelId === lateChannel)
+          .map(({ frame }) => frame);
+      expect(lateFrames().map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+
+      const snapshot = lateFrames().find((frame) => frame.type === BpFrameType.SNAPSHOT);
+      expect(snapshot).toMatchObject({
+        type: BpFrameType.SNAPSHOT,
+        offset: 1n,
+        text: 'x'
+      });
+      expect(lateFrames().some((frame) => frame.type === BpFrameType.OUTPUT)).toBe(false);
+
+      harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
+      await settleSocketIo();
+      emulator.releaseOutputFlush();
+      await settleSocketIo(8);
+
+      const output = lateFrames().find((frame) => frame.type === BpFrameType.OUTPUT);
+      expect(output).toMatchObject({
+        type: BpFrameType.OUTPUT,
+        offset: 1n,
+        bytes: new TextEncoder().encode('y')
+      });
+      if (snapshot?.type !== BpFrameType.SNAPSHOT || output?.type !== BpFrameType.OUTPUT) {
+        throw new Error('expected one snapshot followed by one live output frame');
+      }
+      expect(snapshot.text + new TextDecoder().decode(output.bytes)).toBe('xy');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps same-chunk replay ahead of later live output while replay drain is blocked', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const observations: Array<{ text: string; acks: bigint[] }> = [];
+    const observe = (holder: ExpiringLeaseHolder): void => {
+      observations.push({
+        text: new TextDecoder().decode(joined(...emulator.writes)),
+        acks: [...holder.outputAcks]
+      });
+    };
+    const harness = await startRecoveryHarness(
+      () => emulator,
+      (sessionPath) =>
+        new ExpiringLeaseHolder(sessionPath, false, INCARNATION, false, false, true),
+      async (holder) => {
+        await emulator.firstOutputFlushStarted;
+        holder.sendOutput(1, 3n, 2n, new TextEncoder().encode('c'));
+        await settleSocketIo();
+        observe(holder);
+
+        for (let release = 0; release < 3; release += 1) {
+          emulator.releaseOutputFlush();
+          await settleSocketIo();
+          observe(holder);
+        }
+      }
+    );
+    try {
+      expect(observations).toEqual([
+        { text: 'a', acks: [] },
+        { text: 'ab', acks: [1n] },
+        { text: 'abc', acks: [1n, 2n] },
+        { text: 'abc', acks: [1n, 2n, 3n] }
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
 
   it('preserves recovery input age after transfer to the attached client queue', async () => {
     const harness = await startRecoveryHarness();
@@ -458,7 +1200,7 @@ describe('SessionManager controller-link recovery', () => {
       await settleSocketIo();
 
       expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
-      expect(harness.browserErrors).toEqual([BpError.STALE_LEASE]);
+      expect(harness.browserErrors).toEqual([BpError.INPUT_UNAVAILABLE]);
     } finally {
       await harness.close();
     }
@@ -518,7 +1260,7 @@ describe('SessionManager controller-link recovery', () => {
       await settleSocketIo();
 
       expect(harness.holder.inputs).toEqual([]);
-      expect(harness.browserErrors).toEqual([BpError.STALE_LEASE]);
+      expect(harness.browserErrors).toEqual([BpError.INPUT_UNAVAILABLE]);
     } finally {
       await harness.close();
     }
@@ -649,6 +1391,68 @@ describe('SessionManager controller-link recovery', () => {
         lifecycle: 'exited',
         exit: { origin: 'retired', reason: 'confirmed-holder-absence' }
       });
+      expect(holder.terminateRequests).toBe(0);
+      expect(existsSync(detachedKillWitness)).toBe(false);
+    } finally {
+      manager.closeAllLinks();
+      await holder.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the final output boundary cannot be recovered from an absent holder', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    const root = mkdtempSync(join(tmpdir(), 'desk-link-final-output-absence-'));
+    const sessionPath = join(root, 'session');
+    const detachedKillWitness = join(root, 'detached-kill-ran');
+    const holder = new ExpiringLeaseHolder(sessionPath, true);
+    await holder.listen();
+    const ledger = new GenerationLedger(new InMemoryGenerationLedger());
+    expect(ledger.allocate('session')).toBe(GENERATION);
+    const browserFrames: BpFrame[] = [];
+    const manager = new SessionManager({
+      ledger,
+      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+      emulatorFactory: { create: () => new EmptyEmulator() },
+      now: () => Date.now(),
+      sendBrowser: (_sessionId, _channelId, frame) => browserFrames.push(frame)
+    });
+    try {
+      expect((await manager.restoreAndAttachMoor('session', {
+        sessionPath,
+        killSpec: { binPath: '/usr/bin/touch', args: [detachedKillWitness] }
+      })).ok).toBe(true);
+      const channelId = manager.subscribe('session', 'surface', 24, 80)!;
+
+      expect(
+        manager.observeMoorEvent('session', GENERATION, {
+          ts: Date.now() / 1_000,
+          type: 'exit',
+          code: 0,
+          outcome: { kind: 'exited', code: 0 },
+          outputEnd: 1n
+        })
+      ).toMatchObject({ ok: true, authority: { kind: 'applied' } });
+      expect(browserFrames.filter((frame) => frame.type === BpFrameType.EXIT)).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(3_001);
+      await holder.firstConnectionClosed;
+      await holder.disappeared;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(browserFrames.filter((frame) => frame.type === BpFrameType.EXIT)).toHaveLength(1);
+      expect(manager.stateSnapshot('session')).toMatchObject({
+        generation: GENERATION,
+        lifecycle: 'exited',
+        exit: {
+          origin: 'observed',
+          diagnostic: {
+            code: 'moor-final-output-truncated',
+            detail: 'holder unavailable at output offset 0; expected 1'
+          }
+        }
+      });
+      expect(manager.sessionOfChannel(channelId)).toBeUndefined();
       expect(holder.terminateRequests).toBe(0);
       expect(existsSync(detachedKillWitness)).toBe(false);
     } finally {

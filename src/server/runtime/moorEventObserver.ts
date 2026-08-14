@@ -67,7 +67,14 @@ export type MoorSessionEvent =
   | { ts: number; type: 'ready' }
   | { ts: number; type: 'state'; state: 'busy' | 'idle'; title: string }
   | { ts: number; type: 'link'; uri: string }
-  | { ts: number; type: 'exit'; code: number; outcome: MoorExitOutcome };
+  | {
+      ts: number;
+      type: 'exit';
+      code: number;
+      outcome: MoorExitOutcome;
+      /** Validated lifecycle byte boundary, attached by the daemon consumer. */
+      outputEnd?: bigint;
+    };
 
 export type { MoorExitOutcome } from '../../shared/controlPlane/contract.js';
 
@@ -125,7 +132,12 @@ export interface MoorEventObserverOptions {
    * state; unavailability never claims that the holder or session died.
    */
   maxConsecutiveReadFailures?: number;
-  onEvent: (event: MoorSessionEvent, context: MoorEventContext) => void;
+  onEvent: (event: MoorSessionEvent, context: MoorEventContext) => void | Promise<void>;
+  onEventError?: (
+    error: unknown,
+    event: MoorSessionEvent,
+    context: MoorEventContext
+  ) => 'continue' | 'retry' | 'terminal';
   onDiagnostic: (diagnostic: string) => void;
   /** Availability transitions caused only by failed/successful store reads. */
   onAvailabilityChange?: (availability: MoorEventObserverAvailability) => void;
@@ -263,9 +275,18 @@ export class MoorEventObserver {
     try {
       const snapshot = await this.readSnapshot();
       const result = eventsAfterMoorCursor(snapshot);
+      const delivery = await this.deliver(result.events, 'replay');
+      if (delivery === 'terminal') {
+        this.stop();
+        this.options.onTerminal?.();
+        return false;
+      }
       this.started = true;
+      if (delivery === 'retry') {
+        this.schedule();
+        return true;
+      }
       this.cursor = result.cursor;
-      this.deliver(result.events, 'replay');
       if (!result.streamExhausted) this.schedule();
       return true;
     } catch (error) {
@@ -339,8 +360,13 @@ export class MoorEventObserver {
         !equalBytes(snapshot.commitHash, this.cursor.commitHash)
       ) {
         const result = eventsAfterMoorCursor(snapshot, this.cursor);
+        const delivery = await this.deliver(result.events, 'live');
+        if (delivery === 'terminal') {
+          this.options.onTerminal?.();
+          return 'unobservable';
+        }
+        if (delivery === 'retry') return 'unobservable';
         this.cursor = result.cursor;
-        this.deliver(result.events, 'live');
       }
       return 'drained';
     } catch (error) {
@@ -454,8 +480,17 @@ export class MoorEventObserver {
         return;
       }
       const result = eventsAfterMoorCursor(snapshot, this.cursor);
+      const delivery = await this.deliver(result.events, 'live');
+      if (delivery === 'terminal') {
+        this.stop();
+        this.options.onTerminal?.();
+        return;
+      }
+      if (delivery === 'retry') {
+        this.schedule();
+        return;
+      }
       this.cursor = result.cursor;
-      this.deliver(result.events, 'live');
       if (!result.streamExhausted) this.schedule();
     } catch (error) {
       // Terminal: a cursor gap/rollback or generation, identity, or frontier
@@ -470,18 +505,23 @@ export class MoorEventObserver {
     }
   }
 
-  private deliver(records: readonly MoorEventRecord[], phase: 'replay' | 'live'): void {
+  private async deliver(
+    records: readonly MoorEventRecord[],
+    phase: 'replay' | 'live'
+  ): Promise<'delivered' | 'retry' | 'terminal'> {
     for (const record of records) {
       const event = mapRecord(record);
       if (event === undefined) continue;
       try {
-        this.options.onEvent(event, { phase, kind: record.kind });
+        await this.options.onEvent(event, { phase, kind: record.kind });
       } catch (error) {
-        // A consumer failure is the consumer's bug, never a store gap: report
-        // it and keep delivering the remaining committed records.
         this.options.onDiagnostic(describe(error));
+        const context = { phase, kind: record.kind } as const;
+        const disposition = this.options.onEventError?.(error, event, context);
+        if (disposition === 'retry' || disposition === 'terminal') return disposition;
       }
     }
+    return 'delivered';
   }
 
   private notifyAvailability(availability: MoorEventObserverAvailability): void {

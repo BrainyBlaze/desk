@@ -57,8 +57,8 @@ export interface MoorMasterClientHandlers {
   onHelloAck?: (ack: Holder<'hello-ack'>) => void;
   onAttachAck?: (status: MoorStatus) => void;
   onStatusReply?: (status: MoorStatus) => void;
-  onTerminalState?: (bytes: Uint8Array) => void;
-  onOutput?: (output: Holder<'output'>) => void;
+  onTerminalState?: (bytes: Uint8Array) => void | Promise<void>;
+  onOutput?: (output: Holder<'output'>) => void | Promise<void>;
   onGap?: (gap: Holder<'gap'>) => void;
   onInputReceipt?: (receipt: Holder<'input-receipt'>) => void;
   /** Exact prior request whose lease continuity could not be proved. */
@@ -864,6 +864,11 @@ export class MoorMasterClient {
   }
 
   private onData(chunk: Buffer): void {
+    const socket = this.sock;
+    // Keep unread holder output at the socket boundary while an asynchronous
+    // consumer drains the authoritative emulator. Synchronous handlers resume
+    // in the same turn through routeMessages.
+    socket?.pause();
     const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     this.h.onRaw?.(bytes);
     let messages;
@@ -873,10 +878,34 @@ export class MoorMasterClient {
       this.fail(error);
       return;
     }
-    for (const message of messages) {
+    this.routeMessages(messages, 0, socket);
+  }
+
+  private routeMessages(
+    messages: Array<{ scope: number; kind: number; payload: Uint8Array }>,
+    index: number,
+    socket: Socket | null
+  ): void {
+    while (index < messages.length) {
       // A prior message in this chunk may have closed the client; stop routing.
       if (this.phase === 'closed') return;
-      this.route(message);
+      const routed = this.route(messages[index]!);
+      index += 1;
+      if (routed instanceof Promise) {
+        void routed
+          .then(() => this.routeMessages(messages, index, socket))
+          .catch((error) => {
+            // route() already failed this client closed. Consume the async
+            // continuation rejection so Node does not surface it again as an
+            // unhandled rejection, while still reporting the non-wire bug.
+            console.error(
+              `[desk] moor async message handler failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          });
+        return;
+      }
     }
     // Opt-in §6.1 consumption policy: one coalesced watermark ack per
     // delivered batch, only when the watermark actually advanced.
@@ -890,9 +919,14 @@ export class MoorMasterClient {
       this.lastAcked = this.highestSuppressed;
       this.request({ type: 'output-ack', sequence: this.lastAcked });
     }
+    if (this.phase !== 'closed' && this.sock === socket) socket?.resume();
   }
 
-  private route(message: { scope: number; kind: number; payload: Uint8Array }): void {
+  private route(message: {
+    scope: number;
+    kind: number;
+    payload: Uint8Array;
+  }): void | Promise<void> {
     // EVERY decode failure takes the same fail-closed path: report + close THIS
     // client. A malformed frame from one bad holder must never throw across the
     // socket 'data' callback and take down the multi-session daemon.
@@ -908,13 +942,16 @@ export class MoorMasterClient {
       return;
     }
     try {
-      this.routeDecoded(decoded);
+      const routed = this.routeDecoded(decoded);
+      if (routed instanceof Promise) {
+        return routed.catch((error) => this.fail(error));
+      }
     } catch (error) {
       this.fail(error);
     }
   }
 
-  private routeDecoded(decoded: MoorHolderMessage): void {
+  private routeDecoded(decoded: MoorHolderMessage): void | Promise<void> {
     switch (decoded.type) {
       case 'hello-ack': {
         this.requirePhase(decoded.type, this.phase === 'hello-sent');
@@ -981,8 +1018,7 @@ export class MoorMasterClient {
         this.requirePhase(decoded.type, this.phase === 'adopted');
         this.preambleBytes = decoded.bytes;
         this.phase = 'preamble';
-        this.h.onTerminalState?.(decoded.bytes);
-        return;
+        return this.h.onTerminalState?.(decoded.bytes);
       }
       case 'attach-ack': {
         // §6 order is exact: an ACK without the preceding preamble is refused,
@@ -1042,14 +1078,8 @@ export class MoorMasterClient {
         this.phase = 'attached';
         this.live = true; // the authenticated exchange is verified-live evidence
         this.armLiveness();
-        if (this.deadline !== undefined) {
-          clearTimeout(this.deadline);
-          this.deadline = undefined;
-        }
-        const pending = this.pendingAttach;
-        this.pendingAttach = undefined;
         this.h.onAttachAck?.(decoded.status);
-        pending?.resolve(decoded.status);
+        this.completeAttachIfReplayDelivered();
         return;
       }
       case 'lease-result': {
@@ -1191,10 +1221,6 @@ export class MoorMasterClient {
         this.phase = 'attached';
         this.live = true; // the authenticated exchange is verified-live evidence
         this.armLiveness();
-        if (this.deadline !== undefined) {
-          clearTimeout(this.deadline);
-          this.deadline = undefined;
-        }
         // Granted: adopt epoch + token and keep the lease alive on the 3 s
         // idle cadence. §7.3: a new lease epoch resets the high-water mark,
         // so its first request id is 1. Refused leaves an attached observer.
@@ -1207,10 +1233,8 @@ export class MoorMasterClient {
         } else {
           this.continuity = 'observer';
         }
-        const pending = this.pendingAttach;
-        this.pendingAttach = undefined;
         this.h.onLeaseResult?.(decoded);
-        pending?.resolve(status);
+        this.completeAttachIfReplayDelivered();
         return;
       }
       case 'status-reply':
@@ -1273,8 +1297,15 @@ export class MoorMasterClient {
         this.highestReceived = decoded.sequence;
         // §6.1 reconnect: a controller with an existing cursor discards
         // duplicate record sequences instead of re-delivering them.
-        if (decoded.sequence > this.effectiveResume) this.h.onOutput?.(decoded);
-        else this.highestSuppressed = decoded.sequence;
+        if (decoded.sequence > this.effectiveResume) {
+          const delivered = this.h.onOutput?.(decoded);
+          if (delivered instanceof Promise) {
+            return delivered.then(() => this.completeAttachIfReplayDelivered());
+          }
+        } else {
+          this.highestSuppressed = decoded.sequence;
+        }
+        this.completeAttachIfReplayDelivered();
         return;
       }
       case 'gap': {
@@ -1462,6 +1493,19 @@ export class MoorMasterClient {
       requestLease: mode === 'fresh',
       nonVt: pending.options.nonVt ?? false
     });
+  }
+
+  private completeAttachIfReplayDelivered(): void {
+    const pending = this.pendingAttach;
+    const status = this.status;
+    if (pending === undefined || status === undefined || this.phase !== 'attached') return;
+    if (this.highestReceived < status.replay.last) return;
+    if (this.deadline !== undefined) {
+      clearTimeout(this.deadline);
+      this.deadline = undefined;
+    }
+    this.pendingAttach = undefined;
+    pending.resolve(status);
   }
 
   private fail(error: unknown): void {

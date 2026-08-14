@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { binaryTerminalBroker } from './binaryTerminalBrokerClient.js';
 import { ReplySuppressionAddon } from './replySuppressionAddon.js';
-import { BpError } from '../shared/browserProtocol/index.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
+import { describeBpError } from './terminalBpError.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -1129,20 +1129,4 @@ function latin1ToBytes(data: string): Uint8Array {
     bytes[i] = data.charCodeAt(i) & 0xff;
   }
   return bytes;
-}
-
-/** Human-readable text for a browser-protocol error code (§7.4 ERROR frame). */
-function describeBpError(code: number): string {
-  switch (code) {
-    case BpError.BAD_CHANNEL:
-      return 'terminal channel is no longer valid';
-    case BpError.STALE_GENERATION:
-      return 'session was recreated; reattaching';
-    case BpError.STALE_LEASE:
-      return 'another surface holds the input lease';
-    case BpError.PAYLOAD_TOO_LARGE:
-      return 'terminal frame too large';
-    default:
-      return `terminal error ${code}`;
-  }
 }

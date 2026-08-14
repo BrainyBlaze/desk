@@ -227,6 +227,7 @@ export interface SessionManagerDeps {
   now: () => number;
   /** Deliver a browser frame to a session's surface (the web-server WS wires this). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
+  onSubscriberFailure?: (channelId: number) => void;
   /** desk#62 — durable last-measured geometry per session (see DaemonCoreDeps). */
   sessionGeometry?: DaemonCoreDeps['sessionGeometry'];
   workingLeaseMs?: DaemonCoreDeps['workingLeaseMs'];
@@ -244,6 +245,7 @@ export interface SessionManagerDeps {
 export interface SessionMasterLink {
   sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number, queuedAt: number): boolean;
   cancelQueuedInput(surfaceId: number): void;
+  sealInput(): void;
   sendResize(rows: number, cols: number, surfaceId: number): void;
   close(): void;
   /**
@@ -286,6 +288,8 @@ interface MoorRecoverySlot {
   timer?: NodeJS.Timeout;
   timerDueAt?: number;
   candidate?: MoorMasterClient;
+  frontierWait?: Promise<void>;
+  retainedInputQueuedAt?: number;
   inputQueue: Array<{
     bytes: Uint8Array;
     binary: boolean;
@@ -345,6 +349,10 @@ export class SessionManager {
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
       sendBrowser: deps.sendBrowser,
+      onSubscriberFailure: (_sessionId, channelId) => {
+        this.unsubscribeChannel(channelId);
+        deps.onSubscriberFailure?.(channelId);
+      },
       // Typed master-bound sends route to the session's attached holder link.
       sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
@@ -603,11 +611,13 @@ export class SessionManager {
     let armLivenessProbe: (episode: number) => void = () => undefined;
     /** Bytes queued behind the outstanding §7.3 input request. */
     let inputQueue: Array<{ bytes: Uint8Array; surfaceId: number; queuedAt: number }> = [];
+    let inputSealed = false;
     const flushQueue = (client: MoorMasterClient): void => {
+      if (inputSealed) return;
       const next = inputQueue.shift();
       if (next === undefined) return;
       if (this.now() - next.queuedAt >= RECOVERY_INPUT_MAX_AGE_MS) {
-        this.sendStaleLease(sessionId, next.surfaceId);
+        this.sendInputUnavailable(sessionId, next.surfaceId);
         flushQueue(client);
         return;
       }
@@ -632,15 +642,19 @@ export class SessionManager {
             });
             return;
           }
-          this.core.onMoorOutput(sessionId, output.bytes, output.offset);
-          // Consumption is DELIVERY: acknowledge only after the record
-          // actually reached the authoritative emulator, never at receipt —
-          // an acked-but-undelivered record could be permanently dropped.
-          try {
-            client.ackOutput(output.sequence);
-          } catch {
-            /* link closed mid-batch: nothing to acknowledge */
-          }
+          const acknowledge = (): void => {
+            // Consumption is DELIVERY: acknowledge only after the record
+            // actually reached the authoritative emulator, never at receipt —
+            // an acked-but-undelivered record could be permanently dropped.
+            try {
+              client.ackOutput(output.sequence);
+            } catch {
+              /* link closed mid-batch: nothing to acknowledge */
+            }
+          };
+          const delivered = this.core.onMoorOutput(sessionId, output.bytes, output.offset);
+          if (delivered instanceof Promise) return delivered.then(acknowledge);
+          acknowledge();
         },
         onTerminalState: (preamble: Uint8Array) => {
           terminalStateReady = terminalStateReady
@@ -648,14 +662,27 @@ export class SessionManager {
               ready ? this.core.onMasterTerminalState(sessionId, preamble) : false
             )
             .catch(() => false);
+          return terminalStateReady.then((ready) => {
+            // The Moor client serializes this promise before ATTACH_ACK. Mark
+            // the barrier open here so replay and later live OUTPUT both take
+            // the same asynchronous delivery path and cannot overtake.
+            if (ready) preambleDrained = true;
+          });
         },
         onInputReceipt: () => flushQueue(client),
         onInputContinuityLost: (pending) => {
+          const retained = opts.resumeSnapshot?.lease?.pendingInput;
+          if (retained?.requestId === pending.requestId) {
+            // A completed holder refusal is final for this exact retained
+            // request. Recovery retries reuse the snapshot, so consume the
+            // tuple before reporting its single caller-visible loss.
+            delete opts.resumeSnapshot!.lease!.pendingInput;
+          }
           console.error(
             `[desk] input continuity lost for ${sessionId} generation ${opts.generation} request ${pending.requestId} surface ${pending.surfaceId ?? 'unknown'}`
           );
           if (pending.surfaceId !== undefined && pending.surfaceId !== 0) {
-            this.sendStaleLease(sessionId, pending.surfaceId);
+            this.sendInputUnavailable(sessionId, pending.surfaceId);
           }
         },
         // §8 query arbitration: this controller is the lease-owning VT viewer
@@ -786,10 +813,9 @@ export class SessionManager {
       client.close();
       return false;
     }
-    preambleDrained = true;
     let deliveredWatermark = 0n;
     for (const pending of bufferedOutput.splice(0)) {
-      this.core.onMoorOutput(sessionId, pending.bytes, pending.offset);
+      await this.core.onMoorOutput(sessionId, pending.bytes, pending.offset);
       deliveredWatermark = pending.sequence;
     }
     if (deliveredWatermark > 0n) {
@@ -828,6 +854,7 @@ export class SessionManager {
     attached = true;
     link = {
       sendInput: (bytes, _binary, surfaceId, queuedAt) => {
+        if (inputSealed) return false;
         try {
           client.sendInput(bytes, surfaceId);
           return true;
@@ -844,7 +871,19 @@ export class SessionManager {
       cancelQueuedInput: (surfaceId) => {
         inputQueue = inputQueue.filter((pending) => pending.surfaceId !== surfaceId);
       },
+      sealInput: () => {
+        if (inputSealed) return;
+        inputSealed = true;
+        const queued = inputQueue;
+        inputQueue = [];
+        for (const pending of queued) {
+          if (pending.surfaceId !== 0) {
+            this.sendInputUnavailable(sessionId, pending.surfaceId);
+          }
+        }
+      },
       sendResize: (rows, cols) => {
+        if (inputSealed) return;
         try {
           client.sendResize(cols, rows);
         } catch {
@@ -890,7 +929,15 @@ export class SessionManager {
     };
     this.masters.set(sessionId, link);
     const snapshot = this.core.stateSnapshot(sessionId);
-    if (snapshot === undefined || this.core.markRunning(sessionId, snapshot.generation).kind === 'rejected') {
+    const drainingObservedExit =
+      snapshot?.generation === opts.generation &&
+      snapshot.lifecycle === 'exited' &&
+      this.core.hasPendingExitBoundary(sessionId);
+    if (
+      snapshot === undefined ||
+      (!drainingObservedExit &&
+        this.core.markRunning(sessionId, snapshot.generation).kind === 'rejected')
+    ) {
       this.masters.delete(sessionId);
       attached = false;
       client.close();
@@ -920,7 +967,7 @@ export class SessionManager {
     if (
       state === undefined ||
       state.generation !== input.generation ||
-      state.lifecycle === 'exited'
+      (state.lifecycle === 'exited' && !this.core.hasPendingExitBoundary(input.sessionId))
     ) {
       return;
     }
@@ -995,6 +1042,11 @@ export class SessionManager {
       inputBytes:
         (previous?.inputBytes ?? 0) +
         input.queuedInput.reduce((sum, pending) => sum + pending.bytes.length, 0),
+      ...(previous?.retainedInputQueuedAt !== undefined
+        ? { retainedInputQueuedAt: previous.retainedInputQueuedAt }
+        : input.snapshot?.lease?.pendingInput === undefined
+          ? {}
+          : { retainedInputQueuedAt: this.now() }),
       ...(previous?.pendingResize === undefined
         ? {}
         : { pendingResize: { ...previous.pendingResize } })
@@ -1017,13 +1069,14 @@ export class SessionManager {
     return (
       state !== undefined &&
       state.generation === slot.generation &&
-      state.lifecycle !== 'exited'
+      (state.lifecycle !== 'exited' || this.core.hasPendingExitBoundary(slot.sessionId))
     );
   }
 
   private async runControllerRecovery(slot: MoorRecoverySlot, episode: number): Promise<void> {
     if (!this.recoveryCurrent(slot, episode)) return;
     this.expireRecoveryInput(slot);
+    if (this.waitForAuthoritativeWork(slot, episode)) return;
     const probe = await probeMoorHolder(slot.sessionPath, slot.generation, (candidate) => {
       if (this.recoveryCurrent(slot, episode)) slot.candidate = candidate;
     });
@@ -1068,10 +1121,49 @@ export class SessionManager {
     this.finishRecoveredViewer(slot, link);
   }
 
+  private waitForAuthoritativeWork(slot: MoorRecoverySlot, episode: number): boolean {
+    const work = this.core.pendingAuthoritativeWork(slot.sessionId);
+    if (work === undefined) return false;
+    if (slot.frontierWait === work) return true;
+    slot.frontierWait = work;
+    this.armRecoveryInputExpiry(slot);
+    void work.then(
+      () => {
+        if (slot.frontierWait !== work) return;
+        slot.frontierWait = undefined;
+        if (!this.recoveryCurrent(slot, episode)) return;
+        void this.runControllerRecovery(slot, episode).catch((error) => {
+          console.error(
+            `[desk] controller recovery failed for ${slot.sessionId} generation ${slot.generation}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          if (this.recoveryCurrent(slot, episode)) this.scheduleControllerRecovery(slot);
+        });
+      },
+      () => {
+        // A rejected parser frontier is an indeterminate emulator state. Keep
+        // the single slot-level marker and let queued-input expiry continue;
+        // retrying the same bytes would multiply side effects without proof.
+        if (slot.frontierWait === work) this.expireRecoveryInput(slot);
+      }
+    );
+    return true;
+  }
+
   private finishRecoveredViewer(
     slot: MoorRecoverySlot,
     link: SessionMasterLink | undefined
   ): void {
+    if (this.core.hasPendingExitBoundary(slot.sessionId)) {
+      for (const pending of slot.inputQueue.splice(0)) {
+        slot.inputBytes -= pending.bytes.length;
+        this.sendInputUnavailable(slot.sessionId, pending.surfaceId);
+      }
+      if (slot.timer !== undefined) clearTimeout(slot.timer);
+      this.recoveries.delete(slot.sessionId);
+      return;
+    }
     if (link !== undefined && slot.pendingResize !== undefined) {
       const resize = slot.pendingResize;
       link.sendResize(resize.rows, resize.cols, resize.surfaceId);
@@ -1083,7 +1175,7 @@ export class SessionManager {
         link === undefined ||
         !link.sendInput(pending.bytes, pending.binary, pending.surfaceId, pending.queuedAt)
       ) {
-        this.sendStaleLease(slot.sessionId, pending.surfaceId);
+        this.sendInputUnavailable(slot.sessionId, pending.surfaceId);
       }
     }
     if (slot.timer !== undefined) clearTimeout(slot.timer);
@@ -1122,7 +1214,20 @@ export class SessionManager {
   ): void {
     if (this.owners.get(sessionId) !== owner) return;
     const state = this.core.stateSnapshot(sessionId);
-    if (state === undefined || state.generation !== generation || state.lifecycle === 'exited') return;
+    if (state === undefined || state.generation !== generation) return;
+    const finalOutputPending =
+      state.lifecycle === 'exited' && this.core.hasPendingExitBoundary(sessionId);
+    if (state.lifecycle === 'exited' && !finalOutputPending) return;
+    if (finalOutputPending) {
+      const truncated = this.core.truncatePendingExit(sessionId);
+      if (truncated === undefined) return;
+      this.core.refineExitDiagnostic(sessionId, generation, {
+        code: 'moor-final-output-truncated',
+        detail:
+          `holder unavailable at output offset ${truncated.outputOffset}; ` +
+          `expected ${truncated.outputEnd}`
+      });
+    }
     const recovery = this.recoveries.get(sessionId);
     if (recovery?.timer !== undefined) clearTimeout(recovery.timer);
     this.recoveries.delete(sessionId);
@@ -1210,32 +1315,59 @@ export class SessionManager {
 
   private armRecoveryInputExpiry(slot: MoorRecoverySlot): void {
     const oldest = slot.inputQueue[0];
-    if (oldest === undefined) return;
+    const oldestQueuedAt =
+      oldest === undefined
+        ? slot.retainedInputQueuedAt
+        : slot.retainedInputQueuedAt === undefined
+          ? oldest.queuedAt
+          : Math.min(oldest.queuedAt, slot.retainedInputQueuedAt);
+    if (oldestQueuedAt === undefined) return;
     this.armControllerRecoveryTimer(
       slot,
-      Math.max(0, oldest.queuedAt + RECOVERY_INPUT_MAX_AGE_MS - this.now())
+      Math.max(0, oldestQueuedAt + RECOVERY_INPUT_MAX_AGE_MS - this.now())
     );
   }
 
   private expireRecoveryInput(slot: MoorRecoverySlot): void {
     const cutoff = this.now() - RECOVERY_INPUT_MAX_AGE_MS;
+    if (slot.retainedInputQueuedAt !== undefined && slot.retainedInputQueuedAt <= cutoff) {
+      const retained = slot.snapshot?.lease?.pendingInput;
+      if (retained !== undefined) {
+        delete slot.snapshot!.lease!.pendingInput;
+        if (retained.surfaceId !== undefined && retained.surfaceId !== 0) {
+          this.sendInputUnavailable(slot.sessionId, retained.surfaceId);
+        }
+      }
+      slot.retainedInputQueuedAt = undefined;
+    }
     while (slot.inputQueue[0]?.queuedAt <= cutoff) {
       const expired = slot.inputQueue.shift()!;
       slot.inputBytes -= expired.bytes.length;
-      this.sendStaleLease(slot.sessionId, expired.surfaceId);
+      this.sendInputUnavailable(slot.sessionId, expired.surfaceId);
     }
   }
 
-  private sendStaleLease(sessionId: string, channelId: number): void {
+  private sealInputForObservedExit(sessionId: string): void {
+    this.masters.get(sessionId)?.sealInput();
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery === undefined || !this.recoveryCurrent(recovery, recovery.episode)) return;
+    for (const pending of recovery.inputQueue.splice(0)) {
+      recovery.inputBytes -= pending.bytes.length;
+      this.sendInputUnavailable(sessionId, pending.surfaceId);
+    }
+    recovery.pendingResize = undefined;
+  }
+
+  private sendInputUnavailable(sessionId: string, channelId: number): void {
     try {
       this.core.sendBrowserFrame(sessionId, channelId, {
         type: BpFrameType.ERROR,
         channelId,
-        code: BpError.STALE_LEASE
+        code: BpError.INPUT_UNAVAILABLE
       });
     } catch (error) {
       console.error(
-        `[desk] could not report stale viewer lease for ${sessionId}/${channelId}: ${
+        `[desk] could not report unavailable terminal input for ${sessionId}/${channelId}: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
@@ -1644,7 +1776,23 @@ export class SessionManager {
 
   /** Route INPUT by channelId alone (the router validated WS ownership, §7.4). */
   onBrowserInputByChannel(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
-    return this.core.onBrowserInputByChannel(channelId, binary, bytes);
+    return this.dispatchBrowserInputByChannel(channelId, binary, bytes) === undefined;
+  }
+
+  /** Return the caller-visible ERROR code, or undefined when INPUT was accepted. */
+  dispatchBrowserInputByChannel(
+    channelId: number,
+    binary: boolean,
+    bytes: Uint8Array
+  ): BpError | undefined {
+    const sessionId = this.core.sessionOfChannel(channelId);
+    if (sessionId === undefined) return BpError.BAD_CHANNEL;
+    if (this.core.hasPendingExitBoundary(sessionId)) return BpError.INPUT_UNAVAILABLE;
+    if (this.core.onBrowserInputByChannel(channelId, binary, bytes)) return undefined;
+    const link = this.masters.get(sessionId);
+    return link?.hasViewerLease?.() === false
+      ? BpError.STALE_LEASE
+      : BpError.INPUT_UNAVAILABLE;
   }
 
   /** Unsubscribe a channel (surface + channel→session mapping). */
@@ -1800,8 +1948,32 @@ export class SessionManager {
         // EXIT frame to every subscribed browser surface — replayed or
         // duplicate exits (authority noop/rejected) never re-announce.
         if (authority.kind === 'applied') {
-          this.cancelRecoveryForObservedExit(sessionId, generation);
-          this.core.emitExit(sessionId, event.code);
+          if (event.outputEnd === undefined) {
+            console.error(
+              `[desk] observed Moor exit for ${sessionId} generation ${generation} has no validated output boundary`
+            );
+          } else {
+            const delivery = this.core.emitExit(
+              sessionId,
+              event.code,
+              event.outputEnd,
+              event.outcome.kind === 'signalled' ? event.outcome.signal : 0
+            );
+            this.sealInputForObservedExit(sessionId);
+            if (delivery instanceof Promise) {
+              void delivery
+                .then(() => this.cancelRecoveryForObservedExit(sessionId, generation))
+                .catch((error) =>
+                  console.error(
+                    `[desk] Moor exit delivery failed for ${sessionId} generation ${generation}: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`
+                  )
+                );
+            } else {
+              this.cancelRecoveryForObservedExit(sessionId, generation);
+            }
+          }
         }
         next.exit = { code: event.code, at };
         break;
