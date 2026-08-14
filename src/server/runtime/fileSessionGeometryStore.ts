@@ -9,6 +9,13 @@
 // line from a hard kill is truncated before the append handle opens, so the
 // next record cannot concatenate with it.
 //
+// Append-only would grow without bound: a drag still writes one record per
+// distinct size, and nothing prunes a session that no longer exists. So replay
+// compacts — whenever the log carries more records than the sessions it
+// describes, the reconstructed last-wins map is written back in place of the
+// history. The rule has no tuned threshold to defend: a superseded record is
+// dead weight on every subsequent startup, so it goes.
+//
 // Deliberately NOT fsync'd per record: this is remembered knowledge, not
 // fence-critical state. The failure it must survive is a killed daemon, and the
 // kernel's page cache survives that; a machine crash may lose the newest record
@@ -22,6 +29,9 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
   writeSync
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -39,7 +49,8 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
   constructor(path: string) {
     this.path = path;
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.replay();
+    const records = this.replay();
+    if (records > this.measured.size) this.compact();
     this.fd = openSync(path, 'a');
   }
 
@@ -73,24 +84,29 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
     this.fd = null;
   }
 
-  /** Rebuild the last-wins map; repair only a malformed, unterminated final line. */
-  private replay(): void {
-    if (!existsSync(this.path)) return;
+  /**
+   * Rebuild the last-wins map; repair only a malformed, unterminated final
+   * line. Returns how many terminated records the log held, which is what
+   * decides whether any of them are now dead weight.
+   */
+  private replay(): number {
+    if (!existsSync(this.path)) return 0;
     const bytes = readFileSync(this.path);
     let offset = 0;
+    let records = 0;
     while (offset < bytes.length) {
       const newline = bytes.indexOf(0x0a, offset);
-      const end = newline === -1 ? bytes.length : newline;
-      const line = bytes.subarray(offset, end).toString('utf8');
       if (newline === -1) {
         // An unterminated tail is a torn write: drop it durably so the next
         // append starts on a clean record boundary.
         this.truncateTail(offset);
-        return;
+        return records;
       }
-      this.absorb(line);
+      this.absorb(bytes.subarray(offset, newline).toString('utf8'));
+      records += 1;
       offset = newline + 1;
     }
+    return records;
   }
 
   private absorb(line: string): void {
@@ -102,9 +118,40 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
       return; // an unreadable record is an unmeasured session, not a fatal error
     }
     if (typeof record.s !== 'string' || record.s.length === 0) return;
-    const geometry = { rows: Number(record.r), cols: Number(record.c) };
+    // Typed BEFORE it is measured against the wire range: `Number('48')` and
+    // `Number(true)` both survive coercion, and the second one would install a
+    // 1x1 "measured" geometry. A dimension that is not already a number is not
+    // a dimension.
+    if (typeof record.r !== 'number' || typeof record.c !== 'number') return;
+    const geometry = { rows: record.r, cols: record.c };
     if (!isRealSessionGeometry(geometry)) return;
     this.measured.set(record.s, geometry);
+  }
+
+  /**
+   * Replace the log with the map it reconstructs to. Written beside the log and
+   * renamed over it, so a failure mid-write leaves the original history intact;
+   * and if the rename itself is lost to a machine crash, the surviving file is
+   * still the older, longer log — never a truncated one.
+   */
+  private compact(): void {
+    const scratch = `${this.path}.compact`;
+    let body = '';
+    for (const [sessionId, geometry] of this.measured) {
+      body += `${JSON.stringify({ s: sessionId, c: geometry.cols, r: geometry.rows })}\n`;
+    }
+    try {
+      writeFileSync(scratch, body, { mode: 0o600 });
+      renameSync(scratch, this.path);
+    } catch {
+      // Compaction is housekeeping, never a precondition for serving: a
+      // read-only or full state root keeps the long log and the correct map.
+      try {
+        unlinkSync(scratch);
+      } catch {
+        // nothing to clean up
+      }
+    }
   }
 
   private truncateTail(offset: number): void {
