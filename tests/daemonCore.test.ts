@@ -241,7 +241,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('routes moor child output to the session and out to its subscribers', () => {
     const { core, browserOut } = makeCore();
     core.ensure('s1', { rows: 40, cols: 120 });
-    const ch = core.subscribe('s1', 'main', 40, 120);
+    const ch = core.subscribe('s1', 'main', 40, 120)!.channelId;
     browserOut.length = 0;
     core.onMoorOutput('s1', new TextEncoder().encode('hi'), 0n);
     expect(browserOut).toHaveLength(1);
@@ -254,7 +254,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     core.ensure('s1', { rows: 40, cols: 120 });
 
     const preamble = core.onMasterTerminalState('s1', new TextEncoder().encode('-new'));
-    const channelId = core.subscribe('s1', 'preamble-viewer', 40, 120);
+    const channelId = core.subscribe('s1', 'preamble-viewer', 40, 120)!.channelId;
     expect(
       browserOut
         .filter((entry) => entry.channelId === channelId)
@@ -284,7 +284,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     const retry = core.onMoorOutput('s1', bytes, 0n);
     expect(new TextDecoder().decode(Uint8Array.from(emulator.written))).toBe('x');
 
-    const channelId = core.subscribe('s1', 'retry-viewer', 40, 120);
+    const channelId = core.subscribe('s1', 'retry-viewer', 40, 120)!.channelId;
     expect(
       browserOut
         .filter((entry) => entry.channelId === channelId)
@@ -312,8 +312,9 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       createEmulator: () => emulator
     });
     core.ensure('s1', { rows: 40, cols: 120 });
-    const channelId = core.subscribe('s1', 'main', 40, 120);
+    const channelId = core.subscribe('s1', 'main', 40, 120)!.channelId;
     browserOut.length = 0;
+    masterResizes.length = 0;
 
     const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
     const exit = core.emitExit('s1', 7, 2n);
@@ -321,13 +322,14 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     expect(
       core.onBrowserInputByChannel(channelId, false, new TextEncoder().encode('after-exit'))
     ).toBe(false);
-    expect(core.onBrowserResizeByChannel(channelId, 50, 130)).toBe(false);
+    const resizeOutcome = core.onBrowserResizeByChannel(channelId, 50, 130);
     expect(masterOut).toEqual([]);
     expect(masterResizes).toEqual([]);
     const finalOutput = core.onMoorOutput('s1', new TextEncoder().encode('y'), 1n);
 
     emulator.release();
     await Promise.all([output, finalOutput, exit]);
+    expect(resizeOutcome).toEqual({ routed: true, accepted: false });
     expect(browserOut.map(({ frame }) => frame.type)).toEqual([
       BpFrameType.OUTPUT,
       BpFrameType.OUTPUT,
@@ -345,7 +347,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     core.ensure('s1', { rows: 40, cols: 120 });
 
     const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
-    const channelId = core.subscribe('s1', 'late-before-exit', 40, 120);
+    const channelId = core.subscribe('s1', 'late-before-exit', 40, 120)!.channelId;
     expect(
       browserOut
         .filter((entry) => entry.channelId === channelId)
@@ -405,7 +407,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       generation: 3,
       created: true
     });
-    const successorChannel = core.subscribe('s1', 'successor-viewer', 40, 120);
+    const successorChannel = core.subscribe('s1', 'successor-viewer', 40, 120)!.channelId;
     browserOut.length = 0;
 
     retiredEmulator.release();
@@ -489,7 +491,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('routes browser input to the session master', () => {
     const { core, masterOut } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 });
-    const ch = core.subscribe('s1', 'main', 1, 1)!;
+    const ch = core.subscribe('s1', 'main', 1, 1)!.channelId;
     core.onBrowserInput('s1', ch, false, new TextEncoder().encode('x'));
     expect(masterOut).toHaveLength(1);
     expect(masterOut[0].sessionId).toBe('s1');

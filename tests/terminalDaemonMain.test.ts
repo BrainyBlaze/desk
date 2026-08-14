@@ -487,7 +487,7 @@ describe('startTerminalDaemonServer socket root', () => {
 // desk#62 — a daemon restart must not write a geometry no session has onto a
 // live child. The daemon cannot ask the holder how big the child's pty is (the
 // moor status descriptor, wire schema §5, carries no rows/cols), so the only
-// honest sources are a durable record of what a real client measured and the
+// honest sources are the journal of the last geometry Desk COMMANDED and the
 // wire's own "preserve both" encoding (§4/OB-19: columns and rows both zero).
 // ---------------------------------------------------------------------------
 
@@ -539,7 +539,7 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
     expect(Object.keys(opts)).not.toContain('geometry');
   });
 
-  it('a session a client measured comes back at THAT size, and the ATTACH still asserts nothing on the live child', async () => {
+  it('a session with a COMMANDED size comes back at that size, and the ATTACH still asserts nothing on the live child', async () => {
     // CASE 1 of 2: geometry WAS known before the restart. This is the defect —
     // the daemon discarded knowledge it already had and wrote 24x80 over it.
     const dir = mkdtempSync(join(tmpdir(), 'desk-geo-known-'));
@@ -583,8 +583,8 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
       );
       expect(results).toEqual([{ sessionId: 'measured', ok: true }]);
 
-      // The restored session is the size a client actually measured — NOT the
-      // 24x80 the daemon used to invent.
+      // The restored session is the last size Desk commanded (the subscribe
+      // acquisition journaled 48x100) — NOT the 24x80 the daemon used to invent.
       expect(two.created).toEqual([{ rows: 48, cols: 100 }]);
       // And nothing was written onto the live child: both re-adopting ATTACHes
       // carry moor's preserve pair, so the pty keeps the size it already has.
@@ -599,7 +599,7 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
     }
   }, 20_000);
 
-  it('a session no client ever measured is re-adopted with preserve geometry, so its child keeps the size it has', async () => {
+  it('a session Desk never commanded a size for is re-adopted with preserve geometry, so its child keeps the size it has', async () => {
     // CASE 2 of 2: geometry was NEVER known — no browser has ever rendered
     // this session, and none is attached at restart. Nothing can know better,
     // so the daemon must assert nothing rather than resize the child to a

@@ -10,7 +10,7 @@
 //    path.
 //
 // 2. `Number(record.r)` coerced before it checked, so a record whose numbers
-//    are strings validated as measured knowledge. The file is ours today, but
+//    are strings validated as commanded knowledge. The file is ours today, but
 //    "coerce, then validate" is the exact inversion that hides the honest
 //    answer everywhere else in this codebase.
 
@@ -465,7 +465,7 @@ describe('a failed append leaves the durable record able to catch up (desk#62)',
       store.record('busy', { rows: 24, cols });
     }
 
-    // The compaction wrote `measured`, which carries the geometry the append
+    // The compaction wrote `commanded`, which carries the geometry the append
     // lost — so the record is on disk exactly once, without a catch-up append.
     expect(recordsFor(path, 'pending')).toEqual([{ rows: 48, cols: 120 }]);
     store.record('pending', { rows: 48, cols: 120 });
@@ -584,8 +584,8 @@ describe('the durable geometry record is typed before it is trusted (desk#62)', 
     const path = storePath();
     writeFileSync(path, '{"s":"stringly","c":"100","r":"48"}\n', 'utf8');
 
-    // A string that coerces to a valid integer is still not a measured
-    // geometry: the session is unmeasured, and unmeasured is the honest answer.
+    // A string that coerces to a valid integer is still not a commanded
+    // geometry: the session has no record, and no record is the honest answer.
     expect(new FileSessionGeometryStore(path).get('stringly')).toBeUndefined();
   });
 

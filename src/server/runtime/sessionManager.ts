@@ -14,6 +14,7 @@ import { createConnection } from 'node:net';
 import { GenerationLedger } from '../../shared/controlPlane/generationLedger.js';
 import { WorkerSupervisor } from '../../shared/runtime/workerSupervisor.js';
 import { type EmulatorFactory } from '../../shared/runtime/emulatorPort.js';
+import { type CommandedGeometry } from '../../shared/runtime/sessionRuntime.js';
 import {
   DaemonCore,
   type DaemonAgentStateIntakeResult,
@@ -228,7 +229,7 @@ export interface SessionManagerDeps {
   /** Deliver a browser frame to a session's surface (the web-server WS wires this). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
   onSubscriberFailure?: (channelId: number) => void;
-  /** desk#62 — durable last-measured geometry per session (see DaemonCoreDeps). */
+  /** desk#62 — durable last-COMMANDED geometry per session (see DaemonCoreDeps). */
   sessionGeometry?: DaemonCoreDeps['sessionGeometry'];
   workingLeaseMs?: DaemonCoreDeps['workingLeaseMs'];
   openToolLeaseMs?: DaemonCoreDeps['openToolLeaseMs'];
@@ -350,7 +351,6 @@ export class SessionManager {
       now: deps.now,
       sendBrowser: deps.sendBrowser,
       onSubscriberFailure: (_sessionId, channelId) => {
-        this.unsubscribeChannel(channelId);
         deps.onSubscriberFailure?.(channelId);
       },
       // Typed master-bound sends route to the session's attached holder link.
@@ -1765,7 +1765,15 @@ export class SessionManager {
   }
 
   subscribe(sessionId: string, surfaceId: string, rows: number, cols: number): number | undefined {
-    return this.core.subscribe(sessionId, surfaceId, rows, cols);
+    const result = this.core.subscribe(sessionId, surfaceId, rows, cols);
+    if (result === undefined) return undefined;
+    // desk#68: a subscribe that ACQUIRED ownership commanded the subscriber's
+    // geometry — carry it into an in-flight link recovery like any other
+    // commanded resize, so the recovered link is told the owner's real size.
+    if (result.commanded !== undefined) {
+      this.noteCommandedGeometry(sessionId, result.commanded);
+    }
+    return result.channelId;
   }
 
   onBrowserInput(sessionId: string, channelId: number, binary: boolean, bytes: Uint8Array): void {
@@ -1797,37 +1805,69 @@ export class SessionManager {
 
   /** Unsubscribe a channel (surface + channel→session mapping). */
   unsubscribeChannel(channelId: number): void {
-    const sessionId = this.core.sessionOfChannel(channelId);
-    const recovery = sessionId === undefined ? undefined : this.recoveries.get(sessionId);
-    if (recovery !== undefined) {
-      recovery.inputQueue = recovery.inputQueue.filter((pending) => {
-        if (pending.surfaceId !== channelId) return true;
-        recovery.inputBytes -= pending.bytes.length;
-        return false;
-      });
+    this.unsubscribeChannels([channelId]);
+  }
+
+  /**
+   * Unsubscribe a SET of channels — one closing browser connection's — in bulk
+   * (desk#68): per-channel queue cleanup first, then the core removes every
+   * channel before any resize handoff election runs, so a dying sibling of the
+   * same connection can never be transiently promoted and command the child.
+   */
+  unsubscribeChannels(channelIds: number[]): void {
+    for (const channelId of channelIds) {
+      const sessionId = this.core.sessionOfChannel(channelId);
+      const recovery = sessionId === undefined ? undefined : this.recoveries.get(sessionId);
+      if (recovery !== undefined) {
+        recovery.inputQueue = recovery.inputQueue.filter((pending) => {
+          if (pending.surfaceId !== channelId) return true;
+          recovery.inputBytes -= pending.bytes.length;
+          return false;
+        });
+      }
+      if (sessionId !== undefined) this.masters.get(sessionId)?.cancelQueuedInput(channelId);
     }
-    if (sessionId !== undefined) this.masters.get(sessionId)?.cancelQueuedInput(channelId);
-    this.core.unsubscribeChannel(channelId);
+    for (const handoff of this.core.unsubscribeChannels(channelIds)) {
+      // A departing owner handed off: the successor's geometry is what a
+      // recovered link must be told (desk#68).
+      this.noteCommandedGeometry(handoff.sessionId, handoff.commanded);
+    }
   }
 
   /** Route a browser RESIZE by channelId (ownership validated by the router). */
   onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
     const sessionId = this.core.sessionOfChannel(channelId);
-    if (sessionId === undefined || !this.core.onBrowserResizeByChannel(channelId, rows, cols)) {
-      return false;
-    }
-    const recovery = this.recoveries.get(sessionId);
-    if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
-      recovery.geometry.rows = rows;
-      recovery.geometry.cols = cols;
-      recovery.pendingResize = { rows, cols, surfaceId: channelId };
+    if (sessionId === undefined) return false;
+    const outcome = this.core.onBrowserResizeByChannel(channelId, rows, cols);
+    if (!outcome.routed || outcome.accepted === false) return false;
+    // desk#68: replay only what was COMMANDED. An observer's resize was never
+    // sent anywhere, so queueing it for the recovered link would put the very
+    // size the runtime refused onto the child the moment the link came back.
+    if (outcome.commanded !== undefined) {
+      this.noteCommandedGeometry(sessionId, outcome.commanded);
     }
     return true;
   }
 
   /** Route a browser VISIBILITY by channelId. */
   onBrowserVisibilityByChannel(channelId: number, visible: boolean): boolean {
-    return this.core.onBrowserVisibilityByChannel(channelId, visible);
+    const sessionId = this.core.sessionOfChannel(channelId);
+    const outcome = this.core.onBrowserVisibilityByChannel(channelId, visible);
+    if (sessionId !== undefined && outcome.commanded !== undefined) {
+      this.noteCommandedGeometry(sessionId, outcome.commanded);
+    }
+    return outcome.routed;
+  }
+
+  /** Carry a COMMANDED geometry into an in-flight link recovery (§7.5, desk#68). */
+  private noteCommandedGeometry(sessionId: string, commanded: CommandedGeometry): void {
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery === undefined || !this.recoveryCurrent(recovery, recovery.episode)) return;
+    recovery.geometry.rows = commanded.rows;
+    recovery.geometry.cols = commanded.cols;
+    // The surfaceId is the OWNING channel the runtime resized under — after a
+    // handoff that is the promoted surface, not the one that hid or left.
+    recovery.pendingResize = { rows: commanded.rows, cols: commanded.cols, surfaceId: commanded.surfaceId };
   }
 
   /** Route a browser QUERY_REPLY by channelId (§7.7). */

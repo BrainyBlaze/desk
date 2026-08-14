@@ -1,18 +1,21 @@
-// Last-measured session geometry (desk#62).
+// Last-COMMANDED session geometry (desk#62, semantics sharpened by desk#68).
 //
-// A session's terminal size is knowable in exactly one place: a surface that
-// actually rendered it and measured itself. Nothing else in Desk can derive it
-// — the moor status descriptor (wire schema §5) carries pid, containment,
-// replay coordinates and clocks, but NO rows/cols, so a re-adopting controller
-// cannot ask the holder how big the child's pty is.
+// This journal holds the last valid geometry Desk commanded for a session —
+// what the owning surface asked for and the daemon sent — NOT the pty's
+// measured truth. Moor is the authority on what the child's pty actually is;
+// Desk never hears it back, because the moor status descriptor (wire schema §5)
+// carries pid, containment, replay coordinates and clocks, but NO rows/cols.
+// Until the protocol carries the holder's pair, the last commanded size is the
+// best available approximation, and it is the only geometry Desk may honestly
+// persist.
 //
-// That knowledge therefore has to be KEPT. This port records a client-measured
-// geometry the moment it is applied, so a daemon restart can restore a session
-// at the size it actually had instead of writing an invented one over it. A
-// session no surface has ever measured has no record, and the absence is the
-// honest answer: callers must treat "no record" as "unknown", never as a size.
+// So the journal is KEPT: this port records a geometry the moment it is
+// commanded, and a daemon restart restores a session at the last commanded
+// size instead of writing an invented one over it. A session Desk never
+// commanded a size for has no record, and the absence is the honest answer:
+// callers must treat "no record" as "unknown", never as a size.
 
-/** A real moor geometry (wire schema §4): both dimensions measured, not preserve. */
+/** A real moor geometry (wire schema §4): both dimensions explicit, not preserve. */
 export interface SessionGeometry {
   readonly rows: number;
   readonly cols: number;
@@ -37,14 +40,16 @@ export function isRealSessionGeometry(value: {
 
 export interface SessionGeometryStore {
   /**
-   * The last geometry a real client measured for this session, or undefined
-   * when none ever did. Undefined means UNKNOWN — never a size to fall back on.
+   * The last geometry Desk commanded for this session, or undefined when it
+   * never commanded one. Undefined means UNKNOWN — never a size to fall back
+   * on. Read a record as "what the owner last asked for", never as "the child
+   * is at this size now" — moor owns that truth.
    */
   get(sessionId: string): SessionGeometry | undefined;
   /**
-   * Record a client-measured geometry. Called on every APPLIED resize (not at
-   * shutdown: a daemon that is killed never runs shutdown code). A geometry
-   * that is not a real §4 pair is refused rather than stored.
+   * Record a geometry the moment it is COMMANDED (not at shutdown: a daemon
+   * that is killed never runs shutdown code). A geometry that is not a real
+   * §4 pair is refused rather than stored.
    */
   record(sessionId: string, geometry: { rows: number; cols: number }): void;
   /**
@@ -59,18 +64,18 @@ export interface SessionGeometryStore {
 
 /** Process-local store — the default when no durable one is injected. */
 export class InMemorySessionGeometryStore implements SessionGeometryStore {
-  private readonly measured = new Map<string, SessionGeometry>();
+  private readonly commanded = new Map<string, SessionGeometry>();
 
   get(sessionId: string): SessionGeometry | undefined {
-    return this.measured.get(sessionId);
+    return this.commanded.get(sessionId);
   }
 
   record(sessionId: string, geometry: { rows: number; cols: number }): void {
     if (sessionId.length === 0 || !isRealSessionGeometry(geometry)) return;
-    this.measured.set(sessionId, { rows: geometry.rows, cols: geometry.cols });
+    this.commanded.set(sessionId, { rows: geometry.rows, cols: geometry.cols });
   }
 
   forget(sessionId: string): void {
-    this.measured.delete(sessionId);
+    this.commanded.delete(sessionId);
   }
 }
