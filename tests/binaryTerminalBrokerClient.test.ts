@@ -383,6 +383,39 @@ describe('binary terminal broker client (§7.4)', () => {
     expect(resizes[0]).toMatchObject({ channelId: 9, cols: 100, rows: 30 });
   });
 
+  it('remembers a fit reported while hidden and applies it when the surface is revealed', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, false, handlers(cap));
+    socket.fireOpen();
+
+    client.sendResize('s1', 100, 30);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(0);
+    expect(socket.ofType(BpFrameType.RESIZE)).toHaveLength(0);
+
+    client.setVisibility('s1', true);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)[0]).toMatchObject({ cols: 100, rows: 30 });
+    socket.deliver(ack(10));
+    expect(socket.ofType(BpFrameType.RESIZE)[0]).toMatchObject({ channelId: 10, cols: 100, rows: 30 });
+  });
+
+  it('reasserts the last geometry after reconnect without a new layout event', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    client.sendResize('s1', 100, 30);
+    socket.deliver(ack(1));
+
+    socket.fireClose();
+    socket = new FakeSocket();
+    vi.advanceTimersByTime(2000);
+    socket.fireOpen();
+    socket.deliver(ack(2));
+
+    expect(socket.ofType(BpFrameType.RESIZE)).toEqual([
+      expect.objectContaining({ channelId: 2, cols: 100, rows: 30 })
+    ]);
+  });
+
   it('re-subscribes for a fresh baseline when an output gap makes it dirty', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
