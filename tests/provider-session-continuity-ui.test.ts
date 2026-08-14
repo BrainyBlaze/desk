@@ -29,6 +29,25 @@ function issue(
   };
 }
 
+function resetIssue(
+  provider: 'claude' | 'codex',
+  sessionId: string,
+  durableProviderSessionId: string,
+  observedProviderSessionId: string
+): ClaudeContinuityAttention {
+  const label = provider === 'codex' ? 'Codex' : 'Claude';
+  return {
+    sessionId,
+    cwd: `/workspace/${sessionId}`,
+    code: 'provider-session-reset-incomplete',
+    message: `${label} provider session reset was interrupted; relaunch remains blocked until the durable transition is cancelled`,
+    provider,
+    durableProviderSessionId,
+    observedProviderSessionId,
+    action: `desk reset-provider-session ${sessionId} --force`
+  };
+}
+
 describe('provider session continuity App banners', () => {
   it('renders equivalent actionable Codex and Claude relaunch blockers', () => {
     const html = renderToStaticMarkup(
@@ -36,6 +55,7 @@ describe('provider session continuity App banners', () => {
         issues: [
           issue('codex', 'codex-agent', CODEX_OLD, CODEX_NEW),
           issue('claude', 'claude-agent', CLAUDE_OLD, CLAUDE_NEW),
+          resetIssue('codex', 'codex-reset', CODEX_OLD, CODEX_NEW),
           {
             sessionId: 'claude-memory',
             cwd: '/workspace/memory',
@@ -51,6 +71,7 @@ describe('provider session continuity App banners', () => {
     expect(html).toContain('data-provider="claude"');
     expect(html).toContain('Codex relaunch blocked');
     expect(html).toContain('Claude relaunch blocked');
+    expect(html).toContain('Codex reset interrupted');
     expect(html).toContain(CODEX_OLD);
     expect(html).toContain(CLAUDE_OLD);
     expect(html).toContain(
@@ -61,6 +82,10 @@ describe('provider session continuity App banners', () => {
     );
     expect(html).toContain('aria-label="Copy Codex rebind command"');
     expect(html).toContain('aria-label="Copy Claude rebind command"');
+    expect(html).toContain(
+      'desk reset-provider-session codex-reset --force'
+    );
+    expect(html).toContain('aria-label="Copy Codex reset command"');
     expect(html).not.toContain('one memory conflict');
 
     const appSource = readFileSync(
@@ -69,5 +94,6 @@ describe('provider session continuity App banners', () => {
     );
     expect(appSource).toContain('<ProviderSessionContinuityBanners');
     expect(appSource).toContain('copyContinuityAction');
+    expect(appSource).toContain('Recovery command copied');
   });
 });

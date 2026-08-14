@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { SessionSpec } from '../src/core/types.js';
 import { readProviderSessionContinuityStatus } from '../src/server/providerSessionContinuityStatus.js';
 import { FileProviderSessionContinuityLedger } from '../src/server/runtime/providerSessionContinuityLedger.js';
+import { FileProviderSessionLaunchLedger } from '../src/server/runtime/providerSessionLaunchLedger.js';
 
 const OLD_CODEX_ID = '11111111-1111-4111-8111-111111111111';
 const NEW_CODEX_ID = '22222222-2222-4222-8222-222222222222';
@@ -144,6 +145,10 @@ describe('provider session continuity status', () => {
     ).toEqual([]);
 
     expect(
+      readProviderSessionContinuityStatus([], { ledgerPath: path }).issues
+    ).toEqual([]);
+
+    expect(
       readProviderSessionContinuityStatus(
         [session('codex-agent', 'codex')],
         { ledgerPath: path }
@@ -155,6 +160,18 @@ describe('provider session continuity status', () => {
       })
     ]);
 
+    const launchLedger = new FileProviderSessionLaunchLedger(
+      join(dirname(path), 'provider-session-launch.ndjson'),
+      { createAuthorizationId: () => 'reset-after-restart' }
+    );
+    launchLedger.prepare({
+      deskSessionId: 'codex-agent',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    launchLedger.close();
+
     const reopened = new FileProviderSessionContinuityLedger(path);
     reopened.cancelTransitionByReset({
       deskSessionId: 'codex-agent',
@@ -162,6 +179,24 @@ describe('provider session continuity status', () => {
       resetAuthorizationId: 'reset-after-restart'
     });
     reopened.close();
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex')],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([
+      expect.objectContaining({
+        code: 'provider-session-reset-incomplete',
+        action: 'desk reset-provider-session codex-agent --force'
+      })
+    ]);
+
+    const authorizedLaunch = new FileProviderSessionLaunchLedger(
+      join(dirname(path), 'provider-session-launch.ndjson')
+    );
+    authorizedLaunch.authorize('reset-after-restart');
+    authorizedLaunch.close();
 
     expect(
       readProviderSessionContinuityStatus(

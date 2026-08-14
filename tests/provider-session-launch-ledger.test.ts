@@ -1,8 +1,10 @@
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   rmSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +26,39 @@ describe('FileProviderSessionLaunchLedger', () => {
     roots.push(root);
     return join(root, '_engine', 'provider-session-launch.ndjson');
   }
+
+  it('replays read-only without creating or repairing the durable ledger', () => {
+    const path = ledgerPath();
+    const absent = new FileProviderSessionLaunchLedger(path, {
+      readOnly: true
+    });
+    expect(absent.current('desk-alpha')).toBeUndefined();
+    absent.close();
+    expect(existsSync(path)).toBe(false);
+
+    const writer = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    writer.prepare({
+      deskSessionId: 'desk-alpha',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 7
+    });
+    writer.close();
+    appendFileSync(path, '{"version":1');
+    const before = readFileSync(path);
+
+    const reader = new FileProviderSessionLaunchLedger(path, {
+      readOnly: true
+    });
+    expect(reader.current('desk-alpha')).toMatchObject({
+      authorizationId: 'authorization-1',
+      state: 'prepared'
+    });
+    reader.close();
+    expect(readFileSync(path)).toEqual(before);
+  });
 
   it('durably replays prepared and authorized reset states', () => {
     const path = ledgerPath();

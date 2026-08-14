@@ -84,6 +84,7 @@ export type CompleteProviderSessionLaunchResult =
 
 interface ProviderSessionLaunchLedgerOptions {
   createAuthorizationId?: () => string;
+  readOnly?: boolean;
 }
 
 const PROVIDERS = new Set<ProviderSessionProvider>([
@@ -114,8 +115,12 @@ export class FileProviderSessionLaunchLedger {
   ) {
     this.createAuthorizationId =
       options.createAuthorizationId ?? randomUUID;
+    if (options.readOnly === true) {
+      this.replay(true);
+      return;
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.replay();
+    this.replay(false);
     this.fd = this.openDurableAppend();
   }
 
@@ -303,7 +308,7 @@ export class FileProviderSessionLaunchLedger {
     }
   }
 
-  private replay(): void {
+  private replay(readOnly: boolean): void {
     this.recoveredPreparedAuthorizationIds.clear();
     if (!existsSync(this.path)) return;
     const bytes = readFileSync(this.path);
@@ -322,6 +327,10 @@ export class FileProviderSessionLaunchLedger {
         parsed = JSON.parse(line);
       } catch {
         if (newline === -1) {
+          if (readOnly) {
+            this.markRecoveredPrepared();
+            return;
+          }
           this.truncateTail(offset);
           this.markRecoveredPrepared();
           return;
@@ -332,7 +341,7 @@ export class FileProviderSessionLaunchLedger {
       }
       const record = parseRecord(parsed, offset);
       this.applyRecord(record, offset);
-      if (newline === -1) this.appendRecordSeparator();
+      if (newline === -1 && !readOnly) this.appendRecordSeparator();
       offset = next;
     }
     this.markRecoveredPrepared();

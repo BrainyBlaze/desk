@@ -878,7 +878,7 @@ export function App(): JSX.Element {
   const copyContinuityAction = useCallback(
     (action: string) => {
       void copyTextWithFallback(action).then((copied) => {
-        pushToast(copied ? 'Rebind command copied' : 'Copy failed', copied ? 'ok' : 'error');
+        pushToast(copied ? 'Recovery command copied' : 'Copy failed', copied ? 'ok' : 'error');
       });
     },
     [pushToast]

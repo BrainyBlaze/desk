@@ -6,19 +6,22 @@ interface ProviderSessionContinuityBannersProps {
   onCopyAction: (action: string) => void;
 }
 
-interface ProviderRebindIssue extends ClaudeContinuityAttention {
-  code: 'provider-session-rebind-required';
+interface ProviderContinuityActionIssue extends ClaudeContinuityAttention {
+  code:
+    | 'provider-session-rebind-required'
+    | 'provider-session-reset-incomplete';
   provider: 'claude' | 'codex';
   durableProviderSessionId: string;
   observedProviderSessionId: string;
   action: string;
 }
 
-function isProviderRebindIssue(
+function isProviderContinuityActionIssue(
   issue: ClaudeContinuityAttention
-): issue is ProviderRebindIssue {
+): issue is ProviderContinuityActionIssue {
   return (
-    issue.code === 'provider-session-rebind-required' &&
+    (issue.code === 'provider-session-rebind-required' ||
+      issue.code === 'provider-session-reset-incomplete') &&
     (issue.provider === 'claude' || issue.provider === 'codex') &&
     typeof issue.durableProviderSessionId === 'string' &&
     typeof issue.observedProviderSessionId === 'string' &&
@@ -30,16 +33,20 @@ export function ProviderSessionContinuityBanners({
   issues,
   onCopyAction
 }: ProviderSessionContinuityBannersProps): JSX.Element | null {
-  const rebindIssues = issues.filter(isProviderRebindIssue);
-  if (rebindIssues.length === 0) return null;
+  const actionableIssues = issues.filter(isProviderContinuityActionIssue);
+  if (actionableIssues.length === 0) return null;
 
   return (
     <div
       className="providerContinuityBanners"
       aria-label="Provider session continuity blockers"
     >
-      {rebindIssues.map((issue) => {
+      {actionableIssues.map((issue) => {
         const providerLabel = issue.provider === 'codex' ? 'Codex' : 'Claude';
+        const actionLabel =
+          issue.code === 'provider-session-reset-incomplete'
+            ? 'reset'
+            : 'rebind';
         return (
           <div
             key={issue.sessionId}
@@ -49,7 +56,11 @@ export function ProviderSessionContinuityBanners({
           >
             <TriangleAlert size={15} aria-hidden="true" />
             <div className="providerContinuityBannerBody">
-              <strong>{providerLabel} relaunch blocked</strong>
+              <strong>
+                {issue.code === 'provider-session-reset-incomplete'
+                  ? `${providerLabel} reset interrupted`
+                  : `${providerLabel} relaunch blocked`}
+              </strong>
               <span>{issue.message}</span>
               <small>
                 Durable <code>{issue.durableProviderSessionId}</code>; observed{' '}
@@ -60,8 +71,8 @@ export function ProviderSessionContinuityBanners({
             <button
               type="button"
               className="providerContinuityCopy"
-              aria-label={`Copy ${providerLabel} rebind command`}
-              title={`Copy ${providerLabel} rebind command`}
+              aria-label={`Copy ${providerLabel} ${actionLabel} command`}
+              title={`Copy ${providerLabel} ${actionLabel} command`}
               onClick={() => onCopyAction(issue.action)}
             >
               <Copy size={14} aria-hidden="true" />

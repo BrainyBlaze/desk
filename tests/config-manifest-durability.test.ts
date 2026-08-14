@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -62,5 +68,67 @@ describe('manifest replacement durability', () => {
     expect(inodeSyncIndex).toBeLessThan(renameIndex);
     expect(directorySyncIndex).toBeGreaterThan(renameIndex);
     expect(readFileSync(manifestPath, 'utf8')).toContain('groups: []');
+  });
+
+  it('rejects the replacement when the temp inode cannot be synced', async () => {
+    const manifestPath = join(root, 'desk.yml');
+    writeFileSync(manifestPath, 'groups:\n  - id: old\n');
+
+    vi.doMock('node:fs', async () => {
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+      const pathsByFd = new Map<number, string>();
+      return {
+        ...actual,
+        openSync: ((path: string, flags: string | number, mode?: number) => {
+          const fd = actual.openSync(path, flags, mode);
+          pathsByFd.set(fd, path);
+          return fd;
+        }) as typeof actual.openSync,
+        fsyncSync: ((fd: number) => {
+          if (pathsByFd.get(fd)?.includes('.tmp-') === true) {
+            throw new Error('temp inode fsync failed');
+          }
+          actual.fsyncSync(fd);
+        }) as typeof actual.fsyncSync
+      };
+    });
+
+    const { writeManifestFile } = await import('../src/core/config.js');
+    expect(() => writeManifestFile(manifestPath, { groups: [] })).toThrow(
+      'temp inode fsync failed'
+    );
+    expect(readFileSync(manifestPath, 'utf8')).toContain('id: old');
+    expect(readdirSync(root).some((name) => name.includes('.tmp-'))).toBe(false);
+  });
+
+  it('rejects acceptance when the naming directory cannot be synced', async () => {
+    const manifestPath = join(root, 'desk.yml');
+    writeFileSync(manifestPath, 'groups:\n  - id: old\n');
+
+    vi.doMock('node:fs', async () => {
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+      const pathsByFd = new Map<number, string>();
+      return {
+        ...actual,
+        openSync: ((path: string, flags: string | number, mode?: number) => {
+          const fd = actual.openSync(path, flags, mode);
+          pathsByFd.set(fd, path);
+          return fd;
+        }) as typeof actual.openSync,
+        fsyncSync: ((fd: number) => {
+          if (pathsByFd.get(fd) === root) {
+            throw new Error('directory fsync failed');
+          }
+          actual.fsyncSync(fd);
+        }) as typeof actual.fsyncSync
+      };
+    });
+
+    const { writeManifestFile } = await import('../src/core/config.js');
+    expect(() => writeManifestFile(manifestPath, { groups: [] })).toThrow(
+      'directory fsync failed'
+    );
+    expect(readFileSync(manifestPath, 'utf8')).toContain('groups: []');
+    expect(readdirSync(root).some((name) => name.includes('.tmp-'))).toBe(false);
   });
 });
