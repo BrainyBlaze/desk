@@ -156,6 +156,8 @@ describe('provider session continuity status', () => {
     ).toEqual([
       expect.objectContaining({
         code: 'provider-session-reset-incomplete',
+        message:
+          'Codex provider session reset was interrupted before transition cancellation; relaunch remains blocked until the durable transition is cancelled',
         action: 'desk reset-provider-session codex-agent --force'
       })
     ]);
@@ -188,6 +190,8 @@ describe('provider session continuity status', () => {
     ).toEqual([
       expect.objectContaining({
         code: 'provider-session-reset-incomplete',
+        message:
+          'Codex provider session reset was interrupted after transition cancellation; relaunch remains blocked until the durable fresh-launch authorization is completed',
         action: 'desk reset-provider-session codex-agent --force'
       })
     ]);
@@ -204,6 +208,124 @@ describe('provider session continuity status', () => {
         { ledgerPath: path }
       ).issues
     ).toEqual([]);
+
+    const claimedLaunch = new FileProviderSessionLaunchLedger(
+      join(dirname(path), 'provider-session-launch.ndjson')
+    );
+    expect(
+      claimedLaunch.claim({
+        deskSessionId: 'codex-agent',
+        provider: 'codex',
+        currentGeneration: 3,
+        nextGeneration: 4
+      })
+    ).toMatchObject({ ok: true });
+    claimedLaunch.close();
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex')],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([]);
+
+    const completedLaunch = new FileProviderSessionLaunchLedger(
+      join(dirname(path), 'provider-session-launch.ndjson')
+    );
+    expect(
+      completedLaunch.complete({
+        deskSessionId: 'codex-agent',
+        provider: 'codex',
+        providerSessionId: NEW_CODEX_ID,
+        generation: 4
+      })
+    ).toMatchObject({ ok: true, kind: 'completed' });
+    completedLaunch.close();
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex')],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: 'missing launch authorization',
+      authorization: undefined
+    },
+    {
+      name: 'different authorization id',
+      authorization: {
+        authorizationId: 'unrelated-reset',
+        provider: 'codex' as const,
+        generation: 3
+      }
+    },
+    {
+      name: 'different provider',
+      authorization: {
+        authorizationId: 'linked-reset',
+        provider: 'claude' as const,
+        generation: 3
+      }
+    },
+    {
+      name: 'different generation',
+      authorization: {
+        authorizationId: 'linked-reset',
+        provider: 'codex' as const,
+        generation: 7
+      }
+    }
+  ])('fails closed on a cancelled transition with $name', ({ authorization }) => {
+    const path = ledgerPath();
+    const ledger = new FileProviderSessionContinuityLedger(path);
+    const pending = ledger.stageTransition({
+      deskSessionId: 'codex-agent',
+      provider: 'codex',
+      generation: 3,
+      expectedProviderSessionId: OLD_CODEX_ID,
+      observedProviderSessionId: NEW_CODEX_ID,
+      evidencePath: '/workspace/codex-agent/session.jsonl'
+    });
+    ledger.cancelTransitionByReset({
+      deskSessionId: 'codex-agent',
+      transitionId: pending.transitionId,
+      resetAuthorizationId: 'linked-reset'
+    });
+    ledger.close();
+
+    if (authorization !== undefined) {
+      const launchLedger = new FileProviderSessionLaunchLedger(
+        join(dirname(path), 'provider-session-launch.ndjson'),
+        { createAuthorizationId: () => authorization.authorizationId }
+      );
+      launchLedger.prepare({
+        deskSessionId: 'codex-agent',
+        provider: authorization.provider,
+        expectedPriorBinding: null,
+        generation: authorization.generation
+      });
+      launchLedger.authorize(authorization.authorizationId);
+      launchLedger.close();
+    }
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex')],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([
+      expect.objectContaining({
+        sessionId: 'codex-agent',
+        code: 'continuity-store-corrupt',
+        message: expect.stringContaining(
+          'provider session reset authorization is inconsistent'
+        )
+      })
+    ]);
   });
 
   it('fails closed on a corrupt ledger without repairing or exposing its contents', () => {

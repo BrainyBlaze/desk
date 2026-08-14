@@ -83,6 +83,7 @@ export interface ProviderSessionTransitionProjection {
   expectedProviderSessionId: string;
   observedProviderSessionId: string;
   state: ProviderSessionTransition['state'];
+  resetAuthorizationId?: string;
 }
 
 interface ProviderSessionContinuityLedgerOptions {
@@ -607,7 +608,10 @@ function publicProjection(
     generation: record.generation,
     expectedProviderSessionId: record.expectedProviderSessionId,
     observedProviderSessionId: record.observedProviderSessionId,
-    state: record.state
+    state: record.state,
+    ...(record.state === 'cancelled-by-reset'
+      ? { resetAuthorizationId: record.resetAuthorizationId }
+      : {})
   };
 }
 

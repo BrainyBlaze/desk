@@ -245,6 +245,13 @@ describe('FileProviderSessionContinuityLedger', () => {
       state: 'cancelled-by-reset',
       resetAuthorizationId: 'reset-1'
     });
+    expect(ledger.projectedTransitions()).toEqual([
+      expect.objectContaining({
+        deskSessionId: 'desk-alpha',
+        state: 'cancelled-by-reset',
+        resetAuthorizationId: 'reset-1'
+      })
+    ]);
     expect(ledger.cancelTransitionByReset({
       deskSessionId: 'desk-alpha',
       transitionId: pending.transitionId,
