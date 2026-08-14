@@ -420,8 +420,22 @@ function resolveAuthor(home: string, channel: string, body: Record<string, unkno
 
 const MEMBER_TYPE_BY_AGENT: Record<string, string> = {
   claude: 'claude-code',
-  codex: 'codex-cli'
+  codex: 'codex-cli',
+  qwen: 'qwen',
+  kimi: 'kimi',
+  grok: 'grok'
 };
+
+/**
+ * The channel member kind for a session's agent. Every managed agent gets its
+ * own first-class kind; sessions with no agent (custom commands) and `bash`
+ * fall back to `bash`. Nothing gates behavior on the kind — it is a label for
+ * the roster and join notice — but a Qwen/Kimi/Grok session showing as `bash`
+ * misreads it, so they are named here too.
+ */
+export function memberTypeForAgent(agent: string | undefined): string {
+  return MEMBER_TYPE_BY_AGENT[agent ?? ''] ?? 'bash';
+}
 
 /** Maps an optional thread parent id to the conversation file it lives in. */
 function resolveConversationFile(thread: unknown): string {
@@ -741,7 +755,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         }))
       });
       const member = addMemberWithUniqueHandle(home, channel, handle, {
-        type: MEMBER_TYPE_BY_AGENT[spec.agent ?? ''] ?? 'bash',
+        type: memberTypeForAgent(spec.agent),
         sessionId: sessionKey,
         agentLabel: [spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')
       });
