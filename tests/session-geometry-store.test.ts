@@ -14,7 +14,7 @@
 //    "coerce, then validate" is the exact inversion that hides the honest
 //    answer everywhere else in this codebase.
 
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -60,11 +60,33 @@ describe('the durable geometry log stays bounded (desk#62)', () => {
     first.record('b', { rows: 48, cols: 100 });
     first.close();
     const before = readFileSync(path, 'utf8');
+    // Byte equality alone cannot tell "was not rewritten" from "was rewritten
+    // to the same bytes" — compacting an already-lean log is a no-op on
+    // content. The inode is what distinguishes them, because compaction
+    // renames a new file over this one.
+    const inodeBefore = statSync(path).ino;
 
     const second = new FileSessionGeometryStore(path);
     expect(second.get('a')).toEqual({ rows: 24, cols: 80 });
     expect(second.get('b')).toEqual({ rows: 48, cols: 100 });
     expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(statSync(path).ino).toBe(inodeBefore);
+  });
+
+  it('rewrites the file itself when it does compact, so the saving is real', () => {
+    // The mirror of the test above: when compaction IS warranted the log must
+    // actually be replaced, not merely reported as replaced.
+    const path = storePath();
+    const first = new FileSessionGeometryStore(path);
+    first.record('c', { rows: 24, cols: 80 });
+    first.record('c', { rows: 48, cols: 100 });
+    first.close();
+    const inodeBefore = statSync(path).ino;
+
+    const second = new FileSessionGeometryStore(path);
+    expect(second.get('c')).toEqual({ rows: 48, cols: 100 });
+    expect(lines(path).length).toBe(1);
+    expect(statSync(path).ino).not.toBe(inodeBefore);
   });
 
   it('compacts many sessions without losing any of their last sizes', () => {
