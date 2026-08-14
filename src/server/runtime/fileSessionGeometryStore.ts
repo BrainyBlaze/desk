@@ -31,6 +31,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   ftruncateSync,
   mkdirSync,
   openSync,
@@ -92,13 +93,43 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
     this.measured.set(sessionId, next);
     const durable = this.persisted.get(sessionId);
     if (durable?.rows === next.rows && durable.cols === next.cols) return;
-    if (this.fd === null) return;
+    const fd = this.fd;
+    if (fd === null) return;
+    const encoded = Buffer.from(
+      `${JSON.stringify({ s: sessionId, c: next.cols, r: next.rows })}\n`,
+      'utf8'
+    );
+    let appendStart: number;
     try {
-      writeSync(
-        this.fd,
-        `${JSON.stringify({ s: sessionId, c: next.cols, r: next.rows })}\n`
-      );
+      appendStart = fstatSync(fd).size;
     } catch {
+      return;
+    }
+    let written = 0;
+    let appendAttempted = false;
+    try {
+      while (written < encoded.length) {
+        appendAttempted = true;
+        const remaining = encoded.length - written;
+        const count = writeSync(fd, encoded, written, remaining);
+        if (count <= 0 || count > remaining) throw new Error('incomplete geometry append');
+        written += count;
+      }
+    } catch {
+      if (appendAttempted) {
+        try {
+          ftruncateSync(fd, appendStart);
+        } catch {
+          // An unrepairable partial tail must never accept a valid record behind
+          // it. Closing the descriptor leaves restart replay to truncate it.
+          try {
+            closeSync(fd);
+          } catch {
+            // The descriptor is unusable either way; do not append through it.
+          }
+          if (this.fd === fd) this.fd = null;
+        }
+      }
       // A full or read-only state root must not break a live resize; the
       // in-memory value still serves this daemon incarnation. `persisted` is
       // left STALE on purpose, so the next record for this session writes

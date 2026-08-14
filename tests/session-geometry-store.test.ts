@@ -47,7 +47,12 @@ function noSpace(): NodeJS.ErrnoException {
  * rather than assume it. Neither is reachable from a real filesystem once the
  * append fd is open, which is exactly why they are injected.
  */
-const writeFailure = vi.hoisted(() => ({ enabled: false }));
+const writeFailure = vi.hoisted(() => ({
+  enabled: false,
+  shortBytes: 0,
+  failAfterShort: false,
+  calls: 0
+}));
 const compactFailure = vi.hoisted(() => ({ enabled: false, refused: 0 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -57,6 +62,19 @@ vi.mock('node:fs', async (importOriginal) => {
     default: real,
     writeSync: (...args: Parameters<typeof real.writeSync>): number => {
       if (writeFailure.enabled) throw noSpace();
+      if (writeFailure.shortBytes > 0) {
+        writeFailure.calls += 1;
+        if (writeFailure.calls === 1) {
+          const [fd, data] = args;
+          if (typeof data === 'string') {
+            return real.writeSync(fd, data.slice(0, writeFailure.shortBytes));
+          }
+          const offset = typeof args[2] === 'number' ? args[2] : 0;
+          const length = typeof args[3] === 'number' ? args[3] : data.byteLength - offset;
+          return real.writeSync(fd, data, offset, Math.min(writeFailure.shortBytes, length));
+        }
+        if (writeFailure.failAfterShort && writeFailure.calls === 2) throw noSpace();
+      }
       return real.writeSync(...args);
     },
     writeFileSync: (...args: Parameters<typeof real.writeFileSync>): void => {
@@ -89,6 +107,13 @@ function recordsFor(path: string, sessionId: string): Array<{ rows: number; cols
   return records(path)
     .filter((record) => record.s === sessionId)
     .map((record) => ({ rows: record.r, cols: record.c }));
+}
+
+function resetWriteFailure(): void {
+  writeFailure.enabled = false;
+  writeFailure.shortBytes = 0;
+  writeFailure.failAfterShort = false;
+  writeFailure.calls = 0;
 }
 
 class FakeEmu implements EmulatorPort {
@@ -280,6 +305,58 @@ describe('the durable geometry log compacts WHILE it runs (desk#62)', () => {
 });
 
 describe('a failed append leaves the durable record able to catch up (desk#62)', () => {
+  it('finishes a short append before marking the geometry persisted', () => {
+    const path = storePath();
+    const store = new FileSessionGeometryStore(path);
+    const expected = `${JSON.stringify({ s: 'short-write', c: 120, r: 48 })}\n`;
+
+    writeFailure.shortBytes = 7;
+    try {
+      store.record('short-write', { rows: 48, cols: 120 });
+      expect(writeFailure.calls).toBe(2);
+    } finally {
+      resetWriteFailure();
+    }
+
+    // A second observation of the same geometry is deduped only because the
+    // first append reached its newline-terminated boundary in full.
+    store.record('short-write', { rows: 48, cols: 120 });
+    expect(readFileSync(path, 'utf8')).toBe(expected);
+    store.close();
+    const restored = new FileSessionGeometryStore(path);
+    expect(restored.get('short-write')).toEqual({ rows: 48, cols: 120 });
+    restored.close();
+  });
+
+  it('rolls back a partial append before retrying after the next write fails', () => {
+    const path = storePath();
+    const store = new FileSessionGeometryStore(path);
+    const original = `${JSON.stringify({ s: 'rolled-back', c: 80, r: 24 })}\n`;
+    store.record('rolled-back', { rows: 24, cols: 80 });
+
+    writeFailure.shortBytes = 9;
+    writeFailure.failAfterShort = true;
+    try {
+      store.record('rolled-back', { rows: 48, cols: 120 });
+      expect(writeFailure.calls).toBe(2);
+    } finally {
+      resetWriteFailure();
+    }
+
+    // The partial JSON tail cannot remain in front of the retry: replay would
+    // otherwise discard both it and the valid record appended behind it.
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    store.record('rolled-back', { rows: 48, cols: 120 });
+    expect(recordsFor(path, 'rolled-back')).toEqual([
+      { rows: 24, cols: 80 },
+      { rows: 48, cols: 120 }
+    ]);
+    store.close();
+    const restored = new FileSessionGeometryStore(path);
+    expect(restored.get('rolled-back')).toEqual({ rows: 48, cols: 120 });
+    restored.close();
+  });
+
   it('re-writes an unchanged geometry after a failed append instead of deduping it away forever', () => {
     const path = storePath();
     const store = new FileSessionGeometryStore(path);
