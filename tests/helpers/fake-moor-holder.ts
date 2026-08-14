@@ -145,7 +145,15 @@ function storeHeader(generation: number, epoch: number, first: bigint, next: big
 }
 
 function storeEvent(type: string, epoch: number, sequence: bigint, tail = ''): string {
-  return `{"type":"${type}","ts":${Date.now()},"epoch":${epoch},"seq":${sequence},"kind":"transition"${tail}}\n`;
+  const now = Date.now();
+  const milliseconds = now % 1_000;
+  const timestamp =
+    process.env.FAKE_MOOR_EVENT_TS_SECONDS === '1'
+      ? milliseconds === 0
+        ? String(Math.floor(now / 1_000))
+        : `${Math.floor(now / 1_000)}.${String(milliseconds).padStart(3, '0')}`
+      : String(now);
+  return `{"type":"${type}","ts":${timestamp},"epoch":${epoch},"seq":${sequence},"kind":"transition"${tail}}\n`;
 }
 
 function commitRecord(slot: 0 | 1, kind: number, generation: number, epoch: number, index: bigint, start: bigint, end: bigint, body: Uint8Array): Uint8Array {

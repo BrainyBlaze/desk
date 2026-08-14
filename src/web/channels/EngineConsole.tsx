@@ -34,6 +34,7 @@ const SUBMIT_STATE_LABEL: Record<SubmitState, string> = {
   delivering: 'delivering',
   submitted: 'submitted',
   'delivery-ack-timeout': 'ack timeout',
+  'submit-not-applicable': 'delivered (shell)',
   'submit-stuck-paste': 'paste stuck',
   'submit-stuck-submit': 'submit stuck',
   'submit-stuck-unobservable': 'unobservable'

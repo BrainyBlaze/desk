@@ -5,7 +5,6 @@ import {
   planDeskUp,
   restartSession,
   runPlan,
-  runningSessionSet,
   startSession
 } from '../src/core/runner.js';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
@@ -178,65 +177,20 @@ describe('runPlan moor-native lifecycle', () => {
     expect(control).not.toHaveBeenCalled();
   });
 
-  it('preserves only sessions whose durable master probe succeeds', () => {
+  it('preserves a session the daemon reports as live, and never spawns a probe', async () => {
     const plan = terminalPlan();
     const session = plan[0]!.session;
+    const spawn = vi.fn();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, generation: 1, wallStartMs: 1, pid: 7, running: true })
+    }));
 
-    expect(
-      planDeskUp([session], {
-        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
-        probeSession: (path) => path === '/run/desk/terminal-session'
-      })
-    ).toEqual([{ type: 'preserve', session }]);
-  });
-
-  it('uses a zero-byte moor push probe and rejects stale sockets', () => {
-    const session = terminalPlan()[0]!.session;
-    const spawn = vi
-      .fn()
-      .mockReturnValueOnce({ status: 0 })
-      .mockReturnValueOnce({ status: 1 });
-    const options = {
-      moorBinPath: '/release/libexec/moor',
-      env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
-      spawn: spawn as never
-    };
-
-    expect(runningSessionSet([session], options)).toEqual(new Set(['terminal-session']));
-    expect(runningSessionSet([session], options)).toEqual(new Set());
-    expect(spawn).toHaveBeenNthCalledWith(
-      1,
-      '/release/libexec/moor',
-      ['push', '/run/desk/terminal-session'],
-      expect.objectContaining({ input: '' })
-    );
-  });
-
-  it('classifies every real probe answer: only a live holder counts (desk#50)', () => {
-    // The four answers moor 237a62c actually gives, captured in a real
-    // install. Exit code cannot separate them — all three refusals exit 1 —
-    // and the refusal that proves LIFE arrives on stdout, so the probe reads
-    // both streams and requires positive proof.
-    const session = terminalPlan()[0]!.session;
-    const answer = (status: number, stdout: string, stderr = '') => ({ status, stdout, stderr });
-    const probe = (result: unknown) =>
-      runningSessionSet([session], {
-        moorBinPath: '/release/libexec/moor',
-        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' },
-        spawn: vi.fn().mockReturnValue(result) as never
-      });
-
-    // Accepted push — a holder took the bytes.
-    expect(probe(answer(0, ''))).toEqual(new Set(['terminal-session']));
-    // The daemon holds the §7.3 lease: the normal state of a session in use.
-    expect(probe(answer(1, 'moor: input lease is busy\n'))).toEqual(new Set(['terminal-session']));
-    expect(probe(answer(1, '', 'moor: input lease is busy\n'))).toEqual(new Set(['terminal-session']));
-    // The rendezvous outlived its holder — a tombstone, not a session.
-    expect(probe(answer(1, "moor: session '/run/desk/terminal-session' is not running\n"))).toEqual(new Set());
-    // No rendezvous at all.
-    expect(probe(answer(1, "moor: session '/run/desk/terminal-session' does not exist\n"))).toEqual(new Set());
-    // The probe could not run: unobservable is never claimed alive.
-    expect(probe({ error: new Error('ENOENT'), status: null })).toEqual(new Set());
+    await expect(
+      planDeskUp([session], { fetchImpl: fetchImpl as never, spawn: spawn as never })
+    ).resolves.toEqual([{ type: 'preserve', session }]);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('probes the daemon then attaches the shipped binary to the durable socket', async () => {

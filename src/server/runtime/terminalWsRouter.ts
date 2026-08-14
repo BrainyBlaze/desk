@@ -106,7 +106,15 @@ export class TerminalWsRouter {
           ws.send(encodeBpFrame({ type: BpFrameType.ERROR, channelId: frame.channelId, code: BpError.BAD_CHANNEL }));
           return;
         }
-        this.manager.onBrowserInputByChannel(frame.channelId, frame.binary, frame.bytes);
+        if (!this.manager.onBrowserInputByChannel(frame.channelId, frame.binary, frame.bytes)) {
+          ws.send(
+            encodeBpFrame({
+              type: BpFrameType.ERROR,
+              channelId: frame.channelId,
+              code: BpError.STALE_LEASE
+            })
+          );
+        }
         return;
       }
       case BpFrameType.UNSUBSCRIBE: {

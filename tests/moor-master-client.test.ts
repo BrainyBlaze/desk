@@ -45,8 +45,8 @@ function integer(value: number | bigint, bytes: 2 | 4 | 8): Uint8Array {
 
 const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4), bytes);
 
-function helloAckPayload(identity: Uint8Array): Uint8Array {
-  return joined(Uint8Array.of(3), integer(GENERATION, 4), INCARNATION, wide(identity));
+function helloAckPayload(identity: Uint8Array, incarnation = INCARNATION): Uint8Array {
+  return joined(Uint8Array.of(3), integer(GENERATION, 4), incarnation, wide(identity));
 }
 
 /** Minimal valid §5 status descriptor: layout 0 (no event store), lease owned. */
@@ -101,6 +101,14 @@ function leaseResultPayload(epoch: number): Uint8Array {
     Uint8Array.of(0, 0, 0, 0), // outcome, reason, role, reserved
     integer(epoch, 4),
     new Uint8Array(16).fill(0xd4) // token
+  );
+}
+
+function resumedLeaseResultPayload(epoch: number, tokenByte = 0xe5): Uint8Array {
+  return joined(
+    Uint8Array.of(1, 0, 0, 0),
+    integer(epoch, 4),
+    new Uint8Array(16).fill(tokenByte)
   );
 }
 
@@ -202,6 +210,23 @@ describe('MoorMasterClient', () => {
   it('refuses an unsupervised generation before connecting', () => {
     expect(() => new MoorMasterClient('/tmp/never', 1, {})).toThrowError(/generation/i);
     expect(() => new MoorMasterClient('/tmp/never', 0, {})).toThrowError(/generation/i);
+  });
+
+  it('close while connecting rejects the connect and prevents a late socket install', async () => {
+    const holder = new FakeHolder();
+    await holder.listen();
+    const client = new MoorMasterClient(holder.sockPath, GENERATION);
+    cleanups.push(() => {
+      client.close();
+      holder.close();
+    });
+
+    const connecting = client.connect();
+    client.close();
+
+    await expect(connecting).rejects.toThrow(/closed/i);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(client.connect()).rejects.toThrow(/closed/i);
   });
 
   it('validates the canonical identity: derived POSIX must be resolved, injected tags checked', () => {
@@ -580,6 +605,136 @@ describe('MoorMasterClient', () => {
     await waitFor(() => receipts.length === 1, 'receipt after retry');
   });
 
+  it('resumes the exact viewer lease before attach and restores one ambiguous input tuple', async () => {
+    const first = await start();
+    await completeAttach(first.holder, first.client, first.identity);
+    first.client.sendInput(text('ambiguous'));
+    const originalInput = await first.holder.next();
+    const snapshot = first.client.reconnectSnapshot();
+    expect(snapshot?.lease?.pendingInput).toMatchObject({ requestId: 1n });
+    first.client.close();
+
+    const holder = new FakeHolder();
+    await holder.listen();
+    const client = new MoorMasterClient(holder.sockPath, GENERATION, {}, {
+      resumeCursor: snapshot?.output,
+      resumeLease: snapshot?.lease,
+      requireSameIncarnation: true
+    });
+    cleanups.push(() => {
+      client.close();
+      holder.close();
+    });
+    await client.connect();
+    const attaching = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next(); // HELLO
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(posixMoorIdentity(holder.sockPath)));
+
+    const resume = await holder.next();
+    expect(resume.kind).toBe(MoorKind.LEASE_REQUEST);
+    expect(resume.payload).toEqual(
+      joined(
+        Uint8Array.of(1, 0, 0, 0),
+        integer(5, 4),
+        INCARNATION,
+        new Uint8Array(16).fill(0xd4)
+      )
+    );
+    holder.send(MoorKind.LEASE_RESULT, resumedLeaseResultPayload(5));
+
+    const attach = await holder.next();
+    expect(attach.kind).toBe(MoorKind.ATTACH);
+    expect(attach.payload[4]! & 1).toBe(0);
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(posixMoorIdentity(holder.sockPath), 5));
+    await attaching;
+
+    expect(client.retryPendingInput()).toBe(true);
+    const retry = await holder.next();
+    expect(retry.kind).toBe(MoorKind.INPUT);
+    expect(retry.payload).toEqual(originalInput.payload);
+  });
+
+  it('surfaces ambiguous input and never replays it when resume falls back to a fresh epoch', async () => {
+    const first = await start();
+    await completeAttach(first.holder, first.client, first.identity);
+    first.client.sendInput(text('must-not-cross-epochs'), 42);
+    await first.holder.next();
+    const snapshot = first.client.reconnectSnapshot()!;
+    first.client.close();
+
+    const losses: Array<{ requestId: bigint; bytes: Uint8Array; surfaceId?: number }> = [];
+    const holder = new FakeHolder();
+    await holder.listen();
+    const client = new MoorMasterClient(
+      holder.sockPath,
+      GENERATION,
+      { onInputContinuityLost: (pending) => losses.push(pending) },
+      {
+        resumeCursor: snapshot.output,
+        resumeLease: snapshot.lease,
+        requireSameIncarnation: true
+      }
+    );
+    cleanups.push(() => {
+      client.close();
+      holder.close();
+    });
+    await client.connect();
+    const attaching = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    const identity = posixMoorIdentity(holder.sockPath);
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    expect((await holder.next()).kind).toBe(MoorKind.LEASE_REQUEST);
+    holder.send(
+      MoorKind.LEASE_RESULT,
+      joined(Uint8Array.of(3, 2, 0, 0), integer(6, 4), new Uint8Array(16))
+    );
+    const attach = await holder.next();
+    expect(attach.kind).toBe(MoorKind.ATTACH);
+    expect(attach.payload[4]! & 1).toBe(1);
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 6));
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(6));
+    await attaching;
+
+    expect(losses).toEqual([
+      { requestId: 1n, bytes: text('must-not-cross-epochs'), surfaceId: 42 }
+    ]);
+    expect(client.retryPendingInput()).toBe(false);
+    client.sendInput(text('new'));
+    const fresh = await holder.next();
+    expect(new DataView(fresh.payload.buffer, fresh.payload.byteOffset).getBigUint64(4, true)).toBe(1n);
+  });
+
+  it('upgrades a busy attached observer with a fresh viewer lease without another attach baseline', async () => {
+    const { holder, client, identity } = await start();
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(
+      MoorKind.ATTACH_ACK,
+      statusPayload(identity, 5, { ownsLease: false })
+    );
+    holder.send(
+      MoorKind.LEASE_RESULT,
+      joined(Uint8Array.of(3, 1, 0, 0), integer(5, 4), new Uint8Array(16))
+    );
+    await attached;
+
+    const acquiring = client.acquireViewerLease();
+    const request = await holder.next();
+    expect(request.kind).toBe(MoorKind.LEASE_REQUEST);
+    expect(request.payload).toEqual(new Uint8Array(40));
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(6));
+    await expect(acquiring).resolves.toBe('granted');
+    client.sendInput(text('after-upgrade'));
+    const input = await holder.next();
+    expect(new DataView(input.payload.buffer, input.payload.byteOffset).getUint32(0, true)).toBe(6);
+  });
+
   it('discards records at or below the reconnect cursor without re-delivering them', async () => {
     const outputs: bigint[] = [];
     const gaps: number[] = [];
@@ -611,6 +766,63 @@ describe('MoorMasterClient', () => {
     expect(outputs).toEqual([4n, 5n]); // 3n is the cursor duplicate
     expect(gaps).toEqual([]);
     client.ackOutput(5n); // received records bound the ack even when discarded
+  });
+
+  it('cumulatively acknowledges validated replay suppressed by the reconnect cursor', async () => {
+    const outputs: bigint[] = [];
+    const { holder, client, identity } = await start(
+      { onOutput: (output) => outputs.push(output.sequence) },
+      { resumeCursor: { sequence: 3n, incarnation: INCARNATION } }
+    );
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(
+      MoorKind.ATTACH_ACK,
+      statusPayload(identity, 5, { replay: { first: 1n, last: 3n, start: 0n, end: 3n } })
+    );
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    await attached;
+
+    const next = holder.next();
+    holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('a')));
+    holder.send(MoorKind.OUTPUT, joined(integer(2n, 8), integer(1n, 8), text('b')));
+    holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(2n, 8), text('c')));
+    const ack = await Promise.race([
+      next,
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50))
+    ]);
+    expect(ack?.kind).toBe(MoorKind.OUTPUT_ACK);
+    expect(new DataView(ack!.payload.buffer, ack!.payload.byteOffset).getBigUint64(0, true)).toBe(3n);
+    expect(outputs).toEqual([]);
+  });
+
+  it('fails recovery closed when retained replay starts beyond the delivered cursor', async () => {
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start(
+      { onProtocolError: (error) => protocolErrors.push(error.code) },
+      {
+        resumeCursor: { sequence: 3n, incarnation: INCARNATION },
+        requireReplayContinuity: true
+      }
+    );
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(
+      MoorKind.ATTACH_ACK,
+      statusPayload(identity, 5, { replay: { first: 5n, last: 5n, start: 100n, end: 110n } })
+    );
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    await attached;
+    holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(4n, 8)));
+    await waitFor(() => protocolErrors.length === 1, 'unsafe recovery gap refused');
+    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+    expect(() => client.sendInput(text('never-on-stale-screen'))).toThrow(/attached|closed/i);
   });
 
   it('sends one coalesced auto-ack per delivered batch when the policy is enabled', async () => {
@@ -694,6 +906,22 @@ describe('MoorMasterClient', () => {
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('fresh')));
     await waitFor(() => outputs.length === 1, 'new-incarnation record delivered');
     expect(outputs).toEqual([1n]);
+  });
+
+  it('keeps recovery indeterminate when the holder incarnation changed', async () => {
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start(
+      { onProtocolError: (error) => protocolErrors.push(error.code) },
+      {
+        resumeCursor: { sequence: 1n, incarnation: INCARNATION },
+        requireSameIncarnation: true
+      }
+    );
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity, new Uint8Array(16).fill(0x77)));
+    await expect(attached).rejects.toThrow(/incarnation changed/i);
+    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
   });
 
   it('invalidates the local lease when STATUS_REPLY owns a different epoch', async () => {

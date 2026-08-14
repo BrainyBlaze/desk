@@ -12,6 +12,7 @@ BUN_VERSION="1.3.14"
 MOOR_VERSION="0.1.0"
 MOOR_RELEASE_VERSION="v${MOOR_VERSION}"
 MOOR_REPOSITORY="https://github.com/BrainyBlaze/moor"
+MANIFEST_SCHEMA_VERSION="2"
 PYTHON_MIN_VERSION="3.6"
 LOCK_TOKEN=""
 LOCK_OWNED=0
@@ -534,6 +535,29 @@ download_release_metadata() {
   manifest_digest="$(checksum_entry "$CHECKSUMS_FILE" desk-install-manifest.json)" || die "release checksum manifest has no unique install-manifest checksum."
   actual="$(sha256_file "$INSTALL_MANIFEST_FILE")"
   [ "$actual" = "$manifest_digest" ] || die "checksum mismatch for desk-install-manifest.json."
+  require_matching_release_generation
+}
+
+# An installer and the release it stages are one artifact split in two: the
+# manifest schema is the seam. A release older or newer than this installer is
+# not corrupt, and reporting it as an invalid manifest sends the operator
+# hunting a tampered download. Read the schema off the already-verified bytes,
+# and when it disagrees, name the gap and the installer that does fit. A
+# manifest we cannot read a schema from stays with the strict validator below,
+# which is the one entitled to call it invalid.
+require_matching_release_generation() {
+  local found
+  found="$("$PYTHON_BIN" - "$INSTALL_MANIFEST_FILE" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+except Exception: sys.exit(0)
+value=data.get("schemaVersion") if isinstance(data, dict) else None
+if isinstance(value, int) and not isinstance(value, bool): print(value)
+PY
+)" || found=""
+  [ -n "$found" ] && [ "$found" != "$MANIFEST_SCHEMA_VERSION" ] || return 0
+  die "Desk $VERSION was published for a different installer generation: its release manifest is schemaVersion $found and this installer requires $MANIFEST_SCHEMA_VERSION. Install $VERSION with the installer published alongside it: curl -fsSL https://raw.githubusercontent.com/${REPO}/${VERSION}/install.sh | bash"
 }
 
 expected_node_sha() {
@@ -558,9 +582,9 @@ expected_bun_sha() {
 
 validate_install_manifest() {
   local values manifest_node_sha manifest_bun_sha sums_source manifest_moor_target
-  values="$($PYTHON_BIN - "$INSTALL_MANIFEST_FILE" "$VERSION" "$TARGET" "$HOST_LIBC" "$MOOR_TARGET" "$MOOR_REPOSITORY" "$MOOR_RELEASE_VERSION" <<'PY'
+  values="$($PYTHON_BIN - "$INSTALL_MANIFEST_FILE" "$VERSION" "$TARGET" "$HOST_LIBC" "$MOOR_TARGET" "$MOOR_REPOSITORY" "$MOOR_RELEASE_VERSION" "$MANIFEST_SCHEMA_VERSION" <<'PY'
 import json, re, sys
-path, version, target, host_libc, moor_target, expected_repository, expected_moor_version=sys.argv[1:]
+path, version, target, host_libc, moor_target, expected_repository, expected_moor_version, expected_schema=sys.argv[1:]
 asset_re=re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 digest_re=re.compile(r"[0-9a-f]{64}")
 commit_re=re.compile(r"[0-9a-f]{40}")
@@ -574,16 +598,30 @@ def reject_duplicates(pairs):
     return result
 with open(path, encoding="utf-8") as f: data=json.load(f, object_pairs_hook=reject_duplicates)
 exact(data, ["schemaVersion","version","source","node","bun","moor"], "manifest")
-if data["schemaVersion"] != 2 or data["version"] != version: raise SystemExit("manifest schema/version mismatch")
+if data["schemaVersion"] != int(expected_schema) or data["version"] != version: raise SystemExit("manifest schema/version mismatch")
 exact(data["source"], ["asset","sha256"], "source")
 exact(data["node"], ["version","npmVersion","targets"], "node")
 exact(data["bun"], ["version","tag","targets"], "bun")
-exact(data["moor"], ["schemaVersion","repository","version","commit","targets"], "Moor pin")
+exact(data["moor"], ["schemaVersion","repository","version","commit","coverage","targets"], "Moor pin")
 if data["node"]["version"]!="22.23.1" or data["node"]["npmVersion"]!="10.9.8": raise SystemExit("unexpected Node/npm pin")
 if data["bun"]["version"]!="1.3.14" or data["bun"]["tag"]!="bun-v1.3.14": raise SystemExit("unexpected Bun pin")
 moor=data["moor"]
-if moor["schemaVersion"] != 1 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
+if moor["schemaVersion"] != 2 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
     raise SystemExit("unexpected Moor release identity")
+# desk#60: the installer serves END USERS, who cannot weigh which release lanes
+# went unverified. It therefore has no approval switch at all and refuses any
+# closure but the full frozen matrix -- accepting a narrowed candidate is a
+# developer decision, taken explicitly through fetch-moor, never a default an
+# end user is handed silently.
+coverage=moor["coverage"]
+if not isinstance(coverage, dict) or "requiredClosure" not in coverage:
+    raise SystemExit("Moor pin states no release coverage")
+# The closure is judged BEFORE the key set: a narrowed pin legitimately carries
+# an extra `unverified` list, and complaining about its shape would hide the
+# real reason it is refused.
+if coverage["requiredClosure"] != "full-matrix":
+    raise SystemExit("Moor release closure is not full-matrix: this candidate was not verified on the whole release matrix")
+exact(coverage, ["requiredClosure"], "Moor pin coverage")
 if not isinstance(moor["commit"], str) or commit_re.fullmatch(moor["commit"]) is None:
     raise SystemExit("invalid Moor commit")
 source=data["source"]

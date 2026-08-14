@@ -3,6 +3,8 @@ import {
   daemonControl,
   daemonControlGet,
   daemonHttpBase,
+  observeProviderSessionIdentity,
+  requestProviderSessionRebind,
   toOkResult
 } from '../../src/shared/daemonControlClient.js';
 
@@ -136,6 +138,49 @@ describe('daemonControl', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('terminal daemon unreachable');
     expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+  });
+
+  it('uses exact typed observe and rebind payloads and honors caller cancellation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, kind: 'matching' }), {
+        status: 200
+      })
+    );
+    const controller = new AbortController();
+    const observation = {
+      deskSessionId: 'session-one',
+      provider: 'codex' as const,
+      providerSessionId: '11111111-1111-4111-8111-111111111111',
+      generation: 2,
+      launchProof: 'A'.repeat(43),
+      hook: 'SessionStart'
+    };
+
+    await observeProviderSessionIdentity(observation, {
+      baseUrl: 'http://daemon',
+      fetchImpl: fetchMock,
+      signal: controller.signal,
+      timeoutMs: 900
+    });
+    await requestProviderSessionRebind(
+      {
+        sessionId: 'session-one',
+        targetProviderSessionId: '22222222-2222-4222-8222-222222222222'
+      },
+      { baseUrl: 'http://daemon', fetchImpl: fetchMock }
+    );
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(
+      observation
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      sessionId: 'session-one',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222'
+    });
+    const signal = fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    controller.abort('caller disconnected');
+    expect(signal.aborted).toBe(true);
   });
 
   it('collapses body-bearing results without leaking the response body', async () => {

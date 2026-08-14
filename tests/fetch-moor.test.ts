@@ -1,5 +1,5 @@
 // Binding tests for the moor acquirer against the reviewed release contract
-// (moor repo docs/release-manifest-v1.md @ b57e094): the Desk pin projection's
+// (moor repo docs/release-manifest-v1.md @ f1bd230): the Desk pin projection's
 // exact key sets, the six literal v0.1.0 asset filenames, the production URL
 // derivation, and the fail-closed download/verify/install pipeline over an
 // explicit file:// fixture base (the contract's candidate-override mechanism).
@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  MOOR_PIN_SCHEMA_VERSION,
   MOOR_RELEASE_REPOSITORY,
   MOOR_TARGETS,
   PIN_RELATIVE_PATH,
@@ -34,10 +35,13 @@ const CONTRACT_ASSETS: Record<string, string> = {
 
 function pinFor(bytesByTarget: Record<string, Buffer>) {
   return {
-    schemaVersion: 1,
+    schemaVersion: MOOR_PIN_SCHEMA_VERSION,
     repository: MOOR_RELEASE_REPOSITORY,
+    // desk#60: a pin states which lanes verified the candidate. These fixtures
+    // exercise the full frozen matrix, so they carry the full-matrix closure.
+    coverage: { requiredClosure: 'full-matrix' },
     version: 'v0.1.0',
-    commit: 'b57e094'.padEnd(40, '0'),
+    commit: 'f1bd230bdaf0a7a476f4069a95a2cee77996ab48',
     targets: Object.fromEntries(
       (MOOR_TARGETS as readonly string[]).map((triple) => {
         const bytes = bytesByTarget[triple] ?? Buffer.from(`binary for ${triple}`);
@@ -66,7 +70,7 @@ function writeFixture(root: string, pin: unknown, bytesByTarget: Record<string, 
   return pathToFileURL(assets).href;
 }
 
-describe('moor acquirer × reviewed release contract (b57e094)', () => {
+describe('moor acquirer × reviewed release contract (f1bd230)', () => {
   it('accepts the contract pin projection and derives the production URL exactly', () => {
     const root = mkdtempSync(join(tmpdir(), 'moor-pin-'));
     try {
@@ -187,7 +191,9 @@ describe('moor acquirer × reviewed release contract (b57e094)', () => {
       const mutations: Array<[string, (pin: Record<string, unknown>) => void]> = [
         ['extra top-level key', (p) => { p.mirror = 'https://evil'; }],
         ['missing commit', (p) => { delete p.commit; }],
-        ['wrong schemaVersion', (p) => { p.schemaVersion = 2; }],
+        // Relative to the supported version, so this case keeps its meaning
+        // the next time the pin schema moves (it moved to 2 for desk#60).
+        ['wrong schemaVersion', (p) => { p.schemaVersion = MOOR_PIN_SCHEMA_VERSION + 1; }],
         ['foreign repository', (p) => { p.repository = 'https://github.com/evil/moor'; }],
         ['noncanonical version', (p) => { p.version = '0.1.0'; }],
         ['rc version', (p) => { p.version = 'v0.1.0-rc1'; }],

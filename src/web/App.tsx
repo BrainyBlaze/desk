@@ -179,6 +179,7 @@ import { createMonacoDiagnostics } from './editor/lsp/monacoDiagnostics.js';
 import { GitSubsystem, type GitNavigateTarget } from './git/GitSubsystem.js';
 import { ProjectsSubsystem } from './projects/ProjectsSubsystem.js';
 import { ChannelsSubsystem } from './channels/ChannelsSubsystem.js';
+import { ProviderSessionContinuityBanners } from './ProviderSessionContinuityBanners.js';
 
 type Subsystem = 'agents' | 'editor' | 'git' | 'notes' | 'projects' | 'channels';
 const SUBSYSTEMS: readonly Subsystem[] = ['agents', 'editor', 'git', 'notes', 'projects', 'channels'];
@@ -874,6 +875,14 @@ export function App(): JSX.Element {
   // events/messages, muted sound, and snapshot sync state.
   const attentionCount = actionableSessions(statusViews).length;
   const continuityIssues = snapshot?.continuity.issues ?? [];
+  const copyContinuityAction = useCallback(
+    (action: string) => {
+      void copyTextWithFallback(action).then((copied) => {
+        pushToast(copied ? 'Recovery command copied' : 'Copy failed', copied ? 'ok' : 'error');
+      });
+    },
+    [pushToast]
+  );
   const statusGlobals = useMemo<StatusSegment[]>(() => {
     const segments: StatusSegment[] = [];
     if (continuityIssues.length > 0) {
@@ -2214,6 +2223,10 @@ export function App(): JSX.Element {
                         />
                       ) : null}
                       <main className="subsystemSurfaceInner">
+                        <ProviderSessionContinuityBanners
+                          issues={continuityIssues}
+                          onCopyAction={copyContinuityAction}
+                        />
                         {!activeGroup ? <EmptySubsystem /> : null}
                         {mountedMuxGroups.map((mountedGroup) => (
                           <MountedMux

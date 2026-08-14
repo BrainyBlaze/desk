@@ -406,7 +406,7 @@ describe('SessionManager Moor production-slice adversarial review', () => {
       return;
     }
 
-    const retired = await manager.retireAwaited('s1');
+    const retired = await manager.retireAwaited('s1', { reason: 'control-retire' });
     expect(retired.ok).toBe(true);
     expect(existsSync(sessionPath)).toBe(false);
   }, 15_000);

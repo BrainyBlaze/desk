@@ -176,7 +176,12 @@ export interface BuildSessionOptions {
   agentMcp?: (session: DeskSession, cwd: string) => AgentMcpLaunchConfig | undefined;
 }
 
-export type SessionPlanActionType = 'start' | 'preserve';
+/**
+ * `skip` is the honest third outcome: the authority could not be reached, so
+ * the session's liveness is unknown and neither starting nor preserving it can
+ * be justified (moor#8 criterion 1 — ambiguity stays ambiguous).
+ */
+export type SessionPlanActionType = 'start' | 'preserve' | 'skip';
 
 export interface SessionPlanAction {
   type: SessionPlanActionType;

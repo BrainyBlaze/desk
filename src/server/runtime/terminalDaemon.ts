@@ -15,6 +15,8 @@ import type { Duplex } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { readManifestFile, resolveManifestPath } from '../../core/config.js';
+import { buildSessionSpecs } from '../../core/manifest.js';
 import { ensurePrivateSocketRoot } from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -39,6 +41,7 @@ import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
+import { isRetireReason, type RetireReason } from '../../shared/runtime/daemonCore.js';
 import {
   FileIntakeStore,
   type FileIntakeStoreDependencies
@@ -78,6 +81,7 @@ import {
   type MoorEventDiagnostic
 } from './moorEventObserver.js';
 import type { MoorStatus } from '../../shared/moorWire/messages.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../shared/daemonControlClient.js';
 import type {
   HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
@@ -102,7 +106,24 @@ import {
   authorizeProviderSessionReset,
   type ProviderSessionResetResult as ProviderSessionAuthorizationResetResult
 } from '../providerSessionReset.js';
-import { readProviderSessionBinding } from '../providerSessionBinding.js';
+import {
+  bindProviderSessionIdentity,
+  readProviderSessionBinding,
+  replaceProviderSessionIdentity
+} from '../providerSessionBinding.js';
+import {
+  archiveMoorGenerationStores,
+  readMoorGenerationExitEvidence,
+  type MoorGenerationExitEvidence
+} from './moorGenerationStores.js';
+import {
+  verifyProviderSessionEvidence,
+  type ProviderSessionEvidenceResult
+} from '../providerSessionEvidence.js';
+import {
+  FileProviderSessionContinuityLedger,
+  type ProviderSessionContinuityProvider
+} from './providerSessionContinuityLedger.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -153,6 +174,12 @@ export interface TerminalDaemonOptions {
   homeDir?: string;
   /** Injectable worker admission policy for deterministic composition tests. */
   supervisor?: WorkerSupervisor;
+  /** Injectable durable evidence verifier for boundary-failure tests. */
+  verifyProviderSessionEvidence?: typeof verifyProviderSessionEvidence;
+  /** Injectable continuity ledger for deterministic durability-failure tests. */
+  providerSessionContinuityLedger?: FileProviderSessionContinuityLedger;
+  /** Injectable manifest CAS boundary for deterministic persistence tests. */
+  replaceProviderSessionIdentity?: typeof replaceProviderSessionIdentity;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -203,6 +230,53 @@ export type ProviderSessionResetResult =
       error: string;
     };
 
+export interface ObserveProviderSessionIdentityInput {
+  deskSessionId: string;
+  provider: ProviderSessionContinuityProvider;
+  providerSessionId: string;
+  generation: number;
+  launchProof: string;
+  hook: string;
+}
+
+export interface RebindProviderSessionInput {
+  deskSessionId: string;
+  targetProviderSessionId: string;
+}
+
+export type ProviderSessionContinuityMutationResult =
+  | {
+      ok: true;
+      kind: 'bound' | 'matching' | 'rebound' | 'already-rebound';
+      provider: ProviderSessionContinuityProvider;
+      providerSessionId: string;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'provider-session-not-found'
+        | 'provider-session-agent-mismatch'
+        | 'provider-session-id-invalid'
+        | 'provider-session-id-conflict'
+        | 'provider-session-mismatch'
+        | 'provider-session-provider-mismatch'
+        | 'provider-session-generation-mismatch'
+        | 'provider-session-not-live'
+        | 'provider-session-proof-invalid'
+        | 'provider-session-start-required'
+        | 'provider-session-evidence-missing'
+        | 'provider-session-evidence-stale'
+        | 'provider-session-evidence-invalid'
+        | 'provider-session-rebind-required'
+        | 'provider-session-transition-missing'
+        | 'provider-session-transition-mismatch'
+        | 'provider-session-store-failed';
+      error: string;
+      currentProviderSessionId?: string;
+      targetProviderSessionId?: string;
+      action?: string;
+    };
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
   /** Spawn + attach the moor holder for a session (CREATE contract). */
@@ -213,7 +287,7 @@ export interface TerminalDaemon {
    * immediately after, and a stale socket would be adopted at the old
    * generation. A failed kill is a failure, never a silent 200.
    */
-  retire(sessionId: string): Promise<{ ok: boolean; error?: string }>;
+  retire(sessionId: string, reason: RetireReason): Promise<{ ok: boolean; error?: string }>;
   /** Retire exactly one native generation without touching a successor. */
   retireGeneration(
     sessionId: string,
@@ -225,6 +299,14 @@ export interface TerminalDaemon {
   completeProviderSessionLaunch(
     input: CompleteProviderSessionLaunchInput
   ): CompleteProviderSessionLaunchResult;
+  /** Validate and reconcile one launch-scoped provider hook identity. */
+  observeProviderSessionIdentity(
+    input: ObserveProviderSessionIdentityInput
+  ): Promise<ProviderSessionContinuityMutationResult>;
+  /** Explicitly authorize the exact current pending provider transition. */
+  rebindProviderSession(
+    input: RebindProviderSessionInput
+  ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
   /**
@@ -236,6 +318,8 @@ export interface TerminalDaemon {
   tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
   /** Latest generation-bound terminal observation, independent of semantic authority. */
   terminalObservation(sessionId: string): TerminalObservationSnapshot | undefined;
+  /** Retained predecessor lifecycle exits, newest generation first. */
+  moorExitEvidence(sessionId: string): Promise<readonly MoorGenerationExitEvidence[]>;
   /** Re-open a surviving generation's event sink after daemon restart. */
   reconcileMoorEvents(sessionId: string, generation: number): Promise<boolean>;
   /** §10.2.13 committed-log clear over the live moor link — full result algebra. */
@@ -308,18 +392,57 @@ export interface TerminalDaemon {
 
 /** Assemble the durable terminal daemon + mount its binary WS bridge (additive). */
 export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDaemon {
+  const now = options.now ?? Date.now;
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
   const providerLaunchLedger = new FileProviderSessionLaunchLedger(
     join(options.homeRoot, '_engine', 'provider-session-launch.ndjson')
   );
+  const providerContinuityLedger =
+    options.providerSessionContinuityLedger ??
+    new FileProviderSessionContinuityLedger(
+      join(options.homeRoot, '_engine', 'provider-session-continuity.ndjson')
+    );
+  const replaceProviderIdentity =
+    options.replaceProviderSessionIdentity ?? replaceProviderSessionIdentity;
+  const evidenceVerifier =
+    options.verifyProviderSessionEvidence ?? verifyProviderSessionEvidence;
+  const continuityQueues = new Map<string, Promise<void>>();
+  const runProviderContinuity = async <T>(
+    deskSessionId: string,
+    operation: () => Promise<T> | T
+  ): Promise<T> => {
+    const prior = continuityQueues.get(deskSessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = prior.catch(() => undefined).then(() => gate);
+    continuityQueues.set(deskSessionId, tail);
+    await prior.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (continuityQueues.get(deskSessionId) === tail) {
+        continuityQueues.delete(deskSessionId);
+      }
+    }
+  };
+  const rebindAction = (
+    deskSessionId: string,
+    providerSessionId: string
+  ): string =>
+    `desk rebind-provider-session ${deskSessionId} --to ${providerSessionId} --force`;
   const providerProvisionFailure = (
-    detail: ProviderSessionProvisionRecoveryDetail
+    detail: ProviderSessionProvisionRecoveryDetail,
+    action?: string
   ): SessionSpawnPreallocationResult => ({
     ok: false,
     reason: 'provider-session-identity-missing',
-    detail
+    detail,
+    ...(action === undefined ? {} : { action })
   });
-  const preallocateProviderSession = (
+  const authorizeProviderSessionLaunch = (
     context: SessionSpawnPreallocationContext,
     spec: TerminalDaemonSessionSpec
   ): SessionSpawnPreallocationResult => {
@@ -414,12 +537,69 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     if (claim.ok) return { ok: true };
     return providerProvisionFailure(claim.reason);
   };
+  const preallocateProviderSession = (
+    context: SessionSpawnPreallocationContext,
+    spec: TerminalDaemonSessionSpec
+  ): Promise<SessionSpawnPreallocationResult> | SessionSpawnPreallocationResult => {
+    if (
+      context.subject.kind !== 'agent' ||
+      (context.subject.provider !== 'claude' &&
+        context.subject.provider !== 'codex')
+    ) {
+      return authorizeProviderSessionLaunch(context, spec);
+    }
+    const provider = context.subject.provider;
+    return runProviderContinuity(context.sessionId, () => {
+      try {
+        const launchAuthorization = providerLaunchLedger.current(
+          context.sessionId
+        );
+        const transition = providerContinuityLedger.currentTransition(
+          context.sessionId
+        );
+        const requiresRebind =
+          transition !== undefined &&
+          transition.state !== 'cancelled-by-reset' &&
+          (transition.state === 'pending' ||
+            spec.providerSessionId !==
+              transition.observedProviderSessionId);
+        if (
+          launchAuthorization?.state === 'prepared' &&
+          requiresRebind
+        ) {
+          return providerProvisionFailure('reset-incomplete');
+        }
+        if (requiresRebind) {
+          return providerProvisionFailure(
+            'provider-session-rebind-required',
+            rebindAction(
+              context.sessionId,
+              transition.observedProviderSessionId
+            )
+          );
+        }
+        const authorized = authorizeProviderSessionLaunch(context, spec);
+        if (!authorized.ok) return authorized;
+        const issued = providerContinuityLedger.issueLaunchProof({
+          deskSessionId: context.sessionId,
+          provider,
+          generation: context.nextGeneration,
+          issuedAt: now()
+        });
+        return {
+          ok: true,
+          launchContext: { providerLaunchProof: issued.launchProof }
+        };
+      } catch {
+        return providerProvisionFailure('continuity-store-failed');
+      }
+    });
+  };
   const eventJournal = new FileDeskEventJournal(
     join(options.homeRoot, '_engine', 'desk-events.ndjson')
   );
   let intakeStore: FileIntakeStore | undefined;
   let intakeDependencies: FileIntakeStoreDependencies | undefined;
-  const now = options.now ?? Date.now;
   const hookInstallationProbe =
     options.hookInstallationProbe ?? probeHookInstallation;
   let ready = false;
@@ -428,7 +608,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   let mutationDrainWaiters: Array<() => void> = [];
   let scheduleMoorObserverCleanup = (
     _sessionId: string,
-    _generation: number
+    _generation: number,
+    _origin: 'observed' | 'retired'
   ): void => {};
   const replayingMoorTransitions = new Set<string>();
   const moorTransitionKey = (sessionId: string, generation: number): string =>
@@ -479,9 +660,14 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         eventJournal.appendTransition(transition);
       }
       if (transition.cause === 'lifecycle-exited') {
+        // desk#59: an OBSERVED exit already carries the truth, so its observer
+        // may stop at once. A RETIRED placeholder is Desk tearing the session
+        // down without knowing how the child died — stopping there is what
+        // discarded the evidence, so that path drains first.
         scheduleMoorObserverCleanup(
           transition.sessionId,
-          transition.generation
+          transition.generation,
+          transition.to.exit?.origin === 'observed' ? 'observed' : 'retired'
         );
       }
     },
@@ -651,6 +837,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     /** The per-generation committed event-store DIRECTORY. */
     path: string;
     observer: MoorEventObserver;
+    /**
+     * desk#59 — the ONE final drain for this registration. Both the retired
+     * transition's microtask and the awaited control wrapper join this same
+     * promise, so the store is read exactly once no matter who asks first.
+     */
+    drainPromise?: Promise<void>;
   }
   const eventObservers = new Map<string, EventObserver>();
   const reportMoorDiagnostic = (
@@ -722,6 +914,51 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       }
     };
   };
+  /**
+   * desk#59 — stop an observer only AFTER one last bounded read of its store.
+   *
+   * Moor commits the lifecycle before it unlinks, so at teardown the exit
+   * record is routinely already committed and unread. Stopping first threw it
+   * away and left the session recorded as "someone retired it", with no cause
+   * of death — the exact blindness that made live agent deaths untraceable.
+   *
+   * The registration is rechecked AFTER the awaited drain: a successor
+   * generation may have claimed this sessionId while we were reading, and a
+   * stale observer must never unregister or speak for it.
+   */
+  const drainAndStopEventObserver = (observer: EventObserver): Promise<void> => {
+    // Memoized per registration: a concurrent wrapper and transition must not
+    // read the store twice, and the caller that arrives second must await the
+    // work the first one already started rather than skipping it.
+    observer.drainPromise ??= runFinalDrain(observer);
+    return observer.drainPromise;
+  };
+
+  const runFinalDrain = async (observer: EventObserver): Promise<void> => {
+    const outcome = await observer.observer.drain();
+    if (outcome === 'unobservable') {
+      // Durable first: stderr does not survive the daemon, and a blindness
+      // nobody can read afterwards is the defect this issue exists to fix.
+      // The refinement is generation-fenced and touches ONLY the diagnostic —
+      // the reason that initiated this retirement stays exactly as recorded.
+      // Recheck the registration AFTER the await: a successor may have claimed
+      // this session id while we were reading, and a stale observer must never
+      // annotate it.
+      if (eventObservers.get(observer.sessionId) === observer) {
+        router.sessions.refineExitDiagnostic(observer.sessionId, observer.generation, {
+          code: 'moor-event-drain-unobservable'
+        });
+      }
+      reportMoorDiagnostic(
+        { sessionId: observer.sessionId, generation: observer.generation, path: observer.path },
+        { code: 'tailer-io', message: 'final drain could not read the committed store' }
+      );
+    }
+    if (eventObservers.get(observer.sessionId) === observer) {
+      eventObservers.delete(observer.sessionId);
+    }
+  };
+
   const stopEventObserver = (observer: EventObserver): void => {
     observer.observer.stop();
     if (eventObservers.get(observer.sessionId) === observer) {
@@ -783,7 +1020,19 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           return;
         }
         stopEventObserver(registered);
-        void router.sessions.retireGenerationAwaited(sessionId, generation);
+        // desk#59: this retirement is caused by the observer failing, not by an
+        // operator. Letting it fall through to the default control-retire
+        // reason writes a lie into the record.
+        void router.sessions
+          .retireGenerationAwaited(sessionId, generation, { reason: 'observer-terminal' })
+          .then(() => {
+            // The reason says WHO ended it; the diagnostic says what
+            // observation lost. Both are recorded, neither overwrites the
+            // other.
+            router.sessions.refineExitDiagnostic(sessionId, generation, {
+              code: 'moor-event-observer-terminal'
+            });
+          });
       }
     });
     const observer = { sessionId, generation, path, observer: storeObserver };
@@ -815,16 +1064,392 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     }
     return observer;
   };
-  scheduleMoorObserverCleanup = (sessionId, generation): void => {
+  scheduleMoorObserverCleanup = (sessionId, generation, origin): void => {
     queueMicrotask(() => {
       const observer = eventObservers.get(sessionId);
-      if (observer?.generation === generation) {
-        // §11.6: observation stops here; the PUBLISHED store belongs to the
-        // holder's own retirement cleanup — Desk never deletes it.
+      if (observer?.generation !== generation) return;
+      // §11.6: observation stops here; the PUBLISHED store belongs to the
+      // holder's own retirement cleanup — Desk never deletes it.
+      if (origin === 'observed') {
         stopEventObserver(observer);
+        return;
       }
+      // The synchronous link-close path retires without going through the
+      // control wrapper, so this is the ONLY final read it ever gets.
+      void drainAndStopEventObserver(observer);
     });
   };
+
+  type ContinuityFailure = Extract<
+    ProviderSessionContinuityMutationResult,
+    { ok: false }
+  >;
+  const continuityFailure = (
+    reason: ContinuityFailure['reason'],
+    error: string,
+    detail: Partial<
+      Pick<
+        ContinuityFailure,
+        'currentProviderSessionId' | 'targetProviderSessionId' | 'action'
+      >
+    > = {}
+  ): ContinuityFailure => ({ ok: false, reason, error, ...detail });
+  const bindingFailure = (
+    failure: Extract<
+      ReturnType<typeof readProviderSessionBinding>,
+      { ok: false }
+    >
+  ): ContinuityFailure => continuityFailure(failure.code, failure.error);
+  const evidenceFailure = (
+    failure: Extract<ProviderSessionEvidenceResult, { ok: false }>
+  ): ContinuityFailure => {
+    const reason =
+      failure.code === 'evidence-not-found'
+        ? 'provider-session-evidence-missing'
+        : failure.code === 'evidence-stale'
+          ? 'provider-session-evidence-stale'
+          : 'provider-session-evidence-invalid';
+    return continuityFailure(reason, failure.error);
+  };
+  const selectedProviderSession = (deskSessionId: string) => {
+    const manifestPath = options.manifestPath ?? resolveManifestPath();
+    const homeDir = options.homeDir ?? homedir();
+    return buildSessionSpecs(readManifestFile(manifestPath), { homeDir }).find(
+      (candidate) => candidate.sessionId === deskSessionId
+    );
+  };
+  const verifyEvidence = async (input: {
+    deskSessionId: string;
+    provider: ProviderSessionContinuityProvider;
+    providerSessionId: string;
+    notBeforeMs: number;
+  }): Promise<ProviderSessionEvidenceResult | ContinuityFailure> => {
+    const selected = selectedProviderSession(input.deskSessionId);
+    if (!selected) {
+      return continuityFailure(
+        'provider-session-not-found',
+        `Desk session not found: ${input.deskSessionId}`
+      );
+    }
+    if (selected.agent !== input.provider) {
+      return continuityFailure(
+        'provider-session-agent-mismatch',
+        `Desk session ${input.deskSessionId} is not configured for ${input.provider}`
+      );
+    }
+    return evidenceVerifier({
+      provider: input.provider,
+      providerSessionId: input.providerSessionId,
+      selected: {
+        cwd: selected.cwd,
+        ...(selected.profileId === undefined
+          ? {}
+          : { profileId: selected.profileId })
+      },
+      homeDir: options.homeDir ?? homedir(),
+      notBeforeMs: input.notBeforeMs
+    });
+  };
+  const finishObservedLaunch = (
+    input: CompleteProviderSessionLaunchInput
+  ): ContinuityFailure | undefined => {
+    const completed = providerLaunchLedger.complete(input);
+    if (completed.ok) return undefined;
+    return continuityFailure(
+      'provider-session-store-failed',
+      `provider launch completion failed: ${completed.reason}`
+    );
+  };
+  const observeProviderSessionIdentity = (
+    input: ObserveProviderSessionIdentityInput
+  ): Promise<ProviderSessionContinuityMutationResult> =>
+    runProviderContinuity(input?.deskSessionId ?? '', async () => {
+      try {
+        if (
+          !input ||
+          !isSafeDaemonSessionId(input.deskSessionId) ||
+          (input.provider !== 'claude' && input.provider !== 'codex') ||
+          !isValidProviderSessionId(input.provider, input.providerSessionId) ||
+          !Number.isSafeInteger(input.generation) ||
+          input.generation < 2 ||
+          typeof input.launchProof !== 'string' ||
+          typeof input.hook !== 'string'
+        ) {
+          return continuityFailure(
+            'provider-session-id-invalid',
+            'Invalid provider session observation'
+          );
+        }
+        const binding = readProviderSessionBinding({
+          deskSessionId: input.deskSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!binding.ok) return bindingFailure(binding);
+        if (binding.provider !== input.provider) {
+          return continuityFailure(
+            'provider-session-provider-mismatch',
+            `Desk session ${input.deskSessionId} is configured for ${binding.provider}, not ${input.provider}`
+          );
+        }
+        if (ledger.current(input.deskSessionId) !== input.generation) {
+          return continuityFailure(
+            'provider-session-generation-mismatch',
+            'Provider observation generation is not current'
+          );
+        }
+        const status = router.sessions.moorStatus(input.deskSessionId);
+        if (
+          status === undefined ||
+          status.generation !== input.generation ||
+          !status.running
+        ) {
+          return continuityFailure(
+            'provider-session-not-live',
+            'Provider observation has no exact live adopted Moor generation'
+          );
+        }
+        const proof = providerContinuityLedger.verifyLaunchProof({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          generation: input.generation,
+          launchProof: input.launchProof
+        });
+        if (!proof.ok) {
+          return continuityFailure(
+            'provider-session-proof-invalid',
+            'Provider launch proof is missing or invalid'
+          );
+        }
+        const evidence = await verifyEvidence({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          providerSessionId: input.providerSessionId,
+          notBeforeMs: proof.issuedAt
+        });
+        if (!evidence.ok) {
+          return 'reason' in evidence ? evidence : evidenceFailure(evidence);
+        }
+        if (binding.providerSessionId === null) {
+          const persisted = await bindProviderSessionIdentity({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            ...(options.manifestPath === undefined
+              ? {}
+              : { manifestPath: options.manifestPath }),
+            ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+          });
+          if (!persisted.ok) {
+            return continuityFailure(persisted.code, persisted.error);
+          }
+          const completionFailure = finishObservedLaunch({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            generation: input.generation
+          });
+          if (completionFailure) return completionFailure;
+          return {
+            ok: true,
+            kind: 'bound',
+            provider: input.provider,
+            providerSessionId: input.providerSessionId
+          };
+        }
+        if (binding.providerSessionId === input.providerSessionId) {
+          const completionFailure = finishObservedLaunch({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            generation: input.generation
+          });
+          if (completionFailure) return completionFailure;
+          return {
+            ok: true,
+            kind: 'matching',
+            provider: input.provider,
+            providerSessionId: input.providerSessionId
+          };
+        }
+        providerContinuityLedger.stageTransition({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          generation: input.generation,
+          expectedProviderSessionId: binding.providerSessionId,
+          observedProviderSessionId: input.providerSessionId,
+          evidencePath: evidence.evidencePath
+        });
+        return continuityFailure(
+          'provider-session-rebind-required',
+          'The running provider session differs from the durable Desk binding',
+          {
+            currentProviderSessionId: binding.providerSessionId,
+            targetProviderSessionId: input.providerSessionId,
+            action: rebindAction(
+              input.deskSessionId,
+              input.providerSessionId
+            )
+          }
+        );
+      } catch {
+        return continuityFailure(
+          'provider-session-store-failed',
+          'Provider session continuity operation failed'
+        );
+      }
+    });
+
+  const rebindProviderSession = (
+    input: RebindProviderSessionInput
+  ): Promise<ProviderSessionContinuityMutationResult> =>
+    runProviderContinuity(input?.deskSessionId ?? '', async () => {
+      try {
+        if (
+          !input ||
+          !isSafeDaemonSessionId(input.deskSessionId) ||
+          typeof input.targetProviderSessionId !== 'string'
+        ) {
+          return continuityFailure(
+            'provider-session-id-invalid',
+            'Invalid provider session rebind request'
+          );
+        }
+        const transition = providerContinuityLedger.currentTransition(
+          input.deskSessionId
+        );
+        if (
+          transition === undefined ||
+          transition.state === 'cancelled-by-reset'
+        ) {
+          return continuityFailure(
+            'provider-session-transition-missing',
+            'No pending provider session transition exists'
+          );
+        }
+        if (
+          transition.observedProviderSessionId !==
+          input.targetProviderSessionId
+        ) {
+          return continuityFailure(
+            'provider-session-transition-mismatch',
+            'Requested provider session does not match the current transition'
+          );
+        }
+        if (
+          !isValidProviderSessionId(
+            transition.provider,
+            input.targetProviderSessionId
+          ) ||
+          ledger.current(input.deskSessionId) !== transition.generation
+        ) {
+          return continuityFailure(
+            'provider-session-generation-mismatch',
+            'Provider transition generation is not current'
+          );
+        }
+        const status = router.sessions.moorStatus(input.deskSessionId);
+        if (
+          status === undefined ||
+          status.generation !== transition.generation ||
+          !status.running
+        ) {
+          return continuityFailure(
+            'provider-session-not-live',
+            'Provider rebind has no exact live adopted Moor generation'
+          );
+        }
+        const proof = providerContinuityLedger.proofContext(
+          input.deskSessionId
+        );
+        if (
+          proof === undefined ||
+          proof.provider !== transition.provider ||
+          proof.generation !== transition.generation
+        ) {
+          return continuityFailure(
+            'provider-session-proof-invalid',
+            'Provider transition has no exact launch proof context'
+          );
+        }
+        const binding = readProviderSessionBinding({
+          deskSessionId: input.deskSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!binding.ok) return bindingFailure(binding);
+        if (binding.provider !== transition.provider) {
+          return continuityFailure(
+            'provider-session-provider-mismatch',
+            'Provider transition does not match the configured provider'
+          );
+        }
+        if (
+          binding.providerSessionId !== transition.expectedProviderSessionId &&
+          binding.providerSessionId !== transition.observedProviderSessionId
+        ) {
+          return continuityFailure(
+            'provider-session-mismatch',
+            'Durable provider session changed outside the pending transition'
+          );
+        }
+        const evidence = await verifyEvidence({
+          deskSessionId: input.deskSessionId,
+          provider: transition.provider,
+          providerSessionId: transition.observedProviderSessionId,
+          notBeforeMs: proof.issuedAt
+        });
+        if (!evidence.ok) {
+          return 'reason' in evidence ? evidence : evidenceFailure(evidence);
+        }
+        if (transition.state === 'pending') {
+          providerContinuityLedger.resolveTransition({
+            deskSessionId: input.deskSessionId,
+            transitionId: transition.transitionId,
+            targetProviderSessionId: transition.observedProviderSessionId
+          });
+        }
+        if (binding.providerSessionId === transition.observedProviderSessionId) {
+          return {
+            ok: true,
+            kind: 'already-rebound',
+            provider: transition.provider,
+            providerSessionId: transition.observedProviderSessionId
+          };
+        }
+        const replaced = await replaceProviderIdentity({
+          deskSessionId: input.deskSessionId,
+          provider: transition.provider,
+          expectedProviderSessionId: transition.expectedProviderSessionId,
+          providerSessionId: transition.observedProviderSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!replaced.ok) {
+          return continuityFailure(replaced.code, replaced.error);
+        }
+        return {
+          ok: true,
+          kind:
+            replaced.kind === 'already-replaced'
+              ? 'already-rebound'
+              : 'rebound',
+          provider: transition.provider,
+          providerSessionId: transition.observedProviderSessionId
+        };
+      } catch {
+        return continuityFailure(
+          'provider-session-store-failed',
+          'Provider session continuity operation failed'
+        );
+      }
+    });
 
   return {
     router,
@@ -839,11 +1464,15 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         geometry: spec.geometry,
         subject: spec.subject,
         preallocateSpawn: (context) => preallocateProviderSession(context, spec),
-        // The holder itself creates and commits the -T store during launch;
-        // Desk only NAMES the per-generation directory here and observes it
-        // after the launcher reports ready.
-        prepareSpawn: ({ generation }) => {
+        // The ledger allocation is durable before this hook. Preserve the
+        // predecessor's evidence with independent generation-scoped copies.
+        // Stable companions stay nlink-one so Moor can retain lifecycle-derived
+        // paths, remove stable .log/.events/.exit in that order, then remove the
+        // predecessor's -T event store and -S instrument stage. The independent
+        // archive remains readable; each holder still creates its own -T store.
+        prepareSpawn: async ({ generation }) => {
           observedGeneration = generation;
+          await archiveMoorGenerationStores(sessionPath, generation);
           storeDir = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
           return { storeDir };
         },
@@ -867,7 +1496,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         const generation = observedGeneration;
         const authority = resolveStoreAuthority(status, handedOffDir);
         if (!authority.ok) {
-          await router.sessions.retireGenerationAwaited(sessionId, generation);
+          await router.sessions.retireGenerationAwaited(sessionId, generation, {
+            reason: 'store-authority-refused'
+          });
           throw new Error(authority.error);
         }
         try {
@@ -877,26 +1508,29 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           // is not provisioned — tear the fresh holder down. Store cleanup
           // belongs to the holder's own retirement (§11.6); Desk deletes
           // nothing it merely named.
-          await router.sessions.retireGenerationAwaited(sessionId, generation);
+          await router.sessions.retireGenerationAwaited(sessionId, generation, {
+            reason: 'observer-start-failed'
+          });
           throw error;
         }
       }
       return result;
     },
-    async retire(sessionId) {
+    async retire(sessionId, reason) {
       const observer = eventObservers.get(sessionId);
-      const result = await router.sessions.retireAwaited(sessionId);
-      if (result.ok && observer) stopEventObserver(observer);
+      const result = await router.sessions.retireAwaited(sessionId, { reason });
+      // desk#59: the drain runs AFTER the retire, so the placeholder already
+      // exists and the holder's real exit can strengthen it in place.
+      if (result.ok && observer) await drainAndStopEventObserver(observer);
       return result;
     },
     async retireGeneration(sessionId, generation) {
       const observer = eventObservers.get(sessionId);
-      const result = await router.sessions.retireGenerationAwaited(
-        sessionId,
-        generation
-      );
+      const result = await router.sessions.retireGenerationAwaited(sessionId, generation, {
+        reason: 'control-retire'
+      });
       if (result.ok && observer?.generation === generation) {
-        stopEventObserver(observer);
+        await drainAndStopEventObserver(observer);
       }
       return result;
     },
@@ -904,9 +1538,51 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       const result = await router.sessions.resetForProviderSession(
         sessionId,
         socketPath(sessionId),
-        (generation) => {
+        (generation) => runProviderContinuity(sessionId, async () => {
           const observer = eventObservers.get(sessionId);
           if (observer) stopEventObserver(observer);
+          const transition = providerContinuityLedger.currentTransition(
+            sessionId
+          );
+          const cancellable =
+            transition?.state === 'pending' ||
+            transition?.state === 'resolved'
+              ? transition
+              : undefined;
+          if (cancellable !== undefined) {
+            const binding = readProviderSessionBinding({
+              deskSessionId: sessionId,
+              ...(options.manifestPath === undefined
+                ? {}
+                : { manifestPath: options.manifestPath }),
+              ...(options.homeDir === undefined
+                ? {}
+                : { homeDir: options.homeDir })
+            });
+            const launchAuthorization = providerLaunchLedger.current(sessionId);
+            if (
+              !binding.ok ||
+              binding.provider !== cancellable.provider ||
+              (cancellable.state === 'pending'
+                ? cancellable.generation !== generation
+                : cancellable.generation > generation) ||
+              (binding.providerSessionId !==
+                cancellable.expectedProviderSessionId &&
+                binding.providerSessionId !==
+                  cancellable.observedProviderSessionId &&
+                !(
+                  binding.providerSessionId === null &&
+                  launchAuthorization?.state === 'prepared'
+                ))
+            ) {
+              return {
+                ok: false as const,
+                reason: 'provider-session-store-failed' as const,
+                error:
+                  'Provider session transition does not match reset state'
+              };
+            }
+          }
           return authorizeProviderSessionReset(
             {
               deskSessionId: sessionId,
@@ -918,9 +1594,35 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
                 ? {}
                 : { homeDir: options.homeDir })
             },
-            { ledger: providerLaunchLedger }
+            {
+              ledger: providerLaunchLedger,
+              ...(cancellable === undefined
+                ? {}
+                : {
+                    afterBindingCleared: (authorization: {
+                      authorizationId: string;
+                    }) => {
+                      const current =
+                        providerContinuityLedger.currentTransition(sessionId);
+                      if (
+                        current === undefined ||
+                        current.state === 'cancelled-by-reset' ||
+                        current.transitionId !== cancellable.transitionId
+                      ) {
+                        throw new Error(
+                          'provider session transition changed during reset'
+                        );
+                      }
+                      providerContinuityLedger.cancelTransitionByReset({
+                        deskSessionId: sessionId,
+                        transitionId: cancellable.transitionId,
+                        resetAuthorizationId: authorization.authorizationId
+                      });
+                    }
+                  })
+            }
           );
-        }
+        })
       );
       if (!result.ok) return result;
       return result.value;
@@ -928,6 +1630,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     completeProviderSessionLaunch(input) {
       return providerLaunchLedger.complete(input);
     },
+    observeProviderSessionIdentity,
+    rebindProviderSession,
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
@@ -936,6 +1640,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     },
     terminalObservation(sessionId) {
       return router.sessions.terminalObservation(sessionId);
+    },
+    moorExitEvidence(sessionId) {
+      return readMoorGenerationExitEvidence(socketPath(sessionId));
     },
     async reconcileMoorEvents(sessionId, generation) {
       // Restart reconciliation re-observes the surviving holder's committed
@@ -1113,6 +1820,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       intakeStore = undefined;
       eventJournal.close();
       providerLaunchLedger.close();
+      providerContinuityLedger.close();
     }
   };
 }
@@ -1232,11 +1940,14 @@ export function createDaemonControlHandler(
     | 'retireGeneration'
     | 'resetProviderSession'
     | 'completeProviderSessionLaunch'
+    | 'observeProviderSessionIdentity'
+    | 'rebindProviderSession'
     | 'input'
     | 'tail'
     | 'clearSessionLog'
     | 'moorSessionStatus'
     | 'terminalObservation'
+    | 'moorExitEvidence'
     | 'agentEndpoint'
     | 'activateAgentEndpoint'
     | 'agentEvent'
@@ -1431,7 +2142,9 @@ export function createDaemonControlHandler(
                 ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` to finish the interrupted reset`
                 : detail === 'authorization-consumed'
                   ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` after confirming the prior provider process is stopped`
-                  : undefined;
+                  : 'action' in ens && typeof ens.action === 'string'
+                    ? ens.action
+                    : undefined;
             sendJson(res, 503, {
               ok: false,
               error: `${ens.reason}${
@@ -1455,7 +2168,10 @@ export function createDaemonControlHandler(
           // beginRetire), and its wallStart is the holder's own start clock.
           const status = daemon.moorSessionStatus(sessionId);
           if (status === undefined) {
-            sendJson(res, 404, { ok: false, error: 'session has no live moor link' });
+            // The shared literal, not a local copy: callers tell this negative
+            // verdict apart from any other 404 by its exact wording, and a
+            // reworded copy would read to them as "some proxy said not-found".
+            sendJson(res, 404, { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR });
             return;
           }
           sendJson(res, 200, {
@@ -1492,7 +2208,14 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
             return;
           }
-          const retired = await daemon.retire(body.sessionId);
+          // desk#59: the cause is part of the request, not something the
+          // transport invents. An unknown or absent cause is refused rather
+          // than silently relabelled as a generic control retire.
+          if (!isRetireReason(body.reason)) {
+            sendJson(res, 400, { ok: false, error: 'invalid retire reason' });
+            return;
+          }
+          const retired = await daemon.retire(body.sessionId, body.reason);
           if (!retired.ok) {
             sendJson(res, 502, { ok: false, error: retired.error ?? 'retire failed' });
             return;
@@ -1583,6 +2306,96 @@ export function createDaemonControlHandler(
         }
         if (
           req.method === 'POST' &&
+          url.pathname === '/control/provider-session/observe'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (
+            Object.keys(body).sort().join(',') !==
+              'deskSessionId,generation,hook,launchProof,provider,providerSessionId' ||
+            !isSafeDaemonSessionId(body.deskSessionId) ||
+            (body.provider !== 'claude' && body.provider !== 'codex') ||
+            typeof body.providerSessionId !== 'string' ||
+            !isValidProviderSessionId(
+              body.provider,
+              body.providerSessionId
+            ) ||
+            !Number.isSafeInteger(body.generation) ||
+            (body.generation as number) < 2 ||
+            typeof body.launchProof !== 'string' ||
+            typeof body.hook !== 'string' ||
+            body.hook.length === 0 ||
+            body.hook.length > 128
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              reason: 'provider-session-observation-invalid',
+              error: 'invalid provider session observation'
+            });
+            return;
+          }
+          const result = await daemon.observeProviderSessionIdentity({
+            deskSessionId: body.deskSessionId,
+            provider: body.provider,
+            providerSessionId: body.providerSessionId,
+            generation: body.generation as number,
+            launchProof: body.launchProof,
+            hook: body.hook
+          });
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found'
+                ? 404
+                : result.reason === 'provider-session-store-failed'
+                  ? 500
+                  : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/provider-session/rebind'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (
+            Object.keys(body).sort().join(',') !==
+              'sessionId,targetProviderSessionId' ||
+            !isSafeDaemonSessionId(body.sessionId) ||
+            typeof body.targetProviderSessionId !== 'string'
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              reason: 'provider-session-rebind-invalid',
+              error: 'invalid provider session rebind request'
+            });
+            return;
+          }
+          const result = await daemon.rebindProviderSession({
+            deskSessionId: body.sessionId,
+            targetProviderSessionId: body.targetProviderSessionId
+          });
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found' ||
+              result.reason === 'provider-session-transition-missing'
+                ? 404
+                : result.reason === 'provider-session-store-failed'
+                  ? 500
+                  : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
+          return;
+        }
+        if (
+          req.method === 'POST' &&
           url.pathname === '/control/retire-generation'
         ) {
           const body = await readJsonBody(req, {
@@ -1666,11 +2479,16 @@ export function createDaemonControlHandler(
             return;
           }
           const observation = daemon.terminalObservation(sessionId);
-          if (observation === undefined) {
+          const exitEvidence = await daemon.moorExitEvidence(sessionId);
+          if (observation === undefined && exitEvidence.length === 0) {
             sendJson(res, 404, { ok: false, error: `no such session: ${sessionId}` });
             return;
           }
-          sendJson(res, 200, { ok: true, observation });
+          sendJson(res, 200, {
+            ok: true,
+            observation: observation ?? null,
+            exitEvidence
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/agent-event') {

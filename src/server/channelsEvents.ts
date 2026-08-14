@@ -45,11 +45,14 @@ let cachedHome: string | null = null;
  * protocol change automatically flows into the event-log type.
  */
 type StuckTerminal = Extract<SubmitState, `submit-stuck-${string}`>;
-type SubmitActive = Extract<SubmitState, 'delivering' | 'submitted' | 'delivery-ack-timeout'>;
+type SubmitActive = Extract<
+  SubmitState,
+  'delivering' | 'submitted' | 'delivery-ack-timeout' | 'submit-not-applicable'
+>;
 type PausedStatus = Extract<DeliveryStatus, 'paused'>;
 
 export type DeliveryEventKind =
-  | SubmitActive       // 'delivering' | 'submitted' | 'delivery-ack-timeout' — from SubmitState
+  | SubmitActive       // 'delivering' | 'submitted' | 'delivery-ack-timeout' | 'submit-not-applicable' — from SubmitState
   | StuckTerminal      // 'submit-stuck-paste' | 'submit-stuck-submit' | 'submit-stuck-unobservable' — from SubmitState
   | PausedStatus       // 'paused' — from LifecycleStatus
   | 'queued'           // -specific: item entered the queue

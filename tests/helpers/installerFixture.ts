@@ -39,10 +39,12 @@ interface MoorTargetPin {
 }
 
 interface MoorPin {
-  schemaVersion: 1;
+  schemaVersion: 2;
   repository: typeof MOOR_REPOSITORY;
   version: typeof MOOR_VERSION;
   commit: string;
+  /** desk#60: a published pin states the closure that verified it. */
+  coverage: { requiredClosure: 'full-matrix' };
   targets: Record<keyof typeof MOOR_ASSETS, MoorTargetPin>;
 }
 
@@ -140,10 +142,11 @@ esac
       };
     }
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       repository: MOOR_REPOSITORY,
       version: MOOR_VERSION,
       commit: MOOR_COMMIT,
+      coverage: { requiredClosure: 'full-matrix' },
       targets
     };
   }

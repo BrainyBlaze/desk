@@ -529,7 +529,7 @@ button.statusSegment:hover {
   opacity: 0.45;
 }
 
-/* Toast stack — above modals (z 12) and the drawer (z 9): always on top. */
+/* Toast stack — above modals (z 45) and the drawer (z 9): always on top. */
 .toastStack {
   position: fixed;
   top: 92px;
@@ -1045,7 +1045,7 @@ select:focus {
 }
 
 /* Portalled to <body>: fixed in viewport space at the trigger rect, above the
-   modal scrim (z 12) so it is never clipped by the modal frame or body overflow.
+   modal scrim (z 45) so it is never clipped by the modal frame or body overflow.
    Inline styles set left/top/width; right is cleared so width wins. */
 .deskSelectPanelPortal {
   position: fixed;
@@ -1434,10 +1434,15 @@ select:focus {
   box-shadow: none;
 }
 
+/* The modal layer. A dialog owns the pointer while it is open, so its scrim
+   must outrank every in-surface overlay it shares .deskContent's stacking
+   context with — the responsive sidebar drawer (z 24) and its scrim (z 20),
+   the engine console overlay (z 40), the mention popover (z 30). Only the
+   toast stack (z 50) and the portalled select panel (z 1000) stay above it. */
 .modalScrim {
   position: absolute;
   inset: 0;
-  z-index: 12;
+  z-index: 45;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -1659,6 +1664,80 @@ select:focus {
   min-height: 0;
   width: 100%;
   height: 100%;
+}
+
+.subsystemSurfaceInner {
+  display: flex;
+  flex-direction: column;
+}
+
+.providerContinuityBanners {
+  display: grid;
+  gap: 1px;
+  flex: none;
+  max-height: 35%;
+  overflow: auto;
+  background: var(--desk-error);
+  border-bottom: 1px solid var(--desk-error);
+}
+
+.providerContinuityBanner {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--desk-text);
+  background: var(--desk-bg-elevated);
+  font-size: 12px;
+}
+
+.providerContinuityBanner > svg {
+  color: var(--desk-error);
+  margin-top: 1px;
+}
+
+.providerContinuityBannerBody {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.providerContinuityBannerBody strong {
+  color: var(--desk-error);
+}
+
+.providerContinuityBannerBody small,
+.providerContinuityAction {
+  overflow-wrap: anywhere;
+}
+
+.providerContinuityBannerBody small {
+  color: var(--desk-text-dim);
+}
+
+.providerContinuityAction {
+  color: var(--desk-accent);
+  user-select: text;
+}
+
+.providerContinuityCopy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--desk-text);
+  background: transparent;
+  border: 1px solid var(--desk-line);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.providerContinuityCopy:hover {
+  color: var(--desk-accent);
+  border-color: var(--desk-accent);
 }
 
 .panelResizeHandle {
@@ -3561,7 +3640,8 @@ select {
 }
 .chanRow:hover { background: var(--desk-glow); }
 .chanRow.selected { border-color: var(--desk-line); background: var(--desk-glow); box-shadow: inset 2px 0 0 var(--desk-accent); }
-.chanRowHead { display: flex; align-items: center; gap: 6px; color: var(--desk-accent); font-size: 12px; min-width: 0; }
+.chanRowHead { display: flex; align-items: center; gap: 6px; color: var(--desk-accent); font-size: 12px; min-width: 0; min-height: 18px; }
+.chanRowHead .deskPill { height: 16px; padding: 0 6px; font-size: 9px; margin-left: auto; }
 .chanRowName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
 .chanRowPreview {
   color: var(--desk-text-dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -3636,7 +3716,9 @@ select {
 
 .chanBody { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
 .chanFeedColumn { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; padding: 0 10px 10px; }
-.chanFeed { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding: 8px 4px; }
+.chanFeed { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding: 8px 4px; position: relative; }
+.chanFlowInner { width: 100%; }
+.chanFlowRow { position: relative; }
 .chanFeed.compact { padding: 4px 2px; }
 .chanFeed.chanFeedScrolling .chanMessage { pointer-events: none; }
 .chanFeed.chanFeedScrolling .chanReaction,
@@ -3650,16 +3732,10 @@ select {
 .chanDayLabel { color: var(--desk-text-dim); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
 
 .chanMessage {
-  position: relative; padding: 5px 10px 4px; margin: 1px 0; border-left: 2px solid transparent;
+  position: relative; padding: 5px 10px 4px; margin: 1px 0;
   transition: background 200ms ease, box-shadow 200ms ease;
 }
 .chanMessage:hover { background: var(--desk-glow); }
-.chanMessage.hue-0 { border-left-color: var(--desk-graph-0); }
-.chanMessage.hue-1 { border-left-color: var(--desk-graph-1); }
-.chanMessage.hue-2 { border-left-color: var(--desk-graph-2); }
-.chanMessage.hue-3 { border-left-color: var(--desk-graph-3); }
-.chanMessage.hue-4 { border-left-color: var(--desk-graph-4); }
-.chanMessage.hue-5 { border-left-color: var(--desk-graph-5); }
 .chanMessage.pingsHuman { background: color-mix(in srgb, var(--desk-graph-2) 8%, transparent); }
 /* the @human tint must not defeat the hover highlight (equal specificity, later rule wins) */
 .chanMessage.pingsHuman:hover { background: var(--desk-glow); }
@@ -3872,6 +3948,9 @@ select {
 
 /* NEW divider */
 .chanNewDivider { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; }
+/* overlay flavour: pinned above the first-unread row, zero layout height so the
+   pointer advancing never reflows the feed */
+.chanNewDividerOverlay { position: absolute; top: -13px; left: 0; right: 0; margin: 0; z-index: 1; pointer-events: none; }
 .chanNewDivider .chanDayLine { background: var(--desk-graph-2); opacity: 0.7; }
 .chanNewLabel { color: var(--desk-graph-2); font-size: 9px; font-weight: 700; letter-spacing: 0.2em; flex: none; }
 

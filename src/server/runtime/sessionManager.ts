@@ -2,8 +2,10 @@
 // daemon a complete session pipe: DaemonCore (pure registry) + a per-session
 // the moor master link + browser fan-out. Ensures a session,
 // attaches to its master socket, and wires master frames → SessionRuntime →
-// browser and browser input → master. Node net lives only in the moor client; the
-// DaemonCore stays pure and is driven through its callbacks (no layering break).
+// browser and browser input → master. Unexpected controller loss creates one
+// generation/owner-fenced recovery slot; only explicit control or positively
+// proved holder absence ends authority. Node net lives only in the moor client;
+// DaemonCore stays pure and is driven through callbacks (no layering break).
 //
 // Testable against a fake v3 master today; the real moor binary drops in behind
 // the same socket path once its master speaks v3.
@@ -17,15 +19,21 @@ import {
   type DaemonAgentStateIntakeResult,
   type DaemonCoreDeps,
   type EnsureResult,
-  type RestoreResult
+  type RestoreResult,
+  type RetireReason,
+  type ExitDiagnostic
 } from '../../shared/runtime/daemonCore.js';
 import {
   type AuthorityMutationResult,
   type SessionRegistration,
   type SessionStateSnapshot
 } from '../../shared/controlPlane/index.js';
-import { type BpFrame } from '../../shared/browserProtocol/index.js';
-import { MoorMasterClient, posixMoorIdentity } from './moorMasterClient.js';
+import { BpError, BpFrameType, type BpFrame } from '../../shared/browserProtocol/index.js';
+import {
+  MoorMasterClient,
+  posixMoorIdentity,
+  type MoorReconnectSnapshot
+} from './moorMasterClient.js';
 import type { MoorStatus } from '../../shared/moorWire/messages.js';
 import { spawnMoorMaster } from './moorSpawnMaster.js';
 import { spawn } from 'node:child_process';
@@ -72,7 +80,9 @@ export type ProviderSessionProvisionRecoveryDetail =
   | 'binding-mismatch'
   | 'invalid-provider-session-id'
   | 'session-not-found'
-  | 'agent-mismatch';
+  | 'agent-mismatch'
+  | 'provider-session-rebind-required'
+  | 'continuity-store-failed';
 
 export interface SessionSpawnPreallocationContext {
   sessionId: string;
@@ -82,11 +92,15 @@ export interface SessionSpawnPreallocationContext {
 }
 
 export type SessionSpawnPreallocationResult =
-  | { ok: true }
+  | {
+      ok: true;
+      launchContext?: { providerLaunchProof: string };
+    }
   | {
       ok: false;
       reason: 'provider-session-identity-missing';
       detail: ProviderSessionProvisionRecoveryDetail;
+      action?: string;
     };
 
 export type PreallocateSessionSpawn = (
@@ -225,7 +239,8 @@ export interface SessionManagerDeps {
  * runtime nor the core ever sees an encoded frame.
  */
 export interface SessionMasterLink {
-  sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number): void;
+  sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number, queuedAt: number): boolean;
+  cancelQueuedInput(surfaceId: number): void;
   sendResize(rows: number, cols: number, surfaceId: number): void;
   close(): void;
   /**
@@ -245,6 +260,8 @@ export interface SessionMasterLink {
    * (deadline, transport loss, malformed response).
    */
   clearHolderLog?(): Promise<HolderLogClearOutcome>;
+  acquireViewerLease?(): Promise<'granted' | 'busy'>;
+  hasViewerLease?(): boolean;
 }
 
 /** The full §10.2.13 result algebra a control-plane consumer branches on. */
@@ -253,6 +270,33 @@ export type HolderLogClearOutcome =
   | 'already-clear'
   | 'refused'
   | 'indeterminate';
+
+interface MoorRecoverySlot {
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly owner: symbol;
+  readonly sessionPath: string;
+  readonly geometry: { rows: number; cols: number };
+  snapshot: MoorReconnectSnapshot | undefined;
+  episode: number;
+  attempt: number;
+  timer?: NodeJS.Timeout;
+  timerDueAt?: number;
+  candidate?: MoorMasterClient;
+  inputQueue: Array<{
+    bytes: Uint8Array;
+    binary: boolean;
+    surfaceId: number;
+    queuedAt: number;
+  }>;
+  inputBytes: number;
+  observer?: boolean;
+  pendingResize?: { rows: number; cols: number; surfaceId: number };
+}
+
+const RECOVERY_BACKOFF_MS = [0, 100, 250, 500, 1_000, 2_000] as const;
+const RECOVERY_INPUT_MAX_BYTES = 64 * 1024;
+const RECOVERY_INPUT_MAX_AGE_MS = 10_000;
 
 export class SessionManager {
   private readonly core: DaemonCore;
@@ -278,6 +322,8 @@ export class SessionManager {
    * plain sessionId callback would retire the SUCCESSOR session.
    */
   private readonly owners = new Map<string, symbol>();
+  /** One exact-generation controller re-adoption slot per live session. */
+  private readonly recoveries = new Map<string, MoorRecoverySlot>();
   /**
    * In-flight provision per session: concurrent calls COALESCE onto one
    * operation (two Boot clicks = one spawn, both get its result). Interleaved
@@ -298,7 +344,7 @@ export class SessionManager {
       sendBrowser: deps.sendBrowser,
       // Typed master-bound sends route to the session's attached holder link.
       sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
-        this.masters.get(sessionId)?.sendInput(bytes, binary, surfaceId),
+        this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterResize: (sessionId, rows, cols, surfaceId) =>
         this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
@@ -396,7 +442,7 @@ export class SessionManager {
         this.moorStatuses.delete(sessionId);
       }
       this.detachedKills.delete(sessionId);
-      this.core.retire(sessionId);
+      this.core.retire(sessionId, 'restore-superseded');
       this.dropTerminalObservation(sessionId, restored.generation);
       return { ok: false, reason: 'attach-failed' };
     }
@@ -415,9 +461,21 @@ export class SessionManager {
     sessionId: string,
     sessionPath: string,
     geometry: { rows: number; cols: number },
-    opts: { generation: number; stillValid?: () => boolean; livenessWindowMs?: number }
+    opts: {
+      generation: number;
+      stillValid?: () => boolean;
+      livenessWindowMs?: number;
+      resumeSnapshot?: MoorReconnectSnapshot;
+      recoverySlot?: MoorRecoverySlot;
+      recoveryEpisode?: number;
+    }
   ): Promise<boolean> {
     if (!this.core.hasLiveSession(sessionId)) return false;
+    let owner = this.owners.get(sessionId);
+    if (owner === undefined) {
+      owner = Symbol('attach-op');
+      this.owners.set(sessionId, owner);
+    }
     let link: SessionMasterLink | undefined;
     let attached = false;
     /** §6: parser preamble work must DRAIN before adoption is complete. */
@@ -431,27 +489,18 @@ export class SessionManager {
     let livenessEpisode = 0;
     let livenessEpisodeResolved = true;
     let armLivenessProbe: (episode: number) => void = () => undefined;
-    /**
-     * Did a bounded identity probe POSITIVELY establish that nothing is
-     * listening? Only then may this link's close retire the session. Every
-     * other close — refused late keepalive, write error, transport reset —
-     * leaves the holder's fate unknown, and unknown must never mean dead.
-     */
-    let absenceProven = false;
     /** Bytes queued behind the outstanding §7.3 input request. */
-    let inputQueue: Uint8Array[] = [];
+    let inputQueue: Array<{ bytes: Uint8Array; surfaceId: number; queuedAt: number }> = [];
     const flushQueue = (client: MoorMasterClient): void => {
-      if (inputQueue.length === 0) return;
-      const total = inputQueue.reduce((sum, part) => sum + part.length, 0);
-      const coalesced = new Uint8Array(total);
-      let offset = 0;
-      for (const part of inputQueue) {
-        coalesced.set(part, offset);
-        offset += part.length;
+      const next = inputQueue.shift();
+      if (next === undefined) return;
+      if (this.now() - next.queuedAt >= RECOVERY_INPUT_MAX_AGE_MS) {
+        this.sendStaleLease(sessionId, next.surfaceId);
+        flushQueue(client);
+        return;
       }
-      inputQueue = [];
       try {
-        client.sendInput(coalesced);
+        client.sendInput(next.bytes, next.surfaceId);
       } catch {
         // Lease lost or link closed between receipt and flush: the queued
         // bytes cannot be delivered; the caller-visible state is the closed/
@@ -489,6 +538,14 @@ export class SessionManager {
             .catch(() => false);
         },
         onInputReceipt: () => flushQueue(client),
+        onInputContinuityLost: (pending) => {
+          console.error(
+            `[desk] input continuity lost for ${sessionId} generation ${opts.generation} request ${pending.requestId} surface ${pending.surfaceId ?? 'unknown'}`
+          );
+          if (pending.surfaceId !== undefined && pending.surfaceId !== 0) {
+            this.sendStaleLease(sessionId, pending.surfaceId);
+          }
+        },
         // §8 query arbitration: this controller is the lease-owning VT viewer
         // — the sole 250 ms responder. Cursor position (class 05) is
         // viewer-only and comes from the authoritative emulator (1-based on
@@ -510,32 +567,26 @@ export class SessionManager {
           }
         },
         onClose: () => {
-          // Identity-bound: only the CURRENTLY-installed link is ours to act on.
-          if (!attached || link === undefined || this.masters.get(sessionId) !== link) return;
-          if (absenceProven) {
-            // The bounded identity probe positively established that nothing
-            // is listening: the holder really is gone, so the session ends.
-            this.retire(sessionId);
-            return;
+          // A controller transport is not the holder. Losing the CURRENT link
+          // replaces only link/status state with an exact-generation recovery
+          // slot; it never retires, terminates, kills, or allocates.
+          if (attached && link !== undefined && this.masters.get(sessionId) === link) {
+            this.beginControllerRecovery({
+              sessionId,
+              sessionPath,
+              geometry,
+              generation: opts.generation,
+              owner,
+              link,
+              snapshot: client.reconnectSnapshot(),
+              queuedInput: inputQueue.map((pending) => ({
+                bytes: pending.bytes.slice(),
+                binary: false,
+                surfaceId: pending.surfaceId,
+                queuedAt: pending.queuedAt
+              }))
+            });
           }
-          // Any OTHER close proves nothing about the holder. A late keepalive
-          // refused after a processing pause, a write error, a transport
-          // reset — the child is almost certainly still running, and killing
-          // it here is how thirteen healthy agents died at 21:26 on
-          // 2026-08-13: a ~7 s pause let the lease lapse, moor refused the
-          // overdue keepalive and closed the link, and this branch read that
-          // as death. Losing a link is a DETACH: forget it, mark the holder
-          // indeterminate, and let the probe decide. Nothing is retired and
-          // nothing is killed on evidence this weak.
-          this.masters.delete(sessionId);
-          // Generation-bound authority dies with the link it was adopted from.
-          this.moorStatuses.delete(sessionId);
-          this.core.observeHolderLiveness(
-            sessionId,
-            opts.generation,
-            false,
-            'controller-link-closed'
-          );
         },
         // §10 (OB-30): losing the 15 s verified-live window never proves the
         // holder is gone — no teardown. The session becomes INDETERMINATE
@@ -565,8 +616,28 @@ export class SessionManager {
       // buffering records, a receipt-time ack would confirm consumption
       // before delivery — the watermark is acknowledged manually above,
       // strictly after core delivery.
-      opts.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs }
+      {
+        ...(opts.livenessWindowMs === undefined ? {} : { livenessWindowMs: opts.livenessWindowMs }),
+        ...(opts.resumeSnapshot === undefined
+          ? {}
+          : {
+              resumeCursor: {
+                sequence: opts.resumeSnapshot.output.sequence,
+                incarnation: opts.resumeSnapshot.output.incarnation
+              },
+              resumeLease: opts.resumeSnapshot.lease,
+              requireSameIncarnation: true,
+              requireReplayContinuity: true
+            })
+      }
     );
+    if (
+      opts.recoverySlot !== undefined &&
+      opts.recoveryEpisode !== undefined &&
+      this.recoveryCurrent(opts.recoverySlot, opts.recoveryEpisode)
+    ) {
+      opts.recoverySlot.candidate = client;
+    }
     armLivenessProbe = (episode: number): void => {
       void probeMoorHolder(sessionPath, opts.generation).then((outcome) => {
         // Fenced twice: only the CURRENT link's CURRENT unresolved episode may
@@ -580,13 +651,8 @@ export class SessionManager {
           return;
         }
         if (outcome === 'absent') {
-          // Listener absence positively established: the holder is gone. This
-          // is the ONLY route to retirement — the flag is what separates a
-          // proven absence from every other reason a socket may close, and
-          // onClose refuses to retire without it.
           livenessEpisodeResolved = true;
-          absenceProven = true;
-          client.close();
+          this.endAuthorityForConfirmedAbsence(sessionId, opts.generation, owner);
           return;
         }
         this.core.observeHolderLiveness(sessionId, opts.generation, false, 'probe-indeterminate');
@@ -621,24 +687,50 @@ export class SessionManager {
         /* link closed: nothing to acknowledge */
       }
     }
+    // Retry an ambiguously sent request only after the exact lease resumed
+    // and the terminal-state/replay delivery barrier completed.
+    if (
+      client.leaseContinuity === 'resumed' &&
+      opts.resumeSnapshot?.lease?.pendingInput !== undefined
+    ) {
+      try {
+        client.retryPendingInput();
+      } catch (error) {
+        console.error(
+          `[desk] pending input retry failed for ${sessionId} generation ${opts.generation}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
     // Re-check AFTER the await: a concurrent retire may have torn the session
     // down while the attach prefix was in flight.
-    if ((opts.stillValid !== undefined && !opts.stillValid()) || !this.core.hasLiveSession(sessionId)) {
+    if (
+      client.attached === false ||
+      (opts.stillValid !== undefined && !opts.stillValid()) ||
+      !this.core.hasLiveSession(sessionId)
+    ) {
       client.close();
       return false;
     }
     attached = true;
     link = {
-      sendInput: (bytes) => {
+      sendInput: (bytes, _binary, surfaceId, queuedAt) => {
         try {
-          client.sendInput(bytes);
+          client.sendInput(bytes, surfaceId);
+          return true;
         } catch (error) {
           if (error instanceof Error && /in flight/.test(error.message)) {
-            inputQueue.push(bytes.slice());
-            return;
+            const queuedBytes = inputQueue.reduce((sum, pending) => sum + pending.bytes.length, 0);
+            if (queuedBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) return false;
+            inputQueue.push({ bytes: bytes.slice(), surfaceId, queuedAt });
+            return true;
           }
-          // Not attached / no lease: drop — the session state already says so.
+          return false;
         }
+      },
+      cancelQueuedInput: (surfaceId) => {
+        inputQueue = inputQueue.filter((pending) => pending.surfaceId !== surfaceId);
       },
       sendResize: (rows, cols) => {
         try {
@@ -680,7 +772,9 @@ export class SessionManager {
           default:
             return 'refused';
         }
-      }
+      },
+      acquireViewerLease: () => client.acquireViewerLease(),
+      hasViewerLease: () => client.leaseContinuity !== 'observer'
     };
     this.masters.set(sessionId, link);
     const snapshot = this.core.stateSnapshot(sessionId);
@@ -694,7 +788,298 @@ export class SessionManager {
     // markRunning commit: a failed adoption never publishes authority, so no
     // failure path can leak a descriptor without a live adopted link.
     this.moorStatuses.set(sessionId, adopted);
+    if (opts.recoverySlot?.candidate === client) opts.recoverySlot.candidate = undefined;
     return true;
+  }
+
+  private beginControllerRecovery(input: {
+    sessionId: string;
+    sessionPath: string;
+    geometry: { rows: number; cols: number };
+    generation: number;
+    owner: symbol;
+    link: SessionMasterLink;
+    snapshot: MoorReconnectSnapshot | undefined;
+    queuedInput: MoorRecoverySlot['inputQueue'];
+  }): void {
+    if (this.masters.get(input.sessionId) !== input.link) return;
+    if (this.owners.get(input.sessionId) !== input.owner) return;
+    const state = this.core.stateSnapshot(input.sessionId);
+    if (
+      state === undefined ||
+      state.generation !== input.generation ||
+      state.lifecycle === 'exited'
+    ) {
+      return;
+    }
+    this.masters.delete(input.sessionId);
+    this.moorStatuses.delete(input.sessionId);
+    this.core.observeHolderLiveness(
+      input.sessionId,
+      input.generation,
+      false,
+      'controller-link-recovery'
+    );
+    const previous = this.recoveries.get(input.sessionId);
+    if (previous?.timer !== undefined) clearTimeout(previous.timer);
+    const slot: MoorRecoverySlot = {
+      sessionId: input.sessionId,
+      sessionPath: input.sessionPath,
+      geometry: { ...input.geometry },
+      generation: input.generation,
+      owner: input.owner,
+      snapshot: input.snapshot,
+      episode: (previous?.episode ?? 0) + 1,
+      attempt: 0,
+      inputQueue: [...(previous?.inputQueue ?? []), ...input.queuedInput],
+      inputBytes:
+        (previous?.inputBytes ?? 0) +
+        input.queuedInput.reduce((sum, pending) => sum + pending.bytes.length, 0),
+      ...(previous?.pendingResize === undefined
+        ? {}
+        : { pendingResize: { ...previous.pendingResize } })
+    };
+    this.recoveries.set(input.sessionId, slot);
+    void this.runControllerRecovery(slot, slot.episode).catch((error) => {
+      console.error(
+        `[desk] controller recovery failed for ${input.sessionId} generation ${input.generation}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      if (this.recoveryCurrent(slot, slot.episode)) this.scheduleControllerRecovery(slot);
+    });
+  }
+
+  private recoveryCurrent(slot: MoorRecoverySlot, episode: number): boolean {
+    if (this.recoveries.get(slot.sessionId) !== slot || slot.episode !== episode) return false;
+    if (this.owners.get(slot.sessionId) !== slot.owner) return false;
+    const state = this.core.stateSnapshot(slot.sessionId);
+    return (
+      state !== undefined &&
+      state.generation === slot.generation &&
+      state.lifecycle !== 'exited'
+    );
+  }
+
+  private async runControllerRecovery(slot: MoorRecoverySlot, episode: number): Promise<void> {
+    if (!this.recoveryCurrent(slot, episode)) return;
+    this.expireRecoveryInput(slot);
+    const probe = await probeMoorHolder(slot.sessionPath, slot.generation, (candidate) => {
+      if (this.recoveryCurrent(slot, episode)) slot.candidate = candidate;
+    });
+    if (slot.candidate !== undefined) slot.candidate = undefined;
+    if (!this.recoveryCurrent(slot, episode)) return;
+    if (probe === 'absent') {
+      this.endAuthorityForConfirmedAbsence(slot.sessionId, slot.generation, slot.owner);
+      return;
+    }
+    if (probe === 'indeterminate') {
+      this.scheduleControllerRecovery(slot);
+      return;
+    }
+    const attached = await this.moorAttachMaster(
+      slot.sessionId,
+      slot.sessionPath,
+      slot.geometry,
+      {
+        generation: slot.generation,
+        resumeSnapshot: slot.snapshot,
+        recoverySlot: slot,
+        recoveryEpisode: episode,
+        stillValid: () => this.recoveryCurrent(slot, episode)
+      }
+    );
+    // `candidate` fences only an operation that is still in flight. A failed
+    // attach closes its client before resolving, so retaining it here would
+    // make the shared retry/deadline timer mistake a settled failure for live
+    // work and suppress every later retry.
+    if (slot.candidate !== undefined) slot.candidate = undefined;
+    if (!this.recoveryCurrent(slot, episode)) return;
+    if (!attached) {
+      this.scheduleControllerRecovery(slot);
+      return;
+    }
+    const link = this.masters.get(slot.sessionId);
+    if (link?.hasViewerLease?.() === false) {
+      slot.observer = true;
+      this.scheduleControllerRecovery(slot);
+      return;
+    }
+    this.finishRecoveredViewer(slot, link);
+  }
+
+  private finishRecoveredViewer(
+    slot: MoorRecoverySlot,
+    link: SessionMasterLink | undefined
+  ): void {
+    if (link !== undefined && slot.pendingResize !== undefined) {
+      const resize = slot.pendingResize;
+      link.sendResize(resize.rows, resize.cols, resize.surfaceId);
+    }
+    for (const pending of slot.inputQueue.splice(0)) {
+      slot.inputBytes -= pending.bytes.length;
+      if (
+        this.now() - pending.queuedAt >= RECOVERY_INPUT_MAX_AGE_MS ||
+        link === undefined ||
+        !link.sendInput(pending.bytes, pending.binary, pending.surfaceId, pending.queuedAt)
+      ) {
+        this.sendStaleLease(slot.sessionId, pending.surfaceId);
+      }
+    }
+    if (slot.timer !== undefined) clearTimeout(slot.timer);
+    this.recoveries.delete(slot.sessionId);
+    this.core.observeHolderLiveness(slot.sessionId, slot.generation, true);
+  }
+
+  private async runObserverLeaseRecovery(slot: MoorRecoverySlot, episode: number): Promise<void> {
+    if (!this.recoveryCurrent(slot, episode)) return;
+    this.expireRecoveryInput(slot);
+    const link = this.masters.get(slot.sessionId);
+    if (link?.acquireViewerLease === undefined) {
+      this.scheduleControllerRecovery(slot);
+      return;
+    }
+    const outcome = await link.acquireViewerLease();
+    if (!this.recoveryCurrent(slot, episode)) return;
+    if (outcome === 'busy') {
+      this.scheduleControllerRecovery(slot);
+      return;
+    }
+    slot.observer = false;
+    this.finishRecoveredViewer(slot, link);
+  }
+
+  /**
+   * Positive authenticated-probe absence ends authority without using either
+   * destructive path. `core.retire` records the exact reason and triggers the
+   * existing issue-59 final observer drain; no cleanup, TERMINATE, or retained
+   * CLI kill is invoked.
+   */
+  private endAuthorityForConfirmedAbsence(
+    sessionId: string,
+    generation: number,
+    owner: symbol
+  ): void {
+    if (this.owners.get(sessionId) !== owner) return;
+    const state = this.core.stateSnapshot(sessionId);
+    if (state === undefined || state.generation !== generation || state.lifecycle === 'exited') return;
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery?.timer !== undefined) clearTimeout(recovery.timer);
+    this.recoveries.delete(sessionId);
+    this.owners.delete(sessionId);
+    const link = this.masters.get(sessionId);
+    this.masters.delete(sessionId);
+    this.moorStatuses.delete(sessionId);
+    this.cleanups.delete(sessionId);
+    this.detachedKills.delete(sessionId);
+    link?.close();
+    this.core.retire(sessionId, 'confirmed-holder-absence');
+  }
+
+  private scheduleControllerRecovery(slot: MoorRecoverySlot): void {
+    this.expireRecoveryInput(slot);
+    if (!this.recoveryCurrent(slot, slot.episode)) return;
+    slot.attempt += 1;
+    const delay = RECOVERY_BACKOFF_MS[Math.min(slot.attempt, RECOVERY_BACKOFF_MS.length - 1)]!;
+    this.armControllerRecoveryTimer(slot, delay);
+  }
+
+  private armControllerRecoveryTimer(slot: MoorRecoverySlot, delay: number): void {
+    if (!this.recoveryCurrent(slot, slot.episode)) return;
+    const dueAt = this.now() + delay;
+    if (
+      slot.timer !== undefined &&
+      slot.timerDueAt !== undefined &&
+      slot.timerDueAt <= dueAt
+    ) {
+      return;
+    }
+    if (slot.timer !== undefined) clearTimeout(slot.timer);
+    const episode = slot.episode;
+    slot.timerDueAt = dueAt;
+    slot.timer = setTimeout(() => {
+      slot.timer = undefined;
+      slot.timerDueAt = undefined;
+      if (!this.recoveryCurrent(slot, episode)) return;
+      this.expireRecoveryInput(slot);
+      // Keep the same single timer armed at the oldest queued input's exact
+      // deadline while a bounded probe/attach candidate owns the slot.
+      this.armRecoveryInputExpiry(slot);
+      if (slot.candidate !== undefined) return;
+      const run = slot.observer
+        ? this.runObserverLeaseRecovery(slot, episode)
+        : this.runControllerRecovery(slot, episode);
+      void run.catch((error) => {
+        console.error(
+          `[desk] controller recovery retry failed for ${slot.sessionId} generation ${slot.generation}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        if (this.recoveryCurrent(slot, episode)) this.scheduleControllerRecovery(slot);
+      });
+    }, delay);
+    slot.timer.unref?.();
+  }
+
+  private dispatchMasterInput(
+    sessionId: string,
+    bytes: Uint8Array,
+    binary: boolean,
+    surfaceId: number
+  ): boolean {
+    const link = this.masters.get(sessionId);
+    if (link !== undefined) return link.sendInput(bytes, binary, surfaceId, this.now());
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery === undefined || !this.recoveryCurrent(recovery, recovery.episode)) return false;
+    // Control-plane input must answer synchronously; it cannot claim success
+    // for bytes merely deferred behind uncertain lease ownership.
+    if (surfaceId === 0) return false;
+    if (bytes.length === 0 || recovery.inputBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) {
+      return false;
+    }
+    recovery.inputQueue.push({
+      bytes: bytes.slice(),
+      binary,
+      surfaceId,
+      queuedAt: this.now()
+    });
+    recovery.inputBytes += bytes.length;
+    this.armRecoveryInputExpiry(recovery);
+    return true;
+  }
+
+  private armRecoveryInputExpiry(slot: MoorRecoverySlot): void {
+    const oldest = slot.inputQueue[0];
+    if (oldest === undefined) return;
+    this.armControllerRecoveryTimer(
+      slot,
+      Math.max(0, oldest.queuedAt + RECOVERY_INPUT_MAX_AGE_MS - this.now())
+    );
+  }
+
+  private expireRecoveryInput(slot: MoorRecoverySlot): void {
+    const cutoff = this.now() - RECOVERY_INPUT_MAX_AGE_MS;
+    while (slot.inputQueue[0]?.queuedAt <= cutoff) {
+      const expired = slot.inputQueue.shift()!;
+      slot.inputBytes -= expired.bytes.length;
+      this.sendStaleLease(slot.sessionId, expired.surfaceId);
+    }
+  }
+
+  private sendStaleLease(sessionId: string, channelId: number): void {
+    try {
+      this.core.sendBrowserFrame(sessionId, channelId, {
+        type: BpFrameType.ERROR,
+        channelId,
+        code: BpError.STALE_LEASE
+      });
+    } catch (error) {
+      console.error(
+        `[desk] could not report stale viewer lease for ${sessionId}/${channelId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
   }
 
   /**
@@ -751,8 +1136,14 @@ export class SessionManager {
     sessionId: string,
     opts: Parameters<SessionManager['spawnAndAttachMoor']>[1]
   ): Promise<SessionSpawnResult> {
+    if (this.recoveries.has(sessionId)) {
+      return { ok: false, reason: 'attach-failed' };
+    }
     if (this.core.hasLiveSession(sessionId) && this.masters.has(sessionId)) {
       return this.ensure(sessionId, opts.geometry, opts.subject ?? { kind: 'terminal' });
+    }
+    if (this.core.hasLiveSession(sessionId)) {
+      return { ok: false, reason: 'attach-failed' };
     }
     // A launch this daemon cannot tear down must not happen — and the refusal
     // must precede EVERY effect: no rendezvous mutation, no stateful
@@ -814,6 +1205,7 @@ export class SessionManager {
       }
     }
     const subject = opts.subject ?? { kind: 'terminal' };
+    let launchContext: Extract<SessionSpawnPreallocationResult, { ok: true }>['launchContext'];
     if (opts.preallocateSpawn !== undefined) {
       const decision = await opts.preallocateSpawn({
         sessionId,
@@ -825,6 +1217,7 @@ export class SessionManager {
         subject
       });
       if (!decision.ok) return decision;
+      launchContext = decision.launchContext;
     }
     const ens = this.ensure(sessionId, opts.geometry, subject);
     if (!ens.ok) return ens;
@@ -837,7 +1230,7 @@ export class SessionManager {
       } catch {
         if (this.owners.get(sessionId) === token) this.owners.delete(sessionId);
         if (ens.created) {
-          this.core.retire(sessionId);
+          this.core.retire(sessionId, 'spawn-prepare-failed');
           this.dropTerminalObservation(sessionId, ens.generation);
         }
         return { ok: false, reason: 'spawn-failed' };
@@ -860,6 +1253,9 @@ export class SessionManager {
           binPath: opts.binPath,
           args,
           generation: ens.generation,
+          ...(launchContext === undefined
+            ? {}
+            : { providerLaunchProof: launchContext.providerLaunchProof }),
           ...(opts.env === undefined ? {} : { env: opts.env })
         }));
       } catch {
@@ -907,7 +1303,7 @@ export class SessionManager {
         }
       }
       if (ens.created) {
-        this.core.retire(sessionId);
+        this.core.retire(sessionId, 'spawn-failed');
         this.dropTerminalObservation(sessionId, ens.generation);
       }
       return { ok: false, reason: 'spawn-failed' };
@@ -957,6 +1353,11 @@ export class SessionManager {
    * without retiring: the holders survive the daemon by design.
    */
   closeAllLinks(): void {
+    for (const recovery of this.recoveries.values()) {
+      if (recovery.timer !== undefined) clearTimeout(recovery.timer);
+      recovery.candidate?.close();
+    }
+    this.recoveries.clear();
     const links = [...this.masters.values()];
     this.masters.clear();
     this.moorStatuses.clear();
@@ -1066,7 +1467,7 @@ export class SessionManager {
     }
     if (createdSlot) {
       const generation = this.terminalObservations.get(sessionId)?.generation;
-      this.core.retire(sessionId);
+      this.core.retire(sessionId, 'spawn-aborted');
       if (generation !== undefined) this.dropTerminalObservation(sessionId, generation);
     }
   }
@@ -1088,12 +1489,32 @@ export class SessionManager {
 
   /** Unsubscribe a channel (surface + channel→session mapping). */
   unsubscribeChannel(channelId: number): void {
+    const sessionId = this.core.sessionOfChannel(channelId);
+    const recovery = sessionId === undefined ? undefined : this.recoveries.get(sessionId);
+    if (recovery !== undefined) {
+      recovery.inputQueue = recovery.inputQueue.filter((pending) => {
+        if (pending.surfaceId !== channelId) return true;
+        recovery.inputBytes -= pending.bytes.length;
+        return false;
+      });
+    }
+    if (sessionId !== undefined) this.masters.get(sessionId)?.cancelQueuedInput(channelId);
     this.core.unsubscribeChannel(channelId);
   }
 
   /** Route a browser RESIZE by channelId (ownership validated by the router). */
   onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
-    return this.core.onBrowserResizeByChannel(channelId, rows, cols);
+    const sessionId = this.core.sessionOfChannel(channelId);
+    if (sessionId === undefined || !this.core.onBrowserResizeByChannel(channelId, rows, cols)) {
+      return false;
+    }
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
+      recovery.geometry.rows = rows;
+      recovery.geometry.cols = cols;
+      recovery.pendingResize = { rows, cols, surfaceId: channelId };
+    }
+    return true;
   }
 
   /** Route a browser VISIBILITY by channelId. */
@@ -1130,15 +1551,31 @@ export class SessionManager {
     generation: number,
     event: MoorSessionEvent
   ): MoorObservationResult {
-    if (!this.core.hasLiveSession(sessionId)) {
-      return { ok: false, reason: 'session-not-found' };
-    }
     const state = this.core.stateSnapshot(sessionId);
     if (state === undefined) return { ok: false, reason: 'session-not-found' };
     if (state.generation !== generation) {
       return { ok: false, reason: 'generation-mismatch' };
     }
-    if (state.lifecycle === 'exited') {
+    // desk#59: the holder's real exit routinely lands AFTER Desk tore the
+    // session down, and retire() deletes the runtime entry — so a live-session
+    // guard here discarded the only evidence of how the child actually died.
+    // A retired generation stays observable for exactly one purpose: letting
+    // its own exit strengthen the placeholder. The generation check above still
+    // fences a successor, so this can never reach into N+1.
+    if (!this.core.hasLiveSession(sessionId)) {
+      const retired =
+        state.lifecycle === 'exited' && state.exit?.origin === 'retired';
+      if (!retired || event.type !== 'exit') {
+        return { ok: false, reason: 'session-not-found' };
+      }
+    }
+    // desk#59: an exited session is settled EXCEPT for the one correction that
+    // matters — the holder's own exit strengthening a teardown placeholder.
+    const strengthening =
+      state.lifecycle === 'exited' &&
+      state.exit?.origin === 'retired' &&
+      event.type === 'exit';
+    if (state.lifecycle === 'exited' && !strengthening) {
       return { ok: false, reason: 'lifecycle-exited' };
     }
     const at = Math.round(event.ts * 1_000);
@@ -1182,13 +1619,28 @@ export class SessionManager {
         authority = this.core.markExited(
           sessionId,
           generation,
-          { code: event.code, signal: null },
+          {
+            // desk#59: an unprovable ending has no honest number. Persisting 0
+            // would make it indistinguishable from a clean exit; null says
+            // "no code", and the browser EXIT boundary maps that to 0 itself.
+            code: event.outcome.kind === 'unknown' ? null : event.code,
+            signal:
+              event.outcome.kind === 'signalled' ? String(event.outcome.signal) : null,
+            origin: 'observed',
+            reason: null,
+            // desk#59: the raw ending as moor reported it. `code` stays only as
+            // the legacy numeric view for consumers that still read a number.
+            outcome: event.outcome,
+            // The exit was observed: observation did not fail.
+            diagnostic: null
+          },
           at
         );
         // Cutover parity: an APPLIED exit transition also pushes an explicit
         // EXIT frame to every subscribed browser surface — replayed or
         // duplicate exits (authority noop/rejected) never re-announce.
         if (authority.kind === 'applied') {
+          this.cancelRecoveryForObservedExit(sessionId, generation);
           this.core.emitExit(sessionId, event.code);
         }
         next.exit = { code: event.code, at };
@@ -1209,8 +1661,38 @@ export class SessionManager {
     return observation === undefined ? undefined : structuredClone(observation);
   }
 
+  private cancelRecoveryForObservedExit(sessionId: string, generation: number): void {
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery !== undefined && recovery.generation === generation) {
+      if (recovery.timer !== undefined) clearTimeout(recovery.timer);
+      recovery.candidate?.close();
+      this.recoveries.delete(sessionId);
+    }
+    const state = this.core.stateSnapshot(sessionId);
+    if (state?.generation !== generation || state.lifecycle !== 'exited') return;
+    this.owners.delete(sessionId);
+    const link = this.masters.get(sessionId);
+    this.masters.delete(sessionId);
+    this.moorStatuses.delete(sessionId);
+    link?.close();
+  }
+
   state(sessionId: string): SessionStateSnapshot | undefined {
     return this.core.state(sessionId);
+  }
+
+  /**
+   * desk#59 — record what observation failed to establish, leaving the reason
+   * that initiated the retirement exactly as written. Generation-fenced and
+   * monotonic: it fills an absent diagnostic once and never replaces one.
+   */
+  refineExitDiagnostic(
+    sessionId: string,
+    generation: number,
+    diagnostic: ExitDiagnostic,
+    observedAt?: number
+  ): AuthorityMutationResult {
+    return this.core.refineExitDiagnostic(sessionId, generation, diagnostic, observedAt);
   }
 
   stateSnapshot(sessionId: string): SessionStateSnapshot | undefined {
@@ -1237,8 +1719,16 @@ export class SessionManager {
    * record after a successful fire-and-forget kill is harmless: the next
    * control retire sees the socket already gone and reads clean.
    */
-  retire(sessionId: string): void {
-    const kill = this.beginRetire(sessionId);
+  /**
+   * desk#59 — the reason is REQUIRED, deliberately without a default. A default
+   * would hand an unnamed teardown a confident, plausible label ('the operator
+   * asked'), which is worse than no provenance at all: the record states a
+   * wrong cause instead of admitting it does not know. It also stops the type
+   * from forcing new call sites to declare themselves, letting the regression
+   * back in silently.
+   */
+  retire(sessionId: string, reason: RetireReason): void {
+    const kill = this.beginRetire(sessionId, reason);
     if (kill !== undefined) {
       void runKillCommand(kill); // best effort — no caller to report to
     }
@@ -1251,7 +1741,10 @@ export class SessionManager {
    * the STALE socket as ready; deleting the record earlier means one failed
    * retire loses the ONLY teardown and the next retire reads falsely clean.
    */
-  async retireAwaited(sessionId: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; error?: string }> {
+  async retireAwaited(
+    sessionId: string,
+    opts: { timeoutMs?: number; reason: RetireReason }
+  ): Promise<{ ok: boolean; error?: string }> {
     return this.runSerializedLifecycle(sessionId, () =>
       this.retireAwaitedUnlocked(sessionId, opts)
     );
@@ -1259,11 +1752,11 @@ export class SessionManager {
 
   private async retireAwaitedUnlocked(
     sessionId: string,
-    opts: { timeoutMs?: number } = {}
+    opts: { timeoutMs?: number; reason: RetireReason }
   ): Promise<{ ok: boolean; error?: string }> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
     await this.terminateOverLiveLink(sessionId);
-    const kill = this.beginRetire(sessionId);
+    const kill = this.beginRetire(sessionId, opts.reason);
     if (kill === undefined) {
       return { ok: true };
     }
@@ -1299,7 +1792,7 @@ export class SessionManager {
   async retireGenerationAwaited(
     sessionId: string,
     expectedGeneration: number,
-    opts: { timeoutMs?: number } = {}
+    opts: { timeoutMs?: number; reason: RetireReason }
   ): Promise<RetireGenerationResult> {
     return this.runSerializedLifecycle(sessionId, () =>
       this.retireGenerationAwaitedUnlocked(
@@ -1313,7 +1806,7 @@ export class SessionManager {
   private async retireGenerationAwaitedUnlocked(
     sessionId: string,
     expectedGeneration: number,
-    opts: { timeoutMs?: number } = {}
+    opts: { timeoutMs?: number; reason: RetireReason }
   ): Promise<RetireGenerationResult> {
     const timeoutMs = opts.timeoutMs ?? 5_000;
     const snapshot = this.stateSnapshot(sessionId);
@@ -1338,7 +1831,10 @@ export class SessionManager {
     }
 
     if (snapshot !== undefined) await this.terminateOverLiveLink(sessionId);
-    const kill = snapshot === undefined ? retainedKill : this.beginRetire(sessionId);
+    const kill =
+      snapshot === undefined
+        ? retainedKill
+        : this.beginRetire(sessionId, opts.reason);
     if (kill === undefined) {
       return { ok: true };
     }
@@ -1368,7 +1864,12 @@ export class SessionManager {
     opts: { timeoutMs?: number } = {}
   ): Promise<ProviderSessionResetLivenessResult<T>> {
     return this.runSerializedLifecycle(sessionId, async () => {
-      const retired = await this.retireAwaitedUnlocked(sessionId, opts);
+      // A provider-session reset tears the session down to re-establish its
+      // identity — that is what ended it, and the record says so.
+      const retired = await this.retireAwaitedUnlocked(sessionId, {
+        ...opts,
+        reason: 'provider-session-reset'
+      });
       if (!retired.ok) {
         return {
           ok: false,
@@ -1488,8 +1989,12 @@ export class SessionManager {
    * slot. PEEKS the kill record without consuming it — consumption is the
    * confirming caller's decision.
    */
-  private beginRetire(sessionId: string): DetachedKillRecord | undefined {
+  private beginRetire(sessionId: string, reason: RetireReason): DetachedKillRecord | undefined {
     this.owners.delete(sessionId); // any deferred old-operation callback goes stale
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery?.timer !== undefined) clearTimeout(recovery.timer);
+    recovery?.candidate?.close();
+    this.recoveries.delete(sessionId);
     this.masters.get(sessionId)?.close();
     this.masters.delete(sessionId);
     // Generation-bound authority dies with the link it was adopted from.
@@ -1497,7 +2002,7 @@ export class SessionManager {
     const cleanup = this.cleanups.get(sessionId);
     if (cleanup !== undefined) cleanup();
     this.cleanups.delete(sessionId);
-    this.core.retire(sessionId);
+    this.core.retire(sessionId, reason);
     return this.detachedKills.get(sessionId);
   }
 
@@ -1559,9 +2064,11 @@ export class SessionManager {
  */
 async function probeMoorHolder(
   sessionPath: string,
-  generation: number
+  generation: number,
+  onClient?: (client: MoorMasterClient) => void
 ): Promise<'authenticated-live' | 'absent' | 'indeterminate'> {
   const probe = new MoorMasterClient(sessionPath, generation);
+  onClient?.(probe);
   try {
     await probe.connect();
   } catch (error) {

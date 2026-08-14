@@ -30,6 +30,7 @@ import {
   ensureUploadFileBucket,
   listChannelMembers,
   listChannels,
+  resolveUnreadSummaries,
   readChannelDetail,
   readChannelMessages,
   readThread,
@@ -156,6 +157,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
           confirmDelivered(home, sessionId, context.seq);
           break;
         case 'delivery-ack-timeout':
+          confirmDelivered(home, sessionId, context.seq);
+          break;
+        // Non-agent (shell) session: nothing to verify, and nothing failed —
+        // the item leaves the queue as .delivered, never as .stuck-*.
+        case 'submit-not-applicable':
           confirmDelivered(home, sessionId, context.seq);
           break;
         case 'submit-stuck-paste':
@@ -434,6 +440,21 @@ function resolveConversationFile(thread: unknown): string {
   return `thread-${thread}.md`;
 }
 
+function rejectPassiveDeliveryWrite(res: ServerResponse, engine: ChannelsEngine): boolean {
+  if (!engine.passive) {
+    return false;
+  }
+  const owner = engine.passiveOwnerPid;
+  sendJson(res, 503, {
+    ok: false,
+    error: `channels engine is passive${owner === undefined ? '' : `; process ${owner} owns delivery`}`,
+    passive: true,
+    passiveOwner: owner,
+    lockError: engine.lockError
+  });
+  return true;
+}
+
 export async function handleChannelsRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   if (!url.pathname.startsWith('/api/channels/')) {
     return false;
@@ -443,14 +464,33 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
   try {
     if (req.method === 'GET' && url.pathname === '/api/channels/state') {
       const since = Number(url.searchParams.get('since') ?? '0') || 0;
+      let seen: Record<string, string> | null = null;
+      const seenRaw = url.searchParams.get('seen');
+      if (seenRaw !== null && seenRaw.length <= 16384) {
+        try {
+          const parsed = JSON.parse(seenRaw) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            seen = Object.fromEntries(
+              Object.entries(parsed as Record<string, unknown>).filter(
+                (entry): entry is [string, string] => typeof entry[1] === 'string'
+              )
+            );
+          }
+        } catch {
+          seen = null;
+        }
+      }
+      const channels = listChannels(home);
       sendJson(res, 200, {
         home,
-        channels: listChannels(home),
+        channels: seen === null ? channels : resolveUnreadSummaries(home, channels, seen),
         delivery: await engine.lifecycleStates(),
         activity: engine.listActivity(since).slice(-100),
         activitySeq: engine.latestActivitySeq(),
         // another live desk process owns dispatch for this channels home
         passive: engine.passive,
+        // bounded ownership diagnostic, including degraded OS identity on an active nonce-backed claim
+        lockError: engine.lockError,
         // the owning process's pid, so the UI can name the owner + offer recovery
         passiveOwner: engine.passiveOwnerPid
       });
@@ -464,6 +504,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       sendJson(res, 200, {
         home,
         passive: engine.passive,
+        lockError: engine.lockError,
         pumpAlive: engine.pumpAlive(),
         totalQueued: sessions.reduce((sum, session) => sum + session.queueDepth, 0),
         sessions,
@@ -799,6 +840,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/post') {
       const body = await readJsonBody(req);
+      if (rejectPassiveDeliveryWrite(res, engine)) {
+        return true;
+      }
       const channel = requireChannel(body.channel);
       const author = resolveAuthor(home, channel, body);
       const appended = await appendMessage(home, channel, {
@@ -816,6 +860,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/share') {
       const body = await readJsonBody(req);
+      if (rejectPassiveDeliveryWrite(res, engine)) {
+        return true;
+      }
       const fromChannel = requireChannel(body.fromChannel);
       const toChannel = requireChannel(body.toChannel);
       const messageId = requireString(body.messageId, 'messageId');

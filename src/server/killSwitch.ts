@@ -52,7 +52,7 @@ export async function executeKillSwitch(): Promise<KillResult> {
     result.errors.push(`manifest unreadable: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const sessionId of sessionIds) {
-    const retired = await retireNativeSession(sessionId);
+    const retired = await retireNativeSession(sessionId, 'kill-switch');
     if (retired.ok) {
       result.killedSessions.push(sessionId);
     } else if (retired.error) {

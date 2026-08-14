@@ -98,7 +98,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     });
 
     expect(
-      mgr.observeMoorEvent('web-1', 2, { ts: 1.4, type: 'exit', code: 7 })
+      mgr.observeMoorEvent('web-1', 2, { ts: 1.4, type: 'exit', code: 7, outcome: { kind: 'exited', code: 7 } })
     ).toMatchObject({ ok: true });
     expect(mgr.terminalObservation('web-1')).toMatchObject({
       exit: { code: 7, at: 1_400 },
@@ -135,7 +135,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     ).toEqual({ ok: false, reason: 'generation-mismatch' });
     expect(mgr.terminalObservation('web-1')).toEqual(initial);
 
-    mgr.observeMoorEvent('web-1', 2, { ts: 1.2, type: 'exit', code: 0 });
+    mgr.observeMoorEvent('web-1', 2, { ts: 1.2, type: 'exit', code: 0, outcome: { kind: 'exited', code: 0 } });
     const exited = mgr.terminalObservation('web-1');
     expect(
       mgr.observeMoorEvent('web-1', 2, {
@@ -151,7 +151,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     // re-announce EXIT to the browser.
     mgr.subscribe('web-1', 'main', 1, 1);
     browserOut.length = 0;
-    mgr.observeMoorEvent('web-1', 2, { ts: 1.4, type: 'exit', code: 0 });
+    mgr.observeMoorEvent('web-1', 2, { ts: 1.4, type: 'exit', code: 0, outcome: { kind: 'exited', code: 0 } });
     expect(browserOut.filter((e) => e.frame.type === BpFrameType.EXIT)).toHaveLength(0);
   });
 });

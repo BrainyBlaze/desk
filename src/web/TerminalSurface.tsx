@@ -881,6 +881,9 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       onError: (code) => {
         terminal.writeln(`\r\n\x1b[31m${describeBpError(code)}\x1b[0m`);
       },
+      onClientError: (message) => {
+        terminal.writeln(`\r\n\x1b[31m${message}\x1b[0m`);
+      },
       onConnectionChange: (up) => {
         if (disposed) {
           return;

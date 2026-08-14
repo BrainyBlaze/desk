@@ -8,6 +8,7 @@ import {
   readClaudeContinuityStatus,
   type ClaudeContinuityStatus
 } from './claudeContinuityStatus.js';
+import { readProviderSessionContinuityStatus } from './providerSessionContinuityStatus.js';
 
 import { buildDeskViewModel } from '../ui/model.js';
 import type { DeskGroupSeed, DeskProjectSeed, DeskViewModel } from '../ui/model.js';
@@ -28,6 +29,7 @@ function runningSessionsFor(sessions: readonly SessionSpec[]): Set<string> {
 export interface BuildDeskSnapshotOptions {
   homeDir?: string;
   manifestPath?: string;
+  daemonHomeRoot?: string;
 }
 
 export interface DeskSnapshot {
@@ -45,14 +47,28 @@ export function buildDeskSnapshot(options: BuildDeskSnapshotOptions = {}): DeskS
     homeDir
   });
   const runningSessions = runningSessionsFor(sessions);
+  const daemonHomeRoot =
+    options.daemonHomeRoot ??
+    process.env.DESK_DAEMON_HOME ??
+    join(homeDir, '.config', 'desk');
+  const continuity = readClaudeContinuityStatus(sessions, {
+    homeDir,
+    runningSessions
+  });
+  continuity.issues.push(
+    ...readProviderSessionContinuityStatus(sessions, {
+      ledgerPath: join(
+        daemonHomeRoot,
+        '_engine',
+        'provider-session-continuity.ndjson'
+      )
+    }).issues
+  );
 
   return {
     configPath: manifestPath,
     view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
-    continuity: readClaudeContinuityStatus(sessions, {
-      homeDir,
-      runningSessions
-    }),
+    continuity,
     generatedAt: new Date().toISOString()
   };
 }
@@ -68,14 +84,28 @@ export function buildDeskSnapshotFromManifest(
   const sessions = buildSessionSpecs(manifest, {
     homeDir
   });
+  const daemonHomeRoot =
+    options.daemonHomeRoot ??
+    process.env.DESK_DAEMON_HOME ??
+    join(homeDir, '.config', 'desk');
+  const continuity = readClaudeContinuityStatus(sessions, {
+    homeDir,
+    runningSessions
+  });
+  continuity.issues.push(
+    ...readProviderSessionContinuityStatus(sessions, {
+      ledgerPath: join(
+        daemonHomeRoot,
+        '_engine',
+        'provider-session-continuity.ndjson'
+      )
+    }).issues
+  );
 
   return {
     configPath: manifestPath,
     view: buildDeskViewModel(sessions, runningSessions, buildGroupSeeds(manifest), buildProjectSeeds(manifest)),
-    continuity: readClaudeContinuityStatus(sessions, {
-      homeDir,
-      runningSessions
-    }),
+    continuity,
     generatedAt: new Date().toISOString()
   };
 }

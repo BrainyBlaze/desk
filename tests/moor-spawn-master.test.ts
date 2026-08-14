@@ -18,6 +18,7 @@ import {
   moorLaunchChannelEnvKey
 } from '../src/server/runtime/moorLaunchChannel.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
+import { DESK_PROVIDER_LAUNCH_PROOF } from '../src/shared/providerSessionIdentity.js';
 
 /**
  * Fake moor launcher: finds the single *_LAUNCH_CHANNEL selector in its
@@ -42,12 +43,22 @@ try {
   const generationKeys = Object.keys(process.env).filter((key) => key.endsWith('_GENERATION'));
   const environment = {};
   for (const key of generationKeys) environment[key] = process.env[key];
+  // The terminal identity/locale Desk composes for the child (desk#45/#51):
+  // captured from the SAME spawned process, so a refactor of the env spread
+  // cannot silently stop delivering it.
+  const terminalEnv = {};
+  for (const key of ['TERM', 'COLORTERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'LC_TERMINAL', 'LANG']) {
+    if (process.env[key] !== undefined) terminalEnv[key] = process.env[key];
+  }
+  const providerLaunchProof = process.env['${DESK_PROVIDER_LAUNCH_PROOF}'];
   writeFileSync(out, JSON.stringify({
     selectorKey,
     selector,
     recordHex: Buffer.from(record).toString('hex'),
     recordLength: record.length,
-    environment
+    environment,
+    terminalEnv,
+    providerLaunchProof
   }));
   process.exit(0);
 } catch (error) {
@@ -57,6 +68,8 @@ try {
 `;
 
 interface ProbeReport {
+  terminalEnv?: Record<string, string>;
+  providerLaunchProof?: string;
   selectorKey?: string;
   selector?: string;
   recordHex?: string;
@@ -68,7 +81,8 @@ interface ProbeReport {
 async function runProbe(
   binPath: string,
   generation: number,
-  extraEnv: NodeJS.ProcessEnv = {}
+  extraEnv: NodeJS.ProcessEnv = {},
+  providerLaunchProof?: string
 ): Promise<ProbeReport> {
   const root = mkdtempSync(join(tmpdir(), 'moor-spawn-'));
   try {
@@ -79,7 +93,8 @@ async function runProbe(
       argv0: binPath,
       args: [join(root, 'probe.cjs'), reportPath],
       generation,
-      env: { PATH: process.env.PATH ?? '', ...extraEnv }
+      env: { PATH: process.env.PATH ?? '', ...extraEnv },
+      ...(providerLaunchProof === undefined ? {} : { providerLaunchProof })
     });
     const exitCode = await new Promise<number>((resolve, reject) => {
       child.once('error', reject);
@@ -205,6 +220,58 @@ describe('spawnMoorMaster', () => {
       DESK_SESSION_GENERATION: '23'
     });
     expect(Number.parseInt(report.selector!, 10)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('scrubs ambient provider launch proof and injects only the explicit proof', async () => {
+    const inherited = await runProbe('/usr/local/bin/moor', 24, {
+      [DESK_PROVIDER_LAUNCH_PROOF]: 'ambient-forgery'
+    });
+    expect(inherited.providerLaunchProof).toBeUndefined();
+
+    const authorized = await runProbe(
+      '/usr/local/bin/moor',
+      25,
+      { [DESK_PROVIDER_LAUNCH_PROOF]: 'ambient-forgery' },
+      'daemon-issued-proof'
+    );
+    expect(authorized.providerLaunchProof).toBe('daemon-issued-proof');
+  });
+
+  it('delivers the composed terminal identity and locale to the child (desk#45, desk#51)', async () => {
+    // The verifier found the gap this closes: the old harness captured only
+    // *_GENERATION keys, so nothing asserted that the env Desk composes at the
+    // spawn seam actually REACHES the spawned process. This drives the real
+    // spawnMoorMaster with a daemonized-style environment (no TERM, no locale
+    // — exactly what systemd/docker/the installer hand a daemon).
+    const report = await runProbe('/opt/desk/libexec/moor', 31, {
+      TERM: undefined,
+      LANG: undefined,
+      LC_ALL: undefined,
+      LC_CTYPE: undefined
+    } as NodeJS.ProcessEnv);
+    expect(report.terminalEnv).toMatchObject({
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      TERM_PROGRAM: 'desk',
+      TERM_PROGRAM_VERSION: '0',
+      LC_TERMINAL: 'desk',
+      LANG: 'C.UTF-8'
+    });
+  });
+
+  it('never overrides a terminal identity or locale the operator already set', async () => {
+    const report = await runProbe('/opt/desk/libexec/moor', 33, {
+      TERM: 'screen-256color',
+      TERM_PROGRAM: 'iTerm.app',
+      TERM_PROGRAM_VERSION: '3.5.0',
+      LANG: 'de_DE.UTF-8'
+    });
+    expect(report.terminalEnv).toMatchObject({
+      TERM: 'screen-256color',
+      TERM_PROGRAM: 'iTerm.app',
+      TERM_PROGRAM_VERSION: '3.5.0',
+      LANG: 'de_DE.UTF-8'
+    });
   });
 
   it('names the selector fd it actually wired', async () => {

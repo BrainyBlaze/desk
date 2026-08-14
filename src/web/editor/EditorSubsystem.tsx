@@ -1952,7 +1952,7 @@ export function EditorSubsystem({
     void (async () => {
       try {
         const state = isNotes ? await fsNotesState() : (await fetchSettings()).editor;
-        for (const path of state?.openFiles ?? []) {
+        for (const path of [...(state?.openFiles ?? [])].reverse()) {
           if (rootGenRef.current !== gen) {
             return; // root switched mid-restore — abandon the old root's tabs
           }

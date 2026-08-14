@@ -68,10 +68,11 @@ jobs:
           const bytes = Buffer.from('installer-negative-fixture\n');
           const sha256 = createHash('sha256').update(bytes).digest('hex');
           const pin = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             repository: 'https://github.com/BrainyBlaze/moor',
             version: 'v0.1.0',
             commit: 'b'.repeat(40),
+            coverage: { requiredClosure: 'full-matrix' },
             targets: Object.fromEntries(Object.entries(assets).map(([target, asset]) => [
               target,
               { asset, size: bytes.length, sha256 }

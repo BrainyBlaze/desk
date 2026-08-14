@@ -5,12 +5,22 @@
 // log clear, and the binary's root/alias fences. Skips cleanly when the
 // binary is absent (override with DESK_MOOR_NATIVE_BIN).
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTerminalDaemon } from '../src/server/runtime/terminalDaemon.js';
+import { archiveMoorGenerationStores } from '../src/server/runtime/moorGenerationStores.js';
 import {
   moorEventStoreDir,
   moorEventStoreRoot
@@ -18,6 +28,10 @@ import {
 import { SessionManager } from '../src/server/runtime/sessionManager.js';
 import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../src/shared/runtime/workerSupervisor.js';
+import {
+  MoorStoreKind,
+  readMoorStoreSnapshot
+} from '../src/server/runtime/moorStore.js';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
@@ -68,6 +82,43 @@ function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_000): P
     };
     tick();
   });
+}
+
+const STORE_SLOTS = ['body.0', 'body.1', 'commit.0', 'commit.1'] as const;
+
+function compileInstrument(root: string): string {
+  const source = join(root, 'instrument.c');
+  const object = join(root, 'instrument.so');
+  writeFileSync(
+    source,
+    `#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n\nstatic unsigned char nibble(char value) {\n  if (value >= '0' && value <= '9') return (unsigned char)(value - '0');\n  if (value >= 'a' && value <= 'f') return (unsigned char)(value - 'a' + 10);\n  return 255;\n}\n\n__attribute__((constructor)) static void acknowledge(void) {\n  char *channel = getenv("MOOR_INSTRUMENT_CHANNEL");\n  char *nonce = getenv("MOOR_INSTRUMENT_NONCE");\n  char *generation = getenv("MOOR_SESSION_GENERATION");\n  if (!channel || !nonce || !generation || strlen(nonce) != 32) return;\n  int fd = (int)strtol(channel, 0, 10);\n  uint32_t gen = (uint32_t)strtoul(generation, 0, 10);\n  uint32_t pid = (uint32_t)getpid();\n  unsigned char record[36] = {0};\n  memcpy(record, "MOORINS3", 8);\n  record[8] = 1;\n  for (int at = 0; at < 4; ++at) {\n    record[12 + at] = (unsigned char)(gen >> (at * 8));\n    record[16 + at] = (unsigned char)(pid >> (at * 8));\n  }\n  for (int at = 0; at < 16; ++at) {\n    unsigned char high = nibble(nonce[at * 2]);\n    unsigned char low = nibble(nonce[at * 2 + 1]);\n    if (high > 15 || low > 15) return;\n    record[20 + at] = (unsigned char)((high << 4) | low);\n  }\n  unsetenv("MOOR_INSTRUMENT_CHANNEL");\n  unsetenv("MOOR_INSTRUMENT_NONCE");\n  size_t offset = 0;\n  while (offset < sizeof(record)) {\n    ssize_t written = write(fd, record + offset, sizeof(record) - offset);\n    if (written <= 0) break;\n    offset += (size_t)written;\n  }\n  close(fd);\n}\n`,
+    { mode: 0o600 }
+  );
+  const built = spawnSync('cc', ['-shared', '-fPIC', '-O2', '-o', object, source], {
+    encoding: 'utf8'
+  });
+  if (built.status !== 0) {
+    throw new Error(`could not compile native Moor instrument: ${built.stderr}`);
+  }
+  return object;
+}
+
+function decodeManifestPath(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('native lifecycle omitted an external path');
+  return Buffer.from(value, 'base64').toString();
+}
+
+function expectIndependentCopies(stable: string, archive: string): void {
+  for (const slot of STORE_SLOTS) {
+    const stablePath = join(stable, slot);
+    const archivePath = join(archive, slot);
+    const left = lstatSync(stablePath, { bigint: true });
+    const right = lstatSync(archivePath, { bigint: true });
+    expect(left.nlink).toBe(1n);
+    expect(right.nlink).toBe(1n);
+    expect(left.dev === right.dev && left.ino === right.ino).toBe(false);
+    expect(readFileSync(archivePath)).toEqual(readFileSync(stablePath));
+  }
 }
 
 describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', () => {
@@ -262,6 +313,84 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
 
       const outcome = await daemon.clearSessionLog('native-l');
       expect(['cleared', 'already-clear']).toContain(outcome);
+    },
+    30_000
+  );
+
+  it(
+    'successor cleanup parses copied predecessor lifecycle, removes external artifacts, and preserves archives',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'moor-native-generation-copy-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      pinTmpdir(root);
+      mkdirSync(join(root, '_engine'), { recursive: true, mode: 0o700 });
+      const instrument = compileInstrument(root);
+      const daemon = createTerminalDaemon({
+        homeRoot: root,
+        moorBinPath: NATIVE_BIN,
+        moorSocketRoot: root,
+        httpServer: new FakeUpgradeServer()
+      });
+      cleanups.push(() => daemon.dispose());
+      const sessionId = 'native-generation-copy';
+      const sessionPath = join(root, sessionId);
+
+      const predecessor = await daemon.provision(sessionId, {
+        command: [
+          '-S',
+          instrument,
+          'sh',
+          '-c',
+          'printf predecessor-output; sleep 1; exit 7'
+        ],
+        geometry: { rows: 24, cols: 80 },
+        subject: { kind: 'terminal' }
+      });
+      expect(predecessor).toMatchObject({ ok: true, generation: 2 });
+      await waitFor(
+        () => !existsSync(sessionPath) && existsSync(`${sessionPath}.exit/body.0`),
+        'real predecessor exit companions'
+      );
+
+      const lifecycle = await readMoorStoreSnapshot(
+        `${sessionPath}.exit`,
+        MoorStoreKind.Exit,
+        2
+      );
+      const manifest = JSON.parse(new TextDecoder().decode(lifecycle.bytes)) as {
+        event_path?: unknown;
+        instrument_path?: unknown;
+      };
+      const priorEvent = decodeManifestPath(manifest.event_path);
+      const priorInstrument = decodeManifestPath(manifest.instrument_path);
+      expect(existsSync(priorEvent)).toBe(true);
+      expect(existsSync(priorInstrument)).toBe(true);
+
+      await archiveMoorGenerationStores(sessionPath, 3);
+      expectIndependentCopies(`${sessionPath}.exit`, `${sessionPath}.2.exit`);
+      expectIndependentCopies(`${sessionPath}.log`, `${sessionPath}.2.log`);
+
+      const successor = await daemon.provision(sessionId, {
+        command: ['sh', '-c', 'printf successor-ready; cat'],
+        geometry: { rows: 24, cols: 80 },
+        subject: { kind: 'terminal' }
+      });
+      expect(successor).toMatchObject({ ok: true, generation: 3 });
+      cleanups.push(async () => {
+        await daemon.retire(sessionId).catch(() => undefined);
+      });
+
+      expect(existsSync(priorEvent)).toBe(false);
+      expect(existsSync(priorInstrument)).toBe(false);
+      await expect(
+        readMoorStoreSnapshot(`${sessionPath}.exit`, MoorStoreKind.Exit, 3)
+      ).resolves.toBeDefined();
+      await expect(
+        readMoorStoreSnapshot(`${sessionPath}.2.exit`, MoorStoreKind.Exit, 2)
+      ).resolves.toBeDefined();
+      await expect(
+        readMoorStoreSnapshot(`${sessionPath}.2.log`, MoorStoreKind.Log, 2)
+      ).resolves.toBeDefined();
     },
     30_000
   );

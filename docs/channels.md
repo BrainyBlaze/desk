@@ -165,7 +165,8 @@ surface:
 
 If a second Desk process serves the same channels home, it runs **passive**:
 it renders everything but does not deliver. A passive badge appears in the
-header and status bar with the owning process.
+header and status bar with the owning process. Message posts and shares through
+that server are refused before append until it owns delivery.
 
 ## Notifications
 

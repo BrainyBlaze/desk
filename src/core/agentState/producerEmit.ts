@@ -12,6 +12,8 @@
 // The runtime carries NO judgement about what an observation means. It reports
 // what was seen and stamps who saw it.
 
+import { DESK_PROVIDER_LAUNCH_PROOF } from '../../shared/providerSessionIdentity.js';
+
 /** Producers registered in the control-plane contract, by provider. */
 export const TERMINAL_PRODUCERS = {
   claude: 'claude-hooks',
@@ -220,6 +222,7 @@ async function deskPost(observation) {
     // deduplicates on eventId and groups on invocationId.
     invocationId: eventId,
     occurredAt: now,
+    launchProof: process.env.${DESK_PROVIDER_LAUNCH_PROOF},
     observation: observation
   };
   const controller = new AbortController();

@@ -83,7 +83,7 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
         sendBrowser: (sessionId, _channelId, frame) => browserOut.push({ sessionId, frame })
       });
       cleanups.push(async () => {
-        await manager.retireAwaited('s1').catch(() => undefined);
+        await manager.retireAwaited('s1', { reason: 'control-retire' }).catch(() => undefined);
       });
 
       const killSpec = {
@@ -129,7 +129,7 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
       expect(outputFrames.length).toBeGreaterThan(0);
 
       // Retire runs the confirmed moor kill: the rendezvous must be GONE.
-      const retired = await manager.retireAwaited('s1');
+      const retired = await manager.retireAwaited('s1', { reason: 'control-retire' });
       expect(retired.ok).toBe(true);
       expect(existsSync(sessionPath)).toBe(false);
     },
@@ -150,7 +150,7 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
       sendBrowser: () => {}
     });
     cleanups.push(async () => {
-      await manager.retireAwaited('s2').catch(() => undefined);
+      await manager.retireAwaited('s2', { reason: 'control-retire' }).catch(() => undefined);
     });
 
     const spawnOnce = () =>
@@ -169,14 +169,14 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
 
     const first = await spawnOnce();
     expect(first.ok).toBe(true);
-    const retired = await manager.retireAwaited('s2');
+    const retired = await manager.retireAwaited('s2', { reason: 'control-retire' });
     expect(retired.ok).toBe(true);
     expect(existsSync(sessionPath)).toBe(false);
 
     // A fresh spawn after a clean retire allocates the NEXT generation and joins.
     const second = await spawnOnce();
     expect(second.ok).toBe(true);
-    const secondRetire = await manager.retireAwaited('s2');
+    const secondRetire = await manager.retireAwaited('s2', { reason: 'control-retire' });
     expect(secondRetire.ok).toBe(true);
   }, 30_000);
 });
@@ -252,7 +252,7 @@ describe('SessionManager × moor session control (§8/§9/§7.4/§10.2.13 over t
       expect(result.ok).toBe(true);
       expect(existsSync(sessionPath)).toBe(true);
 
-      const retired = await manager.retireAwaited('t1');
+      const retired = await manager.retireAwaited('t1', { reason: 'control-retire' });
       expect(retired.ok).toBe(true);
       expect(existsSync(sessionPath)).toBe(false);
     },
@@ -268,7 +268,7 @@ describe('SessionManager × moor session control (§8/§9/§7.4/§10.2.13 over t
       cleanups.push(() => killSurvivingHolder(sessionPath));
       const manager = makeManager(new GenerationLedger(new InMemoryGenerationLedger()));
       cleanups.push(async () => {
-        await manager.retireAwaited('q1').catch(() => undefined);
+        await manager.retireAwaited('q1', { reason: 'control-retire' }).catch(() => undefined);
       });
 
       const result = await manager.spawnAndAttachMoor('q1', {
@@ -358,7 +358,7 @@ describe('SessionManager × moor lifecycle concurrency (coalesce + serialized re
         sendBrowser: () => {}
       });
       cleanups.push(async () => {
-        await manager.retireAwaited('c1').catch(() => undefined);
+        await manager.retireAwaited('c1', { reason: 'control-retire' }).catch(() => undefined);
       });
 
       const spawnOnce = () =>
@@ -415,7 +415,7 @@ describe('SessionManager × moor lifecycle concurrency (coalesce + serialized re
       });
       // Submitted while the spawn is still in flight: runSerializedLifecycle
       // must order it BEHIND the spawn — never against a half-built session.
-      const retiring = manager.retireAwaited('r1');
+      const retiring = manager.retireAwaited('r1', { reason: 'control-retire' });
 
       const [spawned, retired] = await Promise.all([spawning, retiring]);
       // Deterministic end state: the spawn fully completed first (it holds the
@@ -598,7 +598,7 @@ describe('SessionManager × moor liveness (§10 indeterminate over the GO harnes
         sendBrowser: () => {}
       });
       cleanups.push(async () => {
-        await manager.retireAwaited('l1').catch(() => undefined);
+        await manager.retireAwaited('l1', { reason: 'control-retire' }).catch(() => undefined);
       });
 
       const result = await manager.spawnAndAttachMoor('l1', {
@@ -646,7 +646,7 @@ describe('SessionManager × moor liveness (§10 indeterminate over the GO harnes
         }
       }
 
-      const retired = await manager.retireAwaited('l1');
+      const retired = await manager.retireAwaited('l1', { reason: 'control-retire' });
       expect(retired.ok).toBe(true);
       expect(existsSync(sessionPath)).toBe(false);
     },
@@ -693,7 +693,7 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
         sendBrowser: (sessionId, _channelId, frame) => browserOut.push({ sessionId, frame })
       });
       cleanups.push(async () => {
-        await manager.retireAwaited('r1').catch(() => undefined);
+        await manager.retireAwaited('r1', { reason: 'control-retire' }).catch(() => undefined);
       });
 
       const restored = await manager.restoreAndAttachMoor('r1', {
@@ -734,7 +734,7 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
       );
 
       // Retire runs the registered moor kill: the rendezvous must be GONE.
-      const retired = await manager.retireAwaited('r1');
+      const retired = await manager.retireAwaited('r1', { reason: 'control-retire' });
       expect(retired.ok).toBe(true);
       expect(existsSync(sessionPath)).toBe(false);
     },

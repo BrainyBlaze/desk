@@ -1,5 +1,7 @@
 export const PROVIDER_SESSION_PROVIDERS = ['claude', 'codex', 'opencode'] as const;
 
+export const DESK_PROVIDER_LAUNCH_PROOF = 'DESK_PROVIDER_LAUNCH_PROOF';
+
 export type ProviderSessionProvider = (typeof PROVIDER_SESSION_PROVIDERS)[number];
 
 export const PROVIDER_SESSION_ID_PAYLOAD_FIELD = {

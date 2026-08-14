@@ -22,6 +22,7 @@ import {
   moorLaunchChannelEnvKey
 } from './moorLaunchChannel.js';
 import { sessionTerminalEnv } from '../../shared/sessionTerminalEnv.js';
+import { DESK_PROVIDER_LAUNCH_PROOF } from '../../shared/providerSessionIdentity.js';
 
 export interface MoorSpawnOptions {
   binPath: string;
@@ -35,6 +36,7 @@ export interface MoorSpawnOptions {
   argv0?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  providerLaunchProof?: string;
   detached?: boolean;
 }
 
@@ -60,6 +62,7 @@ const SUPERVISION_CARRIERS = [
   'MOOR_LAUNCH_CHANNEL',
   MOOR_SESSION_GENERATION,
   DESK_SESSION_GENERATION,
+  DESK_PROVIDER_LAUNCH_PROOF,
   // The pre-decoupling Desk-branded selector name: no live producer sets it
   // anymore, but an inherited stale one is still a conflicting authority.
   'DESK_MOOR_LAUNCH_CHANNEL'
@@ -100,6 +103,9 @@ export function spawnMoorMaster(options: MoorSpawnOptions): MoorSpawnResult {
       // unchanged (§4.7), so this is the one place that can compose it for
       // EVERY session kind. Only absent keys are filled in.
       ...sessionTerminalEnv(inherited),
+      ...(options.providerLaunchProof === undefined
+        ? {}
+        : { [DESK_PROVIDER_LAUNCH_PROOF]: options.providerLaunchProof }),
       [moorLaunchChannelEnvKey(invoked)]: String(LAUNCH_CHANNEL_FD),
       [moorGenerationEnvKey(invoked)]: generationValue,
       [MOOR_SESSION_GENERATION]: generationValue,

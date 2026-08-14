@@ -127,7 +127,8 @@ export async function reconcileExistingSessions(
             // the failure; an indeterminate retirement stays false/retriable.
             await daemon.router.sessions.retireGenerationAwaited(
               sessionId,
-              restored.generation
+              restored.generation,
+              { reason: 'moor-reconcile-failed' }
             );
             results[index] = {
               sessionId,

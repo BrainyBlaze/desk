@@ -346,7 +346,7 @@ export async function executeClaudeProfileHandoff(
   );
 }
 
-function claudeProjectDirName(cwd: string): string {
+export function claudeProjectDirName(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
