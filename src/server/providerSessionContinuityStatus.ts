@@ -39,8 +39,8 @@ export function readProviderSessionContinuityStatus(
         const providerLabel =
           transition.provider === 'codex' ? 'Codex' : 'Claude';
         if (transition.state === 'cancelled-by-reset') {
-          const authorization = loadedLaunchLedger.current(
-            transition.deskSessionId
+          const authorization = loadedLaunchLedger.authorization(
+            transition.resetAuthorizationId ?? ''
           );
           const expectedGeneration =
             authorization?.state === 'claimed' ||
@@ -53,8 +53,14 @@ export function readProviderSessionContinuityStatus(
             authorization === undefined ||
             authorization.authorizationId !==
               transition.resetAuthorizationId ||
+            authorization.deskSessionId !== transition.deskSessionId ||
             authorization.provider !== transition.provider ||
-            authorization.generation !== expectedGeneration
+            authorization.generation !== expectedGeneration ||
+            (authorization.expectedPriorBinding !== null &&
+              authorization.expectedPriorBinding !==
+                transition.expectedProviderSessionId &&
+              authorization.expectedPriorBinding !==
+                transition.observedProviderSessionId)
           ) {
             return [
               {

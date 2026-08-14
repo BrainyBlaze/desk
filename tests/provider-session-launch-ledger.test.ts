@@ -155,6 +155,18 @@ describe('FileProviderSessionLaunchLedger', () => {
     });
 
     expect(ledger.current('desk-alpha')).toEqual(second);
+    const historicalFirst = ledger.authorization(first.authorizationId);
+    expect(historicalFirst).toEqual({
+      ...first,
+      state: 'authorized'
+    });
+    if (historicalFirst !== undefined) historicalFirst.state = 'completed';
+    expect(ledger.authorization(first.authorizationId)).toEqual({
+      ...first,
+      state: 'authorized'
+    });
+    expect(ledger.authorization(second.authorizationId)).toEqual(second);
+    expect(ledger.authorization('unknown-authorization')).toBeUndefined();
     expect(() => ledger.authorize(first.authorizationId)).toThrow(
       'is not the current authorization'
     );
@@ -167,6 +179,16 @@ describe('FileProviderSessionLaunchLedger', () => {
       })
     ).toEqual({ ok: false, reason: 'reset-incomplete' });
     ledger.close();
+
+    const replayed = new FileProviderSessionLaunchLedger(path, {
+      readOnly: true
+    });
+    expect(replayed.authorization(first.authorizationId)).toEqual({
+      ...first,
+      state: 'authorized'
+    });
+    expect(replayed.authorization(second.authorizationId)).toEqual(second);
+    replayed.close();
   });
 
   it('completes only the exact claimed generation after a valid provider binding', () => {

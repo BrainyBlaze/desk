@@ -103,6 +103,10 @@ export class FileProviderSessionLaunchLedger {
     string,
     ProviderSessionLaunchAuthorization
   >();
+  private readonly authorizationById = new Map<
+    string,
+    ProviderSessionLaunchAuthorization
+  >();
   private readonly sessionByAuthorization = new Map<string, string>();
   private readonly recoveredPreparedAuthorizationIds = new Set<string>();
   private readonly createAuthorizationId: () => string;
@@ -130,6 +134,16 @@ export class FileProviderSessionLaunchLedger {
     this.assertHealthy();
     const current = this.currentBySession.get(deskSessionId);
     return current === undefined ? undefined : structuredClone(current);
+  }
+
+  authorization(
+    authorizationId: string
+  ): ProviderSessionLaunchAuthorization | undefined {
+    this.assertHealthy();
+    const authorization = this.authorizationById.get(authorizationId);
+    return authorization === undefined
+      ? undefined
+      : structuredClone(authorization);
   }
 
   resumeRecoveredPrepared(input: {
@@ -401,6 +415,7 @@ export class FileProviderSessionLaunchLedger {
         );
       }
       this.currentBySession.set(record.deskSessionId, record);
+      this.authorizationById.set(record.authorizationId, record);
       this.sessionByAuthorization.set(
         record.authorizationId,
         record.deskSessionId
@@ -443,6 +458,7 @@ export class FileProviderSessionLaunchLedger {
       );
     }
     this.currentBySession.set(record.deskSessionId, record);
+    this.authorizationById.set(record.authorizationId, record);
   }
 
   private assertHealthy(): void {
