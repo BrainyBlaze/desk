@@ -28,6 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli/main.js dist/server/lsp/deskLspMcpCli.js",
     "fetch:moor": "node scripts/fetch-moor.mjs",
+    "project:moor-pin": "node scripts/project-moor-pin.mjs",
     "build:ui": "vite build",
     "build:standalone:assets": "vite build && node scripts/make-assets.mjs",
     "build:standalone": "npm run build:standalone:assets && bun run scripts/build-standalone.ts",
