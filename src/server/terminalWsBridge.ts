@@ -4,7 +4,7 @@
 // frame, relayed verbatim to the router, and the router's server→client
 // frames are sent back as binary messages.
 //
-// Session provisioning (spawn+attach the atch master) is the daemon
+// Session provisioning (spawn+attach the moor holder) is the daemon
 // lifecycle's job, driven by the desk start/stop flow — this bridge only
 // carries surface traffic for sessions the daemon already owns.
 

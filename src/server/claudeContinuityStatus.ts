@@ -9,6 +9,8 @@ export type ClaudeContinuityAttentionCode =
   | 'continuity-store-corrupt'
   | 'claude-memory-conflicts'
   | 'claude-memory-sync-failed'
+  | 'provider-session-rebind-required'
+  | 'provider-session-reset-incomplete'
   | 'provider-session-identity-missing';
 
 export interface ClaudeContinuityAttention {
@@ -18,6 +20,10 @@ export interface ClaudeContinuityAttention {
   code: ClaudeContinuityAttentionCode;
   message: string;
   count?: number;
+  provider?: 'claude' | 'codex';
+  durableProviderSessionId?: string;
+  observedProviderSessionId?: string;
+  action?: string;
 }
 
 export interface ClaudeContinuityStatus {

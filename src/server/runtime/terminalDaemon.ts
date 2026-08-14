@@ -1,8 +1,8 @@
 // Terminal daemon assembly (cutover Phase 2 Step 3, core). Composes the durable
 // terminal daemon the web server mounts at cutover: a TerminalWsRouter backed by
 // a fsync'd generation ledger and the real @xterm/headless emulator, the binary
-// WS bridge on /ws/terminal, and atch session provisioning via @codex's verified
-// contract (CREATE = `atch start ABSOLUTE_SOCKET_PATH cmd`, KILL = `atch kill -f
+// WS bridge on /ws/terminal, and moor session provisioning via @codex's verified
+// contract (CREATE = `moor start ABSOLUTE_SOCKET_PATH cmd`, KILL = `moor kill -f
 // ABSOLUTE_SOCKET_PATH`; a slash-bearing name is the socket path, which isolates
 // the canary under a dedicated socket root).
 //
@@ -14,8 +14,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, unlinkSync } from 'node:fs';
-import { ensurePrivateSocketRoot } from '../../shared/atchPaths.js';
+import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { readManifestFile, resolveManifestPath } from '../../core/config.js';
+import { buildSessionSpecs } from '../../core/manifest.js';
+import { ensurePrivateSocketRoot } from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   AGENT_PRODUCER_BINDINGS,
@@ -29,7 +31,8 @@ import {
   type DeskEventFeedResponse,
   type DeskEventReadRequest,
   type SessionRegistration,
-  type SessionStateSnapshot
+  type SessionStateSnapshot,
+  type SessionStateTransition
 } from '../../shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../../shared/runtime/index.js';
 import { TerminalWsRouter } from './terminalWsRouter.js';
@@ -38,6 +41,7 @@ import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
+import { isRetireReason, type RetireReason } from '../../shared/runtime/daemonCore.js';
 import {
   FileIntakeStore,
   type FileIntakeStoreDependencies
@@ -71,13 +75,15 @@ import {
   type DeskEventJournalHealth
 } from './fileDeskEventJournal.js';
 import {
-  AtchEventTailer,
-  atchEventCursorPath,
-  atchEventPath,
-  prepareAtchEventSink,
-  type AtchEventDiagnostic
-} from './atchEvents.js';
+  MoorEventObserver,
+  moorEventStoreDir,
+  moorEventStoreRoot,
+  type MoorEventDiagnostic
+} from './moorEventObserver.js';
+import type { MoorStatus } from '../../shared/moorWire/messages.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../shared/daemonControlClient.js';
 import type {
+  HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
   RetireGenerationResult,
   SessionSpawnPreallocationContext,
@@ -100,7 +106,24 @@ import {
   authorizeProviderSessionReset,
   type ProviderSessionResetResult as ProviderSessionAuthorizationResetResult
 } from '../providerSessionReset.js';
-import { readProviderSessionBinding } from '../providerSessionBinding.js';
+import {
+  bindProviderSessionIdentity,
+  readProviderSessionBinding,
+  replaceProviderSessionIdentity
+} from '../providerSessionBinding.js';
+import {
+  archiveMoorGenerationStores,
+  readMoorGenerationExitEvidence,
+  type MoorGenerationExitEvidence
+} from './moorGenerationStores.js';
+import {
+  verifyProviderSessionEvidence,
+  type ProviderSessionEvidenceResult
+} from '../providerSessionEvidence.js';
+import {
+  FileProviderSessionContinuityLedger,
+  type ProviderSessionContinuityProvider
+} from './providerSessionContinuityLedger.js';
 
 interface UpgradeServer {
   on(event: 'upgrade', listener: (request: IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
@@ -110,10 +133,10 @@ interface UpgradeServer {
 export interface TerminalDaemonOptions {
   /** Durable state root (the generation ledger lives under <root>/_engine). */
   homeRoot: string;
-  /** Path to the atch binary. */
-  atchBinPath: string;
+  /** Path to the moor binary. */
+  moorBinPath: string;
   /** Dedicated ABSOLUTE socket root; a session's socket is <root>/<sessionId>.sock. */
-  atchSocketRoot: string;
+  moorSocketRoot: string;
   httpServer: UpgradeServer;
   /** WS path (default /ws/terminal). */
   wsPath?: string;
@@ -136,14 +159,14 @@ export interface TerminalDaemonOptions {
   hookInstallationProbe?: (
     provider: HookProbeProvider
   ) => HookInstallationProbe;
-  /** Poll cadence for generation-bound atch event sinks. */
-  atchEventPollIntervalMs?: number;
-  /** Injectable structured diagnostic sink for atch event ingestion. */
-  onAtchEventDiagnostic?: (context: {
+  /** Poll cadence for generation-bound moor event sinks. */
+  moorEventPollIntervalMs?: number;
+  /** Injectable structured diagnostic sink for moor event ingestion. */
+  onMoorEventDiagnostic?: (context: {
     sessionId: string;
     generation: number;
     path: string;
-    diagnostic: AtchEventDiagnostic;
+    diagnostic: MoorEventDiagnostic;
   }) => void;
   /** Active manifest path override for isolated daemon composition tests. */
   manifestPath?: string;
@@ -151,6 +174,12 @@ export interface TerminalDaemonOptions {
   homeDir?: string;
   /** Injectable worker admission policy for deterministic composition tests. */
   supervisor?: WorkerSupervisor;
+  /** Injectable durable evidence verifier for boundary-failure tests. */
+  verifyProviderSessionEvidence?: typeof verifyProviderSessionEvidence;
+  /** Injectable continuity ledger for deterministic durability-failure tests. */
+  providerSessionContinuityLedger?: FileProviderSessionContinuityLedger;
+  /** Injectable manifest CAS boundary for deterministic persistence tests. */
+  replaceProviderSessionIdentity?: typeof replaceProviderSessionIdentity;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -201,9 +230,56 @@ export type ProviderSessionResetResult =
       error: string;
     };
 
+export interface ObserveProviderSessionIdentityInput {
+  deskSessionId: string;
+  provider: ProviderSessionContinuityProvider;
+  providerSessionId: string;
+  generation: number;
+  launchProof: string;
+  hook: string;
+}
+
+export interface RebindProviderSessionInput {
+  deskSessionId: string;
+  targetProviderSessionId: string;
+}
+
+export type ProviderSessionContinuityMutationResult =
+  | {
+      ok: true;
+      kind: 'bound' | 'matching' | 'rebound' | 'already-rebound';
+      provider: ProviderSessionContinuityProvider;
+      providerSessionId: string;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'provider-session-not-found'
+        | 'provider-session-agent-mismatch'
+        | 'provider-session-id-invalid'
+        | 'provider-session-id-conflict'
+        | 'provider-session-mismatch'
+        | 'provider-session-provider-mismatch'
+        | 'provider-session-generation-mismatch'
+        | 'provider-session-not-live'
+        | 'provider-session-proof-invalid'
+        | 'provider-session-start-required'
+        | 'provider-session-evidence-missing'
+        | 'provider-session-evidence-stale'
+        | 'provider-session-evidence-invalid'
+        | 'provider-session-rebind-required'
+        | 'provider-session-transition-missing'
+        | 'provider-session-transition-mismatch'
+        | 'provider-session-store-failed';
+      error: string;
+      currentProviderSessionId?: string;
+      targetProviderSessionId?: string;
+      action?: string;
+    };
+
 export interface TerminalDaemon {
   readonly router: TerminalWsRouter;
-  /** Spawn + attach the atch master for a session (CREATE contract). */
+  /** Spawn + attach the moor holder for a session (CREATE contract). */
   provision(sessionId: string, spec: TerminalDaemonSessionSpec): Promise<ProvisionResult>;
   /**
    * Retire a session (KILL contract), resolving only after the kill command
@@ -211,7 +287,7 @@ export interface TerminalDaemon {
    * immediately after, and a stale socket would be adopted at the old
    * generation. A failed kill is a failure, never a silent 200.
    */
-  retire(sessionId: string): Promise<{ ok: boolean; error?: string }>;
+  retire(sessionId: string, reason: RetireReason): Promise<{ ok: boolean; error?: string }>;
   /** Retire exactly one native generation without touching a successor. */
   retireGeneration(
     sessionId: string,
@@ -223,6 +299,14 @@ export interface TerminalDaemon {
   completeProviderSessionLaunch(
     input: CompleteProviderSessionLaunchInput
   ): CompleteProviderSessionLaunchResult;
+  /** Validate and reconcile one launch-scoped provider hook identity. */
+  observeProviderSessionIdentity(
+    input: ObserveProviderSessionIdentityInput
+  ): Promise<ProviderSessionContinuityMutationResult>;
+  /** Explicitly authorize the exact current pending provider transition. */
+  rebindProviderSession(
+    input: RebindProviderSessionInput
+  ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
   /**
@@ -234,8 +318,40 @@ export interface TerminalDaemon {
   tail(sessionId: string, rows: number, offset?: number): { lines: string[]; totalAvailable: number } | undefined;
   /** Latest generation-bound terminal observation, independent of semantic authority. */
   terminalObservation(sessionId: string): TerminalObservationSnapshot | undefined;
+  /** Retained predecessor lifecycle exits, newest generation first. */
+  moorExitEvidence(sessionId: string): Promise<readonly MoorGenerationExitEvidence[]>;
   /** Re-open a surviving generation's event sink after daemon restart. */
-  reconcileAtchEvents(sessionId: string, generation: number): boolean;
+  reconcileMoorEvents(sessionId: string, generation: number): Promise<boolean>;
+  /** §10.2.13 committed-log clear over the live moor link — full result algebra. */
+  clearSessionLog(
+    sessionId: string
+  ): Promise<HolderLogClearOutcome | 'no-link'>;
+  /** #8: the adopted ATTACH_ACK descriptor while a live moor link exists. */
+  moorSessionStatus(sessionId: string): MoorStatus | undefined;
+  /**
+   * Enter the DRAINING state (idempotent, synchronous): from this instant the
+   * control plane refuses every state-changing request, so a graceful
+   * shutdown's lease-handover snapshot cannot race a late provision.
+   */
+  beginDrain(): void;
+  isDraining(): boolean;
+  /**
+   * Mutation drain barrier: a state-changing control request acquires this
+   * BEFORE its first awaited body read (registering how to ABORT itself) and
+   * releases it when its response finishes. Returns undefined once draining —
+   * the atomically-checked refusal. close() truly awaits the barrier: no
+   * shutdown step past it can run while an admitted mutation can still run.
+   */
+  enterMutation(abort: () => void): (() => void) | undefined;
+  /** Resolves when no admitted mutation remains in flight (draining only). */
+  awaitMutationDrain(): Promise<void>;
+  /**
+   * Sever every still-open admitted mutation (bounded-shutdown escalation):
+   * each registered abort destroys its connection, which fires the request's
+   * close-path release — so the barrier ALWAYS empties instead of the
+   * shutdown proceeding past a live mutation. Returns how many were severed.
+   */
+  abortOpenMutations(): number;
   /** Bind durable provider transport metadata to the canonical producer sequence. */
   agentEndpoint(input: unknown): AgentEndpointStoreResult;
   /** Activate one exact staged provider registration after durable identity binding. */
@@ -276,18 +392,57 @@ export interface TerminalDaemon {
 
 /** Assemble the durable terminal daemon + mount its binary WS bridge (additive). */
 export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDaemon {
+  const now = options.now ?? Date.now;
   const ledger = new GenerationLedger(new FileGenerationLedgerStore(join(options.homeRoot, '_engine', 'generation-ledger.json')));
   const providerLaunchLedger = new FileProviderSessionLaunchLedger(
     join(options.homeRoot, '_engine', 'provider-session-launch.ndjson')
   );
+  const providerContinuityLedger =
+    options.providerSessionContinuityLedger ??
+    new FileProviderSessionContinuityLedger(
+      join(options.homeRoot, '_engine', 'provider-session-continuity.ndjson')
+    );
+  const replaceProviderIdentity =
+    options.replaceProviderSessionIdentity ?? replaceProviderSessionIdentity;
+  const evidenceVerifier =
+    options.verifyProviderSessionEvidence ?? verifyProviderSessionEvidence;
+  const continuityQueues = new Map<string, Promise<void>>();
+  const runProviderContinuity = async <T>(
+    deskSessionId: string,
+    operation: () => Promise<T> | T
+  ): Promise<T> => {
+    const prior = continuityQueues.get(deskSessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = prior.catch(() => undefined).then(() => gate);
+    continuityQueues.set(deskSessionId, tail);
+    await prior.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (continuityQueues.get(deskSessionId) === tail) {
+        continuityQueues.delete(deskSessionId);
+      }
+    }
+  };
+  const rebindAction = (
+    deskSessionId: string,
+    providerSessionId: string
+  ): string =>
+    `desk rebind-provider-session ${deskSessionId} --to ${providerSessionId} --force`;
   const providerProvisionFailure = (
-    detail: ProviderSessionProvisionRecoveryDetail
+    detail: ProviderSessionProvisionRecoveryDetail,
+    action?: string
   ): SessionSpawnPreallocationResult => ({
     ok: false,
     reason: 'provider-session-identity-missing',
-    detail
+    detail,
+    ...(action === undefined ? {} : { action })
   });
-  const preallocateProviderSession = (
+  const authorizeProviderSessionLaunch = (
     context: SessionSpawnPreallocationContext,
     spec: TerminalDaemonSessionSpec
   ): SessionSpawnPreallocationResult => {
@@ -353,11 +508,24 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return providerProvisionFailure('not-authorized');
     }
     const currentAuthorization = providerLaunchLedger.current(context.sessionId);
-    if (
-      context.currentGeneration === 0 &&
-      (currentAuthorization === undefined ||
-        currentAuthorization.state === 'completed')
-    ) {
+    // A FIRST launch needs no authorization: the fence exists to stop a
+    // relaunch from silently orphaning an existing provider conversation, and
+    // here there is none — the binding is null (checked above) and the ledger
+    // has never recorded anything for this session.
+    //
+    // desk#47: the generation used to stand in for "never launched", and it is
+    // not one. The generation ledger is monotonic and tombstone-surviving by
+    // §4.8.1, so it advances on every ATTEMPT — including one that died before
+    // the child ever ran (an agent CLI missing from PATH is the common case).
+    // The manifest entry was rolled back, so the session did not exist, yet
+    // the counter had moved: every later attempt on that name was refused as
+    // an unauthorized relaunch, and `reset-provider-session` could not clear
+    // it either, because that command requires the session to be IN the
+    // manifest. The name was dead with no way back from the UI or the CLI.
+    if (currentAuthorization === undefined) {
+      return { ok: true };
+    }
+    if (context.currentGeneration === 0 && currentAuthorization.state === 'completed') {
       return { ok: true };
     }
     const claim = providerLaunchLedger.claim({
@@ -369,22 +537,94 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     if (claim.ok) return { ok: true };
     return providerProvisionFailure(claim.reason);
   };
+  const preallocateProviderSession = (
+    context: SessionSpawnPreallocationContext,
+    spec: TerminalDaemonSessionSpec
+  ): Promise<SessionSpawnPreallocationResult> | SessionSpawnPreallocationResult => {
+    if (
+      context.subject.kind !== 'agent' ||
+      (context.subject.provider !== 'claude' &&
+        context.subject.provider !== 'codex')
+    ) {
+      return authorizeProviderSessionLaunch(context, spec);
+    }
+    const provider = context.subject.provider;
+    return runProviderContinuity(context.sessionId, () => {
+      try {
+        const launchAuthorization = providerLaunchLedger.current(
+          context.sessionId
+        );
+        const transition = providerContinuityLedger.currentTransition(
+          context.sessionId
+        );
+        const requiresRebind =
+          transition !== undefined &&
+          transition.state !== 'cancelled-by-reset' &&
+          (transition.state === 'pending' ||
+            spec.providerSessionId !==
+              transition.observedProviderSessionId);
+        if (
+          launchAuthorization?.state === 'prepared' &&
+          requiresRebind
+        ) {
+          return providerProvisionFailure('reset-incomplete');
+        }
+        if (requiresRebind) {
+          return providerProvisionFailure(
+            'provider-session-rebind-required',
+            rebindAction(
+              context.sessionId,
+              transition.observedProviderSessionId
+            )
+          );
+        }
+        const authorized = authorizeProviderSessionLaunch(context, spec);
+        if (!authorized.ok) return authorized;
+        const issued = providerContinuityLedger.issueLaunchProof({
+          deskSessionId: context.sessionId,
+          provider,
+          generation: context.nextGeneration,
+          issuedAt: now()
+        });
+        return {
+          ok: true,
+          launchContext: { providerLaunchProof: issued.launchProof }
+        };
+      } catch {
+        return providerProvisionFailure('continuity-store-failed');
+      }
+    });
+  };
   const eventJournal = new FileDeskEventJournal(
     join(options.homeRoot, '_engine', 'desk-events.ndjson')
   );
   let intakeStore: FileIntakeStore | undefined;
   let intakeDependencies: FileIntakeStoreDependencies | undefined;
-  const now = options.now ?? Date.now;
   const hookInstallationProbe =
     options.hookInstallationProbe ?? probeHookInstallation;
   let ready = false;
-  let scheduleAtchObserverCleanup = (
+  let draining = false;
+  const openMutations = new Set<{ abort: () => void }>();
+  let mutationDrainWaiters: Array<() => void> = [];
+  let scheduleMoorObserverCleanup = (
     _sessionId: string,
-    _generation: number
+    _generation: number,
+    _origin: 'observed' | 'retired'
   ): void => {};
-  const replayingAtchTransitions = new Set<string>();
-  const atchTransitionKey = (sessionId: string, generation: number): string =>
+  const replayingMoorTransitions = new Set<string>();
+  const moorTransitionKey = (sessionId: string, generation: number): string =>
     `${sessionId}\0${generation}`;
+  /**
+   * Downtime catch-up: replay re-projects the WHOLE retained store into a
+   * fresh authority, so publishing every replayed transition would storm the
+   * journal with history it already carries. But swallowing them all loses
+   * every change that happened WHILE the daemon was down (an agent's
+   * completion, most notably). The compromise is a summary: remember the LAST
+   * suppressed transition per (session, generation) and publish exactly that
+   * one when the replay finishes — downstream sees one event carrying the
+   * final caught-up state.
+   */
+  const suppressedReplayTransitions = new Map<string, SessionStateTransition>();
   const router = new TerminalWsRouter({
     ledger,
     supervisor:
@@ -411,17 +651,23 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return undefined;
     },
     onStateTransition: (transition) => {
-      if (
-        !replayingAtchTransitions.has(
-          atchTransitionKey(transition.sessionId, transition.generation)
-        )
-      ) {
+      const key = moorTransitionKey(transition.sessionId, transition.generation);
+      if (replayingMoorTransitions.has(key)) {
+        // Replay: keep only the LAST transition — it carries the final
+        // caught-up state and is published once the replay completes.
+        suppressedReplayTransitions.set(key, transition);
+      } else {
         eventJournal.appendTransition(transition);
       }
       if (transition.cause === 'lifecycle-exited') {
-        scheduleAtchObserverCleanup(
+        // desk#59: an OBSERVED exit already carries the truth, so its observer
+        // may stop at once. A RETIRED placeholder is Desk tearing the session
+        // down without knowing how the child died — stopping there is what
+        // discarded the evidence, so that path drains first.
+        scheduleMoorObserverCleanup(
           transition.sessionId,
-          transition.generation
+          transition.generation,
+          transition.to.exit?.origin === 'observed' ? 'observed' : 'retired'
         );
       }
     },
@@ -582,170 +828,709 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   };
   const disposeBridge = installTerminalWsBridge(options.httpServer, router, options.wsPath !== undefined ? { path: options.wsPath } : {});
 
-  const socketPath = (sessionId: string): string => join(options.atchSocketRoot, `${sessionId}.sock`);
+  // Moor rendezvous: `<root>/<sessionId>` — the holder publishes exactly this
+  // name (no suffix); every consumer resolves it through this one function.
+  const socketPath = (sessionId: string): string => join(options.moorSocketRoot, sessionId);
   interface EventObserver {
     sessionId: string;
     generation: number;
+    /** The per-generation committed event-store DIRECTORY. */
     path: string;
-    cursorPath: string;
-    tailer: AtchEventTailer;
+    observer: MoorEventObserver;
+    /**
+     * desk#59 — the ONE final drain for this registration. Both the retired
+     * transition's microtask and the awaited control wrapper join this same
+     * promise, so the store is read exactly once no matter who asks first.
+     */
+    drainPromise?: Promise<void>;
   }
   const eventObservers = new Map<string, EventObserver>();
-  const reportAtchDiagnostic = (
+  const reportMoorDiagnostic = (
     observer: Pick<EventObserver, 'sessionId' | 'generation' | 'path'>,
-    diagnostic: AtchEventDiagnostic
+    diagnostic: MoorEventDiagnostic
   ): void => {
-    if (options.onAtchEventDiagnostic) {
-      options.onAtchEventDiagnostic({ ...observer, diagnostic });
+    if (options.onMoorEventDiagnostic) {
+      options.onMoorEventDiagnostic({ ...observer, diagnostic });
       return;
     }
     // eslint-disable-next-line no-console
     console.error(
-      `[atch-events] ${observer.sessionId}@${observer.generation} ${diagnostic.code}: ${diagnostic.message}`
+      `[moor-events] ${observer.sessionId}@${observer.generation} ${diagnostic.code}: ${diagnostic.message}`
     );
   };
-  const stopEventObserver = (observer: EventObserver, removeSink: boolean): void => {
-    observer.tailer.stop();
+  // Tag-01 path identity — the §1.2 CANONICAL SESSION identity form: 0x01
+  // followed by the RAW path bytes (confirmed by the real binary's attach
+  // fence). The EVENT-store identity is DIFFERENT: the real ATTACH_ACK
+  // carries the handed-off path's raw posix bytes with NO tag (unix.rs
+  // `event_path.as_os_str().as_bytes()`), so its comparand is the raw path.
+  const tag01Identity = (path: string): Uint8Array => {
+    const pathBytes = Buffer.from(path);
+    const identity = new Uint8Array(1 + pathBytes.length);
+    identity[0] = 1;
+    identity.set(pathBytes, 1);
+    return identity;
+  };
+  const eventStoreIdentity = (path: string): Uint8Array => new Uint8Array(Buffer.from(path));
+  const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean => {
+    if (a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) {
+      if (a[index] !== b[index]) return false;
+    }
+    return true;
+  };
+  /**
+   * OB-39 event-store authority: the adopted ATTACH_ACK/STATUS descriptor must
+   * exist, carry the store layout, and name EXACTLY (byte-for-byte raw POSIX
+   * path bytes — never a lossy decoded string) the directory Desk handed to
+   * this launch. Returns the acknowledged 4-field frontier the observer
+   * replays from.
+   */
+  const resolveStoreAuthority = (
+    status: MoorStatus | undefined,
+    handedOffDir: string
+  ):
+    | { ok: true; frontier: { bodySlot: number; commitIndex: bigint; bodyLength: bigint; bodyHash: Uint8Array } }
+    | { ok: false; error: string } => {
+    if (status === undefined || status.layout !== 2) {
+      return { ok: false, error: 'moor attach descriptor is missing or does not carry the event store' };
+    }
+    if (!bytesEqual(status.eventIdentity, eventStoreIdentity(handedOffDir))) {
+      // Byte-for-byte against the raw handed-off path: a lossy decode can
+      // never collapse distinct identities, and any mismatch — different
+      // directory OR an unexpected identity shape — is the same refusal.
+      return {
+        ok: false,
+        error:
+          'moor event-store descriptor names a different directory than this launch handed off'
+      };
+    }
+    return {
+      ok: true,
+      frontier: {
+        bodySlot: status.bodySlot,
+        commitIndex: status.commitIndex,
+        bodyLength: status.bodyLength,
+        bodyHash: status.bodyHash
+      }
+    };
+  };
+  /**
+   * desk#59 — stop an observer only AFTER one last bounded read of its store.
+   *
+   * Moor commits the lifecycle before it unlinks, so at teardown the exit
+   * record is routinely already committed and unread. Stopping first threw it
+   * away and left the session recorded as "someone retired it", with no cause
+   * of death — the exact blindness that made live agent deaths untraceable.
+   *
+   * The registration is rechecked AFTER the awaited drain: a successor
+   * generation may have claimed this sessionId while we were reading, and a
+   * stale observer must never unregister or speak for it.
+   */
+  const drainAndStopEventObserver = (observer: EventObserver): Promise<void> => {
+    // Memoized per registration: a concurrent wrapper and transition must not
+    // read the store twice, and the caller that arrives second must await the
+    // work the first one already started rather than skipping it.
+    observer.drainPromise ??= runFinalDrain(observer);
+    return observer.drainPromise;
+  };
+
+  const runFinalDrain = async (observer: EventObserver): Promise<void> => {
+    const outcome = await observer.observer.drain();
+    if (outcome === 'unobservable') {
+      // Durable first: stderr does not survive the daemon, and a blindness
+      // nobody can read afterwards is the defect this issue exists to fix.
+      // The refinement is generation-fenced and touches ONLY the diagnostic —
+      // the reason that initiated this retirement stays exactly as recorded.
+      // Recheck the registration AFTER the await: a successor may have claimed
+      // this session id while we were reading, and a stale observer must never
+      // annotate it.
+      if (eventObservers.get(observer.sessionId) === observer) {
+        router.sessions.refineExitDiagnostic(observer.sessionId, observer.generation, {
+          code: 'moor-event-drain-unobservable'
+        });
+      }
+      reportMoorDiagnostic(
+        { sessionId: observer.sessionId, generation: observer.generation, path: observer.path },
+        { code: 'tailer-io', message: 'final drain could not read the committed store' }
+      );
+    }
     if (eventObservers.get(observer.sessionId) === observer) {
       eventObservers.delete(observer.sessionId);
     }
-    if (removeSink) {
-      for (const [path, label] of [
-        [observer.path, 'sink'],
-        [observer.cursorPath, 'cursor']
-      ] as const) {
-        try {
-          unlinkSync(path);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            reportAtchDiagnostic(observer, {
-              code: 'tailer-io',
-              message: `could not remove atch event ${label}: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            });
-          }
-        }
-      }
+  };
+
+  const stopEventObserver = (observer: EventObserver): void => {
+    observer.observer.stop();
+    if (eventObservers.get(observer.sessionId) === observer) {
+      eventObservers.delete(observer.sessionId);
     }
   };
-  const startEventObserver = (
+  const startEventObserver = async (
     sessionId: string,
     generation: number,
-    path: string
-  ): EventObserver => {
+    path: string,
+    descriptor?: { bodySlot: number; commitIndex: bigint; bodyLength: bigint; bodyHash: Uint8Array }
+  ): Promise<EventObserver> => {
     const current = eventObservers.get(sessionId);
     if (current?.generation === generation && current.path === path) return current;
-    const cursorPath = atchEventCursorPath(
-      options.atchSocketRoot,
-      sessionId,
-      generation
-    );
     const diagnosticIdentity = { sessionId, generation, path };
-    const tailer = new AtchEventTailer({
-      path,
-      cursorPath,
-      ...(options.atchEventPollIntervalMs === undefined
+    const expectedIdentity = tag01Identity(socketPath(sessionId));
+    const storeObserver = new MoorEventObserver({
+      directory: path,
+      generation,
+      identity: expectedIdentity,
+      ...(descriptor === undefined ? {} : { descriptor }),
+      ...(options.moorEventPollIntervalMs === undefined
         ? {}
-        : { pollIntervalMs: options.atchEventPollIntervalMs }),
+        : { pollIntervalMs: options.moorEventPollIntervalMs }),
       onEvent: (event, context) => {
-        const replayKey = atchTransitionKey(sessionId, generation);
-        if (context.phase === 'replay') replayingAtchTransitions.add(replayKey);
+        const replayKey = moorTransitionKey(sessionId, generation);
+        if (context.phase === 'replay') replayingMoorTransitions.add(replayKey);
         try {
-          router.sessions.observeAtchEvent(sessionId, generation, event);
+          router.sessions.observeMoorEvent(sessionId, generation, event);
         } finally {
-          if (context.phase === 'replay') replayingAtchTransitions.delete(replayKey);
+          if (context.phase === 'replay') replayingMoorTransitions.delete(replayKey);
         }
       },
-      onDiagnostic: (diagnostic) =>
-        reportAtchDiagnostic(diagnosticIdentity, diagnostic)
-    });
-    const observer = { sessionId, generation, path, cursorPath, tailer };
-    if (!tailer.start()) {
-      throw new Error('atch event sink could not be opened securely');
-    }
-    if (current) stopEventObserver(current, false);
-    eventObservers.set(sessionId, observer);
-    return observer;
-  };
-  scheduleAtchObserverCleanup = (sessionId, generation): void => {
-    queueMicrotask(() => {
-      const observer = eventObservers.get(sessionId);
-      if (observer?.generation === generation) {
-        stopEventObserver(observer, true);
+      onDiagnostic: (message) =>
+        reportMoorDiagnostic(diagnosticIdentity, { code: 'tailer-io', message }),
+      onAvailabilityChange: (availability) => {
+        const registered = eventObservers.get(sessionId);
+        if (registered === undefined || registered.observer !== storeObserver) return;
+        reportMoorDiagnostic(diagnosticIdentity, {
+          code:
+            availability.status === 'unavailable'
+              ? 'observer-unavailable'
+              : 'observer-recovered',
+          message:
+            availability.status === 'unavailable'
+              ? `event-store observation unavailable after ${availability.consecutiveReadFailures} consecutive read failures: ${availability.message}`
+              : 'event-store observation recovered'
+        });
+      },
+      onTerminal: () => {
+        // This callback carries an authoritative cursor/identity/content
+        // contradiction, never mere store unreadability. A STALE observer's
+        // late terminal callback must never touch a successor: everything is
+        // guarded by the current registration, the retirement is
+        // exact-generation, and the store is left in place (§11.6: cleanup
+        // of a published store belongs to the holder).
+        const registered = eventObservers.get(sessionId);
+        if (registered === undefined || registered.observer !== storeObserver) {
+          return;
+        }
+        stopEventObserver(registered);
+        // desk#59: this retirement is caused by the observer failing, not by an
+        // operator. Letting it fall through to the default control-retire
+        // reason writes a lie into the record.
+        void router.sessions
+          .retireGenerationAwaited(sessionId, generation, { reason: 'observer-terminal' })
+          .then(() => {
+            // The reason says WHO ended it; the diagnostic says what
+            // observation lost. Both are recorded, neither overwrites the
+            // other.
+            router.sessions.refineExitDiagnostic(sessionId, generation, {
+              code: 'moor-event-observer-terminal'
+            });
+          });
       }
     });
+    const observer = { sessionId, generation, path, observer: storeObserver };
+    // Registered BEFORE the replay runs: an already-committed exit transition
+    // schedules its cleanup as a microtask, which must find this registration
+    // (or the exited store would survive as an orphan).
+    if (current) stopEventObserver(current);
+    eventObservers.set(sessionId, observer);
+    const replayKey = moorTransitionKey(sessionId, generation);
+    suppressedReplayTransitions.delete(replayKey); // no stale carryover into this replay
+    if (!(await storeObserver.start())) {
+      suppressedReplayTransitions.delete(replayKey);
+      if (eventObservers.get(sessionId) === observer) {
+        eventObservers.delete(sessionId);
+      }
+      storeObserver.stop();
+      throw new Error('moor event store could not be observed');
+    }
+    // Downtime catch-up: the replay is fully delivered inside start(), so the
+    // last suppressed transition IS the final caught-up state — publish it as
+    // the one summary event downstream missed while the daemon was down. The
+    // key was cleared before start(), so this entry belongs to exactly THIS
+    // replay — publish unconditionally: a replayed exit legitimately stops
+    // this very observer (cleanup microtask) and must still be announced.
+    const caughtUp = suppressedReplayTransitions.get(replayKey);
+    suppressedReplayTransitions.delete(replayKey);
+    if (caughtUp !== undefined) {
+      eventJournal.appendTransition(caughtUp);
+    }
+    return observer;
   };
+  scheduleMoorObserverCleanup = (sessionId, generation, origin): void => {
+    queueMicrotask(() => {
+      const observer = eventObservers.get(sessionId);
+      if (observer?.generation !== generation) return;
+      // §11.6: observation stops here; the PUBLISHED store belongs to the
+      // holder's own retirement cleanup — Desk never deletes it.
+      if (origin === 'observed') {
+        stopEventObserver(observer);
+        return;
+      }
+      // The synchronous link-close path retires without going through the
+      // control wrapper, so this is the ONLY final read it ever gets.
+      void drainAndStopEventObserver(observer);
+    });
+  };
+
+  type ContinuityFailure = Extract<
+    ProviderSessionContinuityMutationResult,
+    { ok: false }
+  >;
+  const continuityFailure = (
+    reason: ContinuityFailure['reason'],
+    error: string,
+    detail: Partial<
+      Pick<
+        ContinuityFailure,
+        'currentProviderSessionId' | 'targetProviderSessionId' | 'action'
+      >
+    > = {}
+  ): ContinuityFailure => ({ ok: false, reason, error, ...detail });
+  const bindingFailure = (
+    failure: Extract<
+      ReturnType<typeof readProviderSessionBinding>,
+      { ok: false }
+    >
+  ): ContinuityFailure => continuityFailure(failure.code, failure.error);
+  const evidenceFailure = (
+    failure: Extract<ProviderSessionEvidenceResult, { ok: false }>
+  ): ContinuityFailure => {
+    const reason =
+      failure.code === 'evidence-not-found'
+        ? 'provider-session-evidence-missing'
+        : failure.code === 'evidence-stale'
+          ? 'provider-session-evidence-stale'
+          : 'provider-session-evidence-invalid';
+    return continuityFailure(reason, failure.error);
+  };
+  const selectedProviderSession = (deskSessionId: string) => {
+    const manifestPath = options.manifestPath ?? resolveManifestPath();
+    const homeDir = options.homeDir ?? homedir();
+    return buildSessionSpecs(readManifestFile(manifestPath), { homeDir }).find(
+      (candidate) => candidate.sessionId === deskSessionId
+    );
+  };
+  const verifyEvidence = async (input: {
+    deskSessionId: string;
+    provider: ProviderSessionContinuityProvider;
+    providerSessionId: string;
+    notBeforeMs: number;
+  }): Promise<ProviderSessionEvidenceResult | ContinuityFailure> => {
+    const selected = selectedProviderSession(input.deskSessionId);
+    if (!selected) {
+      return continuityFailure(
+        'provider-session-not-found',
+        `Desk session not found: ${input.deskSessionId}`
+      );
+    }
+    if (selected.agent !== input.provider) {
+      return continuityFailure(
+        'provider-session-agent-mismatch',
+        `Desk session ${input.deskSessionId} is not configured for ${input.provider}`
+      );
+    }
+    return evidenceVerifier({
+      provider: input.provider,
+      providerSessionId: input.providerSessionId,
+      selected: {
+        cwd: selected.cwd,
+        ...(selected.profileId === undefined
+          ? {}
+          : { profileId: selected.profileId })
+      },
+      homeDir: options.homeDir ?? homedir(),
+      notBeforeMs: input.notBeforeMs
+    });
+  };
+  const finishObservedLaunch = (
+    input: CompleteProviderSessionLaunchInput
+  ): ContinuityFailure | undefined => {
+    const completed = providerLaunchLedger.complete(input);
+    if (completed.ok) return undefined;
+    return continuityFailure(
+      'provider-session-store-failed',
+      `provider launch completion failed: ${completed.reason}`
+    );
+  };
+  const observeProviderSessionIdentity = (
+    input: ObserveProviderSessionIdentityInput
+  ): Promise<ProviderSessionContinuityMutationResult> =>
+    runProviderContinuity(input?.deskSessionId ?? '', async () => {
+      try {
+        if (
+          !input ||
+          !isSafeDaemonSessionId(input.deskSessionId) ||
+          (input.provider !== 'claude' && input.provider !== 'codex') ||
+          !isValidProviderSessionId(input.provider, input.providerSessionId) ||
+          !Number.isSafeInteger(input.generation) ||
+          input.generation < 2 ||
+          typeof input.launchProof !== 'string' ||
+          typeof input.hook !== 'string'
+        ) {
+          return continuityFailure(
+            'provider-session-id-invalid',
+            'Invalid provider session observation'
+          );
+        }
+        const binding = readProviderSessionBinding({
+          deskSessionId: input.deskSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!binding.ok) return bindingFailure(binding);
+        if (binding.provider !== input.provider) {
+          return continuityFailure(
+            'provider-session-provider-mismatch',
+            `Desk session ${input.deskSessionId} is configured for ${binding.provider}, not ${input.provider}`
+          );
+        }
+        if (ledger.current(input.deskSessionId) !== input.generation) {
+          return continuityFailure(
+            'provider-session-generation-mismatch',
+            'Provider observation generation is not current'
+          );
+        }
+        const status = router.sessions.moorStatus(input.deskSessionId);
+        if (
+          status === undefined ||
+          status.generation !== input.generation ||
+          !status.running
+        ) {
+          return continuityFailure(
+            'provider-session-not-live',
+            'Provider observation has no exact live adopted Moor generation'
+          );
+        }
+        const proof = providerContinuityLedger.verifyLaunchProof({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          generation: input.generation,
+          launchProof: input.launchProof
+        });
+        if (!proof.ok) {
+          return continuityFailure(
+            'provider-session-proof-invalid',
+            'Provider launch proof is missing or invalid'
+          );
+        }
+        const evidence = await verifyEvidence({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          providerSessionId: input.providerSessionId,
+          notBeforeMs: proof.issuedAt
+        });
+        if (!evidence.ok) {
+          return 'reason' in evidence ? evidence : evidenceFailure(evidence);
+        }
+        if (binding.providerSessionId === null) {
+          const persisted = await bindProviderSessionIdentity({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            ...(options.manifestPath === undefined
+              ? {}
+              : { manifestPath: options.manifestPath }),
+            ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+          });
+          if (!persisted.ok) {
+            return continuityFailure(persisted.code, persisted.error);
+          }
+          const completionFailure = finishObservedLaunch({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            generation: input.generation
+          });
+          if (completionFailure) return completionFailure;
+          return {
+            ok: true,
+            kind: 'bound',
+            provider: input.provider,
+            providerSessionId: input.providerSessionId
+          };
+        }
+        if (binding.providerSessionId === input.providerSessionId) {
+          const completionFailure = finishObservedLaunch({
+            deskSessionId: input.deskSessionId,
+            provider: input.provider,
+            providerSessionId: input.providerSessionId,
+            generation: input.generation
+          });
+          if (completionFailure) return completionFailure;
+          return {
+            ok: true,
+            kind: 'matching',
+            provider: input.provider,
+            providerSessionId: input.providerSessionId
+          };
+        }
+        providerContinuityLedger.stageTransition({
+          deskSessionId: input.deskSessionId,
+          provider: input.provider,
+          generation: input.generation,
+          expectedProviderSessionId: binding.providerSessionId,
+          observedProviderSessionId: input.providerSessionId,
+          evidencePath: evidence.evidencePath
+        });
+        return continuityFailure(
+          'provider-session-rebind-required',
+          'The running provider session differs from the durable Desk binding',
+          {
+            currentProviderSessionId: binding.providerSessionId,
+            targetProviderSessionId: input.providerSessionId,
+            action: rebindAction(
+              input.deskSessionId,
+              input.providerSessionId
+            )
+          }
+        );
+      } catch {
+        return continuityFailure(
+          'provider-session-store-failed',
+          'Provider session continuity operation failed'
+        );
+      }
+    });
+
+  const rebindProviderSession = (
+    input: RebindProviderSessionInput
+  ): Promise<ProviderSessionContinuityMutationResult> =>
+    runProviderContinuity(input?.deskSessionId ?? '', async () => {
+      try {
+        if (
+          !input ||
+          !isSafeDaemonSessionId(input.deskSessionId) ||
+          typeof input.targetProviderSessionId !== 'string'
+        ) {
+          return continuityFailure(
+            'provider-session-id-invalid',
+            'Invalid provider session rebind request'
+          );
+        }
+        const transition = providerContinuityLedger.currentTransition(
+          input.deskSessionId
+        );
+        if (
+          transition === undefined ||
+          transition.state === 'cancelled-by-reset'
+        ) {
+          return continuityFailure(
+            'provider-session-transition-missing',
+            'No pending provider session transition exists'
+          );
+        }
+        if (
+          transition.observedProviderSessionId !==
+          input.targetProviderSessionId
+        ) {
+          return continuityFailure(
+            'provider-session-transition-mismatch',
+            'Requested provider session does not match the current transition'
+          );
+        }
+        if (
+          !isValidProviderSessionId(
+            transition.provider,
+            input.targetProviderSessionId
+          ) ||
+          ledger.current(input.deskSessionId) !== transition.generation
+        ) {
+          return continuityFailure(
+            'provider-session-generation-mismatch',
+            'Provider transition generation is not current'
+          );
+        }
+        const status = router.sessions.moorStatus(input.deskSessionId);
+        if (
+          status === undefined ||
+          status.generation !== transition.generation ||
+          !status.running
+        ) {
+          return continuityFailure(
+            'provider-session-not-live',
+            'Provider rebind has no exact live adopted Moor generation'
+          );
+        }
+        const proof = providerContinuityLedger.proofContext(
+          input.deskSessionId
+        );
+        if (
+          proof === undefined ||
+          proof.provider !== transition.provider ||
+          proof.generation !== transition.generation
+        ) {
+          return continuityFailure(
+            'provider-session-proof-invalid',
+            'Provider transition has no exact launch proof context'
+          );
+        }
+        const binding = readProviderSessionBinding({
+          deskSessionId: input.deskSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!binding.ok) return bindingFailure(binding);
+        if (binding.provider !== transition.provider) {
+          return continuityFailure(
+            'provider-session-provider-mismatch',
+            'Provider transition does not match the configured provider'
+          );
+        }
+        if (
+          binding.providerSessionId !== transition.expectedProviderSessionId &&
+          binding.providerSessionId !== transition.observedProviderSessionId
+        ) {
+          return continuityFailure(
+            'provider-session-mismatch',
+            'Durable provider session changed outside the pending transition'
+          );
+        }
+        const evidence = await verifyEvidence({
+          deskSessionId: input.deskSessionId,
+          provider: transition.provider,
+          providerSessionId: transition.observedProviderSessionId,
+          notBeforeMs: proof.issuedAt
+        });
+        if (!evidence.ok) {
+          return 'reason' in evidence ? evidence : evidenceFailure(evidence);
+        }
+        if (transition.state === 'pending') {
+          providerContinuityLedger.resolveTransition({
+            deskSessionId: input.deskSessionId,
+            transitionId: transition.transitionId,
+            targetProviderSessionId: transition.observedProviderSessionId
+          });
+        }
+        if (binding.providerSessionId === transition.observedProviderSessionId) {
+          return {
+            ok: true,
+            kind: 'already-rebound',
+            provider: transition.provider,
+            providerSessionId: transition.observedProviderSessionId
+          };
+        }
+        const replaced = await replaceProviderIdentity({
+          deskSessionId: input.deskSessionId,
+          provider: transition.provider,
+          expectedProviderSessionId: transition.expectedProviderSessionId,
+          providerSessionId: transition.observedProviderSessionId,
+          ...(options.manifestPath === undefined
+            ? {}
+            : { manifestPath: options.manifestPath }),
+          ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir })
+        });
+        if (!replaced.ok) {
+          return continuityFailure(replaced.code, replaced.error);
+        }
+        return {
+          ok: true,
+          kind:
+            replaced.kind === 'already-replaced'
+              ? 'already-rebound'
+              : 'rebound',
+          provider: transition.provider,
+          providerSessionId: transition.observedProviderSessionId
+        };
+      } catch {
+        return continuityFailure(
+          'provider-session-store-failed',
+          'Provider session continuity operation failed'
+        );
+      }
+    });
 
   return {
     router,
     async provision(sessionId, spec) {
-      const sockPath = socketPath(sessionId);
-      let preparedObserver: EventObserver | undefined;
-      try {
-        const result = await router.sessions.spawnAndAttach(sessionId, {
-          binPath: options.atchBinPath,
-          args: ['start', sockPath, ...spec.command],
-          sockPath,
-          geometry: spec.geometry,
-          subject: spec.subject,
-          detached: true,
-          preallocateSpawn: (context) =>
-            preallocateProviderSession(context, spec),
-          prepareSpawn: ({ generation, args }) => {
-            const path = prepareAtchEventSink(
-              options.atchSocketRoot,
-              sessionId,
-              generation
-            );
-            try {
-              preparedObserver = startEventObserver(sessionId, generation, path);
-            } catch (error) {
-              for (const cleanupPath of [
-                path,
-                atchEventCursorPath(
-                  options.atchSocketRoot,
-                  sessionId,
-                  generation
-                )
-              ]) {
-                try {
-                  unlinkSync(cleanupPath);
-                } catch {
-                  // Preserve the observer startup error.
-                }
-              }
-              throw error;
-            }
-            return { args: [args[0]!, '-T', path, ...args.slice(1)] };
-          },
-          killSpec: {
-            binPath: options.atchBinPath,
-            args: ['kill', '-f', sockPath],
-            staleCleanupSpec: { binPath: options.atchBinPath, args: ['rm', sockPath] }
-          }
-        });
-        if (!result.ok && preparedObserver) stopEventObserver(preparedObserver, true);
-        return result;
-      } catch (error) {
-        if (preparedObserver) stopEventObserver(preparedObserver, true);
-        throw error;
+      const sessionPath = socketPath(sessionId);
+      let storeDir: string | undefined;
+      let observedGeneration: number | undefined;
+      const result = await router.sessions.spawnAndAttachMoor(sessionId, {
+        binPath: options.moorBinPath,
+        sessionPath,
+        command: spec.command,
+        geometry: spec.geometry,
+        subject: spec.subject,
+        preallocateSpawn: (context) => preallocateProviderSession(context, spec),
+        // The ledger allocation is durable before this hook. Preserve the
+        // predecessor's evidence with independent generation-scoped copies.
+        // Stable companions stay nlink-one so Moor can retain lifecycle-derived
+        // paths, remove stable .log/.events/.exit in that order, then remove the
+        // predecessor's -T event store and -S instrument stage. The independent
+        // archive remains readable; each holder still creates its own -T store.
+        prepareSpawn: async ({ generation }) => {
+          observedGeneration = generation;
+          await archiveMoorGenerationStores(sessionPath, generation);
+          storeDir = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
+          return { storeDir };
+        },
+        killSpec: {
+          binPath: options.moorBinPath,
+          args: ['kill', '-f', sessionPath],
+          staleCleanupSpec: { binPath: options.moorBinPath, args: ['rm', sessionPath] }
+        }
+      });
+      if (!result.ok) return result;
+      // OB-39: the holder's ATTACH_ACK descriptor is the event-store
+      // authority — the supervisor never guesses. The descriptor must exist,
+      // carry the store layout, and name EXACTLY the directory this launch
+      // handed to the holder; observation replays from the acknowledged
+      // frontier, never behind it.
+      const status = result.moorStatus;
+      if (storeDir !== undefined && observedGeneration !== undefined) {
+        // Every rejection below retires EXACTLY the generation this provision
+        // observed — a stale provision result must never retire a successor.
+        const handedOffDir = storeDir;
+        const generation = observedGeneration;
+        const authority = resolveStoreAuthority(status, handedOffDir);
+        if (!authority.ok) {
+          await router.sessions.retireGenerationAwaited(sessionId, generation, {
+            reason: 'store-authority-refused'
+          });
+          throw new Error(authority.error);
+        }
+        try {
+          await startEventObserver(sessionId, generation, handedOffDir, authority.frontier);
+        } catch (error) {
+          // Fail closed: a session whose lifecycle events cannot be observed
+          // is not provisioned — tear the fresh holder down. Store cleanup
+          // belongs to the holder's own retirement (§11.6); Desk deletes
+          // nothing it merely named.
+          await router.sessions.retireGenerationAwaited(sessionId, generation, {
+            reason: 'observer-start-failed'
+          });
+          throw error;
+        }
       }
+      return result;
     },
-    async retire(sessionId) {
+    async retire(sessionId, reason) {
       const observer = eventObservers.get(sessionId);
-      const result = await router.sessions.retireAwaited(sessionId);
-      if (result.ok && observer) stopEventObserver(observer, true);
+      const result = await router.sessions.retireAwaited(sessionId, { reason });
+      // desk#59: the drain runs AFTER the retire, so the placeholder already
+      // exists and the holder's real exit can strengthen it in place.
+      if (result.ok && observer) await drainAndStopEventObserver(observer);
       return result;
     },
     async retireGeneration(sessionId, generation) {
       const observer = eventObservers.get(sessionId);
-      const result = await router.sessions.retireGenerationAwaited(
-        sessionId,
-        generation
-      );
+      const result = await router.sessions.retireGenerationAwaited(sessionId, generation, {
+        reason: 'control-retire'
+      });
       if (result.ok && observer?.generation === generation) {
-        stopEventObserver(observer, true);
+        await drainAndStopEventObserver(observer);
       }
       return result;
     },
@@ -753,9 +1538,51 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       const result = await router.sessions.resetForProviderSession(
         sessionId,
         socketPath(sessionId),
-        (generation) => {
+        (generation) => runProviderContinuity(sessionId, async () => {
           const observer = eventObservers.get(sessionId);
-          if (observer) stopEventObserver(observer, true);
+          if (observer) stopEventObserver(observer);
+          const transition = providerContinuityLedger.currentTransition(
+            sessionId
+          );
+          const cancellable =
+            transition?.state === 'pending' ||
+            transition?.state === 'resolved'
+              ? transition
+              : undefined;
+          if (cancellable !== undefined) {
+            const binding = readProviderSessionBinding({
+              deskSessionId: sessionId,
+              ...(options.manifestPath === undefined
+                ? {}
+                : { manifestPath: options.manifestPath }),
+              ...(options.homeDir === undefined
+                ? {}
+                : { homeDir: options.homeDir })
+            });
+            const launchAuthorization = providerLaunchLedger.current(sessionId);
+            if (
+              !binding.ok ||
+              binding.provider !== cancellable.provider ||
+              (cancellable.state === 'pending'
+                ? cancellable.generation !== generation
+                : cancellable.generation > generation) ||
+              (binding.providerSessionId !==
+                cancellable.expectedProviderSessionId &&
+                binding.providerSessionId !==
+                  cancellable.observedProviderSessionId &&
+                !(
+                  binding.providerSessionId === null &&
+                  launchAuthorization?.state === 'prepared'
+                ))
+            ) {
+              return {
+                ok: false as const,
+                reason: 'provider-session-store-failed' as const,
+                error:
+                  'Provider session transition does not match reset state'
+              };
+            }
+          }
           return authorizeProviderSessionReset(
             {
               deskSessionId: sessionId,
@@ -767,9 +1594,35 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
                 ? {}
                 : { homeDir: options.homeDir })
             },
-            { ledger: providerLaunchLedger }
+            {
+              ledger: providerLaunchLedger,
+              ...(cancellable === undefined
+                ? {}
+                : {
+                    afterBindingCleared: (authorization: {
+                      authorizationId: string;
+                    }) => {
+                      const current =
+                        providerContinuityLedger.currentTransition(sessionId);
+                      if (
+                        current === undefined ||
+                        current.state === 'cancelled-by-reset' ||
+                        current.transitionId !== cancellable.transitionId
+                      ) {
+                        throw new Error(
+                          'provider session transition changed during reset'
+                        );
+                      }
+                      providerContinuityLedger.cancelTransitionByReset({
+                        deskSessionId: sessionId,
+                        transitionId: cancellable.transitionId,
+                        resetAuthorizationId: authorization.authorizationId
+                      });
+                    }
+                  })
+            }
           );
-        }
+        })
       );
       if (!result.ok) return result;
       return result.value;
@@ -777,6 +1630,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     completeProviderSessionLaunch(input) {
       return providerLaunchLedger.complete(input);
     },
+    observeProviderSessionIdentity,
+    rebindProviderSession,
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
@@ -786,21 +1641,46 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     terminalObservation(sessionId) {
       return router.sessions.terminalObservation(sessionId);
     },
-    reconcileAtchEvents(sessionId, generation) {
-      const path = atchEventPath(options.atchSocketRoot, sessionId, generation);
-      if (!existsSync(path)) return false;
+    moorExitEvidence(sessionId) {
+      return readMoorGenerationExitEvidence(socketPath(sessionId));
+    },
+    async reconcileMoorEvents(sessionId, generation) {
+      // Restart reconciliation re-observes the surviving holder's committed
+      // event store for the ADOPTED generation under the SAME OB-39 authority
+      // as provision: the re-adopted ATTACH_ACK descriptor must exist and
+      // name exactly the directory this launch derived, and observation
+      // replays from the acknowledged frontier — the supervisor never guesses
+      // from the filesystem alone.
+      const path = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
+      const diagnose = (message: string): false => {
+        reportMoorDiagnostic({ sessionId, generation, path }, { code: 'tailer-io', message });
+        return false;
+      };
+      const status = router.sessions.moorStatus(sessionId);
+      if (status !== undefined && status.generation !== generation) {
+        return diagnose(
+          `could not reconcile the moor event store: adopted status is generation ${status.generation}, not ${generation}`
+        );
+      }
+      const authority = resolveStoreAuthority(status, path);
+      if (!authority.ok) {
+        return diagnose(`could not reconcile the moor event store: ${authority.error}`);
+      }
+      if (!existsSync(path)) return diagnose('could not reconcile the moor event store: the acknowledged store directory does not exist');
       try {
-        startEventObserver(sessionId, generation, path);
+        await startEventObserver(sessionId, generation, path, authority.frontier);
         return true;
       } catch (error) {
-        reportAtchDiagnostic({ sessionId, generation, path }, {
-          code: 'tailer-io',
-          message: `could not reconcile atch event sink: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        });
-        return false;
+        return diagnose(`could not reconcile the moor event store: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
       }
+    },
+    clearSessionLog(sessionId) {
+      return router.sessions.clearHolderLog(sessionId);
+    },
+    moorSessionStatus(sessionId) {
+      return router.sessions.moorStatus(sessionId);
     },
     agentEndpoint(input) {
       return endpointStore.register(input);
@@ -889,15 +1769,58 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     markReady() {
       ready = true;
     },
+    beginDrain() {
+      draining = true;
+    },
+    isDraining() {
+      return draining;
+    },
+    enterMutation(abort) {
+      // Atomic with the drain check: either the mutation is admitted and
+      // COUNTED (with its abort registered), or it is refused — there is no
+      // window where a request saw not-draining but escaped the barrier.
+      if (draining) return undefined;
+      const registration = { abort };
+      openMutations.add(registration);
+      return () => {
+        if (!openMutations.delete(registration)) return; // idempotent
+        if (openMutations.size === 0 && mutationDrainWaiters.length > 0) {
+          const waiters = mutationDrainWaiters;
+          mutationDrainWaiters = [];
+          for (const waiter of waiters) waiter();
+        }
+      };
+    },
+    awaitMutationDrain() {
+      if (openMutations.size === 0) return Promise.resolve();
+      return new Promise((resolve) => {
+        mutationDrainWaiters.push(resolve);
+      });
+    },
+    abortOpenMutations() {
+      const severed = [...openMutations];
+      for (const registration of severed) {
+        try {
+          registration.abort();
+        } catch {
+          // The connection is already gone; its close-path release follows.
+        }
+      }
+      return severed.length;
+    },
     dispose() {
+      // ABRUPT teardown: no lease handover here — the graceful §7.4 viewer
+      // detach (release + AWAITED released results) lives on the async
+      // close() shutdown path, which runs it before calling dispose.
       for (const observer of [...eventObservers.values()]) {
-        stopEventObserver(observer, false);
+        stopEventObserver(observer);
       }
       disposeBridge();
       intakeStore?.close();
       intakeStore = undefined;
       eventJournal.close();
       providerLaunchLedger.close();
+      providerContinuityLedger.close();
     }
   };
 }
@@ -992,7 +1915,7 @@ function readAgentObservationScope(
 
 /**
  * The daemon's HTTP control plane: the web server posts here to provision/retire
- * a session's atch master on demand (the spawn/boot/restart cutover path). It is
+ * a session's moor holder on demand (the spawn/boot/restart cutover path). It is
  * an ordinary `request` listener; the binary terminal transport rides the
  * separate `upgrade` event, so the two never collide. Bodies read through the
  * shared bounded `readJsonBody`; responses through the shared `sendJson`.
@@ -1017,9 +1940,14 @@ export function createDaemonControlHandler(
     | 'retireGeneration'
     | 'resetProviderSession'
     | 'completeProviderSessionLaunch'
+    | 'observeProviderSessionIdentity'
+    | 'rebindProviderSession'
     | 'input'
     | 'tail'
+    | 'clearSessionLog'
+    | 'moorSessionStatus'
     | 'terminalObservation'
+    | 'moorExitEvidence'
     | 'agentEndpoint'
     | 'activateAgentEndpoint'
     | 'agentEvent'
@@ -1029,6 +1957,8 @@ export function createDaemonControlHandler(
     | 'readEvents'
     | 'clearEvents'
     | 'isReady'
+    | 'isDraining'
+    | 'enterMutation'
     | 'health'
   >,
   handlerOptions: DaemonControlHandlerOptions = {}
@@ -1046,6 +1976,36 @@ export function createDaemonControlHandler(
           // not-ready.
           sendJson(res, 503, { ok: false, error: 'starting' });
           return;
+        }
+        if (req.method !== 'GET') {
+          // Mutation drain barrier — acquired BEFORE the first awaited body
+          // read, atomically with the draining check: either this mutation is
+          // admitted and COUNTED (shutdown then waits for it to finish, so
+          // its lease lands in the handover snapshot), or it is refused 503.
+          // A body that arrives after close() began can therefore never slip
+          // a state change behind the lease snapshot. Read-only routes stay
+          // answerable while existing connections drain.
+          const releaseMutation = daemon.enterMutation(() => {
+            // Shutdown escalation: sever this connection — its close event
+            // fires the release below, so the barrier always empties.
+            req.destroy();
+          });
+          if (releaseMutation === undefined) {
+            sendJson(res, 503, { ok: false, error: 'draining' });
+            return;
+          }
+          // Released on EVERY exit — normal finish, early return, thrown
+          // route error (the catch below still sends a response), or a client
+          // that vanished mid-body.
+          let released = false;
+          const releaseOnce = (): void => {
+            if (!released) {
+              released = true;
+              releaseMutation();
+            }
+          };
+          res.once('finish', releaseOnce);
+          res.once('close', releaseOnce);
         }
         if (req.method === 'POST' && url.pathname === '/control/provision') {
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
@@ -1182,7 +2142,9 @@ export function createDaemonControlHandler(
                 ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` to finish the interrupted reset`
                 : detail === 'authorization-consumed'
                   ? `rerun \`desk reset-provider-session ${body.sessionId} --force\` after confirming the prior provider process is stopped`
-                  : undefined;
+                  : 'action' in ens && typeof ens.action === 'string'
+                    ? ens.action
+                    : undefined;
             sendJson(res, 503, {
               ok: false,
               error: `${ens.reason}${
@@ -1194,13 +2156,66 @@ export function createDaemonControlHandler(
           }
           return;
         }
+        if (req.method === 'GET' && url.pathname === '/control/moor-status') {
+          const sessionId = url.searchParams.get('sessionId');
+          if (!isSafeDaemonSessionId(sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          // #8: liveness/creation-time are WIRE truth, never filesystem
+          // guesses. The adopted ATTACH_ACK descriptor exists exactly while a
+          // live adopted link exists (published after markRunning, cleared in
+          // beginRetire), and its wallStart is the holder's own start clock.
+          const status = daemon.moorSessionStatus(sessionId);
+          if (status === undefined) {
+            // The shared literal, not a local copy: callers tell this negative
+            // verdict apart from any other 404 by its exact wording, and a
+            // reworded copy would read to them as "some proxy said not-found".
+            sendJson(res, 404, { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR });
+            return;
+          }
+          sendJson(res, 200, {
+            ok: true,
+            generation: status.generation,
+            wallStartMs: Number(status.wallStart),
+            pid: status.pid,
+            running: status.running
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/log-clear') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          // §10.2.13: the FULL result algebra reaches the control-plane
+          // caller — cleared and already-clear are both success, refused is
+          // the holder's completed decision, indeterminate got no valid
+          // complete result and nothing may be assumed about it.
+          const outcome = await daemon.clearSessionLog(body.sessionId);
+          if (outcome === 'no-link') {
+            sendJson(res, 404, { ok: false, outcome, error: 'session has no live moor link' });
+            return;
+          }
+          const ok = outcome === 'cleared' || outcome === 'already-clear';
+          sendJson(res, ok ? 200 : outcome === 'refused' ? 409 : 502, { ok, outcome });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/control/retire') {
           const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
           if (!isSafeDaemonSessionId(body.sessionId)) {
             sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
             return;
           }
-          const retired = await daemon.retire(body.sessionId);
+          // desk#59: the cause is part of the request, not something the
+          // transport invents. An unknown or absent cause is refused rather
+          // than silently relabelled as a generic control retire.
+          if (!isRetireReason(body.reason)) {
+            sendJson(res, 400, { ok: false, error: 'invalid retire reason' });
+            return;
+          }
+          const retired = await daemon.retire(body.sessionId, body.reason);
           if (!retired.ok) {
             sendJson(res, 502, { ok: false, error: retired.error ?? 'retire failed' });
             return;
@@ -1291,6 +2306,96 @@ export function createDaemonControlHandler(
         }
         if (
           req.method === 'POST' &&
+          url.pathname === '/control/provider-session/observe'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (
+            Object.keys(body).sort().join(',') !==
+              'deskSessionId,generation,hook,launchProof,provider,providerSessionId' ||
+            !isSafeDaemonSessionId(body.deskSessionId) ||
+            (body.provider !== 'claude' && body.provider !== 'codex') ||
+            typeof body.providerSessionId !== 'string' ||
+            !isValidProviderSessionId(
+              body.provider,
+              body.providerSessionId
+            ) ||
+            !Number.isSafeInteger(body.generation) ||
+            (body.generation as number) < 2 ||
+            typeof body.launchProof !== 'string' ||
+            typeof body.hook !== 'string' ||
+            body.hook.length === 0 ||
+            body.hook.length > 128
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              reason: 'provider-session-observation-invalid',
+              error: 'invalid provider session observation'
+            });
+            return;
+          }
+          const result = await daemon.observeProviderSessionIdentity({
+            deskSessionId: body.deskSessionId,
+            provider: body.provider,
+            providerSessionId: body.providerSessionId,
+            generation: body.generation as number,
+            launchProof: body.launchProof,
+            hook: body.hook
+          });
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found'
+                ? 404
+                : result.reason === 'provider-session-store-failed'
+                  ? 500
+                  : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
+          return;
+        }
+        if (
+          req.method === 'POST' &&
+          url.pathname === '/control/provider-session/rebind'
+        ) {
+          const body = await readJsonBody(req, {
+            maxBytes: CONTROL_BODY_MAX_BYTES
+          });
+          if (
+            Object.keys(body).sort().join(',') !==
+              'sessionId,targetProviderSessionId' ||
+            !isSafeDaemonSessionId(body.sessionId) ||
+            typeof body.targetProviderSessionId !== 'string'
+          ) {
+            sendJson(res, 400, {
+              ok: false,
+              reason: 'provider-session-rebind-invalid',
+              error: 'invalid provider session rebind request'
+            });
+            return;
+          }
+          const result = await daemon.rebindProviderSession({
+            deskSessionId: body.sessionId,
+            targetProviderSessionId: body.targetProviderSessionId
+          });
+          if (!result.ok) {
+            const status =
+              result.reason === 'provider-session-not-found' ||
+              result.reason === 'provider-session-transition-missing'
+                ? 404
+                : result.reason === 'provider-session-store-failed'
+                  ? 500
+                  : 409;
+            sendJson(res, status, result);
+            return;
+          }
+          sendJson(res, 200, result);
+          return;
+        }
+        if (
+          req.method === 'POST' &&
           url.pathname === '/control/retire-generation'
         ) {
           const body = await readJsonBody(req, {
@@ -1374,11 +2479,16 @@ export function createDaemonControlHandler(
             return;
           }
           const observation = daemon.terminalObservation(sessionId);
-          if (observation === undefined) {
+          const exitEvidence = await daemon.moorExitEvidence(sessionId);
+          if (observation === undefined && exitEvidence.length === 0) {
             sendJson(res, 404, { ok: false, error: `no such session: ${sessionId}` });
             return;
           }
-          sendJson(res, 200, { ok: true, observation });
+          sendJson(res, 200, {
+            ok: true,
+            observation: observation ?? null,
+            exitEvidence
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/control/agent-event') {
@@ -1580,7 +2690,7 @@ export interface ProvisionRequest {
 }
 
 /**
- * Provision atch masters for a set of sessions (the daemon process's startup
+ * Provision moor holders for a set of sessions (the daemon process's startup
  * loop). Sequential so a burst of spawns does not thundering-herd the host; each
  * failure is isolated and reported, never aborting the rest.
  */
@@ -1623,7 +2733,7 @@ export interface RunningTerminalDaemon {
 
 /**
  * The daemon-process main: start the standalone terminal daemon server, then
- * provision the atch master for each running session. Returns a handle with the
+ * provision the moor holder for each running session. Returns a handle with the
  * bound port and per-session provisioning results; a process entry adds the
  * signal handling around it.
  */
@@ -1658,9 +2768,9 @@ export async function startTerminalDaemonServer(
 ): Promise<TerminalDaemonServer> {
   const server = createServer();
   // The socket root must exist (0700, this user) BEFORE anything can bind
-  // <root>/<sessionId>.sock — atch skips its own mkdir for slash-bearing names
+  // <root>/<sessionId> — the holder skips its own mkdir for slash-bearing names
   // and the master's bind() fails ENOENT on an absent parent.
-  ensurePrivateSocketRoot(options.atchSocketRoot);
+  ensurePrivateSocketRoot(options.moorSocketRoot);
   const daemon = createTerminalDaemon({ ...options, httpServer: server });
   server.on(
     'request',
@@ -1681,13 +2791,63 @@ export async function startTerminalDaemonServer(
   });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : options.port;
+  let shutdownPromise: Promise<void> | undefined;
   return {
     daemon,
     server,
     port,
     close() {
-      daemon.dispose();
-      return new Promise<void>((resolve) => server.close(() => resolve()));
+      // Single-flight: repeated close calls (SIGINT + SIGTERM racing) join
+      // the SAME shutdown promise instead of re-running the sequence.
+      shutdownPromise ??= (async () => {
+        // 1. DRAIN synchronously as the very first instruction: from here the
+        //    control plane refuses every state-changing request, so nothing
+        //    can install a master behind the handover snapshot.
+        daemon.beginDrain();
+        // 2. Stop accepting NEW http connections (existing ones finish their
+        //    current — already drain-refused — requests).
+        const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+        // 3. TRULY await the mutation barrier — no shutdown step past this
+        //    line can run while an admitted mutation can still run. Bounded
+        //    by ESCALATION, not by giving up: a request that has not
+        //    finished within 5 s is severed (its connection destroyed),
+        //    which fires its close-path release, so the barrier always
+        //    empties. The client sees an aborted connection — never a 200
+        //    behind the lease snapshot.
+        const escalate = setTimeout(() => {
+          const severed = daemon.abortOpenMutations();
+          if (severed > 0) {
+            process.stderr.write(
+              `desk daemon shutdown: severed ${severed} still-open control mutation(s) after the drain deadline\n`
+            );
+          }
+        }, 5_000);
+        escalate.unref?.();
+        await daemon.awaitMutationDrain();
+        clearTimeout(escalate);
+        // 4. Settle every in-flight provision that could still attach and
+        //    take a lease; only then is the master map final.
+        await daemon.router.sessions.awaitInflightSpawns();
+        // 4. §7.4 graceful viewer detach: release every owned lease and WAIT
+        //    for the released results (bounded by the client's 2 s release
+        //    deadline). Refused/indeterminate outcomes are reported on
+        //    stderr — a failed handover is a fact of the departure, never a
+        //    silent drop; the holders survive either way.
+        const handover = await daemon.router.sessions.releaseAllLeases();
+        for (const entry of handover) {
+          if (entry.outcome !== 'released') {
+            process.stderr.write(
+              `desk daemon shutdown: lease handover for ${entry.sessionId}: ${entry.outcome}\n`
+            );
+          }
+        }
+        // 5. Close the viewer links (detach WITHOUT retiring — the holders
+        //    outlive the daemon), tear the daemon down, finish server close.
+        daemon.router.sessions.closeAllLinks();
+        daemon.dispose();
+        await serverClosed;
+      })();
+      return shutdownPromise;
     }
   };
 }

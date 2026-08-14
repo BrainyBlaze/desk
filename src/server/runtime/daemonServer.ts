@@ -1,7 +1,7 @@
 // Daemon socket/RPC server shell (spec §3.2/§3.7). The runnable process around
 // the pure DaemonCore: a single-instance unix-socket server (0700 dir / 0600
 // sock) enforcing the PID+start-time lock, framing + dispatching versioned RPC
-// (rpcEnvelope) into DaemonCore. Node stdlib only — no atch binary, no
+// (rpcEnvelope) into DaemonCore. Node stdlib only — no moor binary, no
 // @xterm/headless — so it runs and is testable today; the real master link and
 // the @xterm/headless emulator factory drop in at lane-join behind the same
 // DaemonCore + EmulatorFactory seams.
@@ -151,7 +151,7 @@ export class DaemonServer {
         return r.ok ? { ok: true, result: { generation: r.generation, created: r.created } } : { ok: false, errorCode: 'cap-exceeded', errorMessage: 'MAX_LIVE_WORKERS reached' };
       }
       case 'retire':
-        this.core.retire(String(p.sessionId));
+        this.core.retire(String(p.sessionId), 'control-retire');
         return { ok: true, result: { retired: true } };
       case 'list':
         return { ok: true, result: this.core.list() };

@@ -100,6 +100,10 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('producerSeq');
     expect(shim).toContain('providerSessionId');
     expect(shim).toContain(
+      'launchProof: process.env.DESK_PROVIDER_LAUNCH_PROOF'
+    );
+    expect(shim).not.toContain('observation.launchProof');
+    expect(shim).toContain(
       'const DESK_PROVIDER_SESSION_ID_FIELDS = {"claude":"session_id","codex":"session_id","opencode":"sessionID"}'
     );
     expect(shim).toContain(
@@ -214,6 +218,55 @@ describe('agent hook shim runtime (child process)', () => {
     // Exactly one diagnostic line — not merely present (the impl writes once).
     const occurrences = stderr.split('[desk-producer] agent-event POST failed').length - 1;
     expect(occurrences).toBe(1);
+  });
+
+  it('copies launch proof only into the top-level request through the real shim', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-shim-proof-'));
+    try {
+      const shimPath = join(dir, 'shim.mjs');
+      const preloadPath = join(dir, 'capture.mjs');
+      const capturePath = join(dir, 'request.json');
+      writeFileSync(shimPath, buildDeskAgentEventShim());
+      writeFileSync(
+        preloadPath,
+        `import { writeFileSync } from 'node:fs';\n` +
+          `globalThis.fetch = async (_url, init) => {\n` +
+          `  writeFileSync(process.env.DESK_CAPTURE_PATH, String(init.body));\n` +
+          `  return new Response('{"ok":true}', { status: 200 });\n` +
+          `};\n`
+      );
+      const proof = 'A'.repeat(43);
+      const result = spawnSync(
+        process.execPath,
+        [shimPath, '--event', 'SessionStart', '--agent', 'codex'],
+        {
+          input: JSON.stringify({
+            session_id: '11111111-1111-4111-8111-111111111111'
+          }),
+          env: {
+            ...process.env,
+            NODE_OPTIONS: `--import=${preloadPath}`,
+            DESK_SESSION_ID: 'runtime-test',
+            DESK_SESSION_GENERATION: '7',
+            DESK_PROVIDER_LAUNCH_PROOF: proof,
+            DESK_PRODUCER_STATE_DIR: join(dir, 'producer-state'),
+            DESK_CAPTURE_PATH: capturePath
+          },
+          encoding: 'utf8',
+          timeout: 10_000
+        }
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      const request = JSON.parse(readFileSync(capturePath, 'utf8')) as {
+        launchProof?: string;
+        observation: Record<string, unknown>;
+      };
+      expect(request.launchProof).toBe(proof);
+      expect(request.observation.launchProof).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('sends NOTHING when the generation is missing — an unfenceable event is worse than silence', () => {

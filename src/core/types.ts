@@ -157,7 +157,7 @@ export interface SessionSpec {
   resume?: string;
   bypassPermissions?: boolean;
   customCommand?: boolean;
-  /** Durable lifecycle identity and atch socket key (§10). */
+  /** Durable lifecycle identity and moor socket key (§10). */
   sessionId: string;
   /** Selected agent profile, or absent for the ambient account. */
   profileId?: string;
@@ -176,7 +176,12 @@ export interface BuildSessionOptions {
   agentMcp?: (session: DeskSession, cwd: string) => AgentMcpLaunchConfig | undefined;
 }
 
-export type SessionPlanActionType = 'start' | 'preserve';
+/**
+ * `skip` is the honest third outcome: the authority could not be reached, so
+ * the session's liveness is unknown and neither starting nor preserving it can
+ * be justified (moor#8 criterion 1 — ambiguity stays ambiguous).
+ */
+export type SessionPlanActionType = 'start' | 'preserve' | 'skip';
 
 export interface SessionPlanAction {
   type: SessionPlanActionType;

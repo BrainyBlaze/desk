@@ -109,6 +109,12 @@ Who receives a **root message** is decided by mentions in the body:
 | `@channel` | dispatched to every agent member |
 | *(no mention)* | same as `@channel` — everyone |
 | `@human` | notifies the operator's UI (events drawer); **not** dispatched to agents |
+| `@stranger` (names nobody in the channel) | treated as prose about an outsider, **not** as addressing: same as *(no mention)* — everyone |
+
+A mention only narrows dispatch when it names somebody who is actually in the
+channel. Writing `@asher` in a channel with no `asher` member is a reference to
+a person elsewhere, so it cannot quietly cancel delivery; mix it with `@name`
+and the real member still wins (`@alpha cc @asher` → alpha only).
 
 **Thread replies** follow different rules: a reply is dispatched to the parent
 message's author plus any explicitly mentioned agents, and `@channel` is
@@ -240,7 +246,61 @@ to a durable event ring that backs the delivery timeline view.
 Only one desk server process dispatches at a time: the engine takes a pid
 lock in `_engine/engine.pid`, and a second desk process pointed at the same
 channels home runs **passive** (it serves the UI but does not deliver) until
-the lock holder dies.
+ownership can be reclaimed safely. Every new claim is an exact, typed
+`desk-engine-lock-v1` record containing the pid and a 128-bit lowercase-hex
+process-incarnation nonce. On Linux, the record also contains a complete scope
+tuple when available, in this fixed order: canonical lowercase
+`linux_boot_id`, canonical unsigned-64-bit-bigint `linux_pidns_dev`, and
+canonical positive-64-bit-bigint `linux_pidns_ino`; the raw unsigned-64-bit-
+bigint process `starttime` may follow only that complete tuple. Scope without
+start time is valid, while a partial/reordered scope or start time without scope
+invalidates the record. The nonce lives under a process-global symbol:
+module/Vite HMR reloads in the same
+Node process reuse it, while separate processes generate independent values. It
+is a coordination token for protocol-following Desk processes, not a secret
+against another same-user process that can read the pidfile.
+
+A new O_EXCL claim is active only after its entire record has been written
+(including legal short writes), fsynced, and closed. If its Linux scope cannot
+be acquired, it durably writes a nonce-only claim and reports a bounded degraded
+diagnostic; if only start time is unavailable, it writes the complete scope
+without start time. A failed incomplete claim is deleted only after inode and
+exact content-prefix revalidation, so cleanup never blindly unlinks a
+replacement. On Linux, the boot UUID is read from the strict canonical
+`/proc/sys/kernel/random/boot_id` record and PID-namespace identity comes from
+the bigint dev/inode of the followed `/proc/self/ns/pid` nsfs entry.
+`/proc/<pid>/stat` is accepted only when its canonical pid matches the requested
+pid, its parenthesized command and one-byte state are structurally valid, and
+all currently documented fields through field 52 are present with a canonical
+unsigned 64-bit bigint start time in field 22.
+
+Every state, `kill(pid, 0)`, and start-time probe is namespace-local. A foreign
+nonce therefore remains passive without probing the pid unless the recorded
+and current boot UUID plus PID-namespace dev/inode are all present, valid, and
+exactly equal. Scope absence, acquisition ambiguity, boot mismatch, or namespace
+mismatch leaves the record unchanged even if a local probe would report ESRCH.
+Inside an equal scope, zombie/dead states (`Z`, `X`, `x`) or ESRCH can reclaim a
+scope-only record; a full record can additionally be reclaimed when its exact
+bigint start time differs. A matching process-global nonce permits HMR to stay
+active when scope or proc evidence is unavailable, but a known scope mismatch
+is passive because the nonce is readable and cannot override non-comparable OS
+evidence. Lock diagnostics are tightly bounded to a fixed operation category
+and safe error code: they never echo filesystem paths, proc contents, or
+operating-system exception messages. Legacy one-line pid and two-line
+pid/start-time records remain readable, but they contain no boot/PID-namespace
+binding and therefore never become active or reclaim solely from local PID
+evidence; an operator must remove such an abandoned record after independently
+confirming that no Desk owner uses the shared home.
+Passive servers reject message-producing HTTP requests with 503 before append,
+so a post is never acknowledged and marked seen without a delivery owner. Lock
+creation, inspection, and stale reclamation are serialized by
+`_engine/engine.pid.acquire.lock`, a deliberately non-expiring filesystem
+mutex: its ordinary critical section is synchronous and short-lived, while a
+crash inside that exact window leaves dispatch explicitly fail-closed for
+operator recovery instead of risking two active engines. A contender that
+cannot acquire it within the bounded wait reports `FILE_LOCK_BUSY` and stays
+passive. The abandoned mutex must only be removed after confirming no desk
+process is currently acquiring engine ownership.
 
 ## Ops console
 

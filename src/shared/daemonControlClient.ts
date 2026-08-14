@@ -22,6 +22,8 @@ export interface DaemonControlOptions {
   timeoutMs?: number;
   /** Injectable transport for tests; defaults to globalThis.fetch. */
   fetchImpl?: typeof fetch;
+  /** Optional caller lifetime, combined with the hard request deadline. */
+  signal?: AbortSignal;
 }
 
 export interface CompleteProviderSessionLaunchRequest {
@@ -29,6 +31,31 @@ export interface CompleteProviderSessionLaunchRequest {
   provider: ProviderSessionProvider;
   providerSessionId: string;
   generation: number;
+}
+
+/**
+ * The exact negative envelope `/control/moor-status` emits when a session has
+ * no live adopted moor link.
+ *
+ * It lives here, next to the client, because it is a two-sided contract: the
+ * route emits it and callers read it to tell the authority's own "this session
+ * is gone" apart from any other 404 (an old daemon without the route, a proxy,
+ * a generic not-found page). Two copies of the literal would drift, and the
+ * drift would surface as callers quietly deciding a live session is absent.
+ */
+export const MOOR_STATUS_NO_LIVE_LINK_ERROR = 'session has no live moor link';
+export interface ObserveProviderSessionIdentityRequest {
+  deskSessionId: string;
+  provider: Exclude<ProviderSessionProvider, 'opencode'>;
+  providerSessionId: string;
+  generation: number;
+  launchProof: string;
+  hook: string;
+}
+
+export interface RebindProviderSessionRequest {
+  sessionId: string;
+  targetProviderSessionId: string;
 }
 
 /** Derive the daemon's HTTP control origin from its websocket endpoint. */
@@ -85,6 +112,20 @@ export function completeProviderSessionLaunch(
   return daemonControl('/control/provider-session/complete', input, options);
 }
 
+export function observeProviderSessionIdentity(
+  input: ObserveProviderSessionIdentityRequest,
+  options: DaemonControlOptions = {}
+): Promise<DaemonControlResult> {
+  return daemonControl('/control/provider-session/observe', input, options);
+}
+
+export function requestProviderSessionRebind(
+  input: RebindProviderSessionRequest,
+  options: DaemonControlOptions = {}
+): Promise<DaemonControlResult> {
+  return daemonControl('/control/provider-session/rebind', input, options);
+}
+
 /**
  * GET one payload-bearing control resource (the canonical state snapshots).
  *
@@ -107,10 +148,15 @@ async function daemonRequest(
 ): Promise<DaemonControlResult> {
   const baseUrl = options.baseUrl ?? daemonHttpBase(options.env);
   const url = `${baseUrl.replace(/\/+$/, '')}${path}`;
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 10_000);
+  const signal =
+    options.signal === undefined
+      ? timeoutSignal
+      : AbortSignal.any([options.signal, timeoutSignal]);
   try {
     const response = await (options.fetchImpl ?? globalThis.fetch)(url, {
       ...init,
-      signal: AbortSignal.timeout(options.timeoutMs ?? 10_000)
+      signal
     });
     const parsed = parseResponseObject(await response.text());
     if (response.ok && parsed?.ok === true) {

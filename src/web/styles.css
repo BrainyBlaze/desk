@@ -529,7 +529,7 @@ button.statusSegment:hover {
   opacity: 0.45;
 }
 
-/* Toast stack — above modals (z 12) and the drawer (z 9): always on top. */
+/* Toast stack — above modals (z 45) and the drawer (z 9): always on top. */
 .toastStack {
   position: fixed;
   top: 92px;
@@ -1045,7 +1045,7 @@ select:focus {
 }
 
 /* Portalled to <body>: fixed in viewport space at the trigger rect, above the
-   modal scrim (z 12) so it is never clipped by the modal frame or body overflow.
+   modal scrim (z 45) so it is never clipped by the modal frame or body overflow.
    Inline styles set left/top/width; right is cleared so width wins. */
 .deskSelectPanelPortal {
   position: fixed;
@@ -1434,10 +1434,15 @@ select:focus {
   box-shadow: none;
 }
 
+/* The modal layer. A dialog owns the pointer while it is open, so its scrim
+   must outrank every in-surface overlay it shares .deskContent's stacking
+   context with — the responsive sidebar drawer (z 24) and its scrim (z 20),
+   the engine console overlay (z 40), the mention popover (z 30). Only the
+   toast stack (z 50) and the portalled select panel (z 1000) stay above it. */
 .modalScrim {
   position: absolute;
   inset: 0;
-  z-index: 12;
+  z-index: 45;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -1659,6 +1664,80 @@ select:focus {
   min-height: 0;
   width: 100%;
   height: 100%;
+}
+
+.subsystemSurfaceInner {
+  display: flex;
+  flex-direction: column;
+}
+
+.providerContinuityBanners {
+  display: grid;
+  gap: 1px;
+  flex: none;
+  max-height: 35%;
+  overflow: auto;
+  background: var(--desk-error);
+  border-bottom: 1px solid var(--desk-error);
+}
+
+.providerContinuityBanner {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--desk-text);
+  background: var(--desk-bg-elevated);
+  font-size: 12px;
+}
+
+.providerContinuityBanner > svg {
+  color: var(--desk-error);
+  margin-top: 1px;
+}
+
+.providerContinuityBannerBody {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.providerContinuityBannerBody strong {
+  color: var(--desk-error);
+}
+
+.providerContinuityBannerBody small,
+.providerContinuityAction {
+  overflow-wrap: anywhere;
+}
+
+.providerContinuityBannerBody small {
+  color: var(--desk-text-dim);
+}
+
+.providerContinuityAction {
+  color: var(--desk-accent);
+  user-select: text;
+}
+
+.providerContinuityCopy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--desk-text);
+  background: transparent;
+  border: 1px solid var(--desk-line);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.providerContinuityCopy:hover {
+  color: var(--desk-accent);
+  border-color: var(--desk-accent);
 }
 
 .panelResizeHandle {

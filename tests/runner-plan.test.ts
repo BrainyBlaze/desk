@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  atchCommandFor,
+  moorCommandFor,
   attachSession,
   planDeskUp,
   restartSession,
   runPlan,
-  runningSessionSet,
   startSession
 } from '../src/core/runner.js';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
@@ -29,7 +28,7 @@ projects:
   return [{ type: 'start', session: spec }];
 }
 
-describe('runPlan atch-native lifecycle', () => {
+describe('runPlan moor-native lifecycle', () => {
   let errors: string[];
 
   afterEach(() => {
@@ -45,7 +44,7 @@ describe('runPlan atch-native lifecycle', () => {
     await expect(runPlan(plan, false, { control })).resolves.toBe(0);
     expect(control).toHaveBeenCalledWith('/control/provision', {
       sessionId: 'terminal-session',
-      command: atchCommandFor(plan[0]!.session),
+      command: moorCommandFor(plan[0]!.session),
       geometry: { rows: 24, cols: 80 },
       subject: { kind: 'terminal' }
     });
@@ -178,38 +177,20 @@ describe('runPlan atch-native lifecycle', () => {
     expect(control).not.toHaveBeenCalled();
   });
 
-  it('preserves only sessions whose durable master probe succeeds', () => {
+  it('preserves a session the daemon reports as live, and never spawns a probe', async () => {
     const plan = terminalPlan();
     const session = plan[0]!.session;
+    const spawn = vi.fn();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, generation: 1, wallStartMs: 1, pid: 7, running: true })
+    }));
 
-    expect(
-      planDeskUp([session], {
-        env: { DESK_ATCH_SOCKET_ROOT: '/run/desk' },
-        probeSession: (path) => path === '/run/desk/terminal-session.sock'
-      })
-    ).toEqual([{ type: 'preserve', session }]);
-  });
-
-  it('uses a zero-byte atch push probe and rejects stale sockets', () => {
-    const session = terminalPlan()[0]!.session;
-    const spawn = vi
-      .fn()
-      .mockReturnValueOnce({ status: 0 })
-      .mockReturnValueOnce({ status: 1 });
-    const options = {
-      atchBinPath: '/release/libexec/atch',
-      env: { DESK_ATCH_SOCKET_ROOT: '/run/desk' },
-      spawn: spawn as never
-    };
-
-    expect(runningSessionSet([session], options)).toEqual(new Set(['terminal-session']));
-    expect(runningSessionSet([session], options)).toEqual(new Set());
-    expect(spawn).toHaveBeenNthCalledWith(
-      1,
-      '/release/libexec/atch',
-      ['push', '/run/desk/terminal-session.sock'],
-      expect.objectContaining({ input: '' })
-    );
+    await expect(
+      planDeskUp([session], { fetchImpl: fetchImpl as never, spawn: spawn as never })
+    ).resolves.toEqual([{ type: 'preserve', session }]);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('probes the daemon then attaches the shipped binary to the durable socket', async () => {
@@ -221,8 +202,8 @@ describe('runPlan atch-native lifecycle', () => {
       attachSession(session, {
         control,
         spawn: spawn as never,
-        atchBinPath: '/release/libexec/atch',
-        env: { DESK_ATCH_SOCKET_ROOT: '/run/desk' }
+        moorBinPath: '/release/libexec/moor',
+        env: { DESK_MOOR_SOCKET_ROOT: '/run/desk' }
       })
     ).resolves.toBe(0);
     expect(control).toHaveBeenCalledWith('/control/tail', {
@@ -231,8 +212,8 @@ describe('runPlan atch-native lifecycle', () => {
       offset: 0
     });
     expect(spawn).toHaveBeenCalledWith(
-      '/release/libexec/atch',
-      ['attach', '/run/desk/terminal-session.sock'],
+      '/release/libexec/moor',
+      ['attach', '/run/desk/terminal-session'],
       expect.objectContaining({ stdio: 'inherit' })
     );
   });

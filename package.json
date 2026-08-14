@@ -1,8 +1,8 @@
 {
   "name": "desk",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
-  "description": "Agent-first from the ground up: a terminal multiplexer for whole agent fleets, an IDE/CDE with LSPs visible to agents out of the box, and Slack-style inter-agent chat — plus git, notes, and more.",
+  "description": "Agent-first from the ground up: a terminal multiplexer for whole agent fleets, an IDE/CDE with LSPs visible to agents out of the box, and Slack-style inter-agent chat \u2014 plus git, notes, and more.",
   "license": "BUSL-1.1",
   "repository": {
     "type": "git",
@@ -10,7 +10,7 @@
   },
   "keywords": [
     "agents",
-    "atch",
+    "moor",
     "terminal",
     "claude-code",
     "codex",
@@ -27,11 +27,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli/main.js dist/server/lsp/deskLspMcpCli.js",
-    "build:atch": "node scripts/build-atch.mjs",
+    "fetch:moor": "node scripts/fetch-moor.mjs",
     "build:ui": "vite build",
     "build:standalone:assets": "vite build && node scripts/make-assets.mjs",
     "build:standalone": "npm run build:standalone:assets && bun run scripts/build-standalone.ts",
-    "build:distribution": "npm run build:atch && npm run build:standalone && npm run build",
+    "build:application": "npm run build:standalone && npm run build",
+    "build:distribution": "npm run fetch:moor && npm run build:application",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dev": "tsx src/cli/main.ts",

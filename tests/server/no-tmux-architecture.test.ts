@@ -6,7 +6,7 @@ import { SANCTIONS, scanFlagSurface, scanLegacySurface, type ScannedFile } from 
 const ROOT = join(__dirname, '..', '..');
 const SRC = join(ROOT, 'src');
 const DOCS = join(ROOT, 'docs');
-const VENDORED_ATCH = join(ROOT, 'vendor', 'atch');
+const VENDORED_MOOR = join(ROOT, 'vendor', 'moor');
 const SHIPPED_RUNTIME_FILES = [
   'Dockerfile',
   'install.sh',
@@ -97,14 +97,14 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
     expect(scanLegacySurface(scannedShippedRuntime())).toEqual([]);
   });
 
-  it('keeps active public docs on the atch-native runtime', () => {
+  it('keeps active public docs on the moor-native runtime', () => {
     expect(scanRetiredDocRuntime(currentRuntimeDocs())).toEqual([]);
   });
 
-  it('deliberately keeps the pinned fork source outside the Desk vocabulary gate', () => {
-    expect(relative(ROOT, VENDORED_ATCH).split(sep).join('/')).toBe('vendor/atch');
-    expect(statSync(VENDORED_ATCH).isDirectory()).toBe(true);
-    expect(scannedTree().every(({ rel }) => !rel.startsWith('vendor/atch/'))).toBe(true);
+  it('deliberately keeps the pinned holder source outside the Desk vocabulary gate', () => {
+    expect(relative(ROOT, VENDORED_MOOR).split(sep).join('/')).toBe('vendor/moor');
+    expect(statSync(VENDORED_MOOR).isDirectory()).toBe(true);
+    expect(scannedTree().every(({ rel }) => !rel.startsWith('vendor/moor/'))).toBe(true);
   });
 });
 

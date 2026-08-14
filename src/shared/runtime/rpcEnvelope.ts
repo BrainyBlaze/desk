@@ -1,7 +1,7 @@
 // desk-runtime control-plane RPC envelope (spec §3.2 "versioned RPC"). Pure
 // encode/decode + version negotiation over a line/length-framed control socket;
 // the daemon adapter does the socket I/O. This carries LOW-VOLUME control calls
-// (ensure/stop/list/lease/state); the hot terminal path rides the atch wire and
+// (ensure/stop/list/lease/state); the hot terminal path rides the moor wire and
 // the binary browser protocol, not this. JSON keeps it debuggable.
 
 export const RPC_VERSION = 1;

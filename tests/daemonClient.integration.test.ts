@@ -59,7 +59,7 @@ describe('daemon client ↔ server RPC (§3.2/§3.4)', () => {
   it('ping / ensure / list / state round-trip', async () => {
     expect((await client.ping()).pong).toBe(true);
     const ens = await client.ensure('web-1', 40, 120);
-    expect(ens).toEqual({ generation: 1, created: true });
+    expect(ens).toEqual({ generation: 2, created: true });
     const list = await client.list();
     expect(list).toHaveLength(1);
     expect(list[0].sessionId).toBe('web-1');
@@ -78,8 +78,8 @@ describe('daemon client ↔ server RPC (§3.2/§3.4)', () => {
     await client.ensure('a', 1, 1);
     await client.ensure('b', 1, 1);
     const [sa, sb, list] = await Promise.all([client.state('a'), client.state('b'), client.list()]);
-    expect(sa.generation).toBe(1);
-    expect(sb.generation).toBe(1);
+    expect(sa.generation).toBe(2);
+    expect(sb.generation).toBe(2);
     expect(list).toHaveLength(2);
   });
 

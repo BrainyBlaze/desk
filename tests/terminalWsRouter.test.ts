@@ -88,12 +88,13 @@ describe('terminal WS router (§7.4)', () => {
     router.onWsFrame(b, subscribe('s1'));
     expect(a.acks()).toEqual([1]);
     expect(b.acks()).toEqual([2]);
-    // B may not drive A's channel 1 → rejected; A may drive its own → accepted.
+    // B may not drive A's channel 1 → BAD_CHANNEL. A owns it, but this unit
+    // has no attached viewer lease, so the honest result is STALE_LEASE.
     router.onWsFrame(b, input(1, 'x'));
     expect(b.errors()).toContain(BpError.BAD_CHANNEL);
     a.frames.length = 0;
     router.onWsFrame(a, input(1, 'x'));
-    expect(a.errors()).toHaveLength(0); // owner accepted
+    expect(a.errors()).toEqual([BpError.STALE_LEASE]);
   });
 
   it('INPUT on an unknown/stale channel is rejected', () => {
@@ -101,6 +102,14 @@ describe('terminal WS router (§7.4)', () => {
     router.onWsFrame(ws, subscribe('s1')); // owns channel 1
     router.onWsFrame(ws, input(999, 'x')); // never allocated
     expect(ws.errors()).toContain(BpError.BAD_CHANNEL);
+  });
+
+  it('returns STALE_LEASE for a valid channel when no proven viewer lease can accept input', () => {
+    const ws = new FakeWs();
+    router.onWsFrame(ws, subscribe('s1'));
+    router.onWsFrame(ws, input(1, 'not-silently-dropped'));
+    expect(ws.errors()).toContain(BpError.STALE_LEASE);
+    expect(ws.errors()).not.toContain(BpError.BAD_CHANNEL);
   });
 
   it('WS close unsubscribes its channels; later INPUT on them is rejected', () => {

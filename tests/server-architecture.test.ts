@@ -127,7 +127,10 @@ describe('server architecture boundaries', () => {
 
     expect(ci).toContain('node-version: 22.23.1');
     expect(ci).toContain('bun-version: 1.3.14');
-    expect(ci).toContain('npm run build:distribution');
+    expect(ci).toContain('npm run build:application');
+    // Ordinary CI never acquires production moor bytes; the distribution
+    // chain (fetch + application) is exercised by the gated release lane.
+    expect(ci).not.toContain('npm run fetch:moor');
     expect(ci).toContain('npm run smoke:serve-modes');
     expect(release).toContain('npm run release:assets');
     expect(release).toContain('desk-install-manifest.json');
@@ -136,5 +139,16 @@ describe('server architecture boundaries', () => {
     expect(installer).toMatch(/ubuntu|fedora|archlinux|opensuse|alpine/);
     expect(installer).toContain('macos-15');
     expect(installer).toContain('macos-15-intel');
+  });
+
+  it('keeps pre-promotion CI on local Moor fixtures and requires a committed pin for tags', () => {
+    const release = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
+    const installer = readFileSync(join(ROOT, '.github/workflows/installer.yml'), 'utf8');
+
+    expect(installer).not.toContain('npm run fetch:moor');
+    expect(installer).toContain('tests/install-script.test.ts tests/release-assets.test.ts');
+    expect(release).toContain('git cat-file -e HEAD:scripts/distribution/moor-pin.json');
+    expect(release).toContain('Refusing a release tag without a committed Moor pin');
+    expect(release).toContain("steps.moor_pin.outputs.present == 'true'");
   });
 });

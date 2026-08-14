@@ -54,8 +54,8 @@ describe('daemon agent hook preflight', () => {
   ): TerminalDaemon {
     daemon = createTerminalDaemon({
       homeRoot: home,
-      atchBinPath: '/bin/false',
-      atchSocketRoot: home,
+      moorBinPath: '/bin/false',
+      moorSocketRoot: home,
       httpServer: new FakeUpgradeServer(),
       now: () => 1_000,
       hookInstallationProbe
@@ -155,7 +155,7 @@ describe('daemon agent hook preflight', () => {
       running.agentEvent({
         schemaVersion: AGENT_STATE_SCHEMA_VERSION,
         sessionId: 'codex-a',
-        generation: 1,
+        generation: 2,
         provider: 'codex',
         mode: 'terminal',
         producer: 'codex-hooks',

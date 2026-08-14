@@ -12,9 +12,6 @@
 // restore (§8.1), GAP-driven resync (§7.4), and native surfaces (§6.9) are
 // documented extension points wired the same way.
 
-import { ByteReader, type RawFrame } from '../atchWire/codec.js';
-import { EventType, FrameType, RecordType } from '../atchWire/frames.js';
-import { type RecordEnvelope, encodeBody } from '../atchWire/messages.js';
 import { BpFrameType, type BpFrame } from '../browserProtocol/index.js';
 import { InMemoryCmdCache, type DeliveryTxn, applyDelivery } from '../delivery/index.js';
 import { type EmulatorPort } from './emulatorPort.js';
@@ -27,8 +24,13 @@ export interface SessionRuntimeDeps {
   now: () => number;
   /** Deliver a frame to one browser channel (surface WS). */
   sendBrowser: (channelId: number, frame: BpFrame) => void;
-  /** Send a frame to the atch master (INPUT/COMMAND/etc.). */
-  sendMaster: (frame: RawFrame) => void;
+  /**
+   * Typed master-bound operations. The runtime states WHAT the child must
+   * receive; the session manager's installed link owns the wire encoding
+   * (moor supervised frames), so no wire type leaks into the runtime.
+   */
+  sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
+  sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
   onExit?: (exit: { code: number; signal: number }) => void;
 }
 
@@ -54,20 +56,6 @@ export class SessionRuntime {
   }
 
   // ---- master → daemon (data plane, §7.1) -----------------------------------
-  /** Route one decoded RECORD envelope from the master. */
-  onMasterRecord(rec: RecordEnvelope): void {
-    switch (rec.record_type) {
-      case RecordType.OUTPUT:
-        return this.onOutput(rec);
-      case RecordType.RESIZE:
-        return this.onResize(rec);
-      case RecordType.EVENT:
-        return this.onEvent(rec);
-      default:
-        return; // CHECKPOINT_MARK / TRUNCATION handled by the recovery path (§8)
-    }
-  }
-
   /**
    * Restore connection-local terminal parser modes during ATTACH. These bytes are
    * not child PTY output: they do not advance outputOffset or fan out to browsers.
@@ -77,45 +65,40 @@ export class SessionRuntime {
     await this.d.emulator.flush?.();
   }
 
-  private onOutput(rec: RecordEnvelope): void {
-    this.d.emulator.write(rec.body);
-    this.outputOffset = rec.output_offset + BigInt(rec.body.length);
+  /** Authoritative-emulator cursor (0-based; the §8 CPR consumer maps to 1-based). */
+  cursor(): { row: number; col: number } {
+    return this.d.emulator.cursor();
+  }
+
+  /**
+   * Fan a child-exit to every subscribed surface (cutover parity: the browser
+   * receives an explicit EXIT push, not just an authority-snapshot change).
+   * The moor event stream folds a signalled end into its exit code upstream,
+   * so `signal` is 0 unless a caller can still distinguish one.
+   */
+  emitExit(code: number, signal = 0): void {
+    for (const channelId of this.subscribers.keys()) {
+      this.d.sendBrowser(channelId, { type: BpFrameType.EXIT, channelId, code, signal });
+    }
+  }
+
+  /**
+   * Moor-native child output (§6.1 OUTPUT): absolute byte offset + raw bytes.
+   * Feeds the authoritative emulator and fans out to every subscribed surface.
+   */
+  onMoorOutput(bytes: Uint8Array, offset: bigint): void {
+    this.d.emulator.write(bytes);
+    this.outputOffset = offset + BigInt(bytes.length);
     for (const channelId of this.subscribers.keys()) {
       this.d.sendBrowser(channelId, {
         type: BpFrameType.OUTPUT,
         channelId,
         generation: this.d.generation,
         revision: this.revision,
-        offset: rec.output_offset,
-        bytes: rec.body
+        offset,
+        bytes
       });
     }
-  }
-
-  private onResize(rec: RecordEnvelope): void {
-    const r = new ByteReader(rec.body);
-    const rows = r.u16();
-    const cols = r.u16();
-    const geometryRev = r.u32();
-    this.d.emulator.resize(rows, cols);
-    this.revision = geometryRev;
-    // Subscribers pick up the new geometry via their next snapshot (§7.4:
-    // geometry-before-snapshot); a dedicated resize push is an easy extension.
-  }
-
-  private onEvent(rec: RecordEnvelope): void {
-    const r = new ByteReader(rec.body);
-    const eventType = r.u8();
-    if (eventType === EventType.EXIT) {
-      const code = r.u32() | 0; // signed i32
-      const signal = r.u16();
-      this.d.onExit?.({ code, signal });
-      for (const channelId of this.subscribers.keys()) {
-        this.d.sendBrowser(channelId, { type: BpFrameType.EXIT, channelId, code, signal });
-      }
-    }
-    // START/SIGNAL/GAP/CONTROLLER/RECOVERY_LOST → control-plane / GAP frames
-    // (same routing shape); attention (BEL/OSC9) arrives via emulator.onEvent.
   }
 
   // ---- browser → daemon (§7.4/§7.6) -----------------------------------------
@@ -150,10 +133,9 @@ export class SessionRuntime {
     this.subscribers.delete(channelId);
   }
 
-  /** Forward browser input to the master as an INPUT frame (§7.6, two channels). */
-  onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): void {
-    const payload = encodeBody(FrameType.INPUT, { flags: binary ? 1 : 0, surface_id: channelId, bytes });
-    this.d.sendMaster({ type: FrameType.INPUT, flags: 0, generation: this.d.generation, sequence: 0n, aux: 0n, payload });
+  /** Forward browser input to the master (§7.6, two channels). */
+  onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    return this.d.sendMasterInput(bytes, binary, channelId) !== false;
   }
 
   /**
@@ -164,7 +146,7 @@ export class SessionRuntime {
    * app enabled the mode (DECSET 2004), so multi-line text does not submit per
    * newline in a TUI, while a plain shell never sees stray escape codes.
    */
-  injectInput(bytes: Uint8Array, paste = false): void {
+  injectInput(bytes: Uint8Array, paste = false): boolean {
     let data = bytes;
     if (paste && this.d.emulator.bracketedPaste?.() === true) {
       const open = new TextEncoder().encode('\x1b[200~');
@@ -174,8 +156,7 @@ export class SessionRuntime {
       data.set(bytes, open.length);
       data.set(close, open.length + bytes.length);
     }
-    const payload = encodeBody(FrameType.INPUT, { flags: 0, surface_id: 0, bytes: data });
-    this.d.sendMaster({ type: FrameType.INPUT, flags: 0, generation: this.d.generation, sequence: 0n, aux: 0n, payload });
+    return this.d.sendMasterInput(data, false, 0) !== false;
   }
 
   /**
@@ -213,8 +194,11 @@ export class SessionRuntime {
       sub.cols = cols;
     }
     this.d.emulator.resize(rows, cols);
-    const payload = encodeBody(FrameType.RESIZE, { lease_epoch: 0, surface_id: channelId, generation: this.d.generation, rows, cols });
-    this.d.sendMaster({ type: FrameType.RESIZE, flags: 0, generation: this.d.generation, sequence: 0n, aux: 0n, payload });
+    // Geometry is controller-owned: bump the revision locally (the moor holder
+    // never echoes geometry back; the legacy echo path may still overwrite
+    // this with its own counter until it is removed with the old runtime).
+    this.revision += 1;
+    this.d.sendMasterResize(rows, cols, channelId);
   }
 
   /** Browser surface visibility (§3.3/§7.4) — drives worker residency + lease candidacy. */

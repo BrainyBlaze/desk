@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
 import {
-  atchCommandFor,
+  moorCommandFor,
   planDeskUp,
   runPlan,
   startSession
@@ -13,12 +13,19 @@ import type { SessionSpec } from '../src/core/types.js';
 
 const originalEnv = { ...process.env };
 
+/** The daemon's authoritative "no live moor link" answer for any session. */
+const absentSession = async () => ({
+  ok: false,
+  status: 404,
+  text: async () => JSON.stringify({ ok: false, error: 'session has no live moor link' })
+});
+
 afterEach(() => {
   process.env = { ...originalEnv };
 });
 
 describe('opencode launch continuity', () => {
-  it('does not inspect cwd sessions or rewrite a resume-less launch', () => {
+  it('does not inspect cwd sessions or rewrite a resume-less launch', async () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-opencode-no-inference-'));
     try {
       const cwd = join(root, 'project');
@@ -31,7 +38,7 @@ describe('opencode launch continuity', () => {
       };
       const spec = opencodeSpec(root, cwd);
 
-      const plan = planDeskUp([spec], { probeSession: () => false });
+      const plan = await planDeskUp([spec], { fetchImpl: absentSession as never });
 
       expect(plan).toHaveLength(1);
       expect(plan[0]).toMatchObject({ type: 'start', session: spec });
@@ -58,13 +65,13 @@ describe('opencode launch continuity', () => {
       const control = vi.fn().mockResolvedValue({ ok: true });
 
       await expect(
-        startSession(spec, { probeSession: () => false, control })
+        startSession(spec, { fetchImpl: absentSession as never, control })
       ).resolves.toEqual({ ok: true });
 
       expect(control).toHaveBeenCalledOnce();
       expect(control.mock.calls[0]![1]).toMatchObject({
         sessionId: spec.sessionId,
-        command: atchCommandFor(spec)
+        command: moorCommandFor(spec)
       });
       expect(existsSync(markerPath)).toBe(false);
     } finally {
@@ -88,13 +95,13 @@ describe('opencode launch continuity', () => {
       const control = vi.fn().mockResolvedValue({ ok: true });
 
       await expect(
-        startSession(spec, { probeSession: () => false, control })
+        startSession(spec, { fetchImpl: absentSession as never, control })
       ).resolves.toEqual({ ok: true });
 
       expect(spec.command).toContain("--session 'ses_12a31855dffeHTCs6tcfOmsddP'");
       expect(control.mock.calls[0]![1]).toMatchObject({
         sessionId: spec.sessionId,
-        command: atchCommandFor(spec)
+        command: moorCommandFor(spec)
       });
     } finally {
       rmSync(root, { force: true, recursive: true });

@@ -12,6 +12,21 @@ import { ChannelsEngine } from '../src/server/channelsEngine.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const STORE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/server/channelsStore.ts')).href;
+const TEST_PID_SCOPE = {
+  bootId: '11111111-1111-4111-8111-111111111111',
+  pidNamespaceDev: 4n,
+  pidNamespaceIno: 1_001n
+};
+
+function enginePidRecord(pid: number, starttime: bigint): string {
+  return (
+    `desk-engine-lock-v1\npid=${pid}\nnonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n` +
+    `linux_boot_id=${TEST_PID_SCOPE.bootId}\n` +
+    `linux_pidns_dev=${TEST_PID_SCOPE.pidNamespaceDev}\n` +
+    `linux_pidns_ino=${TEST_PID_SCOPE.pidNamespaceIno}\n` +
+    `starttime=${starttime}\n`
+  );
+}
 
 const WORKER_SOURCE = `
 import { appendMessage } from '${STORE_SOURCE}';
@@ -110,14 +125,15 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
     // different from what the injected reader will return for that pid (1) —
     // simulating the original engine dying and the OS giving its pid to an
     // unrelated process whose start-time differs.
-    writeFileSync(join(home, '_engine', 'engine.pid'), `${process.pid}\n99999\n`);
+    writeFileSync(join(home, '_engine', 'engine.pid'), enginePidRecord(process.pid, 99_999n));
 
     const engine = new ChannelsEngine({
       sendEnter: async () => true,
       home,
       pid: process.pid + 1,
+      pidScopeReader: () => TEST_PID_SCOPE,
       pidAlive: () => true, // holder reports alive — pre-fix code trusted this alone
-      pidStarttimeReader: () => 1, // current start-time differs from recorded → stale
+      pidStarttimeReader: () => 1n, // current start-time differs from recorded → stale
       // minimal options to satisfy the constructor:
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000, // effectively off — no pump side effects during the test
@@ -141,14 +157,15 @@ describe('engine.pid PID-reuse hazard (deterministic)', () => {
   // over-stealing (treating a real engine's lock as stale).
   it('still goes passive when the holder pid is alive and the recorded start-time matches', () => {
     mkdirSync(join(home, '_engine'), { recursive: true });
-    writeFileSync(join(home, '_engine', 'engine.pid'), `${process.pid}\n42\n`);
+    writeFileSync(join(home, '_engine', 'engine.pid'), enginePidRecord(process.pid, 42n));
 
     const engine = new ChannelsEngine({
       sendEnter: async () => true,
       home,
       pid: process.pid + 1,
+      pidScopeReader: () => TEST_PID_SCOPE,
       pidAlive: () => true,
-      pidStarttimeReader: () => 42, // matches recorded start-time → real owner
+      pidStarttimeReader: () => 42n, // matches recorded start-time → real owner
       releaseSettleMs: 0,
       pumpIntervalMs: 1_000_000,
       sendText: async () => true,

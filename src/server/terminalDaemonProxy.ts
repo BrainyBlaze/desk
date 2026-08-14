@@ -1,5 +1,5 @@
 // Web-server → daemon WS proxy (cutover, separate-process wiring). The daemon
-// (with @xterm/headless + the atch master links) runs as its OWN process; the
+// (with @xterm/headless + the moor holder links) runs as its OWN process; the
 // web server must NOT embed it (that regressed serve startup timing). Instead the
 // web server proxies each browser /ws/terminal connection to the daemon's WS,
 // forwarding the binary browser-protocol frames verbatim in both directions.
