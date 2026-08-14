@@ -20,7 +20,7 @@ const NEW_CLAUDE_ID = '44444444-4444-4444-8444-444444444444';
 function session(
   sessionId: string,
   agent: 'claude' | 'codex',
-  resume: string
+  resume?: string
 ): SessionSpec {
   return {
     groupId: 'main',
@@ -28,7 +28,7 @@ function session(
     name: sessionId,
     cwd: `/workspace/${sessionId}`,
     agent,
-    resume,
+    ...(resume === undefined ? {} : { resume }),
     sessionId,
     command: agent,
     uiMode: 'terminal'
@@ -139,6 +139,33 @@ describe('provider session continuity status', () => {
     expect(
       readProviderSessionContinuityStatus(
         [session('codex-agent', 'codex', NEW_CODEX_ID)],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([]);
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex')],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([
+      expect.objectContaining({
+        code: 'provider-session-reset-incomplete',
+        action: 'desk reset-provider-session codex-agent --force'
+      })
+    ]);
+
+    const reopened = new FileProviderSessionContinuityLedger(path);
+    reopened.cancelTransitionByReset({
+      deskSessionId: 'codex-agent',
+      transitionId: pending.transitionId,
+      resetAuthorizationId: 'reset-after-restart'
+    });
+    reopened.close();
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex')],
         { ledgerPath: path }
       ).issues
     ).toEqual([]);

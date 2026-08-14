@@ -10,6 +10,7 @@ export type ClaudeContinuityAttentionCode =
   | 'claude-memory-conflicts'
   | 'claude-memory-sync-failed'
   | 'provider-session-rebind-required'
+  | 'provider-session-reset-incomplete'
   | 'provider-session-identity-missing';
 
 export interface ClaudeContinuityAttention {

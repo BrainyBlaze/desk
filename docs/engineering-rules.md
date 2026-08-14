@@ -54,6 +54,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 - **R5.1 MUST** — a write to a user/config file is atomic (temp + `renameSync`), reusing the shared helpers (`fsOps.ts::writeFileAtomic`/`writeFileAtomicCreate` server-side; the `config.ts` temp+rename pattern for the manifest; `agentHooks` now uses `writeJsonIfChanged`). AVOID a bare `writeFileSync` a crash can truncate. *Why:* `agentHooks` wrote the user's `~/.claude/settings.json` / `~/.codex/hooks.json` non-atomically (§6.4.3). *Enforcement:* `[review]` + `[test]`. **Gate.**
 - **R5.2 MUST** — a `JSON.parse` of on-disk/user content is parse-or-default, never an unguarded parse that one hand-edited typo aborts a whole flow. *Why:* `readJsonObject` did `JSON.parse(readFileSync(...))` with no try/catch, so a typo aborted all of `installAgentHooks` (§6.4.3). *Enforcement:* `[review]`. **Guidance.**
 - **R5.3 MUST** `[server-lane]` — concurrent read-modify-write uses a per-path lock AND a collision-proof temp name (random suffix, e.g. `${path}.tmp-${pid}-${randomUUID()}`, NOT `${pid}-${Date.now()}` which collides for two same-ms writes). Judge lock correctness on the SHARED MEDIUM, not an in-memory object. *Why:* the manifest read-modify-write was last-writer-wins with a same-ms-colliding temp name (§6.4.3); the fix is `withFileLock` + `randomUUID` temp in `config.ts` over `src/shared/fileLock.ts`. *Enforcement:* `[test]` (the `config-concurrency` suite: concurrent writers, collision-proof temp) `[CI]`. **Gate.**
+- **R5.4 MUST** `[server-lane]` — a durable state change is accepted only after both its content and the directory entry that names it are durable. Atomic rename alone is not durable acceptance. *Why:* the provider-session transition ledger could durably authorize a rebind while the corresponding manifest replacement had only been renamed, allowing power loss to restore the old binding beside a resolved transition. *Enforcement:* `[test]` (`config-manifest-durability`: temp inode sync precedes rename; parent-directory sync follows it) + `[review]`. **Gate.**
 
 ## R6 — Shell + untrusted rendering are audited once
 
@@ -113,6 +114,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 | R4.5 | §5.8 collapsed LSP errors | typed error codes in `deskLspMcp` |
 | R5.1/R5.2 | §6.4.3 agentHooks | `writeJsonIfChanged` + guarded parse |
 | R5.3 | §6.4.3 manifest lock | `config.ts` `withFileLock` + `randomUUID` temp; `config-concurrency` suite |
+| R5.4 | provider-session rebind durability gap | `config.ts` durable manifest replacement; `config-manifest-durability` suite |
 | R6.1/R6.2 | §3.2/§6.4.3 shell | `src/shared/shell.ts::shellQuote` |
 | R7.2 | §6.4.2 disk-watch | `active` added to subscribe deps |
 | R8.1 | §2/§8.3 God-file | `usePulse`, `ModalRouter`, `*Impl` extraction |

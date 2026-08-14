@@ -36,6 +36,21 @@ export function readProviderSessionContinuityStatus(
         const session = sessionsById.get(transition.deskSessionId);
         const providerLabel =
           transition.provider === 'codex' ? 'Codex' : 'Claude';
+        if (transition.state === 'resolved' && session?.resume === undefined) {
+          return {
+            sessionId: transition.deskSessionId,
+            ...(session?.profileId === undefined
+              ? {}
+              : { profileId: session.profileId }),
+            cwd: session?.cwd ?? dirname(options.ledgerPath),
+            code: 'provider-session-reset-incomplete',
+            message: `${providerLabel} provider session reset was interrupted; relaunch remains blocked until the durable transition is cancelled`,
+            provider: transition.provider,
+            durableProviderSessionId: transition.expectedProviderSessionId,
+            observedProviderSessionId: transition.observedProviderSessionId,
+            action: `desk reset-provider-session ${transition.deskSessionId} --force`
+          };
+        }
         return {
           sessionId: transition.deskSessionId,
           ...(session?.profileId === undefined
