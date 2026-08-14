@@ -3,6 +3,7 @@
 // into a callable daemon — tested with a fake emulator.
 
 import { describe, expect, it } from 'vitest';
+import { BpFrameType } from '../src/shared/browserProtocol/index.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   GenerationLedger,
@@ -22,6 +23,7 @@ import {
 
 class FakeEmu implements EmulatorPort {
   written: number[] = [];
+  disposed = false;
   write(b: Uint8Array): void {
     this.written.push(...b);
   }
@@ -38,7 +40,56 @@ class FakeEmu implements EmulatorPort {
   onEvent(_cb: (e: EmulatorEvent) => void): () => void {
     return () => {};
   }
-  dispose(): void {}
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+class BlockingFlushEmu extends FakeEmu {
+  private drainResolve!: () => void;
+  private readonly drain = new Promise<void>((resolve) => {
+    this.drainResolve = resolve;
+  });
+
+  flush(): Promise<void> {
+    return this.drain;
+  }
+
+  release(): void {
+    this.drainResolve();
+  }
+
+  override serialize(): string {
+    return new TextDecoder().decode(Uint8Array.from(this.written));
+  }
+}
+
+class BlockingPreambleEmu extends FakeEmu {
+  private rendered = 'old';
+  private pending = '';
+  private drainResolve!: () => void;
+  private readonly drain = new Promise<void>((resolve) => {
+    this.drainResolve = resolve;
+  });
+
+  override write(bytes: Uint8Array): void {
+    this.pending += new TextDecoder().decode(bytes);
+  }
+
+  flush(): Promise<void> {
+    return this.drain.then(() => {
+      this.rendered += this.pending;
+      this.pending = '';
+    });
+  }
+
+  release(): void {
+    this.drainResolve();
+  }
+
+  override serialize(): string {
+    return this.rendered;
+  }
 }
 
 function makeCore(
@@ -46,20 +97,23 @@ function makeCore(
     maxLiveWorkers: number;
     initialAgentHealth: NonNullable<DaemonCoreDeps['initialAgentHealth']>;
     onStateTransition: (transition: SessionStateTransition) => void;
+    createEmulator: () => EmulatorPort;
   }> = {}
 ) {
   const browserOut: { sessionId: string; channelId: number; frame: BpFrame }[] = [];
   const masterOut: { sessionId: string; bytes: Uint8Array; binary: boolean; surfaceId: number }[] = [];
+  const masterResizes: { sessionId: string; rows: number; cols: number; surfaceId: number }[] = [];
   const clock = { t: 1000 };
   const deps: DaemonCoreDeps = {
     ledger: new GenerationLedger(new InMemoryGenerationLedger()),
     supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: over.maxLiveWorkers ?? 256 }),
-    emulatorFactory: { create: () => new FakeEmu() },
+    emulatorFactory: { create: over.createEmulator ?? (() => new FakeEmu()) },
     now: () => clock.t,
     sendBrowser: (sessionId, channelId, frame) => browserOut.push({ sessionId, channelId, frame }),
     sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
       masterOut.push({ sessionId, bytes, binary, surfaceId }),
-    sendMasterResize: () => {},
+    sendMasterResize: (sessionId, rows, cols, surfaceId) =>
+      masterResizes.push({ sessionId, rows, cols, surfaceId }),
     ...(over.initialAgentHealth === undefined
       ? {}
       : { initialAgentHealth: over.initialAgentHealth }),
@@ -67,7 +121,7 @@ function makeCore(
       ? {}
       : { onStateTransition: over.onStateTransition })
   };
-  return { core: new DaemonCore(deps), browserOut, masterOut, clock };
+  return { core: new DaemonCore(deps), browserOut, masterOut, masterResizes, clock };
 }
 
 const agentSubject = {
@@ -192,6 +246,180 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     core.onMoorOutput('s1', new TextEncoder().encode('hi'), 0n);
     expect(browserOut).toHaveLength(1);
     expect(browserOut[0]).toMatchObject({ sessionId: 's1', channelId: ch });
+  });
+
+  it('delays a subscription snapshot until terminal-state parser work drains', async () => {
+    const emulator = new BlockingPreambleEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+
+    const preamble = core.onMasterTerminalState('s1', new TextEncoder().encode('-new'));
+    const channelId = core.subscribe('s1', 'preamble-viewer', 40, 120);
+    expect(
+      browserOut
+        .filter((entry) => entry.channelId === channelId)
+        .map((entry) => entry.frame.type)
+    ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+
+    emulator.release();
+    await expect(preamble).resolves.toBe(true);
+    const frames = browserOut
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => entry.frame);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 0n,
+      text: 'old-new'
+    });
+  });
+
+  it('coalesces an identical replay retry while the first parser drain is pending', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+    const bytes = new TextEncoder().encode('x');
+
+    const first = core.onMoorOutput('s1', bytes, 0n);
+    const retry = core.onMoorOutput('s1', bytes, 0n);
+    expect(new TextDecoder().decode(Uint8Array.from(emulator.written))).toBe('x');
+
+    const channelId = core.subscribe('s1', 'retry-viewer', 40, 120);
+    expect(
+      browserOut
+        .filter((entry) => entry.channelId === channelId)
+        .map((entry) => entry.frame.type)
+    ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+
+    emulator.release();
+    await Promise.all([first, retry]);
+
+    const frames = browserOut
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => entry.frame);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 1n,
+      text: 'x'
+    });
+    expect(frames.some((frame) => frame.type === BpFrameType.OUTPUT)).toBe(false);
+  });
+
+  it('waits for the holder final-output boundary before emitting and fencing EXIT', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut, masterOut, masterResizes } = makeCore({
+      createEmulator: () => emulator
+    });
+    core.ensure('s1', { rows: 40, cols: 120 });
+    const channelId = core.subscribe('s1', 'main', 40, 120);
+    browserOut.length = 0;
+
+    const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    const exit = core.emitExit('s1', 7, 2n);
+    expect(browserOut).toEqual([]);
+    expect(
+      core.onBrowserInputByChannel(channelId, false, new TextEncoder().encode('after-exit'))
+    ).toBe(false);
+    expect(core.onBrowserResizeByChannel(channelId, 50, 130)).toBe(false);
+    expect(masterOut).toEqual([]);
+    expect(masterResizes).toEqual([]);
+    const finalOutput = core.onMoorOutput('s1', new TextEncoder().encode('y'), 1n);
+
+    emulator.release();
+    await Promise.all([output, finalOutput, exit]);
+    expect(browserOut.map(({ frame }) => frame.type)).toEqual([
+      BpFrameType.OUTPUT,
+      BpFrameType.OUTPUT,
+      BpFrameType.EXIT
+    ]);
+    expect(new TextDecoder().decode(Uint8Array.from(emulator.written))).toBe('xy');
+    expect(() => core.onMoorOutput('s1', new TextEncoder().encode('z'), 2n)).toThrow(
+      /after session exit/
+    );
+  });
+
+  it('orders an already-admitted delayed snapshot before terminal EXIT', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+
+    const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    const channelId = core.subscribe('s1', 'late-before-exit', 40, 120);
+    expect(
+      browserOut
+        .filter((entry) => entry.channelId === channelId)
+        .map((entry) => entry.frame.type)
+    ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+    const exit = core.emitExit('s1', 7, 1n);
+
+    emulator.release();
+    await Promise.all([output, exit]);
+
+    const frames = browserOut
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => entry.frame);
+    expect(frames.map((frame) => frame.type)).toEqual([
+      BpFrameType.SUBSCRIBE_ACK,
+      BpFrameType.SNAPSHOT,
+      BpFrameType.EXIT
+    ]);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 1n,
+      text: 'x'
+    });
+  });
+
+  it('rejects subscriptions during final drain and after the exit fence', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+
+    const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    const exit = core.emitExit('s1', 7, 1n);
+    expect(core.subscribe('s1', 'during-final-drain', 40, 120)).toBeUndefined();
+
+    emulator.release();
+    await Promise.all([output, exit]);
+    expect(core.subscribe('s1', 'after-exit-fence', 40, 120)).toBeUndefined();
+    expect(browserOut).toEqual([]);
+  });
+
+  it('fences a late output drain after retirement from the successor generation', async () => {
+    const retiredEmulator = new BlockingFlushEmu();
+    const successorEmulator = new FakeEmu();
+    const emulators: EmulatorPort[] = [retiredEmulator, successorEmulator];
+    const { core, browserOut } = makeCore({
+      createEmulator: () => emulators.shift() ?? new FakeEmu()
+    });
+    core.ensure('s1', { rows: 40, cols: 120 });
+    core.subscribe('s1', 'retired-viewer', 40, 120);
+    browserOut.length = 0;
+
+    const late = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    core.retire('s1', 'control-retire');
+    expect(retiredEmulator.disposed).toBe(true);
+    expect(core.ensure('s1', { rows: 40, cols: 120 })).toMatchObject({
+      ok: true,
+      generation: 3,
+      created: true
+    });
+    const successorChannel = core.subscribe('s1', 'successor-viewer', 40, 120);
+    browserOut.length = 0;
+
+    retiredEmulator.release();
+    await late;
+    expect(browserOut).toEqual([]);
+
+    core.onMoorOutput('s1', new TextEncoder().encode('y'), 0n);
+    expect(browserOut).toHaveLength(1);
+    expect(browserOut[0]).toMatchObject({
+      sessionId: 's1',
+      channelId: successorChannel,
+      frame: { type: BpFrameType.OUTPUT, generation: 3, offset: 0n }
+    });
+    expect(new TextDecoder().decode(Uint8Array.from(successorEmulator.written))).toBe('y');
   });
 
   it('accepts one canonical agent event and never reapplies its duplicate', () => {

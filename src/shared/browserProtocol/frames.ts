@@ -70,5 +70,6 @@ export enum BpError {
   BAD_CHANNEL = 5,
   STALE_GENERATION = 6,
   STALE_LEASE = 7,
-  INTERNAL = 8
+  INTERNAL = 8,
+  INPUT_UNAVAILABLE = 9
 }

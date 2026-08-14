@@ -122,6 +122,8 @@ import {
 } from '../providerSessionBinding.js';
 import {
   archiveMoorGenerationStores,
+  MoorCurrentExitEvidenceError,
+  readCurrentMoorGenerationExitEvidence,
   readMoorGenerationExitEvidence,
   type MoorGenerationExitEvidence
 } from './moorGenerationStores.js';
@@ -1010,14 +1012,42 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       ...(options.moorEventPollIntervalMs === undefined
         ? {}
         : { pollIntervalMs: options.moorEventPollIntervalMs }),
-      onEvent: (event, context) => {
+      onEvent: async (event, context) => {
+        let observedEvent = event;
+        if (event.type === 'exit') {
+          const evidence = await readCurrentMoorGenerationExitEvidence(
+            socketPath(sessionId),
+            generation
+          );
+          const outcomeMatches =
+            (evidence.outcome.ended === 'exited' &&
+              event.outcome.kind === 'exited' &&
+              evidence.outcome.code === event.outcome.code) ||
+            (evidence.outcome.ended === 'signalled' &&
+              event.outcome.kind === 'signalled' &&
+              evidence.outcome.signal === event.outcome.signal) ||
+            (evidence.outcome.ended === 'terminated' &&
+              event.outcome.kind === 'terminated' &&
+              evidence.outcome.code === event.outcome.code &&
+              evidence.outcome.method === event.outcome.method);
+          if (!outcomeMatches) {
+            throw new Error(`lifecycle/event exit mismatch for generation ${generation}`);
+          }
+          observedEvent = { ...event, outputEnd: BigInt(evidence.outputEnd) };
+        }
         const replayKey = moorTransitionKey(sessionId, generation);
         if (context.phase === 'replay') replayingMoorTransitions.add(replayKey);
         try {
-          router.sessions.observeMoorEvent(sessionId, generation, event);
+          router.sessions.observeMoorEvent(sessionId, generation, observedEvent);
         } finally {
           if (context.phase === 'replay') replayingMoorTransitions.delete(replayKey);
         }
+      },
+      onEventError: (error, event) => {
+        if (error instanceof MoorCurrentExitEvidenceError) {
+          return error.code === 'UNAVAILABLE' ? 'retry' : 'terminal';
+        }
+        return event.type === 'exit' ? 'terminal' : 'continue';
       },
       onDiagnostic: (message) =>
         reportMoorDiagnostic(diagnosticIdentity, { code: 'tailer-io', message }),

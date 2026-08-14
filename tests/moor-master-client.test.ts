@@ -371,6 +371,33 @@ describe('MoorMasterClient', () => {
     await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
   });
 
+  it('keeps the fresh-lease attach deadline running through replay delivery', async () => {
+    let closed = false;
+    const { holder, client, identity } = await start(
+      {
+        onOutput: () => new Promise<void>(() => undefined),
+        onClose: () => {
+          closed = true;
+        }
+      },
+      { attachDeadlineMs: 60 }
+    );
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(
+      MoorKind.ATTACH_ACK,
+      statusPayload(identity, 5, { replay: { first: 1n, last: 1n, start: 0n, end: 1n } })
+    );
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('x')));
+
+    await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
+    await waitFor(() => closed, 'fresh-lease replay deadline close');
+  });
+
   it('refuses a LEASE_RESULT that contradicts the attach status', async () => {
     const protocolErrors: string[] = [];
     const { holder, client, identity } = await start({
@@ -412,11 +439,11 @@ describe('MoorMasterClient', () => {
       statusPayload(identity, 5, { replay: { first: 3n, last: 4n, start: 100n, end: 120n } })
     );
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
-    await attached;
 
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(100n, 8), text('0123456789')));
     holder.send(MoorKind.OUTPUT, joined(integer(4n, 8), integer(110n, 8), text('0123456789')));
+    await attached;
     await waitFor(() => outputs.length === 2, 'replay after the baseline gap');
     expect(gaps).toEqual([{ first: 1n, last: 2n }]);
     expect(outputs).toEqual([3n, 4n]);
@@ -488,6 +515,7 @@ describe('MoorMasterClient', () => {
       onOutput: (output) => outputs.push(output.sequence)
     });
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
@@ -497,7 +525,6 @@ describe('MoorMasterClient', () => {
       statusPayload(identity, 5, { replay: { first: 3n, last: 4n, start: 100n, end: 121n } })
     );
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
-    await attached;
 
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(100n, 8), text('0123456789')));
@@ -506,6 +533,7 @@ describe('MoorMasterClient', () => {
     await waitFor(() => protocolErrors.length === 1, 'short replay boundary refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(outputs).toEqual([3n]);
+    await expect(attached).rejects.toThrow();
   });
 
   it('bounds OUTPUT_ACK to records actually delivered', async () => {
@@ -755,13 +783,13 @@ describe('MoorMasterClient', () => {
       statusPayload(identity, 5, { replay: { first: 3n, last: 5n, start: 100n, end: 130n } })
     );
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
-    await attached;
 
     // Baseline: GAP{1,2} names records the prior connection consumed — silent.
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(100n, 8), text('0123456789')));
     holder.send(MoorKind.OUTPUT, joined(integer(4n, 8), integer(110n, 8), text('0123456789')));
     holder.send(MoorKind.OUTPUT, joined(integer(5n, 8), integer(120n, 8), text('0123456789')));
+    await attached;
     await waitFor(() => outputs.length === 2, 'only fresh records delivered');
     expect(outputs).toEqual([4n, 5n]); // 3n is the cursor duplicate
     expect(gaps).toEqual([]);
@@ -784,12 +812,12 @@ describe('MoorMasterClient', () => {
       statusPayload(identity, 5, { replay: { first: 1n, last: 3n, start: 0n, end: 3n } })
     );
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
-    await attached;
 
     const next = holder.next();
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('a')));
     holder.send(MoorKind.OUTPUT, joined(integer(2n, 8), integer(1n, 8), text('b')));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(2n, 8), text('c')));
+    await attached;
     const ack = await Promise.race([
       next,
       new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50))
@@ -809,6 +837,7 @@ describe('MoorMasterClient', () => {
       }
     );
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
@@ -818,11 +847,11 @@ describe('MoorMasterClient', () => {
       statusPayload(identity, 5, { replay: { first: 5n, last: 5n, start: 100n, end: 110n } })
     );
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
-    await attached;
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(4n, 8)));
     await waitFor(() => protocolErrors.length === 1, 'unsafe recovery gap refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(() => client.sendInput(text('never-on-stale-screen'))).toThrow(/attached|closed/i);
+    await expect(attached).rejects.toThrow();
   });
 
   it('sends one coalesced auto-ack per delivered batch when the policy is enabled', async () => {

@@ -52,6 +52,7 @@ export interface DaemonCoreDeps {
   now: () => number;
   /** Route a browser frame to a session's surface (the socket shell wires the WS). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
+  onSubscriberFailure?: (sessionId: string, channelId: number) => void;
   /** Typed master-bound sends, routed to the session's attached holder link. */
   sendMasterInput: (
     sessionId: string,
@@ -249,6 +250,13 @@ export class DaemonCore {
       cmdCache: this.cmdCache,
       now: this.d.now,
       sendBrowser: (channelId, frame) => this.d.sendBrowser(sessionId, channelId, frame),
+      onSubscriberFailure: (channelId) => {
+        try {
+          this.d.onSubscriberFailure?.(sessionId, channelId);
+        } finally {
+          this.channelToSession.delete(channelId);
+        }
+      },
       sendMasterInput: (bytes, binary, surfaceId) =>
         this.d.sendMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterResize: (rows, cols, surfaceId) =>
@@ -327,6 +335,7 @@ export class DaemonCore {
         // refines this afterwards without touching the reason above.
         diagnostic: null
       });
+      entry.runtime.dispose();
     }
     this.sessions.delete(sessionId);
     // desk#62: retire is the ONE authoritative end of a session, so it is the
@@ -420,8 +429,13 @@ export class DaemonCore {
    * callers to remember, and the number itself is a compatibility view derived
    * at this boundary — never the durable truth.
    */
-  emitExit(sessionId: string, code: number, signal = 0): void {
-    this.sessions.get(sessionId)?.runtime.emitExit(code, signal);
+  emitExit(
+    sessionId: string,
+    code: number,
+    outputEnd: bigint,
+    signal = 0
+  ): void | Promise<void> {
+    return this.sessions.get(sessionId)?.runtime.emitExit(code, outputEnd, signal);
   }
 
   /**
@@ -500,8 +514,22 @@ export class DaemonCore {
 
   // ---- routing to a session's runtime ---------------------------------------
   /** Moor-native child output: absolute byte offset + raw bytes (§6.1). */
-  onMoorOutput(sessionId: string, bytes: Uint8Array, offset: bigint): void {
-    this.sessions.get(sessionId)?.runtime.onMoorOutput(bytes, offset);
+  onMoorOutput(sessionId: string, bytes: Uint8Array, offset: bigint): void | Promise<void> {
+    return this.sessions.get(sessionId)?.runtime.onMoorOutput(bytes, offset);
+  }
+
+  pendingAuthoritativeWork(sessionId: string): Promise<void> | undefined {
+    return this.sessions.get(sessionId)?.runtime.pendingAuthoritativeWork();
+  }
+
+  hasPendingExitBoundary(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.runtime.hasPendingExitBoundary() ?? false;
+  }
+
+  truncatePendingExit(
+    sessionId: string
+  ): { outputOffset: bigint; outputEnd: bigint } | undefined {
+    return this.sessions.get(sessionId)?.runtime.truncatePendingExit();
   }
 
   /** Manager-originated channel error (for deferred input that lost its lease). */
@@ -528,9 +556,12 @@ export class DaemonCore {
     const e = this.sessions.get(sessionId);
     if (e === undefined) return undefined;
     const channelId = this.nextChannelId++;
-    e.runtime.subscribe(surfaceId, rows, cols, channelId);
     this.channelToSession.set(channelId, sessionId);
-    return channelId;
+    if (!e.runtime.subscribe(surfaceId, rows, cols, channelId)) {
+      this.channelToSession.delete(channelId);
+      return undefined;
+    }
+    return this.channelToSession.has(channelId) ? channelId : undefined;
   }
 
   /** The session that owns a channelId, or undefined if unknown/stale. */
@@ -579,7 +610,7 @@ export class DaemonCore {
     if (sessionId === undefined) return false;
     const entry = this.sessions.get(sessionId);
     if (entry === undefined) return true;
-    entry.runtime.onBrowserResize(channelId, rows, cols);
+    if (!entry.runtime.onBrowserResize(channelId, rows, cols)) return false;
     // desk#62: remember the size the moment it is APPLIED, not at shutdown — a
     // daemon that is killed never runs shutdown code, and this measurement is
     // the only thing that can tell the next incarnation how big this session is.

@@ -8,6 +8,7 @@ import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/contro
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type EmulatorEvent } from '../src/shared/runtime/index.js';
 import { TerminalWsRouter, type WsConn } from '../src/server/runtime/terminalWsRouter.js';
 import { BpError, BpFrameType, decodeBpFrame, encodeBpFrame, type BpFrame } from '../src/shared/browserProtocol/index.js';
+import { describeBpError } from '../src/web/terminalBpError.js';
 
 const createdEmus: FakeEmu[] = [];
 class FakeEmu implements EmulatorPort {
@@ -89,12 +90,12 @@ describe('terminal WS router (§7.4)', () => {
     expect(a.acks()).toEqual([1]);
     expect(b.acks()).toEqual([2]);
     // B may not drive A's channel 1 → BAD_CHANNEL. A owns it, but this unit
-    // has no attached viewer lease, so the honest result is STALE_LEASE.
+    // has no attached controller link, so the honest result is INPUT_UNAVAILABLE.
     router.onWsFrame(b, input(1, 'x'));
     expect(b.errors()).toContain(BpError.BAD_CHANNEL);
     a.frames.length = 0;
     router.onWsFrame(a, input(1, 'x'));
-    expect(a.errors()).toEqual([BpError.STALE_LEASE]);
+    expect(a.errors()).toEqual([BpError.INPUT_UNAVAILABLE]);
   });
 
   it('INPUT on an unknown/stale channel is rejected', () => {
@@ -104,12 +105,15 @@ describe('terminal WS router (§7.4)', () => {
     expect(ws.errors()).toContain(BpError.BAD_CHANNEL);
   });
 
-  it('returns STALE_LEASE for a valid channel when no proven viewer lease can accept input', () => {
+  it('reports truthful browser text when a valid channel has no controller link', () => {
     const ws = new FakeWs();
     router.onWsFrame(ws, subscribe('s1'));
     router.onWsFrame(ws, input(1, 'not-silently-dropped'));
-    expect(ws.errors()).toContain(BpError.STALE_LEASE);
+    expect(ws.errors()).toContain(BpError.INPUT_UNAVAILABLE);
     expect(ws.errors()).not.toContain(BpError.BAD_CHANNEL);
+    expect(describeBpError(ws.errors().at(-1)!)).toBe(
+      'terminal input is unavailable while the session reconnects or exits'
+    );
   });
 
   it('WS close unsubscribes its channels; later INPUT on them is rejected', () => {

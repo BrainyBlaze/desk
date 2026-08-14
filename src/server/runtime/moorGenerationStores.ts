@@ -13,6 +13,7 @@ import { basename, dirname, join } from 'node:path';
 import { withFileLock } from '../../shared/fileLock.js';
 import { posixMoorIdentity } from './moorMasterClient.js';
 import {
+  MoorStoreError,
   MoorStoreKind,
   readMoorStoreSnapshot,
   type MoorStoreSnapshot
@@ -42,6 +43,17 @@ export interface MoorGenerationExitEvidence {
   readonly endWallMs: string;
   readonly outputEnd: string;
   readonly outcome: MoorGenerationExitOutcome;
+}
+
+export class MoorCurrentExitEvidenceError extends Error {
+  constructor(
+    readonly code: 'UNAVAILABLE' | 'CONTRADICTION',
+    message: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'MoorCurrentExitEvidenceError';
+  }
 }
 
 interface FileIdentity {
@@ -1243,6 +1255,48 @@ export async function readMoorGenerationExitEvidence(
     },
     { notFoundMessage: 'Moor parent directory disappeared while reading exit evidence' }
   );
+}
+
+/** Read the exact current generation from the stable lifecycle companion. */
+export async function readCurrentMoorGenerationExitEvidence(
+  sessionPath: string,
+  generation: number
+): Promise<MoorGenerationExitEvidence> {
+  if (!Number.isSafeInteger(generation) || generation <= 0 || generation > U32_MAX) {
+    throw new Error('invalid current Moor generation');
+  }
+  let parent: ParentBinding | undefined;
+  try {
+    parent = await openBoundParent(dirname(sessionPath), undefined, process.platform);
+    const state = await inspectStore(`${sessionPath}.exit`, true);
+    const { snapshot } = await validateNormalStore(
+      parent,
+      state,
+      MoorStoreKind.Exit,
+      generation
+    );
+    validateLifecycle(snapshot, posixMoorIdentity(sessionPath));
+    return decodeExitEvidence(snapshot, generation);
+  } catch (error) {
+    const errorCode =
+      error !== null && typeof error === 'object' && 'code' in error
+        ? String(error.code)
+        : undefined;
+    const code =
+      (error instanceof MoorStoreError && error.code === 'UNAVAILABLE') ||
+      errorCode === 'ENOENT' ||
+      errorCode === 'EAGAIN' ||
+      errorCode === 'ESTALE'
+        ? 'UNAVAILABLE'
+        : 'CONTRADICTION';
+    throw new MoorCurrentExitEvidenceError(
+      code,
+      `current Moor lifecycle exit ${code === 'UNAVAILABLE' ? 'is unavailable' : 'is contradictory'}`,
+      { cause: error }
+    );
+  } finally {
+    await parent?.handle.close();
+  }
 }
 
 /**

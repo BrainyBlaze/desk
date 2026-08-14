@@ -484,6 +484,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       onOutput: (output) => outputs.push(output.offset)
     });
     const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
@@ -496,13 +497,13 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
         replay: { first: 3n, last: 3n, start: 100n, end: 101n, complete: false }
       })
     );
-    await attached;
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(999n, 8), text('x')));
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(outputs).toEqual([]);
+    await expect(attached).rejects.toThrow();
   });
 
   it('enforces the ACK retained byte end on the final replay record', async () => {
@@ -513,6 +514,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       onOutput: (output) => outputs.push(output.sequence)
     });
     const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
@@ -525,12 +527,12 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
         replay: { first: 1n, last: 1n, start: 0n, end: 1n, complete: true }
       })
     );
-    await attached;
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('xx')));
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(outputs).toEqual([]);
+    await expect(attached).rejects.toThrow();
   });
 
   it('does not emit OUTPUT_ACK above the highest record delivered', async () => {

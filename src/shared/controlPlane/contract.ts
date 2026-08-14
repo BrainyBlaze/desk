@@ -339,7 +339,11 @@ const exitSchema = z.strictObject({
     .union([
       z.null(),
       z.strictObject({
-        code: z.enum(['moor-event-drain-unobservable', 'moor-event-observer-terminal']),
+        code: z.enum([
+          'moor-event-drain-unobservable',
+          'moor-event-observer-terminal',
+          'moor-final-output-truncated'
+        ]),
         detail: boundedText(200).optional()
       })
     ])

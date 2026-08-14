@@ -16,6 +16,7 @@ import {
   startTerminalDaemonServer
 } from '../src/server/runtime/terminalDaemon.js';
 import { reconcileExistingSessions } from '../src/server/runtime/terminalDaemonMain.js';
+import { MoorStoreKind } from '../src/server/runtime/moorStore.js';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import type { MoorStatus } from '../src/shared/moorWire/messages.js';
 
@@ -89,6 +90,46 @@ function writeMoorStore(
   writeFileSync(join(directory, 'body.1'), new Uint8Array(), { mode: 0o600 });
   writeFileSync(join(directory, 'commit.1'), new Uint8Array(), { mode: 0o600 });
   return { commitIndex: 1n, bodyLength: BigInt(body.length), bodyHash };
+}
+
+function writeCurrentExitStore(
+  sessionPath: string,
+  generation: number,
+  code: number,
+  outputEnd = 0n
+): void {
+  const identity = Buffer.from(pathIdentity(sessionPath)).toString('base64');
+  const nonce = Buffer.alloc(16).toString('base64');
+  const body = encoder.encode(
+    `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}",` +
+      `"generation":${generation},"wire_generation":${generation},` +
+      `"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1",` +
+      `"boot_id":"${nonce}","path_encoding":"posix-bytes",` +
+      `"event_path":null,"instrument_path":null,"end_wall_ms":"2",` +
+      `"output_end":"${outputEnd}","ended":"exited","code":${code}}\n`
+  );
+  const commit = new Uint8Array(92);
+  const view = new DataView(commit.buffer);
+  commit.set(encoder.encode('MOORCMT1'), 0);
+  commit[8] = 1;
+  commit[9] = 0;
+  commit[10] = 0;
+  commit[11] = MoorStoreKind.Exit;
+  view.setUint32(12, generation, true);
+  view.setUint32(16, 1, true);
+  view.setBigUint64(24, 2n, true);
+  view.setBigUint64(32, BigInt(body.length), true);
+  view.setBigUint64(40, outputEnd, true);
+  view.setBigUint64(48, outputEnd, true);
+  commit.set(createHash('sha256').update(body).digest(), 56);
+  view.setUint32(88, crc32c(commit.subarray(0, 88)), true);
+
+  const directory = `${sessionPath}.exit`;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(join(directory, 'body.0'), body, { mode: 0o600 });
+  writeFileSync(join(directory, 'commit.0'), commit, { mode: 0o600 });
+  writeFileSync(join(directory, 'body.1'), new Uint8Array(), { mode: 0o600 });
+  writeFileSync(join(directory, 'commit.1'), new Uint8Array(), { mode: 0o600 });
 }
 
 function fakeMoorStatus(
@@ -468,6 +509,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
           '{"type":"ready","ts":2,"epoch":0,"seq":0,"kind":"transition"}\n',
           '{"type":"exit","ts":3,"epoch":0,"seq":1,"kind":"transition","ended":"exited","code":0}\n'
         ]);
+        writeCurrentExitStore(options.sessionPath, ensured.generation, 0);
         return {
           ...ensured,
           moorStatus: fakeMoorStatus(

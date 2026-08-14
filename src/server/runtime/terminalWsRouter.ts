@@ -48,6 +48,11 @@ export class TerminalWsRouter {
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
       sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame),
+      onSubscriberFailure: (channelId) => {
+        const ws = this.channelToWs.get(channelId);
+        this.channelToWs.delete(channelId);
+        if (ws !== undefined) this.wsChannels.get(ws)?.delete(channelId);
+      },
       ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
@@ -108,12 +113,17 @@ export class TerminalWsRouter {
           ws.send(encodeBpFrame({ type: BpFrameType.ERROR, channelId: frame.channelId, code: BpError.BAD_CHANNEL }));
           return;
         }
-        if (!this.manager.onBrowserInputByChannel(frame.channelId, frame.binary, frame.bytes)) {
+        const errorCode = this.manager.dispatchBrowserInputByChannel(
+          frame.channelId,
+          frame.binary,
+          frame.bytes
+        );
+        if (errorCode !== undefined) {
           ws.send(
             encodeBpFrame({
               type: BpFrameType.ERROR,
               channelId: frame.channelId,
-              code: BpError.STALE_LEASE
+              code: errorCode
             })
           );
         }
