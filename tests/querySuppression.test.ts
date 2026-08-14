@@ -1,7 +1,7 @@
 // Reply-suppression responder matrix + query classifier (spec §7.7/§7.9).
 
 import { describe, expect, it } from 'vitest';
-import { QueryClass } from '../src/shared/atchWire/frames.js';
+import { QueryClass } from '../src/shared/browserProtocol/querySuppression.js';
 import {
   classifyCsi,
   classifyOsc,

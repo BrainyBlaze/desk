@@ -26,6 +26,7 @@ export interface TerminalWsRouterDeps {
   supervisor: WorkerSupervisor;
   emulatorFactory: EmulatorFactory;
   now: () => number;
+  sessionGeometry?: SessionManagerDeps['sessionGeometry'];
   workingLeaseMs?: SessionManagerDeps['workingLeaseMs'];
   openToolLeaseMs?: SessionManagerDeps['openToolLeaseMs'];
   initialAgentHealth?: SessionManagerDeps['initialAgentHealth'];
@@ -47,6 +48,7 @@ export class TerminalWsRouter {
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
       sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame),
+      ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -106,7 +108,15 @@ export class TerminalWsRouter {
           ws.send(encodeBpFrame({ type: BpFrameType.ERROR, channelId: frame.channelId, code: BpError.BAD_CHANNEL }));
           return;
         }
-        this.manager.onBrowserInputByChannel(frame.channelId, frame.binary, frame.bytes);
+        if (!this.manager.onBrowserInputByChannel(frame.channelId, frame.binary, frame.bytes)) {
+          ws.send(
+            encodeBpFrame({
+              type: BpFrameType.ERROR,
+              channelId: frame.channelId,
+              code: BpError.STALE_LEASE
+            })
+          );
+        }
         return;
       }
       case BpFrameType.UNSUBSCRIBE: {

@@ -9,6 +9,7 @@ import {
   WorkerSupervisor
 } from '../src/shared/runtime/workerSupervisor.js';
 import { FileProviderSessionLaunchLedger } from '../src/server/runtime/providerSessionLaunchLedger.js';
+import { FileProviderSessionContinuityLedger } from '../src/server/runtime/providerSessionContinuityLedger.js';
 import {
   createTerminalDaemon,
   type TerminalDaemon
@@ -79,8 +80,8 @@ function daemonFor(
 ): TerminalDaemon {
     return createTerminalDaemon({
       homeRoot: root,
-      atchBinPath: '/bin/false',
-      atchSocketRoot: root,
+      moorBinPath: '/bin/false',
+      moorSocketRoot: root,
       httpServer: new FakeUpgradeServer(),
       manifestPath,
       homeDir: root,
@@ -93,7 +94,7 @@ function daemonFor(
     currentGeneration: number,
     providerSessionId?: string
   ) {
-    vi.spyOn(daemon.router.sessions, 'spawnAndAttach').mockImplementation(
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
       async (sessionId, options) => {
         const decision = await options.preallocateSpawn?.({
           sessionId,
@@ -116,6 +117,51 @@ function daemonFor(
       ...(providerSessionId === undefined ? {} : { providerSessionId })
     });
   }
+
+  it('lets a never-launched session start after a failed attempt moved the generation (desk#47)', async () => {
+    // The generation ledger is monotonic (§4.8.1), so an attempt that died
+    // before the child ever ran still advanced it. The session had no
+    // conversation to protect (no binding, nothing in the launch ledger), so
+    // the retry is a FIRST launch — it used to be refused forever, and
+    // `reset-provider-session` could not help because the failed attempt had
+    // rolled the session out of the manifest.
+    const { root, manifestPath, ledgerPath } = fixture();
+    const daemon = daemonFor(root, manifestPath);
+    await expect(provisionAtGeneration(daemon, 2)).resolves.toMatchObject({
+      ok: true,
+      generation: 3
+    });
+    daemon.dispose();
+
+    // Nothing was authorized or consumed: a first launch records no claim.
+    const replayed = new FileProviderSessionLaunchLedger(ledgerPath);
+    expect(replayed.current('alpha')).toBeUndefined();
+    replayed.close();
+  });
+
+  it('still fences a relaunch once the launch ledger knows the session (desk#47 guard)', async () => {
+    // The moment an authorization exists, the fence applies exactly as before:
+    // an unauthorized relaunch is refused rather than silently starting a
+    // second conversation.
+    const { root, manifestPath, ledgerPath } = fixture();
+    const seed = new FileProviderSessionLaunchLedger(ledgerPath, {
+      createAuthorizationId: () => 'authorization-guard'
+    });
+    seed.prepare({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 4
+    });
+    seed.close();
+
+    const daemon = daemonFor(root, manifestPath);
+    await expect(provisionAtGeneration(daemon, 9)).resolves.toMatchObject({
+      ok: false,
+      reason: 'provider-session-identity-missing'
+    });
+    daemon.dispose();
+  });
 
   it('allows exact resume after a crash before manifest clear and terminalizes prepared', async () => {
     const { root, manifestPath, ledgerPath } = fixture(PRIOR_ID);
@@ -169,6 +215,72 @@ function daemonFor(
     const replayed = new FileProviderSessionLaunchLedger(ledgerPath);
     expect(replayed.current('alpha')).toEqual(prepared);
     replayed.close();
+  });
+
+  it('reports reset-incomplete when a prepared reset still has a durable pending transition', async () => {
+    const { root, manifestPath, ledgerPath } = fixture();
+    const launchLedger = new FileProviderSessionLaunchLedger(ledgerPath, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    launchLedger.prepare({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      expectedPriorBinding: PRIOR_ID,
+      generation: 7
+    });
+    launchLedger.close();
+    const continuityLedger = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson')
+    );
+    continuityLedger.stageTransition({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      generation: 7,
+      expectedProviderSessionId: PRIOR_ID,
+      observedProviderSessionId: NEXT_ID,
+      evidencePath: '/safe/codex/next.jsonl'
+    });
+    continuityLedger.close();
+
+    const daemon = daemonFor(root, manifestPath);
+    await expect(provisionAtGeneration(daemon, 7, PRIOR_ID)).resolves.toEqual({
+      ok: false,
+      reason: 'provider-session-identity-missing',
+      detail: 'reset-incomplete'
+    });
+    daemon.dispose();
+  });
+
+  it('fences a resolved authorization whose manifest replacement is not applied', async () => {
+    const { root, manifestPath } = fixture(PRIOR_ID);
+    const continuityLedger = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson')
+    );
+    const pending = continuityLedger.stageTransition({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      generation: 7,
+      expectedProviderSessionId: PRIOR_ID,
+      observedProviderSessionId: NEXT_ID,
+      evidencePath: '/safe/codex/next.jsonl'
+    });
+    continuityLedger.resolveTransition({
+      deskSessionId: 'alpha',
+      transitionId: pending.transitionId,
+      targetProviderSessionId: NEXT_ID
+    });
+    continuityLedger.close();
+
+    const daemon = daemonFor(root, manifestPath);
+    await expect(
+      provisionAtGeneration(daemon, 7, PRIOR_ID)
+    ).resolves.toEqual({
+      ok: false,
+      reason: 'provider-session-identity-missing',
+      detail: 'provider-session-rebind-required',
+      action: `desk rebind-provider-session alpha --to ${NEXT_ID} --force`
+    });
+    daemon.dispose();
   });
 
   it('claims one authorized fresh launch for the exact next generation and never reuses it', async () => {
@@ -263,25 +375,47 @@ function daemonFor(
     const replayed = new FileProviderSessionLaunchLedger(ledgerPath);
     expect(replayed.current('alpha')).toMatchObject({
       state: 'claimed',
-      generation: 1
+      generation: 2 // OB-18: the fresh supervised claim owns generation 2
     });
     replayed.close();
   });
 
-  it('refuses a later resume-less launch without authorization but permits generation zero', async () => {
-    const { root, manifestPath } = fixture();
+  it('refuses a later resume-less launch once an authorization exists, at any generation', async () => {
+    // desk#47 narrowed this case. The fence used to refuse purely because the
+    // generation had moved, which caught the session whose first attempt died
+    // before the child ever ran and left nothing behind but a bumped counter.
+    // What the fence protects is an ADDRESSABLE conversation, and Desk can
+    // only address one it recorded: the manifest binding (covered by the
+    // resume tests above) or the launch ledger (asserted here).
+    const { root, manifestPath, ledgerPath } = fixture();
     const daemon = daemonFor(root, manifestPath);
 
     await expect(provisionAtGeneration(daemon, 0)).resolves.toMatchObject({
       ok: true,
       generation: 1
     });
-    await expect(provisionAtGeneration(daemon, 2)).resolves.toEqual({
+    daemon.dispose();
+
+    const seed = new FileProviderSessionLaunchLedger(ledgerPath, {
+      createAuthorizationId: () => 'authorization-recorded'
+    });
+    seed.prepare({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 1
+    });
+    seed.close();
+
+    const fenced = daemonFor(root, manifestPath);
+    // A prepared-but-unfinished reset fences with its own detail; either way
+    // the launch is refused, which is the property under test.
+    await expect(provisionAtGeneration(fenced, 2)).resolves.toEqual({
       ok: false,
       reason: 'provider-session-identity-missing',
-      detail: 'not-authorized'
+      detail: 'reset-incomplete'
     });
-    daemon.dispose();
+    fenced.dispose();
   });
 
   it('completes a stale claimed launch after binding and permits the next exact resume', async () => {
@@ -347,7 +481,7 @@ function daemonFor(
   it('preserves non-agent provisioning at positive generations', async () => {
     const { root, manifestPath } = fixture();
     const daemon = daemonFor(root, manifestPath);
-    vi.spyOn(daemon.router.sessions, 'spawnAndAttach').mockImplementation(
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementation(
       async (sessionId, options) => {
         const decision = await options.preallocateSpawn?.({
           sessionId,

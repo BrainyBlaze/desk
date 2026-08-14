@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
@@ -136,15 +146,32 @@ function writeManifestSource(path: string, source: string): void {
   if (source.trim() === '') {
     throw new Error('refusing to write an empty desk manifest');
   }
-  mkdirSync(dirname(path), { recursive: true });
-  // Atomic write: a crash mid-write leaves the temp file, never a truncated
-  // or 0-byte manifest. rename(2) is atomic on the same filesystem.
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
+  // A replacement is accepted only after both its content and directory entry
+  // are durable. rename(2) alone provides atomicity, not power-loss durability.
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  let fd: number | undefined;
   try {
-    writeFileSync(tmp, source, { flag: 'wx' });
+    fd = openSync(tmp, 'wx');
+    writeFileSync(fd, source);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
     renameSync(tmp, path);
+    fsyncDirectory(directory);
   } finally {
+    if (fd !== undefined) closeSync(fd);
     rmSync(tmp, { force: true });
+  }
+}
+
+function fsyncDirectory(path: string): void {
+  const fd = openSync(path, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 

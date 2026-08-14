@@ -6,11 +6,12 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   daemonChildEnv,
-  resolveAtchBinPath,
+  resolveMoorBinPath,
   resolveDaemonCommand,
   resolveReleaseRoot,
   startDaemonSupervisor
 } from '../../src/server/runtime/daemonSupervisor.js';
+import { attestMoorBinary } from '../../src/shared/moorPaths.js';
 
 class FakeChild extends EventEmitter {
   stdout = null;
@@ -357,8 +358,8 @@ describe('resolveDaemonCommand', () => {
   });
 });
 
-describe('resolveAtchBinPath', () => {
-  it('preflights DESK_ATCH_BIN, then release libexec/atch, then an ABSOLUTE PATH hit, else throws', () => {
+describe('resolveMoorBinPath', () => {
+  it('preflights DESK_MOOR_BIN, then release libexec/moor, then an ABSOLUTE PATH hit, else throws', () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
     const pathDir = mkdtempSync(join(tmpdir(), 'desk-path-'));
     try {
@@ -367,32 +368,32 @@ describe('resolveAtchBinPath', () => {
       mkdirSync(join(root, 'src'), { recursive: true });
       const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
 
-      // an explicit-but-unusable DESK_ATCH_BIN fails BEFORE launch, not at first provision
-      setEnv('DESK_ATCH_BIN', '/opt/custom/atch');
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/not an executable/);
+      // an explicit-but-unusable DESK_MOOR_BIN fails BEFORE launch, not at first provision
+      setEnv('DESK_MOOR_BIN', '/opt/custom/moor');
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/not an executable/);
 
-      const custom = join(pathDir, 'custom-atch');
-      writeFileSync(custom, '#!/bin/sh\n');
+      const custom = join(pathDir, 'custom-moor');
+      writeFileSync(custom, '#!/bin/sh\n[ "$1" = --version ] && { echo "moor 0.1.0"; exit 0; }\n');
       chmodSync(custom, 0o755);
-      setEnv('DESK_ATCH_BIN', custom);
-      expect(resolveAtchBinPath(fromUrl)).toBe(custom);
+      setEnv('DESK_MOOR_BIN', custom);
+      expect(resolveMoorBinPath(fromUrl)).toBe(custom);
 
       // no explicit, no bundled, nothing on PATH → fail closed
-      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('DESK_MOOR_BIN', undefined);
       setEnv('PATH', '/nonexistent-dir');
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/no atch binary/);
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/no attested moor binary/);
 
       // a PATH hit resolves to the ABSOLUTE preflighted path, never the bare name
-      writeFileSync(join(pathDir, 'atch'), '#!/bin/sh\n');
-      chmodSync(join(pathDir, 'atch'), 0o755);
+      writeFileSync(join(pathDir, 'moor'), '#!/bin/sh\n[ "$1" = --version ] && { echo "moor 0.1.0"; exit 0; }\n');
+      chmodSync(join(pathDir, 'moor'), 0o755);
       setEnv('PATH', pathDir);
-      expect(resolveAtchBinPath(fromUrl)).toBe(join(pathDir, 'atch'));
+      expect(resolveMoorBinPath(fromUrl)).toBe(join(pathDir, 'moor'));
 
       // the same-release bundled binary outranks PATH
       mkdirSync(join(root, 'libexec'), { recursive: true });
-      writeFileSync(join(root, 'libexec', 'atch'), '#!/bin/sh\n');
-      chmodSync(join(root, 'libexec', 'atch'), 0o755);
-      expect(resolveAtchBinPath(fromUrl)).toBe(join(root, 'libexec', 'atch'));
+      writeFileSync(join(root, 'libexec', 'moor'), '#!/bin/sh\n[ "$1" = --version ] && { echo "moor 0.1.0"; exit 0; }\n');
+      chmodSync(join(root, 'libexec', 'moor'), 0o755);
+      expect(resolveMoorBinPath(fromUrl)).toBe(join(root, 'libexec', 'moor'));
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(pathDir, { recursive: true, force: true });
@@ -408,18 +409,18 @@ describe('resolveAtchBinPath', () => {
       mkdirSync(join(root, 'src'), { recursive: true });
       const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
 
-      // libexec/atch as a DIRECTORY must not preflight as the atch binary
-      mkdirSync(join(root, 'libexec', 'atch'), { recursive: true });
-      setEnv('DESK_ATCH_BIN', undefined);
+      // libexec/moor as a DIRECTORY must not preflight as the moor binary
+      mkdirSync(join(root, 'libexec', 'moor'), { recursive: true });
+      setEnv('DESK_MOOR_BIN', undefined);
       setEnv('PATH', '/nonexistent-dir');
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/no atch binary/);
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/no attested moor binary/);
 
-      // an explicit DESK_ATCH_BIN naming a directory fails the preflight too
-      setEnv('DESK_ATCH_BIN', join(root, 'libexec', 'atch'));
-      expect(() => resolveAtchBinPath(fromUrl)).toThrow(/not an executable/);
+      // an explicit DESK_MOOR_BIN naming a directory fails the preflight too
+      setEnv('DESK_MOOR_BIN', join(root, 'libexec', 'moor'));
+      expect(() => resolveMoorBinPath(fromUrl)).toThrow(/not an executable/);
 
       // runtime/node as a DIRECTORY must not be picked as the release runtime
-      setEnv('DESK_ATCH_BIN', undefined);
+      setEnv('DESK_MOOR_BIN', undefined);
       setEnv('DESK_DAEMON_CMD', undefined);
       mkdirSync(join(root, 'runtime', 'node'), { recursive: true });
       expect(resolveDaemonCommand(fromUrl, process.env, '/usr/local/bin/node')).toEqual([
@@ -527,5 +528,88 @@ describe('daemonChildEnv', () => {
     expect(daemonChildEnv()).toEqual({ DESK_DAEMON_HOST: '127.0.0.1', DESK_DAEMON_PORT: '5178' });
     setEnv('DESK_DAEMON_URL', 'not a url');
     expect(daemonChildEnv()).toEqual({ DESK_DAEMON_HOST: '127.0.0.1', DESK_DAEMON_PORT: '5178' });
+  });
+});
+
+describe('attestMoorBinary (#10 protocol/build attestation)', () => {
+  it('accepts only the exact attested version answer', () => {
+    expect(attestMoorBinary('/x', () => ({ status: 0, stdout: 'moor 0.1.0\n' }))).toEqual({ ok: true });
+    expect(attestMoorBinary('/x', () => ({ status: 0, stdout: 'moor 0.2.0\n' }))).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('expected "moor 0.1.0"')
+    });
+    // The legacy holder's answer shape must NEVER attest.
+    expect(
+      attestMoorBinary('/x', () => ({ status: 0, stdout: 'atch - version 1.6-bb1, something\n' }))
+    ).toMatchObject({ ok: false });
+  });
+
+  it('attests a REAL binary under any filename: the spec derives the answer from the invoked basename (desk#40)', () => {
+    // No injected probe here — this exercises the DEFAULT probe. The moor
+    // spec (§3) answers `<invoked-basename> <version>`, so a candidate named
+    // anything but `moor` (an operator's DESK_MOOR_BIN=/opt/tools/moor-v1)
+    // must still attest via the canonical-basename probe path.
+    const root = mkdtempSync(join(tmpdir(), 'moor-attest-real-'));
+    try {
+      const argvSensitive = join(root, 'moor-v1');
+      writeFileSync(argvSensitive, '#!/bin/sh\nprintf \'%s 0.1.0\\n\' "$(basename "$0")"\n');
+      chmodSync(argvSensitive, 0o755);
+      expect(attestMoorBinary(argvSensitive)).toEqual({ ok: true });
+
+      // A wrong-version binary still fails under the same real probe.
+      const impostor = join(root, 'moor-old');
+      writeFileSync(impostor, '#!/bin/sh\nprintf \'%s 0.0.9\\n\' "$(basename "$0")"\n');
+      chmodSync(impostor, 0o755);
+      expect(attestMoorBinary(impostor)).toMatchObject({ ok: false });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects nonzero exit, spawn failure, and a hung probe fail-closed', () => {
+    expect(attestMoorBinary('/x', () => ({ status: 64, stdout: '' }))).toMatchObject({
+      ok: false,
+      reason: 'version probe exited 64'
+    });
+    expect(
+      attestMoorBinary('/x', () => ({ status: null, stdout: '', error: new Error('ETIMEDOUT') }))
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('ETIMEDOUT') });
+    expect(
+      attestMoorBinary('/x', () => {
+        throw new Error('spawn EACCES');
+      })
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('EACCES') });
+  });
+
+  it('an explicit DESK_MOOR_BIN failing attestation is a HARD error, never a silent fallthrough', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-attest-'));
+    try {
+      const impostor = join(dir, 'moor');
+      // Executable, but answers as something else entirely.
+      writeFileSync(impostor, '#!/bin/sh\necho not-moor\n', { mode: 0o755 });
+      setEnv('DESK_MOOR_BIN', impostor);
+      expect(() => resolveMoorBinPath(pathToFileURL(join(dir, 'module.js')).href)).toThrow(
+        /failed moor attestation/
+      );
+    } finally {
+      setEnv('DESK_MOOR_BIN', undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a PATH impostor is skipped fail-closed (no attested binary is found)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-attest-path-'));
+    try {
+      writeFileSync(join(dir, 'moor'), '#!/bin/sh\necho impostor\n', { mode: 0o755 });
+      setEnv('DESK_MOOR_BIN', undefined);
+      setEnv('PATH', dir);
+      // cwd pinned to the temp dir: the repo's REAL bundled libexec/moor must
+      // not satisfy this scenario through the release-root fallback.
+      expect(() =>
+        resolveMoorBinPath(pathToFileURL(join(dir, 'module.js')).href, process.env, dir)
+      ).toThrow(/no attested moor binary/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -272,6 +272,32 @@ Desk validates known resume id formats before persisting them. Codex and Claude 
 Capturing a fresh resume id never changes `sessionId`; terminal, channels, and
 attention state remain keyed to the same Desk session.
 
+Desk captures the initial Codex or Claude provider session automatically only
+from the managed child launch. The terminal daemon requires both its private
+per-launch proof and current provider transcript evidence before it persists
+the ID; a generation number by itself is not authorization.
+
+Resuming a different conversation manually inside the provider TUI creates a
+provider-session mismatch. Desk records that transition durably and blocks
+relaunch instead of silently replacing the configured `resume`. Review the two
+IDs shown in the continuity banner, then authorize the observed conversation
+explicitly:
+
+```sh
+desk rebind-provider-session <name-or-sessionId> --to <observed-provider-id> --force
+```
+
+The rebind is compare-and-swap guarded by the daemon's pending transition. If
+the command is interrupted after the manifest update, retry the exact command;
+an already-applied matching transition succeeds without changing authority.
+Do not substitute a fuzzy provider ID or edit `resume` by hand.
+
+`rebind-provider-session` preserves the manually resumed conversation by
+moving the durable binding to the observed ID. In contrast,
+`reset-provider-session <name-or-sessionId> --force` clears the binding and
+authorizes exactly one fresh provider launch. Reset is the destructive recovery
+for intentionally starting over, not a replacement for rebind.
+
 ### Permission bypass
 
 `bypassPermissions` controls supported agent CLIs:

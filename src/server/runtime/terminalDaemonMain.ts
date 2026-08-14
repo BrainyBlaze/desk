@@ -1,19 +1,23 @@
-// atch-native terminal daemon process entry — the target of the internal
+// moor-native terminal daemon process entry — the target of the internal
 // `desk terminal-daemon` CLI subcommand (spawned + supervised by the web
 // server's daemonSupervisor; not user-facing). Starts
-// the terminal daemon server, RECONCILES with already-live atch masters, and
+// the terminal daemon server, RECONCILES with already-live moor holders, and
 // runs until SIGINT/SIGTERM. Config via env so a canary can fully isolate
 // HOME / socket root / port.
 //
 // Startup semantics are reconcile, not provision: `desk serve` never boots
 // sessions (that is `desk up` / the Boot button, via /control/provision), so
-// the daemon attaches ONLY to sessions whose atch socket already exists — a
+// the daemon attaches ONLY to sessions whose moor socket already exists — a
 // daemon restart re-binds running sessions instead of double-spawning them.
 
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveAtchBinPath, resolveAtchSocketRoot } from '../../shared/atchPaths.js';
+import {
+  moorRendezvousPath,
+  resolveMoorBinPath,
+  resolveMoorSocketRoot
+} from '../../shared/moorPaths.js';
 import {
   sessionStateSubjectFor,
   type SessionRegistration
@@ -28,8 +32,8 @@ import {
 
 export interface TerminalDaemonMainConfig {
   homeRoot: string;
-  atchBinPath: string;
-  atchSocketRoot: string;
+  moorBinPath: string;
+  moorSocketRoot: string;
   host: string;
   port: number;
   /** Per-launch identity from the supervisor (DESK_DAEMON_NONCE), echoed by /control/health. */
@@ -42,12 +46,12 @@ export function resolveDaemonConfig(env: NodeJS.ProcessEnv = process.env): Termi
   return {
     homeRoot: home,
     // Resolve through the one audited resolver rather than reading the variable
-    // raw. It preflights DESK_ATCH_BIN as an executable regular file, falls back
-    // to the same-release libexec/atch, and yields an ABSOLUTE path from PATH —
-    // never the bare name "atch", which would hand the daemon's exec to whatever
+    // raw. It preflights DESK_MOOR_BIN as an executable regular file, falls back
+    // to the same-release libexec/moor, and yields an ABSOLUTE path from PATH —
+    // never the bare name "moor", which would hand the daemon's exec to whatever
     // PATH happens to resolve and defer the failure to the first provision.
-    atchBinPath: resolveAtchBinPath(import.meta.url, env),
-    atchSocketRoot: resolveAtchSocketRoot(env),
+    moorBinPath: resolveMoorBinPath(import.meta.url, env),
+    moorSocketRoot: resolveMoorSocketRoot(env),
     host: env.DESK_DAEMON_HOST ?? '127.0.0.1',
     port: Number(env.DESK_DAEMON_PORT ?? 5178),
     ...(env.DESK_DAEMON_NONCE !== undefined && env.DESK_DAEMON_NONCE.length > 0 ? { healthNonce: env.DESK_DAEMON_NONCE } : {})
@@ -60,14 +64,14 @@ export interface ReconcileTarget {
   subject: SessionRegistration['subject'];
 }
 
-/** Manifest sessions whose atch master socket is already live under the root. */
+/** Manifest sessions whose moor holder socket is already live under the root. */
 export function manifestReconcileTargets(
-  atchSocketRoot: string,
+  moorSocketRoot: string,
   socketExists: (path: string) => boolean = existsSync
 ): ReconcileTarget[] {
   return loadDesk({}).sessions.flatMap((session) => {
     const sessionId = session.sessionId;
-    const sockPath = join(atchSocketRoot, `${sessionId}.sock`);
+    const sockPath = moorRendezvousPath(moorSocketRoot, sessionId);
     return socketExists(sockPath)
       ? [{ sessionId, sockPath, subject: sessionStateSubjectFor(session) }]
       : [];
@@ -76,7 +80,7 @@ export function manifestReconcileTargets(
 
 /**
  * Re-adopt each already-live master (restore at the durable ledger generation
- * + attach + register the atch kill command — NEVER ensure/spawn: an allocate
+ * + attach + register the moor kill command — NEVER ensure/spawn: an allocate
  * here would fence the surviving master out, and a missing killSpec would
  * orphan it on the next retire). Failures are isolated per session.
  *
@@ -85,17 +89,23 @@ export function manifestReconcileTargets(
  * few silent sockets could exceed the supervisor's readiness budget — every
  * daemon incarnation then gets terminated pre-ready, taking the HEALTHY
  * sessions down with it. Total startup stays near one timeout window.
+ *
+ * NO GEOMETRY (desk#62). This pass knows nothing about any session's terminal
+ * size, so it asserts nothing: it used to default to 24x80 and hand that to
+ * every re-adoption, which travelled into the wire ATTACH and physically
+ * shrank every running agent's pty on restart. The size a session actually has
+ * is remembered by the daemon (the durable per-session geometry record) and
+ * read by restoreAndAttachMoor; where nothing was ever measured, the ATTACH
+ * carries moor's preserve pair and the child is left alone.
  */
 export async function reconcileExistingSessions(
   daemon: Pick<TerminalDaemon, 'router'> &
-    Partial<Pick<TerminalDaemon, 'reconcileAtchEvents'>>,
+    Partial<Pick<TerminalDaemon, 'reconcileMoorEvents'>>,
   targets: readonly ReconcileTarget[],
-  atchBinPath: string,
-  geometry = { rows: 24, cols: 80 },
-  opts: { concurrency?: number; ackTimeoutMs?: number } = {}
+  moorBinPath: string,
+  opts: { concurrency?: number } = {}
 ): Promise<{ sessionId: string; ok: boolean; error?: string }[]> {
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 8, targets.length || 1));
-  const ackTimeoutMs = opts.ackTimeoutMs ?? 4_000;
   const results: { sessionId: string; ok: boolean; error?: string }[] = new Array(targets.length);
   let next = 0;
   const worker = async (): Promise<void> => {
@@ -105,20 +115,50 @@ export async function reconcileExistingSessions(
       if (index >= targets.length) return;
       const { sessionId, sockPath, subject } = targets[index];
       try {
-        const restored = await daemon.router.sessions.restoreAndAttach(sessionId, {
-          sockPath,
-          geometry,
+        // Native moor re-adoption: the client fences the §3/§6 exchange on the
+        // restored ledger generation and carries the ATTACH_ACK descriptor the
+        // OB-39 reconcile below requires. Its 2 s adoption deadline bounds each
+        // attach, so the worker pool keeps total startup near one window.
+        const restored = await daemon.router.sessions.restoreAndAttachMoor(sessionId, {
+          sessionPath: sockPath,
           killSpec: {
-            binPath: atchBinPath,
+            binPath: moorBinPath,
             args: ['kill', '-f', sockPath],
-            staleCleanupSpec: { binPath: atchBinPath, args: ['rm', sockPath] }
+            staleCleanupSpec: { binPath: moorBinPath, args: ['rm', sockPath] }
           },
-          ackTimeoutMs,
           subject
         });
         if (restored.ok) {
-          daemon.reconcileAtchEvents?.(sessionId, restored.generation);
-          results[index] = { sessionId, ok: true };
+          const reconciled = await daemon.reconcileMoorEvents?.(sessionId, restored.generation);
+          if (reconciled === false) {
+            // The surviving holder's event store is not observable: the
+            // restored attachment must NOT stay live without a lifecycle
+            // source. Retire the EXACT restored generation before reporting
+            // the failure; an indeterminate retirement stays false/retriable.
+            await daemon.router.sessions.retireGenerationAwaited(
+              sessionId,
+              restored.generation,
+              { reason: 'moor-reconcile-failed' }
+            );
+            results[index] = {
+              sessionId,
+              ok: false,
+              error: 'moor event store is not observable'
+            };
+          } else {
+            results[index] = { sessionId, ok: true };
+          }
+        } else if ('retained' in restored && restored.retained) {
+          // desk#64 — reported as NOT re-attached, because it was not: there is
+          // no adopted link and no event-store reconciliation. But the session
+          // was kept rather than retired, and the startup log has to say so —
+          // an operator reading "could not re-attach" must not conclude the
+          // agent is gone when it is running and being re-attached to.
+          results[index] = {
+            sessionId,
+            ok: false,
+            error: `attach failed at generation ${restored.generation}; the session is retained as unadopted and re-attachment is retrying`
+          };
         } else {
           results[index] = { sessionId, ok: false, error: restored.reason };
         }
@@ -134,10 +174,10 @@ export async function reconcileExistingSessions(
 export async function completeDaemonStartup(
   daemon: Pick<
     TerminalDaemon,
-    'router' | 'reconcileAtchEvents' | 'reconcileAgentProviders' | 'markReady'
+    'router' | 'reconcileMoorEvents' | 'reconcileAgentProviders' | 'markReady'
   >,
   targets: readonly ReconcileTarget[],
-  atchBinPath: string
+  moorBinPath: string
 ): Promise<{
   reconciled: { sessionId: string; ok: boolean; error?: string }[];
   providerRecovery: AgentProviderReconcileResult[];
@@ -145,7 +185,7 @@ export async function completeDaemonStartup(
   const reconciled = await reconcileExistingSessions(
     daemon,
     targets,
-    atchBinPath
+    moorBinPath
   );
   const providerRecovery = await daemon.reconcileAgentProviders(
     reconciled.filter((result) => result.ok).map((result) => result.sessionId)
@@ -165,8 +205,8 @@ export async function runTerminalDaemonMain(config = resolveDaemonConfig()): Pro
   try {
     ({ reconciled } = await completeDaemonStartup(
       running.daemon,
-      manifestReconcileTargets(config.atchSocketRoot),
-      config.atchBinPath
+      manifestReconcileTargets(config.moorSocketRoot),
+      config.moorBinPath
     ));
   } catch (error) {
     // A post-listen startup failure (e.g. a malformed manifest) must be FATAL:

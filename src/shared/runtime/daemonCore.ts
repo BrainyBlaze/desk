@@ -21,13 +21,29 @@ import {
 } from '../controlPlane/index.js';
 import { InMemoryCmdCache } from '../delivery/index.js';
 import { type BpFrame } from '../browserProtocol/index.js';
-import { type RawFrame } from '../atchWire/codec.js';
-import { type RecordEnvelope } from '../atchWire/messages.js';
 import { WorkerSupervisor } from './workerSupervisor.js';
 import { type EmulatorFactory } from './emulatorPort.js';
 import { SessionRuntime } from './sessionRuntime.js';
+import {
+  InMemorySessionGeometryStore,
+  type SessionGeometryStore
+} from './sessionGeometryStore.js';
 import { createLeaseState, claim, release, type ClaimResult, type LeaseState } from '../lease/index.js';
 import { decideStop } from './instanceLock.js';
+import type { MoorExitOutcome, SessionExit } from '../controlPlane/contract.js';
+
+/** desk#59 — the closed observation-failure vocabulary. */
+export type ExitDiagnostic = NonNullable<SessionExit['diagnostic']>;
+
+/**
+ * desk#62 — the LOCAL screen a re-adopted session is rebuilt at when no client
+ * ever measured it. It is not a guess about the child: moor creates a session
+ * with no viewer at exactly 80 columns by 24 rows (moor spec §4.3), so an
+ * unrendered child's pty IS this size. It is used only to size this daemon's
+ * own emulator; the adopting ATTACH carries MOOR_PRESERVE_GEOMETRY, so the
+ * child is never told a size by the reconcile pass.
+ */
+const UNMEASURED_SESSION_GEOMETRY = { rows: 24, cols: 80 } as const;
 
 export interface DaemonCoreDeps {
   ledger: GenerationLedger;
@@ -36,8 +52,22 @@ export interface DaemonCoreDeps {
   now: () => number;
   /** Route a browser frame to a session's surface (the socket shell wires the WS). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
-  /** Send a frame to a session's atch master. */
-  sendMaster: (sessionId: string, frame: RawFrame) => void;
+  /** Typed master-bound sends, routed to the session's attached holder link. */
+  sendMasterInput: (
+    sessionId: string,
+    bytes: Uint8Array,
+    binary: boolean,
+    surfaceId: number
+  ) => boolean | void;
+  sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
+  /**
+   * desk#62 — where a client-measured geometry is remembered across daemon
+   * incarnations. Every APPLIED browser resize is recorded here, and restore()
+   * reads it, so a re-adopted session comes back at the size it actually had.
+   * Defaults to a process-local store (correct within one incarnation; a
+   * durable one is injected by the real daemon).
+   */
+  sessionGeometry?: SessionGeometryStore;
   workingLeaseMs?: number;
   openToolLeaseMs?: number;
   initialAgentHealth?: (
@@ -74,12 +104,61 @@ export type DaemonAgentStateIntakeResult =
     })
   | Exclude<AgentStateIntakeResult, { kind: 'accepted' }>;
 
+/**
+ * desk#59 — every teardown names itself, so an exit record can say WHO ended
+ * the session. Deaths that Desk causes are otherwise indistinguishable from a
+ * child that died on its own, which is exactly the ambiguity that made live
+ * agent deaths untraceable.
+ */
+export type RetireReason =
+  | 'control-retire'          // an explicit /control retire RPC
+  | 'restore-superseded'      // a newer generation took the slot during restore
+  | 'master-link-closed'      // the adopted moor link closed
+  | 'spawn-prepare-failed'    // prepareSpawn threw before the master existed
+  | 'spawn-failed'            // the master never came up
+  | 'spawn-aborted'           // the spawn op was abandoned mid-flight
+  | 'moor-reconcile-failed'   // the surviving holder's event store was unobservable
+  | 'observer-terminal'       // the lifecycle observer failed; the session is not operable
+  | 'store-authority-refused' // the holder's acknowledged store could not be trusted
+  | 'observer-start-failed'   // the lifecycle observer could not be started at all
+  | 'provider-session-reset'  // the session was torn down to re-establish provider identity
+  | 'confirmed-holder-absence' // an authenticated probe positively established the holder is gone
+  | 'operator-reboot'         // the operator restarted this session
+  | 'session-deleted'         // the session was removed from the manifest
+  | 'kill-switch'             // the operator's kill switch stopped everything
+  | 'stale-identity-after-edit'; // an edit left the old identity's holder behind
+
+/** desk#59 — the closed set, for validating a cause that arrives over the wire. */
+export const RETIRE_REASONS = [
+  'control-retire',
+  'restore-superseded',
+  'master-link-closed',
+  'spawn-prepare-failed',
+  'spawn-failed',
+  'spawn-aborted',
+  'moor-reconcile-failed',
+  'observer-terminal',
+  'store-authority-refused',
+  'observer-start-failed',
+  'provider-session-reset',
+  'confirmed-holder-absence',
+  'operator-reboot',
+  'session-deleted',
+  'kill-switch',
+  'stale-identity-after-edit'
+] as const satisfies readonly RetireReason[];
+
+export function isRetireReason(value: unknown): value is RetireReason {
+  return typeof value === 'string' && (RETIRE_REASONS as readonly string[]).includes(value);
+}
+
 export class DaemonCore {
   private readonly d: DaemonCoreDeps;
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly authority: AgentStateAuthority;
   private readonly agentStateIntakeStore: AgentStateIntakeStore;
   private readonly cmdCache = new InMemoryCmdCache();
+  private readonly sessionGeometry: SessionGeometryStore;
   /** Global monotonic channelId allocator (§7.4) — never reused across sessions. */
   private nextChannelId = 1;
   /** channelId → owning sessionId, for channelId-only INPUT routing. */
@@ -87,6 +166,7 @@ export class DaemonCore {
 
   constructor(deps: DaemonCoreDeps) {
     this.d = deps;
+    this.sessionGeometry = deps.sessionGeometry ?? new InMemorySessionGeometryStore();
     this.authority = new AgentStateAuthority({
       now: deps.now,
       workingLeaseMs: deps.workingLeaseMs ?? 15_000,
@@ -126,6 +206,10 @@ export class DaemonCore {
 
     const generation = this.d.ledger.allocate(sessionId); // durable, fsync-before-spawn
     this.admitSession(sessionId, geometry, generation, subject);
+    // desk#62: a NEW session's pty is created at exactly this geometry, so it
+    // is measured knowledge too — remember it, or a session that is booted and
+    // never resized would still come back unmeasured after a restart.
+    this.sessionGeometry.record(sessionId, geometry);
     return { ok: true, generation, created: true };
   }
 
@@ -165,11 +249,23 @@ export class DaemonCore {
       cmdCache: this.cmdCache,
       now: this.d.now,
       sendBrowser: (channelId, frame) => this.d.sendBrowser(sessionId, channelId, frame),
-      sendMaster: (frame) => this.d.sendMaster(sessionId, frame),
+      sendMasterInput: (bytes, binary, surfaceId) =>
+        this.d.sendMasterInput(sessionId, bytes, binary, surfaceId),
+      sendMasterResize: (rows, cols, surfaceId) =>
+        this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
       onExit: (exit) => {
         this.authority.markExited(sessionId, generation, {
           code: exit.code,
-          signal: exit.signal === 0 ? null : String(exit.signal)
+          signal: exit.signal === 0 ? null : String(exit.signal),
+          origin: 'observed',
+          reason: null,
+          // The supervised worker path reports a POSIX code/signal pair
+          // directly; the tagged outcome states which of the two it was.
+          outcome:
+            exit.signal === 0 || exit.signal === undefined
+              ? { kind: 'exited', code: exit.code ?? 0 }
+              : { kind: 'signalled', signal: Number(exit.signal) },
+          diagnostic: null
         });
       }
     });
@@ -177,7 +273,7 @@ export class DaemonCore {
   }
 
   /**
-   * Re-adopt a session whose atch master SURVIVED a daemon restart: create the
+   * Re-adopt a session whose moor holder SURVIVED a daemon restart: create the
    * runtime at the ledger's durable CURRENT generation without allocating. The
    * surviving master owns exactly that generation — an ensure() here would
    * allocate current+1 and the fence would reject every frame in both
@@ -187,7 +283,6 @@ export class DaemonCore {
    */
   restore(
     sessionId: string,
-    geometry: { rows: number; cols: number },
     subject: SessionRegistration['subject'] = { kind: 'terminal' }
   ): RestoreResult {
     if (this.sessions.has(sessionId)) return { ok: false, reason: 'already-live' };
@@ -197,7 +292,18 @@ export class DaemonCore {
     const admit = this.d.supervisor.admit(sessionId, this.d.now());
     if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
 
-    this.admitSession(sessionId, geometry, generation, subject);
+    // desk#62: re-adoption takes NO geometry from its caller. The only size
+    // this session may come back at is one a real client measured and the
+    // daemon remembered; with no record, the local screen is built at moor's
+    // own no-viewer creation size (spec §4.3) because that is exactly what an
+    // unrendered child's pty is — and the ATTACH that adopts the holder
+    // carries preserve either way, so neither value reaches the child.
+    this.admitSession(
+      sessionId,
+      this.sessionGeometry.get(sessionId) ?? UNMEASURED_SESSION_GEOMETRY,
+      generation,
+      subject
+    );
     return { ok: true, generation };
   }
 
@@ -206,12 +312,28 @@ export class DaemonCore {
    * emulator; the ledger tombstone is DELIBERATELY kept so a recreate gets a
    * higher generation (§4.8.1).
    */
-  retire(sessionId: string): void {
+  retire(sessionId: string, reason: RetireReason): void {
     const entry = this.sessions.get(sessionId);
     if (entry !== undefined) {
-      this.authority.markExited(sessionId, entry.generation, { code: null, signal: null });
+      this.authority.markExited(sessionId, entry.generation, {
+        code: null,
+        signal: null,
+        origin: 'retired',
+        reason,
+        // Desk tore this session down without seeing how the child ended.
+        // `unknown` states exactly that, instead of inventing a zero.
+        outcome: { kind: 'unknown' },
+        // Nothing has gone wrong with observation yet; a failed final drain
+        // refines this afterwards without touching the reason above.
+        diagnostic: null
+      });
     }
     this.sessions.delete(sessionId);
+    // desk#62: retire is the ONE authoritative end of a session, so it is the
+    // only place the remembered geometry may be dropped. A daemon detach or
+    // shutdown must NOT reach here — a holder that survives this daemon has to
+    // come back at the size it actually has, which is the whole feature.
+    this.sessionGeometry.forget(sessionId);
     this.d.supervisor.release(sessionId);
     for (const [ch, sid] of this.channelToSession) if (sid === sessionId) this.channelToSession.delete(ch);
   }
@@ -254,13 +376,67 @@ export class DaemonCore {
     return this.authority.observeTitleActivity(sessionId, generation, activity, observedAt);
   }
 
+  refineExitDiagnostic(
+    sessionId: string,
+    generation: number,
+    diagnostic: ExitDiagnostic,
+    observedAt?: number
+  ): AuthorityMutationResult {
+    return this.authority.refineExitDiagnostic(sessionId, generation, diagnostic, observedAt);
+  }
+
   markExited(
     sessionId: string,
     generation: number,
-    exit: { code: number | null; signal: string | null },
+    exit: {
+      code: number | null;
+      signal: string | null;
+      /** desk#59 — an exit must say whether it was seen or merely assumed. */
+      origin: 'observed' | 'retired';
+      reason: RetireReason | null;
+      /** desk#59 — the raw ending, or `unknown` when none could be proved. */
+      outcome: MoorExitOutcome;
+      /** desk#59 — what observation failed to establish, if anything. */
+      diagnostic: ExitDiagnostic | null;
+    },
     observedAt?: number
   ): AuthorityMutationResult {
     return this.authority.markExited(sessionId, generation, exit, observedAt);
+  }
+
+  /** §8 CPR source: the authoritative emulator's cursor, if the session lives. */
+  cursor(sessionId: string): { row: number; col: number } | undefined {
+    return this.sessions.get(sessionId)?.runtime.cursor();
+  }
+
+  /** Fan a child-exit push to the session's subscribed browser surfaces. */
+  /**
+   * Announce the legacy numeric EXIT to a LIVE session's browser surfaces.
+   *
+   * desk#59 — deliberately live-only. A retired session's placeholder can still
+   * be strengthened by the holder's real exit long after its runtime is gone;
+   * that correction belongs in the durable record, not on a wire whose surfaces
+   * were already torn down. The lookup makes it a no-op rather than relying on
+   * callers to remember, and the number itself is a compatibility view derived
+   * at this boundary — never the durable truth.
+   */
+  emitExit(sessionId: string, code: number, signal = 0): void {
+    this.sessions.get(sessionId)?.runtime.emitExit(code, signal);
+  }
+
+  /**
+   * §10: verified-live heartbeat evidence lapsed (false) or returned (true).
+   * desk#64 — `reason` names which holder-link degradation this is; it defaults
+   * to the liveness one inside the authority.
+   */
+  observeHolderLiveness(
+    sessionId: string,
+    generation: number,
+    live: boolean,
+    detail?: string,
+    reason?: string
+  ): AuthorityMutationResult {
+    return this.authority.observeHolderLiveness(sessionId, generation, live, detail, reason);
   }
 
   assessAgentHealth(
@@ -323,8 +499,14 @@ export class DaemonCore {
   }
 
   // ---- routing to a session's runtime ---------------------------------------
-  onMasterRecord(sessionId: string, rec: RecordEnvelope): void {
-    this.sessions.get(sessionId)?.runtime.onMasterRecord(rec);
+  /** Moor-native child output: absolute byte offset + raw bytes (§6.1). */
+  onMoorOutput(sessionId: string, bytes: Uint8Array, offset: bigint): void {
+    this.sessions.get(sessionId)?.runtime.onMoorOutput(bytes, offset);
+  }
+
+  /** Manager-originated channel error (for deferred input that lost its lease). */
+  sendBrowserFrame(sessionId: string, channelId: number, frame: BpFrame): void {
+    if (this.sessions.has(sessionId)) this.d.sendBrowser(sessionId, channelId, frame);
   }
 
   /** Apply non-durable terminal parser state before an attach becomes usable. */
@@ -364,8 +546,7 @@ export class DaemonCore {
   injectInput(sessionId: string, bytes: Uint8Array, paste = false): boolean {
     const e = this.sessions.get(sessionId);
     if (e === undefined) return false;
-    e.runtime.injectInput(bytes, paste);
-    return true;
+    return e.runtime.injectInput(bytes, paste);
   }
 
   /** The session's on-screen tail as plain text, or undefined if unknown. */
@@ -382,8 +563,7 @@ export class DaemonCore {
   onBrowserInputByChannel(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
     const sessionId = this.channelToSession.get(channelId);
     if (sessionId === undefined) return false;
-    this.sessions.get(sessionId)?.runtime.onBrowserInput(channelId, binary, bytes);
-    return true;
+    return this.sessions.get(sessionId)?.runtime.onBrowserInput(channelId, binary, bytes) ?? false;
   }
 
   /** Unsubscribe a channel (drops the surface + the channel→session mapping). */
@@ -397,7 +577,13 @@ export class DaemonCore {
   onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
     const sessionId = this.channelToSession.get(channelId);
     if (sessionId === undefined) return false;
-    this.sessions.get(sessionId)?.runtime.onBrowserResize(channelId, rows, cols);
+    const entry = this.sessions.get(sessionId);
+    if (entry === undefined) return true;
+    entry.runtime.onBrowserResize(channelId, rows, cols);
+    // desk#62: remember the size the moment it is APPLIED, not at shutdown — a
+    // daemon that is killed never runs shutdown code, and this measurement is
+    // the only thing that can tell the next incarnation how big this session is.
+    this.sessionGeometry.record(sessionId, { rows, cols });
     return true;
   }
 

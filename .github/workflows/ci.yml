@@ -16,6 +16,8 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v5
+      - name: Prove and run internal path guard
+        run: sh ci/tracked-paths.test.sh
       - uses: actions/setup-node@v5
         with:
           node-version: 22.23.1
@@ -27,20 +29,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ca-certificates curl tar gzip coreutils git python3 make g++
       - run: npm ci
       - run: npm run check
-      # The end-to-end tests attach to a real atch master, so the binary has to
-      # exist before the suite runs, not at packaging time. libexec/atch is
+      # The end-to-end tests attach to a real moor holder, so the binary has to
+      # exist before the suite runs, not at packaging time. libexec/moor is
       # gitignored, so without this step every real-binary test skips silently
-      # and the daemon↔atch seam ships with no automated coverage at all.
-      - name: Build bundled atch for the integration suite
-        run: npm run build:atch
+      # and the daemon↔moor seam ships with no automated coverage at all.
       - name: Test
         run: |
           test_tmp=$(mktemp -d /var/tmp/desk-vitest.XXXXXX)
           trap 'rm -rf "$test_tmp"' EXIT
           TMPDIR="$test_tmp" RUN_REAL_JOIN=1 npm test
-      - run: npm run build:distribution
-      - name: Probe bundled atch
-        run: ./libexec/atch --version
+      # Ordinary PR/push CI never performs network acquisition of the moor
+      # binary: the fetch pipeline (pin validation, download, sha256, atomic
+      # install, attestation) is fully proven by tests/fetch-moor.test.ts
+      # over a local file:// fixture, and PRODUCTION byte acquisition + the
+      # real probe live deliberately in the gated release workflow — so a
+      # pin-introducing PR never depends on already-promoted bytes, and CI
+      # runs are immune to network/rate-limit flakes. The native E2E suite
+      # skips itself when libexec/moor is absent.
+      - name: Build application
+        run: npm run build:application
       - run: npm run smoke:serve-modes
       - name: Restore and verify the Node CLI after runtime smoke
         run: npm run build

@@ -15,6 +15,28 @@ import {
   parseAgentStateEnvelope
 } from './contract.js';
 
+/**
+ * §10: the dedicated health reason for a holder whose verified-live heartbeat
+ * evidence lapsed. Only THIS reason is cleared back to healthy on restoration.
+ */
+export const MOOR_LIVENESS_REASON = 'moor-holder-liveness';
+
+/**
+ * desk#64: the dedicated health reason for a session Desk holds NO link to
+ * because an attach failed — most often a restart re-adoption that the holder
+ * refused or never answered. It is a statement about Desk's link, not about
+ * the child: the holder may be perfectly alive, which is exactly why the
+ * session must not be recorded as ended. A separate reason from the liveness
+ * one because it is what the operator reads: every surface renders
+ * `health.reason` verbatim, and "we never adopted it" and "its heartbeat
+ * lapsed" send an operator to different places. Cleared by the same
+ * restoration as the liveness reason — an adoption ends both.
+ */
+export const MOOR_UNADOPTED_REASON = 'moor-holder-unadopted';
+
+/** The health degradations THIS module owns, and may therefore clear. */
+const MOOR_HOLDER_REASONS: readonly string[] = [MOOR_LIVENESS_REASON, MOOR_UNADOPTED_REASON];
+
 export type SessionRegistration =
   | {
       sessionId: string;
@@ -70,6 +92,13 @@ interface SessionRecord {
   openToolLeaseExpiresAt: Map<string, number>;
   titleFallback?: { activity: 'working' | 'idle'; observedAt: number };
   titleProjectionActive: boolean;
+  /**
+   * §10: the exact health the Moor liveness degradation OVERLAID — restored
+   * verbatim when the liveness episode resolves live, so a producer's own
+   * degradation is never collapsed to healthy by a liveness round-trip. Any
+   * newer health statement from its own source discards this saved state.
+   */
+  priorMoorHealth?: SessionStateSnapshot['health'];
 }
 
 export interface AgentStateAuthorityOptions {
@@ -204,7 +233,78 @@ export class AgentStateAuthority {
     record!.snapshot.subject.wait = null;
     record!.snapshot.subject.evidence = null;
     record!.snapshot.health = { status: 'degraded', reason: 'awaiting-reconciliation', since: at };
+    record!.priorMoorHealth = undefined; // reconciliation resets the health axis
     return this.commit(record!, from, 'producer-reconciled', at);
+  }
+
+  /**
+   * §10 holder-liveness observation (ANY subject kind — a terminal's holder
+   * heartbeats the same way an agent's does). Losing the 15 s verified-live
+   * window never proves the holder is gone, so the session state becomes
+   * INDETERMINATE: health degrades with the dedicated liveness reason (the
+   * bounded identity probe's outcome rides in `detail`). Restoration clears
+   * ONLY that liveness degradation — a producer's own degraded health is a
+   * different source and is never overwritten back to healthy here.
+   *
+   * desk#64: `reason` selects WHICH holder-link degradation this is — the
+   * lapsed heartbeat (default) or an attach that never adopted. Both are
+   * "Desk has no verified link", both are cleared by the same restoration,
+   * and both keep the session non-terminal; they differ only in what the
+   * operator is told, which is the whole reason the vocabulary is split.
+   */
+  observeHolderLiveness(
+    sessionId: string,
+    generation: number,
+    live: boolean,
+    detail?: string,
+    reason: string = MOOR_LIVENESS_REASON
+  ): AuthorityMutationResult {
+    const record = this.sessions.get(sessionId);
+    const rejected = this.guardSession(record, generation);
+    if (rejected !== undefined) return rejected;
+    if (record!.snapshot.lifecycle === 'exited') {
+      return { kind: 'rejected', reason: 'lifecycle-exited', snapshot: clone(record!.snapshot) };
+    }
+    const current = record!.snapshot.health;
+    const ourDegradation =
+      current.status === 'degraded' && MOOR_HOLDER_REASONS.includes(current.reason);
+    if (live) {
+      if (!ourDegradation) {
+        // Another source spoke while (or before) the episode — its statement
+        // is newer than anything we saved, so the saved overlay is stale.
+        record!.priorMoorHealth = undefined;
+        return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      }
+      const at = this.safeNow();
+      const from = clone(record!.snapshot);
+      // Restore the EXACT health the degradation overlaid (a producer's own
+      // degraded state survives the liveness round-trip verbatim); healthy
+      // only when nothing was overlaid.
+      record!.snapshot.health =
+        record!.priorMoorHealth === undefined
+          ? { status: 'healthy', since: at }
+          : clone(record!.priorMoorHealth);
+      record!.priorMoorHealth = undefined;
+      return this.commit(record!, from, 'source-health', at);
+    }
+    if (ourDegradation && current.reason === reason && current.detail === detail) {
+      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+    }
+    const at = this.safeNow();
+    const from = clone(record!.snapshot);
+    if (!ourDegradation) {
+      // First loss of this episode: save what the overlay covers. Moving
+      // BETWEEN our own two reasons keeps the original overlay — it is the
+      // same episode of link loss, told differently.
+      record!.priorMoorHealth = clone(current);
+    }
+    record!.snapshot.health = {
+      status: 'degraded',
+      reason,
+      since: at,
+      ...(detail === undefined ? {} : { detail })
+    };
+    return this.commit(record!, from, 'source-health', at);
   }
 
   assessAgentHealth(
@@ -234,6 +334,8 @@ export class AgentStateAuthority {
 
     const at = this.safeNow();
     const from = clone(record!.snapshot);
+    // The source's own statement supersedes anything a liveness overlay saved.
+    record!.priorMoorHealth = undefined;
     record!.snapshot.health =
       health.status === 'healthy'
         ? { status: 'healthy', since: at }
@@ -317,7 +419,7 @@ export class AgentStateAuthority {
   markExited(
     sessionId: string,
     generation: number,
-    exit: Pick<SessionExit, 'code' | 'signal'>,
+    exit: Required<Pick<SessionExit, 'code' | 'signal' | 'origin' | 'reason' | 'outcome' | 'diagnostic'>>,
     observedAt?: number
   ): AuthorityMutationResult {
     const record = this.sessions.get(sessionId);
@@ -330,7 +432,21 @@ export class AgentStateAuthority {
       return { kind: 'rejected', reason: 'invalid-observation' };
     }
     if (record!.snapshot.lifecycle === 'exited') {
-      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      // desk#59: a `retired` exit is a PLACEHOLDER written by Desk's own
+      // teardown, which knows nothing about how the child died. The holder's
+      // real exit routinely lands milliseconds later; it must be allowed to
+      // replace the placeholder, or the cause of death is lost forever. An
+      // already `observed` exit is the truth and is never downgraded.
+      if (record!.snapshot.exit?.origin !== 'retired' || exit.origin !== 'observed') {
+        return { kind: 'noop', snapshot: clone(record!.snapshot) };
+      }
+      const correctedAt = Math.max(
+        observedAt === undefined ? this.safeNow() : Math.floor(observedAt),
+        record!.snapshot.updatedAt
+      );
+      const before = clone(record!.snapshot);
+      record!.snapshot.exit = { ...exit, at: correctedAt };
+      return this.commit(record!, before, 'lifecycle-exited', correctedAt);
     }
     const at =
       observedAt === undefined
@@ -343,6 +459,7 @@ export class AgentStateAuthority {
     record!.workingLeaseExpiresAt = undefined;
     record!.openToolLeaseExpiresAt.clear();
     record!.titleFallback = undefined;
+    record!.priorMoorHealth = undefined; // no liveness overlay survives an exit
     record!.titleProjectionActive = false;
     if (record!.snapshot.subject.kind === 'agent') {
       record!.snapshot.subject.activity = 'unknown';
@@ -350,6 +467,46 @@ export class AgentStateAuthority {
       record!.snapshot.subject.wait = null;
       record!.snapshot.subject.evidence = null;
     }
+    return this.commit(record!, from, 'lifecycle-exited', at);
+  }
+
+  /**
+   * desk#59 — record what OBSERVATION failed to establish, without touching why
+   * the session was retired.
+   *
+   * The initiating reason and a failed final drain are independent facts: a
+   * session retired because its link closed, whose store then could not be
+   * read, is BOTH of those things. Overwriting one with the other would trade a
+   * known cause for a known blindness. So this refines exactly one field, once:
+   * `diagnostic` may go from absent/null to an exact code and never back, and
+   * origin, reason and outcome are left untouched. Observed truth is never
+   * annotated this way, and the generation fence keeps a successor out.
+   */
+  refineExitDiagnostic(
+    sessionId: string,
+    generation: number,
+    diagnostic: NonNullable<SessionExit['diagnostic']>,
+    observedAt?: number
+  ): AuthorityMutationResult {
+    const record = this.sessions.get(sessionId);
+    const rejected = this.guardSession(record, generation);
+    if (rejected !== undefined) return rejected;
+    const exit = record!.snapshot.exit;
+    if (
+      exit === null ||
+      record!.snapshot.lifecycle !== 'exited' ||
+      exit.origin !== 'retired' ||
+      // Monotonic: an existing diagnostic is never downgraded or replaced.
+      (exit.diagnostic !== null && exit.diagnostic !== undefined)
+    ) {
+      return { kind: 'noop', snapshot: clone(record!.snapshot) };
+    }
+    const at = Math.max(
+      observedAt === undefined ? this.safeNow() : Math.floor(observedAt),
+      record!.snapshot.updatedAt
+    );
+    const from = clone(record!.snapshot);
+    record!.snapshot.exit = { ...exit, diagnostic };
     return this.commit(record!, from, 'lifecycle-exited', at);
   }
 

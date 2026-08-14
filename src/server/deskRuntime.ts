@@ -13,7 +13,7 @@ import { startSystemSampling, stopSystemSampling } from './systemSampler.js';
 import { installTerminalDaemonProxy } from './terminalDaemonProxy.js';
 import {
   daemonChildEnv,
-  resolveAtchBinPath,
+  resolveMoorBinPath,
   resolveDaemonCommand,
   startDaemonSupervisor
 } from './runtime/daemonSupervisor.js';
@@ -62,7 +62,7 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
           command: resolveDaemonCommand(import.meta.url),
           env: {
             ...childEnv,
-            DESK_ATCH_BIN: resolveAtchBinPath(import.meta.url)
+            DESK_MOOR_BIN: resolveMoorBinPath(import.meta.url)
           },
           healthUrl: `http://${childEnv.DESK_DAEMON_HOST}:${childEnv.DESK_DAEMON_PORT}/control/health`
         });

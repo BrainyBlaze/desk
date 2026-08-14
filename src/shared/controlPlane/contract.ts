@@ -299,7 +299,51 @@ const policySchema = z.strictObject({
 const exitSchema = z.strictObject({
   at: timestampSchema,
   code: z.number().int().nullable(),
-  signal: boundedText(64).nullable()
+  signal: boundedText(64).nullable(),
+  /**
+   * desk#59 — who ended the session. `observed` means the child's own exit
+   * reached us and code/signal are the truth; `retired` means Desk tore the
+   * session down and knows nothing about how the child died. Optional ONLY so
+   * that exits journalled before this field existed still parse: their
+   * provenance is genuinely unknown and must not be invented.
+   */
+  origin: z.enum(['observed', 'retired']).optional(),
+  /** Which call site retired the session (`retired` only). */
+  reason: boundedText(120).nullable().optional(),
+  /**
+   * desk#59 — the holder's ending EXACTLY as moor reported it, not folded into
+   * a number. `unknown` means no valid lifecycle could be proved, which is a
+   * statement of evidence, not an invented value. Optional only for exits
+   * journalled before this field existed.
+   */
+  outcome: z
+    .discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('exited'), code: z.number().int() }),
+      z.strictObject({ kind: z.literal('signalled'), signal: z.number().int() }),
+      z.strictObject({
+        kind: z.literal('terminated'),
+        code: z.number().int(),
+        method: z.enum(['graceful', 'forced'])
+      }),
+      z.strictObject({ kind: z.literal('unknown') })
+    ])
+    .optional(),
+  /**
+   * desk#59 — what OBSERVATION could not establish, kept independent of why
+   * the session was retired. The initiating reason and a failed final drain
+   * are two separate facts: overwriting one with the other would trade a known
+   * cause for a known blindness. `null` means nothing went wrong with
+   * observation; legacy records may omit it entirely.
+   */
+  diagnostic: z
+    .union([
+      z.null(),
+      z.strictObject({
+        code: z.enum(['moor-event-drain-unobservable', 'moor-event-observer-terminal']),
+        detail: boundedText(200).optional()
+      })
+    ])
+    .optional()
 });
 
 const snapshotSchema = z
@@ -350,6 +394,12 @@ export type TerminalSubjectSnapshot = z.infer<typeof terminalSubjectSchema>;
 export type DeliverySnapshot = z.infer<typeof deliverySchema>;
 export type SessionPolicySnapshot = z.infer<typeof policySchema>;
 export type SessionExit = z.infer<typeof exitSchema>;
+/**
+ * desk#59 — the holder's ending as moor reported it. Declared HERE, in the
+ * shared contract, because the durable model owns it: the server-side observer
+ * produces it, but nothing shared may depend upward on the server layer.
+ */
+export type MoorExitOutcome = NonNullable<SessionExit['outcome']>;
 export type SessionStateSnapshot = z.infer<typeof snapshotSchema>;
 
 export interface AcceptedAgentStateEvent {

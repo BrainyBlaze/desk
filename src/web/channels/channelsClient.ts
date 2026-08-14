@@ -151,6 +151,8 @@ export interface ChannelsState {
   activitySeq: number;
   /** another live desk process owns dispatch for this channels home */
   passive?: boolean;
+  /** bounded engine ownership diagnostic; an active claim can report degraded OS identity */
+  lockError?: string;
   /** pid of the owning desk process (when passive) — for the recovery hint */
   passiveOwner?: number;
 }
@@ -378,6 +380,7 @@ export async function channelsShare(payload: {
 export interface EngineDiagnostics {
   home: string;
   passive: boolean;
+  lockError?: string;
   pumpAlive: boolean;
   totalQueued: number;
   sessions: SessionDiagnostic[];

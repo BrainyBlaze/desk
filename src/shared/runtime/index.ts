@@ -6,5 +6,6 @@ export * from './instanceLock.js';
 export * from './rpcEnvelope.js';
 export * from './emulatorPort.js';
 export * from './nativeLifecycle.js';
+export * from './sessionGeometryStore.js';
 export * from './sessionRuntime.js';
 export * from './daemonCore.js';
