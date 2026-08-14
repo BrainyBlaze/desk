@@ -176,6 +176,10 @@ export interface TerminalDaemonOptions {
   supervisor?: WorkerSupervisor;
   /** Injectable durable evidence verifier for boundary-failure tests. */
   verifyProviderSessionEvidence?: typeof verifyProviderSessionEvidence;
+  /** Injectable continuity ledger for deterministic durability-failure tests. */
+  providerSessionContinuityLedger?: FileProviderSessionContinuityLedger;
+  /** Injectable manifest CAS boundary for deterministic persistence tests. */
+  replaceProviderSessionIdentity?: typeof replaceProviderSessionIdentity;
 }
 
 /** A provisionable session: the command to run and its initial geometry. */
@@ -393,9 +397,13 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   const providerLaunchLedger = new FileProviderSessionLaunchLedger(
     join(options.homeRoot, '_engine', 'provider-session-launch.ndjson')
   );
-  const providerContinuityLedger = new FileProviderSessionContinuityLedger(
-    join(options.homeRoot, '_engine', 'provider-session-continuity.ndjson')
-  );
+  const providerContinuityLedger =
+    options.providerSessionContinuityLedger ??
+    new FileProviderSessionContinuityLedger(
+      join(options.homeRoot, '_engine', 'provider-session-continuity.ndjson')
+    );
+  const replaceProviderIdentity =
+    options.replaceProviderSessionIdentity ?? replaceProviderSessionIdentity;
   const evidenceVerifier =
     options.verifyProviderSessionEvidence ?? verifyProviderSessionEvidence;
   const continuityQueues = new Map<string, Promise<void>>();
@@ -546,19 +554,27 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         const launchAuthorization = providerLaunchLedger.current(
           context.sessionId
         );
-        const pending = providerContinuityLedger.pending(context.sessionId);
+        const transition = providerContinuityLedger.currentTransition(
+          context.sessionId
+        );
+        const requiresRebind =
+          transition !== undefined &&
+          transition.state !== 'cancelled-by-reset' &&
+          (transition.state === 'pending' ||
+            spec.providerSessionId !==
+              transition.observedProviderSessionId);
         if (
           launchAuthorization?.state === 'prepared' &&
-          pending !== undefined
+          requiresRebind
         ) {
           return providerProvisionFailure('reset-incomplete');
         }
-        if (pending !== undefined) {
+        if (requiresRebind) {
           return providerProvisionFailure(
             'provider-session-rebind-required',
             rebindAction(
               context.sessionId,
-              pending.observedProviderSessionId
+              transition.observedProviderSessionId
             )
           );
         }
@@ -1207,15 +1223,6 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
             'Provider launch proof is missing or invalid'
           );
         }
-        if (
-          binding.providerSessionId !== input.providerSessionId &&
-          input.hook !== 'SessionStart'
-        ) {
-          return continuityFailure(
-            'provider-session-start-required',
-            'Only SessionStart may establish or change provider session identity'
-          );
-        }
         const evidence = await verifyEvidence({
           deskSessionId: input.deskSessionId,
           provider: input.provider,
@@ -1399,15 +1406,14 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         if (!evidence.ok) {
           return 'reason' in evidence ? evidence : evidenceFailure(evidence);
         }
-        if (transition.state === 'resolved') {
-          if (
-            binding.providerSessionId !== transition.observedProviderSessionId
-          ) {
-            return continuityFailure(
-              'provider-session-mismatch',
-              'Resolved transition no longer matches the durable binding'
-            );
-          }
+        if (transition.state === 'pending') {
+          providerContinuityLedger.resolveTransition({
+            deskSessionId: input.deskSessionId,
+            transitionId: transition.transitionId,
+            targetProviderSessionId: transition.observedProviderSessionId
+          });
+        }
+        if (binding.providerSessionId === transition.observedProviderSessionId) {
           return {
             ok: true,
             kind: 'already-rebound',
@@ -1415,7 +1421,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
             providerSessionId: transition.observedProviderSessionId
           };
         }
-        const replaced = await replaceProviderSessionIdentity({
+        const replaced = await replaceProviderIdentity({
           deskSessionId: input.deskSessionId,
           provider: transition.provider,
           expectedProviderSessionId: transition.expectedProviderSessionId,
@@ -1428,11 +1434,6 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         if (!replaced.ok) {
           return continuityFailure(replaced.code, replaced.error);
         }
-        providerContinuityLedger.resolveTransition({
-          deskSessionId: input.deskSessionId,
-          transitionId: transition.transitionId,
-          targetProviderSessionId: transition.observedProviderSessionId
-        });
         return {
           ok: true,
           kind:
@@ -1540,8 +1541,15 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         (generation) => runProviderContinuity(sessionId, async () => {
           const observer = eventObservers.get(sessionId);
           if (observer) stopEventObserver(observer);
-          const pending = providerContinuityLedger.pending(sessionId);
-          if (pending !== undefined) {
+          const transition = providerContinuityLedger.currentTransition(
+            sessionId
+          );
+          const cancellable =
+            transition?.state === 'pending' ||
+            transition?.state === 'resolved'
+              ? transition
+              : undefined;
+          if (cancellable !== undefined) {
             const binding = readProviderSessionBinding({
               deskSessionId: sessionId,
               ...(options.manifestPath === undefined
@@ -1554,10 +1562,14 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
             const launchAuthorization = providerLaunchLedger.current(sessionId);
             if (
               !binding.ok ||
-              binding.provider !== pending.provider ||
-              pending.generation !== generation ||
-              (binding.providerSessionId !== pending.expectedProviderSessionId &&
-                binding.providerSessionId !== pending.observedProviderSessionId &&
+              binding.provider !== cancellable.provider ||
+              (cancellable.state === 'pending'
+                ? cancellable.generation !== generation
+                : cancellable.generation > generation) ||
+              (binding.providerSessionId !==
+                cancellable.expectedProviderSessionId &&
+                binding.providerSessionId !==
+                  cancellable.observedProviderSessionId &&
                 !(
                   binding.providerSessionId === null &&
                   launchAuthorization?.state === 'prepared'
@@ -1566,7 +1578,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
               return {
                 ok: false as const,
                 reason: 'provider-session-store-failed' as const,
-                error: 'Pending provider transition does not match reset state'
+                error:
+                  'Provider session transition does not match reset state'
               };
             }
           }
@@ -1583,26 +1596,26 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
             },
             {
               ledger: providerLaunchLedger,
-              ...(pending === undefined
+              ...(cancellable === undefined
                 ? {}
                 : {
                     afterBindingCleared: (authorization: {
                       authorizationId: string;
                     }) => {
-                      const current = providerContinuityLedger.pending(
-                        sessionId
-                      );
+                      const current =
+                        providerContinuityLedger.currentTransition(sessionId);
                       if (
                         current === undefined ||
-                        current.transitionId !== pending.transitionId
+                        current.state === 'cancelled-by-reset' ||
+                        current.transitionId !== cancellable.transitionId
                       ) {
                         throw new Error(
-                          'pending provider transition changed during reset'
+                          'provider session transition changed during reset'
                         );
                       }
                       providerContinuityLedger.cancelTransitionByReset({
                         deskSessionId: sessionId,
-                        transitionId: pending.transitionId,
+                        transitionId: cancellable.transitionId,
                         resetAuthorizationId: authorization.authorizationId
                       });
                     }

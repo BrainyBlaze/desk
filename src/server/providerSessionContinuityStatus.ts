@@ -24,7 +24,14 @@ export function readProviderSessionContinuityStatus(
     );
     const issues = ledger
       .projectedTransitions()
-      .filter((transition) => transition.state === 'pending')
+      .filter((transition) => {
+        if (transition.state === 'pending') return true;
+        if (transition.state !== 'resolved') return false;
+        return (
+          sessionsById.get(transition.deskSessionId)?.resume !==
+          transition.observedProviderSessionId
+        );
+      })
       .map((transition): ClaudeContinuityAttention => {
         const session = sessionsById.get(transition.deskSessionId);
         const providerLabel =

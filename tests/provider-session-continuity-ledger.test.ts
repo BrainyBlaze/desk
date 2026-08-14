@@ -258,6 +258,45 @@ describe('FileProviderSessionContinuityLedger', () => {
     ledger.close();
   });
 
+  it('durably cancels and replays an exact resolved transition after reset', () => {
+    const path = ledgerPath();
+    let ledger = new FileProviderSessionContinuityLedger(path);
+    const pending = ledger.stageTransition({
+      deskSessionId: 'desk-alpha',
+      provider: 'codex',
+      generation: 3,
+      expectedProviderSessionId: OLD_ID,
+      observedProviderSessionId: NEW_ID,
+      evidencePath: '/safe/codex/new.jsonl'
+    });
+    ledger.resolveTransition({
+      deskSessionId: 'desk-alpha',
+      transitionId: pending.transitionId,
+      targetProviderSessionId: NEW_ID
+    });
+    expect(
+      ledger.cancelTransitionByReset({
+        deskSessionId: 'desk-alpha',
+        transitionId: pending.transitionId,
+        resetAuthorizationId: 'reset-resolved'
+      })
+    ).toMatchObject({
+      state: 'cancelled-by-reset',
+      resetAuthorizationId: 'reset-resolved'
+    });
+    ledger.close();
+
+    ledger = new FileProviderSessionContinuityLedger(path, {
+      readOnly: true
+    });
+    expect(ledger.currentTransition('desk-alpha')).toMatchObject({
+      state: 'cancelled-by-reset',
+      transitionId: pending.transitionId,
+      resetAuthorizationId: 'reset-resolved'
+    });
+    ledger.close();
+  });
+
   it('repairs a torn final record, rejects malformed interior history, and stays unhealthy after append failure', () => {
     const path = ledgerPath();
     const ledger = new FileProviderSessionContinuityLedger(path);

@@ -305,11 +305,13 @@ export class FileProviderSessionContinuityLedger {
       return publicTransition(current) as CancelledProviderSessionTransition;
     }
     if (
-      current?.state !== 'pending' ||
+      (current?.state !== 'pending' && current?.state !== 'resolved') ||
       current.transitionId !== input.transitionId ||
       input.resetAuthorizationId.trim().length === 0
     ) {
-      throw new Error('provider transition is not the current pending transition');
+      throw new Error(
+        'provider transition is not the current non-cancelled transition'
+      );
     }
     const record: TransitionRecord = {
       ...current,
@@ -461,8 +463,17 @@ export class FileProviderSessionContinuityLedger {
       this.transitionsBySession.set(record.deskSessionId, record);
       return;
     }
+    if (current === undefined) {
+      throw new Error(
+        `corrupt provider continuity ledger${location}: transition resolution is not current`
+      );
+    }
+    const validPredecessor =
+      record.state === 'resolved'
+        ? current.state === 'pending'
+        : current.state === 'pending' || current.state === 'resolved';
     if (
-      current?.state !== 'pending' ||
+      !validPredecessor ||
       current.transitionId !== record.transitionId ||
       current.provider !== record.provider ||
       current.generation !== record.generation ||

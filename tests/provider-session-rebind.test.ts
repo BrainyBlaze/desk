@@ -3,15 +3,21 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readManifestFile } from '../src/core/config.js';
-import type { ProviderSessionContinuityProvider } from '../src/server/runtime/providerSessionContinuityLedger.js';
+import { replaceProviderSessionIdentity } from '../src/server/providerSessionBinding.js';
+import {
+  FileProviderSessionContinuityLedger,
+  type ProviderSessionContinuityProvider
+} from '../src/server/runtime/providerSessionContinuityLedger.js';
+import { FileProviderSessionLaunchLedger } from '../src/server/runtime/providerSessionLaunchLedger.js';
 import {
   createTerminalDaemon,
   type TerminalDaemon
@@ -42,6 +48,16 @@ const LATER_ID = '33333333-3333-4333-8333-333333333333';
 type EvidenceVerifier = NonNullable<
   Parameters<typeof createTerminalDaemon>[0]['verifyProviderSessionEvidence']
 >;
+type ManifestReplacer = NonNullable<
+  Parameters<typeof createTerminalDaemon>[0]['replaceProviderSessionIdentity']
+>;
+
+interface FixtureOverrides {
+  continuityLedger?: (
+    root: string
+  ) => FileProviderSessionContinuityLedger;
+  replaceProviderSessionIdentity?: ManifestReplacer;
+}
 
 function barrier(): {
   entered: Promise<void>;
@@ -78,7 +94,8 @@ describe('provider session continuity coordinator', () => {
   function fixture(
     provider: ProviderSessionContinuityProvider,
     resume?: string,
-    verifyProviderSessionEvidence?: EvidenceVerifier
+    verifyProviderSessionEvidence?: EvidenceVerifier,
+    overrides: FixtureOverrides = {}
   ): { root: string; manifestPath: string; daemon: TerminalDaemon } {
     const root = mkdtempSync(join(tmpdir(), 'desk-provider-rebind-'));
     roots.push(root);
@@ -99,7 +116,19 @@ describe('provider session continuity coordinator', () => {
       now: () => Date.now() - 1_000,
       ...(verifyProviderSessionEvidence === undefined
         ? {}
-        : { verifyProviderSessionEvidence })
+        : { verifyProviderSessionEvidence }),
+      ...(overrides.continuityLedger === undefined
+        ? {}
+        : {
+            providerSessionContinuityLedger:
+              overrides.continuityLedger(root)
+          }),
+      ...(overrides.replaceProviderSessionIdentity === undefined
+        ? {}
+        : {
+            replaceProviderSessionIdentity:
+              overrides.replaceProviderSessionIdentity
+          })
     });
     daemons.push(daemon);
     return { root, manifestPath, daemon };
@@ -225,6 +254,191 @@ describe('provider session continuity coordinator', () => {
       ).resolves.toMatchObject({ ok: true, kind: 'matching' });
     }
   );
+
+  it('keeps OLD and pending when the write-ahead authorization append fails, then retries safely', async () => {
+    let failAuthorization = false;
+    const verifier: EvidenceVerifier = async (raw) => {
+      const input = raw as {
+        provider: 'codex';
+        providerSessionId: string;
+      };
+      return {
+        ok: true,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        evidencePath: '/safe/codex/new.jsonl'
+      };
+    };
+    const { root, manifestPath, daemon } = fixture('codex', OLD_ID, verifier, {
+      continuityLedger: (ledgerRoot) => {
+        const ledger = new FileProviderSessionContinuityLedger(
+          join(
+            ledgerRoot,
+            '_engine',
+            'provider-session-continuity.ndjson'
+          )
+        );
+        const resolve = ledger.resolveTransition.bind(ledger);
+        vi.spyOn(ledger, 'resolveTransition').mockImplementation((input) => {
+          if (failAuthorization) {
+            failAuthorization = false;
+            throw new Error('simulated continuity fsync failure');
+          }
+          return resolve(input);
+        });
+        return ledger;
+      }
+    });
+    const launched = await launch(daemon, 'codex', OLD_ID);
+    await daemon.observeProviderSessionIdentity({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      providerSessionId: NEW_ID,
+      generation: launched.generation,
+      launchProof: launched.launchProof,
+      hook: 'SessionStart'
+    });
+    failAuthorization = true;
+
+    await expect(
+      daemon.rebindProviderSession({
+        deskSessionId: 'alpha',
+        targetProviderSessionId: NEW_ID
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: 'provider-session-store-failed'
+    });
+    expect(manifestResume(manifestPath)).toBe(OLD_ID);
+    const replayed = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson'),
+      { readOnly: true }
+    );
+    expect(replayed.currentTransition('alpha')).toMatchObject({
+      state: 'pending',
+      expectedProviderSessionId: OLD_ID,
+      observedProviderSessionId: NEW_ID
+    });
+    replayed.close();
+    await expect(
+      daemon.rebindProviderSession({
+        deskSessionId: 'alpha',
+        targetProviderSessionId: NEW_ID
+      })
+    ).resolves.toMatchObject({ ok: true, kind: 'rebound' });
+    expect(manifestResume(manifestPath)).toBe(NEW_ID);
+  });
+
+  it('replays durable authorization after manifest failure, stays fenced, and applies on retry', async () => {
+    let failManifest = true;
+    const verifier: EvidenceVerifier = async (raw) => {
+      const input = raw as {
+        provider: 'codex';
+        providerSessionId: string;
+      };
+      return {
+        ok: true,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        evidencePath: '/safe/codex/new.jsonl'
+      };
+    };
+    const replace: ManifestReplacer = vi.fn(async (input) => {
+      if (failManifest) {
+        failManifest = false;
+        throw new Error('simulated manifest persistence failure');
+      }
+      return replaceProviderSessionIdentity(input);
+    });
+    const { root, manifestPath, daemon } = fixture(
+      'codex',
+      OLD_ID,
+      verifier,
+      { replaceProviderSessionIdentity: replace }
+    );
+    const launched = await launch(daemon, 'codex', OLD_ID);
+    await daemon.observeProviderSessionIdentity({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      providerSessionId: NEW_ID,
+      generation: launched.generation,
+      launchProof: launched.launchProof,
+      hook: 'SessionStart'
+    });
+    await expect(
+      daemon.rebindProviderSession({
+        deskSessionId: 'alpha',
+        targetProviderSessionId: NEW_ID
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: 'provider-session-store-failed'
+    });
+    expect(manifestResume(manifestPath)).toBe(OLD_ID);
+
+    const authorized = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson'),
+      { readOnly: true }
+    );
+    expect(authorized.currentTransition('alpha')).toMatchObject({
+      state: 'resolved',
+      expectedProviderSessionId: OLD_ID,
+      observedProviderSessionId: NEW_ID
+    });
+    authorized.close();
+    daemon.dispose();
+
+    const restarted = createTerminalDaemon({
+      homeRoot: root,
+      moorBinPath: '/bin/false',
+      moorSocketRoot: root,
+      httpServer: new FakeUpgradeServer(),
+      manifestPath,
+      homeDir: root,
+      verifyProviderSessionEvidence: verifier,
+      replaceProviderSessionIdentity: replace
+    });
+    daemons.push(restarted);
+    vi.spyOn(
+      restarted.router.sessions,
+      'spawnAndAttachMoor'
+    ).mockImplementationOnce(async (sessionId, options) => {
+      const decision = await options.preallocateSpawn?.({
+        sessionId,
+        currentGeneration: 2,
+        nextGeneration: 3,
+        subject: options.subject ?? { kind: 'terminal' }
+      });
+      return decision ?? { ok: false, reason: 'spawn-failed' };
+    });
+    await expect(
+      restarted.provision('alpha', {
+        command: ['codex', 'resume', OLD_ID],
+        geometry: { rows: 24, cols: 80 },
+        subject: {
+          kind: 'agent',
+          provider: 'codex',
+          mode: 'terminal',
+          producer: 'codex-hooks'
+        },
+        providerSessionId: OLD_ID
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      detail: 'provider-session-rebind-required'
+    });
+    vi.spyOn(restarted.router.sessions, 'moorStatus').mockReturnValue({
+      generation: 2,
+      running: true
+    } as never);
+    await expect(
+      restarted.rebindProviderSession({
+        deskSessionId: 'alpha',
+        targetProviderSessionId: NEW_ID
+      })
+    ).resolves.toMatchObject({ ok: true, kind: 'rebound' });
+    expect(manifestResume(manifestPath)).toBe(NEW_ID);
+  });
 
   it('rejects generation-only authority before evidence lookup or manifest mutation', async () => {
     const { root, manifestPath, daemon } = fixture('codex');
@@ -648,27 +862,260 @@ describe('provider session continuity coordinator', () => {
         });
       }
       expect(manifestResume(manifestPath)).toBeUndefined();
+      const replayed = new FileProviderSessionContinuityLedger(
+        join(
+          dirname(manifestPath),
+          '_engine',
+          'provider-session-continuity.ndjson'
+        ),
+        { readOnly: true }
+      );
+      expect(replayed.currentTransition('alpha')).toMatchObject({
+        state: 'cancelled-by-reset',
+        observedProviderSessionId: NEW_ID
+      });
+      replayed.close();
     }
   );
 
-  it('does not let a non-SessionStart hook create initial authority', async () => {
-    const { root, manifestPath, daemon } = fixture('claude');
-    const launched = await launch(daemon, 'claude');
-    writeEvidence(root, 'claude', NEW_ID);
+  it('keeps a resolved rebind reset-incomplete until cancellation is durable and retry authorizes fresh launch', async () => {
+    let failCancellation = false;
+    const verifier: EvidenceVerifier = async (raw) => {
+      const input = raw as {
+        provider: 'codex';
+        providerSessionId: string;
+      };
+      return {
+        ok: true,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        evidencePath: '/safe/codex/new.jsonl'
+      };
+    };
+    const { root, manifestPath, daemon } = fixture('codex', OLD_ID, verifier, {
+      continuityLedger: (ledgerRoot) => {
+        const ledger = new FileProviderSessionContinuityLedger(
+          join(
+            ledgerRoot,
+            '_engine',
+            'provider-session-continuity.ndjson'
+          )
+        );
+        const cancel = ledger.cancelTransitionByReset.bind(ledger);
+        vi.spyOn(ledger, 'cancelTransitionByReset').mockImplementation(
+          (input) => {
+            if (failCancellation) {
+              failCancellation = false;
+              throw new Error(
+                'simulated continuity cancellation fsync failure'
+              );
+            }
+            return cancel(input);
+          }
+        );
+        return ledger;
+      }
+    });
+    const launched = await launch(daemon, 'codex', OLD_ID);
+    await daemon.observeProviderSessionIdentity({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      providerSessionId: NEW_ID,
+      generation: launched.generation,
+      launchProof: launched.launchProof,
+      hook: 'SessionStart'
+    });
+    await daemon.rebindProviderSession({
+      deskSessionId: 'alpha',
+      targetProviderSessionId: NEW_ID
+    });
+    vi.spyOn(
+      daemon.router.sessions,
+      'resetForProviderSession'
+    ).mockImplementation(async (_sessionId, _socketPath, transaction) => ({
+      ok: true,
+      generation: 2,
+      value: await transaction(2)
+    }));
+    failCancellation = true;
 
+    await expect(daemon.resetProviderSession('alpha')).resolves.toMatchObject({
+      ok: false,
+      reason: 'provider-session-store-failed'
+    });
+    expect(manifestResume(manifestPath)).toBeUndefined();
+    const continuityPath = join(
+      root,
+      '_engine',
+      'provider-session-continuity.ndjson'
+    );
+    let continuity = new FileProviderSessionContinuityLedger(continuityPath, {
+      readOnly: true
+    });
+    expect(continuity.currentTransition('alpha')).toMatchObject({
+      state: 'resolved',
+      observedProviderSessionId: NEW_ID
+    });
+    continuity.close();
+    let launchLedger = new FileProviderSessionLaunchLedger(
+      join(root, '_engine', 'provider-session-launch.ndjson')
+    );
+    const prepared = launchLedger.current('alpha');
+    expect(prepared).toMatchObject({ state: 'prepared', generation: 2 });
+    launchLedger.close();
+
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementationOnce(
+      async (sessionId, options) => {
+        const decision = await options.preallocateSpawn?.({
+          sessionId,
+          currentGeneration: 2,
+          nextGeneration: 3,
+          subject: options.subject ?? { kind: 'terminal' }
+        });
+        return decision ?? { ok: false, reason: 'spawn-failed' };
+      }
+    );
     await expect(
-      daemon.observeProviderSessionIdentity({
+      daemon.provision('alpha', {
+        command: ['codex'],
+        geometry: { rows: 24, cols: 80 },
+        subject: {
+          kind: 'agent',
+          provider: 'codex',
+          mode: 'terminal',
+          producer: 'codex-hooks'
+        }
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      detail: 'reset-incomplete'
+    });
+
+    await expect(daemon.resetProviderSession('alpha')).resolves.toMatchObject({
+      ok: true,
+      state: 'authorized',
+      authorizationId: prepared?.authorizationId
+    });
+    continuity = new FileProviderSessionContinuityLedger(continuityPath, {
+      readOnly: true
+    });
+    expect(continuity.currentTransition('alpha')).toMatchObject({
+      state: 'cancelled-by-reset',
+      resetAuthorizationId: prepared?.authorizationId
+    });
+    continuity.close();
+    launchLedger = new FileProviderSessionLaunchLedger(
+      join(root, '_engine', 'provider-session-launch.ndjson')
+    );
+    expect(launchLedger.current('alpha')).toMatchObject({
+      state: 'authorized',
+      authorizationId: prepared?.authorizationId
+    });
+    launchLedger.close();
+
+    vi.spyOn(daemon.router.sessions, 'spawnAndAttachMoor').mockImplementationOnce(
+      async (sessionId, options) => {
+        const decision = await options.preallocateSpawn?.({
+          sessionId,
+          currentGeneration: 2,
+          nextGeneration: 3,
+          subject: options.subject ?? { kind: 'terminal' }
+        });
+        if (decision !== undefined && !decision.ok) return decision;
+        return { ok: true, generation: 3, created: true };
+      }
+    );
+    await expect(
+      daemon.provision('alpha', {
+        command: ['codex'],
+        geometry: { rows: 24, cols: 80 },
+        subject: {
+          kind: 'agent',
+          provider: 'codex',
+          mode: 'terminal',
+          producer: 'codex-hooks'
+        }
+      })
+    ).resolves.toMatchObject({ ok: true, generation: 3 });
+  });
+
+  it.each([
+    ['binds', undefined, 'bound'],
+    ['stages', OLD_ID, 'provider-session-rebind-required']
+  ] as const)(
+    '%s a provider identity from a later hook only after stale SessionStart evidence becomes fresh',
+    async (_label, resume, expectedOutcome) => {
+      const { root, manifestPath, daemon } = fixture('claude', resume);
+      const launched = await launch(daemon, 'claude', resume);
+      writeEvidence(root, 'claude', NEW_ID);
+      const evidencePath = join(
+        root,
+        '.claude',
+        'projects',
+        root.replace(/[^A-Za-z0-9._-]/g, '-'),
+        `${NEW_ID}.jsonl`
+      );
+      const stale = new Date(Date.now() - 10_000);
+      utimesSync(evidencePath, stale, stale);
+
+      await expect(
+        daemon.observeProviderSessionIdentity({
+          deskSessionId: 'alpha',
+          provider: 'claude',
+          providerSessionId: NEW_ID,
+          generation: launched.generation,
+          launchProof: launched.launchProof,
+          hook: 'SessionStart'
+        })
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: 'provider-session-evidence-stale'
+      });
+      expect(manifestResume(manifestPath)).toBe(resume);
+
+      await expect(
+        daemon.observeProviderSessionIdentity({
+          deskSessionId: 'alpha',
+          provider: 'claude',
+          providerSessionId: NEW_ID,
+          generation: launched.generation,
+          launchProof: launched.launchProof,
+          hook: 'Stop'
+        })
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: 'provider-session-evidence-stale'
+      });
+      expect(manifestResume(manifestPath)).toBe(resume);
+
+      writeEvidence(root, 'claude', NEW_ID);
+      const recovered = await daemon.observeProviderSessionIdentity({
         deskSessionId: 'alpha',
         provider: 'claude',
         providerSessionId: NEW_ID,
         generation: launched.generation,
         launchProof: launched.launchProof,
         hook: 'Stop'
-      })
-    ).resolves.toMatchObject({
-      ok: false,
-      reason: 'provider-session-start-required'
-    });
-    expect(manifestResume(manifestPath)).toBeUndefined();
-  });
+      });
+      if (expectedOutcome === 'bound') {
+        expect(recovered).toMatchObject({ ok: true, kind: 'bound' });
+        expect(manifestResume(manifestPath)).toBe(NEW_ID);
+      } else {
+        expect(recovered).toMatchObject({
+          ok: false,
+          reason: expectedOutcome,
+          currentProviderSessionId: OLD_ID,
+          targetProviderSessionId: NEW_ID
+        });
+        expect(manifestResume(manifestPath)).toBe(OLD_ID);
+        await expect(
+          daemon.rebindProviderSession({
+            deskSessionId: 'alpha',
+            targetProviderSessionId: NEW_ID
+          })
+        ).resolves.toMatchObject({ ok: true, kind: 'rebound' });
+        expect(manifestResume(manifestPath)).toBe(NEW_ID);
+      }
+    }
+  );
 });

@@ -105,6 +105,45 @@ describe('provider session continuity status', () => {
     ]);
   });
 
+  it('keeps a resolved-but-unapplied authorization actionable until the manifest is NEW', () => {
+    const path = ledgerPath();
+    const ledger = new FileProviderSessionContinuityLedger(path);
+    const pending = ledger.stageTransition({
+      deskSessionId: 'codex-agent',
+      provider: 'codex',
+      generation: 3,
+      expectedProviderSessionId: OLD_CODEX_ID,
+      observedProviderSessionId: NEW_CODEX_ID,
+      evidencePath: '/workspace/codex-agent/session.jsonl'
+    });
+    ledger.resolveTransition({
+      deskSessionId: 'codex-agent',
+      transitionId: pending.transitionId,
+      targetProviderSessionId: NEW_CODEX_ID
+    });
+    ledger.close();
+
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex', OLD_CODEX_ID)],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([
+      expect.objectContaining({
+        code: 'provider-session-rebind-required',
+        durableProviderSessionId: OLD_CODEX_ID,
+        observedProviderSessionId: NEW_CODEX_ID,
+        action: `desk rebind-provider-session codex-agent --to ${NEW_CODEX_ID} --force`
+      })
+    ]);
+    expect(
+      readProviderSessionContinuityStatus(
+        [session('codex-agent', 'codex', NEW_CODEX_ID)],
+        { ledgerPath: path }
+      ).issues
+    ).toEqual([]);
+  });
+
   it('fails closed on a corrupt ledger without repairing or exposing its contents', () => {
     const path = ledgerPath();
     mkdirSync(dirname(path), { recursive: true });

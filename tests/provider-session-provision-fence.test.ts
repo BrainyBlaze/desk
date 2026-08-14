@@ -251,6 +251,38 @@ function daemonFor(
     daemon.dispose();
   });
 
+  it('fences a resolved authorization whose manifest replacement is not applied', async () => {
+    const { root, manifestPath } = fixture(PRIOR_ID);
+    const continuityLedger = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson')
+    );
+    const pending = continuityLedger.stageTransition({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      generation: 7,
+      expectedProviderSessionId: PRIOR_ID,
+      observedProviderSessionId: NEXT_ID,
+      evidencePath: '/safe/codex/next.jsonl'
+    });
+    continuityLedger.resolveTransition({
+      deskSessionId: 'alpha',
+      transitionId: pending.transitionId,
+      targetProviderSessionId: NEXT_ID
+    });
+    continuityLedger.close();
+
+    const daemon = daemonFor(root, manifestPath);
+    await expect(
+      provisionAtGeneration(daemon, 7, PRIOR_ID)
+    ).resolves.toEqual({
+      ok: false,
+      reason: 'provider-session-identity-missing',
+      detail: 'provider-session-rebind-required',
+      action: `desk rebind-provider-session alpha --to ${NEXT_ID} --force`
+    });
+    daemon.dispose();
+  });
+
   it('claims one authorized fresh launch for the exact next generation and never reuses it', async () => {
     const { root, manifestPath, ledgerPath } = fixture();
     const seed = new FileProviderSessionLaunchLedger(ledgerPath, {
