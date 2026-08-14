@@ -121,6 +121,21 @@ function makeManager(ledger: GenerationLedger): SessionManager {
   });
 }
 
+/**
+ * The recovery slot a manager actually holds for a session. Read directly
+ * because "a retry is armed" is a FACT about the manager, and a test that
+ * accepted the return value of the call that arms it would be trusting the
+ * same statement the code under test is trusted not to trust.
+ */
+function recoveryFor(
+  manager: SessionManager,
+  sessionId: string
+): { generation: number } | undefined {
+  return (
+    manager as unknown as { recoveries: Map<string, { generation: number }> }
+  ).recoveries.get(sessionId);
+}
+
 function batchOf(snapshot: SessionStateSnapshot | undefined): {
   ok: boolean;
   revision: number | null;
@@ -459,6 +474,104 @@ describe('desk#64 — restart attach failure retains the session', () => {
       // The refusal must precede every effect that presumes retention: no
       // unadopted health written for a transition that did not happen.
       expect(manager.stateSnapshot('r64h')?.health.status).toBe('healthy');
+    },
+    30_000
+  );
+
+  it(
+    'never claims a retry it did not arm: a re-entrant transition consumer that retires mid-flight',
+    async () => {
+      // The ONLY window in which the recovery slot's own guards can decline
+      // after the caller has already decided to retain: committing the
+      // unadopted health degradation calls the authority's `onTransition`
+      // consumer SYNCHRONOUSLY, between the caller's checks and the slot
+      // being installed. A consumer that re-enters the manager therefore
+      // changes the world underneath it.
+      const root = mkdtempSync(join(tmpdir(), 'desk64-reentrant-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      const ledger = new GenerationLedger(new InMemoryGenerationLedger());
+      expect(ledger.allocate('r64k')).toBe(2);
+
+      let manager: SessionManager;
+      let reentered = false;
+      manager = new SessionManager({
+        ledger,
+        supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+        emulatorFactory: { create: () => new ByteSinkEmu() },
+        now: () => Date.now(),
+        sendBrowser: () => {},
+        onStateTransition: (transition) => {
+          // React to the unadopted degradation exactly once, from inside the
+          // commit that publishes it.
+          if (reentered || transition.cause !== 'source-health') return;
+          reentered = true;
+          manager.retire('r64k', 'kill-switch');
+        }
+      });
+      cleanups.push(() => manager.closeAllLinks());
+      vi.spyOn(manager, 'moorAttachMaster').mockResolvedValue(false);
+
+      const result = await manager.restoreAndAttachMoor('r64k', {
+        sessionPath: join(root, 'r64k'),
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/bin/true', args: [] }
+      });
+
+      expect(reentered).toBe(true);
+      // No slot was armed — so the caller must not say one was. This is the
+      // claim an operator reads as "alive, being re-attached to".
+      expect(result).toEqual({
+        ok: false,
+        reason: 'attach-failed',
+        retained: false,
+        generation: 2
+      });
+      // And the fact behind the claim: nothing is retrying this session.
+      expect(recoveryFor(manager, 'r64k')).toBeUndefined();
+      expect(manager.stateSnapshot('r64k')).toMatchObject({
+        lifecycle: 'exited',
+        exit: { origin: 'retired', reason: 'kill-switch' }
+      });
+    },
+    30_000
+  );
+
+  it(
+    'an owner change during the awaited attach never yields retained:true (absorbed by the authority check)',
+    async () => {
+      // What this pins and what it does NOT: every real path that replaces or
+      // clears the owner token also moves the authority record (a retire exits
+      // the session; a successor spawn registers a newer generation), and
+      // `markRunning` is consulted first — so this returns at the authority
+      // check and the ownership guard never runs. It pins the OUTCOME, not the
+      // guard. The guard is pinned by the re-entrancy test above, which is the
+      // only window that reaches it.
+      const root = mkdtempSync(join(tmpdir(), 'desk64-owner-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      const ledger = new GenerationLedger(new InMemoryGenerationLedger());
+      expect(ledger.allocate('r64l')).toBe(2);
+      const manager = makeManager(ledger);
+      cleanups.push(() => manager.closeAllLinks());
+
+      // A successor takes the session while the attach is awaited — the real
+      // sequence, through the public API: retire, then a new operation.
+      vi.spyOn(manager, 'moorAttachMaster').mockImplementation(async () => {
+        manager.retire('r64l', 'operator-reboot');
+        expect(ledger.allocate('r64l')).toBe(3); // the successor's generation
+        expect(manager.ensure('r64l', { rows: 24, cols: 80 }).ok).toBe(true);
+        return false;
+      });
+
+      const result = await manager.restoreAndAttachMoor('r64l', {
+        sessionPath: join(root, 'r64l'),
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/bin/true', args: [] }
+      });
+
+      expect(result).toMatchObject({ ok: false, reason: 'attach-failed', retained: false });
+      expect(recoveryFor(manager, 'r64l')).toBeUndefined();
+      // The successor's generation is untouched by the superseded operation.
+      expect(manager.stateSnapshot('r64l')?.generation).toBe(4);
     },
     30_000
   );

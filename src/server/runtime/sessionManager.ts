@@ -520,9 +520,14 @@ export class SessionManager {
           generation: restored.generation
         };
       }
-      // Both calls below are now unrejectable: no await separates them from
-      // the checks above, the generation is the one the authority just
-      // accepted, and the lifecycle it just committed is `running`.
+      // `observeHolderLiveness` cannot be rejected here: no await separates it
+      // from the checks above, the generation is the one the authority just
+      // accepted, and the lifecycle it just committed is `running`. It is NOT
+      // inert, though — committing a transition calls the authority's
+      // `onTransition` consumer SYNCHRONOUSLY, and a consumer that re-enters
+      // this manager (retiring, say) changes the world between here and the
+      // slot below. That window is the only one left, which is exactly why
+      // `retained` is read back from the map rather than taken on trust.
       this.core.observeHolderLiveness(
         sessionId,
         restored.generation,
@@ -530,17 +535,28 @@ export class SessionManager {
         'restore-attach-failed',
         MOOR_UNADOPTED_REASON
       );
-      const registered = this.beginRestoreRecovery({
+      this.beginRestoreRecovery({
         sessionId,
         sessionPath: opts.sessionPath,
         geometry: attachGeometry,
         generation: restored.generation,
         owner: token
       });
+      // `retained` is the FACT, read back from the map — not the helper's
+      // report of it. The two differ exactly when a guard inside declines
+      // after this operation has already decided it is retaining the session,
+      // and the caller repeats `retained: true` to an operator as "alive and
+      // being re-attached to". A claim this operation can verify locally is
+      // one it must never take on trust: the slot is retained only if it is
+      // THERE, at this generation, under this operation's token.
+      const slot = this.recoveries.get(sessionId);
       return {
         ok: false,
         reason: 'attach-failed',
-        retained: registered,
+        retained:
+          slot !== undefined &&
+          slot.owner === token &&
+          slot.generation === restored.generation,
         generation: restored.generation
       };
     }
@@ -929,10 +945,13 @@ export class SessionManager {
    * owner-fenced slot rather than a second, subtly different one. There is no
    * resume snapshot and no queued input: nothing was ever adopted to resume.
    *
-   * Returns whether a slot was actually installed: a guard that declines is
-   * the difference between a session that is being re-attached to and one
-   * nobody will ever try again, and the caller states that outcome rather
-   * than assuming the happy path.
+   * Deliberately returns nothing. An earlier revision returned "did I install
+   * one?" and the caller reported that as retention — which put the caller's
+   * honesty at the mercy of this function's control flow, when the caller can
+   * simply LOOK. Both guards below can only fail through one window: the
+   * synchronous `onTransition` consumer that the health degradation just
+   * before this call invokes. They stay because the window is real, not
+   * because the caller depends on their answer.
    */
   private beginRestoreRecovery(input: {
     sessionId: string;
@@ -940,18 +959,17 @@ export class SessionManager {
     geometry: { rows: number; cols: number };
     generation: number;
     owner: symbol;
-  }): boolean {
-    if (this.owners.get(input.sessionId) !== input.owner) return false;
+  }): void {
+    if (this.owners.get(input.sessionId) !== input.owner) return;
     const state = this.core.stateSnapshot(input.sessionId);
     if (
       state === undefined ||
       state.generation !== input.generation ||
       state.lifecycle === 'exited'
     ) {
-      return false;
+      return;
     }
     this.openRecoverySlot({ ...input, snapshot: undefined, queuedInput: [] });
-    return true;
   }
 
   /** Install (or replace) the session's single re-attachment slot and run it. */
