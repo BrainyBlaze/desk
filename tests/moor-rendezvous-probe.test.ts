@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { probeRendezvous } from '../src/server/runtime/sessionManager.js';
+import { moorSocketRootUsable } from '../src/shared/moorPaths.js';
 
 /** Root bypasses the DAC checks that produce EACCES, so it cannot see that case. */
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -71,6 +72,18 @@ describe('probeRendezvous holds three outcomes, and claims the dangerous one onl
       server.listen(path, resolve);
     });
   };
+
+  it('accepts only an owner-private rendezvous namespace as usable', () => {
+    for (const [mode, usable] of [
+      [0o700, true],
+      [0o777, false],
+      [0o770, false],
+      [0o707, false]
+    ] as const) {
+      chmodSync(dir, mode);
+      expect(moorSocketRootUsable(dir), mode.toString(8)).toBe(usable);
+    }
+  });
 
   it('answers live for a socket with a listener behind it', async () => {
     const sock = join(dir, 'held');

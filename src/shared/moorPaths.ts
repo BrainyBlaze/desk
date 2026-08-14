@@ -61,7 +61,10 @@ export function moorSocketRootUsable(root: string): boolean {
     if (!stat.isDirectory()) {
       return false;
     }
-    return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+    if (typeof process.getuid !== 'function') {
+      return true;
+    }
+    return stat.uid === process.getuid() && (stat.mode & 0o7777) === 0o700;
   } catch {
     return false;
   }
