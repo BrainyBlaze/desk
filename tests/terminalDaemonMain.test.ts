@@ -688,6 +688,33 @@ describe('reconcileExistingSessions', () => {
       producer: 'codex-hooks'
     });
   });
+
+  it('desk#64: reports a retained unadopted session as not re-attached, and says it is retrying', async () => {
+    const restoreAndAttachMoor = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'attach-failed',
+      retained: true,
+      generation: 7
+    });
+    const reconcileMoorEvents = vi.fn();
+    const daemon = {
+      router: { sessions: { restoreAndAttachMoor } },
+      reconcileMoorEvents
+    } as never;
+    const results = await reconcileExistingSessions(
+      daemon,
+      [{ sessionId: 'd', sockPath: '/r/d', subject: { kind: 'terminal' } }],
+      '/opt/moor'
+    );
+    // Honest on both counts: nothing was adopted (ok:false, no event-store
+    // reconcile), and the session was NOT ended — the startup log an operator
+    // reads must not imply the agent is gone.
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.error).toContain('retained');
+    expect(results[0]!.error).toContain('retrying');
+    expect(results[0]!.error).toContain('generation 7');
+    expect(reconcileMoorEvents).not.toHaveBeenCalled();
+  });
 });
 
 describe('/control/moor-status separates the LINK from the HOLDER (desk#50b)', () => {
