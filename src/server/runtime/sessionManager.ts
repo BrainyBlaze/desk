@@ -414,8 +414,14 @@ export class SessionManager {
          * re-attachment registered) instead of retired. The caller has no
          * adopted link and no ATTACH_ACK descriptor either way; this only says
          * whether a session still exists to be adopted later.
+         *
+         * FALSE is not a rollback: it means this operation no longer owns the
+         * session (the authority refused the transition, or a newer operation
+         * took over during the attach). It is reported rather than assumed,
+         * because a caller told `retained: true` will describe a live,
+         * retrying session to an operator — a claim this path must earn.
          */
-        retained: true;
+        retained: boolean;
         generation: number;
       }
   > {
@@ -433,12 +439,22 @@ export class SessionManager {
       generation: restored.generation,
       sockPath: opts.sessionPath
     });
+    /**
+     * The geometry THIS re-adoption puts on the wire — and, when the attach
+     * fails, the one its retry inherits. Deliberately ONE value: a retry that
+     * asserted a different size than the adoption it is retrying would be
+     * inventing a measurement nobody made. desk#62 replaces this expression
+     * with `MOOR_PRESERVE_GEOMETRY` (the daemon cannot know a re-adopted
+     * child's pty size — the §5 status descriptor carries none), and the retry
+     * below picks that up with no change of its own.
+     */
+    const attachGeometry = opts.geometry;
     let attached = false;
     try {
       // The native client fences the WHOLE §3/§6 exchange on the restored
       // ledger generation — a holder carrying any other generation fails the
       // attach instead of splitting the fence.
-      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, opts.geometry, {
+      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, attachGeometry, {
         generation: restored.generation,
         stillValid: () => this.owners.get(sessionId) === token,
         ...(opts.livenessWindowMs === undefined
@@ -474,7 +490,39 @@ export class SessionManager {
       // wait", and the channels engine holds the queue on it just as silently
       // as on `exited`. The uncertainty belongs on the health axis, which is
       // where the operator reads it, and where the probe resolves it.
-      this.core.markRunning(sessionId, restored.generation);
+      //
+      // The authority's ANSWER decides whether retention happened — this must
+      // not assert a state it merely asked for. `rejected` is reachable here:
+      // the attach above awaited real I/O, and in that window a concurrent
+      // retire can have exited the session ('lifecycle-exited') or a successor
+      // operation can have registered a newer generation
+      // ('generation-mismatch'). ('session-not-found' cannot: the authority
+      // never deletes a record it registered.) A `noop` — already running — is
+      // success, not failure, and must stay that way.
+      const running = this.core.markRunning(sessionId, restored.generation);
+      if (running.kind === 'rejected') {
+        return {
+          ok: false,
+          reason: 'attach-failed',
+          retained: false,
+          generation: restored.generation
+        };
+      }
+      // Ownership is the second claim this path makes. A newer operation that
+      // took the session during the attach owns its state and its recovery
+      // slot; degrading health or arming a retry underneath it would fight a
+      // successor with stale intentions.
+      if (this.owners.get(sessionId) !== token) {
+        return {
+          ok: false,
+          reason: 'attach-failed',
+          retained: false,
+          generation: restored.generation
+        };
+      }
+      // Both calls below are now unrejectable: no await separates them from
+      // the checks above, the generation is the one the authority just
+      // accepted, and the lifecycle it just committed is `running`.
       this.core.observeHolderLiveness(
         sessionId,
         restored.generation,
@@ -482,17 +530,17 @@ export class SessionManager {
         'restore-attach-failed',
         MOOR_UNADOPTED_REASON
       );
-      this.beginRestoreRecovery({
+      const registered = this.beginRestoreRecovery({
         sessionId,
         sessionPath: opts.sessionPath,
-        geometry: opts.geometry,
+        geometry: attachGeometry,
         generation: restored.generation,
         owner: token
       });
       return {
         ok: false,
         reason: 'attach-failed',
-        retained: true,
+        retained: registered,
         generation: restored.generation
       };
     }
@@ -880,6 +928,11 @@ export class SessionManager {
    * with the same fencing requirements, so it gets the same generation- and
    * owner-fenced slot rather than a second, subtly different one. There is no
    * resume snapshot and no queued input: nothing was ever adopted to resume.
+   *
+   * Returns whether a slot was actually installed: a guard that declines is
+   * the difference between a session that is being re-attached to and one
+   * nobody will ever try again, and the caller states that outcome rather
+   * than assuming the happy path.
    */
   private beginRestoreRecovery(input: {
     sessionId: string;
@@ -887,17 +940,18 @@ export class SessionManager {
     geometry: { rows: number; cols: number };
     generation: number;
     owner: symbol;
-  }): void {
-    if (this.owners.get(input.sessionId) !== input.owner) return;
+  }): boolean {
+    if (this.owners.get(input.sessionId) !== input.owner) return false;
     const state = this.core.stateSnapshot(input.sessionId);
     if (
       state === undefined ||
       state.generation !== input.generation ||
       state.lifecycle === 'exited'
     ) {
-      return;
+      return false;
     }
     this.openRecoverySlot({ ...input, snapshot: undefined, queuedInput: [] });
+    return true;
   }
 
   /** Install (or replace) the session's single re-attachment slot and run it. */

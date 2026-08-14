@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionManager } from '../src/server/runtime/sessionManager.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
@@ -373,6 +373,172 @@ describe('desk#64 — restart attach failure retains the session', () => {
         origin: 'retired',
         reason: 'confirmed-holder-absence'
       });
+    },
+    60_000
+  );
+
+  it(
+    'never claims retention the authority refused: a rejected markRunning reports retained:false',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'desk64-refused-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      const ledger = new GenerationLedger(new InMemoryGenerationLedger());
+      expect(ledger.allocate('r64g')).toBe(2);
+      const manager = makeManager(ledger);
+      cleanups.push(() => manager.closeAllLinks());
+
+      // A concurrent retire lands while the attach is in flight — the window
+      // is real: the attach awaits socket I/O. The authority then refuses the
+      // starting→running transition with `lifecycle-exited`.
+      vi.spyOn(manager, 'moorAttachMaster').mockImplementation(async () => {
+        manager.retire('r64g', 'kill-switch');
+        return false;
+      });
+
+      const result = await manager.restoreAndAttachMoor('r64g', {
+        sessionPath: join(root, 'r64g'),
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/bin/true', args: [] }
+      });
+
+      expect(result.ok).toBe(false);
+      // The claim the caller repeats to an operator ("retained, retrying")
+      // must not be made for a session the authority says is over.
+      expect(result).toEqual({
+        ok: false,
+        reason: 'attach-failed',
+        retained: false,
+        generation: 2
+      });
+      expect(manager.stateSnapshot('r64g')).toMatchObject({
+        lifecycle: 'exited',
+        exit: { origin: 'retired', reason: 'kill-switch' }
+      });
+    },
+    30_000
+  );
+
+  it(
+    'reads the authority answer itself: a refused markRunning alone blocks the retention claim',
+    async () => {
+      // The test above cannot attribute its outcome: every path that exits a
+      // session also clears the operation's owner token, so the ownership
+      // guard would report retained:false even if the authority's answer were
+      // ignored. This one isolates the markRunning check by refusing ONLY that
+      // transition, with ownership and lifecycle otherwise intact — the
+      // `generation-mismatch` rejection, which a successor registration can
+      // produce without touching the owner map.
+      const root = mkdtempSync(join(tmpdir(), 'desk64-refused-authority-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      const ledger = new GenerationLedger(new InMemoryGenerationLedger());
+      expect(ledger.allocate('r64h')).toBe(2);
+      const manager = makeManager(ledger);
+      cleanups.push(() => manager.closeAllLinks());
+
+      const core = (manager as unknown as {
+        core: { markRunning: (sessionId: string, generation: number) => unknown };
+      }).core;
+      const markRunning = vi
+        .spyOn(core, 'markRunning')
+        .mockReturnValue({ kind: 'rejected', reason: 'generation-mismatch' });
+      vi.spyOn(manager, 'moorAttachMaster').mockResolvedValue(false);
+
+      const result = await manager.restoreAndAttachMoor('r64h', {
+        sessionPath: join(root, 'r64h'),
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/bin/true', args: [] }
+      });
+
+      expect(markRunning).toHaveBeenCalledWith('r64h', 2);
+      expect(result).toEqual({
+        ok: false,
+        reason: 'attach-failed',
+        retained: false,
+        generation: 2
+      });
+      // The refusal must precede every effect that presumes retention: no
+      // unadopted health written for a transition that did not happen.
+      expect(manager.stateSnapshot('r64h')?.health.status).toBe('healthy');
+    },
+    30_000
+  );
+
+  it(
+    'THE DEAD END this fix prevents: a session retired while its holder still listens cannot be re-provisioned',
+    async () => {
+      const world = await twoIncarnations('r64i');
+      // Reproduce the pre-fix state directly — retire the session while its
+      // holder is alive and listening, which is exactly what the old rollback
+      // did on a failed restart attach.
+      const restored = await world.second.restoreAndAttachMoor('r64i', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: world.killSpec
+      });
+      expect(restored.ok).toBe(false);
+      // The old path retired WITHOUT a kill record; `retire` here reaches the
+      // same place through the public API, and the record it consumes is the
+      // one thing that could have freed the rendezvous.
+      const third = makeManager(world.ledger);
+      cleanups.push(() => third.closeAllLinks());
+      third.retire('r64i', 'restore-superseded'); // no kill record in THIS manager
+      expect(third.stateSnapshot('r64i')?.lifecycle ?? 'absent').not.toBe('running');
+      expect(processAlive(world.pid)).toBe(true);
+
+      // The spawn preflight refuses a rendezvous with a live listener, and it
+      // is right to: staleness must be POSITIVE. So a re-provision cannot
+      // rescue the session — nothing frees the path while the holder lives.
+      const reprovision = await third.spawnAndAttachMoor('r64i', {
+        binPath: process.execPath,
+        binArgs: NODE_IMPORT_ARGS,
+        sessionPath: world.sessionPath,
+        command: ['sleep', '60'],
+        geometry: { rows: 24, cols: 80 },
+        killSpec: {
+          binPath: process.execPath,
+          args: [...NODE_IMPORT_ARGS, 'kill', world.sessionPath]
+        }
+      });
+      expect(reprovision).toEqual({ ok: false, reason: 'spawn-failed' });
+      expect(processAlive(world.pid)).toBe(true);
+      expect(existsSync(world.sessionPath)).toBe(true);
+    },
+    60_000
+  );
+
+  it(
+    'THE ESCAPE HATCH that does work: a fresh daemon incarnation re-adopts a session an earlier one retired',
+    async () => {
+      const world = await twoIncarnations('r64j');
+      const failed = await world.second.restoreAndAttachMoor('r64j', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: world.killSpec
+      });
+      expect(failed.ok).toBe(false);
+      world.second.closeAllLinks(); // the daemon departs; the holder survives
+
+      // The authority is per-process: nothing durable records `exited`, so a
+      // NEW incarnation over the SAME durable ledger reconciles from scratch.
+      // This is why an orphaned session is recoverable by restarting the
+      // daemon — and why in-incarnation resurrection is not needed to rescue
+      // one. The transient attach failure is gone by now.
+      rmSync(world.refuseFile, { force: true });
+      const third = makeManager(world.ledger);
+      cleanups.push(() => third.closeAllLinks());
+      const rescued = await third.restoreAndAttachMoor('r64j', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: world.killSpec
+      });
+
+      expect(rescued.ok).toBe(true);
+      expect(third.stateSnapshot('r64j')).toMatchObject({
+        lifecycle: 'running',
+        generation: 2 // the SAME generation the holder carries: the fence held
+      });
+      expect(third.moorStatus('r64j')?.generation).toBe(2);
+      expect(processAlive(world.pid)).toBe(true);
     },
     60_000
   );
