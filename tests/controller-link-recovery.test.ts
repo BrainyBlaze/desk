@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SessionManager } from '../src/server/runtime/sessionManager.js';
+import {
+  SessionManager,
+  type SessionManagerDeps
+} from '../src/server/runtime/sessionManager.js';
 import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import { GenerationLedger } from '../src/shared/controlPlane/generationLedger.js';
@@ -592,11 +595,37 @@ async function settleSocketIo(turns = 4): Promise<void> {
   }
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+async function waitForSocketCondition(
+  predicate: () => boolean,
+  description: string,
+  turns = 50
+): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
 async function startRecoveryHarness(
   createEmulator: () => EmulatorPort = () => new EmptyEmulator(),
   createHolder: (sessionPath: string) => ExpiringLeaseHolder = (sessionPath) =>
     new ExpiringLeaseHolder(sessionPath),
-  duringRestore?: (holder: ExpiringLeaseHolder) => Promise<void>
+  duringRestore?: (holder: ExpiringLeaseHolder) => Promise<void>,
+  options: {
+    onLateMoorAdoption?: SessionManagerDeps['onLateMoorAdoption'];
+  } = {}
 ): Promise<{
   holder: ExpiringLeaseHolder;
   manager: SessionManager;
@@ -622,6 +651,9 @@ async function startRecoveryHarness(
     supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
     emulatorFactory: { create: createEmulator },
     now: () => Date.now(),
+    ...(options.onLateMoorAdoption === undefined
+      ? {}
+      : { onLateMoorAdoption: options.onLateMoorAdoption }),
     sendBrowser: (_sessionId, _channelId, frame) => {
       if (failingBrowserChannels.has(_channelId)) throw new Error('browser send boom');
       browserFrames.push({ channelId: _channelId, frame });
@@ -660,6 +692,68 @@ async function startRecoveryHarness(
 
 describe('SessionManager controller-link recovery', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('desk#66 gates ambiguous input retransmission on late observer acceptance', async () => {
+    const acceptance = deferred<boolean>();
+    const callbackStarted = deferred<void>();
+    const onLateMoorAdoption = vi.fn(() => {
+      callbackStarted.resolve(undefined);
+      return acceptance.promise;
+    });
+    const harness = await startRecoveryHarness(
+      undefined,
+      undefined,
+      undefined,
+      { onLateMoorAdoption }
+    );
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+      expect(harness.holder.inputRequests).toHaveLength(1);
+      const original = { ...harness.holder.inputRequests[0]! };
+
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await callbackStarted.promise;
+      await settleSocketIo();
+      const inputsWhilePending = [...harness.holder.inputs];
+      const requestsWhilePending = harness.holder.inputRequests.map((request) => ({
+        ...request
+      }));
+      const healthWhilePending = harness.manager.stateSnapshot('session')?.health;
+
+      acceptance.resolve(true);
+      await waitForSocketCondition(
+        () => harness.holder.inputRequests.length === 2,
+        'the exact retained input retransmission'
+      );
+      await waitForSocketCondition(
+        () => harness.manager.stateSnapshot('session')?.health.status === 'healthy',
+        'observer-accepted recovery health'
+      );
+
+      expect.soft(inputsWhilePending).toEqual(['ambiguous']);
+      expect.soft(requestsWhilePending).toHaveLength(1);
+      expect.soft(healthWhilePending?.status).toBe('degraded');
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
+      expect(harness.holder.inputRequests).toEqual([
+        original,
+        { ...original, connection: 3 }
+      ]);
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+      expect(onLateMoorAdoption).toHaveBeenCalledWith('session', GENERATION);
+    } finally {
+      acceptance.resolve(true);
+      await harness.close();
+    }
+  });
 
   it('bounds recovery while the authoritative emulator is not draining', async () => {
     const emulator = new BlockingRecoveryEmulator();

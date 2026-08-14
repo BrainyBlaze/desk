@@ -236,6 +236,12 @@ export interface SessionManagerDeps {
   initialAgentHealth?: DaemonCoreDeps['initialAgentHealth'];
   createAgentStateIntakeStore?: DaemonCoreDeps['createAgentStateIntakeStore'];
   onStateTransition?: DaemonCoreDeps['onStateTransition'];
+  /**
+   * Accept an ATTACH_ACK-authorized late adoption only after its durable Moor
+   * observer is installed. TerminalWsRouter requires this dependency; omission
+   * is reserved for direct low-level, observer-free SessionManager compositions.
+   */
+  onLateMoorAdoption?: (sessionId: string, generation: number) => Promise<boolean>;
 }
 
 /**
@@ -245,6 +251,8 @@ export interface SessionManagerDeps {
  */
 export interface SessionMasterLink {
   sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number, queuedAt: number): boolean;
+  /** Re-send only the exact pending tuple whose lease this recovered link resumed. */
+  retryPendingInput?(): void;
   cancelQueuedInput(surfaceId: number): void;
   sealInput(): void;
   sendResize(rows: number, cols: number, surfaceId: number): void;
@@ -298,6 +306,8 @@ interface MoorRecoverySlot {
     queuedAt: number;
   }>;
   inputBytes: number;
+  /** The one durable-observer acceptance transaction for this exact slot episode. */
+  observerAcceptance?: Promise<boolean>;
   observer?: boolean;
   pendingResize?: { rows: number; cols: number; surfaceId: number };
 }
@@ -310,6 +320,7 @@ export class SessionManager {
   private readonly core: DaemonCore;
   private readonly ledger: GenerationLedger;
   private readonly now: () => number;
+  private readonly onLateMoorAdoption: SessionManagerDeps['onLateMoorAdoption'];
   private readonly masters = new Map<string, SessionMasterLink>();
   /** OB-39: the last adopted ATTACH_ACK descriptor per session (holder truth). */
   private readonly moorStatuses = new Map<string, MoorStatus>();
@@ -344,6 +355,7 @@ export class SessionManager {
   constructor(deps: SessionManagerDeps) {
     this.now = deps.now;
     this.ledger = deps.ledger;
+    this.onLateMoorAdoption = deps.onLateMoorAdoption;
     this.core = new DaemonCore({
       ledger: deps.ledger,
       supervisor: deps.supervisor,
@@ -356,8 +368,16 @@ export class SessionManager {
       // Typed master-bound sends route to the session's attached holder link.
       sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
-      sendMasterResize: (sessionId, rows, cols, surfaceId) =>
-        this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId),
+      sendMasterResize: (sessionId, rows, cols, surfaceId) => {
+        const recovery = this.recoveries.get(sessionId);
+        if (
+          recovery !== undefined &&
+          this.recoveryCurrent(recovery, recovery.episode)
+        ) {
+          return;
+        }
+        this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId);
+      },
       ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
@@ -786,6 +806,13 @@ export class SessionManager {
         if (outcome === 'authenticated-live') {
           // A completed authenticated exchange — the ONLY thing that restores.
           livenessEpisodeResolved = true;
+          const recovery = this.recoveries.get(sessionId);
+          if (
+            recovery !== undefined &&
+            this.recoveryCurrent(recovery, recovery.episode)
+          ) {
+            return;
+          }
           this.core.observeHolderLiveness(sessionId, opts.generation, true);
           return;
         }
@@ -825,22 +852,6 @@ export class SessionManager {
         /* link closed: nothing to acknowledge */
       }
     }
-    // Retry an ambiguously sent request only after the exact lease resumed
-    // and the terminal-state/replay delivery barrier completed.
-    if (
-      client.leaseContinuity === 'resumed' &&
-      opts.resumeSnapshot?.lease?.pendingInput !== undefined
-    ) {
-      try {
-        client.retryPendingInput();
-      } catch (error) {
-        console.error(
-          `[desk] pending input retry failed for ${sessionId} generation ${opts.generation}: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
-    }
     // Re-check AFTER the await: a concurrent retire may have torn the session
     // down while the attach prefix was in flight.
     if (
@@ -852,6 +863,30 @@ export class SessionManager {
       return false;
     }
     attached = true;
+    const retainedPendingInput =
+      client.leaseContinuity === 'resumed'
+        ? opts.resumeSnapshot?.lease?.pendingInput
+        : undefined;
+    let retainedInputRetried = false;
+    const retryPendingInput =
+      retainedPendingInput === undefined
+        ? undefined
+        : (): void => {
+            if (retainedInputRetried) return;
+            retainedInputRetried = true;
+            // Input expiry or a completed continuity refusal consumes this
+            // exact snapshot tuple; never recreate it from the client copy.
+            if (opts.resumeSnapshot?.lease?.pendingInput !== retainedPendingInput) return;
+            try {
+              client.retryPendingInput();
+            } catch (error) {
+              console.error(
+                `[desk] pending input retry failed for ${sessionId} generation ${opts.generation}: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+            }
+          };
     link = {
       sendInput: (bytes, _binary, surfaceId, queuedAt) => {
         if (inputSealed) return false;
@@ -868,6 +903,7 @@ export class SessionManager {
           return false;
         }
       },
+      ...(retryPendingInput === undefined ? {} : { retryPendingInput }),
       cancelQueuedInput: (surfaceId) => {
         inputQueue = inputQueue.filter((pending) => pending.surfaceId !== surfaceId);
       },
@@ -1076,6 +1112,10 @@ export class SessionManager {
   private async runControllerRecovery(slot: MoorRecoverySlot, episode: number): Promise<void> {
     if (!this.recoveryCurrent(slot, episode)) return;
     this.expireRecoveryInput(slot);
+    if (slot.observerAcceptance !== undefined) {
+      await slot.observerAcceptance;
+      return;
+    }
     if (this.waitForAuthoritativeWork(slot, episode)) return;
     const probe = await probeMoorHolder(slot.sessionPath, slot.generation, (candidate) => {
       if (this.recoveryCurrent(slot, episode)) slot.candidate = candidate;
@@ -1093,7 +1133,7 @@ export class SessionManager {
     const attached = await this.moorAttachMaster(
       slot.sessionId,
       slot.sessionPath,
-      slot.geometry,
+      MOOR_PRESERVE_GEOMETRY,
       {
         generation: slot.generation,
         resumeSnapshot: slot.snapshot,
@@ -1112,6 +1152,75 @@ export class SessionManager {
       this.scheduleControllerRecovery(slot);
       return;
     }
+    // The ATTACH_ACK descriptor is now published, but recovery is not yet
+    // accepted: a daemon composition must install/reuse the durable event
+    // observer before health, queued input, or pending geometry can advance.
+    // Observer-only lease retries keep this exact slot and its acceptance promise,
+    // so they never start a duplicate observer for one recovery episode.
+    if (this.onLateMoorAdoption !== undefined) {
+      await this.beginLateMoorAdoption(slot, episode);
+      return;
+    }
+    // Explicit low-level observer-free compositions have no observer
+    // transaction. Production routers require the callback at their boundary.
+    this.continueRecoveredViewer(slot, episode);
+  }
+
+  /** Install one immutable acceptance promise before invoking the callback. */
+  private beginLateMoorAdoption(
+    slot: MoorRecoverySlot,
+    episode: number
+  ): Promise<boolean> {
+    const existing = slot.observerAcceptance;
+    if (existing !== undefined) return existing;
+    const acceptance = Promise.resolve().then(() =>
+      this.completeLateMoorAdoption(slot, episode)
+    );
+    slot.observerAcceptance = acceptance;
+    return acceptance;
+  }
+
+  /** Own the callback, failure retirement, and sole successful slot release. */
+  private async completeLateMoorAdoption(
+    slot: MoorRecoverySlot,
+    episode: number
+  ): Promise<boolean> {
+    let accepted = false;
+    try {
+      accepted = await this.onLateMoorAdoption!(slot.sessionId, slot.generation);
+    } catch (error) {
+      console.error(
+        `[desk] late Moor adoption observer failed for ${slot.sessionId} generation ${slot.generation}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    // The callback was fenced when it began and is fenced again after its
+    // await. A retire, replacement slot, new owner, successor generation, or
+    // replayed exit makes this completion inert.
+    if (!this.recoveryCurrent(slot, episode)) return false;
+    if (!accepted) {
+      const retired = await this.retireGenerationAwaited(
+        slot.sessionId,
+        slot.generation,
+        { reason: 'moor-reconcile-failed' }
+      );
+      if (!retired.ok) {
+        console.error(
+          `[desk] could not retire unreconciled Moor adoption for ${slot.sessionId} generation ${slot.generation}: ${retired.error}`
+        );
+      }
+      // Retirement failure retains its exact teardown record and retired
+      // authority. Never resume recovery or release queued viewer work.
+      return false;
+    }
+    if (!this.recoveryCurrent(slot, episode)) return false;
+    this.continueRecoveredViewer(slot, episode);
+    return true;
+  }
+
+  private continueRecoveredViewer(slot: MoorRecoverySlot, episode: number): void {
+    if (!this.recoveryCurrent(slot, episode)) return;
     const link = this.masters.get(slot.sessionId);
     if (link?.hasViewerLease?.() === false) {
       slot.observer = true;
@@ -1164,6 +1273,7 @@ export class SessionManager {
       this.recoveries.delete(slot.sessionId);
       return;
     }
+    link?.retryPendingInput?.();
     if (link !== undefined && slot.pendingResize !== undefined) {
       const resize = slot.pendingResize;
       link.sendResize(resize.rows, resize.cols, resize.surfaceId);
@@ -1292,25 +1402,29 @@ export class SessionManager {
     binary: boolean,
     surfaceId: number
   ): boolean {
-    const link = this.masters.get(sessionId);
-    if (link !== undefined) return link.sendInput(bytes, binary, surfaceId, this.now());
     const recovery = this.recoveries.get(sessionId);
-    if (recovery === undefined || !this.recoveryCurrent(recovery, recovery.episode)) return false;
-    // Control-plane input must answer synchronously; it cannot claim success
-    // for bytes merely deferred behind uncertain lease ownership.
-    if (surfaceId === 0) return false;
-    if (bytes.length === 0 || recovery.inputBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) {
-      return false;
+    if (
+      recovery !== undefined &&
+      this.recoveryCurrent(recovery, recovery.episode)
+    ) {
+      // Control-plane input must answer synchronously; it cannot claim success
+      // for bytes merely deferred behind uncertain lease ownership.
+      if (surfaceId === 0) return false;
+      if (bytes.length === 0 || recovery.inputBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) {
+        return false;
+      }
+      recovery.inputQueue.push({
+        bytes: bytes.slice(),
+        binary,
+        surfaceId,
+        queuedAt: this.now()
+      });
+      recovery.inputBytes += bytes.length;
+      this.armRecoveryInputExpiry(recovery);
+      return true;
     }
-    recovery.inputQueue.push({
-      bytes: bytes.slice(),
-      binary,
-      surfaceId,
-      queuedAt: this.now()
-    });
-    recovery.inputBytes += bytes.length;
-    this.armRecoveryInputExpiry(recovery);
-    return true;
+    const link = this.masters.get(sessionId);
+    return link?.sendInput(bytes, binary, surfaceId, this.now()) ?? false;
   }
 
   private armRecoveryInputExpiry(slot: MoorRecoverySlot): void {

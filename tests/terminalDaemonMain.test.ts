@@ -21,6 +21,7 @@ import {
   AGENT_STATE_SCHEMA_VERSION,
   GenerationLedger,
   InMemoryGenerationLedger,
+  MOOR_UNADOPTED_REASON,
   type AgentStateEnvelope
 } from '../src/shared/controlPlane/index.js';
 import {
@@ -45,7 +46,10 @@ import {
 import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../src/shared/daemonControlClient.js';
 import { shellQuote } from '../src/shared/shell.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
-import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
+import {
+  moorEventStoreDir,
+  moorEventStoreRoot
+} from '../src/server/runtime/moorEventObserver.js';
 import { FileSessionGeometryStore } from '../src/server/runtime/fileSessionGeometryStore.js';
 import { fileURLToPath } from 'node:url';
 
@@ -60,13 +64,14 @@ async function spawnFakeMoorHolder(
   storeDir: string,
   generation: number,
   command: string[],
-  tmpdirRoot: string
+  tmpdirRoot: string,
+  env: NodeJS.ProcessEnv = {}
 ): Promise<void> {
   const { child } = spawnMoorMaster({
     binPath: process.execPath,
     args: [...FAKE_MOOR_ARGS, 'start', '-T', storeDir, sessionPath, ...command],
     generation,
-    env: { ...process.env, TMPDIR: tmpdirRoot }
+    env: { ...process.env, TMPDIR: tmpdirRoot, ...env }
   });
   const code = await new Promise<number>((resolve, reject) => {
     child.once('error', reject);
@@ -715,6 +720,106 @@ describe('reconcileExistingSessions', () => {
     expect(results[0]!.error).toContain('generation 7');
     expect(reconcileMoorEvents).not.toHaveBeenCalled();
   });
+
+  it(
+    'desk#66: late retry adoption replays the acknowledged Moor exit with observed provenance',
+    async () => {
+      const base = mkdtempSync(join(tmpdir(), 'desk66-late-observer-'));
+      const homeRoot = join(base, 'home');
+      const socketRoot = join(base, 'moor');
+      const sessionId = 'late-exit';
+      const sessionPath = join(socketRoot, sessionId);
+      const refuseFile = join(base, 'refuse-attach');
+      const previousTmpdir = process.env.TMPDIR;
+      let second: Awaited<ReturnType<typeof startTerminalDaemonServer>> | undefined;
+      try {
+        process.env.TMPDIR = base;
+        mkdirSync(join(homeRoot, '_engine'), { recursive: true });
+        mkdirSync(socketRoot, { recursive: true, mode: 0o700 });
+
+        // Incarnation one leaves exactly generation 2 in the durable ledger.
+        const first = await startTerminalDaemonServer({
+          homeRoot,
+          moorBinPath: process.execPath,
+          moorSocketRoot: socketRoot,
+          host: '127.0.0.1',
+          port: 0
+        });
+        try {
+          expect(
+            first.daemon.router.sessions.ensure(sessionId, { rows: 24, cols: 80 })
+          ).toMatchObject({ ok: true, generation: 2 });
+        } finally {
+          await first.close();
+        }
+
+        writeFileSync(refuseFile, 'refuse');
+        const storeDir = moorEventStoreDir(
+          moorEventStoreRoot(process.execPath, { tmpdir: base }),
+          sessionId,
+          2
+        );
+        await spawnFakeMoorHolder(
+          sessionPath,
+          storeDir,
+          2,
+          ['sh', '-c', 'exit 7'],
+          base,
+          { FAKE_MOOR_REFUSE_ATTACH_FILE: refuseFile }
+        );
+
+        second = await startTerminalDaemonServer({
+          homeRoot,
+          moorBinPath: process.execPath,
+          moorSocketRoot: socketRoot,
+          host: '127.0.0.1',
+          port: 0
+        });
+        await expect(
+          reconcileExistingSessions(
+            second.daemon,
+            [{ sessionId, sockPath: sessionPath, subject: { kind: 'terminal' } }],
+            process.execPath
+          )
+        ).resolves.toEqual([expect.objectContaining({ sessionId, ok: false })]);
+        expect(second.daemon.router.sessions.stateSnapshot(sessionId)?.health).toMatchObject({
+          status: 'degraded',
+          reason: MOOR_UNADOPTED_REASON
+        });
+
+        // The retained recovery now adopts the exact ATTACH_ACK authority.
+        // Its already-committed exit must be replayed before recovery can be
+        // declared healthy; otherwise this stays a plausible running session.
+        rmSync(refuseFile, { force: true });
+        await waitFor(
+          () =>
+            second!.daemon.router.sessions.moorStatus(sessionId)?.generation === 2 ||
+            second!.daemon.router.sessions.stateSnapshot(sessionId)?.exit?.origin ===
+              'observed'
+        );
+        await waitFor(
+          () =>
+            second!.daemon.router.sessions.stateSnapshot(sessionId)?.exit?.origin ===
+            'observed'
+        );
+        expect(second.daemon.router.sessions.stateSnapshot(sessionId)?.exit).toMatchObject({
+          code: 7,
+          signal: null,
+          origin: 'observed',
+          reason: null,
+          outcome: { kind: 'exited', code: 7 },
+          diagnostic: null
+        });
+      } finally {
+        await second?.close();
+        await killFakeMoorHolder(sessionPath);
+        if (previousTmpdir === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previousTmpdir;
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+    60_000
+  );
 });
 
 describe('/control/moor-status separates the LINK from the HOLDER (desk#50b)', () => {

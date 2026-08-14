@@ -116,7 +116,8 @@ function statusPayload(
     commitIndex: bigint;
     bodyLength: bigint;
     bodyHash: Uint8Array;
-  }
+  },
+  ownsLease = true
 ): Uint8Array {
   const tail = new Uint8Array(69);
   const view = new DataView(tail.buffer);
@@ -125,7 +126,10 @@ function statusPayload(
   view.setBigUint64(8, replay.last, true);
   view.setBigUint64(16, replay.start, true);
   view.setBigUint64(24, replay.end, true);
-  view.setUint8(32, (complete ? 0x01 : 0) | 0x10 | 0x20 | 0x40);
+  view.setUint8(
+    32,
+    (complete ? 0x01 : 0) | (ownsLease ? 0x10 : 0) | 0x20 | 0x40
+  );
   view.setUint32(33, leaseEpoch, true);
   // Real-binary parity: the EVENT identity is the handed-off path's RAW
   // posix bytes — no tag byte (the tag-01 form is the session identity only).
@@ -154,6 +158,10 @@ function statusPayload(
 
 function leaseGrantPayload(epoch: number): Uint8Array {
   return joined(Uint8Array.of(0, 0, 0, 0), integer(epoch, 4), new Uint8Array(16).fill(0xd4));
+}
+
+function leaseBusyPayload(epoch: number): Uint8Array {
+  return joined(Uint8Array.of(3, 1, 0, 0), integer(epoch, 4), new Uint8Array(16));
 }
 
 // ---- committed event store (four slots, 92-byte commit, CRC + SHA) ----------
@@ -191,6 +199,42 @@ function commitRecord(slot: 0 | 1, kind: number, generation: number, epoch: numb
   record.set(createHash('sha256').update(body).digest(), 56);
   view.setUint32(88, crc32c(record.subarray(0, 88)), true);
   return record;
+}
+
+/** Commit the stable current-generation lifecycle companion before publishing exit. */
+function writeCurrentExitStore(
+  sessionPath: string,
+  generation: number,
+  identity: Uint8Array,
+  incarnation: Uint8Array,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  outputEnd: bigint
+): void {
+  const encodedIdentity = Buffer.from(identity).toString('base64');
+  const nonce = Buffer.from(incarnation).toString('base64');
+  const outcome =
+    signal === null
+      ? `,"ended":"exited","code":${code ?? 0}`
+      : ',"ended":"signalled","signal":15';
+  const body = encoder.encode(
+    `{"v":1,"type":"lifecycle","phase":"exited","session":"${encodedIdentity}",` +
+      `"generation":${generation},"wire_generation":${generation},` +
+      `"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1",` +
+      `"boot_id":"${nonce}","path_encoding":"posix-bytes",` +
+      `"event_path":null,"instrument_path":null,"end_wall_ms":"2",` +
+      `"output_end":"${outputEnd}"${outcome}}\n`
+  );
+  const directory = `${sessionPath}.exit`;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(`${directory}/body.0`, body, { mode: 0o600 });
+  writeFileSync(
+    `${directory}/commit.0`,
+    commitRecord(0, 3, generation, 1, 2n, outputEnd, outputEnd, body),
+    { mode: 0o600 }
+  );
+  writeFileSync(`${directory}/body.1`, new Uint8Array(), { mode: 0o600 });
+  writeFileSync(`${directory}/commit.1`, new Uint8Array(), { mode: 0o600 });
 }
 
 class EventStore {
@@ -445,6 +489,15 @@ async function holder(argv: string[]): Promise<void> {
     }
   });
   child?.on('exit', (code, signal) => {
+    writeCurrentExitStore(
+      sessionPath,
+      generation,
+      identity,
+      incarnation,
+      code,
+      signal,
+      outputOffset
+    );
     store?.append(
       'exit',
       signal !== null ? `,"ended":"signalled","signal":${15}` : `,"ended":"exited","code":${code ?? 0}`
@@ -504,6 +557,12 @@ async function holder(argv: string[]): Promise<void> {
               start: 0n,
               end: outputOffset
             };
+            const leaseBusyFile = process.env.FAKE_MOOR_VIEWER_LEASE_BUSY_FILE;
+            const wantsLease = (message.payload[4]! & 1) === 1;
+            const leaseBusy =
+              wantsLease &&
+              leaseBusyFile !== undefined &&
+              existsSync(leaseBusyFile);
             socket.write(conn.codec.encode(generation, MoorKind.TERMINAL_STATE, integer(0, 2)));
             socket.write(
               conn.codec.encode(
@@ -517,13 +576,19 @@ async function holder(argv: string[]): Promise<void> {
                   replay,
                   store === undefined || storeDir === undefined
                     ? undefined
-                    : { directory: storeDir, ...store.frontier() }
+                    : { directory: storeDir, ...store.frontier() },
+                  !leaseBusy
                 )
               )
             );
-            const wantsLease = (message.payload[4]! & 1) === 1;
             if (wantsLease) {
-              socket.write(conn.codec.encode(generation, MoorKind.LEASE_RESULT, leaseGrantPayload(1)));
+              socket.write(
+                conn.codec.encode(
+                  generation,
+                  MoorKind.LEASE_RESULT,
+                  leaseBusy ? leaseBusyPayload(1) : leaseGrantPayload(1)
+                )
+              );
             }
             for (const record of retained) {
               socket.write(
@@ -606,6 +671,14 @@ async function holder(argv: string[]): Promise<void> {
               respond(2, 0, 'terminate identity mismatch');
               break;
             }
+            const refuseTerminateFile = process.env.FAKE_MOOR_REFUSE_TERMINATE_FILE;
+            if (
+              refuseTerminateFile !== undefined &&
+              existsSync(refuseTerminateFile)
+            ) {
+              respond(2, 0, 'terminate refused by test holder');
+              break;
+            }
             // Graceful §9 termination: child ends (SIGTERM → 1.2 s SIGKILL
             // escalation), the exit transition commits, the rendezvous is
             // unlinked, and ONLY THEN does TERMINATED go out — the outcome
@@ -640,6 +713,22 @@ async function holder(argv: string[]): Promise<void> {
             } else {
               finish();
             }
+            break;
+          }
+          case MoorKind.LEASE_REQUEST: {
+            const leaseBusyFile = process.env.FAKE_MOOR_VIEWER_LEASE_BUSY_FILE;
+            const leaseBusy =
+              leaseBusyFile !== undefined && existsSync(leaseBusyFile);
+            if (leaseBusyFile !== undefined) {
+              appendFileSync(`${sessionPath}.viewer-lease-requests`, 'request\n');
+            }
+            socket.write(
+              conn.codec.encode(
+                generation,
+                MoorKind.LEASE_RESULT,
+                leaseBusy ? leaseBusyPayload(1) : leaseGrantPayload(1)
+              )
+            );
             break;
           }
           case MoorKind.LEASE_RELEASE: {

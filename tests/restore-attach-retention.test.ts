@@ -15,7 +15,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SessionManager } from '../src/server/runtime/sessionManager.js';
+import {
+  SessionManager,
+  type SessionManagerDeps
+} from '../src/server/runtime/sessionManager.js';
+import { MoorMasterClient } from '../src/server/runtime/moorMasterClient.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
 import { canonicalDeliveryDecision } from '../src/server/channelsDeliveryStrategy.js';
@@ -111,14 +115,61 @@ async function spawnSurvivingHolder(input: {
   if (code !== 0) throw new Error(`fake moor launcher exited ${code}`);
 }
 
-function makeManager(ledger: GenerationLedger): SessionManager {
+interface ManagerOptions {
+  emulator?: ByteSinkEmu;
+  onLateMoorAdoption?: SessionManagerDeps['onLateMoorAdoption'];
+}
+
+function makeManager(
+  ledger: GenerationLedger,
+  options: ManagerOptions = {}
+): SessionManager {
   return new SessionManager({
     ledger,
     supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
-    emulatorFactory: { create: () => new ByteSinkEmu() },
+    emulatorFactory: { create: () => options.emulator ?? new ByteSinkEmu() },
     now: () => Date.now(),
-    sendBrowser: () => {}
+    sendBrowser: () => {},
+    ...(options.onLateMoorAdoption === undefined
+      ? {}
+      : { onLateMoorAdoption: options.onLateMoorAdoption })
   });
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function textWritten(emulator: ByteSinkEmu): string {
+  return emulator.written
+    .map((bytes) => new TextDecoder().decode(bytes))
+    .join('');
+}
+
+function geometryWitnessLines(sessionPath: string): string[] {
+  const path = `${sessionPath}.geometry-witness`;
+  return existsSync(path)
+    ? readFileSync(path, 'utf8').split('\n').filter((line) => line.length > 0)
+    : [];
+}
+
+function viewerLeaseRequestCount(sessionPath: string): number {
+  const path = `${sessionPath}.viewer-lease-requests`;
+  return existsSync(path)
+    ? readFileSync(path, 'utf8').split('\n').filter((line) => line.length > 0).length
+    : 0;
 }
 
 /**
@@ -130,10 +181,61 @@ function makeManager(ledger: GenerationLedger): SessionManager {
 function recoveryFor(
   manager: SessionManager,
   sessionId: string
+): {
+  generation: number;
+  episode: number;
+  inputQueue: Array<{ queuedAt: number }>;
+} | undefined {
+  return (
+    manager as unknown as {
+      recoveries: Map<
+        string,
+        {
+          generation: number;
+          episode: number;
+          inputQueue: Array<{ queuedAt: number }>;
+        }
+      >;
+    }
+  ).recoveries.get(sessionId);
+}
+
+function expireRecoveryInputNow(manager: SessionManager, sessionId: string): void {
+  const internals = manager as unknown as {
+    recoveries: Map<
+      string,
+      {
+        generation: number;
+        episode: number;
+        inputQueue: Array<{ queuedAt: number }>;
+      }
+    >;
+    armRecoveryInputExpiry(slot: {
+      generation: number;
+      episode: number;
+      inputQueue: Array<{ queuedAt: number }>;
+    }): void;
+  };
+  const slot = internals.recoveries.get(sessionId);
+  const oldest = slot?.inputQueue[0];
+  if (slot === undefined || oldest === undefined) {
+    throw new Error(`missing queued recovery input for ${sessionId}`);
+  }
+  // Preserve the real expiry/timer path while moving only the test record's
+  // age beyond every finite production retention window.
+  oldest.queuedAt = 0;
+  internals.armRecoveryInputExpiry(slot);
+}
+
+function retainedKillFor(
+  manager: SessionManager,
+  sessionId: string
 ): { generation: number } | undefined {
   return (
-    manager as unknown as { recoveries: Map<string, { generation: number }> }
-  ).recoveries.get(sessionId);
+    manager as unknown as {
+      detachedKills: Map<string, { generation: number }>;
+    }
+  ).detachedKills.get(sessionId);
 }
 
 function batchOf(snapshot: SessionStateSnapshot | undefined): {
@@ -151,7 +253,11 @@ function batchOf(snapshot: SessionStateSnapshot | undefined): {
 describe('desk#64 — restart attach failure retains the session', () => {
   const cleanups: Array<() => void | Promise<void>> = [];
   afterEach(async () => {
-    while (cleanups.length > 0) await cleanups.pop()!();
+    try {
+      while (cleanups.length > 0) await cleanups.pop()!();
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   /**
@@ -160,11 +266,23 @@ describe('desk#64 — restart attach failure retains the session', () => {
    * flips to make the SECOND incarnation's attach fail against a holder that
    * is still alive and still answering HELLO.
    */
-  async function twoIncarnations(id: string, command: string[] = ['sleep', '60']): Promise<{
+  async function twoIncarnations(
+    id: string,
+    command: string[] = ['sleep', '60'],
+    options: {
+      onLateMoorAdoption?: SessionManagerDeps['onLateMoorAdoption'];
+      viewerLeaseBusy?: boolean;
+      refuseTerminate?: boolean;
+    } = {}
+  ): Promise<{
+    root: string;
     sessionPath: string;
     refuseFile: string;
+    viewerLeaseBusyFile?: string;
+    refuseTerminateFile?: string;
     ledger: GenerationLedger;
     second: SessionManager;
+    emulator: ByteSinkEmu;
     pid: number;
     /**
      * The registered detached-holder teardown, deliberately INSTANT: if any
@@ -178,6 +296,12 @@ describe('desk#64 — restart attach failure retains the session', () => {
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const sessionPath = join(root, id);
     const refuseFile = join(root, 'refuse-attach');
+    const viewerLeaseBusyFile = options.viewerLeaseBusy
+      ? join(root, 'viewer-lease-busy')
+      : undefined;
+    const refuseTerminateFile = options.refuseTerminate
+      ? join(root, 'refuse-terminate')
+      : undefined;
     cleanups.push(() => killSurvivingHolder(sessionPath));
 
     const ledger = new GenerationLedger(new InMemoryGenerationLedger());
@@ -188,7 +312,15 @@ describe('desk#64 — restart attach failure retains the session', () => {
       generation: 2,
       command,
       tmpdirRoot: root,
-      env: { FAKE_MOOR_REFUSE_ATTACH_FILE: refuseFile }
+      env: {
+        FAKE_MOOR_REFUSE_ATTACH_FILE: refuseFile,
+        ...(viewerLeaseBusyFile === undefined
+          ? {}
+          : { FAKE_MOOR_VIEWER_LEASE_BUSY_FILE: viewerLeaseBusyFile }),
+        ...(refuseTerminateFile === undefined
+          ? {}
+          : { FAKE_MOOR_REFUSE_TERMINATE_FILE: refuseTerminateFile })
+      }
     });
     const pid = holderPid(sessionPath);
     expect(processAlive(pid)).toBe(true);
@@ -206,14 +338,26 @@ describe('desk#64 — restart attach failure retains the session', () => {
 
     // The holder now refuses every ATTACH while still answering HELLO.
     writeFileSync(refuseFile, 'refuse');
+    if (viewerLeaseBusyFile !== undefined) writeFileSync(viewerLeaseBusyFile, 'busy');
+    if (refuseTerminateFile !== undefined) writeFileSync(refuseTerminateFile, 'refuse');
 
-    const second = makeManager(ledger);
+    const emulator = new ByteSinkEmu();
+    const second = makeManager(ledger, {
+      emulator,
+      ...(options.onLateMoorAdoption === undefined
+        ? {}
+        : { onLateMoorAdoption: options.onLateMoorAdoption })
+    });
     cleanups.push(() => second.closeAllLinks());
     return {
+      root,
       sessionPath,
       refuseFile,
+      ...(viewerLeaseBusyFile === undefined ? {} : { viewerLeaseBusyFile }),
+      ...(refuseTerminateFile === undefined ? {} : { refuseTerminateFile }),
       ledger,
       second,
+      emulator,
       pid,
       killSpec: { binPath: '/bin/sh', args: ['-c', `kill -9 ${pid}`] }
     };
@@ -282,7 +426,7 @@ describe('desk#64 — restart attach failure retains the session', () => {
   );
 
   it(
-    'registers a retry that adopts the session when the holder accepts a later attach',
+    'explicit observer-free low-level composition adopts when the holder accepts a later attach',
     async () => {
       const world = await twoIncarnations('r64c');
       const failed = await world.second.restoreAndAttachMoor('r64c', {
@@ -293,6 +437,9 @@ describe('desk#64 — restart attach failure retains the session', () => {
       expect(failed.ok).toBe(false);
       expect(world.second.moorStatus('r64c')).toBeUndefined();
 
+      // This test composes SessionManager directly, outside TerminalWsRouter
+      // and the daemon observer boundary. Omitting the callback is the explicit
+      // observer-free low-level contract, not a production fallback.
       // The holder starts accepting attaches again; the registered retry — the
       // SAME generation/owner-fenced recovery slot the controller-link path
       // uses — must adopt without any further call from the daemon.
@@ -311,6 +458,463 @@ describe('desk#64 — restart attach failure retains the session', () => {
       expect(snapshot?.generation).toBe(2);
       expect(snapshot?.health.status).toBe('healthy');
       expect(processAlive(world.pid)).toBe(true);
+    },
+    60_000
+  );
+
+  it(
+    'desk#66 late adoption stays degraded and holds queued work until observer acceptance',
+    async () => {
+      const gate = deferred<boolean>();
+      const onLateMoorAdoption = vi.fn(() => gate.promise);
+      const world = await twoIncarnations('r66-gate', ['cat'], {
+        onLateMoorAdoption
+      });
+      const failed = await world.second.restoreAndAttachMoor('r66-gate', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: world.killSpec
+      });
+      expect(failed.ok).toBe(false);
+
+      const channelId = world.second.subscribe('r66-gate', 'main', 24, 80);
+      expect(channelId).toBeDefined();
+      expect(
+        world.second.onBrowserInputByChannel(
+          channelId!,
+          false,
+          new TextEncoder().encode('held-until-observed\n')
+        )
+      ).toBe(true);
+      expect(world.second.onBrowserResizeByChannel(channelId!, 31, 101)).toBe(true);
+
+      rmSync(world.refuseFile, { force: true });
+      await waitFor(
+        () => onLateMoorAdoption.mock.calls.length === 1,
+        'the late-adoption observer callback started',
+        5_000
+      );
+      expect(onLateMoorAdoption).toHaveBeenCalledWith('r66-gate', 2);
+      expect(world.second.moorStatus('r66-gate')?.generation).toBe(2);
+
+      await sleep(300);
+      expect(world.second.stateSnapshot('r66-gate')?.health).toMatchObject({
+        status: 'degraded',
+        reason: MOOR_UNADOPTED_REASON
+      });
+      expect(textWritten(world.emulator)).not.toContain('held-until-observed');
+      const geometryWhilePending = geometryWitnessLines(world.sessionPath);
+
+      gate.resolve(true);
+      await waitFor(
+        () => world.second.stateSnapshot('r66-gate')?.health.status === 'healthy',
+        'observer acceptance completed recovery'
+      );
+      await waitFor(
+        () => textWritten(world.emulator).includes('held-until-observed'),
+        'queued input flushed only after observer acceptance'
+      );
+      await waitFor(
+        () => geometryWitnessLines(world.sessionPath).includes('resize 101x31'),
+        'queued resize flushed only after observer acceptance'
+      );
+      const finalGeometry = geometryWitnessLines(world.sessionPath);
+      const nonPreservingAttachCount = finalGeometry.filter(
+        (line) => line.startsWith('attach ') && line !== 'attach 0x0'
+      ).length;
+      const exactResizeCount = finalGeometry.filter(
+        (line) => line === 'resize 101x31'
+      ).length;
+
+      expect.soft(geometryWhilePending).not.toContain('attach 101x31');
+      expect.soft(geometryWhilePending).not.toContain('resize 101x31');
+      expect(nonPreservingAttachCount).toBe(0);
+      expect(exactResizeCount).toBe(1);
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+    },
+    60_000
+  );
+
+  it(
+    'desk#66 late adoption gates input, resize, and liveness arriving after attach publication',
+    async () => {
+      const livenessPrototype = MoorMasterClient.prototype as unknown as {
+        livenessWindowMs: number;
+        armLiveness(): void;
+      };
+      const armLiveness = livenessPrototype.armLiveness;
+      const livenessSpy = vi
+        .spyOn(livenessPrototype, 'armLiveness')
+        .mockImplementation(function (this: typeof livenessPrototype): void {
+          // Exercise the real liveness timer/probe path without paying the
+          // production 15-second window in this focused transaction witness.
+          this.livenessWindowMs = 50;
+          armLiveness.call(this);
+        });
+      const gate = deferred<boolean>();
+      try {
+        const onLateMoorAdoption = vi.fn(() => gate.promise);
+        const world = await twoIncarnations('r66-post-attach-gate', ['cat'], {
+          onLateMoorAdoption
+        });
+        const failed = await world.second.restoreAndAttachMoor('r66-post-attach-gate', {
+          sessionPath: world.sessionPath,
+          geometry: { rows: 24, cols: 80 },
+          killSpec: world.killSpec
+        });
+        expect(failed.ok).toBe(false);
+
+        const channelId = world.second.subscribe('r66-post-attach-gate', 'main', 24, 80);
+        expect(channelId).toBeDefined();
+        rmSync(world.refuseFile, { force: true });
+        await waitFor(
+          () => onLateMoorAdoption.mock.calls.length === 1,
+          'the post-attach transaction reached its observer gate',
+          5_000
+        );
+        expect(world.second.moorStatus('r66-post-attach-gate')?.generation).toBe(2);
+
+        // These arrive only AFTER the ATTACH_ACK authority is published and
+        // the observer callback is pending. None may bypass that transaction.
+        expect(
+          world.second.onBrowserInputByChannel(
+            channelId!,
+            false,
+            new TextEncoder().encode('post-attach-held\n')
+          )
+        ).toBe(true);
+        expect(world.second.onBrowserResizeByChannel(channelId!, 37, 109)).toBe(true);
+
+        const inputDeliveryCount = (): number =>
+          textWritten(world.emulator).split('post-attach-held\n').length - 1;
+        const resizeDeliveryCount = (): number =>
+          geometryWitnessLines(world.sessionPath).filter(
+            (line) => line === 'resize 109x37'
+          ).length;
+
+        // This is a timing witness by design: 300 ms spans six of the explicit
+        // 50 ms liveness windows above, allowing the real authenticated probe
+        // to complete while the adoption callback remains unresolved.
+        await sleep(300);
+        const healthWhilePending = world.second.stateSnapshot('r66-post-attach-gate')?.health;
+        const outputWhilePending = textWritten(world.emulator);
+        const geometryWhilePending = geometryWitnessLines(world.sessionPath);
+
+        gate.resolve(true);
+        await waitFor(
+          () => world.second.stateSnapshot('r66-post-attach-gate')?.health.status === 'healthy',
+          'observer acceptance completed the post-attach transaction'
+        );
+        await waitFor(
+          () => inputDeliveryCount() >= 1,
+          'post-attach input was released after observer acceptance'
+        );
+        await waitFor(
+          () => resizeDeliveryCount() >= 1,
+          'the latest commanded resize was released after observer acceptance'
+        );
+
+        expect.soft(healthWhilePending?.status).toBe('degraded');
+        expect.soft(outputWhilePending).not.toContain('post-attach-held');
+        expect.soft(geometryWhilePending).not.toContain('resize 109x37');
+        expect(inputDeliveryCount()).toBe(1);
+        expect(resizeDeliveryCount()).toBe(1);
+      } finally {
+        gate.resolve(true);
+        livenessSpy.mockRestore();
+      }
+    },
+    60_000
+  );
+
+  it(
+    'desk#66 input expiry re-entry evaluates one late-adoption callback per recovery episode',
+    async () => {
+      const gate = deferred<boolean>();
+      const onLateMoorAdoption = vi.fn(() => gate.promise);
+      const world = await twoIncarnations('r66-callback-once', ['cat'], {
+        onLateMoorAdoption
+      });
+      const failed = await world.second.restoreAndAttachMoor('r66-callback-once', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: world.killSpec
+      });
+      expect(failed.ok).toBe(false);
+
+      const channelId = world.second.subscribe('r66-callback-once', 'main', 24, 80);
+      expect(channelId).toBeDefined();
+      expect(
+        world.second.onBrowserInputByChannel(
+          channelId!,
+          false,
+          new TextEncoder().encode('expires-while-observer-pending\n')
+        )
+      ).toBe(true);
+
+      rmSync(world.refuseFile, { force: true });
+      await waitFor(
+        () => onLateMoorAdoption.mock.calls.length === 1,
+        'the first observer evaluation is pending',
+        5_000
+      );
+      const episode = recoveryFor(world.second, 'r66-callback-once')?.episode;
+      expect(episode).toBeDefined();
+
+      expireRecoveryInputNow(world.second, 'r66-callback-once');
+      await waitFor(
+        () => recoveryFor(world.second, 'r66-callback-once')?.inputQueue.length === 0,
+        'the real recovery input-expiry timer fired',
+        5_000
+      );
+      // The retry attach has a documented two-second absolute deadline. This
+      // 2.5-second bounded interval gives any prohibited timer re-entry its
+      // full opportunity to reach the still-pending callback.
+      await sleep(2_500);
+      const evaluations = onLateMoorAdoption.mock.calls.length;
+
+      gate.resolve(true);
+      await waitFor(
+        () => world.second.stateSnapshot('r66-callback-once')?.health.status === 'healthy',
+        'the one observer evaluation completed recovery'
+      );
+      expect(recoveryFor(world.second, 'r66-callback-once')).toBeUndefined();
+      expect(evaluations).toBe(1);
+    },
+    60_000
+  );
+
+  it.each([
+    { outcome: 'false' as const },
+    { outcome: 'throw' as const }
+  ])(
+    'desk#66 late adoption callback $outcome retires the exact generation',
+    async ({ outcome }) => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const onLateMoorAdoption = vi.fn(async () => {
+        if (outcome === 'throw') throw new Error('observer failed');
+        return false;
+      });
+      const id = `r66-${outcome}`;
+      const world = await twoIncarnations(id, ['sleep', '60'], {
+        onLateMoorAdoption
+      });
+      const failed = await world.second.restoreAndAttachMoor(id, {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: {
+          binPath: process.execPath,
+          args: [...NODE_IMPORT_ARGS, 'kill', world.sessionPath]
+        }
+      });
+      expect(failed.ok).toBe(false);
+
+      rmSync(world.refuseFile, { force: true });
+      await waitFor(
+        () => world.second.stateSnapshot(id)?.lifecycle === 'exited',
+        `callback ${outcome} retired the late adoption`,
+        5_000
+      );
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+      expect(onLateMoorAdoption).toHaveBeenCalledWith(id, 2);
+      expect(world.second.stateSnapshot(id)?.exit).toMatchObject({
+        origin: 'retired',
+        reason: 'moor-reconcile-failed'
+      });
+      await waitFor(
+        () => !existsSync(world.sessionPath),
+        `callback ${outcome} retirement removed the holder`
+      );
+      if (outcome === 'throw') {
+        expect(
+          consoleError.mock.calls.some((args) => args.join(' ').includes('observer failed'))
+        ).toBe(true);
+      }
+    },
+    60_000
+  );
+
+  it(
+    'desk#66 observer-only lease retries reuse one accepted late observer',
+    async () => {
+      const onLateMoorAdoption = vi.fn(async () => true);
+      const world = await twoIncarnations('r66-observer-lease', ['cat'], {
+        onLateMoorAdoption,
+        viewerLeaseBusy: true
+      });
+      const failed = await world.second.restoreAndAttachMoor('r66-observer-lease', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: world.killSpec
+      });
+      expect(failed.ok).toBe(false);
+      const channelId = world.second.subscribe('r66-observer-lease', 'main', 24, 80);
+      expect(channelId).toBeDefined();
+      expect(
+        world.second.onBrowserInputByChannel(
+          channelId!,
+          false,
+          new TextEncoder().encode('after-viewer-lease\n')
+        )
+      ).toBe(true);
+
+      rmSync(world.refuseFile, { force: true });
+      await waitFor(
+        () => onLateMoorAdoption.mock.calls.length === 1,
+        'observer authority accepted the observer-only attachment',
+        5_000
+      );
+      await waitFor(
+        () => viewerLeaseRequestCount(world.sessionPath) >= 2,
+        'at least two observer-only lease retries stayed busy',
+        5_000
+      );
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+      expect(world.second.stateSnapshot('r66-observer-lease')?.health.status).toBe(
+        'degraded'
+      );
+      expect(textWritten(world.emulator)).not.toContain('after-viewer-lease');
+
+      rmSync(world.viewerLeaseBusyFile!, { force: true });
+      await waitFor(
+        () =>
+          world.second.stateSnapshot('r66-observer-lease')?.health.status ===
+          'healthy',
+        'the existing observer link acquired its viewer lease'
+      );
+      await waitFor(
+        () => textWritten(world.emulator).includes('after-viewer-lease'),
+        'queued input flushed after the observer link acquired its viewer lease'
+      );
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+    },
+    60_000
+  );
+
+  it(
+    'desk#66 failed reconcile retirement stays retired with teardown retained and no queued release',
+    async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const onLateMoorAdoption = vi.fn(async () => false);
+      const world = await twoIncarnations('r66-retire-failed', ['cat'], {
+        onLateMoorAdoption,
+        refuseTerminate: true
+      });
+      const failed = await world.second.restoreAndAttachMoor('r66-retire-failed', {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: { binPath: '/bin/false', args: [] }
+      });
+      expect(failed.ok).toBe(false);
+      const channelId = world.second.subscribe('r66-retire-failed', 'main', 24, 80);
+      expect(channelId).toBeDefined();
+      expect(
+        world.second.onBrowserInputByChannel(
+          channelId!,
+          false,
+          new TextEncoder().encode('must-never-flush\n')
+        )
+      ).toBe(true);
+      expect(world.second.onBrowserResizeByChannel(channelId!, 33, 99)).toBe(true);
+
+      rmSync(world.refuseFile, { force: true });
+      await waitFor(
+        () =>
+          consoleError.mock.calls.some((args) =>
+            args.join(' ').includes('could not retire unreconciled Moor adoption')
+          ),
+        'failed exact-generation retirement was reported',
+        5_000
+      );
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+      expect(world.second.stateSnapshot('r66-retire-failed')).toMatchObject({
+        generation: 2,
+        lifecycle: 'exited',
+        exit: { origin: 'retired', reason: 'moor-reconcile-failed' }
+      });
+      expect(retainedKillFor(world.second, 'r66-retire-failed')?.generation).toBe(2);
+      expect(recoveryFor(world.second, 'r66-retire-failed')).toBeUndefined();
+      expect(existsSync(world.sessionPath)).toBe(true);
+      expect(processAlive(world.pid)).toBe(true);
+
+      await sleep(750);
+      expect(onLateMoorAdoption).toHaveBeenCalledTimes(1);
+      expect(recoveryFor(world.second, 'r66-retire-failed')).toBeUndefined();
+      expect(world.second.stateSnapshot('r66-retire-failed')?.health.status).not.toBe(
+        'healthy'
+      );
+      expect(textWritten(world.emulator)).not.toContain('must-never-flush');
+      expect(geometryWitnessLines(world.sessionPath)).not.toContain('resize 99x33');
+    },
+    60_000
+  );
+
+  it.each([
+    {
+      outcome: 'true' as const,
+      settle: (gate: Deferred<boolean>) => gate.resolve(true)
+    },
+    {
+      outcome: 'false' as const,
+      settle: (gate: Deferred<boolean>) => gate.resolve(false)
+    },
+    {
+      outcome: 'throw' as const,
+      settle: (gate: Deferred<boolean>) => gate.reject(new Error('stale observer failure'))
+    }
+  ])(
+    'desk#66 stale late-adoption callback $outcome cannot touch a successor',
+    async ({ outcome, settle }) => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const gate = deferred<boolean>();
+      const onLateMoorAdoption = vi.fn(() => gate.promise);
+      const id = `r66-stale-${outcome}`;
+      const world = await twoIncarnations(id, ['sleep', '60'], {
+        onLateMoorAdoption
+      });
+      const failed = await world.second.restoreAndAttachMoor(id, {
+        sessionPath: world.sessionPath,
+        geometry: { rows: 24, cols: 80 },
+        killSpec: {
+          binPath: process.execPath,
+          args: [...NODE_IMPORT_ARGS, 'kill', world.sessionPath]
+        }
+      });
+      expect(failed.ok).toBe(false);
+
+      rmSync(world.refuseFile, { force: true });
+      await waitFor(
+        () => onLateMoorAdoption.mock.calls.length === 1,
+        `the stale ${outcome} callback is pending`,
+        5_000
+      );
+      expect(recoveryFor(world.second, id)).toMatchObject({ generation: 2 });
+
+      const retire = vi.spyOn(world.second, 'retireGenerationAwaited');
+      await expect(
+        world.second.retireGenerationAwaited(id, 2, { reason: 'control-retire' })
+      ).resolves.toEqual({ ok: true });
+      const successor = world.second.ensure(id, { rows: 24, cols: 80 });
+      expect(successor).toMatchObject({ ok: true, generation: 3 });
+      const before = world.second.stateSnapshot(id);
+      retire.mockClear();
+
+      settle(gate);
+      await sleep(300);
+      expect(retire).not.toHaveBeenCalled();
+      expect(world.second.stateSnapshot(id)).toEqual(before);
+      expect(world.second.stateSnapshot(id)).toMatchObject({
+        generation: 3,
+        lifecycle: 'starting'
+      });
+      expect(recoveryFor(world.second, id)).toBeUndefined();
+      if (outcome === 'throw') {
+        expect(
+          consoleError.mock.calls.some((args) =>
+            args.join(' ').includes('stale observer failure')
+          )
+        ).toBe(true);
+      }
     },
     60_000
   );
