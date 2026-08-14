@@ -16,6 +16,14 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v5
+      - name: Reject tracked internal workflow documents
+        run: |
+          tracked=$(git ls-files 'docs/superpowers/**')
+          if [ -n "$tracked" ]; then
+            echo "::error::Internal workflow documents must not be tracked"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
       - uses: actions/setup-node@v5
         with:
           node-version: 22.23.1
