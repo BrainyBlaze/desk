@@ -626,6 +626,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
    * final caught-up state.
    */
   const suppressedReplayTransitions = new Map<string, SessionStateTransition>();
+  // desk#62: the daemon's memory of what a real client measured. It holds a
+  // persistent append descriptor, so it is a resource this daemon OWNS and
+  // must release in dispose() alongside the other durable stores below.
+  const sessionGeometryStore = new FileSessionGeometryStore(
+    join(options.homeRoot, '_engine', 'session-geometry.ndjson')
+  );
   const router = new TerminalWsRouter({
     ledger,
     supervisor:
@@ -635,9 +641,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     // desk#62: the daemon's memory of what a real client measured. Written on
     // every applied resize, read by every re-adoption — without it a restart
     // has no way to know a surviving session's size at all.
-    sessionGeometry: new FileSessionGeometryStore(
-      join(options.homeRoot, '_engine', 'session-geometry.ndjson')
-    ),
+    sessionGeometry: sessionGeometryStore,
     initialAgentHealth: (subject) => {
       if (subject.mode !== 'terminal') return undefined;
       const probe = hookInstallationProbe(subject.provider);
@@ -1825,6 +1829,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       disposeBridge();
       intakeStore?.close();
       intakeStore = undefined;
+      sessionGeometryStore.close();
       eventJournal.close();
       providerLaunchLedger.close();
       providerContinuityLedger.close();

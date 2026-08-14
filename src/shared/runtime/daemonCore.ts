@@ -329,6 +329,11 @@ export class DaemonCore {
       });
     }
     this.sessions.delete(sessionId);
+    // desk#62: retire is the ONE authoritative end of a session, so it is the
+    // only place the remembered geometry may be dropped. A daemon detach or
+    // shutdown must NOT reach here — a holder that survives this daemon has to
+    // come back at the size it actually has, which is the whole feature.
+    this.sessionGeometry.forget(sessionId);
     this.d.supervisor.release(sessionId);
     for (const [ch, sid] of this.channelToSession) if (sid === sessionId) this.channelToSession.delete(ch);
   }

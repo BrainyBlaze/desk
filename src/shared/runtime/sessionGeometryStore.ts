@@ -47,6 +47,14 @@ export interface SessionGeometryStore {
    * that is not a real §4 pair is refused rather than stored.
    */
   record(sessionId: string, geometry: { rows: number; cols: number }): void;
+  /**
+   * The session ENDED — drop what was remembered about it. Called from the one
+   * terminal end of a session (DaemonCore.retire), never from a daemon detach
+   * or shutdown: a holder that outlives the daemon must come back at the size
+   * it has, which is the whole point of remembering. Without this, a durable
+   * store keeps one record for every session that ever existed.
+   */
+  forget(sessionId: string): void;
 }
 
 /** Process-local store — the default when no durable one is injected. */
@@ -60,5 +68,9 @@ export class InMemorySessionGeometryStore implements SessionGeometryStore {
   record(sessionId: string, geometry: { rows: number; cols: number }): void {
     if (sessionId.length === 0 || !isRealSessionGeometry(geometry)) return;
     this.measured.set(sessionId, { rows: geometry.rows, cols: geometry.cols });
+  }
+
+  forget(sessionId: string): void {
+    this.measured.delete(sessionId);
   }
 }
