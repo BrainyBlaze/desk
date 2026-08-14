@@ -698,7 +698,6 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
 
       const restored = await manager.restoreAndAttachMoor('r1', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: {
           binPath: process.execPath,
           args: [...NODE_IMPORT_ARGS, 'kill', sessionPath],
@@ -773,7 +772,6 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
 
       const restored = await manager.restoreAndAttachMoor('r2', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: {
           binPath: process.execPath,
           args: [...NODE_IMPORT_ARGS, 'kill', sessionPath]

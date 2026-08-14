@@ -24,12 +24,26 @@ import { type BpFrame } from '../browserProtocol/index.js';
 import { WorkerSupervisor } from './workerSupervisor.js';
 import { type EmulatorFactory } from './emulatorPort.js';
 import { SessionRuntime } from './sessionRuntime.js';
+import {
+  InMemorySessionGeometryStore,
+  type SessionGeometryStore
+} from './sessionGeometryStore.js';
 import { createLeaseState, claim, release, type ClaimResult, type LeaseState } from '../lease/index.js';
 import { decideStop } from './instanceLock.js';
 import type { MoorExitOutcome, SessionExit } from '../controlPlane/contract.js';
 
 /** desk#59 — the closed observation-failure vocabulary. */
 export type ExitDiagnostic = NonNullable<SessionExit['diagnostic']>;
+
+/**
+ * desk#62 — the LOCAL screen a re-adopted session is rebuilt at when no client
+ * ever measured it. It is not a guess about the child: moor creates a session
+ * with no viewer at exactly 80 columns by 24 rows (moor spec §4.3), so an
+ * unrendered child's pty IS this size. It is used only to size this daemon's
+ * own emulator; the adopting ATTACH carries MOOR_PRESERVE_GEOMETRY, so the
+ * child is never told a size by the reconcile pass.
+ */
+const UNMEASURED_SESSION_GEOMETRY = { rows: 24, cols: 80 } as const;
 
 export interface DaemonCoreDeps {
   ledger: GenerationLedger;
@@ -46,6 +60,14 @@ export interface DaemonCoreDeps {
     surfaceId: number
   ) => boolean | void;
   sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
+  /**
+   * desk#62 — where a client-measured geometry is remembered across daemon
+   * incarnations. Every APPLIED browser resize is recorded here, and restore()
+   * reads it, so a re-adopted session comes back at the size it actually had.
+   * Defaults to a process-local store (correct within one incarnation; a
+   * durable one is injected by the real daemon).
+   */
+  sessionGeometry?: SessionGeometryStore;
   workingLeaseMs?: number;
   openToolLeaseMs?: number;
   initialAgentHealth?: (
@@ -136,6 +158,7 @@ export class DaemonCore {
   private readonly authority: AgentStateAuthority;
   private readonly agentStateIntakeStore: AgentStateIntakeStore;
   private readonly cmdCache = new InMemoryCmdCache();
+  private readonly sessionGeometry: SessionGeometryStore;
   /** Global monotonic channelId allocator (§7.4) — never reused across sessions. */
   private nextChannelId = 1;
   /** channelId → owning sessionId, for channelId-only INPUT routing. */
@@ -143,6 +166,7 @@ export class DaemonCore {
 
   constructor(deps: DaemonCoreDeps) {
     this.d = deps;
+    this.sessionGeometry = deps.sessionGeometry ?? new InMemorySessionGeometryStore();
     this.authority = new AgentStateAuthority({
       now: deps.now,
       workingLeaseMs: deps.workingLeaseMs ?? 15_000,
@@ -182,6 +206,10 @@ export class DaemonCore {
 
     const generation = this.d.ledger.allocate(sessionId); // durable, fsync-before-spawn
     this.admitSession(sessionId, geometry, generation, subject);
+    // desk#62: a NEW session's pty is created at exactly this geometry, so it
+    // is measured knowledge too — remember it, or a session that is booted and
+    // never resized would still come back unmeasured after a restart.
+    this.sessionGeometry.record(sessionId, geometry);
     return { ok: true, generation, created: true };
   }
 
@@ -255,7 +283,6 @@ export class DaemonCore {
    */
   restore(
     sessionId: string,
-    geometry: { rows: number; cols: number },
     subject: SessionRegistration['subject'] = { kind: 'terminal' }
   ): RestoreResult {
     if (this.sessions.has(sessionId)) return { ok: false, reason: 'already-live' };
@@ -265,7 +292,18 @@ export class DaemonCore {
     const admit = this.d.supervisor.admit(sessionId, this.d.now());
     if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
 
-    this.admitSession(sessionId, geometry, generation, subject);
+    // desk#62: re-adoption takes NO geometry from its caller. The only size
+    // this session may come back at is one a real client measured and the
+    // daemon remembered; with no record, the local screen is built at moor's
+    // own no-viewer creation size (spec §4.3) because that is exactly what an
+    // unrendered child's pty is — and the ATTACH that adopts the holder
+    // carries preserve either way, so neither value reaches the child.
+    this.admitSession(
+      sessionId,
+      this.sessionGeometry.get(sessionId) ?? UNMEASURED_SESSION_GEOMETRY,
+      generation,
+      subject
+    );
     return { ok: true, generation };
   }
 
@@ -529,7 +567,13 @@ export class DaemonCore {
   onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
     const sessionId = this.channelToSession.get(channelId);
     if (sessionId === undefined) return false;
-    this.sessions.get(sessionId)?.runtime.onBrowserResize(channelId, rows, cols);
+    const entry = this.sessions.get(sessionId);
+    if (entry === undefined) return true;
+    entry.runtime.onBrowserResize(channelId, rows, cols);
+    // desk#62: remember the size the moment it is APPLIED, not at shutdown — a
+    // daemon that is killed never runs shutdown code, and this measurement is
+    // the only thing that can tell the next incarnation how big this session is.
+    this.sessionGeometry.record(sessionId, { rows, cols });
     return true;
   }
 

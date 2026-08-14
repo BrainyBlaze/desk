@@ -38,6 +38,7 @@ import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../../shared/runtim
 import { TerminalWsRouter } from './terminalWsRouter.js';
 import { XtermEmulatorFactory } from './xtermEmulator.js';
 import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
+import { FileSessionGeometryStore } from './fileSessionGeometryStore.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
@@ -631,6 +632,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       options.supervisor ?? new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
     now,
+    // desk#62: the daemon's memory of what a real client measured. Written on
+    // every applied resize, read by every re-adoption — without it a restart
+    // has no way to know a surviving session's size at all.
+    sessionGeometry: new FileSessionGeometryStore(
+      join(options.homeRoot, '_engine', 'session-geometry.ndjson')
+    ),
     initialAgentHealth: (subject) => {
       if (subject.mode !== 'terminal') return undefined;
       const probe = hookInstallationProbe(subject.provider);

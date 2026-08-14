@@ -16,6 +16,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -44,6 +45,23 @@ function fail(message: string): never {
 
 function pidfileOf(sessionPath: string): string {
   return `${sessionPath}.holder-pid`;
+}
+
+/**
+ * desk#62 — the geometry witness path: every geometry-bearing controller frame
+ * appends one `<kind> <columns>x<rows>` line here, so a test can read exactly
+ * what the daemon asserted onto a live child instead of inferring it.
+ */
+function geometryWitnessPath(sessionPath: string): string {
+  return `${sessionPath}.geometry-witness`;
+}
+
+/** Append one witness line from a payload whose first four bytes are §4 geometry. */
+function appendGeometryWitness(sessionPath: string, kind: string, payload: Uint8Array): void {
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const columns = view.getUint16(0, true);
+  const rows = view.getUint16(2, true);
+  appendFileSync(geometryWitnessPath(sessionPath), `${kind} ${columns}x${rows}\n`);
 }
 
 // ---- byte builders (mirror the approved wire fixtures) ----------------------
@@ -464,6 +482,10 @@ async function holder(argv: string[]): Promise<void> {
             socket.write(conn.codec.encode(generation, MoorKind.HELLO_ACK, helloAckPayload(generation, incarnation, identity)));
             break;
           case MoorKind.ATTACH: {
+            // desk#62 witness: the geometry §4 pair this ATTACH asserted, so a
+            // test can prove what the controller wrote onto the live child's
+            // pty (0x0 is the spec's "preserve both" — assert nothing).
+            appendGeometryWitness(sessionPath, 'attach', message.payload);
             // Frozen §6 prefix: TERMINAL_STATE → ATTACH_ACK → LEASE_RESULT
             // when requested → the retained replay baseline → live output.
             const replay = {
@@ -700,8 +722,12 @@ async function holder(argv: string[]): Promise<void> {
               )
             );
             break;
+          case MoorKind.RESIZE:
+            // desk#62 witness: RESIZE carries u32 lease epoch, then geometry.
+            appendGeometryWitness(sessionPath, 'resize', message.payload.subarray(4));
+            break;
           default:
-            break; // RESIZE / OUTPUT_ACK / LEASE_KEEPALIVE: accepted silently
+            break; // OUTPUT_ACK / LEASE_KEEPALIVE: accepted silently
         }
       }
     });

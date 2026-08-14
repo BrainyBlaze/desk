@@ -585,7 +585,6 @@ describe('SessionManager Moor production-slice adversarial review', () => {
     await expect(
       manager.restoreAndAttachMoor('s1', {
         sessionPath: '/tmp/s1',
-        geometry: { rows: 24, cols: 80 },
         killSpec: { binPath: '/opt/moor', args: ['kill', '-f', '/tmp/s1'] }
       })
     ).resolves.toEqual({ ok: false, reason: 'attach-failed' });

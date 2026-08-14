@@ -85,13 +85,20 @@ export function manifestReconcileTargets(
  * few silent sockets could exceed the supervisor's readiness budget — every
  * daemon incarnation then gets terminated pre-ready, taking the HEALTHY
  * sessions down with it. Total startup stays near one timeout window.
+ *
+ * NO GEOMETRY (desk#62). This pass knows nothing about any session's terminal
+ * size, so it asserts nothing: it used to default to 24x80 and hand that to
+ * every re-adoption, which travelled into the wire ATTACH and physically
+ * shrank every running agent's pty on restart. The size a session actually has
+ * is remembered by the daemon (the durable per-session geometry record) and
+ * read by restoreAndAttachMoor; where nothing was ever measured, the ATTACH
+ * carries moor's preserve pair and the child is left alone.
  */
 export async function reconcileExistingSessions(
   daemon: Pick<TerminalDaemon, 'router'> &
     Partial<Pick<TerminalDaemon, 'reconcileMoorEvents'>>,
   targets: readonly ReconcileTarget[],
   moorBinPath: string,
-  geometry = { rows: 24, cols: 80 },
   opts: { concurrency?: number } = {}
 ): Promise<{ sessionId: string; ok: boolean; error?: string }[]> {
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 8, targets.length || 1));
@@ -110,7 +117,6 @@ export async function reconcileExistingSessions(
         // attach, so the worker pool keeps total startup near one window.
         const restored = await daemon.router.sessions.restoreAndAttachMoor(sessionId, {
           sessionPath: sockPath,
-          geometry,
           killSpec: {
             binPath: moorBinPath,
             args: ['kill', '-f', sockPath],
