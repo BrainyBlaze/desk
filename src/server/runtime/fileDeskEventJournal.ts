@@ -289,10 +289,7 @@ export class FileDeskEventJournal {
         : [
             ...new Set(
               parsed.ids.filter((id) =>
-                this.events.some(
-                  (event) =>
-                    event.id === id && event.seq > this.clearedThrough
-                )
+                this.events.some((event) => event.id === id && event.seq > this.clearedThrough)
               )
             )
           ];

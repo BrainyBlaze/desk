@@ -2057,11 +2057,6 @@ select:focus {
   overflow: auto hidden;
   padding: 4px 8px;
   border-bottom: 1px solid var(--desk-line);
-  cursor: grab;
-}
-
-.cellTabs:active {
-  cursor: grabbing;
 }
 
 .cellTab {
@@ -2074,7 +2069,7 @@ select:focus {
   gap: 6px;
   padding: 0 10px;
   border: none;
-  cursor: pointer;
+  cursor: grab;
   user-select: none;
   white-space: nowrap;
   color: var(--desk-text-dim);
@@ -2085,6 +2080,10 @@ select:focus {
 
 .cellTab:hover {
   color: var(--desk-text);
+}
+
+.cellTab:active {
+  cursor: grabbing;
 }
 
 .cellTab span:last-child {

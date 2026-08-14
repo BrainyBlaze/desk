@@ -145,9 +145,9 @@ describe('filters', () => {
   });
 
   it('offers a chip for every kind, most actionable first', () => {
+    const synthetic = new Set<EventFilter>(['all', 'unread', 'needs-you', 'threads']);
     const kinds = EVENT_FILTER_ORDER.filter(
-      (filter): filter is Exclude<EventFilter, 'all' | 'unread' | 'needs-you'> =>
-        filter !== 'all' && filter !== 'unread' && filter !== 'needs-you'
+      (filter): filter is Exclude<EventFilter, 'all' | 'unread' | 'needs-you' | 'threads'> => !synthetic.has(filter)
     );
     expect(kinds).toEqual([
       'agent-blocked',
@@ -158,6 +158,8 @@ describe('filters', () => {
       'agent-exited'
     ]);
     expect(EVENT_FILTER_ORDER.indexOf('needs-you')).toBeLessThan(EVENT_FILTER_ORDER.indexOf('agent-idle'));
+    // the threads filter sits with channel messages, right after channels
+    expect(EVENT_FILTER_ORDER.indexOf('threads')).toBe(EVENT_FILTER_ORDER.indexOf('channel-message') + 1);
   });
 });
 
@@ -169,5 +171,44 @@ describe('the drawer distinguishes an empty feed from an unreachable one', () =>
     // as a silent agent reported idle. The drawer must say WHY it is empty.
     expect(source).toMatch(/feedError\s*\?\s*`Events unavailable/);
     expect(source).toMatch(/feedError\}=\{eventFeedError\}|feedError=\{eventFeedError\}/);
+  });
+});
+
+const threadReply = (mentionsOperator = false): DeskEvent =>
+  ({
+    schemaVersion: 1,
+    id: 'evt-6',
+    seq: 6,
+    at: AT,
+    read: false,
+    kind: 'channel-message',
+    channel: 'desk',
+    messageId: 'msg-2',
+    thread: 'msg-1',
+    author: 'codex',
+    mentionsOperator,
+    message: 'reply in the thread'
+  }) as DeskEvent;
+
+describe('thread replies as events', () => {
+  it('threads and channels are disjoint filters over the same log', () => {
+    const rootRead = { ...channel(false), id: 'evt-7', read: true } as DeskEvent;
+    const replyRead = { ...threadReply(false), id: 'evt-8', read: true } as DeskEvent;
+    const events = [channel(false), rootRead, threadReply(false), replyRead, idle()];
+    // threads = every thread reply, read or not (a plain filter, no clearing)
+    expect(filterEvents(events, 'threads').map((e) => e.id)).toEqual(['evt-6', 'evt-8']);
+    // channels = root messages only, so no card lands in both tabs
+    expect(filterEvents(events, 'channel-message').map((e) => e.id)).toEqual(['evt-5', 'evt-7']);
+  });
+
+  it('labels a thread reply distinctly from a root message, ping still wins', () => {
+    expect(deskEventView(threadReply(false)).label).toBe('THREAD REPLY');
+    expect(deskEventView(channel(false)).label).toBe('MESSAGE');
+    expect(deskEventView(threadReply(true)).label).toBe('@HUMAN PING');
+  });
+
+  it('carries the thread parent in the click target so navigation opens the thread', () => {
+    const target = deskEventView(threadReply(false)).target;
+    expect(target).toEqual({ kind: 'channel', channel: 'desk', messageId: 'msg-2', thread: 'msg-1' });
   });
 });
