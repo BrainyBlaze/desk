@@ -2331,6 +2331,10 @@ export function App(): JSX.Element {
                 </div>
                 <div
                   className={`editorMount channelsKeepAliveMount ${subsystem === 'channels' ? 'active' : ''}`}
+                  style={{
+                    visibility: subsystem === 'channels' ? 'visible' : 'hidden',
+                    pointerEvents: subsystem === 'channels' ? 'auto' : 'none'
+                  }}
                   aria-hidden={subsystem !== 'channels'}
                 >
                   <ChannelsSubsystem
