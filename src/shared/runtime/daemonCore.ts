@@ -23,7 +23,7 @@ import { InMemoryCmdCache } from '../delivery/index.js';
 import { type BpFrame } from '../browserProtocol/index.js';
 import { WorkerSupervisor } from './workerSupervisor.js';
 import { type EmulatorFactory } from './emulatorPort.js';
-import { SessionRuntime } from './sessionRuntime.js';
+import { SessionRuntime, type CommandedGeometry } from './sessionRuntime.js';
 import {
   InMemorySessionGeometryStore,
   type SessionGeometryStore
@@ -36,14 +36,15 @@ import type { MoorExitOutcome, SessionExit } from '../controlPlane/contract.js';
 export type ExitDiagnostic = NonNullable<SessionExit['diagnostic']>;
 
 /**
- * desk#62 — the LOCAL screen a re-adopted session is rebuilt at when no client
- * ever measured it. It is not a guess about the child: moor creates a session
- * with no viewer at exactly 80 columns by 24 rows (moor spec §4.3), so an
- * unrendered child's pty IS this size. It is used only to size this daemon's
- * own emulator; the adopting ATTACH carries MOOR_PRESERVE_GEOMETRY, so the
- * child is never told a size by the reconcile pass.
+ * desk#62 — the LOCAL screen a re-adopted session is rebuilt at when Desk never
+ * commanded (journaled) a size for it. It is not a guess about the child: moor
+ * creates a session with no viewer at exactly 80 columns by 24 rows (moor spec
+ * §4.3), so an unrendered child's pty IS this size. It is used only to size
+ * this daemon's own emulator; the adopting ATTACH carries
+ * MOOR_PRESERVE_GEOMETRY, so the child is never told a size by the reconcile
+ * pass.
  */
-const UNMEASURED_SESSION_GEOMETRY = { rows: 24, cols: 80 } as const;
+const UNRECORDED_SESSION_GEOMETRY = { rows: 24, cols: 80 } as const;
 
 export interface DaemonCoreDeps {
   ledger: GenerationLedger;
@@ -61,11 +62,13 @@ export interface DaemonCoreDeps {
   ) => boolean | void;
   sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
   /**
-   * desk#62 — where a client-measured geometry is remembered across daemon
-   * incarnations. Every APPLIED browser resize is recorded here, and restore()
-   * reads it, so a re-adopted session comes back at the size it actually had.
-   * Defaults to a process-local store (correct within one incarnation; a
-   * durable one is injected by the real daemon).
+   * desk#62 — where the last COMMANDED geometry is remembered across daemon
+   * incarnations. Every commanded resize is recorded here, and restore() reads
+   * it, so a re-adopted session comes back at the last commanded size — the
+   * best available approximation of the pty until the protocol carries the
+   * holder's pair (moor owns that truth). Defaults to a process-local store
+   * (correct within one incarnation; a durable one is injected by the real
+   * daemon).
    */
   sessionGeometry?: SessionGeometryStore;
   workingLeaseMs?: number;
@@ -206,9 +209,10 @@ export class DaemonCore {
 
     const generation = this.d.ledger.allocate(sessionId); // durable, fsync-before-spawn
     this.admitSession(sessionId, geometry, generation, subject);
-    // desk#62: a NEW session's pty is created at exactly this geometry, so it
-    // is measured knowledge too — remember it, or a session that is booted and
-    // never resized would still come back unmeasured after a restart.
+    // desk#62: a NEW session's child is created at exactly this geometry —
+    // Desk commanded it into existence at this size — so it is journaled like
+    // any other commanded geometry; without this, a session that is booted and
+    // never resized would come back with no record after a restart.
     this.sessionGeometry.record(sessionId, geometry);
     return { ok: true, generation, created: true };
   }
@@ -293,14 +297,14 @@ export class DaemonCore {
     if (!admit.ok) return { ok: false, reason: 'cap-exceeded' };
 
     // desk#62: re-adoption takes NO geometry from its caller. The only size
-    // this session may come back at is one a real client measured and the
-    // daemon remembered; with no record, the local screen is built at moor's
-    // own no-viewer creation size (spec §4.3) because that is exactly what an
+    // this session may come back at is one Desk actually COMMANDED and
+    // journaled; with no record, the local screen is built at moor's own
+    // no-viewer creation size (spec §4.3) because that is exactly what an
     // unrendered child's pty is — and the ATTACH that adopts the holder
     // carries preserve either way, so neither value reaches the child.
     this.admitSession(
       sessionId,
-      this.sessionGeometry.get(sessionId) ?? UNMEASURED_SESSION_GEOMETRY,
+      this.sessionGeometry.get(sessionId) ?? UNRECORDED_SESSION_GEOMETRY,
       generation,
       subject
     );
@@ -331,8 +335,9 @@ export class DaemonCore {
     this.sessions.delete(sessionId);
     // desk#62: retire is the ONE authoritative end of a session, so it is the
     // only place the remembered geometry may be dropped. A daemon detach or
-    // shutdown must NOT reach here — a holder that survives this daemon has to
-    // come back at the size it actually has, which is the whole feature.
+    // shutdown must NOT reach here — a holder that survives this daemon must
+    // come back at the last commanded size (the best approximation Desk has;
+    // moor owns the pty's real size), which is the whole feature.
     this.sessionGeometry.forget(sessionId);
     this.d.supervisor.release(sessionId);
     for (const [ch, sid] of this.channelToSession) if (sid === sessionId) this.channelToSession.delete(ch);
@@ -524,13 +529,24 @@ export class DaemonCore {
    * route by channelId alone; the WS-owner scoping is the router's job (§7.4 —
    * INPUT is accepted only from the connection that owns the channel).
    */
-  subscribe(sessionId: string, surfaceId: string, rows: number, cols: number): number | undefined {
+  subscribe(
+    sessionId: string,
+    surfaceId: string,
+    rows: number,
+    cols: number
+  ): { channelId: number; commanded?: CommandedGeometry } | undefined {
     const e = this.sessions.get(sessionId);
     if (e === undefined) return undefined;
     const channelId = this.nextChannelId++;
-    e.runtime.subscribe(surfaceId, rows, cols, channelId);
+    const result = e.runtime.subscribe(surfaceId, rows, cols, channelId);
     this.channelToSession.set(channelId, sessionId);
-    return channelId;
+    // desk#68: a subscribe that ACQUIRED ownership commanded the subscriber's
+    // geometry; journal it like any other commanded resize, so the record
+    // follows what was actually sent — never what a surface merely reported.
+    if (result.commanded !== undefined) {
+      this.recordCommandedGeometry(sessionId, result.commanded);
+    }
+    return result;
   }
 
   /** The session that owns a channelId, or undefined if unknown/stale. */
@@ -566,33 +582,97 @@ export class DaemonCore {
     return this.sessions.get(sessionId)?.runtime.onBrowserInput(channelId, binary, bytes) ?? false;
   }
 
-  /** Unsubscribe a channel (drops the surface + the channel→session mapping). */
-  unsubscribeChannel(channelId: number): void {
-    const sessionId = this.channelToSession.get(channelId);
-    if (sessionId !== undefined) this.sessions.get(sessionId)?.runtime.unsubscribe(channelId);
-    this.channelToSession.delete(channelId);
+  /**
+   * Unsubscribe a channel (drops the surface + the channel→session mapping).
+   * Returns the geometry a resulting resize handoff commanded, if any (desk#68).
+   */
+  unsubscribeChannel(channelId: number): CommandedGeometry | undefined {
+    return this.unsubscribeChannels([channelId])[0]?.commanded;
   }
 
-  /** Route a browser RESIZE by channelId (the router validated ownership). */
-  onBrowserResizeByChannel(channelId: number, rows: number, cols: number): boolean {
+  /**
+   * Unsubscribe a SET of channels — one closing browser connection's — grouped
+   * per session so each session's runtime removes ALL of its affected channels
+   * before electing at most once (desk#68). Sequential per-channel removal
+   * would transiently promote a dying sibling of the same connection and
+   * command the child through it. Returns, per session that handed off, the
+   * geometry the single election commanded (already journaled here).
+   */
+  unsubscribeChannels(channelIds: number[]): { sessionId: string; commanded: CommandedGeometry }[] {
+    const bySession = new Map<string, number[]>();
+    for (const channelId of channelIds) {
+      const sessionId = this.channelToSession.get(channelId);
+      this.channelToSession.delete(channelId);
+      if (sessionId === undefined) continue;
+      const group = bySession.get(sessionId);
+      if (group === undefined) bySession.set(sessionId, [channelId]);
+      else group.push(channelId);
+    }
+    const handoffs: { sessionId: string; commanded: CommandedGeometry }[] = [];
+    for (const [sessionId, ids] of bySession) {
+      const commanded = this.sessions.get(sessionId)?.runtime.unsubscribeMany(ids);
+      if (commanded !== undefined) {
+        this.recordCommandedGeometry(sessionId, commanded);
+        handoffs.push({ sessionId, commanded });
+      }
+    }
+    return handoffs;
+  }
+
+  /**
+   * Route a browser RESIZE by channelId (the router validated ownership).
+   * `commanded` carries the geometry the runtime selected and sent — absent for
+   * an OBSERVER's resize, which the runtime records but never commands
+   * (desk#68). `routed` keeps the old boolean meaning: whether the channel maps
+   * to a known session.
+   */
+  onBrowserResizeByChannel(
+    channelId: number,
+    rows: number,
+    cols: number
+  ): { routed: boolean; commanded?: CommandedGeometry } {
     const sessionId = this.channelToSession.get(channelId);
-    if (sessionId === undefined) return false;
+    if (sessionId === undefined) return { routed: false };
     const entry = this.sessions.get(sessionId);
-    if (entry === undefined) return true;
-    entry.runtime.onBrowserResize(channelId, rows, cols);
-    // desk#62: remember the size the moment it is APPLIED, not at shutdown — a
-    // daemon that is killed never runs shutdown code, and this measurement is
-    // the only thing that can tell the next incarnation how big this session is.
-    this.sessionGeometry.record(sessionId, { rows, cols });
-    return true;
+    if (entry === undefined) return { routed: true };
+    const commanded = entry.runtime.onBrowserResize(channelId, rows, cols);
+    if (commanded === undefined) return { routed: true };
+    this.recordCommandedGeometry(sessionId, commanded);
+    return { routed: true, commanded };
   }
 
-  /** Route a browser VISIBILITY by channelId. */
-  onBrowserVisibilityByChannel(channelId: number, visible: boolean): boolean {
+  /**
+   * Route a browser VISIBILITY by channelId. `commanded` carries the geometry a
+   * resize handoff sent, if hiding the owner caused one (desk#68).
+   */
+  onBrowserVisibilityByChannel(
+    channelId: number,
+    visible: boolean
+  ): { routed: boolean; commanded?: CommandedGeometry } {
     const sessionId = this.channelToSession.get(channelId);
-    if (sessionId === undefined) return false;
-    this.sessions.get(sessionId)?.runtime.onBrowserVisibility(channelId, visible);
-    return true;
+    if (sessionId === undefined) return { routed: false };
+    const commanded = this.sessions.get(sessionId)?.runtime.onBrowserVisibility(channelId, visible);
+    if (commanded === undefined) return { routed: true };
+    this.recordCommandedGeometry(sessionId, commanded);
+    return { routed: true, commanded };
+  }
+
+  /**
+   * desk#62: remember the size the moment it is COMMANDED, not at shutdown — a
+   * daemon that is killed never runs shutdown code, and this journal is the only
+   * thing that can tell the next incarnation how big this session was.
+   *
+   * What is stored is the geometry Desk commanded, which is all this journal has
+   * ever held: the moor holder is the authority on the child's real pty, and
+   * once the protocol carries the holder's pair in ATTACH_ACK/STATUS_REPLY this
+   * journal is deleted outright. Read a record as "what the owner last asked
+   * for", never as "the child is at this size now".
+   *
+   * desk#68: a surface that is not the resize owner produces no record at all —
+   * persisting its reported size would write the resize war into a durable file.
+   */
+  private recordCommandedGeometry(sessionId: string, commanded: CommandedGeometry): void {
+    this.sessionGeometry.record(sessionId, { rows: commanded.rows, cols: commanded.cols });
   }
 
   /** Route a browser QUERY_REPLY by channelId (§7.7 — currently fail-closed drop). */

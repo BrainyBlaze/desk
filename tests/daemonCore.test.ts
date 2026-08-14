@@ -187,7 +187,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('routes moor child output to the session and out to its subscribers', () => {
     const { core, browserOut } = makeCore();
     core.ensure('s1', { rows: 40, cols: 120 });
-    const ch = core.subscribe('s1', 'main', 40, 120);
+    const ch = core.subscribe('s1', 'main', 40, 120)!.channelId;
     browserOut.length = 0;
     core.onMoorOutput('s1', new TextEncoder().encode('hi'), 0n);
     expect(browserOut).toHaveLength(1);
@@ -261,7 +261,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('routes browser input to the session master', () => {
     const { core, masterOut } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 });
-    const ch = core.subscribe('s1', 'main', 1, 1)!;
+    const ch = core.subscribe('s1', 'main', 1, 1)!.channelId;
     core.onBrowserInput('s1', ch, false, new TextEncoder().encode('x'));
     expect(masterOut).toHaveLength(1);
     expect(masterOut[0].sessionId).toBe('s1');

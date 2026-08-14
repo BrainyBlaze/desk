@@ -148,12 +148,17 @@ export class TerminalWsRouter {
     return false;
   }
 
-  /** Clean up all of a WS's channels when it closes (§7.4 lifecycle). */
+  /**
+   * Clean up all of a WS's channels when it closes (§7.4 lifecycle) — in BULK
+   * (desk#68): the whole connection's channel set leaves before any resize
+   * handoff election runs, so a dying sibling channel of this same connection
+   * can never be transiently promoted and command the child through a surface
+   * that is already gone.
+   */
   onWsClose(ws: WsConn): void {
-    for (const ch of [...this.channelsOf(ws)]) {
-      this.manager.unsubscribeChannel(ch);
-      this.channelToWs.delete(ch);
-    }
+    const channels = [...this.channelsOf(ws)];
+    this.manager.unsubscribeChannels(channels);
+    for (const ch of channels) this.channelToWs.delete(ch);
     this.wsChannels.delete(ws);
   }
 

@@ -1,10 +1,13 @@
-// Durable last-measured session geometry (desk#62). The on-disk backing behind
-// SessionGeometryStore: the only way a daemon that comes back can know how big
-// a surviving session's terminal actually is, because the moor status
-// descriptor does not carry geometry and the browser may not be attached.
+// Durable last-COMMANDED session geometry (desk#62, semantics sharpened by
+// desk#68). The on-disk backing behind SessionGeometryStore: it holds the last
+// geometry Desk commanded for each session — NOT the pty's measured truth.
+// Moor is the authority on what a surviving session's terminal actually is;
+// this journal is the best available approximation for a daemon that comes
+// back, because the moor status descriptor does not carry geometry and the
+// browser may not be attached.
 //
 // Format: newline-delimited JSON records {s: sessionId, c: cols, r: rows},
-// appended when a client-measured geometry CHANGES (so a resize drag costs one
+// appended when a commanded geometry CHANGES (so a resize drag costs one
 // record, not one per frame) and replayed last-wins on startup. A torn final
 // line from a hard kill is truncated before the append handle opens, so the
 // next record cannot concatenate with it.
@@ -25,8 +28,8 @@
 // Deliberately NOT fsync'd per record: this is remembered knowledge, not
 // fence-critical state. The failure it must survive is a killed daemon, and the
 // kernel's page cache survives that; a machine crash may lose the newest record
-// and the session simply reads as unmeasured — which is the honest answer, not
-// a wrong size.
+// and the session simply reads as never-commanded — which is the honest answer,
+// not a wrong size.
 
 import {
   closeSync,
@@ -50,12 +53,12 @@ import {
 
 export class FileSessionGeometryStore implements SessionGeometryStore {
   private readonly path: string;
-  /** In-memory truth: what this daemon incarnation serves, disk or no disk. */
-  private readonly measured = new Map<string, SessionGeometry>();
+  /** In-memory view: what this daemon incarnation serves, disk or no disk. */
+  private readonly commanded = new Map<string, SessionGeometry>();
   /**
-   * What we believe actually REACHED the disk. The dedupe measures against
-   * this, never against `measured`: an append failure is swallowed so a full
-   * state root cannot break a live resize, and if the dedupe were measured
+   * What we believe actually REACHED the disk. The dedupe checks against
+   * this, never against `commanded`: an append failure is swallowed so a full
+   * state root cannot break a live resize, and if the dedupe were checked
    * against memory the two would diverge permanently — memory holds the new
    * size, the file holds the old one, and every later record of that same
    * geometry is suppressed as "unchanged" against a value the disk never got.
@@ -74,23 +77,24 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
     // Whatever the log carries beyond one record per live session is already
     // dead weight; it counts against the online bound from the first append,
     // so a compaction that could not run at startup is not started from zero.
-    this.appendsSinceCompactionAttempt = Math.max(0, records - this.measured.size);
-    if (records > this.measured.size) this.compact();
-    else this.syncPersistedFromMeasured();
+    this.appendsSinceCompactionAttempt = Math.max(0, records - this.commanded.size);
+    if (records > this.commanded.size) this.compact();
+    else this.syncPersistedFromCommanded();
     this.fd = openSync(path, 'a');
   }
 
   get(sessionId: string): SessionGeometry | undefined {
-    return this.measured.get(sessionId);
+    return this.commanded.get(sessionId);
   }
 
   record(sessionId: string, geometry: { rows: number; cols: number }): void {
     // A geometry that is not a real §4 pair is not knowledge — refuse it rather
-    // than persist something a later restore would apply as if it were measured.
+    // than persist something a later restore would apply as if it had really
+    // been commanded.
     if (sessionId.length === 0 || !isRealSessionGeometry(geometry)) return;
     const next: SessionGeometry = { rows: geometry.rows, cols: geometry.cols };
     // Memory first and unconditionally: this is what serves the live session.
-    this.measured.set(sessionId, next);
+    this.commanded.set(sessionId, next);
     const durable = this.persisted.get(sessionId);
     if (durable?.rows === next.rows && durable.cols === next.cols) return;
     const fd = this.fd;
@@ -147,11 +151,11 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
    * without it — the only way a session ever leaves the file.
    */
   forget(sessionId: string): void {
-    const wasMeasured = this.measured.delete(sessionId);
+    const hadRecord = this.commanded.delete(sessionId);
     const wasPersisted = this.persisted.delete(sessionId);
     // Nothing to evict: rewriting the log here would burn a full file rewrite
-    // on every retire of a session no surface ever measured.
-    if (!wasMeasured && !wasPersisted) return;
+    // on every retire of a session Desk never commanded a size for.
+    if (!hadRecord && !wasPersisted) return;
     this.compact();
   }
 
@@ -192,24 +196,24 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
     try {
       record = JSON.parse(line) as { s?: unknown; c?: unknown; r?: unknown };
     } catch {
-      return; // an unreadable record is an unmeasured session, not a fatal error
+      return; // an unreadable record is a session with no record, not a fatal error
     }
     if (typeof record.s !== 'string' || record.s.length === 0) return;
-    // Typed BEFORE it is measured against the wire range: `Number('48')` and
+    // Typed BEFORE it is checked against the wire range: `Number('48')` and
     // `Number(true)` both survive coercion, and the second one would install a
-    // 1x1 "measured" geometry. A dimension that is not already a number is not
-    // a dimension.
+    // 1x1 "commanded" geometry no owner ever asked for. A dimension that is not
+    // already a number is not a dimension.
     if (typeof record.r !== 'number' || typeof record.c !== 'number') return;
     const geometry = { rows: record.r, cols: record.c };
     if (!isRealSessionGeometry(geometry)) return;
-    this.measured.set(record.s, geometry);
+    this.commanded.set(record.s, geometry);
   }
 
   /**
    * How many appends may accumulate before the log is rewritten.
    *
    * RELATIVE, not a bare constant. One compaction costs a rewrite of
-   * `measured.size` records, so letting 4x that many appends accumulate first
+   * `commanded.size` records, so letting 4x that many appends accumulate first
    * amortises the rewrite to about a quarter of a record written per append —
    * the same ratio for a two-session laptop and a five-hundred-session fleet —
    * and bounds the log at roughly 5x the live set. A bare constant gets both
@@ -223,7 +227,7 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
    * worst case a 64-line file.
    */
   private compactionThreshold(): number {
-    return Math.max(64, 4 * this.measured.size);
+    return Math.max(64, 4 * this.commanded.size);
   }
 
   /**
@@ -235,7 +239,7 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
   private compact(): void {
     const scratch = `${this.path}.compact`;
     let body = '';
-    for (const [sessionId, geometry] of this.measured) {
+    for (const [sessionId, geometry] of this.commanded) {
       body += `${JSON.stringify({ s: sessionId, c: geometry.cols, r: geometry.rows })}\n`;
     }
     // The append handle names an INODE, and the rename below puts a different
@@ -250,8 +254,8 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
     try {
       writeFileSync(scratch, body, { mode: 0o600 });
       renameSync(scratch, this.path);
-      // The file now IS the map, so what reached the disk is exactly `measured`.
-      this.syncPersistedFromMeasured();
+      // The file now IS the map, so what reached the disk is exactly `commanded`.
+      this.syncPersistedFromCommanded();
     } catch {
       // Compaction is housekeeping, never a precondition for serving: a
       // read-only or full state root keeps the long log and the correct map.
@@ -275,9 +279,9 @@ export class FileSessionGeometryStore implements SessionGeometryStore {
     }
   }
 
-  private syncPersistedFromMeasured(): void {
+  private syncPersistedFromCommanded(): void {
     this.persisted.clear();
-    for (const [sessionId, geometry] of this.measured) this.persisted.set(sessionId, geometry);
+    for (const [sessionId, geometry] of this.commanded) this.persisted.set(sessionId, geometry);
   }
 
   private truncateTail(offset: number): void {
