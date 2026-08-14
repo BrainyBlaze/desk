@@ -410,7 +410,15 @@ describe('createNativeChannelsTransport', () => {
         return {
           ok: false,
           status: 404,
-          text: async () => JSON.stringify({ ok: false, error: 'session has no live moor link' })
+          // desk#50b: the negative envelope carries BOTH facts — no adopted
+          // link, and a holder positively proven absent. Without the second,
+          // this is a live session mid-re-adoption and the verdict is unknown.
+          text: async () =>
+            JSON.stringify({
+              ok: false,
+              error: 'session has no live moor link',
+              holder: 'absent'
+            })
         };
       }
       throw new Error('connect ECONNREFUSED');

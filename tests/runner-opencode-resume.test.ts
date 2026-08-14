@@ -13,11 +13,16 @@ import type { SessionSpec } from '../src/core/types.js';
 
 const originalEnv = { ...process.env };
 
-/** The daemon's authoritative "no live moor link" answer for any session. */
+/**
+ * The daemon's authoritative "this session is gone" answer for any session:
+ * no adopted link AND a holder proven absent (desk#50b — the 404 alone means
+ * only the former, which is also true of a live session mid-re-adoption).
+ */
 const absentSession = async () => ({
   ok: false,
   status: 404,
-  text: async () => JSON.stringify({ ok: false, error: 'session has no live moor link' })
+  text: async () =>
+    JSON.stringify({ ok: false, error: 'session has no live moor link', holder: 'absent' })
 });
 
 afterEach(() => {

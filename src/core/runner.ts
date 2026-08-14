@@ -5,11 +5,16 @@ import { join } from 'node:path';
 import {
   daemonControl,
   daemonControlGet,
+  MOOR_HOLDER_PROVEN_ABSENT,
   MOOR_STATUS_NO_LIVE_LINK_ERROR,
   type DaemonControlResult
 } from '../shared/daemonControlClient.js';
 import { moorCommandFor as buildAtchCommand } from '../shared/moorCommand.js';
-import { resolveMoorBinPath, resolveMoorSocketRoot } from '../shared/moorPaths.js';
+import {
+  moorRendezvousPath,
+  resolveMoorBinPath,
+  resolveMoorSocketRoot
+} from '../shared/moorPaths.js';
 import { readManifestFile, resolveManifestPath } from './config.js';
 import { buildSessionSpecs } from './manifest.js';
 import { ensureOpencodeConfigDir } from './opencodeConfig.js';
@@ -74,7 +79,7 @@ export function loadDeskCached(options: LoadDeskOptions = {}): LoadedDesk {
 }
 
 function socketPath(sessionId: string, env: NodeJS.ProcessEnv = process.env): string {
-  return join(resolveMoorSocketRoot(env), sessionId); // moor rendezvous: no suffix
+  return moorRendezvousPath(resolveMoorSocketRoot(env), sessionId);
 }
 
 /**
@@ -83,8 +88,15 @@ function socketPath(sessionId: string, env: NodeJS.ProcessEnv = process.env): st
  * Three states, because the honest answer really has three values and
  * collapsing the third is what broke desk#50:
  *   `verified-live`  — the authority says a holder is running;
- *   `stale`          — the authority says no live holder exists;
- *   `indeterminate`  — nobody authoritative answered. NOT dead, NOT alive.
+ *   `stale`          — the authority PROVED no holder exists;
+ *   `indeterminate`  — nobody authoritative answered, or what was answered
+ *                      does not settle the holder. NOT dead, NOT alive.
+ *
+ * desk#50b sharpened `stale`. It used to be claimed from the daemon's
+ * no-adopted-link 404, which is a fact about the LINK — true of every live
+ * session in the re-adoption window. `stale` is the verdict that authorises a
+ * start, so it now requires the route's separate, positive proof that the
+ * HOLDER is gone; a live-but-unadopted session is `indeterminate`.
  */
 export type SessionLiveness = 'verified-live' | 'stale' | 'indeterminate';
 
@@ -130,13 +142,16 @@ export async function sessionLivenessFor(
     return descriptor.running ? 'verified-live' : 'stale';
   }
   if (provesNoLiveMoorLink(result)) {
-    // The authority's negative verdict: no live moor link for this session.
+    // The authority's negative verdict AND its proof that no holder is there.
     return 'stale';
   }
   // Unreachable daemon (no status at all), a 200 whose body is not a descriptor
   // this route could have produced, a 2xx that is not this route's 200, a bare
-  // 404 from something that never spoke about moor links, or a daemon that
-  // answered about something other than this session's liveness (400/5xx).
+  // 404 from something that never spoke about moor links, a daemon that
+  // answered about something other than this session's liveness (400/5xx), or
+  // — desk#50b — this route's own no-adopted-link 404 without proof that the
+  // holder is gone: a surviving session mid-re-adoption, or an older daemon
+  // that cannot speak about holders at all.
   // Either way nothing authoritative was said, so nothing is claimed.
   return 'indeterminate';
 }
@@ -250,22 +265,46 @@ function adoptedMoorDescriptor(
 }
 
 /**
- * Did the route itself say this session has no live moor link?
+ * Did the route itself prove this session has no live HOLDER?
  *
- * A 404 is not that statement. The same status comes from a daemon too old to
- * carry `/control/moor-status` at all, from a reverse proxy that never reached
- * a daemon, and from any generic not-found page — none of which have looked at
+ * Two things had to be true here, and desk#50b was the second one missing.
+ *
+ * FIRST, the answer must be this route's own negative envelope. A 404 alone is
+ * not that statement: the same status comes from a daemon too old to carry
+ * `/control/moor-status` at all, from a reverse proxy that never reached a
+ * daemon, and from any generic not-found page — none of which have looked at
  * this session, yet all of which would license a start if their status code
- * were taken as the authority's negative verdict. Absence is proven only by the
- * negative envelope this route emits for it, so a 404 carrying HTML, no body,
- * or unrelated JSON stays `indeterminate` and `desk up` reports it as
- * unfinished business instead of silently double-starting a live session.
+ * were taken as the authority's verdict. So a 404 carrying HTML, no body, or
+ * unrelated JSON stays `indeterminate`.
+ *
+ * SECOND — and this is the fix — the envelope proves the wrong proposition on
+ * its own. `session has no live moor link` says the DAEMON HOLDS NO ADOPTED
+ * LINK. A holder can be alive while that is true: it is true of every
+ * surviving session between daemon start and re-adoption, and of every session
+ * whose controller link was lost. Reading the link's absence as the holder's
+ * absence is what made `desk up` plan a start for every session that survived
+ * a daemon restart, and made a session edit skip the respawn and leave a live
+ * holder running the pre-edit launch config. Verified on a live machine:
+ * `qa-claude` had a live holder, a live child, and an agent-state authority
+ * reporting running/healthy, and this route 404'd for it.
+ *
+ * So the holder verdict is required, and required to be the proven-absent
+ * value EXACTLY. An old daemon that sends no `holder` at all reads as
+ * indeterminate, because a missing field is not a verdict — a silent daemon
+ * must not authorise a start. `present` and `unknown` authorise nothing
+ * either; only positive proof of absence does, which keeps genuinely dead
+ * sessions startable without ever licensing a second holder over a live one.
+ *
+ * The comparison is against the exact string. `holder: true`, `'ABSENT'`, and
+ * `' absent '` are all bodies this route cannot emit, and each would be read as
+ * absence by a looser check.
  */
 function provesNoLiveMoorLink(result: DaemonControlResult): boolean {
   return (
     result.status === 404 &&
     result.body?.ok === false &&
-    result.body.error === MOOR_STATUS_NO_LIVE_LINK_ERROR
+    result.body.error === MOOR_STATUS_NO_LIVE_LINK_ERROR &&
+    result.body.holder === MOOR_HOLDER_PROVEN_ABSENT
   );
 }
 

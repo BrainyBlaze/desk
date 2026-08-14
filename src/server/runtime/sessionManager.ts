@@ -2086,7 +2086,20 @@ async function probeMoorHolder(
   }
 }
 
-async function probeRendezvous(
+/**
+ * Tri-valued rendezvous liveness, EXPORTED because it is the one probe the
+ * daemon owns and desk#50b needed a second caller for it — the holder-presence
+ * question `/control/moor-status` answers when no adopted link exists. A
+ * parallel probe written for that route would be a second definition of
+ * "alive", and the two would disagree the first time either was tuned.
+ *
+ * Non-destructive and non-adopting by construction: it connects, reads the
+ * kernel's answer, and destroys its own socket. It writes no protocol bytes
+ * (so it cannot fence or steal a live holder's supervised link) and it unlinks
+ * nothing (desk#42 — the caller that DOES unlink adds its own TOCTOU identity
+ * fence on top of a `stale` verdict; the presence probe never unlinks at all).
+ */
+export async function probeRendezvous(
   path: string,
   timeoutMs = 250
 ): Promise<'live' | 'stale' | 'indeterminate'> {

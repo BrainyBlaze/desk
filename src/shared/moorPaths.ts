@@ -32,6 +32,42 @@ export function resolveMoorSocketRoot(env: NodeJS.ProcessEnv = process.env): str
 }
 
 /**
+ * A session's moor rendezvous: `<root>/<sessionId>`, no suffix — the exact
+ * name the holder publishes. Four consumers derived this independently (the
+ * daemon's provisioning, the reconcile target scan, the CLI's attach, the
+ * holder-presence probe); one of them drifting is one of them asking about a
+ * path no holder ever bound.
+ */
+export function moorRendezvousPath(root: string, sessionId: string): string {
+  return join(root, sessionId);
+}
+
+/**
+ * Is the rendezvous NAMESPACE itself usable right now — a directory this user
+ * owns, at the path the daemon binds under?
+ *
+ * Read-only, and it exists to make a NEGATIVE answer honest rather than to
+ * make a positive one. A connect(2) that fails inside a live socket root is
+ * evidence about the session; the identical failure with the root swept away,
+ * misconfigured, or replaced by a foreign-owned node is evidence about the
+ * root. Callers use this only to downgrade a would-be absence proof to
+ * "unknown" — never to upgrade anything.
+ */
+export function moorSocketRootUsable(root: string): boolean {
+  try {
+    // lstat, matching ensurePrivateSocketRoot: a planted symlink is not the
+    // namespace this daemon binds under, whatever it points at.
+    const stat = lstatSync(root);
+    if (!stat.isDirectory()) {
+      return false;
+    }
+    return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Create + validate the socket root before any health/reconcile/provision:
  * the moor holder bind()s <root>/<sessionId> and fails ENOENT when the
  * parent is absent (slash-bearing names skip the holder's own mkdir). Fail closed on
