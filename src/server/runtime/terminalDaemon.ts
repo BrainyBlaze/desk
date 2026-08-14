@@ -643,9 +643,10 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
    * final caught-up state.
    */
   const suppressedReplayTransitions = new Map<string, SessionStateTransition>();
-  // desk#62: the daemon's memory of what a real client measured. It holds a
-  // persistent append descriptor, so it is a resource this daemon OWNS and
-  // must release in dispose() alongside the other durable stores below.
+  // desk#62: the daemon's journal of the last COMMANDED geometry per session
+  // (moor owns the pty's real size). It holds a persistent append descriptor,
+  // so it is a resource this daemon OWNS and must release in dispose()
+  // alongside the other durable stores below.
   const sessionGeometryStore = new FileSessionGeometryStore(
     join(options.homeRoot, '_engine', 'session-geometry.ndjson')
   );
@@ -655,9 +656,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       options.supervisor ?? new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
     now,
-    // desk#62: the daemon's memory of what a real client measured. Written on
-    // every applied resize, read by every re-adoption — without it a restart
-    // has no way to know a surviving session's size at all.
+    // desk#62: the daemon's journal of the last COMMANDED geometry. Written on
+    // every commanded resize, read by every re-adoption — without it a restart
+    // has nothing to approximate a surviving session's size with.
     sessionGeometry: sessionGeometryStore,
     initialAgentHealth: (subject) => {
       if (subject.mode !== 'terminal') return undefined;

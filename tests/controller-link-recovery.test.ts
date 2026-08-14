@@ -1277,7 +1277,72 @@ describe('SessionManager controller-link recovery', () => {
       await harness.holder.recoveryAttached;
       await settleSocketIo();
 
-      expect(harness.holder.resizes).toEqual([{ connection: 3, columns: 120, rows: 40 }]);
+      expect(harness.holder.resizes).toEqual([
+        // The harness subscribe ACQUIRED ownership, which commands the
+        // subscriber's geometry on the live pre-recovery link (desk#68).
+        { connection: 1, columns: 80, rows: 24 },
+        // The recovery replay carries only the NEWEST commanded resize.
+        { connection: 3, columns: 120, rows: 40 }
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // desk#68: an observer's resize is never commanded, so it must not be queued
+  // for the recovered link either — replaying it would send the very size the
+  // runtime refused the moment the link came back.
+  it('replays only the OWNING surface resize to the recovered link', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      const observer = harness.manager.subscribe('session', 'second', 41, 137)!;
+      expect(observer).not.toBe(harness.channelId);
+      await harness.enterRecovery();
+      expect(harness.manager.onBrowserResizeByChannel(harness.channelId, 48, 95)).toBe(true);
+      // Reported LAST, and still ignored: ownership decides, not arrival order.
+      expect(harness.manager.onBrowserResizeByChannel(observer, 41, 137)).toBe(true);
+
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.resizes).toEqual([
+        // The acquisition command from the harness subscribe (desk#68) — the
+        // observer's later subscribe and resize add NOTHING to this list.
+        { connection: 1, columns: 80, rows: 24 },
+        { connection: 3, columns: 95, rows: 48 }
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // desk#68: a surface that subscribes during a link outage — the tab was
+  // closed while the link was down and reopened — ACQUIRES ownership, and the
+  // acquisition's commanded geometry must reach the recovered link. No RESIZE
+  // frame will follow it (the client's reveal dedupe suppresses an unchanged
+  // size), so if the subscribe path did not queue it, the child would come back
+  // at whatever size the recovery remembered.
+  it('a subscribe that acquires ownership during recovery replays its geometry to the recovered link', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      await harness.enterRecovery();
+      // The only surface leaves mid-outage: no owner remains, nothing commands.
+      harness.manager.unsubscribeChannel(harness.channelId);
+      // A new tab subscribes at its own measured size and acquires ownership.
+      const reopened = harness.manager.subscribe('session', 'reopened', 41, 137)!;
+      expect(reopened).not.toBe(harness.channelId);
+
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.resizes).toEqual([
+        // The original harness subscribe's acquisition on the live link.
+        { connection: 1, columns: 80, rows: 24 },
+        // The mid-outage acquisition, replayed on the recovered link.
+        { connection: 3, columns: 137, rows: 41 }
+      ]);
     } finally {
       await harness.close();
     }

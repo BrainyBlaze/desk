@@ -163,6 +163,63 @@ describe('terminal WS router (§7.4)', () => {
     expect(b.errors()).toContain(BpError.BAD_CHANNEL);
   });
 
+  // ---- desk#68: a closing connection removes its channels in BULK -----------
+  // The three tests below assert on the emulator's resize sequence, which is
+  // written by the same single writer as the master resize (commandOwnerSize):
+  // this unit has no attached master link, so the emulator is the observable.
+  const sized = (sessionId: string, surfaceId: string, rows: number, cols: number) =>
+    encodeBpFrame({ type: BpFrameType.SUBSCRIBE, sessionId, surfaceId, rows, cols });
+
+  it('desk#68: closing a WS with two channels elects at most once, never through the dying sibling', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, sized('s1', 'cell-one', 48, 95)); // channel 1 — owner
+    router.onWsFrame(a, sized('s1', 'cell-two', 41, 137)); // channel 2 — observer, same conn
+    router.onWsFrame(b, sized('s1', 'cell-other', 30, 90)); // channel 3 — the true survivor
+    const emu = createdEmus[0]!;
+    const before = emu.resizes.length;
+
+    router.onWsClose(a);
+
+    // Exactly one command: the survivor's. Sequential removal would first
+    // promote dying channel 2 and command 41x137 through it.
+    expect(emu.resizes.slice(before)).toEqual([{ rows: 30, cols: 90 }]);
+    expect(emu.resizes).toEqual([
+      { rows: 48, cols: 95 },
+      { rows: 30, cols: 90 }
+    ]);
+  });
+
+  it('desk#68: a WS holding ALL channels closes — zero commands, size left alone', () => {
+    const a = new FakeWs();
+    router.onWsFrame(a, sized('s1', 'cell-one', 48, 95)); // owner
+    router.onWsFrame(a, sized('s1', 'cell-two', 41, 137)); // observer, same conn
+    const emu = createdEmus[0]!;
+    const before = emu.resizes.length;
+
+    router.onWsClose(a);
+
+    expect(emu.resizes.slice(before)).toEqual([]);
+    expect(emu.resizes).toEqual([{ rows: 48, cols: 95 }]);
+  });
+
+  it('desk#68: a close spanning two sessions elects independently per session', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, sized('s1', 'one', 48, 95)); // s1 owner
+    router.onWsFrame(a, sized('s2', 'two', 41, 137)); // s2 owner
+    router.onWsFrame(b, sized('s1', 'other', 30, 90)); // s1 survivor
+
+    router.onWsClose(a);
+
+    expect(createdEmus[0]!.resizes).toEqual([
+      { rows: 48, cols: 95 },
+      { rows: 30, cols: 90 }
+    ]);
+    // s2 loses its only surface: no election, size left alone.
+    expect(createdEmus[1]!.resizes).toEqual([{ rows: 41, cols: 137 }]);
+  });
+
   it('QUERY_REPLY from the owner is dropped fail-closed (no error, no crash); a non-owner is rejected', () => {
     const a = new FakeWs();
     const b = new FakeWs();

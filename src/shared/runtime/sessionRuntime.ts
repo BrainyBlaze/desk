@@ -35,6 +35,22 @@ export interface SessionRuntimeDeps {
   onExit?: (exit: { code: number; signal: number }) => void;
 }
 
+/**
+ * A geometry Desk SELECTED and COMMANDED for a session, and the channel whose
+ * ownership authorised it (desk#68). It is what the daemon resized its own
+ * emulator to and sent to the master — not proof of the child's pty: with no
+ * master link the send goes nowhere, and only the moor holder knows the pair
+ * the native resize actually produced. Callers that persist or replay geometry
+ * must still use THIS, never the rows/cols a surface asked for: an observer's
+ * request is recorded against that surface and goes no further.
+ */
+export interface CommandedGeometry {
+  rows: number;
+  cols: number;
+  /** The owning channel — the surfaceId the master resize was sent under. */
+  surfaceId: number;
+}
+
 interface Subscriber {
   surfaceId: string;
   rows: number;
@@ -81,6 +97,21 @@ export class SessionRuntime {
   private disposed = false;
   /** Geometry revision; bumps on resize so stale-revision frames are discardable. */
   private revision = 0;
+  /**
+   * desk#68 — the channel that owns this session's SIZE. Exactly one at a time;
+   * every other subscriber is an observer whose resizes are recorded but never
+   * commanded, so two surfaces of one session can no longer fight over the pty.
+   * undefined only while no subscriber is visible.
+   *
+   * SEAM (§7.5): the spec's controller lease says the same owner drives INPUT
+   * *and* RESIZE, and `LeaseState` models that. This owner enforces RESIZE ONLY.
+   * INPUT from any subscriber still reaches the child (see onBrowserInput), and
+   * `LeaseState` — conn-keyed, claimed by no browser path today — is not
+   * consulted here. Half of §7.5, deliberately, and not to be read as more.
+   */
+  private resizeOwner: number | undefined;
+  /** The rows×cols this runtime last COMMANDED (see CommandedGeometry). */
+  private commanded: { rows: number; cols: number } | undefined;
 
   constructor(deps: SessionRuntimeDeps) {
     this.d = deps;
@@ -220,25 +251,53 @@ export class SessionRuntime {
   // ---- browser → daemon (§7.4/§7.6) -----------------------------------------
   /**
    * Subscribe a surface: assign a channelId, ACK it, and emit the baseline
-   * SNAPSHOT at the current output offset (§7.4). Returns whether the runtime
-   * admitted the subscriber.
+   * SNAPSHOT at the current output offset (§7.4). Returns the channelId and, if
+   * this subscribe ACQUIRED ownership, the geometry that acquisition commanded.
    */
-  subscribe(surfaceId: string, rows: number, cols: number, assignedChannelId?: number): boolean {
+  subscribe(
+    surfaceId: string,
+    rows: number,
+    cols: number,
+    assignedChannelId?: number
+  ): { channelId: number; commanded?: CommandedGeometry } | undefined {
     // The daemon allocates a GLOBALLY-unique channelId (so frames that carry only
     // channelId route unambiguously); fall back to a local counter when called
     // directly (e.g. unit tests).
     const channelId = assignedChannelId ?? this.nextChannelId++;
-    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
+    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return undefined;
     const subscriber: Subscriber = { surfaceId, rows, cols, visible: true, ready: false };
     this.subscribers.set(channelId, subscriber);
+    let commanded: CommandedGeometry | undefined;
+    if (this.resizeOwner === undefined) {
+      // First surface in takes resize ownership, and acquisition COMMANDS the
+      // acquirer's geometry (desk#68). It must: the reveal path suppresses a
+      // RESIZE whose size is unchanged (TerminalSurface's lastResizeRef dedupe),
+      // so after hide-all this SUBSCRIBE is the only carrier of the new owner's
+      // geometry the runtime will ever see — without commanding here the owner
+      // renders one size while the child stays at the previous owner's forever.
+      // The value is not invented: SUBSCRIBE carries the surface's current xterm
+      // rows×cols (TerminalSurface.tsx subscribes with terminal.rows/cols) — the
+      // fitted measurement on reveal; on a very first mount it is the terminal's
+      // construction size, and the first fit corrects it via a normal owner
+      // RESIZE because a CHANGED size passes the dedupe. A later subscriber
+      // joins as an OBSERVER — it never becomes owner while the owner is still
+      // visible, so the common two-surface transient (the outgoing cell still
+      // mounted while the incoming one mounts) cannot move the pty.
+      this.resizeOwner = channelId;
+      commanded = this.commandOwnerSize(channelId, rows, cols);
+    }
+    // ACK + SNAPSHOT emit AFTER any acquisition command, so the ACK carries the
+    // post-command revision. The snapshot is deferred behind authoritative
+    // output, then serialized at the geometry the surface will actually render.
     if (!this.sendSubscriber(channelId, {
       type: BpFrameType.SUBSCRIBE_ACK,
       channelId,
       generation: this.d.generation,
       revision: this.revision
-    })) return false;
+    })) return undefined;
     this.scheduleSubscriberActivation(channelId, subscriber);
-    return this.subscribers.get(channelId) === subscriber;
+    if (this.subscribers.get(channelId) !== subscriber) return undefined;
+    return commanded === undefined ? { channelId } : { channelId, commanded };
   }
 
   private scheduleSubscriberActivation(channelId: number, subscriber: Subscriber): void {
@@ -300,11 +359,15 @@ export class SessionRuntime {
   }
 
   private failSubscriber(channelId: number): void {
-    this.subscribers.delete(channelId);
+    if (!this.subscribers.has(channelId)) return;
     try {
       this.d.onSubscriberFailure?.(channelId);
     } catch {
       // Browser-local cleanup must not poison authoritative output consumption.
+    } finally {
+      // DaemonCore normally performs the ownership handoff and journal update;
+      // this remains a local safety net for direct SessionRuntime embeddings.
+      if (this.subscribers.has(channelId)) this.unsubscribe(channelId);
     }
   }
 
@@ -374,8 +437,11 @@ export class SessionRuntime {
     return truncated;
   }
 
-  unsubscribe(channelId: number): void {
-    this.subscribers.delete(channelId);
+  /** Drop a surface. Returns the geometry a resulting handoff commanded, if any. */
+  unsubscribe(channelId: number): CommandedGeometry | undefined {
+    // An owner that leaves hands off (desk#68) — otherwise the session keeps a
+    // dead surface's geometry and no live surface can ever correct it.
+    return this.unsubscribeMany([channelId]);
   }
 
   dispose(): void {
@@ -391,7 +457,35 @@ export class SessionRuntime {
     this.d.emulator.dispose();
   }
 
-  /** Forward browser input to the master (§7.6, two channels). */
+  /**
+   * Drop a SET of surfaces — all channels of one closing browser connection —
+   * and only then elect, at most once, from the true survivors (desk#68). The
+   * whole set leaves before any election runs: removing the channels one at a
+   * time would transiently promote a dying sibling and command the child
+   * through a surface that is already gone. Returns the geometry the single
+   * election commanded, if one ran and found a visible successor.
+   */
+  unsubscribeMany(channelIds: Iterable<number>): CommandedGeometry | undefined {
+    let ownerRemoved = false;
+    for (const channelId of channelIds) {
+      if (this.subscribers.delete(channelId) && channelId === this.resizeOwner) {
+        ownerRemoved = true;
+      }
+    }
+    // Ownership is untouched unless the owner itself left: removing observers
+    // never re-elects, and with no owner (all hidden) there is nothing to hand
+    // off — the size stays where the last owner put it.
+    if (!ownerRemoved) return undefined;
+    return this.electOwner();
+  }
+
+  /**
+   * Forward browser input to the master (§7.6, two channels).
+   *
+   * NOT gated on the resize owner (desk#68 seam): §7.5 puts INPUT and RESIZE
+   * under one owner, but this change enforces the RESIZE half only. Any
+   * subscriber may still type.
+   */
   onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
     if (
       this.disposed ||
@@ -449,30 +543,121 @@ export class SessionRuntime {
   }
 
   /**
-   * Browser-initiated resize (§7.5): resize the authoritative emulator and tell
-   * the master to resize the PTY. Lease enforcement (only the owning surface may
-   * resize) is the §7.5 refinement layered above; here the frame carries the
-   * session generation so the master's fence accepts it.
+   * Browser-initiated resize (§7.5). ONE subscriber owns the session's size at a
+   * time; the others are observers whose reported geometry is remembered but
+   * never commanded. Returns the size commanded, or undefined when this call
+   * commanded nothing — callers that persist or replay geometry must use the
+   * return value, never their own arguments (desk#68: two surfaces at different
+   * sizes used to overwrite each other forever, and the loser's size was still
+   * written to the durable geometry record).
    */
-  onBrowserResize(channelId: number, rows: number, cols: number): boolean {
-    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
-    const sub = this.subscribers.get(channelId);
-    if (sub === undefined) return false;
-    sub.rows = rows;
-    sub.cols = cols;
-    this.d.emulator.resize(rows, cols);
-    // Geometry is controller-owned: bump the revision locally (the moor holder
-    // never echoes geometry back; the legacy echo path may still overwrite
-    // this with its own counter until it is removed with the old runtime).
-    this.revision += 1;
-    this.d.sendMasterResize(rows, cols, channelId);
-    return true;
+  acceptsBrowserResize(channelId: number): boolean {
+    return (
+      !this.disposed &&
+      this.pendingExit === undefined &&
+      !this.exitFenced &&
+      this.subscribers.has(channelId)
+    );
   }
 
-  /** Browser surface visibility (§3.3/§7.4) — drives worker residency + lease candidacy. */
-  onBrowserVisibility(channelId: number, visible: boolean): void {
+  onBrowserResize(
+    channelId: number,
+    rows: number,
+    cols: number
+  ): CommandedGeometry | undefined {
+    if (!this.acceptsBrowserResize(channelId)) return undefined;
     const sub = this.subscribers.get(channelId);
-    if (sub !== undefined) sub.visible = visible;
+    if (sub === undefined) return undefined;
+    // Remember every surface's own geometry even when it may not drive: it is
+    // what gets commanded if this surface is later promoted.
+    sub.rows = rows;
+    sub.cols = cols;
+    // An observer — including the PREVIOUS owner after a handoff — reports only.
+    if (channelId !== this.resizeOwner) return undefined;
+    return this.commandOwnerSize(channelId, rows, cols);
+  }
+
+  /**
+   * Browser surface visibility (§3.3/§7.4) — drives worker residency + lease
+   * candidacy. Returns the geometry a resulting handoff commanded, if any.
+   */
+  onBrowserVisibility(channelId: number, visible: boolean): CommandedGeometry | undefined {
+    const sub = this.subscribers.get(channelId);
+    if (sub === undefined) return undefined;
+    sub.visible = visible;
+    // A hidden owner is no longer driving anything a human can see: hand off to
+    // a visible surface, or hold the size if there is none (desk#68).
+    return this.handoffIfOwnerGone(channelId);
+  }
+
+  /** The channel that currently owns this session's size, if any (§7.5, desk#68). */
+  get resizeOwnerChannel(): number | undefined {
+    return this.resizeOwner;
+  }
+
+  /** The rows×cols this runtime last commanded, if it ever commanded one. */
+  commandedSize(): { rows: number; cols: number } | undefined {
+    return this.commanded === undefined ? undefined : { ...this.commanded };
+  }
+
+  /**
+   * Command the owner's geometry: resize the authoritative emulator and tell the
+   * master to resize the child. The one place either happens, so "who may
+   * resize" is a single check. Whether the child's pty ends up at this size is
+   * the holder's business — the send is best-effort and may have no link at all.
+   */
+  private commandOwnerSize(surfaceId: number, rows: number, cols: number): CommandedGeometry {
+    this.commanded = { rows, cols };
+    this.d.emulator.resize(rows, cols);
+    // Geometry is controller-owned: the revision is bumped here and nowhere
+    // else. The moor holder never echoes geometry back, so this counter is the
+    // only authority on which frames are stale after a size change.
+    this.revision += 1;
+    this.d.sendMasterResize(rows, cols, surfaceId);
+    return { rows, cols, surfaceId };
+  }
+
+  /**
+   * desk#68 handoff. Called when a subscriber hides or leaves; a no-op unless
+   * that subscriber was the owner and can no longer drive.
+   *
+   * The successor is the visible subscriber with the LOWEST channelId. channelIds
+   * are allocated monotonically, so that is the longest-standing visible surface
+   * — an explicit, stable rule rather than whatever the Map happens to yield
+   * first. Its stored geometry is commanded EXACTLY ONCE here; the promoted
+   * surface does not have to re-report to fix the pty, and the demoted one
+   * cannot move it afterwards (its late resizes are observer reports).
+   *
+   * With no visible successor the session keeps its owner-less state and the
+   * size is left ALONE — a child whose surfaces are all hidden is not resized
+   * to nothing, and the first surface to come back takes ownership then.
+   */
+  private handoffIfOwnerGone(channelId: number): CommandedGeometry | undefined {
+    if (this.resizeOwner !== undefined) {
+      if (this.resizeOwner !== channelId) return undefined;
+      if (this.subscribers.get(channelId)?.visible === true) return undefined;
+    }
+    return this.electOwner();
+  }
+
+  /**
+   * The one election (desk#68): the visible subscriber with the lowest
+   * channelId — channelIds are allocated monotonically, so that is the
+   * longest-standing visible surface — becomes owner and its stored geometry
+   * is commanded exactly once. With no visible candidate the session is
+   * owner-less and the size is left alone.
+   */
+  private electOwner(): CommandedGeometry | undefined {
+    this.resizeOwner = undefined;
+    let successor: number | undefined;
+    for (const [candidate, sub] of this.subscribers) {
+      if (!sub.visible) continue;
+      if (successor === undefined || candidate < successor) successor = candidate;
+    }
+    if (successor === undefined) return undefined;
+    this.resizeOwner = successor;
+    const sub = this.subscribers.get(successor)!;
+    return this.commandOwnerSize(successor, sub.rows, sub.cols);
   }
 
   /**
