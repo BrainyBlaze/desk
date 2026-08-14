@@ -52,9 +52,9 @@ export const PIN_SCHEMA_VERSION = 2;
 // version whose requirements this file has never been reviewed against.
 if (MOOR_PIN_SCHEMA_VERSION !== PIN_SCHEMA_VERSION) {
   throw new Error(
-    `moor pin consumer moved to schemaVersion ${MOOR_PIN_SCHEMA_VERSION}; ` +
-      `the projection in ${'scripts/project-moor-pin.mjs'} is only reviewed against ${PIN_SCHEMA_VERSION} ` +
-      '— re-derive it from moor docs/release-manifest-v1.md before bumping this constant'
+    `moor pin consumer moved to schemaVersion ${MOOR_PIN_SCHEMA_VERSION}; this projector is only ` +
+      `reviewed against ${PIN_SCHEMA_VERSION} — re-derive the projection from moor ` +
+      'docs/release-manifest-v1.md before bumping this constant'
   );
 }
 
