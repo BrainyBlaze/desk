@@ -32,14 +32,23 @@ import {
 } from '../src/shared/runtime/index.js';
 import { SessionManager } from '../src/server/runtime/sessionManager.js';
 
+function noSpace(): NodeJS.ErrnoException {
+  const error: NodeJS.ErrnoException = new Error('ENOSPC: no space left on device, write');
+  error.code = 'ENOSPC';
+  return error;
+}
+
 /**
- * The one injected failure in this file: `writeSync` refuses while the flag is
- * on. This is the ENOSPC/EBADF the store already claims to survive — the point
- * is what the store believes about the DISK afterwards, which no amount of
- * real-filesystem setup can provoke deterministically once the append fd is
- * already open.
+ * Two injected failures in this file, each a full state root refusing a write.
+ *
+ * `writeFailure` refuses the APPEND — the ENOSPC/EBADF the store already claims
+ * to survive. `compactFailure` refuses the COMPACTION's scratch write, and
+ * counts the attempts so a test can prove a compaction was actually reached
+ * rather than assume it. Neither is reachable from a real filesystem once the
+ * append fd is open, which is exactly why they are injected.
  */
 const writeFailure = vi.hoisted(() => ({ enabled: false }));
+const compactFailure = vi.hoisted(() => ({ enabled: false, refused: 0 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
@@ -47,14 +56,17 @@ vi.mock('node:fs', async (importOriginal) => {
     ...real,
     default: real,
     writeSync: (...args: Parameters<typeof real.writeSync>): number => {
-      if (writeFailure.enabled) {
-        const error: NodeJS.ErrnoException = new Error(
-          'ENOSPC: no space left on device, write'
-        );
-        error.code = 'ENOSPC';
-        throw error;
-      }
+      if (writeFailure.enabled) throw noSpace();
       return real.writeSync(...args);
+    },
+    writeFileSync: (...args: Parameters<typeof real.writeFileSync>): void => {
+      // Only the compaction's scratch file — never a test's own fixture write.
+      const target = args[0];
+      if (compactFailure.enabled && typeof target === 'string' && target.endsWith('.compact')) {
+        compactFailure.refused += 1;
+        throw noSpace();
+      }
+      real.writeFileSync(...args);
     }
   };
 });
@@ -132,6 +144,26 @@ describe('the durable geometry log stays bounded (desk#62)', () => {
     second.record('dragged', { rows: 50, cols: 300 });
     second.close();
     expect(new FileSessionGeometryStore(path).get('dragged')).toEqual({ rows: 50, cols: 300 });
+  });
+
+  it('does not re-append, after a restart, a geometry the log already carries', () => {
+    const path = storePath();
+    const first = new FileSessionGeometryStore(path);
+    first.record('a', { rows: 24, cols: 80 });
+    first.record('b', { rows: 48, cols: 120 });
+    first.close();
+
+    // Reopened on a log that replay proved is already one record per session:
+    // the file IS the map, so the store knows those geometries are on disk and
+    // an unchanged one costs no write. Without that seeding, every daemon
+    // start pays one redundant record per session it re-measures.
+    const second = new FileSessionGeometryStore(path);
+    second.record('a', { rows: 24, cols: 80 });
+    second.record('b', { rows: 48, cols: 120 });
+    second.close();
+
+    expect(recordsFor(path, 'a')).toEqual([{ rows: 24, cols: 80 }]);
+    expect(recordsFor(path, 'b')).toEqual([{ rows: 48, cols: 120 }]);
   });
 
   it('leaves a log that is already lean untouched, so a restart is not a rewrite', () => {
@@ -284,6 +316,84 @@ describe('a failed append leaves the durable record able to catch up (desk#62)',
 
     store.close();
     expect(new FileSessionGeometryStore(path).get('caught-up')).toEqual({ rows: 48, cols: 120 });
+  });
+
+  it('a FAILED compaction does not claim the pending geometry reached the disk', () => {
+    // The compound case, and the only door left open into the original defect.
+    // A compaction writes the whole in-memory map, so a SUCCESSFUL one heals a
+    // session whose append was lost. A FAILED one heals nothing — and if it
+    // marks the map persisted anyway, the dedupe is poisoned exactly as it was
+    // before this fix, only reached through compaction instead of append.
+    const path = storePath();
+    const store = new FileSessionGeometryStore(path);
+    store.record('pending', { rows: 24, cols: 80 });
+
+    // Step 1: the append for 'pending' is lost. The catch-up is now armed.
+    writeFailure.enabled = true;
+    try {
+      store.record('pending', { rows: 48, cols: 120 });
+    } finally {
+      writeFailure.enabled = false;
+    }
+    expect(recordsFor(path, 'pending')).toEqual([{ rows: 24, cols: 80 }]);
+
+    // Step 2: drive a second session past the compaction threshold while the
+    // scratch write is refused, so a compaction is REACHED and fails.
+    compactFailure.enabled = true;
+    compactFailure.refused = 0;
+    try {
+      for (let cols = 80; cols < 150; cols += 1) {
+        store.record('busy', { rows: 24, cols });
+      }
+      // Substance before shape: without a reached compaction this test proves
+      // nothing at all, so the attempt itself is asserted, not assumed.
+      expect(compactFailure.refused).toBeGreaterThan(0);
+
+      // The rewrite failed, so the disk never got 48x120 — and the store must
+      // not believe otherwise.
+      expect(recordsFor(path, 'pending')).toEqual([{ rows: 24, cols: 80 }]);
+      expect(store.get('pending')).toEqual({ rows: 48, cols: 120 });
+
+      // The catch-up must still fire: the same geometry, appended once, now
+      // that the append path works again.
+      store.record('pending', { rows: 48, cols: 120 });
+      expect(recordsFor(path, 'pending')).toEqual([
+        { rows: 24, cols: 80 },
+        { rows: 48, cols: 120 }
+      ]);
+    } finally {
+      compactFailure.enabled = false;
+    }
+
+    store.close();
+    expect(new FileSessionGeometryStore(path).get('pending')).toEqual({ rows: 48, cols: 120 });
+  });
+
+  it('a SUCCESSFUL compaction heals a lost append, and does not then re-write it', () => {
+    // The mirror of the test above: the compaction's rewrite carries the whole
+    // in-memory map, so it legitimately puts the lost geometry on disk — and
+    // once it has, the dedupe must go quiet again.
+    const path = storePath();
+    const store = new FileSessionGeometryStore(path);
+    store.record('pending', { rows: 24, cols: 80 });
+
+    writeFailure.enabled = true;
+    try {
+      store.record('pending', { rows: 48, cols: 120 });
+    } finally {
+      writeFailure.enabled = false;
+    }
+
+    for (let cols = 80; cols < 150; cols += 1) {
+      store.record('busy', { rows: 24, cols });
+    }
+
+    // The compaction wrote `measured`, which carries the geometry the append
+    // lost — so the record is on disk exactly once, without a catch-up append.
+    expect(recordsFor(path, 'pending')).toEqual([{ rows: 48, cols: 120 }]);
+    store.record('pending', { rows: 48, cols: 120 });
+    expect(recordsFor(path, 'pending')).toEqual([{ rows: 48, cols: 120 }]);
+    store.close();
   });
 
   it('does not let one session’s failed append force re-writes for another', () => {
