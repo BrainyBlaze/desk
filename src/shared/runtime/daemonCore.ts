@@ -381,14 +381,19 @@ export class DaemonCore {
     this.sessions.get(sessionId)?.runtime.emitExit(code, signal);
   }
 
-  /** §10: verified-live heartbeat evidence lapsed (false) or returned (true). */
+  /**
+   * §10: verified-live heartbeat evidence lapsed (false) or returned (true).
+   * desk#64 — `reason` names which holder-link degradation this is; it defaults
+   * to the liveness one inside the authority.
+   */
   observeHolderLiveness(
     sessionId: string,
     generation: number,
     live: boolean,
-    detail?: string
+    detail?: string,
+    reason?: string
   ): AuthorityMutationResult {
-    return this.authority.observeHolderLiveness(sessionId, generation, live, detail);
+    return this.authority.observeHolderLiveness(sessionId, generation, live, detail, reason);
   }
 
   assessAgentHealth(

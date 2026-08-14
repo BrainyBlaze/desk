@@ -21,6 +21,22 @@ import {
  */
 export const MOOR_LIVENESS_REASON = 'moor-holder-liveness';
 
+/**
+ * desk#64: the dedicated health reason for a session Desk holds NO link to
+ * because an attach failed — most often a restart re-adoption that the holder
+ * refused or never answered. It is a statement about Desk's link, not about
+ * the child: the holder may be perfectly alive, which is exactly why the
+ * session must not be recorded as ended. A separate reason from the liveness
+ * one because it is what the operator reads: every surface renders
+ * `health.reason` verbatim, and "we never adopted it" and "its heartbeat
+ * lapsed" send an operator to different places. Cleared by the same
+ * restoration as the liveness reason — an adoption ends both.
+ */
+export const MOOR_UNADOPTED_REASON = 'moor-holder-unadopted';
+
+/** The health degradations THIS module owns, and may therefore clear. */
+const MOOR_HOLDER_REASONS: readonly string[] = [MOOR_LIVENESS_REASON, MOOR_UNADOPTED_REASON];
+
 export type SessionRegistration =
   | {
       sessionId: string;
@@ -229,12 +245,19 @@ export class AgentStateAuthority {
    * bounded identity probe's outcome rides in `detail`). Restoration clears
    * ONLY that liveness degradation — a producer's own degraded health is a
    * different source and is never overwritten back to healthy here.
+   *
+   * desk#64: `reason` selects WHICH holder-link degradation this is — the
+   * lapsed heartbeat (default) or an attach that never adopted. Both are
+   * "Desk has no verified link", both are cleared by the same restoration,
+   * and both keep the session non-terminal; they differ only in what the
+   * operator is told, which is the whole reason the vocabulary is split.
    */
   observeHolderLiveness(
     sessionId: string,
     generation: number,
     live: boolean,
-    detail?: string
+    detail?: string,
+    reason: string = MOOR_LIVENESS_REASON
   ): AuthorityMutationResult {
     const record = this.sessions.get(sessionId);
     const rejected = this.guardSession(record, generation);
@@ -244,7 +267,7 @@ export class AgentStateAuthority {
     }
     const current = record!.snapshot.health;
     const ourDegradation =
-      current.status === 'degraded' && current.reason === MOOR_LIVENESS_REASON;
+      current.status === 'degraded' && MOOR_HOLDER_REASONS.includes(current.reason);
     if (live) {
       if (!ourDegradation) {
         // Another source spoke while (or before) the episode — its statement
@@ -264,18 +287,20 @@ export class AgentStateAuthority {
       record!.priorMoorHealth = undefined;
       return this.commit(record!, from, 'source-health', at);
     }
-    if (ourDegradation && current.detail === detail) {
+    if (ourDegradation && current.reason === reason && current.detail === detail) {
       return { kind: 'noop', snapshot: clone(record!.snapshot) };
     }
     const at = this.safeNow();
     const from = clone(record!.snapshot);
     if (!ourDegradation) {
-      // First loss of this episode: save what the overlay covers.
+      // First loss of this episode: save what the overlay covers. Moving
+      // BETWEEN our own two reasons keeps the original overlay — it is the
+      // same episode of link loss, told differently.
       record!.priorMoorHealth = clone(current);
     }
     record!.snapshot.health = {
       status: 'degraded',
-      reason: MOOR_LIVENESS_REASON,
+      reason,
       since: at,
       ...(detail === undefined ? {} : { detail })
     };

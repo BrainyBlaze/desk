@@ -464,6 +464,16 @@ async function holder(argv: string[]): Promise<void> {
             socket.write(conn.codec.encode(generation, MoorKind.HELLO_ACK, helloAckPayload(generation, incarnation, identity)));
             break;
           case MoorKind.ATTACH: {
+            // desk#64 knob: a holder that is demonstrably ALIVE (it answered
+            // the HELLO above) but refuses this controller's adoption, for as
+            // long as the named file exists. Drops the adopting connection
+            // without touching the child — the restart-time attach failure a
+            // daemon must never read as "the session ended".
+            const refuseAttachFile = process.env.FAKE_MOOR_REFUSE_ATTACH_FILE;
+            if (refuseAttachFile !== undefined && existsSync(refuseAttachFile)) {
+              socket.destroy();
+              return;
+            }
             // Frozen §6 prefix: TERMINAL_STATE → ATTACH_ACK → LEASE_RESULT
             // when requested → the retained replay baseline → live output.
             const replay = {

@@ -15,7 +15,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionManager } from '../src/server/runtime/sessionManager.js';
 import {
   GenerationLedger,
-  InMemoryGenerationLedger
+  InMemoryGenerationLedger,
+  MOOR_UNADOPTED_REASON
 } from '../src/shared/controlPlane/index.js';
 import {
   DEFAULT_SUPERVISOR_CONFIG,
@@ -582,19 +583,39 @@ describe('SessionManager Moor production-slice adversarial review', () => {
       return false;
     });
 
-    await expect(
-      manager.restoreAndAttachMoor('s1', {
-        sessionPath: '/tmp/s1',
-        geometry: { rows: 24, cols: 80 },
-        killSpec: { binPath: '/opt/moor', args: ['kill', '-f', '/tmp/s1'] }
-      })
-    ).resolves.toEqual({ ok: false, reason: 'attach-failed' });
-
-    expect(manager.moorStatus('s1')).toBeUndefined();
-    expect(manager.stateSnapshot('s1')).toMatchObject({
-      generation: GENERATION,
-      lifecycle: 'exited'
+    const result = await manager.restoreAndAttachMoor('s1', {
+      sessionPath: '/tmp/s1',
+      geometry: { rows: 24, cols: 80 },
+      killSpec: { binPath: '/opt/moor', args: ['kill', '-f', '/tmp/s1'] }
     });
-    expect(manager.subscribe('s1', 'main', 24, 80)).toBeUndefined();
+    // Read the state BEFORE the registered retry's probe can resolve: no I/O
+    // callback can have run between the resolved attach and this line.
+    const immediate = manager.stateSnapshot('s1');
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'attach-failed',
+      retained: true,
+      generation: GENERATION
+    });
+    // The subject of this test is unchanged: a failed adoption never leaves a
+    // published descriptor behind.
+    expect(manager.moorStatus('s1')).toBeUndefined();
+    // desk#64 — this used to assert `lifecycle: 'exited'`. The failed attach
+    // proved nothing about the holder, so it may not end the session; the
+    // rendezvous being unreachable is what ends it, one probe later.
+    expect(immediate).toMatchObject({
+      generation: GENERATION,
+      lifecycle: 'running',
+      health: { status: 'degraded', reason: MOOR_UNADOPTED_REASON }
+    });
+    await waitFor(
+      () => manager.stateSnapshot('s1')?.lifecycle === 'exited',
+      'the retry probe positively established absence at /tmp/s1'
+    );
+    expect(manager.stateSnapshot('s1')?.exit).toMatchObject({
+      origin: 'retired',
+      reason: 'confirmed-holder-absence'
+    });
   });
 });

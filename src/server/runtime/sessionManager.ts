@@ -24,6 +24,7 @@ import {
   type ExitDiagnostic
 } from '../../shared/runtime/daemonCore.js';
 import {
+  MOOR_UNADOPTED_REASON,
   type AuthorityMutationResult,
   type SessionRegistration,
   type SessionStateSnapshot
@@ -378,9 +379,18 @@ export class SessionManager {
    * attach over the moor rendezvous, and register the detached-holder kill
    * command first so a close racing the attach can never leave an adopted-but-
    * unkillable holder. The adopted ATTACH_ACK status rides on the result — it
-   * is the OB-39 event-store authority for restart reconciliation. Fails
-   * closed (and rolls the restore back WITHOUT killing: the holder may be
-   * healthy and merely rejecting us) when the attach fails.
+   * is the OB-39 event-store authority for restart reconciliation.
+   *
+   * desk#64 — a FAILED ATTACH IS NOT AN ENDED SESSION. This used to retire the
+   * session as `restore-superseded` while deliberately NOT killing the holder:
+   * the same code path admitted the holder might be alive and recorded the
+   * session as over. `exited` then made channel delivery refuse it as
+   * `offline` forever, with the queue held against a session that could never
+   * become deliverable again — a live agent, deaf, with nothing reporting it.
+   * The attach failure is now what it actually is: no link. The session stays
+   * non-terminal with the unadopted health reason, and the SAME
+   * generation/owner-fenced recovery slot the controller-link path uses keeps
+   * trying. Only the probe's positive absence ends it.
    */
   async restoreAndAttachMoor(
     sessionId: string,
@@ -396,7 +406,18 @@ export class SessionManager {
     }
   ): Promise<
     | (RestoreResult & { moorStatus?: MoorStatus })
-    | { ok: false; reason: 'attach-failed' }
+    | {
+        ok: false;
+        reason: 'attach-failed';
+        /**
+         * desk#64 — true when the session was KEPT (non-terminal, unadopted,
+         * re-attachment registered) instead of retired. The caller has no
+         * adopted link and no ATTACH_ACK descriptor either way; this only says
+         * whether a session still exists to be adopted later.
+         */
+        retained: true;
+        generation: number;
+      }
   > {
     const restored = this.core.restore(
       sessionId,
@@ -441,10 +462,39 @@ export class SessionManager {
       if (stale !== undefined && !successorAuthority) {
         this.moorStatuses.delete(sessionId);
       }
-      this.detachedKills.delete(sessionId);
-      this.core.retire(sessionId, 'restore-superseded');
-      this.dropTerminalObservation(sessionId, restored.generation);
-      return { ok: false, reason: 'attach-failed' };
+      // The kill record is KEPT: the session lives on, so the operator's
+      // explicit retire must still have a teardown for this exact holder.
+      // Dropping it here would leave a live holder nothing can stop.
+      //
+      // Lifecycle stays non-terminal AND becomes `running`, because lifecycle
+      // states whether a session exists to receive — not whether Desk holds
+      // its link. The controller-link recovery path already says exactly this:
+      // a session whose link died stays `running` while its slot re-attaches.
+      // `starting` would be the worse lie of the two: it reads as "booting,
+      // wait", and the channels engine holds the queue on it just as silently
+      // as on `exited`. The uncertainty belongs on the health axis, which is
+      // where the operator reads it, and where the probe resolves it.
+      this.core.markRunning(sessionId, restored.generation);
+      this.core.observeHolderLiveness(
+        sessionId,
+        restored.generation,
+        false,
+        'restore-attach-failed',
+        MOOR_UNADOPTED_REASON
+      );
+      this.beginRestoreRecovery({
+        sessionId,
+        sessionPath: opts.sessionPath,
+        geometry: opts.geometry,
+        generation: restored.generation,
+        owner: token
+      });
+      return {
+        ok: false,
+        reason: 'attach-failed',
+        retained: true,
+        generation: restored.generation
+      };
     }
     const moorStatus = this.moorStatuses.get(sessionId);
     return moorStatus === undefined ? restored : { ...restored, moorStatus };
@@ -820,6 +870,46 @@ export class SessionManager {
       false,
       'controller-link-recovery'
     );
+    this.openRecoverySlot(input);
+  }
+
+  /**
+   * desk#64 — a restart re-adoption that never attached enters the SAME
+   * re-attachment machinery as a lost controller link. It is the same
+   * situation (a session with no link and a holder that may well be alive)
+   * with the same fencing requirements, so it gets the same generation- and
+   * owner-fenced slot rather than a second, subtly different one. There is no
+   * resume snapshot and no queued input: nothing was ever adopted to resume.
+   */
+  private beginRestoreRecovery(input: {
+    sessionId: string;
+    sessionPath: string;
+    geometry: { rows: number; cols: number };
+    generation: number;
+    owner: symbol;
+  }): void {
+    if (this.owners.get(input.sessionId) !== input.owner) return;
+    const state = this.core.stateSnapshot(input.sessionId);
+    if (
+      state === undefined ||
+      state.generation !== input.generation ||
+      state.lifecycle === 'exited'
+    ) {
+      return;
+    }
+    this.openRecoverySlot({ ...input, snapshot: undefined, queuedInput: [] });
+  }
+
+  /** Install (or replace) the session's single re-attachment slot and run it. */
+  private openRecoverySlot(input: {
+    sessionId: string;
+    sessionPath: string;
+    geometry: { rows: number; cols: number };
+    generation: number;
+    owner: symbol;
+    snapshot: MoorReconnectSnapshot | undefined;
+    queuedInput: MoorRecoverySlot['inputQueue'];
+  }): void {
     const previous = this.recoveries.get(input.sessionId);
     if (previous?.timer !== undefined) clearTimeout(previous.timer);
     const slot: MoorRecoverySlot = {

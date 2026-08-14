@@ -138,6 +138,17 @@ export async function reconcileExistingSessions(
           } else {
             results[index] = { sessionId, ok: true };
           }
+        } else if ('retained' in restored && restored.retained) {
+          // desk#64 — reported as NOT re-attached, because it was not: there is
+          // no adopted link and no event-store reconciliation. But the session
+          // was kept rather than retired, and the startup log has to say so —
+          // an operator reading "could not re-attach" must not conclude the
+          // agent is gone when it is running and being re-attached to.
+          results[index] = {
+            sessionId,
+            ok: false,
+            error: `attach failed at generation ${restored.generation}; the session is retained as unadopted and re-attachment is retrying`
+          };
         } else {
           results[index] = { sessionId, ok: false, error: restored.reason };
         }
