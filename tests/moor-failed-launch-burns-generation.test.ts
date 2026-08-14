@@ -107,7 +107,9 @@ describe('moor#9: a failed launch burns its generation', () => {
     // would agree with itself no matter which generation the retry took.
     expect(ledger.current('b1')).toBe(3);
 
-    const retired = await manager.retireAwaited('b1');
+    const retired = await manager.retireAwaited('b1', {
+      reason: 'control-retire'
+    });
     expect(retired.ok).toBe(true);
   }, 30_000);
 
