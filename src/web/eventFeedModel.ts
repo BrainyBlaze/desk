@@ -136,7 +136,11 @@ export function filterEvents(events: readonly DeskEvent[], filter: EventFilter):
     case 'needs-you':
       return events.filter((event) => deskEventView(event).actionable);
     case 'threads':
-      return events.filter((event) => event.kind === 'channel-message' && event.thread !== undefined && !event.read);
+      return events.filter((event) => event.kind === 'channel-message' && event.thread !== undefined);
+    case 'channel-message':
+      // The channels tab is root messages; thread replies have their own tab,
+      // so the two channel filters stay disjoint (no card in both).
+      return events.filter((event) => event.kind === 'channel-message' && event.thread === undefined);
     default:
       return events.filter((event) => event.kind === filter);
   }

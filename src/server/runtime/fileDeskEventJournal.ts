@@ -283,21 +283,16 @@ export class FileDeskEventJournal {
 
   markRead(input: unknown): number {
     const parsed = parseDeskEventReadRequest(input);
-    // A thread selector is resolved to the current matching ids here — it never
-    // enters the journal record, so replay/checkpoint stay on the ids/all/kinds
-    // shape and a reply arriving after this call stays a fresh unread.
-    const ids = new Set(parsed.ids ?? []);
-    if (parsed.thread !== undefined) {
-      for (const event of this.events) {
-        if (event.kind === 'channel-message' && event.thread === parsed.thread) {
-          ids.add(event.id);
-        }
-      }
-    }
     const knownIds =
-      ids.size === 0
+      parsed.ids === undefined
         ? undefined
-        : [...ids].filter((id) => this.events.some((event) => event.id === id && event.seq > this.clearedThrough));
+        : [
+            ...new Set(
+              parsed.ids.filter((id) =>
+                this.events.some((event) => event.id === id && event.seq > this.clearedThrough)
+              )
+            )
+          ];
     const request: DeskEventReadRequest = {
       ...(parsed.all === undefined ? {} : { all: parsed.all }),
       ...(knownIds === undefined ? {} : { ids: knownIds }),
@@ -385,16 +380,11 @@ export class FileDeskEventJournal {
   }
 
   private isRead(event: DeskEvent): boolean {
-    if (event.seq <= this.readAllThrough || this.readIds.has(event.id)) {
-      return true;
-    }
-    // A thread reply is only seen inside its thread, so the channel-message
-    // kind mark (fired just by opening the channel) must not clear it — it goes
-    // read only by an explicit id/thread mark or a global mark-all.
-    if (event.kind === 'channel-message' && event.thread !== undefined) {
-      return false;
-    }
-    return event.seq <= (this.kindReadThrough.get(event.kind) ?? 0);
+    return (
+      event.seq <= this.readAllThrough ||
+      event.seq <= (this.kindReadThrough.get(event.kind) ?? 0) ||
+      this.readIds.has(event.id)
+    );
   }
 
   private withReadState(event: DeskEvent): DeskEvent {

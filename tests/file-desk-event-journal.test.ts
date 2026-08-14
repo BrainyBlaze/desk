@@ -49,58 +49,6 @@ function idleTransition(revision = 41): SessionStateTransition {
   return transition(from, to);
 }
 
-describe('FileDeskEventJournal thread-reply read scoping', () => {
-  let dir: string;
-  let path: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'desk-event-journal-thread-'));
-    path = join(dir, 'events.ndjson');
-  });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
-
-  const root = (id: string) => ({ channel: 'desk', messageId: id, author: 'codex', mentionsOperator: false, message: 'root ' + id });
-  const reply = (id: string, parent: string) => ({ channel: 'desk', messageId: id, thread: parent, author: 'codex', mentionsOperator: false, message: 'reply ' + id });
-
-  it('the channel-message kind mark clears root messages but never thread replies', () => {
-    const journal = new FileDeskEventJournal(path);
-    journal.appendChannel(root('msg-1'));
-    journal.appendChannel(reply('msg-2', 'msg-1'));
-    journal.appendChannel(reply('msg-3', 'msg-1'));
-
-    journal.markRead({ kinds: ['channel-message'] });
-    const read = new Map(journal.snapshot().items.map((e) => [e.kind === 'channel-message' ? e.messageId : e.id, e.read]));
-    expect(read.get('msg-1')).toBe(true);
-    expect(read.get('msg-2')).toBe(false);
-    expect(read.get('msg-3')).toBe(false);
-  });
-
-  it('the thread selector marks read exactly that thread\'s replies', () => {
-    const journal = new FileDeskEventJournal(path);
-    journal.appendChannel(root('msg-1'));
-    journal.appendChannel(reply('msg-2', 'msg-1'));
-    journal.appendChannel(reply('msg-3', 'msg-1'));
-    journal.appendChannel(reply('msg-9', 'msg-8'));
-
-    journal.markRead({ thread: 'msg-1' });
-    const read = new Map(journal.snapshot().items.map((e) => [e.kind === 'channel-message' ? e.messageId : e.id, e.read]));
-    expect(read.get('msg-2')).toBe(true);
-    expect(read.get('msg-3')).toBe(true);
-    expect(read.get('msg-9')).toBe(false);
-    expect(read.get('msg-1')).toBe(false);
-  });
-
-  it('a thread reply arriving after the thread was acknowledged stays unread', () => {
-    const journal = new FileDeskEventJournal(path);
-    journal.appendChannel(reply('msg-2', 'msg-1'));
-    journal.markRead({ thread: 'msg-1' });
-    journal.appendChannel(reply('msg-3', 'msg-1'));
-    const read = new Map(journal.snapshot().items.map((e) => [e.kind === 'channel-message' ? e.messageId : e.id, e.read]));
-    expect(read.get('msg-2')).toBe(true);
-    expect(read.get('msg-3')).toBe(false);
-  });
-});
-
 describe('FileDeskEventJournal', () => {
   let dir: string;
   let path: string;
