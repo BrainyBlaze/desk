@@ -298,9 +298,12 @@ export class BinaryTerminalBrokerClient {
 
   sendResize(surfaceId: string, cols: number, rows: number): void {
     const surface = this.surfaces.get(surfaceId);
-    if (!surface || !surface.visible) {
-      return; // server accepts resize only from a visible surface
+    if (!surface) {
+      return;
     }
+    // A reveal measures the fitted terminal before it marks the broker surface
+    // visible. Retain that measurement now; flushResize still prevents a hidden
+    // surface from sending a resize to the server.
     surface.cols = cols;
     surface.rows = rows;
     // Record the latest size; flushResize sends it now if the channel is live,
@@ -510,6 +513,11 @@ export class BinaryTerminalBrokerClient {
       surface.channelId = undefined;
       surface.resync = undefined;
       surface.awaitingAck = false;
+      // The replacement socket may belong to a freshly restarted daemon whose
+      // adopted emulator is back at its bootstrap geometry. Reassert the last
+      // fitted browser size after the new SUBSCRIBE_ACK even when layout did
+      // not change and TerminalSurface therefore emits no new resize.
+      surface.pendingResize = { cols: surface.cols, rows: surface.rows };
       // Deliberately NOT clearing pendingInput here: this path runs when the
       // transport is reset (socket 'close' or forceReconnect), while the
       // surface itself remains live, visible, and bound to the same session.

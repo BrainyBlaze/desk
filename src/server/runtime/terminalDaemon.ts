@@ -17,7 +17,11 @@ import { join } from 'node:path';
 import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { readManifestFile, resolveManifestPath } from '../../core/config.js';
 import { buildSessionSpecs } from '../../core/manifest.js';
-import { ensurePrivateSocketRoot } from '../../shared/moorPaths.js';
+import {
+  ensurePrivateSocketRoot,
+  moorRendezvousPath,
+  moorSocketRootUsable
+} from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   AGENT_PRODUCER_BINDINGS,
@@ -38,6 +42,7 @@ import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG } from '../../shared/runtim
 import { TerminalWsRouter } from './terminalWsRouter.js';
 import { XtermEmulatorFactory } from './xtermEmulator.js';
 import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
+import { FileSessionGeometryStore } from './fileSessionGeometryStore.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
@@ -81,7 +86,11 @@ import {
   type MoorEventDiagnostic
 } from './moorEventObserver.js';
 import type { MoorStatus } from '../../shared/moorWire/messages.js';
-import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../shared/daemonControlClient.js';
+import {
+  MOOR_STATUS_NO_LIVE_LINK_ERROR,
+  type MoorHolderPresence
+} from '../../shared/daemonControlClient.js';
+import { probeRendezvous } from './sessionManager.js';
 import type {
   HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
@@ -328,6 +337,13 @@ export interface TerminalDaemon {
   ): Promise<HolderLogClearOutcome | 'no-link'>;
   /** #8: the adopted ATTACH_ACK descriptor while a live moor link exists. */
   moorSessionStatus(sessionId: string): MoorStatus | undefined;
+  /**
+   * desk#50b: is a holder there, INDEPENDENTLY of whether this daemon has
+   * adopted it? Meaningful precisely when `moorSessionStatus` is undefined —
+   * the re-adoption window and the post-link-loss state, where "no adopted
+   * link" says nothing about the holder.
+   */
+  moorHolderPresence(sessionId: string): Promise<MoorHolderPresence>;
   /**
    * Enter the DRAINING state (idempotent, synchronous): from this instant the
    * control plane refuses every state-changing request, so a graceful
@@ -625,12 +641,22 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
    * final caught-up state.
    */
   const suppressedReplayTransitions = new Map<string, SessionStateTransition>();
+  // desk#62: the daemon's memory of what a real client measured. It holds a
+  // persistent append descriptor, so it is a resource this daemon OWNS and
+  // must release in dispose() alongside the other durable stores below.
+  const sessionGeometryStore = new FileSessionGeometryStore(
+    join(options.homeRoot, '_engine', 'session-geometry.ndjson')
+  );
   const router = new TerminalWsRouter({
     ledger,
     supervisor:
       options.supervisor ?? new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
     now,
+    // desk#62: the daemon's memory of what a real client measured. Written on
+    // every applied resize, read by every re-adoption — without it a restart
+    // has no way to know a surviving session's size at all.
+    sessionGeometry: sessionGeometryStore,
     initialAgentHealth: (subject) => {
       if (subject.mode !== 'terminal') return undefined;
       const probe = hookInstallationProbe(subject.provider);
@@ -830,7 +856,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
 
   // Moor rendezvous: `<root>/<sessionId>` — the holder publishes exactly this
   // name (no suffix); every consumer resolves it through this one function.
-  const socketPath = (sessionId: string): string => join(options.moorSocketRoot, sessionId);
+  const socketPath = (sessionId: string): string =>
+    moorRendezvousPath(options.moorSocketRoot, sessionId);
   interface EventObserver {
     sessionId: string;
     generation: number;
@@ -1682,6 +1709,32 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     moorSessionStatus(sessionId) {
       return router.sessions.moorStatus(sessionId);
     },
+    async moorHolderPresence(sessionId) {
+      // The rendezvous NAMESPACE first. A connect failure inside a live socket
+      // root is evidence about this session; the identical failure with the
+      // root swept, misconfigured, or foreign-owned is evidence about the
+      // root, and reporting it as `absent` would let a misconfiguration
+      // authorise starting a second holder over every live one at once.
+      if (!moorSocketRootUsable(options.moorSocketRoot)) {
+        return 'unknown';
+      }
+      // The daemon's own probe, the same one the spawn path's staleness fence
+      // uses — not a second definition of "alive". It connects and destroys:
+      // no protocol bytes (so a live holder's supervised link is never fenced
+      // or stolen by a status query) and no unlink (desk#42).
+      //
+      // `stale` is POSITIVE absence and nothing else: the kernel refused the
+      // connect (ECONNREFUSED — the node is there and no process is listening
+      // on it) or there was no rendezvous object to connect to (ENOENT). It is
+      // never inferred from a stat; every answer here costs a real connect(2)
+      // against the exact path a holder for this session would have bound.
+      // EACCES, timeouts, and resource errors are `unknown` — a live holder
+      // this daemon merely cannot reach must never read as a dead one.
+      const outcome = await probeRendezvous(
+        moorRendezvousPath(options.moorSocketRoot, sessionId)
+      );
+      return outcome === 'live' ? 'present' : outcome === 'stale' ? 'absent' : 'unknown';
+    },
     agentEndpoint(input) {
       return endpointStore.register(input);
     },
@@ -1818,6 +1871,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       disposeBridge();
       intakeStore?.close();
       intakeStore = undefined;
+      sessionGeometryStore.close();
       eventJournal.close();
       providerLaunchLedger.close();
       providerContinuityLedger.close();
@@ -1946,6 +2000,7 @@ export function createDaemonControlHandler(
     | 'tail'
     | 'clearSessionLog'
     | 'moorSessionStatus'
+    | 'moorHolderPresence'
     | 'terminalObservation'
     | 'moorExitEvidence'
     | 'agentEndpoint'
@@ -2168,10 +2223,21 @@ export function createDaemonControlHandler(
           // beginRetire), and its wallStart is the holder's own start clock.
           const status = daemon.moorSessionStatus(sessionId);
           if (status === undefined) {
+            // desk#50b: this 404 states that THIS DAEMON holds no adopted
+            // link — nothing more. It is the daemon's honest answer during the
+            // whole re-adoption window and after any controller link loss,
+            // while the holder runs on. Callers read it as a licence to start,
+            // so the envelope must also answer the separable question it was
+            // being mistaken for: is a holder nevertheless there?
+            //
             // The shared literal, not a local copy: callers tell this negative
             // verdict apart from any other 404 by its exact wording, and a
             // reworded copy would read to them as "some proxy said not-found".
-            sendJson(res, 404, { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR });
+            sendJson(res, 404, {
+              ok: false,
+              error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+              holder: await daemon.moorHolderPresence(sessionId)
+            });
             return;
           }
           sendJson(res, 200, {

@@ -16,7 +16,11 @@ import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
 import { GenerationLedger } from '../src/shared/controlPlane/generationLedger.js';
-import { InMemoryGenerationLedger, MOOR_LIVENESS_REASON } from '../src/shared/controlPlane/index.js';
+import {
+  InMemoryGenerationLedger,
+  MOOR_LIVENESS_REASON,
+  MOOR_UNADOPTED_REASON
+} from '../src/shared/controlPlane/index.js';
 import { WorkerSupervisor } from '../src/shared/runtime/workerSupervisor.js';
 import { DEFAULT_SUPERVISOR_CONFIG } from '../src/shared/runtime/workerSupervisor.js';
 import { BpFrameType, type BpFrame } from '../src/shared/browserProtocol/index.js';
@@ -698,7 +702,6 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
 
       const restored = await manager.restoreAndAttachMoor('r1', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: {
           binPath: process.execPath,
           args: [...NODE_IMPORT_ARGS, 'kill', sessionPath],
@@ -742,7 +745,7 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
   );
 
   it(
-    'rolls back without killing when the holder carries a different generation',
+    'refuses a holder carrying a different generation without killing it or ending the session',
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'moor-restore-fence-'));
       cleanups.push(() => rmSync(root, { recursive: true, force: true }));
@@ -773,19 +776,33 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
 
       const restored = await manager.restoreAndAttachMoor('r2', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: {
           binPath: process.execPath,
           args: [...NODE_IMPORT_ARGS, 'kill', sessionPath]
         }
       });
-      expect(restored).toEqual({ ok: false, reason: 'attach-failed' });
-      // Rollback NEVER kills: the mismatched holder may belong to someone
-      // else's lifecycle — it stays published; the live slot is freed (the
-      // authority retains only the exited-state record of the rollback).
+      expect(restored).toEqual({
+        ok: false,
+        reason: 'attach-failed',
+        retained: true,
+        generation: 3
+      });
+      // The fence held: no adoption at generation 3 against a generation-2
+      // holder, and the mismatched holder is NEVER killed — it may belong to
+      // someone else's lifecycle.
       expect(existsSync(sessionPath)).toBe(true);
-      expect(manager.stateSnapshot('r2')?.lifecycle).not.toBe('running');
-      expect(manager.subscribe('r2', 'main', 24, 80)).toBeUndefined();
+      expect(manager.moorStatus('r2')).toBeUndefined();
+      // desk#64 — this used to assert the session was rolled back out of the
+      // live set. A refused attach is not a proof that generation 3's holder
+      // ended, so the session is retained (unadopted, retrying) instead of
+      // being recorded as exited on evidence nobody has.
+      expect(manager.stateSnapshot('r2')).toMatchObject({
+        generation: 3,
+        lifecycle: 'running',
+        exit: null,
+        health: { status: 'degraded', reason: MOOR_UNADOPTED_REASON }
+      });
+      manager.closeAllLinks(); // stop the retry before the holder is torn down
     },
     30_000
   );

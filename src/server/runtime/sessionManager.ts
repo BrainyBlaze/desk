@@ -24,6 +24,7 @@ import {
   type ExitDiagnostic
 } from '../../shared/runtime/daemonCore.js';
 import {
+  MOOR_UNADOPTED_REASON,
   type AuthorityMutationResult,
   type SessionRegistration,
   type SessionStateSnapshot
@@ -34,7 +35,7 @@ import {
   posixMoorIdentity,
   type MoorReconnectSnapshot
 } from './moorMasterClient.js';
-import type { MoorStatus } from '../../shared/moorWire/messages.js';
+import { MOOR_PRESERVE_GEOMETRY, type MoorStatus } from '../../shared/moorWire/messages.js';
 import { spawnMoorMaster } from './moorSpawnMaster.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, unlinkSync } from 'node:fs';
@@ -226,6 +227,8 @@ export interface SessionManagerDeps {
   now: () => number;
   /** Deliver a browser frame to a session's surface (the web-server WS wires this). */
   sendBrowser: (sessionId: string, channelId: number, frame: BpFrame) => void;
+  /** desk#62 — durable last-measured geometry per session (see DaemonCoreDeps). */
+  sessionGeometry?: DaemonCoreDeps['sessionGeometry'];
   workingLeaseMs?: DaemonCoreDeps['workingLeaseMs'];
   openToolLeaseMs?: DaemonCoreDeps['openToolLeaseMs'];
   initialAgentHealth?: DaemonCoreDeps['initialAgentHealth'];
@@ -347,6 +350,7 @@ export class SessionManager {
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterResize: (sessionId, rows, cols, surfaceId) =>
         this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId),
+      ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -378,16 +382,24 @@ export class SessionManager {
    * attach over the moor rendezvous, and register the detached-holder kill
    * command first so a close racing the attach can never leave an adopted-but-
    * unkillable holder. The adopted ATTACH_ACK status rides on the result — it
-   * is the OB-39 event-store authority for restart reconciliation. Fails
-   * closed (and rolls the restore back WITHOUT killing: the holder may be
-   * healthy and merely rejecting us) when the attach fails.
+   * is the OB-39 event-store authority for restart reconciliation.
+   *
+   * desk#64 — a FAILED ATTACH IS NOT AN ENDED SESSION. This used to retire the
+   * session as `restore-superseded` while deliberately NOT killing the holder:
+   * the same code path admitted the holder might be alive and recorded the
+   * session as over. `exited` then made channel delivery refuse it as
+   * `offline` forever, with the queue held against a session that could never
+   * become deliverable again — a live agent, deaf, with nothing reporting it.
+   * The attach failure is now what it actually is: no link. The session stays
+   * non-terminal with the unadopted health reason, and the SAME
+   * generation/owner-fenced recovery slot the controller-link path uses keeps
+   * trying. Only the probe's positive absence ends it.
    */
   async restoreAndAttachMoor(
     sessionId: string,
     opts: {
       /** Moor rendezvous path — `<root>/<sessionId>`, no suffix. */
       sessionPath: string;
-      geometry: { rows: number; cols: number };
       /** The detached-holder stop command (e.g. `moor kill -f SESSION`). */
       killSpec: DetachedKillSpec;
       subject?: SessionRegistration['subject'];
@@ -396,13 +408,26 @@ export class SessionManager {
     }
   ): Promise<
     | (RestoreResult & { moorStatus?: MoorStatus })
-    | { ok: false; reason: 'attach-failed' }
+    | {
+        ok: false;
+        reason: 'attach-failed';
+        /**
+         * desk#64 — true when the session was KEPT (non-terminal, unadopted,
+         * re-attachment registered) instead of retired. The caller has no
+         * adopted link and no ATTACH_ACK descriptor either way; this only says
+         * whether a session still exists to be adopted later.
+         *
+         * FALSE is not a rollback: it means this operation no longer owns the
+         * session (the authority refused the transition, or a newer operation
+         * took over during the attach). It is reported rather than assumed,
+         * because a caller told `retained: true` will describe a live,
+         * retrying session to an operator — a claim this path must earn.
+         */
+        retained: boolean;
+        generation: number;
+      }
   > {
-    const restored = this.core.restore(
-      sessionId,
-      opts.geometry,
-      opts.subject ?? { kind: 'terminal' }
-    );
+    const restored = this.core.restore(sessionId, opts.subject ?? { kind: 'terminal' });
     if (!restored.ok) return restored;
     this.ensureTerminalObservation(sessionId, restored.generation);
     const token = Symbol('restore-op');
@@ -412,12 +437,22 @@ export class SessionManager {
       generation: restored.generation,
       sockPath: opts.sessionPath
     });
+    /**
+     * The geometry THIS re-adoption puts on the wire — and, when the attach
+     * fails, the one its retry inherits. Deliberately ONE value: a retry that
+     * asserted a different size than the adoption it is retrying would be
+     * inventing a measurement nobody made. desk#62 replaces this expression
+     * with `MOOR_PRESERVE_GEOMETRY` (the daemon cannot know a re-adopted
+     * child's pty size — the §5 status descriptor carries none), and the retry
+     * below picks that up with no change of its own.
+     */
+    const attachGeometry = MOOR_PRESERVE_GEOMETRY;
     let attached = false;
     try {
       // The native client fences the WHOLE §3/§6 exchange on the restored
       // ledger generation — a holder carrying any other generation fails the
       // attach instead of splitting the fence.
-      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, opts.geometry, {
+      attached = await this.moorAttachMaster(sessionId, opts.sessionPath, attachGeometry, {
         generation: restored.generation,
         stillValid: () => this.owners.get(sessionId) === token,
         ...(opts.livenessWindowMs === undefined
@@ -441,10 +476,87 @@ export class SessionManager {
       if (stale !== undefined && !successorAuthority) {
         this.moorStatuses.delete(sessionId);
       }
-      this.detachedKills.delete(sessionId);
-      this.core.retire(sessionId, 'restore-superseded');
-      this.dropTerminalObservation(sessionId, restored.generation);
-      return { ok: false, reason: 'attach-failed' };
+      // The kill record is KEPT: the session lives on, so the operator's
+      // explicit retire must still have a teardown for this exact holder.
+      // Dropping it here would leave a live holder nothing can stop.
+      //
+      // Lifecycle stays non-terminal AND becomes `running`, because lifecycle
+      // states whether a session exists to receive — not whether Desk holds
+      // its link. The controller-link recovery path already says exactly this:
+      // a session whose link died stays `running` while its slot re-attaches.
+      // `starting` would be the worse lie of the two: it reads as "booting,
+      // wait", and the channels engine holds the queue on it just as silently
+      // as on `exited`. The uncertainty belongs on the health axis, which is
+      // where the operator reads it, and where the probe resolves it.
+      //
+      // The authority's ANSWER decides whether retention happened — this must
+      // not assert a state it merely asked for. `rejected` is reachable here:
+      // the attach above awaited real I/O, and in that window a concurrent
+      // retire can have exited the session ('lifecycle-exited') or a successor
+      // operation can have registered a newer generation
+      // ('generation-mismatch'). ('session-not-found' cannot: the authority
+      // never deletes a record it registered.) A `noop` — already running — is
+      // success, not failure, and must stay that way.
+      const running = this.core.markRunning(sessionId, restored.generation);
+      if (running.kind === 'rejected') {
+        return {
+          ok: false,
+          reason: 'attach-failed',
+          retained: false,
+          generation: restored.generation
+        };
+      }
+      // Ownership is the second claim this path makes. A newer operation that
+      // took the session during the attach owns its state and its recovery
+      // slot; degrading health or arming a retry underneath it would fight a
+      // successor with stale intentions.
+      if (this.owners.get(sessionId) !== token) {
+        return {
+          ok: false,
+          reason: 'attach-failed',
+          retained: false,
+          generation: restored.generation
+        };
+      }
+      // `observeHolderLiveness` cannot be rejected here: no await separates it
+      // from the checks above, the generation is the one the authority just
+      // accepted, and the lifecycle it just committed is `running`. It is NOT
+      // inert, though — committing a transition calls the authority's
+      // `onTransition` consumer SYNCHRONOUSLY, and a consumer that re-enters
+      // this manager (retiring, say) changes the world between here and the
+      // slot below. That window is the only one left, which is exactly why
+      // `retained` is read back from the map rather than taken on trust.
+      this.core.observeHolderLiveness(
+        sessionId,
+        restored.generation,
+        false,
+        'restore-attach-failed',
+        MOOR_UNADOPTED_REASON
+      );
+      this.beginRestoreRecovery({
+        sessionId,
+        sessionPath: opts.sessionPath,
+        geometry: attachGeometry,
+        generation: restored.generation,
+        owner: token
+      });
+      // `retained` is the FACT, read back from the map — not the helper's
+      // report of it. The two differ exactly when a guard inside declines
+      // after this operation has already decided it is retaining the session,
+      // and the caller repeats `retained: true` to an operator as "alive and
+      // being re-attached to". A claim this operation can verify locally is
+      // one it must never take on trust: the slot is retained only if it is
+      // THERE, at this generation, under this operation's token.
+      const slot = this.recoveries.get(sessionId);
+      return {
+        ok: false,
+        reason: 'attach-failed',
+        retained:
+          slot !== undefined &&
+          slot.owner === token &&
+          slot.generation === restored.generation,
+        generation: restored.generation
+      };
     }
     const moorStatus = this.moorStatuses.get(sessionId);
     return moorStatus === undefined ? restored : { ...restored, moorStatus };
@@ -820,6 +932,54 @@ export class SessionManager {
       false,
       'controller-link-recovery'
     );
+    this.openRecoverySlot(input);
+  }
+
+  /**
+   * desk#64 — a restart re-adoption that never attached enters the SAME
+   * re-attachment machinery as a lost controller link. It is the same
+   * situation (a session with no link and a holder that may well be alive)
+   * with the same fencing requirements, so it gets the same generation- and
+   * owner-fenced slot rather than a second, subtly different one. There is no
+   * resume snapshot and no queued input: nothing was ever adopted to resume.
+   *
+   * Deliberately returns nothing. An earlier revision returned "did I install
+   * one?" and the caller reported that as retention — which put the caller's
+   * honesty at the mercy of this function's control flow, when the caller can
+   * simply LOOK. Both guards below can only fail through one window: the
+   * synchronous `onTransition` consumer that the health degradation just
+   * before this call invokes. They stay because the window is real, not
+   * because the caller depends on their answer.
+   */
+  private beginRestoreRecovery(input: {
+    sessionId: string;
+    sessionPath: string;
+    geometry: { rows: number; cols: number };
+    generation: number;
+    owner: symbol;
+  }): void {
+    if (this.owners.get(input.sessionId) !== input.owner) return;
+    const state = this.core.stateSnapshot(input.sessionId);
+    if (
+      state === undefined ||
+      state.generation !== input.generation ||
+      state.lifecycle === 'exited'
+    ) {
+      return;
+    }
+    this.openRecoverySlot({ ...input, snapshot: undefined, queuedInput: [] });
+  }
+
+  /** Install (or replace) the session's single re-attachment slot and run it. */
+  private openRecoverySlot(input: {
+    sessionId: string;
+    sessionPath: string;
+    geometry: { rows: number; cols: number };
+    generation: number;
+    owner: symbol;
+    snapshot: MoorReconnectSnapshot | undefined;
+    queuedInput: MoorRecoverySlot['inputQueue'];
+  }): void {
     const previous = this.recoveries.get(input.sessionId);
     if (previous?.timer !== undefined) clearTimeout(previous.timer);
     const slot: MoorRecoverySlot = {
@@ -2086,7 +2246,20 @@ async function probeMoorHolder(
   }
 }
 
-async function probeRendezvous(
+/**
+ * Tri-valued rendezvous liveness, EXPORTED because it is the one probe the
+ * daemon owns and desk#50b needed a second caller for it — the holder-presence
+ * question `/control/moor-status` answers when no adopted link exists. A
+ * parallel probe written for that route would be a second definition of
+ * "alive", and the two would disagree the first time either was tuned.
+ *
+ * Non-destructive and non-adopting by construction: it connects, reads the
+ * kernel's answer, and destroys its own socket. It writes no protocol bytes
+ * (so it cannot fence or steal a live holder's supervised link) and it unlinks
+ * nothing (desk#42 — the caller that DOES unlink adds its own TOCTOU identity
+ * fence on top of a `stale` verdict; the presence probe never unlinks at all).
+ */
+export async function probeRendezvous(
   path: string,
   timeoutMs = 250
 ): Promise<'live' | 'stale' | 'indeterminate'> {

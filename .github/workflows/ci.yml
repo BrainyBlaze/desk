@@ -16,6 +16,8 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v5
+      - name: Prove and run internal path guard
+        run: sh ci/tracked-paths.test.sh
       - uses: actions/setup-node@v5
         with:
           node-version: 22.23.1

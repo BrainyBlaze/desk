@@ -3,7 +3,16 @@
 // never ensures/spawns over them.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -33,9 +42,11 @@ import {
   reconcileExistingSessions,
   resolveDaemonConfig
 } from '../src/server/runtime/terminalDaemonMain.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../src/shared/daemonControlClient.js';
 import { shellQuote } from '../src/shared/shell.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
+import { FileSessionGeometryStore } from '../src/server/runtime/fileSessionGeometryStore.js';
 import { fileURLToPath } from 'node:url';
 
 const FAKE_MOOR = fileURLToPath(new URL('./helpers/fake-moor-holder.ts', import.meta.url));
@@ -194,7 +205,7 @@ describe('reconcile liveness (wedged sockets must not stall startup)', () => {
       const { manager } = makeManager(store);
       const daemon = { router: { sessions: manager } } as never;
       const started = Date.now();
-      const results = await reconcileExistingSessions(daemon, targets, '/usr/bin/true', { rows: 24, cols: 80 });
+      const results = await reconcileExistingSessions(daemon, targets, '/usr/bin/true');
       const wall = Date.now() - started;
       expect(results.find((r) => r.sessionId === 'healthy')?.ok).toBe(true);
       for (let i = 0; i < 3; i += 1) {
@@ -472,6 +483,159 @@ describe('startTerminalDaemonServer socket root', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// desk#62 — a daemon restart must not write a geometry no session has onto a
+// live child. The daemon cannot ask the holder how big the child's pty is (the
+// moor status descriptor, wire schema §5, carries no rows/cols), so the only
+// honest sources are a durable record of what a real client measured and the
+// wire's own "preserve both" encoding (§4/OB-19: columns and rows both zero).
+// ---------------------------------------------------------------------------
+
+/** Mirrors the fake holder's witness path (the helper is a script, not importable). */
+const geometryWitness = (sessionPath: string): string => `${sessionPath}.geometry-witness`;
+
+const witnessLines = (sessionPath: string): string[] => {
+  const path = geometryWitness(sessionPath);
+  return existsSync(path)
+    ? readFileSync(path, 'utf8').split('\n').filter((line) => line.length > 0)
+    : [];
+};
+
+function makeManagerWithGeometry(
+  store: InMemoryGenerationLedger,
+  geometryStore: FileSessionGeometryStore
+): { manager: SessionManager; created: Array<{ rows: number; cols: number }> } {
+  const created: Array<{ rows: number; cols: number }> = [];
+  const manager = new SessionManager({
+    ledger: new GenerationLedger(store),
+    supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+    emulatorFactory: {
+      create: (opts) => {
+        created.push({ rows: opts.rows, cols: opts.cols });
+        return new FakeEmu();
+      }
+    },
+    now: () => 1000,
+    sendBrowser: () => {},
+    sessionGeometry: geometryStore
+  });
+  return { manager, created };
+}
+
+describe('re-adoption never invents a geometry (desk#62)', () => {
+  it('the reconcile pass hands restoreAndAttachMoor no geometry at all', async () => {
+    const restoreAndAttachMoor = vi.fn().mockResolvedValue({ ok: true, generation: 2 });
+    const daemon = { router: { sessions: { restoreAndAttachMoor } } } as never;
+
+    await reconcileExistingSessions(
+      daemon,
+      [{ sessionId: 'a', sockPath: '/r/a', subject: { kind: 'terminal' } }],
+      '/opt/moor'
+    );
+
+    // Not "a better default" — NO geometry. The reconcile pass has no
+    // knowledge of any session's size, so it must assert none.
+    const opts = restoreAndAttachMoor.mock.calls[0][1] as Record<string, unknown>;
+    expect(Object.keys(opts)).not.toContain('geometry');
+  });
+
+  it('a session a client measured comes back at THAT size, and the ATTACH still asserts nothing on the live child', async () => {
+    // CASE 1 of 2: geometry WAS known before the restart. This is the defect —
+    // the daemon discarded knowledge it already had and wrote 24x80 over it.
+    const dir = mkdtempSync(join(tmpdir(), 'desk-geo-known-'));
+    const sock = join(dir, 'measured');
+    const geometryPath = join(dir, '_engine', 'session-geometry.ndjson');
+    await spawnFakeMoorHolder(
+      sock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: dir }), 'measured.events'),
+      2,
+      ['sleep', '30'],
+      dir
+    );
+    const targets = [
+      { sessionId: 'measured', sockPath: sock, subject: { kind: 'terminal' } as const }
+    ];
+    const ledgerStore = new InMemoryGenerationLedger();
+    new GenerationLedger(ledgerStore).allocate('measured'); // durable generation 2
+    try {
+      // --- daemon incarnation 1: a real surface measures 100x48 -------------
+      const first = new FileSessionGeometryStore(geometryPath);
+      const one = makeManagerWithGeometry(ledgerStore, first);
+      await reconcileExistingSessions(
+        { router: { sessions: one.manager } } as never,
+        targets,
+        '/usr/bin/true'
+      );
+      const channelId = one.manager.subscribe('measured', 'surface-1', 48, 100);
+      expect(channelId).not.toBeUndefined();
+      expect(one.manager.onBrowserResizeByChannel(channelId!, 48, 100)).toBe(true);
+      await waitFor(() => witnessLines(sock).includes('resize 100x48'));
+      one.manager.closeAllLinks(); // the daemon departs; the holder survives
+      first.close();
+
+      // --- daemon incarnation 2: it comes back ------------------------------
+      const second = new FileSessionGeometryStore(geometryPath);
+      const two = makeManagerWithGeometry(ledgerStore, second);
+      const results = await reconcileExistingSessions(
+        { router: { sessions: two.manager } } as never,
+        targets,
+        '/usr/bin/true'
+      );
+      expect(results).toEqual([{ sessionId: 'measured', ok: true }]);
+
+      // The restored session is the size a client actually measured — NOT the
+      // 24x80 the daemon used to invent.
+      expect(two.created).toEqual([{ rows: 48, cols: 100 }]);
+      // And nothing was written onto the live child: both re-adopting ATTACHes
+      // carry moor's preserve pair, so the pty keeps the size it already has.
+      expect(witnessLines(sock).filter((line) => line.startsWith('attach '))).toEqual([
+        'attach 0x0',
+        'attach 0x0'
+      ]);
+      second.close();
+    } finally {
+      await killFakeMoorHolder(sock);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('a session no client ever measured is re-adopted with preserve geometry, so its child keeps the size it has', async () => {
+    // CASE 2 of 2: geometry was NEVER known — no browser has ever rendered
+    // this session, and none is attached at restart. Nothing can know better,
+    // so the daemon must assert nothing rather than resize the child to a
+    // value it made up. This is the case no client-side mitigation can reach.
+    const dir = mkdtempSync(join(tmpdir(), 'desk-geo-unknown-'));
+    const sock = join(dir, 'unmeasured');
+    await spawnFakeMoorHolder(
+      sock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: dir }), 'unmeasured.events'),
+      2,
+      ['sleep', '30'],
+      dir
+    );
+    const ledgerStore = new InMemoryGenerationLedger();
+    new GenerationLedger(ledgerStore).allocate('unmeasured');
+    try {
+      const geometryStore = new FileSessionGeometryStore(
+        join(dir, '_engine', 'session-geometry.ndjson')
+      );
+      const { manager } = makeManagerWithGeometry(ledgerStore, geometryStore);
+      const results = await reconcileExistingSessions(
+        { router: { sessions: manager } } as never,
+        [{ sessionId: 'unmeasured', sockPath: sock, subject: { kind: 'terminal' } }],
+        '/usr/bin/true'
+      );
+      expect(results).toEqual([{ sessionId: 'unmeasured', ok: true }]);
+      expect(witnessLines(sock)).toEqual(['attach 0x0']);
+      manager.closeAllLinks();
+      geometryStore.close();
+    } finally {
+      await killFakeMoorHolder(sock);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
 describe('reconcileExistingSessions', () => {
   it('isolates per-session failures and reports each outcome', async () => {
     const restoreAndAttachMoor = vi
@@ -523,5 +687,200 @@ describe('reconcileExistingSessions', () => {
       mode: 'terminal',
       producer: 'codex-hooks'
     });
+  });
+
+  it('desk#64: reports a retained unadopted session as not re-attached, and says it is retrying', async () => {
+    const restoreAndAttachMoor = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'attach-failed',
+      retained: true,
+      generation: 7
+    });
+    const reconcileMoorEvents = vi.fn();
+    const daemon = {
+      router: { sessions: { restoreAndAttachMoor } },
+      reconcileMoorEvents
+    } as never;
+    const results = await reconcileExistingSessions(
+      daemon,
+      [{ sessionId: 'd', sockPath: '/r/d', subject: { kind: 'terminal' } }],
+      '/opt/moor'
+    );
+    // Honest on both counts: nothing was adopted (ok:false, no event-store
+    // reconcile), and the session was NOT ended — the startup log an operator
+    // reads must not imply the agent is gone.
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.error).toContain('retained');
+    expect(results[0]!.error).toContain('retrying');
+    expect(results[0]!.error).toContain('generation 7');
+    expect(reconcileMoorEvents).not.toHaveBeenCalled();
+  });
+});
+
+describe('/control/moor-status separates the LINK from the HOLDER (desk#50b)', () => {
+  // The 404 means "this daemon holds no adopted link", which is true of every
+  // surviving session between daemon start and re-adoption. It must therefore
+  // also answer the separable question — is a holder nevertheless there? —
+  // and it must answer it by PROBING the rendezvous, not by stat()ing a node.
+  it('reports a present holder for a live but never-adopted session', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'desk-holder-'));
+    const socketRoot = join(base, 'moor');
+    mkdirSync(join(base, 'home', '_engine'), { recursive: true });
+    mkdirSync(socketRoot, { recursive: true, mode: 0o700 });
+    const survivingSock = join(socketRoot, 'surviving'); // moor rendezvous: no suffix
+    await spawnFakeMoorHolder(
+      survivingSock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: base }), 'surviving.events'),
+      2,
+      ['sleep', '30'],
+      base
+    );
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      moorBinPath: '/usr/bin/true',
+      moorSocketRoot: socketRoot,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      server.daemon.markReady();
+      // Nothing provisioned or reconciled this holder: there is no adopted
+      // ATTACH_ACK descriptor, exactly as during the re-adoption window.
+      expect(server.daemon.moorSessionStatus('surviving')).toBeUndefined();
+
+      const alive = await fetch(
+        `http://127.0.0.1:${server.port}/control/moor-status?sessionId=surviving`
+      );
+      expect(alive.status).toBe(404);
+      expect(await alive.json()).toEqual({
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'present'
+      });
+
+      // A session that never published a rendezvous at all: proven absent, so
+      // `desk up` can still start genuinely dead sessions.
+      const gone = await fetch(
+        `http://127.0.0.1:${server.port}/control/moor-status?sessionId=never-started`
+      );
+      expect(gone.status).toBe(404);
+      expect(await gone.json()).toEqual({
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'absent'
+      });
+
+      // desk#42: the probe observes; it never unlinks. The rendezvous node of
+      // a live holder must survive being asked about.
+      expect(existsSync(survivingSock)).toBe(true);
+    } finally {
+      await server.close();
+      await killFakeMoorHolder(survivingSock);
+      rmSync(base, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('answers unknown for a holder it cannot REACH, with the namespace intact', async () => {
+    // The namespace-gone test below exits at the socket-root guard and never
+    // reaches the probe, so on its own it pins only half of this. Here the
+    // root is a healthy private directory and the rendezvous for the session
+    // really exists — the probe runs, and comes back unable to decide.
+    //
+    // This is the branch the whole change exists for: an unreachable holder
+    // must not round down to a dead one. Collapsing it to `absent` reports
+    // `stale`, which authorises a start over a live holder — and it would do
+    // so only under permission trouble or load, exactly when a duplicate
+    // holder does the most damage.
+    const base = mkdtempSync(join(tmpdir(), 'desk-holder-unreachable-'));
+    const socketRoot = join(base, 'moor');
+    mkdirSync(join(base, 'home', '_engine'), { recursive: true });
+    mkdirSync(socketRoot, { recursive: true, mode: 0o700 });
+
+    // A live listener the probe has no permission to connect to (EACCES).
+    // Root bypasses that check by design, so the uid-independent ELOOP case
+    // below carries the same branch where this one cannot exist.
+    const unreachable = join(socketRoot, 'unreachable-holder');
+    const held = createServer(() => {});
+    await new Promise<void>((resolve, reject) => {
+      held.once('error', reject);
+      held.listen(unreachable, resolve);
+    });
+    const canTestEacces = typeof process.getuid !== 'function' || process.getuid() !== 0;
+    if (canTestEacces) chmodSync(unreachable, 0o000);
+
+    // A rendezvous name that cannot be resolved at all (ELOOP) — path
+    // resolution, not permissions, so this holds at every uid.
+    const looping = join(socketRoot, 'looping-holder');
+    symlinkSync(join(socketRoot, 'looping-other'), looping);
+    symlinkSync(looping, join(socketRoot, 'looping-other'));
+
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      moorBinPath: '/usr/bin/true',
+      moorSocketRoot: socketRoot,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      server.daemon.markReady();
+      const ask = async (sessionId: string): Promise<unknown> => {
+        const response = await fetch(
+          `http://127.0.0.1:${server.port}/control/moor-status?sessionId=${sessionId}`
+        );
+        expect(response.status).toBe(404);
+        return response.json();
+      };
+      const unknownBody = {
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'unknown'
+      };
+
+      expect(await ask('looping-holder')).toEqual(unknownBody);
+      if (canTestEacces) {
+        expect(await ask('unreachable-holder')).toEqual(unknownBody);
+      }
+
+      // desk#42 again, from the route: an indeterminate probe unlinks nothing.
+      expect(existsSync(unreachable)).toBe(true);
+    } finally {
+      await server.close();
+      if (canTestEacces) chmodSync(unreachable, 0o700);
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('answers unknown — never absent — when the rendezvous namespace is gone', async () => {
+    // Absence is a claim about the SESSION, and it can only be made inside the
+    // namespace where that session's holder would publish. With the socket
+    // root itself missing, a failed connect says the root is misconfigured or
+    // was swept, not that the holder died — so nothing may be claimed.
+    const base = mkdtempSync(join(tmpdir(), 'desk-holder-root-'));
+    const socketRoot = join(base, 'moor');
+    mkdirSync(join(base, 'home', '_engine'), { recursive: true });
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      moorBinPath: '/usr/bin/true',
+      moorSocketRoot: socketRoot,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      server.daemon.markReady();
+      rmSync(socketRoot, { recursive: true, force: true });
+      const answer = await fetch(
+        `http://127.0.0.1:${server.port}/control/moor-status?sessionId=whoever`
+      );
+      expect(answer.status).toBe(404);
+      expect(await answer.json()).toEqual({
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'unknown'
+      });
+    } finally {
+      await server.close();
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

@@ -363,7 +363,7 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
     // A RESTARTED daemon over the same durable store re-adopts, never allocates.
     const ledger = new GenerationLedger(store);
     const { core, masterOut } = coreOverLedger(ledger);
-    const restored = core.restore('s1', { rows: 24, cols: 80 });
+    const restored = core.restore('s1');
     expect(restored).toEqual({ ok: true, generation: 2 });
     expect(ledger.current('s1')).toBe(2); // NOT bumped — the surviving master owns 2
 
@@ -379,14 +379,14 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
 
   it('fails closed when the ledger has no durable generation for the socket', () => {
     const { core } = coreOverLedger(new GenerationLedger(new InMemoryGenerationLedger()));
-    expect(core.restore('ghost', { rows: 24, cols: 80 })).toEqual({ ok: false, reason: 'no-generation' });
+    expect(core.restore('ghost')).toEqual({ ok: false, reason: 'no-generation' });
   });
 
   it('refuses to restore over an already-live session', () => {
     const store = new InMemoryGenerationLedger();
     const { core } = coreOverLedger(new GenerationLedger(store));
     expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
-    expect(core.restore('s1', { rows: 24, cols: 80 })).toEqual({ ok: false, reason: 'already-live' });
+    expect(core.restore('s1')).toEqual({ ok: false, reason: 'already-live' });
   });
 
   it('ensure AFTER a retire still allocates a HIGHER generation than the restored one', () => {
@@ -394,7 +394,7 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
     new GenerationLedger(store).allocate('s1'); // original spawn: 2 (OB-18)
     const ledger = new GenerationLedger(store);
     const { core } = coreOverLedger(ledger);
-    expect(core.restore('s1', { rows: 24, cols: 80 }).ok).toBe(true);
+    expect(core.restore('s1').ok).toBe(true);
     core.retire('s1');
     const recreated = core.ensure('s1', { rows: 24, cols: 80 });
     expect(recreated.ok).toBe(true);

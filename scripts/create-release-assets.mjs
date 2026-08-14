@@ -76,7 +76,13 @@ export function validateMoorPin(moor) {
   // The version is checked BEFORE the key set, or a legacy pin — which is
   // missing `coverage` precisely because it predates it — reports a generic
   // key mismatch and hides the one fact that matters.
-  if (moor?.schemaVersion !== MOOR_PIN_SCHEMA_VERSION) {
+  if (moor === null || typeof moor !== 'object' || Array.isArray(moor)) {
+    // Before any diagnostic that reads a field off it: an absent pin has no
+    // schemaVersion to report, and dereferencing one here turns "no pin was
+    // supplied" into a raw TypeError naming a property.
+    throw new Error('Moor pin is absent: a release asset cannot be built without one');
+  }
+  if (moor.schemaVersion !== MOOR_PIN_SCHEMA_VERSION) {
     throw new Error(
       moor.schemaVersion === 1
         ? 'Moor pin schemaVersion 1 predates release coverage: re-project it from the release manifest'

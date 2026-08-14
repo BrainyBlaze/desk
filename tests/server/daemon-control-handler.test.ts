@@ -2,6 +2,7 @@ import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import { createDaemonControlHandler, isSafeDaemonSessionId } from '../../src/server/runtime/terminalDaemon.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../src/shared/daemonControlClient.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   DESK_EVENT_SCHEMA_VERSION,
@@ -172,6 +173,7 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     isDraining: vi.fn().mockReturnValue(false),
     enterMutation: vi.fn((_abort: () => void) => () => undefined),
     moorSessionStatus: vi.fn().mockReturnValue(undefined),
+    moorHolderPresence: vi.fn().mockResolvedValue('unknown'),
     health: vi.fn().mockReturnValue({ status: 'healthy' })
   };
 }
@@ -232,9 +234,25 @@ describe('daemon control handler', () => {
     });
     expect(daemon.moorSessionStatus).toHaveBeenCalledWith('sess-a');
 
+    // desk#50b: with no adopted link the route must ALSO answer the separable
+    // holder question, because callers read this 404 as a licence to start and
+    // it is equally the answer for a live session mid-re-adoption. The verdict
+    // is the daemon's, passed through verbatim — the route never invents one.
     daemon.moorSessionStatus = vi.fn().mockReturnValue(undefined);
+    daemon.moorHolderPresence = vi.fn().mockResolvedValue('present');
     const miss = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
-    expect(miss).toMatchObject({ status: 404, body: { ok: false } });
+    expect(miss).toEqual({
+      status: 404,
+      body: { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR, holder: 'present' }
+    });
+    expect(daemon.moorHolderPresence).toHaveBeenCalledWith('sess-a');
+
+    daemon.moorHolderPresence = vi.fn().mockResolvedValue('absent');
+    const dead = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
+    expect(dead).toEqual({
+      status: 404,
+      body: { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR, holder: 'absent' }
+    });
 
     const bad = await invoke(daemon, 'GET', '/control/moor-status?sessionId=../evil');
     expect(bad).toMatchObject({ status: 400 });

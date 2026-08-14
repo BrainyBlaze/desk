@@ -398,7 +398,6 @@ async function startRecoveryHarness(): Promise<{
   });
   const restored = await manager.restoreAndAttachMoor('session', {
     sessionPath,
-    geometry: { rows: 24, cols: 80 },
     killSpec: { binPath: '/usr/bin/true', args: [] }
   });
   expect(restored.ok).toBe(true);
@@ -562,7 +561,6 @@ describe('SessionManager controller-link recovery', () => {
     try {
       const restored = await manager.restoreAndAttachMoor('session', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: { binPath: '/usr/bin/touch', args: [detachedKillWitness] }
       });
       expect(restored.ok).toBe(true);
@@ -638,7 +636,6 @@ describe('SessionManager controller-link recovery', () => {
     try {
       expect((await manager.restoreAndAttachMoor('session', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: { binPath: '/usr/bin/touch', args: [detachedKillWitness] }
       })).ok).toBe(true);
 
@@ -683,8 +680,7 @@ describe('SessionManager controller-link recovery', () => {
     });
     try {
       expect((await manager.restoreAndAttachMoor('session', {
-        sessionPath,
-        geometry: { rows: 24, cols: 80 }
+        sessionPath
       })).ok).toBe(true);
       const writesBeforeRecovery = emulator.writes.map((bytes) => bytes.slice());
       await vi.advanceTimersByTimeAsync(3_001);
@@ -727,8 +723,7 @@ describe('SessionManager controller-link recovery', () => {
     });
     try {
       expect((await manager.restoreAndAttachMoor('session', {
-        sessionPath,
-        geometry: { rows: 24, cols: 80 }
+        sessionPath
       })).ok).toBe(true);
       const writesBeforeRecovery = emulator.writes.map((bytes) => bytes.slice());
       expect(new TextDecoder().decode(joined(...writesBeforeRecovery))).toContain('abc');
@@ -777,7 +772,6 @@ describe('SessionManager controller-link recovery', () => {
     try {
       expect((await manager.restoreAndAttachMoor('session', {
         sessionPath,
-        geometry: { rows: 24, cols: 80 },
         killSpec: { binPath: '/usr/bin/touch', args: [detachedKillWitness] }
       })).ok).toBe(true);
       await vi.advanceTimersByTimeAsync(3_001);

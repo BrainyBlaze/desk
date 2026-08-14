@@ -8,6 +8,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync
@@ -23,6 +26,25 @@ import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { readProviderSessionBinding } from '../src/server/providerSessionBinding.js';
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
+/**
+ * How many descriptors THIS process still holds on `path`, read out of the
+ * kernel's own fd table. A disposal test that only asserts `close()` was
+ * called proves the call, not the release — and a leaked append fd is a
+ * kernel-side fact, so that is where it has to be checked.
+ */
+function openDescriptorCount(path: string): number {
+  const resolved = realpathSync(path);
+  let count = 0;
+  for (const entry of readdirSync('/proc/self/fd')) {
+    try {
+      if (readlinkSync(join('/proc/self/fd', entry)) === resolved) count += 1;
+    } catch {
+      // The descriptor readdir itself opened has already gone.
+    }
+  }
+  return count;
+}
 
 class FakeUpgradeServer {
   listeners: UpgradeListener[] = [];
@@ -212,6 +234,24 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
 
     daemon.dispose();
     expect(server.listeners).toHaveLength(0); // bridge unmounted
+  });
+
+  it('releases the durable geometry store’s append descriptor on dispose (desk#62)', () => {
+    const geometryPath = join(home, '_engine', 'session-geometry.ndjson');
+    const daemon = createTerminalDaemon({
+      homeRoot: home,
+      moorBinPath: '/bin/false',
+      moorSocketRoot: home,
+      httpServer: new FakeUpgradeServer()
+    });
+    // Substance before shape: the store really is holding one append fd open,
+    // so the count below is measuring a release and not an absent file.
+    expect(openDescriptorCount(geometryPath)).toBe(1);
+
+    daemon.dispose();
+
+    // Every in-process daemon reconstruction used to leak exactly this one.
+    expect(openDescriptorCount(geometryPath)).toBe(0);
   });
 
   it('owns provider reset authorization and completion in the durable daemon', async () => {
