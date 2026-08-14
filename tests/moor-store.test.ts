@@ -325,7 +325,7 @@ describe('Moor store filesystem trust boundary', () => {
     }
   });
 
-  it('rejects an unprotected or missing directory as corruption', async () => {
+  it('distinguishes an unprotected directory from an unavailable directory', async () => {
     const unprotected = await store();
     await chmod(unprotected, 0o755);
     await expect(readMoorStoreSnapshot(unprotected, MoorStoreKind.Event)).rejects.toMatchObject({
@@ -333,7 +333,7 @@ describe('Moor store filesystem trust boundary', () => {
     });
     const missing = join(tmpdir(), `desk-moor-missing-${process.pid}-${Date.now()}`);
     await expect(readMoorStoreSnapshot(missing, MoorStoreKind.Event)).rejects.toMatchObject({
-      code: 'CORRUPT'
+      code: 'UNAVAILABLE'
     });
   });
 });

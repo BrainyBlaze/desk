@@ -17,10 +17,11 @@
  * - A TRANSIENT read failure says nothing about content: the directory was
  *   briefly unreachable, a syscall was interrupted, the holder was mid-commit.
  *   These get a bounded number of consecutive attempts before the observer
- *   gives up, and any successful read clears the count.
+ *   declares itself unavailable, and any successful read clears the state.
  *
- * The bound is what keeps this honest: a store that is genuinely gone still
- * terminates the observer, just not on the first stumble.
+ * The threshold is what keeps this honest: persistent loss is reported as an
+ * explicit observer outage, while low-level polling continues so observation
+ * can recover without retiring or relaunching the live holder.
  */
 import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -31,6 +32,7 @@ import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { MoorStoreKind } from '../src/server/runtime/moorStore.js';
 import {
   MoorEventObserver,
+  type MoorEventObserverAvailability,
   type MoorSessionEvent
 } from '../src/server/runtime/moorEventObserver.js';
 
@@ -117,14 +119,17 @@ async function writeSlot(
 function collector() {
   const seen: MoorSessionEvent[] = [];
   const diagnostics: string[] = [];
+  const availability: MoorEventObserverAvailability[] = [];
   let terminal = 0;
   return {
     seen,
     diagnostics,
+    availability,
     terminalCount: () => terminal,
     handlers: {
       onEvent: (value: MoorSessionEvent) => seen.push(value),
       onDiagnostic: (diagnostic: string) => diagnostics.push(diagnostic),
+      onAvailabilityChange: (value: MoorEventObserverAvailability) => availability.push(value),
       onTerminal: () => {
         terminal += 1;
       }
@@ -169,7 +174,7 @@ describe('a transient store read failure must not kill a live session', () => {
 
     // The store goes unreachable for a moment — exactly what an interrupted
     // syscall or a directory in flux looks like from here — and does so TWICE,
-    // three failures each time. Six failures against a budget of five: the
+    // three failures each time. Six failures against a threshold of five: the
     // session survives only if a successful read in between genuinely clears
     // the count, rather than the observer merely tolerating six in total.
     for (const outage of [1, 2]) {
@@ -198,9 +203,9 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(terminalCount()).toBe(0);
   });
 
-  it('still gives up — bounded — when the store never becomes readable', async () => {
+  it('declares persistent unreadability and resumes observation after recovery', async () => {
     const root = await readyStore();
-    const { diagnostics, terminalCount, handlers } = collector();
+    const { seen, diagnostics, availability, terminalCount, handlers } = collector();
     const observer = new MoorEventObserver({
       directory: root,
       generation: 7,
@@ -212,21 +217,33 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(await observer.start()).toBe(true);
 
     await chmod(root, 0o000);
-    await waitFor(() => terminalCount() === 1, 'terminal after the bounded attempts');
-    // Exactly the configured budget of attempts, each one reported: a retry
-    // that hides its failures would make an unreadable store look healthy.
-    expect(diagnostics.length).toBe(3);
+    await waitFor(
+      () => availability.some((value) => value.status === 'unavailable'),
+      'explicit unavailable state after the bounded attempts'
+    );
+    expect(availability[0]).toMatchObject({
+      status: 'unavailable',
+      consecutiveReadFailures: 3
+    });
+    expect(diagnostics).toHaveLength(3);
+    expect(terminalCount()).toBe(0);
 
-    // Bounded means bounded: nothing keeps polling after it gave up.
-    const settled = diagnostics.length;
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(diagnostics.length).toBe(settled);
-    expect(terminalCount()).toBe(1);
+    await chmod(root, 0o700);
+    const body = eventBody([
+      event('ready', 1, 1n),
+      event('link', 1, 2n, ',\"uri\":\"https://example.test/recovered\",\"truncated\":false')
+    ]);
+    await writeSlot(root, 1, body, commitRecord({ slot: 1, bytes: body, index: 2n, start: 1n, end: 3n }));
+
+    await waitFor(() => seen.length === 2, 'live event after persistent outage recovery');
+    expect(seen[1]).toMatchObject({ type: 'link', uri: 'https://example.test/recovered' });
+    expect(availability[1]).toEqual({ status: 'available' });
+    expect(terminalCount()).toBe(0);
   });
 
-  it('defaults to five consecutive attempts before giving up', async () => {
+  it('defaults to five consecutive failures before declaring unavailability', async () => {
     const root = await readyStore();
-    const { diagnostics, terminalCount, handlers } = collector();
+    const { diagnostics, availability, terminalCount, handlers } = collector();
     const observer = new MoorEventObserver({
       directory: root,
       generation: 7,
@@ -237,8 +254,16 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(await observer.start()).toBe(true);
 
     await chmod(root, 0o000);
-    await waitFor(() => terminalCount() === 1, 'terminal at the default budget');
-    expect(diagnostics.length).toBe(5);
+    await waitFor(
+      () => availability.some((value) => value.status === 'unavailable'),
+      'unavailable at the default threshold'
+    );
+    expect(availability[0]).toMatchObject({
+      status: 'unavailable',
+      consecutiveReadFailures: 5
+    });
+    expect(diagnostics).toHaveLength(5);
+    expect(terminalCount()).toBe(0);
   });
 
   it('treats a compaction gap as terminal on the FIRST read, with no retry', async () => {
@@ -263,5 +288,40 @@ describe('a transient store read failure must not kill a live session', () => {
     await waitFor(() => terminalCount() === 1, 'terminal on the compaction gap');
     expect(diagnostics.length).toBe(1);
     expect(diagnostics[0]).toMatch(/COMPACTION_GAP/);
+  });
+
+  it('treats committed structural corruption as terminal on the FIRST read', async () => {
+    const root = await readyStore();
+    const { diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 20,
+      maxConsecutiveReadFailures: 3,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    // This commit is readable and self-consistent at the commit-record layer,
+    // but its selected body is not a valid event snapshot. With no valid
+    // fallback slot, the store has established corruption rather than an I/O
+    // outage, so retrying cannot change the answer.
+    const body = encoder.encode('{"v":2}\n');
+    await writeSlot(
+      root,
+      0,
+      body,
+      commitRecord({ slot: 0, bytes: body, index: 2n, start: 1n, end: 1n })
+    );
+
+    await waitFor(
+      () => terminalCount() === 1 || availability.length > 0,
+      'terminal corruption decision'
+    );
+    expect(terminalCount()).toBe(1);
+    expect(availability).toEqual([]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatch(/CORRUPT/);
   });
 });
