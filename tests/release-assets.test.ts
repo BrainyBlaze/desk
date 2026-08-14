@@ -224,3 +224,26 @@ describe('release asset generation', () => {
     expect(() => writeReleaseAssets({ root, version: 'v0.3.0', outDir })).toThrow(/clean|dirty|untracked/i);
   });
 });
+
+describe('an absent Moor pin is diagnosed, not crashed on (desk#60)', () => {
+  // The guard uses optional chaining, so an absent pin passes it — and the
+  // very next expression dereferences the pin unguarded to choose the
+  // diagnostic. The release builder then dies with a raw TypeError naming a
+  // property, instead of saying that no pin was supplied at all.
+  it.each([[null], [undefined]])('names the missing pin rather than throwing a TypeError for %s', (moor) => {
+    const build = () =>
+      createInstallManifest({
+        version: 'v0.3.0',
+        sourceAsset: 'desk-v0.3.0-source.tar.gz',
+        sourceSha256: 'a'.repeat(64),
+        toolchains: {
+          schemaVersion: 1,
+          node: { version: '22.23.1', npmVersion: '10.9.8', targets: {} },
+          bun: { version: '1.3.14', tag: 'bun-v1.3.14', targets: {} }
+        },
+        moor: moor as never
+      });
+    expect(build).toThrow();
+    expect(build).not.toThrow(TypeError);
+  });
+});

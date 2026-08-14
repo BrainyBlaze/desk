@@ -255,7 +255,14 @@ export function readMoorPin(root = DEFAULT_ROOT) {
   if (topKeys.length !== expectedTop.length || topKeys.some((key, i) => key !== expectedTop[i])) {
     throw new Error(`moor pin must carry exactly [${expectedTop.join(', ')}]; got [${topKeys.join(', ')}]`);
   }
-  if (typeof pin.version !== 'string' || !/^v\d+\.\d+\.\d+$/.test(pin.version)) {
+  // The release document forbids a leading zero in any component: `v01.2.3`
+  // and `v1.2.3` denote one version but name two different tags, so a consumer
+  // that accepts both cannot say which release it pinned. A bare `0` component
+  // is canonical and stays accepted — v0.1.0 is the first release.
+  if (
+    typeof pin.version !== 'string' ||
+    !/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(pin.version)
+  ) {
     throw new Error(`moor pin version must be a canonical tag like v0.1.0, got ${JSON.stringify(pin.version)}`);
   }
   if (typeof pin.commit !== 'string' || !/^[0-9a-f]{40}$/.test(pin.commit)) {
