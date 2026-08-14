@@ -13,6 +13,7 @@ import {
   readDeskSessionBody,
   runManagedPlan
 } from '../../src/server/routes/sessionsRoutes.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../src/shared/daemonControlClient.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -491,6 +492,7 @@ describe('sessions route Claude profile continuity', () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-profile-edit-home-'));
     const work = mkdtempSync(join(tmpdir(), 'desk-profile-edit-work-'));
     const previousHome = process.env.HOME;
+    const previousDaemonUrl = process.env.DESK_DAEMON_URL;
     try {
       mkdirSync(join(home, '.config', 'desk'), { recursive: true });
       const manifestPath = join(home, '.config', 'desk', 'desk.yml');
@@ -535,6 +537,19 @@ describe('sessions route Claude profile continuity', () => {
       mkdirSync(join(sourceTranscript, '..'), { recursive: true });
       writeFileSync(sourceTranscript, 'conversation');
       process.env.HOME = home;
+      process.env.DESK_DAEMON_URL = 'http://127.0.0.1:5178';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({ ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR }),
+            {
+              status: 404,
+              headers: { 'content-type': 'application/json' }
+            }
+          )
+        )
+      );
 
       const req = Object.assign(new PassThrough(), {
         method: 'POST',
@@ -579,8 +594,14 @@ describe('sessions route Claude profile continuity', () => {
       expect(readFileSync(targetTranscript, 'utf8')).toBe('conversation');
       expect(statSync(targetTranscript).ino).toBe(statSync(sourceTranscript).ino);
       expect(readFileSync(manifestPath, 'utf8')).toContain('profileId: target');
+      expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe(
+        'http://127.0.0.1:5178/control/moor-status?sessionId=desk-chat'
+      );
     } finally {
       process.env.HOME = previousHome;
+      if (previousDaemonUrl === undefined) delete process.env.DESK_DAEMON_URL;
+      else process.env.DESK_DAEMON_URL = previousDaemonUrl;
+      vi.unstubAllGlobals();
       rmSync(home, { recursive: true, force: true });
       rmSync(work, { recursive: true, force: true });
     }

@@ -316,6 +316,10 @@ export class MoorEventObserver {
       await new Promise((resolve) => setImmediate(resolve));
     }
     if (this.stopped) return 'drained';
+    if (Date.now() >= deadline) {
+      this.stop();
+      return 'unobservable';
+    }
     this.polling = true;
     // The epoch fences a read that completes AFTER the deadline: its records
     // must not be delivered into a session everyone has already finished

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli/main.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../src/shared/daemonControlClient.js';
 
 async function run(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const output: string[] = [];
@@ -33,6 +34,7 @@ describe('desk CLI native lifecycle', () => {
     vi.stubEnv('PATH', '');
     vi.stubEnv('DESK_MOOR_BIN', join(dir, 'missing-moor'));
     vi.stubEnv('DESK_MOOR_SOCKET_ROOT', join(dir, 'moor'));
+    vi.stubEnv('DESK_DAEMON_URL', 'http://127.0.0.1:5178');
     vi.stubEnv('HOME', dir);
     const defaultManifest = join(dir, '.config', 'desk', 'desk.yml');
     mkdirSync(join(dir, '.config', 'desk'), { recursive: true });
@@ -63,13 +65,29 @@ describe('desk CLI native lifecycle', () => {
     expect(result.stderr).toContain('DESK_MOOR_BIN is not an executable file');
   });
 
-  it('reports status from the canonical moor socket path without requiring the binary', async () => {
+  it('reports the daemon authority\'s no-link verdict as missing without requiring the binary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR }),
+          {
+            status: 404,
+            headers: { 'content-type': 'application/json' }
+          }
+        )
+      )
+    );
+
     const result = await run(['status', '--file', manifest]);
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('missing');
     expect(result.stdout).toContain('alpha');
     expect(result.stderr).toBe('');
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe(
+      'http://127.0.0.1:5178/control/moor-status?sessionId=alpha'
+    );
   });
 
   it('captures retained output through the daemon instead of a local multiplexer', async () => {
