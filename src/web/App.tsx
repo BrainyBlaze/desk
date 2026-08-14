@@ -2148,7 +2148,7 @@ export function App(): JSX.Element {
         disabled={reduced}
         duration={{ enter: DESK_DURATIONS.enter, exit: DESK_DURATIONS.exit, stagger: DESK_DURATIONS.stagger }}
       >
-        <Animator active={booted} combine manager="stagger" duration={{ stagger: 0.12 }}>
+        <Animator active={booted && snapshot !== null} combine manager="stagger" duration={{ stagger: 0.12 }}>
           <main className="deskShell" style={themeVars}>
             <BackdropField />
             <AttentionAnnouncer statusViews={statusViews} />
@@ -2346,6 +2346,7 @@ export function App(): JSX.Element {
                   className={`editorMount channelsKeepAliveMount ${subsystem === 'channels' ? 'active' : ''}`}
                   style={{
                     visibility: subsystem === 'channels' ? 'visible' : 'hidden',
+                    opacity: subsystem === 'channels' ? 1 : 0,
                     pointerEvents: subsystem === 'channels' ? 'auto' : 'none'
                   }}
                   aria-hidden={subsystem !== 'channels'}
