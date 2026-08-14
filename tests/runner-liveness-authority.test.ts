@@ -49,8 +49,16 @@ function daemonAnswering(
 }
 
 const LIVE = { ok: true, generation: 3, wallStartMs: 1786560739350, pid: 209, running: true };
-/** The route's own negative envelope — the only 404 that proves absence. */
-const NO_LINK = { ok: false, error: 'session has no live moor link' };
+/**
+ * The route's own negative envelope — the only 404 that proves absence.
+ *
+ * Both halves are load-bearing (desk#50b). The wording distinguishes this
+ * route's verdict from any other 404; `holder` carries the separate, positive
+ * proof that no holder is there. The 404 alone only says this daemon holds no
+ * adopted LINK, which is equally true of a live session mid-re-adoption —
+ * `tests/runner-link-vs-holder.test.ts` owns that distinction.
+ */
+const NO_LINK = { ok: false, error: 'session has no live moor link', holder: 'absent' };
 
 describe('CLI liveness is the daemon authority, not a moor push heuristic (desk#50 / moor#8 §1)', () => {
   afterEach(() => {

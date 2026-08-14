@@ -542,7 +542,14 @@ describe('sessions route Claude profile continuity', () => {
         'fetch',
         vi.fn().mockResolvedValue(
           new Response(
-            JSON.stringify({ ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR }),
+            // A genuinely STOPPED session, which this edit path may only
+            // conclude from the holder proof (desk#50b): the bare 404 means
+            // "no adopted link", and the route now fails the edit closed on it.
+            JSON.stringify({
+              ok: false,
+              error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+              holder: 'absent'
+            }),
             {
               status: 404,
               headers: { 'content-type': 'application/json' }

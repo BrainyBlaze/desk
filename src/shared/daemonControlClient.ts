@@ -44,6 +44,35 @@ export interface CompleteProviderSessionLaunchRequest {
  * drift would surface as callers quietly deciding a live session is absent.
  */
 export const MOOR_STATUS_NO_LIVE_LINK_ERROR = 'session has no live moor link';
+
+/**
+ * The SECOND question `/control/moor-status` answers, and the reason desk#50b
+ * existed at all.
+ *
+ * The 404 above is a statement about the LINK: this daemon holds no adopted
+ * ATTACH_ACK descriptor for the session. That is true of every surviving
+ * session in the window between daemon start and re-adoption, and of every
+ * session whose controller link was lost — while its holder runs on. Reading
+ * the link's absence as the holder's absence conflated two propositions, and
+ * the conflation authorised starting a second holder over a live one.
+ *
+ * So the negative envelope carries a separate holder verdict, in a CLOSED
+ * vocabulary:
+ *   `present` — a holder was positively observed on this session's rendezvous;
+ *   `absent`  — the holder's absence was POSITIVELY PROVEN;
+ *   `unknown` — neither could be proven. Not a synonym for either.
+ *
+ * Only `absent` authorises a start. A daemon too old to send the field at all
+ * therefore reads as unknown, because a missing field is not a verdict.
+ */
+export type MoorHolderPresence = 'present' | 'absent' | 'unknown';
+
+/**
+ * The one holder verdict that authorises acting on the session's absence.
+ * Named because the callers that consume it are making a decision — starting
+ * a process — that a wrong reading turns into a duplicate holder.
+ */
+export const MOOR_HOLDER_PROVEN_ABSENT: MoorHolderPresence = 'absent';
 export interface ObserveProviderSessionIdentityRequest {
   deskSessionId: string;
   provider: Exclude<ProviderSessionProvider, 'opencode'>;

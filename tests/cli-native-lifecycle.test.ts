@@ -70,7 +70,13 @@ describe('desk CLI native lifecycle', () => {
       'fetch',
       vi.fn().mockResolvedValue(
         new Response(
-          JSON.stringify({ ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR }),
+          // desk#50b: `missing` needs BOTH — no adopted link, and a holder
+          // proven absent. The 404 on its own would print `unknown`.
+          JSON.stringify({
+            ok: false,
+            error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+            holder: 'absent'
+          }),
           {
             status: 404,
             headers: { 'content-type': 'application/json' }

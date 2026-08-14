@@ -3,7 +3,16 @@
 // never ensures/spawns over them.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -33,6 +42,7 @@ import {
   reconcileExistingSessions,
   resolveDaemonConfig
 } from '../src/server/runtime/terminalDaemonMain.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../src/shared/daemonControlClient.js';
 import { shellQuote } from '../src/shared/shell.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
@@ -523,5 +533,173 @@ describe('reconcileExistingSessions', () => {
       mode: 'terminal',
       producer: 'codex-hooks'
     });
+  });
+});
+
+describe('/control/moor-status separates the LINK from the HOLDER (desk#50b)', () => {
+  // The 404 means "this daemon holds no adopted link", which is true of every
+  // surviving session between daemon start and re-adoption. It must therefore
+  // also answer the separable question — is a holder nevertheless there? —
+  // and it must answer it by PROBING the rendezvous, not by stat()ing a node.
+  it('reports a present holder for a live but never-adopted session', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'desk-holder-'));
+    const socketRoot = join(base, 'moor');
+    mkdirSync(join(base, 'home', '_engine'), { recursive: true });
+    mkdirSync(socketRoot, { recursive: true, mode: 0o700 });
+    const survivingSock = join(socketRoot, 'surviving'); // moor rendezvous: no suffix
+    await spawnFakeMoorHolder(
+      survivingSock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: base }), 'surviving.events'),
+      2,
+      ['sleep', '30'],
+      base
+    );
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      moorBinPath: '/usr/bin/true',
+      moorSocketRoot: socketRoot,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      server.daemon.markReady();
+      // Nothing provisioned or reconciled this holder: there is no adopted
+      // ATTACH_ACK descriptor, exactly as during the re-adoption window.
+      expect(server.daemon.moorSessionStatus('surviving')).toBeUndefined();
+
+      const alive = await fetch(
+        `http://127.0.0.1:${server.port}/control/moor-status?sessionId=surviving`
+      );
+      expect(alive.status).toBe(404);
+      expect(await alive.json()).toEqual({
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'present'
+      });
+
+      // A session that never published a rendezvous at all: proven absent, so
+      // `desk up` can still start genuinely dead sessions.
+      const gone = await fetch(
+        `http://127.0.0.1:${server.port}/control/moor-status?sessionId=never-started`
+      );
+      expect(gone.status).toBe(404);
+      expect(await gone.json()).toEqual({
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'absent'
+      });
+
+      // desk#42: the probe observes; it never unlinks. The rendezvous node of
+      // a live holder must survive being asked about.
+      expect(existsSync(survivingSock)).toBe(true);
+    } finally {
+      await server.close();
+      await killFakeMoorHolder(survivingSock);
+      rmSync(base, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('answers unknown for a holder it cannot REACH, with the namespace intact', async () => {
+    // The namespace-gone test below exits at the socket-root guard and never
+    // reaches the probe, so on its own it pins only half of this. Here the
+    // root is a healthy private directory and the rendezvous for the session
+    // really exists — the probe runs, and comes back unable to decide.
+    //
+    // This is the branch the whole change exists for: an unreachable holder
+    // must not round down to a dead one. Collapsing it to `absent` reports
+    // `stale`, which authorises a start over a live holder — and it would do
+    // so only under permission trouble or load, exactly when a duplicate
+    // holder does the most damage.
+    const base = mkdtempSync(join(tmpdir(), 'desk-holder-unreachable-'));
+    const socketRoot = join(base, 'moor');
+    mkdirSync(join(base, 'home', '_engine'), { recursive: true });
+    mkdirSync(socketRoot, { recursive: true, mode: 0o700 });
+
+    // A live listener the probe has no permission to connect to (EACCES).
+    // Root bypasses that check by design, so the uid-independent ELOOP case
+    // below carries the same branch where this one cannot exist.
+    const unreachable = join(socketRoot, 'unreachable-holder');
+    const held = createServer(() => {});
+    await new Promise<void>((resolve, reject) => {
+      held.once('error', reject);
+      held.listen(unreachable, resolve);
+    });
+    const canTestEacces = typeof process.getuid !== 'function' || process.getuid() !== 0;
+    if (canTestEacces) chmodSync(unreachable, 0o000);
+
+    // A rendezvous name that cannot be resolved at all (ELOOP) — path
+    // resolution, not permissions, so this holds at every uid.
+    const looping = join(socketRoot, 'looping-holder');
+    symlinkSync(join(socketRoot, 'looping-other'), looping);
+    symlinkSync(looping, join(socketRoot, 'looping-other'));
+
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      moorBinPath: '/usr/bin/true',
+      moorSocketRoot: socketRoot,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      server.daemon.markReady();
+      const ask = async (sessionId: string): Promise<unknown> => {
+        const response = await fetch(
+          `http://127.0.0.1:${server.port}/control/moor-status?sessionId=${sessionId}`
+        );
+        expect(response.status).toBe(404);
+        return response.json();
+      };
+      const unknownBody = {
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'unknown'
+      };
+
+      expect(await ask('looping-holder')).toEqual(unknownBody);
+      if (canTestEacces) {
+        expect(await ask('unreachable-holder')).toEqual(unknownBody);
+      }
+
+      // desk#42 again, from the route: an indeterminate probe unlinks nothing.
+      expect(existsSync(unreachable)).toBe(true);
+    } finally {
+      await server.close();
+      if (canTestEacces) chmodSync(unreachable, 0o700);
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('answers unknown — never absent — when the rendezvous namespace is gone', async () => {
+    // Absence is a claim about the SESSION, and it can only be made inside the
+    // namespace where that session's holder would publish. With the socket
+    // root itself missing, a failed connect says the root is misconfigured or
+    // was swept, not that the holder died — so nothing may be claimed.
+    const base = mkdtempSync(join(tmpdir(), 'desk-holder-root-'));
+    const socketRoot = join(base, 'moor');
+    mkdirSync(join(base, 'home', '_engine'), { recursive: true });
+    const server = await startTerminalDaemonServer({
+      homeRoot: join(base, 'home'),
+      moorBinPath: '/usr/bin/true',
+      moorSocketRoot: socketRoot,
+      host: '127.0.0.1',
+      port: 0
+    });
+    try {
+      server.daemon.markReady();
+      rmSync(socketRoot, { recursive: true, force: true });
+      const answer = await fetch(
+        `http://127.0.0.1:${server.port}/control/moor-status?sessionId=whoever`
+      );
+      expect(answer.status).toBe(404);
+      expect(await answer.json()).toEqual({
+        ok: false,
+        error: MOOR_STATUS_NO_LIVE_LINK_ERROR,
+        holder: 'unknown'
+      });
+    } finally {
+      await server.close();
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

@@ -13,7 +13,11 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveMoorBinPath, resolveMoorSocketRoot } from '../../shared/moorPaths.js';
+import {
+  moorRendezvousPath,
+  resolveMoorBinPath,
+  resolveMoorSocketRoot
+} from '../../shared/moorPaths.js';
 import {
   sessionStateSubjectFor,
   type SessionRegistration
@@ -67,7 +71,7 @@ export function manifestReconcileTargets(
 ): ReconcileTarget[] {
   return loadDesk({}).sessions.flatMap((session) => {
     const sessionId = session.sessionId;
-    const sockPath = join(moorSocketRoot, sessionId); // moor rendezvous: no suffix
+    const sockPath = moorRendezvousPath(moorSocketRoot, sessionId);
     return socketExists(sockPath)
       ? [{ sessionId, sockPath, subject: sessionStateSubjectFor(session) }]
       : [];
