@@ -423,3 +423,25 @@ describe('the public fetch path refuses fail-open approval (desk#60)', () => {
     await expect(fetchMoor({ root })).rejects.toThrow(/not full-matrix/);
   });
 });
+
+// Two gaps found while writing the projector (desk#60). Both are places where
+// the code is laxer than the document it implements, and in both the laxness
+// only shows up on inputs nobody has produced yet — which is exactly when a
+// contract stops being enforced and starts being assumed.
+describe('the pin version grammar matches the release document (desk#60)', () => {
+  it('refuses a version component with a leading zero', async () => {
+    // docs/release-manifest-v1.md: "a stable SemVer core (vMAJOR.MINOR.PATCH,
+    // with no leading zero, prerelease, or build suffix)". `v01.2.3` and
+    // `v1.2.3` would name two different tags while denoting one version, so a
+    // consumer that accepts both cannot say which release it pinned.
+    write(pinWith({ requiredClosure: 'full-matrix' }, { version: 'v01.2.3' }));
+    await expect(fetchMoor({ root })).rejects.toThrow(/canonical tag/);
+  });
+
+  it('still accepts every canonical form, including a zero component', async () => {
+    // The fix must not overshoot: `v0.1.0` is the actual first release, and a
+    // bare `0` is not a leading zero.
+    write(pinWith({ requiredClosure: 'full-matrix' }, { version: 'v0.1.0' }));
+    await expect(fetchMoor({ root })).rejects.toThrow(/download|fetch|network|ENOTFOUND|getaddrinfo/i);
+  });
+});
