@@ -96,7 +96,10 @@ describe('terminal WS bridge integration (§7.4)', () => {
       ledger: new GenerationLedger(new InMemoryGenerationLedger()),
       supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
       emulatorFactory: { create: () => new FakeEmu() },
-      now: () => 1000
+      now: () => 1000,
+      // This bridge-only suite has no durable Moor store; acknowledge the
+      // production-required recovery gate explicitly.
+      onLateMoorAdoption: async () => true
     });
     router.sessions.ensure('s1', { rows: 40, cols: 120 });
     server = createServer();

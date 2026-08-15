@@ -656,6 +656,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       options.supervisor ?? new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
     emulatorFactory: new XtermEmulatorFactory(),
     now,
+    onLateMoorAdoption: reconcileMoorEvents,
     // desk#62: the daemon's journal of the last COMMANDED geometry. Written on
     // every commanded resize, read by every re-adoption — without it a restart
     // has nothing to approximate a surviving session's size with.
@@ -867,6 +868,12 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     /** The per-generation committed event-store DIRECTORY. */
     path: string;
     observer: MoorEventObserver;
+    /** One shared start/replay readiness result for every exact duplicate. */
+    readonly ready: Promise<void>;
+    /** Pending from map publication until the shared readiness is settled. */
+    readiness: 'pending' | 'settled';
+    /** A replaced pending registration can never later report readiness. */
+    superseded: boolean;
     /**
      * desk#59 — the ONE final drain for this registration. Both the retired
      * transition's microtask and the awaited control wrapper join this same
@@ -995,6 +1002,41 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       eventObservers.delete(observer.sessionId);
     }
   };
+  const cleanupFailedEventObserver = (observer: EventObserver): void => {
+    const replayKey = moorTransitionKey(observer.sessionId, observer.generation);
+    if (!observer.superseded) suppressedReplayTransitions.delete(replayKey);
+    if (eventObservers.get(observer.sessionId) === observer) {
+      eventObservers.delete(observer.sessionId);
+    }
+  };
+  const initializeEventObserver = async (observer: EventObserver): Promise<void> => {
+    const replayKey = moorTransitionKey(observer.sessionId, observer.generation);
+    try {
+      if (!(await observer.observer.start())) {
+        throw new Error('moor event store could not be observed');
+      }
+      if (observer.superseded) {
+        throw new Error('moor event observer registration was superseded');
+      }
+      // Downtime catch-up: the replay is fully delivered inside start(), so the
+      // last suppressed transition IS the final caught-up state — publish it as
+      // the one summary event downstream missed while the daemon was down. The
+      // key was cleared before start(), so this entry belongs to exactly THIS
+      // replay — publish unconditionally: a replayed exit legitimately stops
+      // this very observer (cleanup microtask) and must still be announced.
+      const caughtUp = suppressedReplayTransitions.get(replayKey);
+      suppressedReplayTransitions.delete(replayKey);
+      if (caughtUp !== undefined) {
+        eventJournal.appendTransition(caughtUp);
+      }
+    } catch (error) {
+      // Keep the failed exact registration published until its shared
+      // readiness rejects. A duplicate arriving from stop/failure cleanup must
+      // join that result instead of starting a replacement observer early.
+      observer.observer.stop();
+      throw error;
+    }
+  };
   const startEventObserver = async (
     sessionId: string,
     generation: number,
@@ -1002,7 +1044,13 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     descriptor?: { bodySlot: number; commitIndex: bigint; bodyLength: bigint; bodyHash: Uint8Array }
   ): Promise<EventObserver> => {
     const current = eventObservers.get(sessionId);
-    if (current?.generation === generation && current.path === path) return current;
+    if (current?.generation === generation && current.path === path) {
+      await current.ready;
+      if (current.superseded) {
+        throw new Error('moor event observer registration was superseded');
+      }
+      return current;
+    }
     const diagnosticIdentity = { sessionId, generation, path };
     const expectedIdentity = tag01Identity(socketPath(sessionId));
     const storeObserver = new MoorEventObserver({
@@ -1077,7 +1125,13 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         if (registered === undefined || registered.observer !== storeObserver) {
           return;
         }
-        stopEventObserver(registered);
+        registered.observer.stop();
+        if (
+          registered.readiness === 'settled' &&
+          eventObservers.get(sessionId) === registered
+        ) {
+          eventObservers.delete(sessionId);
+        }
         // desk#59: this retirement is caused by the observer failing, not by an
         // operator. Letting it fall through to the default control-retire
         // reason writes a lie into the record.
@@ -1093,35 +1147,98 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           });
       }
     });
-    const observer = { sessionId, generation, path, observer: storeObserver };
+    let resolveReady!: () => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    let observer!: EventObserver;
+    observer = {
+      sessionId,
+      generation,
+      path,
+      observer: storeObserver,
+      ready,
+      readiness: 'pending',
+      superseded: false
+    };
     // Registered BEFORE the replay runs: an already-committed exit transition
     // schedules its cleanup as a microtask, which must find this registration
     // (or the exited store would survive as an orphan).
-    if (current) stopEventObserver(current);
+    if (current) {
+      current.superseded = true;
+      stopEventObserver(current);
+    }
     eventObservers.set(sessionId, observer);
     const replayKey = moorTransitionKey(sessionId, generation);
     suppressedReplayTransitions.delete(replayKey); // no stale carryover into this replay
-    if (!(await storeObserver.start())) {
-      suppressedReplayTransitions.delete(replayKey);
-      if (eventObservers.get(sessionId) === observer) {
-        eventObservers.delete(sessionId);
+    void initializeEventObserver(observer).then(
+      () => {
+        observer.readiness = 'settled';
+        resolveReady();
+      },
+      (error) => {
+        observer.readiness = 'settled';
+        rejectReady(error);
+        // Promise reactions for every current waiter were enqueued by the
+        // rejection above. Cleanup follows in a later microtask, fenced to this
+        // exact registration, so a non-overlapping retry can start afterwards.
+        queueMicrotask(() => cleanupFailedEventObserver(observer));
       }
-      storeObserver.stop();
-      throw new Error('moor event store could not be observed');
-    }
-    // Downtime catch-up: the replay is fully delivered inside start(), so the
-    // last suppressed transition IS the final caught-up state — publish it as
-    // the one summary event downstream missed while the daemon was down. The
-    // key was cleared before start(), so this entry belongs to exactly THIS
-    // replay — publish unconditionally: a replayed exit legitimately stops
-    // this very observer (cleanup microtask) and must still be announced.
-    const caughtUp = suppressedReplayTransitions.get(replayKey);
-    suppressedReplayTransitions.delete(replayKey);
-    if (caughtUp !== undefined) {
-      eventJournal.appendTransition(caughtUp);
+    );
+    await observer.ready;
+    if (observer.superseded) {
+      throw new Error('moor event observer registration was superseded');
     }
     return observer;
   };
+  async function reconcileMoorEvents(
+    sessionId: string,
+    generation: number
+  ): Promise<boolean> {
+    // Restart reconciliation and late retry adoption re-observe the surviving
+    // holder's committed event store under the SAME OB-39 authority as
+    // provision: the adopted ATTACH_ACK descriptor must exist and name exactly
+    // the directory this launch derived, and replay starts at its frontier.
+    const path = moorEventStoreDir(
+      moorEventStoreRoot(options.moorBinPath),
+      sessionId,
+      generation
+    );
+    const diagnose = (message: string): false => {
+      reportMoorDiagnostic(
+        { sessionId, generation, path },
+        { code: 'tailer-io', message }
+      );
+      return false;
+    };
+    const status = router.sessions.moorStatus(sessionId);
+    if (status !== undefined && status.generation !== generation) {
+      return diagnose(
+        `could not reconcile the moor event store: adopted status is generation ${status.generation}, not ${generation}`
+      );
+    }
+    const authority = resolveStoreAuthority(status, path);
+    if (!authority.ok) {
+      return diagnose(`could not reconcile the moor event store: ${authority.error}`);
+    }
+    if (!existsSync(path)) {
+      return diagnose(
+        'could not reconcile the moor event store: the acknowledged store directory does not exist'
+      );
+    }
+    try {
+      await startEventObserver(sessionId, generation, path, authority.frontier);
+      return true;
+    } catch (error) {
+      return diagnose(
+        `could not reconcile the moor event store: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
   scheduleMoorObserverCleanup = (sessionId, generation, origin): void => {
     queueMicrotask(() => {
       const observer = eventObservers.get(sessionId);
@@ -1702,38 +1819,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     moorExitEvidence(sessionId) {
       return readMoorGenerationExitEvidence(socketPath(sessionId));
     },
-    async reconcileMoorEvents(sessionId, generation) {
-      // Restart reconciliation re-observes the surviving holder's committed
-      // event store for the ADOPTED generation under the SAME OB-39 authority
-      // as provision: the re-adopted ATTACH_ACK descriptor must exist and
-      // name exactly the directory this launch derived, and observation
-      // replays from the acknowledged frontier — the supervisor never guesses
-      // from the filesystem alone.
-      const path = moorEventStoreDir(moorEventStoreRoot(options.moorBinPath), sessionId, generation);
-      const diagnose = (message: string): false => {
-        reportMoorDiagnostic({ sessionId, generation, path }, { code: 'tailer-io', message });
-        return false;
-      };
-      const status = router.sessions.moorStatus(sessionId);
-      if (status !== undefined && status.generation !== generation) {
-        return diagnose(
-          `could not reconcile the moor event store: adopted status is generation ${status.generation}, not ${generation}`
-        );
-      }
-      const authority = resolveStoreAuthority(status, path);
-      if (!authority.ok) {
-        return diagnose(`could not reconcile the moor event store: ${authority.error}`);
-      }
-      if (!existsSync(path)) return diagnose('could not reconcile the moor event store: the acknowledged store directory does not exist');
-      try {
-        await startEventObserver(sessionId, generation, path, authority.frontier);
-        return true;
-      } catch (error) {
-        return diagnose(`could not reconcile the moor event store: ${
-          error instanceof Error ? error.message : String(error)
-        }`);
-      }
-    },
+    reconcileMoorEvents,
     clearSessionLog(sessionId) {
       return router.sessions.clearHolderLog(sessionId);
     },

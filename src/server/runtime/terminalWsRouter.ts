@@ -32,6 +32,8 @@ export interface TerminalWsRouterDeps {
   initialAgentHealth?: SessionManagerDeps['initialAgentHealth'];
   createAgentStateIntakeStore?: SessionManagerDeps['createAgentStateIntakeStore'];
   onStateTransition?: SessionManagerDeps['onStateTransition'];
+  /** Production recovery cannot declare a late Moor adoption healthy before observation. */
+  onLateMoorAdoption: NonNullable<SessionManagerDeps['onLateMoorAdoption']>;
 }
 
 export class TerminalWsRouter {
@@ -47,6 +49,7 @@ export class TerminalWsRouter {
       supervisor: deps.supervisor,
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
+      onLateMoorAdoption: deps.onLateMoorAdoption,
       sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame),
       onSubscriberFailure: (channelId) => {
         const ws = this.channelToWs.get(channelId);

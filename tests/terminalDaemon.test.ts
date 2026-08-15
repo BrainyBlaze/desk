@@ -21,7 +21,11 @@ import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createTerminalDaemon, provisionSessions, runTerminalDaemon, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
-import { moorEventStoreDir, moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
+import {
+  MoorEventObserver,
+  moorEventStoreDir,
+  moorEventStoreRoot
+} from '../src/server/runtime/moorEventObserver.js';
 import { MoorStoreKind } from '../src/server/runtime/moorStore.js';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { readProviderSessionBinding } from '../src/server/providerSessionBinding.js';
@@ -237,6 +241,20 @@ function fakeMoorStatus(
   };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('terminal daemon assembly (cutover Step 3)', () => {
   let home: string;
   let priorTmpdir: string | undefined;
@@ -250,9 +268,13 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
     process.env.TMPDIR = home;
   });
   afterEach(() => {
-    if (priorTmpdir === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = priorTmpdir;
-    rmSync(home, { recursive: true, force: true });
+    try {
+      if (priorTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = priorTmpdir;
+      rmSync(home, { recursive: true, force: true });
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('assembles a durable daemon, mounts the ws bridge, allocates from the fsync ledger, and disposes', () => {
@@ -767,6 +789,178 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
     }
   });
 
+  it.each(['false', 'throw', 'true'] as const)(
+    'desk#66 concurrent reconcile calls share a pending observer start that ends in %s',
+    async (outcome) => {
+      const daemon = createTerminalDaemon({
+        homeRoot: home,
+        moorBinPath: '/opt/moor',
+        moorSocketRoot: home,
+        httpServer: new FakeUpgradeServer()
+      });
+      const gate = deferred<boolean>();
+      const start = vi
+        .spyOn(MoorEventObserver.prototype, 'start')
+        .mockImplementation(() => gate.promise);
+      try {
+        const sessionPath = join(home, 'sess-1');
+        const storeDir = moorEventStoreDir(
+          moorEventStoreRoot('/opt/moor'),
+          'sess-1',
+          2
+        );
+        const store = new MoorStoreFixture(
+          storeDir,
+          2,
+          moorStoreIdentity(sessionPath)
+        );
+        vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
+          fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
+        );
+
+        const first = daemon.reconcileMoorEvents('sess-1', 2);
+        expect(start).toHaveBeenCalledTimes(1);
+        let secondSettled = false;
+        const second = daemon.reconcileMoorEvents('sess-1', 2).finally(() => {
+          secondSettled = true;
+        });
+
+        // Drain every eager async-function continuation without settling the
+        // controlled start. A follower that returns the registered object
+        // instead of its readiness reaches `finally` within these microtasks.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect.soft(secondSettled).toBe(false);
+
+        if (outcome === 'throw') {
+          gate.reject(new Error('deferred observer start failed'));
+        } else {
+          gate.resolve(outcome === 'true');
+        }
+
+        await expect(Promise.all([first, second])).resolves.toEqual(
+          outcome === 'true' ? [true, true] : [false, false]
+        );
+        expect(start).toHaveBeenCalledTimes(1);
+      } finally {
+        gate.resolve(false);
+        start.mockRestore();
+        daemon.dispose();
+      }
+    }
+  );
+
+  it('desk#66 exact duplicate joins a failed observer start during cleanup', async () => {
+    const daemon = createTerminalDaemon({
+      homeRoot: home,
+      moorBinPath: '/opt/moor',
+      moorSocketRoot: home,
+      httpServer: new FakeUpgradeServer()
+    });
+    const sessionPath = join(home, 'sess-1');
+    const storeDir = moorEventStoreDir(
+      moorEventStoreRoot('/opt/moor'),
+      'sess-1',
+      2
+    );
+    const store = new MoorStoreFixture(
+      storeDir,
+      2,
+      moorStoreIdentity(sessionPath)
+    );
+    const status = vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
+      fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
+    );
+    const start = vi
+      .spyOn(MoorEventObserver.prototype, 'start')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const cleanupReached = deferred<void>();
+    const originalStop = MoorEventObserver.prototype.stop;
+    let second: Promise<boolean> | undefined;
+    let triggerDuplicate = true;
+    const stop = vi
+      .spyOn(MoorEventObserver.prototype, 'stop')
+      .mockImplementation(function (this: MoorEventObserver): void {
+        originalStop.call(this);
+        if (!triggerDuplicate) return;
+        triggerDuplicate = false;
+        second = daemon.reconcileMoorEvents('sess-1', 2);
+        cleanupReached.resolve(undefined);
+      });
+    try {
+      const first = daemon.reconcileMoorEvents('sess-1', 2);
+      await cleanupReached.promise;
+      expect(second).toBeDefined();
+
+      const results = await Promise.all([first, second!]);
+      expect.soft(results).toEqual([false, false]);
+      expect(start).toHaveBeenCalledTimes(1);
+
+      await expect(daemon.reconcileMoorEvents('sess-1', 2)).resolves.toBe(true);
+      expect(start).toHaveBeenCalledTimes(2);
+    } finally {
+      daemon.dispose();
+      stop.mockRestore();
+      start.mockRestore();
+      status.mockRestore();
+    }
+  });
+
+  it('desk#66 replay-terminal duplicate joins the observer start failure before return', async () => {
+    const daemon = createTerminalDaemon({
+      homeRoot: home,
+      moorBinPath: '/opt/moor',
+      moorSocketRoot: home,
+      httpServer: new FakeUpgradeServer()
+    });
+    const sessionPath = join(home, 'sess-1');
+    const storeDir = moorEventStoreDir(
+      moorEventStoreRoot('/opt/moor'),
+      'sess-1',
+      2
+    );
+    const store = new MoorStoreFixture(
+      storeDir,
+      2,
+      moorStoreIdentity(sessionPath)
+    );
+    const status = vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
+      fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
+    );
+    const duplicateLaunched = deferred<void>();
+    let second: Promise<boolean> | undefined;
+    const start = vi
+      .spyOn(MoorEventObserver.prototype, 'start')
+      .mockImplementationOnce(function (this: MoorEventObserver): Promise<boolean> {
+        const onTerminal = (
+          this as unknown as { options: { onTerminal: () => void } }
+        ).options.onTerminal;
+        onTerminal();
+        second = daemon.reconcileMoorEvents('sess-1', 2);
+        duplicateLaunched.resolve(undefined);
+        return Promise.resolve(false);
+      })
+      .mockResolvedValue(true);
+    try {
+      const first = daemon.reconcileMoorEvents('sess-1', 2);
+      await duplicateLaunched.promise;
+      expect(second).toBeDefined();
+
+      const results = await Promise.all([first, second!]);
+      expect.soft(results).toEqual([false, false]);
+      expect.soft(start).toHaveBeenCalledTimes(1);
+
+      await expect(daemon.reconcileMoorEvents('sess-1', 2)).resolves.toBe(true);
+      expect(start).toHaveBeenCalledTimes(2);
+    } finally {
+      daemon.dispose();
+      start.mockRestore();
+      status.mockRestore();
+    }
+  });
+
   it('reconcileMoorEvents observes from the re-adopted descriptor and refuses a generation mismatch', async () => {
     const daemon = createTerminalDaemon({
       homeRoot: home,
@@ -784,7 +978,12 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
       const status = vi
         .spyOn(daemon.router.sessions, 'moorStatus')
         .mockReturnValue(adopted);
+      const start = vi.spyOn(MoorEventObserver.prototype, 'start');
       await expect(daemon.reconcileMoorEvents('sess-1', 2)).resolves.toBe(true);
+      await expect(daemon.reconcileMoorEvents('sess-1', 2)).resolves.toBe(true);
+      // Startup and late adoption share this idempotent installer: repeating
+      // one exact generation/path authority reuses its sole observer.
+      expect(start).toHaveBeenCalledTimes(1);
 
       // A stale adopted status from ANOTHER generation must never authorize
       // this generation's observation.
