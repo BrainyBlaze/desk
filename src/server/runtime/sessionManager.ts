@@ -40,7 +40,7 @@ import { MOOR_PRESERVE_GEOMETRY, type MoorStatus } from '../../shared/moorWire/m
 import { spawnMoorMaster } from './moorSpawnMaster.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, unlinkSync } from 'node:fs';
-import { type MoorSessionEvent } from './moorEventObserver.js';
+import { type MoorExitOutcome, type MoorSessionEvent } from './moorEventObserver.js';
 
 interface KillCommandSpec {
   binPath: string;
@@ -126,7 +126,8 @@ export interface TerminalObservationSnapshot {
   activityAt: number | null;
   title: string | null;
   link: { uri: string; at: number } | null;
-  exit: { code: number; at: number } | null;
+  /** `code` is the durable numeric view (see durableExitCode): null for an unprovable ending. */
+  exit: { code: number | null; at: number } | null;
   updatedAt: number;
 }
 
@@ -174,6 +175,28 @@ export type ProviderSessionResetLivenessResult<T> =
       reason: 'session-live' | 'retire-failed';
       error: string;
     };
+
+/**
+ * The durable record's numeric view of an ending, derived HERE — the one place
+ * the record is written — and persisted alongside the tagged outcome, never in
+ * its place: exited and terminated pass their code through, signalled follows
+ * the POSIX shell 128+signal convention, and an unprovable ending has no code
+ * at all. It is null, not zero: a zero would be indistinguishable from a
+ * clean exit. Nothing on the browser path reads this — the EXIT frame carries
+ * the outcome itself.
+ */
+function durableExitCode(outcome: MoorExitOutcome): number | null {
+  switch (outcome.kind) {
+    case 'exited':
+      return outcome.code;
+    case 'signalled':
+      return 128 + outcome.signal;
+    case 'terminated':
+      return outcome.code;
+    case 'unknown':
+      return null;
+  }
+}
 
 /**
  * Run a detached-master kill command to completion, BOUNDED: spawn error,
@@ -2077,21 +2100,24 @@ export class SessionManager {
         }
         next.link = { uri: event.uri, at };
         break;
-      case 'exit':
+      case 'exit': {
+        // desk#59: an unprovable ending has no honest number. Persisting 0
+        // would make it indistinguishable from a clean exit; null says "no
+        // code". The browser is not told this number at all — its EXIT frame
+        // carries the tagged outcome, so `unknown` reaches the surface as the
+        // word, never as a zero.
+        const code = durableExitCode(event.outcome);
         authority = this.core.markExited(
           sessionId,
           generation,
           {
-            // desk#59: an unprovable ending has no honest number. Persisting 0
-            // would make it indistinguishable from a clean exit; null says
-            // "no code", and the browser EXIT boundary maps that to 0 itself.
-            code: event.outcome.kind === 'unknown' ? null : event.code,
+            code,
             signal:
               event.outcome.kind === 'signalled' ? String(event.outcome.signal) : null,
             origin: 'observed',
             reason: null,
-            // desk#59: the raw ending as moor reported it. `code` stays only as
-            // the legacy numeric view for consumers that still read a number.
+            // desk#59: the raw ending as moor reported it. `code` above stays
+            // only as the durable numeric view for consumers that read a number.
             outcome: event.outcome,
             // The exit was observed: observation did not fail.
             diagnostic: null
@@ -2107,12 +2133,7 @@ export class SessionManager {
               `[desk] observed Moor exit for ${sessionId} generation ${generation} has no validated output boundary`
             );
           } else {
-            const delivery = this.core.emitExit(
-              sessionId,
-              event.code,
-              event.outputEnd,
-              event.outcome.kind === 'signalled' ? event.outcome.signal : 0
-            );
+            const delivery = this.core.emitExit(sessionId, event.outcome, event.outputEnd);
             this.sealInputForObservedExit(sessionId);
             if (delivery instanceof Promise) {
               void delivery
@@ -2129,8 +2150,9 @@ export class SessionManager {
             }
           }
         }
-        next.exit = { code: event.code, at };
+        next.exit = { code, at };
         break;
+      }
     }
 
     next.updatedAt = Math.max(next.updatedAt, at);

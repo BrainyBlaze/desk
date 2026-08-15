@@ -1144,7 +1144,6 @@ describe('SessionManager controller-link recovery', () => {
         harness.manager.observeMoorEvent('session', GENERATION, {
           ts: Date.now() / 1_000,
           type: 'exit',
-          code: 0,
           outcome: { kind: 'exited', code: 0 },
           outputEnd: 1n
         })
@@ -1587,7 +1586,6 @@ describe('SessionManager controller-link recovery', () => {
         manager.observeMoorEvent('session', GENERATION, {
           ts: Date.now() / 1_000,
           type: 'exit',
-          code: 0,
           outcome: { kind: 'exited', code: 0 },
           outputEnd: 1n
         })

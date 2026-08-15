@@ -66,7 +66,6 @@ describe('late holder exit after retire, on the real observer path (desk#59)', (
     // 28 ms later moor reports the truth for the EXACT retired generation.
     const observed = mgr.observeMoorEvent('sess', generation, {
       type: 'exit',
-      code: 143,
       outcome: { kind: 'signalled', signal: 15 },
       ts: 1.028
     } as never);
@@ -90,7 +89,6 @@ describe('late holder exit after retire, on the real observer path (desk#59)', (
 
     const stale = mgr.observeMoorEvent('sess', generation + 1, {
       type: 'exit',
-      code: 7,
       outcome: { kind: 'exited', code: 7 },
       ts: 1.028
     } as never);
@@ -195,10 +193,9 @@ describe('an unprovable ending is never persisted as a clean exit (desk#59)', ()
 
     mgr.observeMoorEvent('sess', generation, {
       type: 'exit',
-      // The legacy numeric view of an unprovable ending is 0, which in the
-      // durable record would be indistinguishable from a child that exited
-      // cleanly. The record must say "no code", not "code zero".
-      code: 0,
+      // An unprovable ending has no number; a 0 in the durable record would
+      // be indistinguishable from a child that exited cleanly. The record must
+      // say "no code", not "code zero".
       outcome: { kind: 'unknown' },
       ts: 1.028
     } as never);
@@ -210,7 +207,7 @@ describe('an unprovable ending is never persisted as a clean exit (desk#59)', ()
   });
 });
 
-describe('the legacy EXIT frame stays live-only (desk#59)', () => {
+describe('the browser EXIT frame stays live-only (desk#59)', () => {
   it('does not announce a strengthening to surfaces that are already gone', () => {
     const frames: Array<{ sessionId: string; frame: unknown }> = [];
     const mgr = new SessionManager({
@@ -227,7 +224,6 @@ describe('the legacy EXIT frame stays live-only (desk#59)', () => {
 
     mgr.observeMoorEvent('sess', generation, {
       type: 'exit',
-      code: 143,
       outcome: { kind: 'signalled', signal: 15 },
       ts: 1.028
     } as never);

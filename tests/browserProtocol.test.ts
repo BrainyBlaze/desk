@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  BP_HEADER_LEN,
   BP_MAX_INPUT_BYTES,
   BP_MAX_QUERY_BYTES,
   BP_VERSION,
@@ -15,6 +16,7 @@ import {
   isClientFrame,
   isServerFrame
 } from '../src/shared/browserProtocol/index.js';
+import type { MoorExitOutcome } from '../src/shared/controlPlane/contract.js';
 
 const bytes = (...v: number[]) => Uint8Array.of(...v);
 
@@ -30,8 +32,11 @@ const SAMPLES: Record<string, BpFrame> = {
   SNAPSHOT: { type: BpFrameType.SNAPSHOT, channelId: 7, generation: 4, revision: 9, offset: 900n, text: '\x1b[H\x1b[2J restored — ★' },
   OUTPUT: { type: BpFrameType.OUTPUT, channelId: 7, generation: 4, revision: 9, offset: 902n, bytes: bytes(0x00, 0xff, 0x1b, 0x5b, 0x41) },
   GAP: { type: BpFrameType.GAP, channelId: 7, from: 902n, to: 1500n },
-  EXIT: { type: BpFrameType.EXIT, channelId: 7, code: -1, signal: 15 },
-  EXIT_CLEAN: { type: BpFrameType.EXIT, channelId: 7, code: 0, signal: 0 },
+  EXIT_EXITED: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'exited', code: 7 } },
+  EXIT_SIGNALLED: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'signalled', signal: 15 } },
+  EXIT_TERMINATED_GRACEFUL: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'terminated', code: 0, method: 'graceful' } },
+  EXIT_TERMINATED_FORCED: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'terminated', code: 1, method: 'forced' } },
+  EXIT_UNKNOWN: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'unknown' } },
   HEARTBEAT: { type: BpFrameType.HEARTBEAT },
   ERROR: { type: BpFrameType.ERROR, channelId: 0, code: BpError.STALE_GENERATION },
   QUERY_REQUEST: { type: BpFrameType.QUERY_REQUEST, channelId: 7, queryOffset: 900n, leaseEpoch: 3, queryBytes: bytes(0x1b, 0x5b, 0x63) }
@@ -47,16 +52,69 @@ describe('browser protocol — frame round-trip (§7.4)', () => {
     });
   }
 
-  it('exit code -1 survives as a signed i32', () => {
-    const dec = decodeBpFrame(encodeBpFrame(SAMPLES.EXIT)) as Extract<BpFrame, { type: BpFrameType.EXIT }>;
-    expect(dec.code).toBe(-1);
-    expect(dec.signal).toBe(15);
-  });
-
   it('u64 offsets survive as BigInt beyond 2^53', () => {
     const big = 9_007_199_254_740_993n; // 2^53 + 1
     const dec = decodeBpFrame(encodeBpFrame({ type: BpFrameType.OUTPUT, channelId: 1, generation: 1, revision: 1, offset: big, bytes: bytes(1) })) as Extract<BpFrame, { type: BpFrameType.OUTPUT }>;
     expect(dec.offset).toBe(big);
+  });
+});
+
+describe('browser protocol — EXIT carries the tagged outcome (desk#70)', () => {
+  // The frame used to be one i32 code + u16 signal, so an unprovable ending
+  // had no way onto the wire except as a fabricated `code 0`. Each moor ending
+  // now travels under its own tag and comes back as exactly that tag.
+  const outcomes: MoorExitOutcome[] = [
+    { kind: 'exited', code: 0 },
+    { kind: 'exited', code: 143 },
+    { kind: 'signalled', signal: 15 },
+    { kind: 'terminated', code: 0, method: 'graceful' },
+    { kind: 'terminated', code: 3221225477, method: 'forced' }, // a full-width Windows DWORD (STATUS_ACCESS_VIOLATION)
+    { kind: 'unknown' }
+  ];
+  for (const outcome of outcomes) {
+    it(`${JSON.stringify(outcome)} decodes to the same tagged value`, () => {
+      const dec = decodeBpFrame(encodeBpFrame({ type: BpFrameType.EXIT, channelId: 9, outcome })) as Extract<BpFrame, { type: BpFrameType.EXIT }>;
+      expect(dec.outcome).toEqual(outcome);
+    });
+  }
+
+  it('unknown survives as unknown and puts no number on the wire at all', () => {
+    const enc = encodeBpFrame({ type: BpFrameType.EXIT, channelId: 9, outcome: { kind: 'unknown' } });
+    // header (version, type) + channelId u32 + kind u8 — nothing that could be read as a code.
+    expect(enc.length).toBe(BP_HEADER_LEN + 4 + 1);
+    const dec = decodeBpFrame(enc) as Extract<BpFrame, { type: BpFrameType.EXIT }>;
+    expect(dec.outcome).toEqual({ kind: 'unknown' });
+    expect(dec).not.toHaveProperty('code');
+    expect(dec).not.toHaveProperty('signal');
+  });
+
+  it('refuses to encode a code or signal outside u32 rather than wrapping it into a different number', () => {
+    for (const outcome of [
+      { kind: 'exited', code: -1 },
+      { kind: 'exited', code: 2 ** 32 },
+      { kind: 'signalled', signal: 1.5 },
+      { kind: 'terminated', code: -1, method: 'forced' }
+    ] as MoorExitOutcome[]) {
+      try {
+        encodeBpFrame({ type: BpFrameType.EXIT, channelId: 9, outcome });
+        throw new Error('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(BrowserProtocolError);
+        expect((e as BrowserProtocolError).code).toBe(BpError.INTERNAL);
+      }
+    }
+  });
+
+  it('rejects an EXIT whose kind byte is not a known ending instead of inventing one', () => {
+    const enc = encodeBpFrame({ type: BpFrameType.EXIT, channelId: 9, outcome: { kind: 'unknown' } });
+    enc[BP_HEADER_LEN + 4] = 200; // the kind byte
+    try {
+      decodeBpFrame(enc);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(BrowserProtocolError);
+      expect((e as BrowserProtocolError).code).toBe(BpError.UNKNOWN_TYPE);
+    }
   });
 });
 

@@ -7,49 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BP_CONN_CHANNEL,
   BpError,
-  BpFrameType,
-  decodeBpFrame,
-  encodeBpFrame,
-  type BpFrame
+  BpFrameType
 } from '../src/shared/browserProtocol/index.js';
-import { BinaryTerminalBrokerClient, type BinaryBrokerSocket, type BinarySurfaceHandlers } from '../src/web/binaryTerminalBrokerClient.js';
-
-class FakeSocket implements BinaryBrokerSocket {
-  readyState = 1; // OPEN — the client only sends once it sees the 'open' event
-  binaryType = '';
-  sent: BpFrame[] = [];
-  private handlers = new Map<string, (event: any) => void>();
-  send(data: Uint8Array): void {
-    this.sent.push(decodeBpFrame(data));
-  }
-  close(): void {
-    this.readyState = 3;
-  }
-  addEventListener(type: string, handler: (event: any) => void): void {
-    this.handlers.set(type, handler);
-  }
-  fireOpen(): void {
-    this.handlers.get('open')?.({});
-  }
-  fireClose(): void {
-    this.readyState = 3;
-    this.handlers.get('close')?.({});
-  }
-  deliver(frame: BpFrame): void {
-    // WS binaryType 'arraybuffer' delivers an ArrayBuffer.
-    const bytes = encodeBpFrame(frame);
-    this.handlers.get('message')?.({ data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
-  }
-  /** Frames of a given type the client has sent so far. */
-  ofType<T extends BpFrameType>(type: T): Extract<BpFrame, { type: T }>[] {
-    return this.sent.filter((f) => f.type === type) as Extract<BpFrame, { type: T }>[];
-  }
-}
+import type { MoorExitOutcome } from '../src/shared/controlPlane/contract.js';
+import { BinaryTerminalBrokerClient, type BinarySurfaceHandlers } from '../src/web/binaryTerminalBrokerClient.js';
+import { FakeBinaryBrokerSocket as FakeSocket } from './helpers/fake-binary-broker-socket.js';
 
 interface Captured {
   output: Uint8Array[];
   snapshot: string[];
-  exit: { code: number; signal: number }[];
+  exit: MoorExitOutcome[];
   error: number[];
   clientError: string[];
   connection: boolean[];
@@ -59,7 +26,7 @@ function handlers(cap: Captured): BinarySurfaceHandlers {
   return {
     onOutput: (b) => cap.output.push(b),
     onSnapshot: (t) => cap.snapshot.push(t),
-    onExit: (code, signal) => cap.exit.push({ code, signal }),
+    onExit: (outcome) => cap.exit.push(outcome),
     onError: (code) => cap.error.push(code),
     onClientError: (message) => cap.clientError.push(message),
     onConnectionChange: (up) => cap.connection.push(up)
@@ -567,12 +534,21 @@ describe('binary terminal broker client (§7.4)', () => {
     expect([...cap.output[0]]).toEqual([2]);
   });
 
-  it('routes EXIT to the owning surface', () => {
+  it('routes EXIT to the owning surface with the tagged outcome intact', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     socket.deliver(ack(1));
-    socket.deliver({ type: BpFrameType.EXIT, channelId: 1, code: 137, signal: 9 });
-    expect(cap.exit).toEqual([{ code: 137, signal: 9 }]);
+    socket.deliver({ type: BpFrameType.EXIT, channelId: 1, outcome: { kind: 'signalled', signal: 9 } });
+    expect(cap.exit).toEqual([{ kind: 'signalled', signal: 9 }]);
+  });
+
+  it('hands an unprovable ending to the surface as unknown, never as a number', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    socket.deliver(ack(1));
+    socket.deliver({ type: BpFrameType.EXIT, channelId: 1, outcome: { kind: 'unknown' } });
+    expect(cap.exit).toEqual([{ kind: 'unknown' }]);
   });
 });

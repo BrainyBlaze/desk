@@ -189,7 +189,7 @@ describe('Moor current exit output boundary', () => {
           throw new Error('lifecycle/event exit mismatch');
         }
         exitApplications += 1;
-        await core.emitExit('session', event.code, BigInt(evidence.outputEnd));
+        await core.emitExit('session', event.outcome, BigInt(evidence.outputEnd));
       },
       onEventError: classifyExitError,
       onDiagnostic: () => undefined

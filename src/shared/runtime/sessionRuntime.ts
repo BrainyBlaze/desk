@@ -13,6 +13,7 @@
 // documented extension points wired the same way.
 
 import { BpFrameType, type BpFrame } from '../browserProtocol/index.js';
+import type { MoorExitOutcome } from '../controlPlane/contract.js';
 import { InMemoryCmdCache, type DeliveryTxn, applyDelivery } from '../delivery/index.js';
 import { type EmulatorPort } from './emulatorPort.js';
 
@@ -32,7 +33,6 @@ export interface SessionRuntimeDeps {
    */
   sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
-  onExit?: (exit: { code: number; signal: number }) => void;
 }
 
 /**
@@ -72,11 +72,24 @@ interface TerminalStateDelivery {
 }
 
 interface PendingExit {
-  code: number;
-  signal: number;
+  outcome: MoorExitOutcome;
   outputEnd: bigint;
   promise: Promise<void>;
   resolve: () => void;
+}
+
+/** Two endings are the same claim only if every field of the tag agrees. */
+function sameExitOutcome(a: MoorExitOutcome, b: MoorExitOutcome): boolean {
+  switch (a.kind) {
+    case 'exited':
+      return b.kind === 'exited' && b.code === a.code;
+    case 'signalled':
+      return b.kind === 'signalled' && b.signal === a.signal;
+    case 'terminated':
+      return b.kind === 'terminated' && b.code === a.code && b.method === a.method;
+    case 'unknown':
+      return b.kind === 'unknown';
+  }
 }
 
 export class SessionRuntime {
@@ -157,18 +170,14 @@ export class SessionRuntime {
   /**
    * Fan a child-exit to every subscribed surface (cutover parity: the browser
    * receives an explicit EXIT push, not just an authority-snapshot change).
-   * The moor event stream folds a signalled end into its exit code upstream,
-   * so `signal` is 0 unless a caller can still distinguish one.
+   * The ending travels as the tagged outcome moor reported — `unknown` stays
+   * `unknown` all the way to the frame; nothing here invents a code for it.
    */
-  emitExit(code: number, outputEnd: bigint, signal = 0): void | Promise<void> {
+  emitExit(outcome: MoorExitOutcome, outputEnd: bigint): void | Promise<void> {
     if (this.disposed || this.exitFenced) return this.exitDelivery;
     const pending = this.pendingExit;
     if (pending !== undefined) {
-      if (
-        pending.code !== code ||
-        pending.signal !== signal ||
-        pending.outputEnd !== outputEnd
-      ) {
+      if (!sameExitOutcome(pending.outcome, outcome) || pending.outputEnd !== outputEnd) {
         throw new Error('conflicting Moor session exit boundary');
       }
       return pending.promise;
@@ -182,7 +191,7 @@ export class SessionRuntime {
     const delivery = new Promise<void>((done) => {
       resolve = done;
     });
-    this.pendingExit = { code, signal, outputEnd, promise: delivery, resolve };
+    this.pendingExit = { outcome, outputEnd, promise: delivery, resolve };
     this.exitDelivery = delivery;
     this.completeExitIfReady();
     return delivery;
@@ -412,8 +421,7 @@ export class SessionRuntime {
       this.sendSubscriber(channelId, {
         type: BpFrameType.EXIT,
         channelId,
-        code: pending.code,
-        signal: pending.signal
+        outcome: pending.outcome
       });
     }
     pending.resolve();

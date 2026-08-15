@@ -267,22 +267,7 @@ export class DaemonCore {
       sendMasterInput: (bytes, binary, surfaceId) =>
         this.d.sendMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterResize: (rows, cols, surfaceId) =>
-        this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
-      onExit: (exit) => {
-        this.authority.markExited(sessionId, generation, {
-          code: exit.code,
-          signal: exit.signal === 0 ? null : String(exit.signal),
-          origin: 'observed',
-          reason: null,
-          // The supervised worker path reports a POSIX code/signal pair
-          // directly; the tagged outcome states which of the two it was.
-          outcome:
-            exit.signal === 0 || exit.signal === undefined
-              ? { kind: 'exited', code: exit.code ?? 0 }
-              : { kind: 'signalled', signal: Number(exit.signal) },
-          diagnostic: null
-        });
-      }
+        this.d.sendMasterResize(sessionId, rows, cols, surfaceId)
     });
     this.sessions.set(sessionId, { runtime, lease: createLeaseState(), generation });
   }
@@ -426,24 +411,18 @@ export class DaemonCore {
     return this.sessions.get(sessionId)?.runtime.cursor();
   }
 
-  /** Fan a child-exit push to the session's subscribed browser surfaces. */
   /**
-   * Announce the legacy numeric EXIT to a LIVE session's browser surfaces.
+   * Announce the holder's tagged ending to a LIVE session's browser surfaces.
    *
    * desk#59 — deliberately live-only. A retired session's placeholder can still
    * be strengthened by the holder's real exit long after its runtime is gone;
    * that correction belongs in the durable record, not on a wire whose surfaces
    * were already torn down. The lookup makes it a no-op rather than relying on
-   * callers to remember, and the number itself is a compatibility view derived
-   * at this boundary — never the durable truth.
+   * callers to remember. The outcome crosses this boundary as-is: the same
+   * tagged value the durable record persists, `unknown` included.
    */
-  emitExit(
-    sessionId: string,
-    code: number,
-    outputEnd: bigint,
-    signal = 0
-  ): void | Promise<void> {
-    return this.sessions.get(sessionId)?.runtime.emitExit(code, outputEnd, signal);
+  emitExit(sessionId: string, outcome: MoorExitOutcome, outputEnd: bigint): void | Promise<void> {
+    return this.sessions.get(sessionId)?.runtime.emitExit(outcome, outputEnd);
   }
 
   /**

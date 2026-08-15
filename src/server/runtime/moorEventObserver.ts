@@ -42,26 +42,6 @@ function exitOutcome(value: Record<string, unknown>): MoorExitOutcome {
   return { kind: 'unknown' };
 }
 
-/**
- * The legacy numeric view, derived at the edge and never persisted as the whole
- * truth: exited passes its code through, signalled follows the POSIX shell
- * 128+signal convention, terminated reports the holder's code, and an
- * unprovable ending has no honest number -- it reports 0 only because the
- * browser EXIT frame has no way to say "unknown".
- */
-function legacyExitCode(outcome: MoorExitOutcome): number {
-  switch (outcome.kind) {
-    case 'exited':
-      return outcome.code;
-    case 'signalled':
-      return 128 + outcome.signal;
-    case 'terminated':
-      return outcome.code;
-    case 'unknown':
-      return 0;
-  }
-}
-
 /** Desk-facing session event — the discriminated shape the router consumes. */
 export type MoorSessionEvent =
   | { ts: number; type: 'ready' }
@@ -70,7 +50,7 @@ export type MoorSessionEvent =
   | {
       ts: number;
       type: 'exit';
-      code: number;
+      /** The raw ending, tag preserved — the only view of the exit this event carries. */
       outcome: MoorExitOutcome;
       /** Validated lifecycle byte boundary, attached by the daemon consumer. */
       outputEnd?: bigint;
@@ -216,15 +196,12 @@ function mapRecord(record: MoorEventRecord): MoorSessionEvent | undefined {
       };
     case 'link':
       return { ts, type: 'link', uri: typeof value.uri === 'string' ? value.uri : '' };
-    case 'exit': {
+    case 'exit':
       // The store has already validated the record against the canonical
       // grammar, so each ending carries exactly its own fields. The tagged
-      // outcome is what Desk persists; `code` stays only as the legacy numeric
-      // view (exited passthrough, signalled 128+signal) that older consumers
-      // and the browser EXIT frame still read.
-      const outcome = exitOutcome(value);
-      return { ts, type: 'exit', code: legacyExitCode(outcome), outcome };
-    }
+      // outcome is what Desk persists and what the browser EXIT frame carries;
+      // no numeric view is derived here.
+      return { ts, type: 'exit', outcome: exitOutcome(value) };
     default:
       // Unknown-but-valid event types (future moor additions) are skipped: the
       // store already validated them; Desk just has no consumer yet.

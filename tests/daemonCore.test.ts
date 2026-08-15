@@ -317,7 +317,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     masterResizes.length = 0;
 
     const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
-    const exit = core.emitExit('s1', 7, 2n);
+    const exit = core.emitExit('s1', { kind: 'exited', code: 7 }, 2n);
     expect(browserOut).toEqual([]);
     expect(
       core.onBrowserInputByChannel(channelId, false, new TextEncoder().encode('after-exit'))
@@ -353,7 +353,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
         .filter((entry) => entry.channelId === channelId)
         .map((entry) => entry.frame.type)
     ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
-    const exit = core.emitExit('s1', 7, 1n);
+    const exit = core.emitExit('s1', { kind: 'exited', code: 7 }, 1n);
 
     emulator.release();
     await Promise.all([output, exit]);
@@ -379,7 +379,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     core.ensure('s1', { rows: 40, cols: 120 });
 
     const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
-    const exit = core.emitExit('s1', 7, 1n);
+    const exit = core.emitExit('s1', { kind: 'exited', code: 7 }, 1n);
     expect(core.subscribe('s1', 'during-final-drain', 40, 120)).toBeUndefined();
 
     emulator.release();

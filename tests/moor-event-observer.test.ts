@@ -172,7 +172,11 @@ describe('MoorEventObserver', () => {
     });
   });
 
-  it('maps exit endings onto Desk exit codes (exited passthrough, signalled 128+signal)', async () => {
+  it('emits the exit as the tagged outcome and nothing else — no folded number rides along (desk#70)', async () => {
+    // The observer used to attach a legacy `code` (128+signal here, and a
+    // fabricated 0 for an unprovable ending) beside the outcome. The event now
+    // carries the ending exactly once, as its tag; every numeric view is
+    // derived by whoever needs one, from the tag, and says null when it cannot.
     const root = await makeStore();
     const body = eventBody([
       event('ready', 1, 1n),
@@ -182,7 +186,8 @@ describe('MoorEventObserver', () => {
 
     const { seen, handlers } = collector();
     await startObserver(root, handlers);
-    expect(seen[1]!.event).toMatchObject({ type: 'exit', code: 143 });
+    expect(seen[1]!.event).toEqual({ ts: 1, type: 'exit', outcome: { kind: 'signalled', signal: 15 } });
+    expect(seen[1]!.event).not.toHaveProperty('code');
   });
 
   it('preserves the raw Moor outcome instead of folding it to one number (desk#59)', async () => {
@@ -190,8 +195,8 @@ describe('MoorEventObserver', () => {
     // number before the event ever entered Desk, so a SIGTERM death and a
     // child that exited 143 on its own became indistinguishable -- and the
     // durable record could no longer say which happened. The tagged outcome
-    // must survive to the durable model; the legacy number is derived only at
-    // the browser compatibility boundary.
+    // must survive to the durable model, which derives its own numeric view
+    // from it; the browser EXIT frame carries the tag itself (desk#70).
     const cases: Array<[string, Record<string, unknown>]> = [
       [',"ended":"signalled","signal":15', { kind: 'signalled', signal: 15 }],
       [',"ended":"exited","code":7', { kind: 'exited', code: 7 }],

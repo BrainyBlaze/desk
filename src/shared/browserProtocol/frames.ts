@@ -10,7 +10,16 @@
 // Every DATA frame (SNAPSHOT/OUTPUT) carries generation+revision so a stale
 // producer's bytes are discardable at the browser.
 
-export const BP_VERSION = 1;
+/**
+ * v2: EXIT carries the holder's tagged ending (BpExitKind + per-kind payload)
+ * instead of one i32 code + u16 signal, so an unprovable ending travels as
+ * `unknown` rather than a fabricated code 0. Both ends ship in this repo and
+ * the browser is the only consumer, so the layout was replaced, not extended;
+ * a tab still running the v1 bundle rejects every v2 frame as BAD_VERSION (and
+ * the server its v1 frames) until it reloads — silence, never a mis-decoded
+ * ending shown as a code.
+ */
+export const BP_VERSION = 2;
 export const BP_HEADER_LEN = 2; // u8 version + u8 type
 
 /** Hard per-frame payload cap (bytes). The server chunks output/snapshots below this. */
@@ -60,6 +69,28 @@ export function isServerFrame(type: number): boolean {
 export const BpInputFlag = {
   BINARY: 1 << 0
 } as const;
+
+/**
+ * EXIT ending kinds (u8) — the tag of the holder's outcome exactly as moor
+ * reported it (the durable record's MoorExitOutcome). Each kind is followed by
+ * its own payload: EXITED → u32 code; SIGNALLED → u32 signal; TERMINATED → u32
+ * code + u8 BpTerminatedMethod; UNKNOWN → nothing. Widths follow moor's own
+ * grammar (`code:u`, `signal:p` are u32), so a full-width Windows exit status
+ * is carried whole. There is deliberately no numeric fallback: an ending the
+ * grammar could not prove is UNKNOWN on the wire, never a zero.
+ */
+export enum BpExitKind {
+  EXITED = 1,
+  SIGNALLED = 2,
+  TERMINATED = 3,
+  UNKNOWN = 4
+}
+
+/** How a TERMINATED ending was brought about (u8), moor's `method` field. */
+export enum BpTerminatedMethod {
+  GRACEFUL = 1,
+  FORCED = 2
+}
 
 /** Browser-protocol error codes (u16), carried in ERROR frames. */
 export enum BpError {
