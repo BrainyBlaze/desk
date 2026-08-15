@@ -1,6 +1,5 @@
-import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -12,7 +11,6 @@ import {
 } from '../src/server/channelsApi.js';
 import { listPausedSessions } from '../src/server/channelsPaused.js';
 import { appendMessage, createChannel, editMessage } from '../src/server/channelsStore.js';
-import { startChannelsOwner } from './helpers/channels-owner-process.js';
 
 interface ApiResult {
   handled: boolean;
@@ -54,7 +52,6 @@ describe('channels storage API endpoints', () => {
   afterEach(() => {
     resetChannelsRuntime();
     vi.restoreAllMocks();
-    syncBuiltinESMExports();
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
@@ -118,68 +115,6 @@ describe('channels storage API endpoints', () => {
     expect(changedState.body.channels[0].contentRevision).not.toBe(revision);
     expect(changedDetail.body.contentRevision).toBe(changedState.body.channels[0].contentRevision);
   });
-
-  it.runIf(process.platform === 'linux')(
-    'exposes a bounded identity diagnostic while the engine remains active',
-    async () => {
-      resetChannelsRuntime();
-      rmSync(join(home, '_engine', 'engine.pid'), { force: true });
-      const originalReadFileSync = fs.readFileSync;
-      vi.spyOn(fs, 'readFileSync').mockImplementation(((path, options) => {
-        if (path === `/proc/${process.pid}/stat`) {
-          throw Object.assign(new Error('sensitive proc failure'), { code: 'EIO' });
-        }
-        return originalReadFileSync(path, options as never);
-      }) as typeof fs.readFileSync);
-      syncBuiltinESMExports();
-      initChannelsRuntime({ home });
-
-      const state = await callChannelsApi('GET', '/api/channels/state');
-      const diagnostics = await callChannelsApi('GET', '/api/channels/engine');
-      expect(state.body).toMatchObject({
-        passive: false,
-        lockError: 'channels engine ownership: process identity read failed (EIO)'
-      });
-      expect(diagnostics.body).toMatchObject({
-        passive: false,
-        lockError: 'channels engine ownership: process identity read failed (EIO)'
-      });
-    }
-  );
-
-  it.runIf(process.platform === 'linux')(
-    'refuses a post before append when another live process owns delivery',
-    async () => {
-      resetChannelsRuntime();
-      rmSync(join(home, '_engine', 'engine.pid'), { force: true });
-      createChannel(home, 'ops', 'goal');
-      const owner = startChannelsOwner(home);
-      try {
-        const witness = await owner.ready;
-        const runtime = initChannelsRuntime({ home });
-        expect(runtime.engine.passive).toBe(true);
-        expect(runtime.engine.passiveOwnerPid).toBe(witness.pid);
-
-        const posted = await callChannelsApi('POST', '/api/channels/post', {
-          channel: 'ops',
-          body: 'must not be acknowledged without a delivery owner'
-        });
-        expect(posted.status).toBe(503);
-        expect(posted.body).toMatchObject({
-          ok: false,
-          passive: true,
-          passiveOwner: witness.pid
-        });
-        expect(posted.body.error).toMatch(/passive/i);
-
-        const detail = await callChannelsApi('GET', '/api/channels/channel?name=ops');
-        expect(detail.body.messages).toEqual([]);
-      } finally {
-        await owner.release();
-      }
-    },
-    20_000
-  );
 
   it('persists pause/resume actions through both the paused endpoint and engine action endpoint', async () => {
     const paused = await callChannelsApi('POST', '/api/channels/paused', {

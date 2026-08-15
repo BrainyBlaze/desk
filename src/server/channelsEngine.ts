@@ -1,24 +1,15 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
-  closeSync,
   existsSync,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
-  writeSync
 } from 'node:fs';
 import { join } from 'node:path';
-
-import { withFileLockSync } from '../shared/fileLock.js';
 
 import {
   isShellAgent,
@@ -62,11 +53,6 @@ import {
   type CanonicalAgentView
 } from './channelsDeliveryStrategy.js';
 import { readAgentStatePulse } from './agentStatePulse.js';
-import {
-  isSeedCommitted,
-  markSeedCommitted,
-  readSeedJournalForConsumption
-} from './cutoverStoreMigration.js';
 
 /**
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
@@ -99,11 +85,6 @@ export type {
   QueuedPrompt
 };
 
-export interface LinuxPidScope {
-  bootId: string;
-  pidNamespaceDev: bigint;
-  pidNamespaceIno: bigint;
-}
 export interface ChannelsEngineOptions {
   home: string;
   /** push a prompt into a session; resolved implementation is injectable for tests */
@@ -162,639 +143,16 @@ export interface ChannelsEngineOptions {
   readAgentStates?: () => Promise<AgentStateBatch>;
   /** Clock used for working-lease validation and deterministic tests. */
   now?: () => number;
-  /** current process id (injectable for the single-engine guard tests) */
-  pid?: number;
-  /** liveness probe for the pid in the lock file (injectable for tests) */
-  pidAlive?: (pid: number) => boolean;
-  /** process-state probe for zombie/dead detection (injectable for tests).
-   *  `null` means the platform cannot inspect `/proc`; ownership stays
-   *  fail-closed unless another probe positively proves death or PID reuse. */
-  pidStateReader?: (pid: number) => string | null;
-  /** Linux boot + PID-namespace scope for interpreting namespace-local pid evidence.
-   *  `null` means the scope cannot be established and foreign ownership stays passive. */
-  pidScopeReader?: () => LinuxPidScope | null;
-  /** raw process start-time probe for PID-reuse detection (injectable for tests).
-   *  Returns the OS's raw start-time value (Linux: jiffies since boot) or null
-   *  when unavailable; equality test against the recorded value is the reuse guard. */
-  pidStarttimeReader?: (pid: number) => bigint | null;
 }
 
 const MAX_ACTIVITY_EVENTS = 300;
 const MAX_DELIVERED_MEMORY = 2000;
 /** Runaway-conversation backstop: a session's queue never grows past this. */
 const MAX_QUEUE_PER_SESSION = 50;
-/** The acquisition mutex protects only the short synchronous pid-lock transaction. */
-const ENGINE_LOCK_ACQUIRE_TIMEOUT_MS = 1_000;
-/**
- * Deliberately non-expiring: proper-lockfile's normal stale recovery is itself
- * stat -> remove -> create, which can ABA-delete a replacement mutex. A crash
- * inside this tiny critical section therefore leaves an explicit fail-closed
- * mutex instead of ever admitting two delivery owners.
- */
-const ENGINE_LOCK_MUTEX_STALE_MS = Number.MAX_SAFE_INTEGER;
-
-const ENGINE_PIDFILE_HEADER = 'desk-engine-lock-v1';
-const ENGINE_PROCESS_INCARNATION_KEY = Symbol.for('desk.channels-engine.process-incarnation.v1');
-const INCARNATION_NONCE_PATTERN = /^[0-9a-f]{32}$/;
-
-interface ParsedPidFile {
-  format: 'legacy' | 'v1';
-  pid: number;
-  incarnationNonce: string | null;
-  scope: LinuxPidScope | null;
-  starttime: bigint | null;
-}
-
-function parseCanonicalPid(value: string): number | null {
-  if (!/^[1-9]\d*$/.test(value)) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
-
-function parseCanonicalUnsignedBigint(value: string): bigint | null {
-  if (!/^(?:0|[1-9]\d*)$/.test(value) || value.length > 20) {
-    return null;
-  }
-  const parsed = BigInt(value);
-  return parsed <= MAX_LINUX_IDENTITY_VALUE ? parsed : null;
-}
-
-function parseCanonicalPositiveBigint(value: string): bigint | null {
-  const parsed = parseCanonicalUnsignedBigint(value);
-  return parsed !== null && parsed > 0n ? parsed : null;
-}
-
-const LINUX_BOOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const MAX_LINUX_IDENTITY_VALUE = 18_446_744_073_709_551_615n;
-
-/**
- * Parses the canonical versioned record and the prior one/two-line numeric
- * formats. New records require exact ordering and a final newline so partial,
- * duplicated, or extended claims cannot be mistaken for complete ownership.
- */
-function parsePidFile(content: string): ParsedPidFile | null {
-  if (content.startsWith(`${ENGINE_PIDFILE_HEADER}\n`)) {
-    if (!content.endsWith('\n')) {
-      return null;
-    }
-    const lines = content.slice(0, -1).split('\n');
-    if (lines.length !== 3 && lines.length !== 6 && lines.length !== 7) {
-      return null;
-    }
-    if (lines[0] !== ENGINE_PIDFILE_HEADER || !lines[1]?.startsWith('pid=')) {
-      return null;
-    }
-    const pid = parseCanonicalPid(lines[1].slice('pid='.length));
-    const nonceLine = lines[2];
-    if (pid === null || !nonceLine?.startsWith('nonce=')) {
-      return null;
-    }
-    const incarnationNonce = nonceLine.slice('nonce='.length);
-    if (!INCARNATION_NONCE_PATTERN.test(incarnationNonce)) {
-      return null;
-    }
-    if (lines.length === 3) {
-      return { format: 'v1', pid, incarnationNonce, scope: null, starttime: null };
-    }
-    const bootIdLine = lines[3];
-    const namespaceDevLine = lines[4];
-    const namespaceInoLine = lines[5];
-    if (
-      !bootIdLine?.startsWith('linux_boot_id=') ||
-      !namespaceDevLine?.startsWith('linux_pidns_dev=') ||
-      !namespaceInoLine?.startsWith('linux_pidns_ino=')
-    ) {
-      return null;
-    }
-    const bootId = bootIdLine.slice('linux_boot_id='.length);
-    const pidNamespaceDev = parseCanonicalUnsignedBigint(
-      namespaceDevLine.slice('linux_pidns_dev='.length)
-    );
-    const pidNamespaceIno = parseCanonicalPositiveBigint(
-      namespaceInoLine.slice('linux_pidns_ino='.length)
-    );
-    if (!LINUX_BOOT_ID_PATTERN.test(bootId) || pidNamespaceDev === null || pidNamespaceIno === null) {
-      return null;
-    }
-    const scope = { bootId, pidNamespaceDev, pidNamespaceIno };
-    if (lines.length === 6) {
-      return { format: 'v1', pid, incarnationNonce, scope, starttime: null };
-    }
-    const starttimeLine = lines[6];
-    if (!starttimeLine?.startsWith('starttime=')) {
-      return null;
-    }
-    const starttime = parseCanonicalUnsignedBigint(starttimeLine.slice('starttime='.length));
-    return starttime === null ? null : { format: 'v1', pid, incarnationNonce, scope, starttime };
-  }
-
-  const lines = content.endsWith('\n') ? content.slice(0, -1).split('\n') : content.split('\n');
-  if (lines.length < 1 || lines.length > 2) {
-    return null;
-  }
-  const pid = parseCanonicalPid(lines[0] ?? '');
-  if (pid === null) {
-    return null;
-  }
-  const starttimeRaw = lines[1];
-  if (starttimeRaw === undefined) {
-    return { format: 'legacy', pid, incarnationNonce: null, scope: null, starttime: null };
-  }
-  // Preserve the historical numeric grammar for already-written records,
-  // including leading zeroes. Only v1 fields use canonical decimal spelling.
-  if (!/^\d+$/.test(starttimeRaw) || starttimeRaw.length > 20) {
-    return null;
-  }
-  const starttime = BigInt(starttimeRaw);
-  if (starttime > MAX_LINUX_IDENTITY_VALUE) {
-    return null;
-  }
-  return {
-    format: 'legacy',
-    pid,
-    incarnationNonce: null,
-    scope: null,
-    starttime
-  };
-}
-
-function processIncarnationNonce(): string {
-  const processGlobals = globalThis as typeof globalThis & Record<PropertyKey, unknown>;
-  const existing = processGlobals[ENGINE_PROCESS_INCARNATION_KEY];
-  if (typeof existing === 'string' && INCARNATION_NONCE_PATTERN.test(existing)) {
-    return existing;
-  }
-  const created = randomBytes(16).toString('hex');
-  processGlobals[ENGINE_PROCESS_INCARNATION_KEY] = created;
-  return created;
-}
-
-function encodePidFile(
-  pid: number,
-  incarnationNonce: string,
-  scope: LinuxPidScope | null,
-  starttime: bigint | null
-): Buffer {
-  const optionalScope =
-    scope === null
-      ? ''
-      : `linux_boot_id=${scope.bootId}\nlinux_pidns_dev=${scope.pidNamespaceDev}\nlinux_pidns_ino=${scope.pidNamespaceIno}\n`;
-  const optionalStarttime = starttime === null ? '' : `starttime=${starttime}\n`;
-  return Buffer.from(
-    `${ENGINE_PIDFILE_HEADER}\npid=${pid}\nnonce=${incarnationNonce}\n${optionalScope}${optionalStarttime}`,
-    'utf8'
-  );
-}
 
 function threadParentIdFromFile(file: string): string | undefined {
   return /^thread-(msg-[A-Za-z0-9-]+)\.md$/.exec(file)?.[1];
 }
-
-export type PidLivenessProbe =
-  | { status: 'alive' }
-  | { status: 'dead' }
-  | { status: 'unknown'; diagnostic: string };
-
-export type PidValueProbe<T> =
-  | { status: 'known'; value: T }
-  | { status: 'unknown'; diagnostic: string };
-
-function boundedErrnoCode(error: unknown): string {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN';
-}
-
-type EngineLockOperation =
-  | 'acquisition mutex'
-  | 'lock storage preparation'
-  | 'pidfile close'
-  | 'pidfile create'
-  | 'pidfile identity'
-  | 'pidfile read'
-  | 'pidfile reclaim'
-  | 'pidfile sync'
-  | 'pidfile validation'
-  | 'pidfile write'
-  | 'linux boot identity read'
-  | 'linux boot identity validation'
-  | 'linux pid namespace read'
-  | 'linux pid namespace validation'
-  | 'process identity availability'
-  | 'process identity probe'
-  | 'process identity read'
-  | 'process identity validation'
-  | 'process incarnation creation'
-  | 'process liveness probe'
-  | 'process scope availability'
-  | 'process scope probe'
-  | 'process scope validation'
-  | 'process state availability'
-  | 'process state probe';
-
-function boundedDiagnosticCode(errorOrCode: unknown): string {
-  return typeof errorOrCode === 'string' && /^[A-Z0-9_]{1,32}$/.test(errorOrCode)
-    ? errorOrCode
-    : boundedErrnoCode(errorOrCode);
-}
-
-function engineLockDiagnostic(operation: EngineLockOperation, errorOrCode: unknown): string {
-  return `channels engine ownership: ${operation} failed (${boundedDiagnosticCode(errorOrCode)})`;
-}
-
-class EngineLockOperationError extends Error {
-  readonly code: string;
-
-  constructor(
-    readonly operation: EngineLockOperation,
-    error: unknown,
-    code = boundedErrnoCode(error)
-  ) {
-    const boundedCode = boundedDiagnosticCode(code);
-    super(`${operation} failed (${boundedCode})`);
-    this.name = 'EngineLockOperationError';
-    this.code = boundedCode;
-  }
-}
-
-function engineLockErrorMessage(
-  error: unknown,
-  fallbackOperation: EngineLockOperation
-): string {
-  return error instanceof EngineLockOperationError
-    ? engineLockDiagnostic(error.operation, error.code)
-    : engineLockDiagnostic(fallbackOperation, error);
-}
-
-interface FileIdentity {
-  dev: bigint;
-  ino: bigint;
-}
-
-function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-function removeIncompletePidClaim(
-  lockPath: string,
-  identity: FileIdentity | undefined,
-  expectedPrefix: Buffer
-): EngineLockOperationError | undefined {
-  if (identity === undefined) {
-    return undefined;
-  }
-  try {
-    const before = lstatSync(lockPath, { bigint: true });
-    if (!before.isFile() || !sameFileIdentity(identity, before)) {
-      return undefined;
-    }
-    const content = readFileSync(lockPath);
-    if (!content.equals(expectedPrefix)) {
-      return undefined;
-    }
-    const after = lstatSync(lockPath, { bigint: true });
-    if (!after.isFile() || !sameFileIdentity(identity, after)) {
-      return undefined;
-    }
-    unlinkSync(lockPath);
-    return undefined;
-  } catch (error) {
-    // Disappearance is equivalent to successful cleanup. Other failures are
-    // surfaced in place of the primary write error because they may leave an
-    // incomplete ownership record requiring operator recovery.
-    return boundedErrnoCode(error) === 'ENOENT'
-      ? undefined
-      : new EngineLockOperationError('pidfile reclaim', error);
-  }
-}
-
-function writeDurablePidClaim(fd: number, payload: Buffer, progress: { bytesWritten: number }): void {
-  while (progress.bytesWritten < payload.length) {
-    const remaining = payload.length - progress.bytesWritten;
-    let written: number;
-    try {
-      written = writeSync(fd, payload, progress.bytesWritten, remaining, null);
-    } catch (error) {
-      if (boundedErrnoCode(error) === 'EINTR') {
-        continue;
-      }
-      throw new EngineLockOperationError('pidfile write', error);
-    }
-    if (!Number.isSafeInteger(written) || written <= 0 || written > remaining) {
-      throw new EngineLockOperationError('pidfile write', undefined, 'INVALID_PROGRESS');
-    }
-    progress.bytesWritten += written;
-  }
-
-  for (;;) {
-    try {
-      fsyncSync(fd);
-      return;
-    } catch (error) {
-      if (boundedErrnoCode(error) === 'EINTR') {
-        continue;
-      }
-      throw new EngineLockOperationError('pidfile sync', error);
-    }
-  }
-}
-
-export function defaultPidAlive(pid: number): PidLivenessProbe {
-  try {
-    process.kill(pid, 0);
-    return { status: 'alive' };
-  } catch (error) {
-    // Only ESRCH proves the pid is absent. EPERM and unexpected probe errors
-    // cannot authorize stealing a shared lock.
-    const code = boundedErrnoCode(error);
-    return code === 'ESRCH'
-      ? { status: 'dead' }
-      : {
-          status: 'unknown',
-          diagnostic: engineLockDiagnostic('process liveness probe', code)
-        };
-  }
-}
-
-export interface LinuxPidStat {
-  state: string;
-  starttime: bigint;
-}
-
-/** Linux proc_pid_stat(5) currently documents fields 1 through 52. */
-const LINUX_PID_STAT_MIN_FIELDS = 52;
-const CANONICAL_POSITIVE_DECIMAL = /^[1-9]\d*$/;
-const CANONICAL_SIGNED_DECIMAL = /^(?:0|-?[1-9]\d*)$/;
-
-/** Parse and bind the identity-bearing fields from Linux `/proc/<pid>/stat`. */
-export function parseLinuxPidStat(stat: string, expectedPid: number): LinuxPidStat | null {
-  if (!Number.isSafeInteger(expectedPid) || expectedPid <= 0) {
-    return null;
-  }
-
-  // procfs emits one record followed by at most one LF. Do not trim or split
-  // on arbitrary whitespace: accepting alternate separators would also accept
-  // numeric prefixes that are not part of proc_pid_stat's decimal grammar.
-  const record = stat.endsWith('\n') ? stat.slice(0, -1) : stat;
-  const pidSeparator = record.indexOf(' ');
-  if (pidSeparator <= 0) {
-    return null;
-  }
-  const pidToken = record.slice(0, pidSeparator);
-  if (!CANONICAL_POSITIVE_DECIMAL.test(pidToken)) {
-    return null;
-  }
-  const parsedPid = Number(pidToken);
-  if (!Number.isSafeInteger(parsedPid) || parsedPid !== expectedPid) {
-    return null;
-  }
-  if (record[pidSeparator + 1] !== '(') {
-    return null;
-  }
-
-  // comm (field 2) may itself contain spaces and close parentheses. Numeric
-  // fields cannot contain `) `, so the final marker is the structural close.
-  const closeMarker = record.lastIndexOf(') ');
-  if (closeMarker < pidSeparator + 2) {
-    return null;
-  }
-  const tail = record.slice(closeMarker + 2);
-  if (tail.length < 3 || tail[1] !== ' ') {
-    return null;
-  }
-  const state = tail[0];
-  // Linux has added states over time; include current and historical proc(5)
-  // values, but reject arbitrary one-byte input as an ambiguous identity.
-  if (!/^[RSDTtWXxKPNIZ]$/.test(state)) {
-    return null;
-  }
-
-  const fields4ThroughEnd = tail.slice(2).split(' ');
-  if (
-    fields4ThroughEnd.length < LINUX_PID_STAT_MIN_FIELDS - 3 ||
-    fields4ThroughEnd.some((token) => !CANONICAL_SIGNED_DECIMAL.test(token))
-  ) {
-    return null;
-  }
-  const starttimeToken = fields4ThroughEnd[18];
-  const starttime = parseCanonicalUnsignedBigint(starttimeToken ?? '');
-  if (starttime === null) {
-    return null;
-  }
-  return { state, starttime };
-}
-
-function isLinuxPidScope(value: unknown): value is LinuxPidScope {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const candidate = value as Partial<LinuxPidScope>;
-  return (
-    typeof candidate.bootId === 'string' &&
-    LINUX_BOOT_ID_PATTERN.test(candidate.bootId) &&
-    typeof candidate.pidNamespaceDev === 'bigint' &&
-    candidate.pidNamespaceDev >= 0n &&
-    candidate.pidNamespaceDev <= MAX_LINUX_IDENTITY_VALUE &&
-    typeof candidate.pidNamespaceIno === 'bigint' &&
-    candidate.pidNamespaceIno > 0n &&
-    candidate.pidNamespaceIno <= MAX_LINUX_IDENTITY_VALUE
-  );
-}
-
-function sameLinuxPidScope(left: LinuxPidScope, right: LinuxPidScope): boolean {
-  return (
-    left.bootId === right.bootId &&
-    left.pidNamespaceDev === right.pidNamespaceDev &&
-    left.pidNamespaceIno === right.pidNamespaceIno
-  );
-}
-
-export function defaultPidScopeReader(): PidValueProbe<LinuxPidScope> {
-  if (process.platform !== 'linux') {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('process scope availability', 'UNSUPPORTED_PLATFORM')
-    };
-  }
-
-  let bootIdContent: string;
-  try {
-    bootIdContent = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8');
-  } catch (error) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('linux boot identity read', error)
-    };
-  }
-  const bootIdMatch = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\n$/.exec(
-    bootIdContent
-  );
-  if (bootIdMatch === null) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('linux boot identity validation', 'INVALID_BOOT_ID')
-    };
-  }
-
-  let namespaceStat: ReturnType<typeof statSync>;
-  try {
-    namespaceStat = statSync('/proc/self/ns/pid', { bigint: true });
-  } catch (error) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('linux pid namespace read', error)
-    };
-  }
-  let validNamespaceStat = false;
-  try {
-    validNamespaceStat =
-      typeof namespaceStat.dev === 'bigint' &&
-      namespaceStat.dev >= 0n &&
-      namespaceStat.dev <= MAX_LINUX_IDENTITY_VALUE &&
-      typeof namespaceStat.ino === 'bigint' &&
-      namespaceStat.ino > 0n &&
-      namespaceStat.ino <= MAX_LINUX_IDENTITY_VALUE &&
-      namespaceStat.isFile();
-  } catch {
-    validNamespaceStat = false;
-  }
-  if (!validNamespaceStat) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic(
-        'linux pid namespace validation',
-        'INVALID_PID_NAMESPACE'
-      )
-    };
-  }
-
-  return {
-    status: 'known',
-    value: {
-      bootId: bootIdMatch[1],
-      pidNamespaceDev: namespaceStat.dev,
-      pidNamespaceIno: namespaceStat.ino
-    }
-  };
-}
-
-function defaultLinuxPidStat(pid: number): PidValueProbe<LinuxPidStat> {
-  if (process.platform !== 'linux') {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('process identity availability', 'UNSUPPORTED_PLATFORM')
-    };
-  }
-  try {
-    const parsed = parseLinuxPidStat(readFileSync(`/proc/${pid}/stat`, 'utf8'), pid);
-    return parsed === null
-      ? {
-          status: 'unknown',
-          diagnostic: engineLockDiagnostic('process identity validation', 'INVALID_PROC_STAT')
-        }
-      : { status: 'known', value: parsed };
-  } catch (error) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('process identity read', error)
-    };
-  }
-}
-
-/** Read Linux `/proc` process state without collapsing unavailable/error state. */
-export function defaultPidStateReader(pid: number): PidValueProbe<string> {
-  const stat = defaultLinuxPidStat(pid);
-  return stat.status === 'known' ? { status: 'known', value: stat.value.state } : stat;
-}
-
-/**
- * Reads the RAW process start-time for a pid — the value used to detect PID
- * reuse. On Linux, parses `/proc/<pid>/stat` field 22 (jiffies since boot).
- * Unavailable, unreadable, and malformed input remains an explicit unknown
- * result with a bounded diagnostic rather than collapsing to null.
- *
- * The value is intentionally UNNORMALIZED (raw jiffies, not ms). Equality
- * comparison between a recorded and a current value works in the same units
- * and sidesteps the _SC_CLK_TCK-not-always-100 edge — same process always
- * reads the same raw value; a reused pid reads a different one.
- */
-export function defaultPidStarttimeReader(pid: number): PidValueProbe<bigint> {
-  const stat = defaultLinuxPidStat(pid);
-  return stat.status === 'known' ? { status: 'known', value: stat.value.starttime } : stat;
-}
-
-function customPidAliveProbe(probe: (pid: number) => boolean, pid: number): PidLivenessProbe {
-  try {
-    return probe(pid) ? { status: 'alive' } : { status: 'dead' };
-  } catch (error) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('process liveness probe', error)
-    };
-  }
-}
-
-function customPidValueProbe<T>(
-  probe: (pid: number) => T | null,
-  pid: number,
-  kind: 'process identity' | 'process state'
-): PidValueProbe<T> {
-  try {
-    const value = probe(pid);
-    return value === null
-      ? {
-          status: 'unknown',
-          diagnostic: engineLockDiagnostic(`${kind} availability`, 'UNAVAILABLE')
-        }
-      : { status: 'known', value };
-  } catch (error) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic(`${kind} probe`, error)
-    };
-  }
-}
-
-function customPidStarttimeProbe(
-  probe: (pid: number) => bigint | null,
-  pid: number
-): PidValueProbe<bigint> {
-  const result = customPidValueProbe(probe, pid, 'process identity');
-  return result.status === 'known' &&
-    (typeof result.value !== 'bigint' ||
-      result.value < 0n ||
-      result.value > MAX_LINUX_IDENTITY_VALUE)
-    ? {
-        status: 'unknown',
-        diagnostic: engineLockDiagnostic('process identity validation', 'INVALID_STARTTIME')
-      }
-    : result;
-}
-
-function customPidScopeProbe(probe: () => LinuxPidScope | null): PidValueProbe<LinuxPidScope> {
-  try {
-    const value = probe();
-    if (value === null) {
-      return {
-        status: 'unknown',
-        diagnostic: engineLockDiagnostic('process scope availability', 'UNAVAILABLE')
-      };
-    }
-    return isLinuxPidScope(value)
-      ? { status: 'known', value }
-      : {
-          status: 'unknown',
-          diagnostic: engineLockDiagnostic('process scope validation', 'INVALID_PROCESS_SCOPE')
-        };
-  } catch (error) {
-    return {
-      status: 'unknown',
-      diagnostic: engineLockDiagnostic('process scope probe', error)
-    };
-  }
-}
-
 const DELIVERY_SEND_TIMEOUT_MS = 30_000;
 const DELIVERY_CAPTURE_TIMEOUT_MS = 4_000;
 
@@ -1107,13 +465,6 @@ export class ChannelsEngine {
   private readonly delivered = new Set<string>();
   /** queue metadata retained after delivery shift so async submit-state events can be attributed */
   private readonly deliveryEventContext = new Map<string, DeliveryEventContext>();
-  /** true when another live desk process already owns this channels home */
-  readonly passive: boolean;
-  /** when passive: the pid of the desk process that owns dispatch, used for the operator recovery hint */
-  passiveOwnerPid?: number;
-  /** bounded ownership diagnostic; may accompany an active nonce-backed claim when OS identity is unavailable */
-  lockError?: string;
-
   constructor(private readonly options: ChannelsEngineOptions) {
     this.sendText = options.sendText;
     this.capturePane = options.capturePane;
@@ -1128,303 +479,10 @@ export class ChannelsEngine {
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
     this.readAgentStates = options.readAgentStates ?? readAgentStatePulse;
     this.now = options.now ?? Date.now;
-    this.passive = !this.acquireEngineLock();
-    if (!this.passive) {
-      this.restorePausedSessions();
-      this.restoreMigrationSeed();
-      this.restoreQueues();
-      this.startPump(options.pumpIntervalMs ?? 2500);
-    }
+    this.restorePausedSessions();
+    this.restoreQueues();
+    this.startPump(options.pumpIntervalMs ?? 2500);
   }
-
-  /**
-   * Single-engine guard: two desk processes serving the same channels home
-   * would each dispatch every message — guaranteed double prompts. The first
-   * live process owns `_engine/engine.pid`; later ones run passive (reads
-   * fine, no dispatch/delivery) until the owner dies.
-   *
-   * Every create/inspect/reclaim transaction is serialized by the shared
-   * filesystem mutex `_engine/engine.pid.acquire.lock`; O_EXCL (`openSync`
-   * with flag `'wx'`) remains the final atomic claim. The lockfile records
-   * a versioned pid and per-process incarnation nonce. When available, it also
-   * records the exact Linux boot UUID and PID-namespace dev/inode, followed by
-   * an optional raw bigint start time. The nonce survives module/HMR reloads
-   * through process-global state but differs across processes. Namespace-local
-   * state, liveness, and start-time evidence is interpreted only after the
-   * recorded/current Linux scopes compare exactly equal.
-   * A new claim is not active until every pid-record byte has been written,
-   * the file has been fsynced, and its descriptor has closed successfully;
-   * short writes and EINTR are handled explicitly. Failed incomplete claims
-   * are removed only after inode and content-prefix revalidation.
-   * Inside a comparable scope, Linux zombie/dead states are reclaimable even
-   * while `kill(pid, 0)` still succeeds. `/proc/<pid>/stat` must match the
-   * requested canonical pid and complete documented 52-field grammar. Missing,
-   * malformed, or non-comparable scope stays passive before any local pid probe.
-   * Legacy one/two-line records remain readable but lack scope, so they require
-   * explicit operator recovery and are never stolen from namespace-local pid
-   * evidence.
-   */
-  private acquireEngineLock(): boolean {
-    const pid = this.options.pid ?? process.pid;
-    const pidAlive = this.options.pidAlive;
-    const pidStateReader = this.options.pidStateReader;
-    const pidScopeReader = this.options.pidScopeReader;
-    const pidStarttimeReader = this.options.pidStarttimeReader;
-    const probeAlive = pidAlive
-      ? (probedPid: number) => customPidAliveProbe(pidAlive, probedPid)
-      : defaultPidAlive;
-    const readState = pidStateReader
-      ? (probedPid: number) => customPidValueProbe(pidStateReader, probedPid, 'process state')
-      : defaultPidStateReader;
-    const readScope = pidScopeReader
-      ? () => customPidScopeProbe(pidScopeReader)
-      : defaultPidScopeReader;
-    const readStarttime = pidStarttimeReader
-      ? (probedPid: number) => customPidStarttimeProbe(pidStarttimeReader, probedPid)
-      : defaultPidStarttimeReader;
-    const engineDir = join(this.options.home, '_engine');
-    const lockPath = join(engineDir, 'engine.pid');
-    const acquisitionMutexPath = join(engineDir, 'engine.pid.acquire.lock');
-    this.lockError = undefined;
-    try {
-      let incarnationNonce: string;
-      try {
-        incarnationNonce = processIncarnationNonce();
-      } catch (error) {
-        throw new EngineLockOperationError('process incarnation creation', error);
-      }
-      try {
-        mkdirSync(engineDir, { recursive: true });
-      } catch (error) {
-        throw new EngineLockOperationError('lock storage preparation', error);
-      }
-      return withFileLockSync(
-        acquisitionMutexPath,
-        () => {
-          // All retries stay inside the shared critical section. Releasing the
-          // mutex between inspection and the eventual O_EXCL claim would
-          // recreate the stale-owner ABA this guard exists to prevent.
-          for (;;) {
-            let fd: number | undefined;
-            try {
-              fd = openSync(lockPath, 'wx');
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-                throw new EngineLockOperationError('pidfile create', error);
-              }
-            }
-            if (fd !== undefined) {
-              const scope = readScope();
-              const starttime = scope.status === 'known' ? readStarttime(pid) : undefined;
-              if (scope.status === 'unknown') {
-                this.lockError = scope.diagnostic;
-              } else if (starttime?.status === 'unknown') {
-                this.lockError = starttime.diagnostic;
-              }
-              const payload = encodePidFile(
-                pid,
-                incarnationNonce,
-                scope.status === 'known' ? scope.value : null,
-                starttime?.status === 'known' ? starttime.value : null
-              );
-              const progress = { bytesWritten: 0 };
-              let identity: FileIdentity | undefined;
-              let failure: unknown;
-              try {
-                const stat = fstatSync(fd, { bigint: true });
-                identity = { dev: stat.dev, ino: stat.ino };
-                writeDurablePidClaim(fd, payload, progress);
-              } catch (error) {
-                failure =
-                  error instanceof EngineLockOperationError
-                    ? error
-                    : new EngineLockOperationError('pidfile identity', error);
-              }
-              try {
-                closeSync(fd);
-              } catch (error) {
-                failure ??= new EngineLockOperationError('pidfile close', error);
-              }
-              if (failure !== undefined) {
-                const cleanupFailure = removeIncompletePidClaim(
-                  lockPath,
-                  identity,
-                  payload.subarray(0, progress.bytesWritten)
-                );
-                throw cleanupFailure ?? failure;
-              }
-              return true;
-            }
-
-            let inspectedContent: string;
-            try {
-              inspectedContent = readFileSync(lockPath, 'utf8');
-            } catch (error) {
-              throw new EngineLockOperationError('pidfile read', error);
-            }
-            const parsed = parsePidFile(inspectedContent);
-            if (parsed === null) {
-              throw new EngineLockOperationError(
-                'pidfile validation',
-                undefined,
-                'INVALID_RECORD'
-              );
-            }
-            const {
-              pid: holderPid,
-              incarnationNonce: recordedIncarnationNonce,
-              scope: recordedScope,
-              starttime: recordedStarttime
-            } = parsed;
-            let reclaim = false;
-
-            if (holderPid === pid && recordedIncarnationNonce === incarnationNonce) {
-              // A matching process-global nonce proves a compliant same-process
-              // module/HMR rebuild even when the OS identity probe is unavailable.
-              // Re-run the probe so active ownership still exposes that bounded
-              // diagnostic instead of silently hiding degraded PID-reuse evidence.
-              const currentScope = readScope();
-              if (currentScope.status === 'unknown') {
-                this.lockError = currentScope.diagnostic;
-                return true;
-              }
-              if (recordedScope === null) {
-                this.lockError = engineLockDiagnostic(
-                  'process scope validation',
-                  'MISSING_LOCK_SCOPE'
-                );
-                return true;
-              }
-              if (!sameLinuxPidScope(recordedScope, currentScope.value)) {
-                this.passiveOwnerPid = holderPid;
-                this.lockError = engineLockDiagnostic(
-                  'process scope validation',
-                  'NONCOMPARABLE_SCOPE'
-                );
-                return false;
-              }
-              const currentStarttime = readStarttime(pid);
-              if (currentStarttime.status === 'unknown') {
-                this.lockError = currentStarttime.diagnostic;
-                return true;
-              }
-              if (
-                recordedStarttime !== null &&
-                currentStarttime.value !== recordedStarttime
-              ) {
-                // OS incarnation evidence outranks a readable coordination
-                // token (the pidfile is not a hostile-user security boundary).
-                reclaim = true;
-              } else {
-                return true;
-              }
-            } else {
-              // Different nonce means a different compliant process even when a
-              // test seam supplies the same pid. Legacy records also enter here:
-              // without a recorded boot + PID namespace, local pid evidence is
-              // not comparable and can never authorize ownership or reclamation.
-              if (recordedScope === null) {
-                this.passiveOwnerPid = holderPid;
-                this.lockError = engineLockDiagnostic(
-                  'process scope validation',
-                  'MISSING_LOCK_SCOPE'
-                );
-                return false;
-              }
-              const currentScope = readScope();
-              if (currentScope.status === 'unknown') {
-                this.passiveOwnerPid = holderPid;
-                this.lockError = currentScope.diagnostic;
-                return false;
-              }
-              if (!sameLinuxPidScope(recordedScope, currentScope.value)) {
-                this.passiveOwnerPid = holderPid;
-                this.lockError = engineLockDiagnostic(
-                  'process scope validation',
-                  'NONCOMPARABLE_SCOPE'
-                );
-                return false;
-              }
-
-              // Every pid probe below is namespace-local. Reaching this point
-              // means the exact recorded/current boot + PID namespace matched.
-              const holderState = readState(holderPid);
-              const holderIsTerminal =
-                holderState.status === 'known' &&
-                (holderState.value === 'Z' || holderState.value === 'X' || holderState.value === 'x');
-              const holderLiveness = holderIsTerminal ? undefined : probeAlive(holderPid);
-              const currentStarttime =
-                !holderIsTerminal && holderLiveness?.status !== 'dead' && recordedStarttime !== null
-                  ? readStarttime(holderPid)
-                  : undefined;
-
-              if (holderIsTerminal || holderLiveness?.status === 'dead') {
-                reclaim = true;
-              } else if (
-                recordedStarttime !== null &&
-                currentStarttime?.status === 'known' &&
-                currentStarttime.value !== recordedStarttime
-              ) {
-                // A readable identity mismatch proves pid reuse even when the
-                // liveness probe itself is inconclusive.
-                reclaim = true;
-              }
-
-              if (!reclaim) {
-                this.passiveOwnerPid = holderPid;
-                const ambiguity =
-                  holderState.status === 'unknown'
-                    ? holderState
-                    : holderLiveness?.status === 'unknown'
-                      ? holderLiveness
-                      : currentStarttime?.status === 'unknown'
-                        ? currentStarttime
-                        : undefined;
-                if (ambiguity) {
-                  this.lockError = ambiguity.diagnostic;
-                }
-                return false;
-              }
-            }
-
-            // Revalidate the exact bytes inspected while still holding the
-            // cross-process mutex. Protocol-following contenders cannot change
-            // them here; the reread also detects a legacy/out-of-protocol write
-            // before unlinking anything.
-            let revalidatedContent: string;
-            try {
-              revalidatedContent = readFileSync(lockPath, 'utf8');
-            } catch (error) {
-              throw new EngineLockOperationError('pidfile read', error);
-            }
-            if (revalidatedContent !== inspectedContent) {
-              continue;
-            }
-            try {
-              unlinkSync(lockPath);
-            } catch (error) {
-              throw new EngineLockOperationError('pidfile reclaim', error);
-            }
-          }
-        },
-        {
-          retryMs: 25,
-          timeoutMs: ENGINE_LOCK_ACQUIRE_TIMEOUT_MS,
-          staleMs: ENGINE_LOCK_MUTEX_STALE_MS
-        }
-      );
-    } catch (error) {
-      this.lockError = engineLockErrorMessage(error, 'acquisition mutex');
-      // Ownership that cannot be established on the shared medium fails closed:
-      // dispatching without the lock could duplicate every prompt.
-      return false;
-    }
-  }
-
-  // Note: the lock is deliberately NOT released on dispose. In-process vite
-  // restarts share the pid (the replacement engine re-acquires before the old
-  // one disposes), so removal would open a window for a second process to
-  // steal ownership. The holder pid dying is the release.
 
   /**
    * Dispatch work nobody awaits — timer ticks, drains kicked off from a
@@ -1671,40 +729,6 @@ export class ChannelsEngine {
   }
 
   /**
-   * Materialize the one-time cutover journal into the normal queue lifecycle.
-   * Every target name is deterministic, so a crash before the commit marker can
-   * safely replay the writes; a crash after it leaves restoreQueues to consume
-   * the fully seeded files on the next start.
-   */
-  private restoreMigrationSeed(): void {
-    if (isSeedCommitted(this.options.home)) {
-      return;
-    }
-    const seed = readSeedJournalForConsumption(this.options.home);
-    if (seed === null) {
-      return;
-    }
-    for (const item of seed.items) {
-      const extension =
-        item.phase === 'queued'
-          ? EXT_QUEUED
-          : item.phase === 'semantic-unknown'
-            ? EXT_STUCK_SUBMIT
-            : EXT_DELIVERED;
-      const dir = this.queueDir(item.sessionId);
-      mkdirSync(dir, { recursive: true });
-      writeFileAtomic(
-        join(dir, `${String(item.seq).padStart(10, '0')}.${extension}`),
-        JSON.stringify(item.body)
-      );
-      if (item.phase === 'submit-confirmed') {
-        this.delivered.add(`${item.sessionId}:${item.body.messageId}`);
-      }
-    }
-    markSeedCommitted(this.options.home);
-  }
-
-  /**
    * Reload persisted queues after a server restart (agents assumed idle).
    *
    * Per-item lifecycle extensions under _engine/queue/<sessionId>/:
@@ -1911,7 +935,7 @@ export class ChannelsEngine {
 
   /** Entry point for every finalised message (server appends + watcher finds). */
   handleMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): void {
-    if (this.disposed || this.passive) {
+    if (this.disposed) {
       return;
     }
     const { channel, file, message } = incoming;
@@ -1988,7 +1012,7 @@ export class ChannelsEngine {
 
   private recordWorkerPrompt(channel: string, member: string): void {
     const entry = this.ensureChannelActivity(channel);
-    const now = Date.now();
+    const now = this.now();
     const prior = entry.workers.get(member) ?? { lastPromptAt: 0, lastPostAt: 0 };
     entry.workers.set(member, { lastPromptAt: now, lastPostAt: prior.lastPostAt });
     // A new task landed → the previous check-in window closes; the next window
@@ -1998,7 +1022,7 @@ export class ChannelsEngine {
 
   private recordWorkerPost(channel: string, member: string): void {
     const entry = this.ensureChannelActivity(channel);
-    const now = Date.now();
+    const now = this.now();
     const prior = entry.workers.get(member) ?? { lastPromptAt: 0, lastPostAt: 0 };
     entry.workers.set(member, { lastPromptAt: prior.lastPromptAt, lastPostAt: now });
     // Someone reported back → the check-in guard resets so the next open work
@@ -2438,7 +1462,7 @@ export class ChannelsEngine {
    * whether the submit is verified against the terminal.
    */
   enqueuePrompt(sessionId: string, channel: string, prompt: string, idHint: string): void {
-    if (this.disposed || this.passive) {
+    if (this.disposed) {
       return;
     }
     this.enqueue(sessionId, {
@@ -2526,7 +1550,7 @@ export class ChannelsEngine {
    * reachable from the console behind a confirm. Returns whether the push landed.
    */
   async forceDeliver(sessionId: string, seq?: number): Promise<boolean> {
-    if (this.disposed || this.passive) {
+    if (this.disposed) {
       return false;
     }
     const runtime = this.members.get(sessionId);
@@ -2553,13 +1577,13 @@ export class ChannelsEngine {
     // the first sendText call is still unresolved.
     if (
       runtime.deliveryInFlight ||
-      (runtime.draining && Date.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs)
+      (runtime.draining && this.now() - (runtime.drainingSince ?? 0) < this.drainWatchdogMs)
     ) {
       return false;
     }
     const generation = ++runtime.drainGeneration;
     runtime.draining = true;
-    runtime.drainingSince = Date.now();
+    runtime.drainingSince = this.now();
     try {
       this.resetHold(runtime);
       return await this.deliverNext(runtime, false, seq, generation);

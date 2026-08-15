@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -100,18 +100,22 @@ describe('desk channels CLI', () => {
     expect(errors.join('\n')).toContain(`${option} requires a value`);
   });
 
-  it('rejects a non-member --as override when posting through the offline fallback', async () => {
+  it('requires the authoritative Desk server and never appends locally when it is unreachable', async () => {
     const home = resolveChannelsHome();
     createChannel(home, 'ops', 'test channel');
     addMember(home, 'ops', { name: 'alpha', type: 'codex', tmuxSession: 'tmux-alpha' });
+    const conversationPath = join(home, 'ops', 'root.md');
+    const before = readFileSync(conversationPath);
+    vi.stubEnv('DESK_API', 'http://127.0.0.1:59173');
     vi.stubGlobal('fetch', vi.fn(async () => {
       throw new Error('server offline');
     }));
 
-    const code = await runChannelsCli(['post', 'ops', '--as', 'intruder', 'message']);
+    const code = await runChannelsCli(['post', 'ops', '--as', 'alpha', 'message']);
 
     expect(code).toBe(1);
-    expect(errors.join('\n')).toContain('@intruder is not a member of #ops');
+    expect(errors.join('\n')).toContain('server down at http://127.0.0.1:59173: start desk, then repost');
+    expect(readFileSync(conversationPath)).toEqual(before);
     expect(readChannelDetail(home, 'ops').messages).toEqual([]);
   });
 });

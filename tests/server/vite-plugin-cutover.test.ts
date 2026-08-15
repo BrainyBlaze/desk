@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import { installDeskApi } from '../../src/server/vitePlugin.js';
 
-describe('Desk API cutover gate', () => {
-  it('fails before registering middleware when production migration fails', () => {
+describe('Desk API ownership gate', () => {
+  it('fails before registering middleware when Channels ownership is unavailable', () => {
     const use = vi.fn();
-    const failure = new Error('migration refused');
+    const failure = new Error('another Desk server owns Channels');
 
     expect(() => installDeskApi(
       { httpServer: null, middlewares: { use } },
-      { runCutoverMigration: () => { throw failure; } }
+      {
+        acquireChannelsOwner: () => {
+          throw failure;
+        }
+      }
     )).toThrow(failure);
 
     expect(use).not.toHaveBeenCalled();

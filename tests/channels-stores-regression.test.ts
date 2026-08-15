@@ -217,10 +217,7 @@ describe('channelsPaused', () => {
     expect(() => pauseSession(home, 'has space', 'reason')).toThrow();
   });
 
-  it('falls back to empty list when the store file is corrupt', () => {
-    mkdirSync(join(home, '_engine'), { recursive: true });
-    writeFileSync(join(home, '_engine', 'paused.json'), 'garbage');
-    expect(listPausedSessions(home)).toEqual([]);
-    expect(isSessionPaused(home, 'tmux-a')).toBe(false);
-  });
+  // A corrupt paused store no longer falls back to "nothing is paused": that
+  // silently resumed sessions an operator had deliberately held. It now fails
+  // closed and preserves the evidence — pinned in tests/channels-paused.test.ts.
 });

@@ -162,7 +162,6 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
             <span className={`chanEnginePill ${!live ? 'muted' : live.pumpAlive ? 'ok' : 'warn'}`}>
               {!live ? 'pump —' : live.pumpAlive ? 'pump live' : 'pump down'}
             </span>
-            {live?.passive ? <span className="chanEnginePill warn">passive</span> : null}
             <span className="chanEnginePill muted">{live ? `${live.totalQueued} queued` : '— queued'}</span>
           </div>
         </div>
@@ -173,18 +172,6 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
           </button>
           <button className="chanEngineBtn" onClick={() => void act('drain-ready-all')} disabled={busyAction}>
             Drain ready
-          </button>
-          <button
-            className="chanEngineBtn danger"
-            disabled={busyAction}
-            onClick={() =>
-              setConfirm({
-                label: 'Rebuild the engine in-process? Queues are preserved (re-read from disk) and the pump restarts. Use this to recover a wedged engine without restarting desk serve.',
-                run: () => act('rebuild-engine')
-              })
-            }
-          >
-            Rebuild engine
           </button>
         </div>
 

@@ -149,12 +149,6 @@ export interface ChannelsState {
   delivery: LifecycleState[];
   activity: ChannelActivityEvent[];
   activitySeq: number;
-  /** another live desk process owns dispatch for this channels home */
-  passive?: boolean;
-  /** bounded engine ownership diagnostic; an active claim can report degraded OS identity */
-  lockError?: string;
-  /** pid of the owning desk process (when passive) — for the recovery hint */
-  passiveOwner?: number;
 }
 
 export async function channelsState(since = 0, seen?: Record<string, string>): Promise<ChannelsState> {
@@ -379,8 +373,6 @@ export async function channelsShare(payload: {
 
 export interface EngineDiagnostics {
   home: string;
-  passive: boolean;
-  lockError?: string;
   pumpAlive: boolean;
   totalQueued: number;
   sessions: SessionDiagnostic[];
@@ -396,8 +388,7 @@ export type EngineActionName =
   | 'drop-queue'
   | 'drop-message'
   | 'force-deliver'
-  | 'drain-ready-all'
-  | 'rebuild-engine';
+  | 'drain-ready-all';
 
 export async function channelsEngineDiagnostics(): Promise<EngineDiagnostics> {
   return readJson(fetch('/api/channels/engine'));

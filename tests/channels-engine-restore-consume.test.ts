@@ -3,8 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt } from '../src/server/channelsEngine.js';
-import { claimDelivering, confirmDelivered, listStuckItems } from '../src/server/channelsDurability.js';
-import { isSeedCommitted } from '../src/server/cutoverStoreMigration.js';
+import { claimDelivering, confirmDelivered } from '../src/server/channelsDurability.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const fsFaults = vi.hoisted(() => ({ failQueueJsonRm: false, failPersistQueueScan: false, queueDirReads: 0 }));
@@ -192,58 +191,4 @@ describe('ChannelsEngine restore consume safety', () => {
     restored.dispose();
   });
 
-  it('consumes a migration seed exactly once and preserves each repaired disposition', async () => {
-    home = mkdtempSync(join(tmpdir(), 'desk-restore-seed-'));
-    const migrationDir = join(home, '_engine', 'migration');
-    const bodiesDir = join(migrationDir, 'bodies', 'alpha');
-    mkdirSync(bodiesDir, { recursive: true });
-    const body = (seq: number, messageId: string): QueuedPrompt => ({
-      seq,
-      channel: 'ops',
-      messageId,
-      author: 'human',
-      prompt: `seed prompt ${seq}`,
-      queuedAt: '2026-06-18T20:00:00.000Z',
-      file: 'root.md',
-      member: 'alpha'
-    });
-    writeFileSync(
-      join(migrationDir, 'seed-journal.json'),
-      `${JSON.stringify({
-        version: 1,
-        committed: false,
-        items: [
-          { sessionId: 'alpha', seq: 1, phase: 'queued', reissue: false },
-          { sessionId: 'alpha', seq: 2, phase: 'semantic-unknown', reissue: false },
-          { sessionId: 'alpha', seq: 3, phase: 'submit-confirmed', reissue: false }
-        ]
-      })}\n`
-    );
-    for (const [seq, messageId] of [[1, 'msg-queued'], [2, 'msg-held'], [3, 'msg-confirmed']] as const) {
-      writeFileSync(join(bodiesDir, `${String(seq).padStart(10, '0')}.json`), JSON.stringify(body(seq, messageId)));
-    }
-
-    const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
-    const engineOptions = {
-      home,
-      pumpIntervalMs: 100000,
-      sendText: async () => false,
-      sessionRunning: () => false,
-      capturePane: async () => null
-    };
-
-    const first = new ChannelsEngine(engineOptions);
-    expect(isSeedCommitted(home)).toBe(true);
-    expect(first.queuedItems('alpha').map((item) => item.messageId)).toEqual(['msg-queued']);
-    expect(listStuckItems(home, 'alpha')).toEqual([
-      expect.objectContaining({ seq: 2, kind: 'submit', item: expect.objectContaining({ messageId: 'msg-held' }) })
-    ]);
-    expect(existsSync(join(home, '_engine', 'queue', 'alpha', '0000000003.delivered'))).toBe(true);
-    first.dispose();
-
-    const second = new ChannelsEngine(engineOptions);
-    expect(second.queuedItems('alpha').map((item) => item.messageId)).toEqual(['msg-queued']);
-    expect(listStuckItems(home, 'alpha')).toHaveLength(1);
-    second.dispose();
-  });
 });

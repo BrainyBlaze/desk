@@ -8,6 +8,7 @@ import {
   ChannelsEngine
 } from '../src/server/channelsEngine.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import { readDeliveryEvents } from '../src/server/channelsEvents.js';
 import { addMember, createChannel, updateMemberSupervisor } from '../src/server/channelsStore.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -191,6 +192,135 @@ describe('buildSupervisorCheckInPrompt', () => {
     });
     expect(prompt).toContain('Additional role: lead');
     expect(prompt).toContain('Additional functions: coordinate work');
+  });
+});
+
+describe('checkSupervisorIdle measures silence on the injected clock', () => {
+  // The stuck window is a DURATION: the prompt/post stamps and the comparison
+  // must come from ONE clock. These tests advance an injected clock instead of
+  // back-dating the engine's private state, so nothing here depends on how long
+  // the test process actually took.
+  const CLOCK_BASE = 1_760_000_000_000;
+  let home: string;
+  let sent: Array<{ session: string; text: string }>;
+  let engine: ChannelsEngine;
+  let clock: number;
+
+  const membersFixture = (): ChannelMember[] => [
+    member('agent-a', 'tmux-a'),
+    { ...member('supe', 'tmux-supe'), supervisor: true, supervisorMaxIdleMinutes: 1 },
+    { ...member('human', '', 'human'), sessionId: undefined }
+  ];
+
+  /** One deliberate pump tick — the check runs when we say, not when a timer fires. */
+  const tick = (): Promise<void> =>
+    (engine as unknown as { runPumpTick: () => Promise<void> }).runPumpTick();
+
+  /** Check-ins DELIVERED to the supervisor (async: a drain has to run first). */
+  const checkIns = (): Array<{ session: string; text: string }> =>
+    sent.filter((entry) => entry.text.includes('Supervisor check-in'));
+
+  /** Check-ins RAISED, whether or not one has been delivered yet. `enqueue`
+   *  appends this event synchronously and checkSupervisorIdle runs inside the
+   *  tick, so after an awaited tick this is exact in BOTH directions — an empty
+   *  result means no check-in fired, not that we did not wait long enough. */
+  const raisedCheckIns = (): string[] =>
+    readDeliveryEvents(home)
+      .filter((event) => event.kind === 'queued' && event.messageId?.startsWith('supervisor-check-in-ops'))
+      .map((event) => event.messageId ?? '');
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'desk-supe-clock-'));
+    createChannel(home, 'ops', 'goal');
+    addMember(home, 'ops', { name: 'supe', type: 'claude-code', sessionId: 'tmux-supe' });
+    addMember(home, 'ops', { name: 'agent-a', type: 'claude-code', sessionId: 'tmux-a' });
+    updateMemberSupervisor(home, 'ops', 'supe', true, 1);
+    sent = [];
+    clock = CLOCK_BASE;
+    engine = new ChannelsEngine({
+      sendEnter: async () => true,
+      home,
+      pumpIntervalMs: 60_000, // background pump parked: every tick below is explicit
+      releaseSettleMs: 0,
+      enterVerifyDelayMs: 5,
+      verifyCycles: 1,
+      now: () => clock,
+      sendText: async (session, text) => {
+        sent.push({ session, text });
+        return true;
+      },
+      readAgentStates: async () => ({
+        ok: true,
+        revision: 17,
+        snapshots: [agentSnapshot('tmux-a', 'idle'), agentSnapshot('tmux-supe', 'idle')]
+      }),
+      sessionRunning: () => true,
+      capturePane: async () => '❯ '
+    });
+  });
+
+  afterEach(() => {
+    engine.dispose();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('fires AT the stuck threshold on the injected clock and not one tick before', async () => {
+    engine.handleMessage(
+      { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do the thing') },
+      membersFixture()
+    );
+    // Let the ordinary turn prompts land first. A check-in enqueued while another
+    // item is still queued is COALESCED into a digest — a different delivery
+    // shape from the one under test, and nothing to do with the clock.
+    await waitFor(() => sent.some((entry) => entry.session === 'tmux-supe') && engine.queuedItems('tmux-supe').length === 0);
+
+    // Silence of 0 ms, then of 59_999 ms: both INSIDE the 1-minute window, so no
+    // check-in may be raised. Asserted on the raised-event log, which is written
+    // synchronously inside the tick — an absence here is a fact, not a timeout.
+    await tick();
+    expect(raisedCheckIns()).toEqual([]);
+    clock += 59_999;
+    await tick();
+    expect(raisedCheckIns()).toEqual([]);
+
+    // The boundary itself. One millisecond of injected time separates this tick
+    // from the last one, and it is the only thing that changed.
+    clock += 1;
+    await tick();
+    expect(raisedCheckIns()).toHaveLength(1);
+
+    await waitFor(() => checkIns().length > 0);
+    expect(checkIns()).toHaveLength(1);
+    expect(checkIns()[0].session).toBe('tmux-supe');
+    // The reported duration is the injected elapsed time, not a wall-clock delta.
+    expect(checkIns()[0].text).toContain('@agent-a — stopped 1 minute(s) ago');
+  });
+
+  it('does not read an EARLIER post as a reply to a LATER prompt', async () => {
+    // agent-a speaks before the channel hands it work. That post is not a reply
+    // to the prompt that follows, so the worker still counts as stuck. This only
+    // holds if the post stamp and the prompt stamp share the clock that measures
+    // them — mixed sources make the earlier post look like the newer one.
+    engine.handleMessage(
+      { channel: 'ops', file: 'root.md', message: message('msg-post-1', 'agent-a', 'unrelated status from before') },
+      membersFixture()
+    );
+    clock += 1_000;
+    engine.handleMessage(
+      { channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@agent-a do the thing') },
+      membersFixture()
+    );
+
+    // Inside the window the prompt is not yet old enough, whichever stamp the
+    // post left behind; past it the worker counts as stuck because the post
+    // came BEFORE the prompt on the one clock that measures both.
+    clock += 59_999;
+    await tick();
+    expect(raisedCheckIns()).toEqual([]);
+
+    clock += 1;
+    await tick();
+    expect(raisedCheckIns()).toHaveLength(1);
   });
 });
 
