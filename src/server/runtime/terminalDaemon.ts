@@ -2944,7 +2944,7 @@ export interface TerminalDaemonServer {
  * This is the whole point of the three-tier split: the @xterm/headless emulator
  * and the master links live in the daemon process, NEVER in the web-server
  * process (embedding them there regressed serve startup timing). The web server
- * connects out to this via daemonClient / a WS proxy.
+ * connects out to this over the WS proxy.
  */
 export async function startTerminalDaemonServer(
   options: Omit<TerminalDaemonOptions, 'httpServer'> & { host?: string; port: number }

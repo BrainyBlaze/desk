@@ -93,12 +93,32 @@ function itemKind(item: ProjectItem): string {
   return 'issue';
 }
 
-function itemState(item: ProjectItem): string {
-  const state = item.content?.state?.toLowerCase() ?? '';
+/**
+ * The item's lifecycle state as a filter value: `open`, `closed`, `merged`,
+ * or `draft` for an item whose content carries NO state at all (a draft
+ * issue). A draft is not open — `state:open` must not match it, and no tally
+ * may count it as open — because the board never said so.
+ */
+export function itemState(item: ProjectItem): 'open' | 'closed' | 'merged' | 'draft' {
+  const state = item.content?.state?.toLowerCase();
+  if (state === undefined) {
+    return 'draft';
+  }
   if (state === 'merged') {
     return 'merged';
   }
   return state === 'closed' ? 'closed' : 'open';
+}
+
+/** Board tallies with drafts counted apart, never as open. */
+export function tallyBoardItems(items: readonly ProjectItem[]): { open: number; draft: number; live: number; archived: number } {
+  const live = items.filter((item) => !item.isArchived);
+  return {
+    open: live.filter((item) => itemState(item) === 'open').length,
+    draft: live.filter((item) => itemState(item) === 'draft').length,
+    live: live.length,
+    archived: items.length - live.length
+  };
 }
 
 function matchClause(item: ProjectItem, clause: FilterClause, fields: ProjectField[]): boolean {

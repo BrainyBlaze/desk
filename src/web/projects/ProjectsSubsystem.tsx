@@ -80,6 +80,7 @@ import {
   optionColor,
   parseFilter,
   sortItems,
+  tallyBoardItems,
   valueFor,
   type BoardColumn,
   type SortDirection
@@ -183,9 +184,10 @@ export function ProjectsSubsystem({
       ]);
       return;
     }
-    const live = board.items.filter((item) => !item.isArchived);
-    const openCount = live.filter((item) => (item.content?.state ?? 'OPEN').toUpperCase() === 'OPEN').length;
-    const archived = board.items.length - live.length;
+    // Draft items carry no content state at all: they are neither open nor
+    // closed, and counting them as OPEN inflated the tally and drove the
+    // accent tone from ignorance. They are counted apart, by name.
+    const { open: openCount, draft: draftCount, live: liveCount, archived } = tallyBoardItems(board.items);
     const segments: StatusSegment[] = [
       {
         key: 'board',
@@ -198,9 +200,9 @@ export function ProjectsSubsystem({
       },
       {
         key: 'items',
-        text: `${openCount} open / ${live.length} items${archived > 0 ? ` (+${archived} archived)` : ''}`,
+        text: `${openCount} open${draftCount > 0 ? ` / ${draftCount} draft` : ''} / ${liveCount} items${archived > 0 ? ` (+${archived} archived)` : ''}`,
         tone: openCount > 0 ? 'accent' : 'ok',
-        hint: 'Open items on this board'
+        hint: 'Open items on this board (drafts have no state and are counted apart)'
       }
     ];
     if (board.truncated) {

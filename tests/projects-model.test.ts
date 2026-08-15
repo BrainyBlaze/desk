@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   displayValue,
   groupItems,
+  itemState,
   matchesFilter,
   parseFilter,
   sortItems,
+  tallyBoardItems,
   valueFor
 } from '../src/web/projects/projectsModel';
 import type { ProjectField, ProjectItem } from '../src/web/projects/projectsClient';
@@ -83,6 +85,34 @@ describe('matchesFilter', () => {
     expect(matchesFilter(item, parseFilter('acme'), [])).toBe(true);
     expect(matchesFilter(item, parseFilter('#1'), [])).toBe(true);
     expect(matchesFilter(item, parseFilter('checkout'), [])).toBe(false);
+  });
+});
+
+describe('draft items have no state and are never counted as open', () => {
+  const draft = makeItem('d1', {
+    type: 'DRAFT_ISSUE',
+    content: { __typename: 'DraftIssue', id: 'c_d1', title: 'Someday' }
+  });
+  const open = makeItem('o1');
+  const closed = makeItem('c1', {
+    content: { __typename: 'Issue', id: 'c_c1', title: 'Done', number: 2, state: 'CLOSED' }
+  });
+
+  it('classifies a stateless draft as draft, not open', () => {
+    expect(itemState(draft)).toBe('draft');
+    expect(itemState(open)).toBe('open');
+    expect(itemState(closed)).toBe('closed');
+  });
+
+  it('is:open does not match a draft', () => {
+    expect(matchesFilter(draft, parseFilter('is:open'), [])).toBe(false);
+    expect(matchesFilter(draft, parseFilter('is:draft'), [])).toBe(true);
+    expect(matchesFilter(open, parseFilter('is:open'), [])).toBe(true);
+  });
+
+  it('tallies drafts apart from open items', () => {
+    const archived = makeItem('a1', { isArchived: true });
+    expect(tallyBoardItems([draft, open, closed, archived])).toEqual({ open: 1, draft: 1, live: 3, archived: 1 });
   });
 });
 

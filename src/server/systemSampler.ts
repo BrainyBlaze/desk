@@ -56,11 +56,16 @@ export function startSystemSampling(intervalMs = 2000): void {
 }
 
 /**
- * The latest cached snapshot. Falls back to a one-off synchronous collect only
- * if the sampler was never started (e.g. a unit test hitting the route directly).
+ * The latest cached snapshot. The sampler is started by the runtime before
+ * any route can serve; asking for a snapshot before that is a wiring error,
+ * not a reason to run a hidden one-off collect that would make the route
+ * appear to work in a process where nothing is sampling.
  */
 export function getSystemSnapshot(): SystemSnapshot {
-  const snapshot = cachedSnapshot ?? collectSystemSnapshot();
+  if (cachedSnapshot === null) {
+    throw new Error('system sampler has not been started; startSystemSampling() must run before snapshots are served');
+  }
+  const snapshot = cachedSnapshot;
   const sampledAtMs = lastSampleAtMs ?? Date.parse(snapshot.generatedAt);
   const safeSampledAtMs = Number.isFinite(sampledAtMs) ? sampledAtMs : Date.now();
   return {

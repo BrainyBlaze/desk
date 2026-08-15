@@ -58,9 +58,11 @@ export interface SystemSnapshot {
   kernel: string;
   uptimeSeconds: number;
   cpu: CpuMetrics;
-  memory: MemoryMetrics;
+  /** Absent when memory could not be measured (unreadable /proc/meminfo, a non-Linux host): never a fabricated zero. */
+  memory?: MemoryMetrics;
   network: NetworkMetrics;
-  disk: DiskMetrics;
+  /** Absent when the root filesystem could not be measured: never a fabricated zero. */
+  disk?: DiskMetrics;
   gpu: {
     nvidia: GpuMetrics;
     intel: GpuMetrics;

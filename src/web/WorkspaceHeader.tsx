@@ -23,7 +23,8 @@ import {
   formatPercent,
   formatRate,
   formatStorage,
-  formatUptime
+  formatUptime,
+  type SparkSample
 } from './systemFormat.js';
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 
@@ -46,7 +47,7 @@ function WorkspaceHeaderImpl({
   snapshot: DeskSnapshot | null;
   systemSnapshot: SystemSnapshot | null;
   systemError: string | null;
-  telemetryHistory: { cpu: number[]; ram: number[]; gpu: number[]; net: number[]; disk: number[] };
+  telemetryHistory: { cpu: SparkSample[]; ram: SparkSample[]; gpu: SparkSample[]; net: SparkSample[]; disk: SparkSample[] };
   busy: boolean;
   muted: boolean;
   unreadEvents: number;
@@ -315,11 +316,13 @@ function WorkspaceHeaderImpl({
         />
         <TelemetryCell
           label="RAM"
-          value={formatPercent(systemSnapshot?.memory.usedPercent)}
+          value={formatPercent(systemSnapshot?.memory?.usedPercent)}
           sub={
-            systemSnapshot
+            systemSnapshot?.memory
               ? `${formatBytes(systemSnapshot.memory.usedBytes)} / ${formatBytes(systemSnapshot.memory.totalBytes)}`
-              : 'init'
+              : systemSnapshot
+                ? 'unmeasured'
+                : 'init'
           }
           title="Memory used / total | sparkline: last 2 min, 0–100%"
           spark={telemetryHistory.ram}
@@ -348,7 +351,9 @@ function WorkspaceHeaderImpl({
           value={
             systemSnapshot?.disk
               ? `${formatPercent(systemSnapshot.disk.usedPercent)} | ${formatStorage(systemSnapshot.disk.usedBytes, systemSnapshot.disk.totalBytes)}`
-              : 'init'
+              : systemSnapshot
+                ? 'unmeasured'
+                : 'init'
           }
           sub={
             systemSnapshot?.disk?.readBytesPerSecond !== undefined

@@ -110,7 +110,10 @@ function splitFields(line: string, count: number): { parts: string[]; rest: stri
 
 /* ---------- log ---------- */
 
-export type GitRefKind = 'head' | 'branch' | 'remote' | 'tag';
+/** `other` — a ref outside the three classified namespaces (`refs/stash`,
+ *  `refs/notes/*`, `refs/bisect/*`, …). It is named as what it is instead
+ *  of being labelled a branch by default. */
+export type GitRefKind = 'head' | 'branch' | 'remote' | 'tag' | 'other';
 
 export interface GitRef {
   name: string;
@@ -159,9 +162,11 @@ export function parseLogOutput(output: string): GitLogCommit[] {
 }
 
 /**
- * Parse a `%D` decoration into refs. Expects `--decorate=full` so kinds are
- * unambiguous (`refs/heads/feature/x` is a branch, not a remote); short
- * forms are still handled as a fallback.
+ * Parse a `%D` decoration into refs. Requires `--decorate=full` (the only
+ * caller passes it): with full names every kind is unambiguous —
+ * `refs/heads/feature/x` is a branch, not a remote — and anything outside the
+ * three classified namespaces is reported as `other`, never presumed to be a
+ * branch.
  */
 export function parseRefNames(decoration: string): GitRef[] {
   if (decoration.trim() === '') {
@@ -178,7 +183,7 @@ export function parseRefNames(decoration: string): GitRef[] {
     if (name.startsWith('refs/tags/')) {
       return { name: name.slice('refs/tags/'.length), kind: 'tag' };
     }
-    return { name, kind: 'branch' };
+    return { name, kind: 'other' };
   };
   for (const raw of decoration.split(', ')) {
     const part = raw.trim();

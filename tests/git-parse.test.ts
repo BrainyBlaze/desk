@@ -93,11 +93,14 @@ describe('parseRefNames', () => {
     ]);
   });
 
-  it('falls back gracefully on short decorations', () => {
-    expect(parseRefNames('HEAD, tag: v2, dev')).toEqual([
+  it('reports refs outside the classified namespaces as other, never as a branch by default', () => {
+    // `refs/stash` under --decorate=full used to be labelled a branch — the
+    // classifier's terminal case presumed the kind it could not determine.
+    expect(parseRefNames('HEAD, refs/stash, refs/notes/commits, tag: v2')).toEqual([
       { name: 'HEAD', kind: 'head' },
-      { name: 'v2', kind: 'tag' },
-      { name: 'dev', kind: 'branch' }
+      { name: 'refs/stash', kind: 'other' },
+      { name: 'refs/notes/commits', kind: 'other' },
+      { name: 'v2', kind: 'tag' }
     ]);
   });
 });

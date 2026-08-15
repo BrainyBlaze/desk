@@ -319,6 +319,23 @@ describe('agent hook shim runtime (child process)', () => {
     // attempt a POST — which is exactly what this must not do.
     expect(stderr).not.toContain('agent-event POST failed');
   });
+
+  // A hand-written hook that names NO agent must read as unattributed. The
+  // ambient DESK_AGENT describes whichever session surrounds the process, not
+  // the producer of this hook: resolving it here would attribute a nested
+  // shell's or a helper's event to the surrounding session's agent — the exact
+  // mislabelling the argument-wins rule above exists to prevent, arriving
+  // through the back door the fallback left open.
+  it('does not attribute an agent-less hook to the ambient DESK_AGENT', () => {
+    const { status, stderr } = runShim(
+      { ...process.env, DESK_DEBUG: '1', DESK_AGENT: 'claude' },
+      ['--event', 'Stop']
+    );
+    expect(status).toBe(0);
+    // Resolving `claude` from the environment would bind a producer and try a
+    // POST; an unattributed hook must stay silent instead.
+    expect(stderr).not.toContain('agent-event POST failed');
+  });
 });
 
 describe('upgrading over a previous install', () => {
