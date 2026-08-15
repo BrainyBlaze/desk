@@ -9,7 +9,7 @@ import {
   type EngineActionName,
   type EngineDiagnostics,
   type SessionDiagnostic,
-  type SubmitState
+  type HistoricalSubmitState
 } from './channelsClient.js';
 
 /**
@@ -30,7 +30,9 @@ const BLOCK_REASON_LABEL: Record<DeliveryBlockReason, string> = {
   'submit-stuck-submit': 'submit stuck'
 };
 
-const SUBMIT_STATE_LABEL: Record<SubmitState, string> = {
+// Labels span the HISTORICAL vocabulary: the console renders persisted
+// history, and `delivery-ack-timeout` still exists in old rings/ack files.
+const SUBMIT_STATE_LABEL: Record<HistoricalSubmitState, string> = {
   delivering: 'delivering',
   submitted: 'submitted',
   'delivery-ack-timeout': 'ack timeout',

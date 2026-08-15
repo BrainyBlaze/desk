@@ -2458,6 +2458,8 @@ export function ChannelsSubsystem({
                                 <Pill tone="warn" title="delivery blocked past the hold threshold">blocked</Pill>
                               ) : queue?.deliveryStatus === 'paused' ? (
                                 <Pill tone="muted" title="delivery paused by operator — resume from the engine console">paused</Pill>
+                              ) : queue?.deliveryStatus === 'unregistered' ? (
+                                <Pill tone="muted" title="the delivery engine holds no runtime for this session — it is not driving its queue">unregistered</Pill>
                               ) : null}
                               {member.type !== 'human' ? (
                                 <span className="gitRowActions">

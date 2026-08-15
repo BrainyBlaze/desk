@@ -445,6 +445,17 @@ describe('ChannelsEngine delivery gating', () => {
       expect(diag.items[0].preview.length).toBeGreaterThan(0);
     });
 
+    it('inspectSession reports a session with neither runtime nor durable items as unregistered, not ready', async () => {
+      // `ready` is a positive claim about a queue this engine owns; a session
+      // that was never registered as a member and has nothing on disk has no
+      // such queue. Shading it green in the ops console misdirects the
+      // diagnosis of "why is nothing delivered to this session".
+      const eng = opsEngine();
+      const diag = await eng.inspectSession('tmux-nobody');
+      expect(diag.deliveryStatus).toBe('unregistered');
+      expect(diag.blockedItems).toEqual([]);
+    });
+
     it('inspectSession does not turn pane holds into delivery blocks', async () => {
       let pane = 'working (esc to interrupt)';
       const eng = opsEngine({
@@ -551,9 +562,14 @@ describe('ChannelsEngine delivery gating', () => {
         })
       );
       const diag = await eng.inspectSession('tmux-a');
+      // The engine holds no runtime for tmux-a, but a durable stuck item sits
+      // on disk: the status answers "is there work and why is it not moving"
+      // — `submit-stuck` — instead of `ready` (a green lie) or `unregistered`
+      // (true of the runtime, but it would hide the work the operator must
+      // unblock in the very field they look at first).
       expect(diag).toMatchObject({
         activity: 'idle',
-        deliveryStatus: 'ready',
+        deliveryStatus: 'submit-stuck',
         deliveryBlocked: false,
         queueDepth: 0
       });
