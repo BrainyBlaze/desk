@@ -57,6 +57,26 @@ describe('Channels runtime ownership', () => {
     expect(() => initChannelsRuntime({ home })).not.toThrow();
   });
 
+  it('names the loss when the live lease is destroyed from under the owner, instead of dying in a timer', async () => {
+    // A lease that vanishes from under a live owner (an operator wiping
+    // `_engine`, a filesystem fault, a foreign tool) is a compromised
+    // ownership: the library's default is to THROW from inside its refresh
+    // timer — an unhandled exception with no server name and no explanation.
+    // The designed behaviour is a named, loud exit: the process ends with a
+    // diagnostic that says the Channels ownership lease was lost, so the
+    // operator learns why the server stopped instead of finding a bare
+    // ECOMPROMISED in a crash log.
+    const owner = startChannelsRuntimeOwner(home);
+    await owner.ready;
+    rmSync(join(home, '_engine'), { recursive: true, force: true });
+    const result = await owner.exit;
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toMatch(/Channels ownership lease .* was lost/);
+    expect(result.stderr).toContain(home);
+    // The successor is not blocked by the dead owner.
+    expect(() => initChannelsRuntime({ home })).not.toThrow();
+  }, 15_000);
+
   it('fails directly when an obsolete ownership artifact reaches the runtime boundary', () => {
     const engineDir = join(home, '_engine');
     mkdirSync(engineDir, { recursive: true });

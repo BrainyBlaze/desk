@@ -36,8 +36,8 @@ Everything lives under `~/.config/desk/channels/`, one directory per channel:
 
 `_engine/` holds the delivery queues (`queue/<sessionId>/<seq>.json`), the
 delivery-history event ring (`events.jsonl`), operator pause state
-(`paused.json`), and the single-engine pid lock (`engine.pid`). It is an
-implementation detail: external writers must never create, edit, or delete
+(`paused.json`), and the server ownership lease (`server-owner.lease`). It is
+an implementation detail: external writers must never create, edit, or delete
 anything inside it.
 
 Channel names are lowercase slugs: they start with a letter, contain only
@@ -236,71 +236,35 @@ so the agent re-reads the channel before acting on stale context. Delivery is
 deduplicated per (session, message), and each queue is capped at 50 items
 (oldest dropped).
 
-### Pause, passive mode, and the event log
+### Pause, ownership, and the event log
 
 Operators can pause delivery per session from the engine console; pause state
 persists across restarts and is never confused with busy or stuck. Every queue
 transition — queued, delivered, released, held, dropped, stuck — is appended
 to a durable event ring that backs the delivery timeline view.
 
-Only one desk server process dispatches at a time: the engine takes a pid
-lock in `_engine/engine.pid`, and a second desk process pointed at the same
-channels home runs **passive** (it serves the UI but does not deliver) until
-ownership can be reclaimed safely. Every new claim is an exact, typed
-`desk-engine-lock-v1` record containing the pid and a 128-bit lowercase-hex
-process-incarnation nonce. On Linux, the record also contains a complete scope
-tuple when available, in this fixed order: canonical lowercase
-`linux_boot_id`, canonical unsigned-64-bit-bigint `linux_pidns_dev`, and
-canonical positive-64-bit-bigint `linux_pidns_ino`; the raw unsigned-64-bit-
-bigint process `starttime` may follow only that complete tuple. Scope without
-start time is valid, while a partial/reordered scope or start time without scope
-invalidates the record. The nonce lives under a process-global symbol:
-module/Vite HMR reloads in the same
-Node process reuse it, while separate processes generate independent values. It
-is a coordination token for protocol-following Desk processes, not a secret
-against another same-user process that can read the pidfile.
+Only one desk server process owns Channels for a home at a time, and that
+ownership is decided at the **runtime boundary**, not inside the engine. The
+server acquires a heartbeat lease at `_engine/server-owner.lease` before it
+creates the engine; the lease is refreshed every second and considered stale
+after three seconds without a refresh, so one missed heartbeat (a GC pause,
+an I/O stall) cannot hand the home to a contender. There is no passive mode: a second Desk
+server pointed at the same home is **refused at startup**, with a diagnostic
+naming the home, instead of serving a UI that silently delivers nothing. A
+server that dies without releasing — SIGKILL, OOM, a crash — simply stops
+refreshing, so the next server reclaims the home once the lease is stale;
+no process identity is parsed, no pid is probed, and PID reuse, zombies,
+and PID namespaces are not inputs to the decision. Orderly shutdown releases
+the lease immediately. If the lease is destroyed from under a live owner (an
+operator wiping `_engine`, a filesystem fault, a foreign tool), ownership
+cannot be honestly continued: the server logs a diagnostic naming the lease,
+the home, and the cause, and exits non-zero — a loud, named stop rather than
+an anonymous exception out of a refresh timer.
 
-A new O_EXCL claim is active only after its entire record has been written
-(including legal short writes), fsynced, and closed. If its Linux scope cannot
-be acquired, it durably writes a nonce-only claim and reports a bounded degraded
-diagnostic; if only start time is unavailable, it writes the complete scope
-without start time. A failed incomplete claim is deleted only after inode and
-exact content-prefix revalidation, so cleanup never blindly unlinks a
-replacement. On Linux, the boot UUID is read from the strict canonical
-`/proc/sys/kernel/random/boot_id` record and PID-namespace identity comes from
-the bigint dev/inode of the followed `/proc/self/ns/pid` nsfs entry.
-`/proc/<pid>/stat` is accepted only when its canonical pid matches the requested
-pid, its parenthesized command and one-byte state are structurally valid, and
-all currently documented fields through field 52 are present with a canonical
-unsigned 64-bit bigint start time in field 22.
-
-Every state, `kill(pid, 0)`, and start-time probe is namespace-local. A foreign
-nonce therefore remains passive without probing the pid unless the recorded
-and current boot UUID plus PID-namespace dev/inode are all present, valid, and
-exactly equal. Scope absence, acquisition ambiguity, boot mismatch, or namespace
-mismatch leaves the record unchanged even if a local probe would report ESRCH.
-Inside an equal scope, zombie/dead states (`Z`, `X`, `x`) or ESRCH can reclaim a
-scope-only record; a full record can additionally be reclaimed when its exact
-bigint start time differs. A matching process-global nonce permits HMR to stay
-active when scope or proc evidence is unavailable, but a known scope mismatch
-is passive because the nonce is readable and cannot override non-comparable OS
-evidence. Lock diagnostics are tightly bounded to a fixed operation category
-and safe error code: they never echo filesystem paths, proc contents, or
-operating-system exception messages. Legacy one-line pid and two-line
-pid/start-time records remain readable, but they contain no boot/PID-namespace
-binding and therefore never become active or reclaim solely from local PID
-evidence; an operator must remove such an abandoned record after independently
-confirming that no Desk owner uses the shared home.
-Passive servers reject message-producing HTTP requests with 503 before append,
-so a post is never acknowledged and marked seen without a delivery owner. Lock
-creation, inspection, and stale reclamation are serialized by
-`_engine/engine.pid.acquire.lock`, a deliberately non-expiring filesystem
-mutex: its ordinary critical section is synchronous and short-lived, while a
-crash inside that exact window leaves dispatch explicitly fail-closed for
-operator recovery instead of risking two active engines. A contender that
-cannot acquire it within the bounded wait reports `FILE_LOCK_BUSY` and stays
-passive. The abandoned mutex must only be removed after confirming no desk
-process is currently acquiring engine ownership.
+The former `_engine/engine.pid` ownership record is retired. A home that
+still carries one is refused at startup by name (the operator must stop
+Desk and run the current installer), because a stale pid record is exactly
+the artifact that used to leave a crashed deployment permanently silent.
 
 ## Ops console
 

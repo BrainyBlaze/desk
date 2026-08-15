@@ -103,11 +103,16 @@ function runOwnerChild(): void {
   }
   initChannelsRuntime({ home });
   writeFileSync(readyPath, JSON.stringify({ pid: process.pid }));
-  const waitCell = new Int32Array(new SharedArrayBuffer(4));
-  while (!existsSync(releasePath)) {
-    Atomics.wait(waitCell, 0, 0, 5);
-  }
-  disposeChannelsRuntime();
+  // Poll on the event loop, NOT with Atomics.wait: the ownership lease
+  // refreshes itself from a timer, and a blocked loop would silently stop
+  // the heartbeat this helper exists to exercise.
+  const poll = setInterval(() => {
+    if (!existsSync(releasePath)) {
+      return;
+    }
+    clearInterval(poll);
+    disposeChannelsRuntime();
+  }, 5);
 }
 
 if (process.argv[2] === CHILD_MARKER) {
