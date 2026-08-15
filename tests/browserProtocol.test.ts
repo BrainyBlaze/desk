@@ -116,6 +116,27 @@ describe('browser protocol — EXIT carries the tagged outcome (desk#70)', () =>
       expect((e as BrowserProtocolError).code).toBe(BpError.UNKNOWN_TYPE);
     }
   });
+
+  it('rejects a TERMINATED ending whose method byte is not graceful or forced instead of defaulting one', () => {
+    // The termination method is the axis desk#59's provenance work exists to
+    // preserve — "how it ended" and "did the holder ask it to end" are two
+    // independent facts. A decoder that maps an unknown method byte onto
+    // `graceful` would fabricate the second fact from the first, which is the
+    // same defect this frame change removes for the code.
+    const enc = encodeBpFrame({
+      type: BpFrameType.EXIT,
+      channelId: 9,
+      outcome: { kind: 'terminated', code: 7, method: 'forced' }
+    });
+    enc[enc.length - 1] = 200; // the trailing method byte
+    try {
+      decodeBpFrame(enc);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(BrowserProtocolError);
+      expect((e as BrowserProtocolError).code).toBe(BpError.UNKNOWN_TYPE);
+    }
+  });
 });
 
 describe('browser protocol — direction helpers', () => {
