@@ -42,12 +42,7 @@ import { readAgentStatePulse } from '../../agentStatePulse.js';
 import { agentDelivery, type AgentDelivery } from './transport.js';
 import { MentionRouter, type MessageRouter } from '../routing/router.js';
 import { ChannelSupervision } from '../routing/supervision.js';
-import {
-  buildDigestPrompt,
-  buildOnboardingPrompt,
-  buildSupervisorCheckInPrompt,
-  buildTurnPrompt
-} from '../render/prompts.js';
+import { defaultPromptRenderer, type PromptRenderer } from '../render/prompts.js';
 
 /**
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
@@ -134,6 +129,8 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  /** Renders what an agent sees. Defaults to the stock prompts. */
+  renderer?: PromptRenderer;
   /** Where conversations are read from. Defaults to the filesystem store. */
   store?: ChannelStore;
   /** Decides who a message is for. Defaults to the stock @mention router. */
@@ -228,6 +225,7 @@ export class ChannelsEngine {
   private readonly now: () => number;
   private readonly router: MessageRouter;
   private readonly store: ChannelStore;
+  private readonly renderer: PromptRenderer;
   private pumpTimer: NodeJS.Timeout | undefined;
   /** delivered (session:messageId) pairs — dispatch dedupe across all paths */
   private readonly delivered = new Set<string>();
@@ -251,6 +249,7 @@ export class ChannelsEngine {
     this.now = options.now ?? Date.now;
     this.router = options.router ?? new MentionRouter();
     this.store = options.store ?? new FileChannelStore(options.home);
+    this.renderer = options.renderer ?? defaultPromptRenderer;
     this.restorePausedSessions();
     this.restoreQueues();
     this.startPump(options.pumpIntervalMs ?? 2500);
@@ -379,7 +378,7 @@ export class ChannelsEngine {
           channel,
           messageId: `supervisor-check-in-${channel}-${now}`,
           author: 'system',
-          prompt: buildSupervisorCheckInPrompt({
+          prompt: this.renderer.supervisorCheckIn({
             channel,
             member: supervisor.name,
             stuckAgents: stuck,
@@ -716,7 +715,7 @@ export class ChannelsEngine {
       if (target.supervisor !== true && target.type !== 'human' && !decision.authorIsSupervisor) {
         this.supervision.recordPrompt(channel, target.name, this.now());
       }
-      const prompt = buildTurnPrompt({
+      const prompt = this.renderer.turn({
         channel,
         file,
         member: target.name,
@@ -959,7 +958,7 @@ export class ChannelsEngine {
     // a staleness note so the agent weighs them against newer context.
     const ageMs = this.now() - Date.parse(next.queuedAt);
     const payload = digest
-      ? buildDigestPrompt(digestItems, this.options.home, notificationId)
+      ? this.renderer.digest(digestItems, this.options.home, notificationId)
       : Number.isFinite(ageMs) && ageMs > this.staleAfterMs
         ? `(delayed delivery — this message was posted ${Math.round(ageMs / 60000)} minutes ago; read the channel for the current state before acting)\n${next.prompt}`
         : next.prompt;

@@ -227,3 +227,23 @@ export function buildOnboardingPrompt(options: {
   );
   return lines.join('\n');
 }
+
+/**
+ * The renderer as a port. The four builders are free functions because they are
+ * pure and nothing stops a caller from using one directly; this object is what
+ * the engine depends on, so the whole agent-facing surface can be replaced at
+ * once rather than function by function.
+ */
+export interface PromptRenderer {
+  turn(options: Parameters<typeof buildTurnPrompt>[0]): string;
+  digest(items: QueuedPrompt[], home: string, notificationId?: string): string;
+  onboarding(options: Parameters<typeof buildOnboardingPrompt>[0]): string;
+  supervisorCheckIn(options: Parameters<typeof buildSupervisorCheckInPrompt>[0]): string;
+}
+
+export const defaultPromptRenderer: PromptRenderer = {
+  turn: buildTurnPrompt,
+  digest: buildDigestPrompt,
+  onboarding: buildOnboardingPrompt,
+  supervisorCheckIn: buildSupervisorCheckInPrompt
+};

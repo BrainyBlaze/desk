@@ -1,12 +1,13 @@
 import type { Server as NodeHttpServer } from 'node:http';
 import type { Plugin, PreviewServer, ViteDevServer } from 'vite';
 import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
-import { handleChannelsRequest } from './channels/api.js';
 import {
   acquireChannelsRuntimeOwner,
+  handleChannelsRequest,
+  resolveChannelsHome,
   type ChannelsRuntimeOwner
-} from './channels/runtimeOwner.js';
-import { resolveChannelsHome } from './channels/store/fileStore.js';
+} from './channels/index.js';
+
 import { createDeskApiMiddleware } from './deskApiRouter.js';
 import type { DeskApiHost } from './deskApiTypes.js';
 import { installDeskRuntime } from './deskRuntime.js';
