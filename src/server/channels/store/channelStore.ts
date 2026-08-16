@@ -1,43 +1,121 @@
 // Where the conversation lives.
 //
-// The port the rest of the subsystem reads a channel through: the roster, a
-// message by id, and — the part that used to be assembled by hand at the API
-// layer — notification that a finalised message exists.
+// Every operation the server performs on a channel, as one contract. The size
+// of this interface is not a choice: it is the set of things the HTTP surface
+// and the delivery engine actually do, and anything left off would be a hole a
+// replacement store silently fails to fill.
 //
-// `onFinalized` belongs here rather than in the caller because "a new message
-// appeared" is a property of the store, not of whoever happens to wire it.
-// Messages arrive through two doors: the server appends one, or something
-// outside the server writes the file directly (the CLI's offline fallback does
-// exactly that, and the watcher is why it works). A consumer should not have to
-// know which door was used, or that a watcher exists at all.
+// Two things were deliberately kept OFF it, because they are not operations on
+// a store:
+//
+//   - where the store lives. `resolveChannelsHome`/`ensureChannelsHome` compute
+//     and prepare a filesystem path. That is how a FileChannelStore is built,
+//     not something a store does, and requiring it would mean every
+//     implementation has to have a home directory.
+//   - attachments. Bytes are a different medium from conversation, and the old
+//     `channelFilePath` handed a caller an absolute path to run its own
+//     `createReadStream` on — a store that is not a filesystem could not
+//     satisfy it at all. See `ChannelFiles`.
+//
+// Unread is a read PARAMETER, not an operation: `listChannels({ seen })`
+// resolves it, because the caller that wants unread counts always wanted the
+// summaries too, and the store is the only place that can compute them cheaply
+// (the filesystem one memoises on a file fingerprint).
 
 import {
+  addMemberWithUniqueHandle,
+  appendMessage,
   ChannelsWatcher,
+  createChannel,
+  deleteMessage,
+  destroyChannel,
+  editChannelGoal,
+  editMessage,
   listChannelMembers,
+  listChannels,
+  readChannelDetail,
   readChannelMessage,
-  type IncomingChannelMessage
+  readChannelMessages,
+  readThread,
+  removeMember,
+  resolveUnreadSummaries,
+  searchChannelMessages,
+  updateMemberRole,
+  updateMemberSupervisor,
+  type AppendedMessage,
+  type AppendMessageOptions,
+  type ChannelDetail,
+  type ChannelSearchOptions,
+  type ChannelSearchResult,
+  type ChannelSummary,
+  type IncomingChannelMessage,
+  type MessageSliceOpts,
+  type MessageWindow
 } from './fileStore.js';
 import type { ChannelMember, ChannelMessage } from '../protocol/format.js';
 
 export type Unsubscribe = () => void;
 
-export interface ChannelStore {
-  /** Roster of a channel. Throws when the channel is gone or its manifest is broken. */
-  listMembers(channel: string): ChannelMember[];
+/** Read cursor per channel: the last message id this reader has seen. */
+export type SeenCursors = Record<string, string>;
 
-  /** One message by id. Throws when it cannot be read. */
+export interface NewMemberSpec {
+  type: string;
+  sessionId?: string;
+  agentLabel?: string;
+}
+
+export interface ChannelStore {
+  // ---- channels -----------------------------------------------------------
+
+  /** Summaries for every channel. With `seen`, unread counts are resolved too. */
+  listChannels(opts?: { seen?: SeenCursors }): ChannelSummary[];
+  createChannel(name: string, goal: string): void;
+  destroyChannel(name: string): void;
+  setGoal(name: string, goal: string): void;
+
+  // ---- conversation -------------------------------------------------------
+
+  /** A channel with a window of its messages — the initial view. */
+  readChannel(channel: string, window?: MessageSliceOpts): ChannelDetail;
+  /** A further window of messages — scroll paging. */
+  readMessages(channel: string, window: MessageSliceOpts): MessageWindow;
+  /** One message by id, wherever in the channel it lives (root or any thread). */
   readMessage(channel: string, id: string): ChannelMessage;
+  readThread(channel: string, parentId: string): ChannelMessage[];
+  search(opts: ChannelSearchOptions): ChannelSearchResult[];
+
+  append(channel: string, options: AppendMessageOptions): Promise<AppendedMessage>;
+  editMessage(channel: string, file: string, id: string, body: string): Promise<ChannelMessage>;
+  deleteMessage(channel: string, file: string, id: string): Promise<void>;
+
+  // ---- roster -------------------------------------------------------------
+
+  listMembers(channel: string): ChannelMember[];
+  addMember(channel: string, handle: string, spec: NewMemberSpec): ChannelMember;
+  removeMember(channel: string, name: string): void;
+  updateMemberRole(channel: string, name: string, role?: string, functions?: string): ChannelMember | undefined;
+  updateMemberSupervisor(
+    channel: string,
+    name: string,
+    supervisor: boolean,
+    maxIdleMinutes?: number
+  ): ChannelMember | undefined;
+
+  // ---- change notification ------------------------------------------------
 
   /**
-   * Every finalised message, from either door. Returns an unsubscribe; calling
-   * it stops the underlying watch when the last subscriber leaves.
+   * Every finalised message, from either door: the server appended one, or
+   * something outside wrote the file directly. The CLI's offline fallback does
+   * exactly that, and this is the only reason it works — a consumer should not
+   * have to know which door was used, or that a watcher exists.
    */
   onFinalized(handler: (incoming: IncomingChannelMessage) => void): Unsubscribe;
 
   /**
-   * Record that a message has already been dispatched, so the watcher does not
-   * hand it over a second time. The append-then-dispatch path calls this after
-   * dispatch succeeds — if dispatch throws, the watcher still finds the message.
+   * Record that a message has already been dispatched, so the change feed does
+   * not hand it over a second time. Callers mark AFTER dispatch succeeds: if
+   * dispatch throws, the message stays undispatched and is picked up again.
    */
   markSeen(channel: string, file: string, id: string): void;
 }
@@ -49,12 +127,78 @@ export class FileChannelStore implements ChannelStore {
 
   constructor(private readonly home: string) {}
 
-  listMembers(channel: string): ChannelMember[] {
-    return listChannelMembers(this.home, channel);
+  listChannels(opts: { seen?: SeenCursors } = {}): ChannelSummary[] {
+    const summaries = listChannels(this.home);
+    return opts.seen === undefined ? summaries : resolveUnreadSummaries(this.home, summaries, opts.seen);
+  }
+
+  createChannel(name: string, goal: string): void {
+    createChannel(this.home, name, goal);
+  }
+
+  destroyChannel(name: string): void {
+    destroyChannel(this.home, name);
+  }
+
+  setGoal(name: string, goal: string): void {
+    editChannelGoal(this.home, name, goal);
+  }
+
+  readChannel(channel: string, window?: MessageSliceOpts): ChannelDetail {
+    return readChannelDetail(this.home, channel, window);
+  }
+
+  readMessages(channel: string, window: MessageSliceOpts): MessageWindow {
+    return readChannelMessages(this.home, channel, window);
   }
 
   readMessage(channel: string, id: string): ChannelMessage {
     return readChannelMessage(this.home, channel, id);
+  }
+
+  readThread(channel: string, parentId: string): ChannelMessage[] {
+    return readThread(this.home, channel, parentId);
+  }
+
+  search(opts: ChannelSearchOptions): ChannelSearchResult[] {
+    return searchChannelMessages(this.home, opts);
+  }
+
+  append(channel: string, options: AppendMessageOptions): Promise<AppendedMessage> {
+    return appendMessage(this.home, channel, options);
+  }
+
+  editMessage(channel: string, file: string, id: string, body: string): Promise<ChannelMessage> {
+    return editMessage(this.home, channel, file, id, body);
+  }
+
+  deleteMessage(channel: string, file: string, id: string): Promise<void> {
+    return deleteMessage(this.home, channel, file, id);
+  }
+
+  listMembers(channel: string): ChannelMember[] {
+    return listChannelMembers(this.home, channel);
+  }
+
+  addMember(channel: string, handle: string, spec: NewMemberSpec): ChannelMember {
+    return addMemberWithUniqueHandle(this.home, channel, handle, spec);
+  }
+
+  removeMember(channel: string, name: string): void {
+    removeMember(this.home, channel, name);
+  }
+
+  updateMemberRole(channel: string, name: string, role?: string, functions?: string): ChannelMember | undefined {
+    return updateMemberRole(this.home, channel, name, role, functions);
+  }
+
+  updateMemberSupervisor(
+    channel: string,
+    name: string,
+    supervisor: boolean,
+    maxIdleMinutes?: number
+  ): ChannelMember | undefined {
+    return updateMemberSupervisor(this.home, channel, name, supervisor, maxIdleMinutes);
   }
 
   onFinalized(handler: (incoming: IncomingChannelMessage) => void): Unsubscribe {
