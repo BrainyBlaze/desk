@@ -97,9 +97,11 @@ describe('Channels runtime ownership', () => {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toMatch(/obsolete Channels ownership artifact/);
-    expect(message).toContain(artifact);
     expect(message).toMatch(/stop every Desk server for this home/i);
-    expect(message).toMatch(/delete /);
+    // The instruction itself must name the file to delete — not merely the
+    // "artifact at <path>" prefix, which would survive a remedy that forgot
+    // the path.
+    expect(message).toContain(`delete ${artifact}`);
     expect(message).not.toMatch(/installer/);
   });
 });
