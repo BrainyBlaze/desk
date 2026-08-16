@@ -27,8 +27,8 @@ import {
   type QueuedItemMeta,
   type BlockedItemMeta,
   type SessionDiagnostic
-} from './channelsProtocol.js';
-import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from './channelsStore.js';
+} from '../protocol/format.js';
+import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from '../store/fileStore.js';
 import {
   classifyQueueFile,
   dropStuckItem,
@@ -42,17 +42,17 @@ import {
   readQueueItem,
   retryStuckItem,
   sweepDeliveredTtl
-} from './channelsDurability.js';
-import { appendDeliveryEvent, type DeliveryEvent, type DeliveryEventInput } from './channelsEvents.js';
-import { listPausedSessions } from './channelsPaused.js';
-import { writeFileAtomic } from './fsOps.js';
+} from './durability.js';
+import { appendDeliveryEvent, type DeliveryEvent, type DeliveryEventInput } from './events.js';
+import { listPausedSessions } from './paused.js';
+import { writeFileAtomic } from '../../fsOps.js';
 import {
   canonicalAgentView,
   canonicalDeliveryDecision,
   type AgentStateBatch,
   type CanonicalAgentView
-} from './channelsDeliveryStrategy.js';
-import { readAgentStatePulse } from './agentStatePulse.js';
+} from './strategy.js';
+import { readAgentStatePulse } from '../../agentStatePulse.js';
 
 /**
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
@@ -68,7 +68,7 @@ import { readAgentStatePulse } from './agentStatePulse.js';
  */
 
 // MemberDeliveryState / PaneState / SubmitState / DeliveryBlockReason /
-// QueuedItemMeta / SessionDiagnostic are DEFINED in channelsProtocol.ts now —
+// QueuedItemMeta / SessionDiagnostic are DEFINED in protocol/format.ts now —
 // one source shared with the web client (channelsClient re-exports the same
 // definitions). Imported above for local use and re-exported here so existing
 // server-side importers keep resolving against the engine module.

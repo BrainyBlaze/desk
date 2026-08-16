@@ -1,6 +1,6 @@
 // Delivery-phase engine (spec §6.10, H1: accepted != delivered). Pure module.
 //
-// The old durability model (src/server/channelsDurability.ts) marked a prompt
+// The old durability model (src/server/channels/delivery/durability.ts) marked a prompt
 // `.delivered` when "paste landed AND pane went working" — conflating transport
 // acceptance with the semantic proof of submission. This engine SEPARATES them:
 // transport phases (body-accepted, submit-accepted) come from COMMAND ACKs /

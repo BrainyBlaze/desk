@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { writeFileAtomic } from './fsOps.js';
-import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from './channelsProtocol.js';
+import { writeFileAtomic } from '../../fsOps.js';
+import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from '../protocol/format.js';
 
 /**
  * Channels delivery-history events ring. Engine-internal durable record
@@ -20,8 +20,8 @@ import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from './chann
  * ever introduce an `await` inside the prune path, the invariant breaks → add
  * a lock THEN.
  *
- * Cross-lane: the engine (channelsEngine.ts) calls `appendDeliveryEvent` on
- * every state transition. The API (channelsApi.ts) exposes `readDeliveryEvents`
+ * Cross-lane: the engine (delivery/engine.ts) calls `appendDeliveryEvent` on
+ * every state transition. The API (api.ts) exposes `readDeliveryEvents`
  * via an endpoint. The UI (ChannelsSubsystem) renders the timeline.
  */
 

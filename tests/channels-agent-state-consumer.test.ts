@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ChannelsEngine } from '../src/server/channelsEngine.js';
-import type { AgentStateBatch } from '../src/server/channelsDeliveryStrategy.js';
-import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import { ChannelsEngine } from '../src/server/channels/delivery/engine.js';
+import type { AgentStateBatch } from '../src/server/channels/delivery/strategy.js';
+import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   type AgentActivity,

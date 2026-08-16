@@ -2,10 +2,10 @@ import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createChannelDeliverySender } from '../src/server/channelsApi.js';
-import { claimDelivering, revertAllDeliveringToJson } from '../src/server/channelsDurability.js';
-import { ChannelsEngine } from '../src/server/channelsEngine.js';
-import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import { createChannelDeliverySender } from '../src/server/channels/api.js';
+import { claimDelivering, revertAllDeliveringToJson } from '../src/server/channels/delivery/durability.js';
+import { ChannelsEngine } from '../src/server/channels/delivery/engine.js';
+import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const READY_PANE = 'ready prompt';

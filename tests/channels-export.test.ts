@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createChannel, appendMessage } from '../src/server/channelsStore.js';
-import { exportChannelToMarkdown } from '../src/server/channelsExport.js';
+import { createChannel, appendMessage } from '../src/server/channels/store/fileStore.js';
+import { exportChannelToMarkdown } from '../src/server/channels/store/export.js';
 
 describe('channelsExport', () => {
   let home: string;

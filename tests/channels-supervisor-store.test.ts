@@ -8,7 +8,7 @@ import {
   listChannelMembers,
   updateMemberRole,
   updateMemberSupervisor
-} from '../src/server/channelsStore.js';
+} from '../src/server/channels/store/fileStore.js';
 
 describe('updateMemberSupervisor', () => {
   let home: string;

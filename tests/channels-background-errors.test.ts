@@ -6,8 +6,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ChannelsEngine } from '../src/server/channelsEngine.js';
-import { claimDelivering, confirmDelivered, markStuck } from '../src/server/channelsDurability.js';
+import { ChannelsEngine } from '../src/server/channels/delivery/engine.js';
+import { claimDelivering, confirmDelivered, markStuck } from '../src/server/channels/delivery/durability.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const READY_PANE = 'agent ready\n> ';

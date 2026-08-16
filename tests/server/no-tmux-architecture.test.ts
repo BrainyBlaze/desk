@@ -212,7 +212,11 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
     // trunk, this change the organs); what may still spell the retired shape
     // is exactly the reader that refuses it.
     expect(Object.keys(SANCTIONS).sort()).toEqual(
-      ['core/manifest.ts', 'server/channelsEvents.ts', 'server/channelsProtocol.ts'].sort()
+      [
+        'core/manifest.ts',
+        'server/channels/delivery/events.ts',
+        'server/channels/protocol/format.ts'
+      ].sort()
     );
   });
 });

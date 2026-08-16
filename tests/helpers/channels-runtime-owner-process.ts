@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import {
   disposeChannelsRuntime,
   initChannelsRuntime
-} from '../../src/server/channelsApi.js';
+} from '../../src/server/channels/api.js';
 
 const CHILD_MARKER = '--channels-runtime-owner-child';
 

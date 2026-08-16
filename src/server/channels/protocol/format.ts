@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { AgentActivity, SessionLifecycle, WaitOwner } from '../shared/controlPlane/index.js';
+import type { AgentActivity, SessionLifecycle, WaitOwner } from '../../../shared/controlPlane/index.js';
 
 /**
  * Channels protocol — pure parsing/formatting for the markdown-based
@@ -42,7 +42,7 @@ export interface ChannelMessage {
  * Lightweight reaction/acknowledgement a member can attach to a message.
  * A FIXED enum, NOT an open string, so the UI label/icon map is
  * exhaustiveness-guarded (Theme C) and a new kind cannot land half-wired.
- * Persisted by channelsReactions.ts (single global reactions.json), consumed by
+ * Persisted by store/reactions.ts (single global reactions.json), consumed by
  * the MessageList reaction action + render.
  */
 export type ReactionKind = 'ack' | 'seen' | 'done' | 'thumbs-up';
@@ -53,7 +53,7 @@ export type ReactionKind = 'ack' | 'seen' | 'done' | 'thumbs-up';
  * matches body+author, `author` matches the author handle, `mentionsMe` keeps
  * messages addressed to the viewer (or @channel), `hasThread` keeps root
  * messages that opened a thread. Frozen here as the single source so
- * channelsViews.ts (storage) persists it verbatim and the UI matcher reads the
+ * store/views.ts (storage) persists it verbatim and the UI matcher reads the
  * same shape — no duplication, no churn.
  */
 export interface ViewFilter {
@@ -93,7 +93,7 @@ export interface ChannelMember {
 
 /**
  * Channels engine diagnostics — the contracts shared by the server engine and
- * the web ops console. DEFINED HERE (single source): channelsEngine.ts imports
+ * the web ops console. DEFINED HERE (single source): delivery/engine.ts imports
  * + re-exports them for the server, channelsClient.ts imports + re-exports them
  * for the web. They used to be hand-mirrored in the client, which drifted from
  * the server union; a new state now lands in one place and tsc-forces every

@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync as realRmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { QueuedPrompt } from '../src/server/channelsEngine.js';
-import { claimDelivering, confirmDelivered } from '../src/server/channelsDurability.js';
+import type { QueuedPrompt } from '../src/server/channels/delivery/engine.js';
+import { claimDelivering, confirmDelivered } from '../src/server/channels/delivery/durability.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const fsFaults = vi.hoisted(() => ({ failQueueJsonRm: false, failPersistQueueScan: false, queueDirReads: 0 }));
@@ -77,7 +77,7 @@ describe('ChannelsEngine restore consume safety', () => {
     };
     writeFileSync(join(queueDir, '0000000007.json'), JSON.stringify(queued));
 
-    const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
+    const { ChannelsEngine } = await import('../src/server/channels/delivery/engine.js');
 
     let sends = 0;
     const engineOptions = {
@@ -128,7 +128,7 @@ describe('ChannelsEngine restore consume safety', () => {
     };
     writeFileSync(join(queueDir, '0000000007.json.consumed'), JSON.stringify(queued));
 
-    const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
+    const { ChannelsEngine } = await import('../src/server/channels/delivery/engine.js');
     let sends = 0;
     const restored = new ChannelsEngine({
       sendEnter: async () => true,
@@ -168,7 +168,7 @@ describe('ChannelsEngine restore consume safety', () => {
     writeFileSync(join(queueDir, '0000000007.json.consumed'), JSON.stringify(queued));
     writeFileSync(join(queueDir, '0000000008.json'), JSON.stringify({ ...queued, seq: 8 }));
 
-    const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
+    const { ChannelsEngine } = await import('../src/server/channels/delivery/engine.js');
     let sends = 0;
     const restored = new ChannelsEngine({
       sendEnter: async () => true,

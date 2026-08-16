@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type ViewFilter } from './channelsProtocol.js';
-import { writeFileAtomic } from './fsOps.js';
+import { type ViewFilter } from '../protocol/format.js';
+import { writeFileAtomic } from '../../fsOps.js';
 
 /**
  * Channels saved-views store — operator-named filter views. Mirrors the
@@ -9,7 +9,7 @@ import { writeFileAtomic } from './fsOps.js';
  * atomic writes via writeFileAtomic, server-only writer.
  *
  * `filter` is the frozen ViewFilter type (text? / author? / mentionsMe? /
- * hasThread?); adding a field requires a channelsProtocol.ts change so the
+ * hasThread?); adding a field requires a protocol/format.ts change so the
  * channelsModel matcher stays exhaustive (Theme C single-source).
  *
  * CONCURRENCY INVARIANT: the read-modify-write path (readStore → mutate →

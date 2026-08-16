@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { formatChannelPreamble, formatMessageBlock } from '../src/server/channelsProtocol.js';
+import { formatChannelPreamble, formatMessageBlock } from '../src/server/channels/protocol/format.js';
 
 const timestamp = '2026-06-18 16:00:00';
 const partial = 'PARTIAL_WRITE_BEFORE_CRASH';
@@ -104,7 +104,7 @@ describe('channels store atomic conversation writes', () => {
 
   it('does not expose a partially-created channel when human manifest creation crashes', async () => {
     crashOnWrite((path) => path.includes('/_members/') && path.includes('human.md'));
-    const { createChannel, listChannels } = await import('../src/server/channelsStore.js');
+    const { createChannel, listChannels } = await import('../src/server/channels/store/fileStore.js');
 
     expect(() => createChannel(home, 'ops', 'new channel')).toThrow(/simulated write crash/);
 
@@ -113,12 +113,12 @@ describe('channels store atomic conversation writes', () => {
   });
 
   it('does not leave a partial uploaded file when a binary write crashes', async () => {
-    const { createChannel } = await import('../src/server/channelsStore.js');
+    const { createChannel } = await import('../src/server/channels/store/fileStore.js');
     createChannel(home, 'ops', 'uploads');
     vi.doUnmock('node:fs');
     vi.resetModules();
     crashOnWrite((path, content) => path.includes('/_files/') && path.includes('payload.bin') && content.includes('binary payload'));
-    const { saveChannelFile } = await import('../src/server/channelsStore.js');
+    const { saveChannelFile } = await import('../src/server/channels/store/fileStore.js');
 
     expect(() => saveChannelFile(home, 'ops', 'payload.bin', Buffer.from('binary payload'))).toThrow(/simulated write crash/);
 
@@ -126,7 +126,7 @@ describe('channels store atomic conversation writes', () => {
   });
 
   it('retries upload names when the chosen target appears before the atomic create', async () => {
-    const { createChannel } = await import('../src/server/channelsStore.js');
+    const { createChannel } = await import('../src/server/channels/store/fileStore.js');
     createChannel(home, 'ops', 'uploads');
     vi.doUnmock('node:fs');
     vi.resetModules();
@@ -159,7 +159,7 @@ describe('channels store atomic conversation writes', () => {
         }) as typeof actual.writeFileSync
       };
     });
-    const { saveChannelFile } = await import('../src/server/channelsStore.js');
+    const { saveChannelFile } = await import('../src/server/channels/store/fileStore.js');
 
     const saved = saveChannelFile(home, 'ops', 'race.txt', Buffer.from('ours'));
 
@@ -169,7 +169,7 @@ describe('channels store atomic conversation writes', () => {
   });
 
   it('serializes concurrent same-base member handle allocation under the channel lock instead of throwing', async () => {
-    const { createChannel, addMemberWithUniqueHandle, listChannelMembers } = await import('../src/server/channelsStore.js');
+    const { createChannel, addMemberWithUniqueHandle, listChannelMembers } = await import('../src/server/channels/store/fileStore.js');
     createChannel(home, 'ops', 'members');
 
     const [first, second] = await Promise.all([
@@ -184,7 +184,7 @@ describe('channels store atomic conversation writes', () => {
   it('preserves root.md when editChannelGoal crashes during replacement', async () => {
     const { rootFile, rootContent } = seedChannel();
     crashOnWrite((_path, content) => content.includes('new goal'));
-    const { editChannelGoal } = await import('../src/server/channelsStore.js');
+    const { editChannelGoal } = await import('../src/server/channels/store/fileStore.js');
 
     expect(() => editChannelGoal(home, 'ops', 'new goal')).toThrow(/simulated write crash/);
 
@@ -194,7 +194,7 @@ describe('channels store atomic conversation writes', () => {
   it('does not leave a partial thread file when thread preamble creation crashes', async () => {
     const { threadFile } = seedChannel();
     crashOnWrite((_path, content) => content.startsWith('# Thread: msg-parent'));
-    const { appendMessage } = await import('../src/server/channelsStore.js');
+    const { appendMessage } = await import('../src/server/channels/store/fileStore.js');
 
     await expect(appendMessage(home, 'ops', { author: 'agent', body: 'reply', threadParentId: 'msg-parent' })).rejects.toThrow(
       /simulated write crash/
@@ -207,7 +207,7 @@ describe('channels store atomic conversation writes', () => {
     const { rootFile, rootContent, threadFile } = seedChannel();
     seedThread(threadFile);
     crashOnWrite((_path, content) => content.includes('**thread**:'));
-    const { appendMessage } = await import('../src/server/channelsStore.js');
+    const { appendMessage } = await import('../src/server/channels/store/fileStore.js');
 
     await expect(appendMessage(home, 'ops', { author: 'agent', body: 'new reply', threadParentId: 'msg-parent' })).rejects.toThrow(
       /simulated write crash/
@@ -219,7 +219,7 @@ describe('channels store atomic conversation writes', () => {
   it('preserves root.md when a root message append crashes', async () => {
     const { rootFile, rootContent } = seedChannel();
     crashOnAppend((_path, content) => content.includes('new root message'));
-    const { appendMessage } = await import('../src/server/channelsStore.js');
+    const { appendMessage } = await import('../src/server/channels/store/fileStore.js');
 
     await expect(appendMessage(home, 'ops', { author: 'agent', body: 'new root message' })).rejects.toThrow(
       /simulated append crash/
@@ -232,7 +232,7 @@ describe('channels store atomic conversation writes', () => {
     const { threadFile } = seedChannel();
     const threadContent = seedThread(threadFile);
     crashOnAppend((_path, content) => content.includes('new thread reply'));
-    const { appendMessage } = await import('../src/server/channelsStore.js');
+    const { appendMessage } = await import('../src/server/channels/store/fileStore.js');
 
     await expect(appendMessage(home, 'ops', { author: 'agent', body: 'new thread reply', threadParentId: 'msg-parent' })).rejects.toThrow(
       /simulated append crash/
@@ -244,7 +244,7 @@ describe('channels store atomic conversation writes', () => {
   it('preserves root.md when editMessage crashes during replacement', async () => {
     const { rootFile, rootContent } = seedChannel();
     crashOnWrite((_path, content) => content.includes('edited body'));
-    const { editMessage } = await import('../src/server/channelsStore.js');
+    const { editMessage } = await import('../src/server/channels/store/fileStore.js');
 
     await expect(editMessage(home, 'ops', 'root.md', 'msg-parent', 'edited body')).rejects.toThrow(/simulated write crash/);
 
@@ -254,7 +254,7 @@ describe('channels store atomic conversation writes', () => {
   it('preserves root.md when deleteMessage crashes during replacement', async () => {
     const { rootFile, rootContent } = seedChannel();
     crashOnWrite((_path, content) => content.startsWith('# ops') && !content.includes('msg-parent'));
-    const { deleteMessage } = await import('../src/server/channelsStore.js');
+    const { deleteMessage } = await import('../src/server/channels/store/fileStore.js');
 
     await expect(deleteMessage(home, 'ops', 'root.md', 'msg-parent')).rejects.toThrow(/simulated write crash/);
 

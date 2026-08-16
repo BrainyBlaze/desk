@@ -6,10 +6,10 @@ import {
   buildSupervisorCheckInPrompt,
   buildTurnPrompt,
   ChannelsEngine
-} from '../src/server/channelsEngine.js';
-import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
-import { readDeliveryEvents } from '../src/server/channelsEvents.js';
-import { addMember, createChannel, updateMemberSupervisor } from '../src/server/channelsStore.js';
+} from '../src/server/channels/delivery/engine.js';
+import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
+import { readDeliveryEvents } from '../src/server/channels/delivery/events.js';
+import { addMember, createChannel, updateMemberSupervisor } from '../src/server/channels/store/fileStore.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   type AgentActivity,

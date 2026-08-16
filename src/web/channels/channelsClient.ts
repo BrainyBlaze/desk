@@ -14,11 +14,11 @@ import type {
   SessionResumeInfo,
   ReactionKind,
   ViewFilter
-} from '../../server/channelsProtocol.js';
-import type { ReactionRef } from '../../server/channelsReactions.js';
+} from '../../server/channels/protocol/format.js';
+import type { ReactionRef } from '../../server/channels/store/reactions.js';
 import { readJson } from '../httpJson.js';
-import type { SavedView } from '../../server/channelsViews.js';
-import type { DeliveryEvent, DeliveryEventKind } from '../../server/channelsEvents.js';
+import type { SavedView } from '../../server/channels/store/views.js';
+import type { DeliveryEvent, DeliveryEventKind } from '../../server/channels/delivery/events.js';
 
 // Store-defined row types re-exported for the web subsystem (type-only — the
 // server store modules are erased from the web bundle).

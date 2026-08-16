@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   initChannelsRuntime,
   resetChannelsRuntime
-} from '../src/server/channelsApi.js';
+} from '../src/server/channels/api.js';
 import { startChannelsRuntimeOwner } from './helpers/channels-runtime-owner-process.js';
 
 describe('Channels runtime ownership', () => {

@@ -1,8 +1,8 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
-import { disposeChannelsRuntime, initChannelsRuntime } from './channelsApi.js';
-import type { ChannelsRuntimeOwner } from './channelsRuntimeOwner.js';
+import { disposeChannelsRuntime, initChannelsRuntime } from './channels/api.js';
+import type { ChannelsRuntimeOwner } from './channels/runtimeOwner.js';
 import type { DeskApiHost } from './deskApiTypes.js';
 import type { DeskServices } from './deskServices.js';
 import type { DisposerRegistry } from './disposerRegistry.js';

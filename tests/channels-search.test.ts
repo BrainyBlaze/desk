@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { searchChannelMessages } from '../src/server/channelsStore.js';
-import { formatChannelPreamble, formatMessageBlock } from '../src/server/channelsProtocol.js';
+import { searchChannelMessages } from '../src/server/channels/store/fileStore.js';
+import { formatChannelPreamble, formatMessageBlock } from '../src/server/channels/protocol/format.js';
 
 const t1 = '2026-06-18 15:00:00';
 const t2 = '2026-06-18 16:00:00';

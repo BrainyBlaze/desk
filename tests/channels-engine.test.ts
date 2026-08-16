@@ -8,7 +8,7 @@ import {
   buildTurnPrompt,
   ChannelsEngine,
   type ChannelsEngineOptions
-} from '../src/server/channelsEngine.js';
+} from '../src/server/channels/delivery/engine.js';
 import {
   claimDelivering,
   confirmDelivered,
@@ -16,11 +16,11 @@ import {
   listStuckItems,
   markStuck,
   EXT_STUCK_SUBMIT
-} from '../src/server/channelsDurability.js';
-import { readDeliveryEvents } from '../src/server/channelsEvents.js';
-import { pauseSession as persistPausedSession } from '../src/server/channelsPaused.js';
-import { DELIVERY_BLOCK_REASONS } from '../src/server/channelsProtocol.js';
-import type { ChannelMember, ChannelMessage, DeliveryBlockReason } from '../src/server/channelsProtocol.js';
+} from '../src/server/channels/delivery/durability.js';
+import { readDeliveryEvents } from '../src/server/channels/delivery/events.js';
+import { pauseSession as persistPausedSession } from '../src/server/channels/delivery/paused.js';
+import { DELIVERY_BLOCK_REASONS } from '../src/server/channels/protocol/format.js';
+import type { ChannelMember, ChannelMessage, DeliveryBlockReason } from '../src/server/channels/protocol/format.js';
 import {
   appendMessage,
   ChannelsWatcher,
@@ -33,7 +33,7 @@ import {
   readChannelDetail,
   readThread,
   sliceMessages
-} from '../src/server/channelsStore.js';
+} from '../src/server/channels/store/fileStore.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 vi.mock('../src/server/agentStatePulse.js', async () => {

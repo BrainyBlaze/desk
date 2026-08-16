@@ -11,7 +11,7 @@ import {
   pruneDeliveryEvents,
   readDeliveryEvents,
   resetDeliveryEventSeqCache
-} from '../src/server/channelsEvents.js';
+} from '../src/server/channels/delivery/events.js';
 
 describe('channelsEvents', () => {
   let home: string;

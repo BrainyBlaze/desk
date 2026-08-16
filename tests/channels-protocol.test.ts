@@ -14,7 +14,7 @@ import {
   qualifiedMemberHandle,
   resolveTargets,
   type ChannelMember
-} from '../src/server/channelsProtocol.js';
+} from '../src/server/channels/protocol/format.js';
 
 const member = (name: string, type = 'claude-code', sessionId?: string): ChannelMember => ({
   name,

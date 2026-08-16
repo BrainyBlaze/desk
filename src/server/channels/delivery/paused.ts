@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PreCutoverStoreError } from '../shared/supportFloor.js';
-import { writeFileAtomic } from './fsOps.js';
+import { PreCutoverStoreError } from '../../../shared/supportFloor.js';
+import { writeFileAtomic } from '../../fsOps.js';
 
 /**
  * Channels operator-pause store. Engine-internal (NOT user-workspace):

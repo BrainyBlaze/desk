@@ -36,8 +36,8 @@ const PRE_CUTOVER_SHAPES = [
  * a violation even when it reuses an allowed construct.
  */
 export const SANCTIONS: Record<string, Sanction> = {
-  'server/channelsEvents.ts': { count: 1, allowed: PRE_CUTOVER_SHAPES },
-  'server/channelsProtocol.ts': { count: 1, allowed: PRE_CUTOVER_SHAPES },
+  'server/channels/delivery/events.ts': { count: 1, allowed: PRE_CUTOVER_SHAPES },
+  'server/channels/protocol/format.ts': { count: 1, allowed: PRE_CUTOVER_SHAPES },
   'core/manifest.ts': { count: 5, allowed: PRE_CUTOVER_SHAPES }
 };
 

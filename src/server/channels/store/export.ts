@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { listChannelMembers, readThread, listChannels } from './channelsStore.js';
-import { parseConversation, type ChannelMessage } from './channelsProtocol.js';
+import { listChannelMembers, readThread, listChannels } from './fileStore.js';
+import { parseConversation, type ChannelMessage } from '../protocol/format.js';
 
 /**
  * Channels export-to-markdown. Serializes a channel's conversation

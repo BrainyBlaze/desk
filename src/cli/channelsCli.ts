@@ -6,8 +6,8 @@ import {
   readChannelMessage,
   readThread,
   resolveChannelsHome
-} from '../server/channelsStore.js';
-import { parseConversation, type ChannelMessage } from '../server/channelsProtocol.js';
+} from '../server/channels/store/fileStore.js';
+import { parseConversation, type ChannelMessage } from '../server/channels/protocol/format.js';
 import { assertAllowedOption, requireOptionValue } from './args.js';
 
 /**

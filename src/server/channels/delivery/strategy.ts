@@ -3,8 +3,8 @@ import type {
   AgentWait,
   SessionLifecycle,
   SessionStateSnapshot
-} from '../shared/controlPlane/index.js';
-import type { DeliveryBlockReason } from './channelsProtocol.js';
+} from '../../../shared/controlPlane/index.js';
+import type { DeliveryBlockReason } from '../protocol/format.js';
 
 export interface AgentStateBatch {
   ok: boolean;

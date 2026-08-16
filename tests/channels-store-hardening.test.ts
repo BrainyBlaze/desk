@@ -16,7 +16,7 @@ import {
   listChannelMembers,
   listChannels,
   saveChannelFile
-} from '../src/server/channelsStore.js';
+} from '../src/server/channels/store/fileStore.js';
 
 describe('boot sweep: boot-time orphan-temp sweep', () => {
   let home: string;

@@ -16,9 +16,9 @@ import {
   parseMemberManifest,
   type ChannelMember,
   type ChannelMessage
-} from './channelsProtocol.js';
-import { writeFileAtomic, writeFileAtomicCreate } from './fsOps.js';
-import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
+} from '../protocol/format.js';
+import { writeFileAtomic, writeFileAtomicCreate } from '../../fsOps.js';
+import { withFileLock, withFileLockSync } from '../../../shared/fileLock.js';
 
 /**
  * Channels store — the filesystem side of the messaging protocol.

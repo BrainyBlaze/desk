@@ -1,21 +1,21 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname } from 'node:path';
-import { readJsonBody, sendJson } from './httpUtil.js';
-import { loadDesk, loadDeskCached } from '../core/runner.js';
+import { readJsonBody, sendJson } from '../httpUtil.js';
+import { loadDesk, loadDeskCached } from '../../core/runner.js';
 import {
   daemonControl,
   type DaemonControlResult
-} from '../shared/daemonControlClient.js';
-import type { ChannelMessageDeskEventInput } from '../shared/controlPlane/index.js';
-import { createNativeChannelsTransport } from './runtime/nativeSessionControl.js';
-import { buildOnboardingPrompt, ChannelsEngine } from './channelsEngine.js';
+} from '../../shared/daemonControlClient.js';
+import type { ChannelMessageDeskEventInput } from '../../shared/controlPlane/index.js';
+import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.js';
+import { buildOnboardingPrompt, ChannelsEngine } from './delivery/engine.js';
 import {
   claimDelivering,
   confirmDelivered,
   markStuck,
   revertAllDeliveringToJson
-} from './channelsDurability.js';
+} from './delivery/durability.js';
 import {
   addMemberWithUniqueHandle,
   appendMessage,
@@ -40,26 +40,26 @@ import {
   searchChannelMessages,
   updateMemberRole,
   updateMemberSupervisor
-} from './channelsStore.js';
-import { addFeatured, listFeaturedItems, removeFeatured } from './channelsFeatured.js';
+} from './store/fileStore.js';
+import { addFeatured, listFeaturedItems, removeFeatured } from './store/featured.js';
 import {
   addReaction,
   clearReactionsForMessage,
   listReactions,
   removeReaction
-} from './channelsReactions.js';
+} from './store/reactions.js';
 import {
   addView,
   listViews,
   removeView
-} from './channelsViews.js';
+} from './store/views.js';
 import {
   listPausedSessions,
   pauseSession as persistPausedSession,
   resumeSession as persistResumedSession
-} from './channelsPaused.js';
-import { readDeliveryEvents, latestEventSeq } from './channelsEvents.js';
-import { exportChannelToMarkdown } from './channelsExport.js';
+} from './delivery/paused.js';
+import { readDeliveryEvents, latestEventSeq } from './delivery/events.js';
+import { exportChannelToMarkdown } from './store/export.js';
 import {
   formatSharedMessage,
   isValidChannelName,
@@ -67,15 +67,15 @@ import {
   qualifiedMemberHandle,
   type ReactionKind,
   type ViewFilter
-} from './channelsProtocol.js';
+} from './protocol/format.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentSurfaceBroker } from './agentSurfaceBroker.js';
-import { readAgentStatePulse } from './agentStatePulse.js';
+import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
+import { readAgentStatePulse } from '../agentStatePulse.js';
 import {
   acquireChannelsRuntimeOwner,
   type ChannelsRuntimeOwner
-} from './channelsRuntimeOwner.js';
+} from './runtimeOwner.js';
 
 /**
  * /api/channels/* — slack-like messaging between desk agents over the
