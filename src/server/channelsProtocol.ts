@@ -92,7 +92,14 @@ export interface ChannelMember {
  * consumer (e.g. the EngineConsole label maps) to handle it.
  */
 
-export type DeliveryStatus = 'ready' | 'queued' | 'delivering' | 'submit-stuck' | 'blocked' | 'paused';
+/**
+ * `unregistered` — the engine holds NO runtime state for the session (it is
+ * not a tracked member of any channel this engine drives). It is not `ready`:
+ * ready is a positive claim about a queue the engine owns, and this engine
+ * owns none for the session. Operator diagnostics must say so instead of
+ * shading it green.
+ */
+export type DeliveryStatus = 'ready' | 'queued' | 'delivering' | 'submit-stuck' | 'blocked' | 'paused' | 'unregistered';
 
 /**
  * One Channels row combines a projection of one canonical authority batch with
@@ -158,9 +165,8 @@ export interface ChannelActivityEvent {
  *  - `submit-stuck-unobservable` — no positive observation across N cycles
  *    (capture null/failed throughout); submission unconfirmed, so at-least-once
  *    replay (the message-id embedded in the prompt makes the replay safe).
- *  - `delivery-ack-timeout` — legacy persisted/historical state retained for
- *    fail-closed repair and event timelines. The live runtime no longer emits
- *    delivery ACK outcomes.
+ *  - (`delivery-ack-timeout` is NOT a live state: it exists only in
+ *    `HistoricalSubmitState` for readers of already-persisted history.)
  *  - `submit-not-applicable` — the receiving session is not an agent (a shell),
  *    so there is no submit to verify: no activity to go `working`, no input box
  *    an Enter could be eaten by, no approval menu. The paste reached the pane
@@ -174,11 +180,21 @@ export interface ChannelActivityEvent {
 export type SubmitState =
   | 'delivering'
   | 'submitted'
-  | 'delivery-ack-timeout'
   | 'submit-not-applicable'
   | 'submit-stuck-paste'
   | 'submit-stuck-submit'
   | 'submit-stuck-unobservable';
+
+/**
+ * The HISTORICAL submit vocabulary: everything the live engine emits today plus
+ * `delivery-ack-timeout`, a state no live path has emitted since delivery ACK
+ * outcomes were retired. It survives only in already-persisted event rings and
+ * ack-file names, so readers of durable history (the timeline, the console
+ * label table) speak this wider vocabulary — while the engine's own state and
+ * every write path speak `SubmitState`, and a write arm for the retired state
+ * cannot exist because the type refuses it.
+ */
+export type HistoricalSubmitState = SubmitState | 'delivery-ack-timeout';
 
 /**
  * Agents whose sessions are a bare shell rather than an assistant CLI. They

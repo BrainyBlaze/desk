@@ -1643,10 +1643,16 @@ export class ChannelsEngine {
 
   private deriveDeliveryStatus(
     runtime: MemberRuntime | undefined,
-    block: Pick<SessionDiagnostic, 'deliveryBlocked'>
+    block: Pick<SessionDiagnostic, 'deliveryBlocked'>,
+    stuckOnDisk: readonly BlockedItemMeta[]
   ): DeliveryStatus {
     if (!runtime) {
-      return 'ready';
+      // No runtime, but durable stuck items on disk: the status answers "is
+      // there work and why is it not moving", so it is `submit-stuck`, not a
+      // label about registration that would hide the work an operator must
+      // unblock. Only a session with neither runtime nor durable items is
+      // truly unregistered.
+      return stuckOnDisk.length > 0 ? 'submit-stuck' : 'unregistered';
     }
     if (runtime.pausedByOperator) {
       return 'paused';
@@ -1673,7 +1679,7 @@ export class ChannelsEngine {
       sessionId,
       ...this.canonicalFields(view),
       queueDepth: runtime?.queue.length ?? 0,
-      deliveryStatus: this.deriveDeliveryStatus(runtime, block),
+      deliveryStatus: this.deriveDeliveryStatus(runtime, block, stuckItems),
       pausedByOperator: Boolean(pause),
       pauseReason: pause?.reason,
       pausedAt: pause?.since,
@@ -1739,7 +1745,7 @@ export class ChannelsEngine {
         sessionId: runtime.sessionId,
         ...this.canonicalFields(view),
         queueDepth: runtime.queue.length,
-        deliveryStatus: this.deriveDeliveryStatus(runtime, block),
+        deliveryStatus: this.deriveDeliveryStatus(runtime, block, stuckItems),
         lastDeliveryAt: runtime.lastDeliveryAt,
         lastReleaseAt: runtime.lastReleaseAt,
         submitState: runtime.submitState,

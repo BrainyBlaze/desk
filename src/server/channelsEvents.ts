@@ -1,7 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsOps.js';
-import type { SubmitState, DeliveryStatus } from './channelsProtocol.js';
+import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from './channelsProtocol.js';
 
 /**
  * Channels delivery-history events ring. Engine-internal durable record
@@ -36,6 +36,27 @@ const PREVIEW_MAX_BYTES = 200;
 let cachedSeq = 0;
 let cachedHome: string | null = null;
 
+function endsWithNewline(path: string): boolean {
+  const fd = openSync(path, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) {
+      return true;
+    }
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 0x0a;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Test seam: forget the in-process seq authority so the next append re-derives it from disk. */
+export function resetDeliveryEventSeqCache(): void {
+  cachedSeq = 0;
+  cachedHome = null;
+}
+
 /**
  * Delivery event kind — derived from the frozen protocol unions where they
  * overlap, plus event-log-specific kinds that have no protocol equivalent.
@@ -46,13 +67,13 @@ let cachedHome: string | null = null;
  */
 type StuckTerminal = Extract<SubmitState, `submit-stuck-${string}`>;
 type SubmitActive = Extract<
-  SubmitState,
+  HistoricalSubmitState,
   'delivering' | 'submitted' | 'delivery-ack-timeout' | 'submit-not-applicable'
 >;
 type PausedStatus = Extract<DeliveryStatus, 'paused'>;
 
 export type DeliveryEventKind =
-  | SubmitActive       // 'delivering' | 'submitted' | 'delivery-ack-timeout' | 'submit-not-applicable' — from SubmitState
+  | SubmitActive       // 'delivering' | 'submitted' | 'delivery-ack-timeout' | 'submit-not-applicable' — from HistoricalSubmitState (the ring is durable history)
   | StuckTerminal      // 'submit-stuck-paste' | 'submit-stuck-submit' | 'submit-stuck-unobservable' — from SubmitState
   | PausedStatus       // 'paused' — from LifecycleStatus
   | 'queued'           // -specific: item entered the queue
@@ -106,13 +127,27 @@ export function appendDeliveryEvent(
       : event.preview
     : undefined;
   const full: DeliveryEvent = { ...event, seq, at: event.at ?? now.toISOString(), preview };
-  appendFileSync(eventsPath(home), `${JSON.stringify(full)}\n`, 'utf8');
+  // A torn tail (crash mid-append) ends without its newline. Appending
+  // straight after it would fuse the new record onto the partial one and
+  // lose BOTH; terminate the tail first so the torn line stays an isolated,
+  // skippable line and the new record stays whole.
+  const path = eventsPath(home);
+  const terminator = existsSync(path) && !endsWithNewline(path) ? '\n' : '';
+  appendFileSync(path, `${terminator}${JSON.stringify(full)}\n`, 'utf8');
   if (seq > MAX_EVENTS && seq % PRUNE_INTERVAL === 0) {
     pruneDeliveryEvents(home);
   }
   return full;
 }
 
+/**
+ * The seq authority is the last line of the ring that PARSES, scanning
+ * backwards. A torn tail (crash mid-append) must not reset numbering to 1
+ * after thousands of real events, and a ring in which nothing parses is not
+ * "empty" — it is unreadable, and appending a confident seq 1 into it would
+ * silently restart the numbering of a ring an operator is still reading. Only
+ * an absent file or one with no nonblank line at all starts at 1.
+ */
 function nextSeq(home: string): number {
   if (cachedHome === home && cachedSeq > 0) {
     cachedSeq += 1;
@@ -124,23 +159,28 @@ function nextSeq(home: string): number {
     cachedSeq = 1;
     return 1;
   }
-  try {
-    const content = readFileSync(path, 'utf8');
-    const lines = content.split('\n').filter((l) => l.trim().length > 0);
-    if (lines.length === 0) {
-      cachedHome = home;
-      cachedSeq = 1;
-      return 1;
-    }
-    const last = JSON.parse(lines[lines.length - 1]!) as Partial<DeliveryEvent>;
-    cachedHome = home;
-    cachedSeq = (Number.isFinite(last.seq) ? last.seq! : 0) + 1;
-    return cachedSeq;
-  } catch {
+  const lines = readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
     cachedHome = home;
     cachedSeq = 1;
     return 1;
   }
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(lines[index]!);
+    } catch {
+      continue;
+    }
+    if (typeof parsed === 'object' && parsed !== null && Number.isFinite((parsed as { seq?: unknown }).seq)) {
+      cachedHome = home;
+      cachedSeq = ((parsed as { seq: number }).seq) + 1;
+      return cachedSeq;
+    }
+  }
+  throw new Error(`events ring at ${path} has no readable record to continue from; refusing to append`);
 }
 
 /**
@@ -203,7 +243,27 @@ export function pruneDeliveryEvents(home: string, maxEvents = MAX_EVENTS): numbe
   if (!existsSync(path)) {
     return 0;
   }
-  const events = readDeliveryEvents(home);
+  // Prune is a rewrite: it must not launder a lossy read into a clean file.
+  // Every nonblank line that does not parse into an event is a line the
+  // rewrite would silently discard, so the ring is left byte-for-byte as it
+  // is and the caller hears why.
+  const lines = readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+  const events: DeliveryEvent[] = [];
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error(`events ring at ${path} holds an unreadable line; refusing to prune over it`);
+    }
+    const event = parsed as Partial<DeliveryEvent>;
+    if (typeof event.seq !== 'number' || typeof event.kind !== 'string') {
+      throw new Error(`events ring at ${path} holds a record without seq/kind; refusing to prune over it`);
+    }
+    events.push(event as DeliveryEvent);
+  }
   if (events.length <= maxEvents) {
     return 0;
   }

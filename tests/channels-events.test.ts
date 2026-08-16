@@ -9,7 +9,8 @@ import {
   appendDeliveryEvent,
   latestEventSeq,
   pruneDeliveryEvents,
-  readDeliveryEvents
+  readDeliveryEvents,
+  resetDeliveryEventSeqCache
 } from '../src/server/channelsEvents.js';
 
 describe('channelsEvents', () => {
@@ -128,6 +129,48 @@ describe('channelsEvents', () => {
     // The corrupt line is skipped; the valid events (including the manually-added one) survive.
     expect(events.length).toBeGreaterThanOrEqual(3);
     expect(events.some((e) => e.seq === 99 && e.kind === 'submitted')).toBe(true);
+  });
+
+  it('a torn last line does not reset the seq authority: the next append continues after the last VALID seq', () => {
+    // A crash mid-append leaves a partial JSON tail. Reading "1" from that and
+    // stamping the next event seq 1 after thousands of real events corrupts
+    // ring order and latestEventSeq. The authority is the last line that
+    // parses, scanning backwards.
+    appendDeliveryEvent(home, { kind: 'queued', sessionId: 'tmux-a' });
+    appendDeliveryEvent(home, { kind: 'delivering', sessionId: 'tmux-a' });
+    appendDeliveryEvent(home, { kind: 'submitted', sessionId: 'tmux-a' });
+    const path = join(home, '_engine', 'events.jsonl');
+    writeFileSync(path, readFileSync(path, 'utf8') + '{"seq":4,"at":"x","ki');
+    resetDeliveryEventSeqCache();
+    const next = appendDeliveryEvent(home, { kind: 'released', sessionId: 'tmux-a' });
+    expect(next.seq).toBe(4);
+    expect(latestEventSeq(home)).toBe(4);
+  });
+
+  it('refuses to append when no line of a nonempty ring parses', () => {
+    // Nothing valid to continue from is not "start over at 1": that would
+    // silently restart the numbering of a ring an operator is still reading.
+    mkdirSync(join(home, '_engine'), { recursive: true });
+    const path = join(home, '_engine', 'events.jsonl');
+    writeFileSync(path, '{ corrupt\n{ also corrupt\n');
+    resetDeliveryEventSeqCache();
+    expect(() => appendDeliveryEvent(home, { kind: 'queued' })).toThrow(/events ring/);
+    // The evidence is untouched.
+    expect(readFileSync(path, 'utf8')).toBe('{ corrupt\n{ also corrupt\n');
+  });
+
+  it('prune refuses to rewrite a ring it could not read completely', () => {
+    // A rewrite from a lossy read would silently drop the lines it skipped.
+    // Prune must either keep every byte it did not understand or refuse.
+    for (let index = 0; index < 5; index += 1) {
+      appendDeliveryEvent(home, { kind: 'queued', messageId: `msg-${index}` });
+    }
+    const path = join(home, '_engine', 'events.jsonl');
+    const before = readFileSync(path, 'utf8');
+    writeFileSync(path, before.replace('"msg-2"', '"msg-2"}}}garbage'));
+    const corrupt = readFileSync(path, 'utf8');
+    expect(() => pruneDeliveryEvents(home, 2)).toThrow(/events ring/);
+    expect(readFileSync(path, 'utf8')).toBe(corrupt);
   });
 
   it('returns [] when the events file does not exist', () => {
