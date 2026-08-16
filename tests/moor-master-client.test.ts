@@ -641,6 +641,58 @@ describe('MoorMasterClient', () => {
     await waitFor(() => receipts.length === 1, 'receipt after retry');
   });
 
+  it('does not mislabel a lease-free real-geometry attach as resumed', async () => {
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start({
+      onProtocolError: (error) => protocolErrors.push(error.code)
+    });
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    attached.catch(() => undefined);
+
+    expect((await holder.next()).kind).toBe(MoorKind.HELLO);
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+
+    await waitFor(() => protocolErrors.length === 1, 'lease-free geometry refused');
+    expect(protocolErrors).toEqual(['MALFORMED']);
+    await expect(attached).rejects.toThrow(/invalid attach geometry/i);
+  });
+
+  it.each([
+    { label: 'drops ownership', ownsLease: false, leaseEpoch: 5 },
+    { label: 'changes epoch', ownsLease: true, leaseEpoch: 6 }
+  ])('fails a resumed attach when its ACK $label', async ({ ownsLease, leaseEpoch }) => {
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start(
+      { onProtocolError: (error) => protocolErrors.push(error.code) },
+      {
+        resumeLease: {
+          epoch: 5,
+          incarnation: INCARNATION,
+          token: new Uint8Array(16).fill(0xd4),
+          nextRequestId: 1n
+        },
+        requireSameIncarnation: true
+      }
+    );
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    attached.catch(() => undefined);
+
+    expect((await holder.next()).kind).toBe(MoorKind.HELLO);
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    expect((await holder.next()).kind).toBe(MoorKind.LEASE_REQUEST);
+    holder.send(MoorKind.LEASE_RESULT, resumedLeaseResultPayload(5));
+
+    const attach = await holder.next();
+    expect(attach.kind).toBe(MoorKind.ATTACH);
+    expect(attach.payload).toEqual(joined(integer(80, 2), integer(24, 2), Uint8Array.of(0)));
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, leaseEpoch, { ownsLease }));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+
+    await waitFor(() => protocolErrors.length === 1, 'resumed lease contradiction refused');
+    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+    await expect(attached).rejects.toThrow();
+  });
+
   it('resumes the exact viewer lease before attach and restores one ambiguous input tuple', async () => {
     const first = await start();
     await completeAttach(first.holder, first.client, first.identity);

@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
+import { MoorKind, decodeMoorHolderMessage } from '../src/shared/moorWire/messages.js';
+import { MoorWireError } from '../src/shared/moorWire/schema.js';
 import {
   MoorStoreError,
   MoorStoreKind,
@@ -23,6 +25,67 @@ afterEach(async () => {
 
 function sessionIdentity(): Uint8Array {
   return Uint8Array.of(1, 0x2f, ...encoder.encode('tmp/session'));
+}
+
+function joined(...parts: Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function integer(value: number | bigint, bytes: 2 | 4 | 8): Uint8Array {
+  const result = new Uint8Array(bytes);
+  const view = new DataView(result.buffer);
+  if (bytes === 2) view.setUint16(0, Number(value), true);
+  if (bytes === 4) view.setUint32(0, Number(value), true);
+  if (bytes === 8) view.setBigUint64(0, BigInt(value), true);
+  return result;
+}
+
+const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4), bytes);
+
+function legacyLayoutOneStatusPayload(): {
+  payload: Uint8Array;
+  identity: Uint8Array;
+  incarnation: Uint8Array;
+} {
+  const identity = sessionIdentity();
+  const incarnation = new Uint8Array(16).fill(0x11);
+  const eventIdentity = Uint8Array.of(...identity, ...encoder.encode('/events'));
+  const emptyCommit = joined(
+    Uint8Array.of(0xff), // bodySlot
+    integer(0n, 8), // commitIndex
+    integer(0n, 8), // bodyLength
+    new Uint8Array(32) // bodyHash
+  );
+  const replayTail = joined(new Uint8Array(32), Uint8Array.of(1), new Uint8Array(36));
+
+  return {
+    identity,
+    incarnation,
+    payload: joined(
+      wide(identity),
+      integer(7, 4),
+      incarnation,
+      Uint8Array.of(1),
+      wide(eventIdentity),
+      emptyCommit,
+      integer(100n, 8),
+      integer(50n, 8),
+      new Uint8Array(16).fill(0x33),
+      wide(encoder.encode('/tmp/session')),
+      integer(1234, 4),
+      integer(5678, 4),
+      new Uint8Array(16).fill(0x44),
+      integer(80, 2),
+      integer(24, 2),
+      replayTail
+    )
+  };
 }
 
 const V24_LIFECYCLE_BODY = encoder.encode(
@@ -190,6 +253,19 @@ function asCommit(
     ...overrides
   };
 }
+
+describe('Moor committed-store descriptor grammar', () => {
+  it('rejects legacy layout 1 with event identity present and empty commit fields', () => {
+    const { payload, identity, incarnation } = legacyLayoutOneStatusPayload();
+
+    expect(() =>
+      decodeMoorHolderMessage(
+        { scope: 7, kind: MoorKind.STATUS_REPLY, payload },
+        { identity, generation: 7, incarnation }
+      )
+    ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
+  });
+});
 
 describe('Moor committed store selection', () => {
   it('reads the exact commit layout and only the committed body prefix', async () => {
@@ -413,6 +489,17 @@ describe('Moor event snapshots and cursors', () => {
     }
   });
 
+  it.each([
+    ['a bogus', ',"ended":"exited","code":0,"method":"bogus"'],
+    ['a missing', ',"ended":"exited","code":0']
+  ] as const)('rejects v4 exit events with %s method', (_label, tail) => {
+    const body = eventBody({ records: [event('exit', 1, 1n, 'transition', tail)] });
+
+    expect(() => decodeMoorEventSnapshot(body, asCommit(body))).toThrowError(
+      expect.objectContaining<MoorStoreError>({ code: 'CORRUPT' })
+    );
+  });
+
   it('emits all records initially and only unseen records after append', () => {
     const initialBody = eventBody({
       records: [event('ready', 1, 1n), event('link', 1, 2n, 'transition', ',"uri":"x","truncated":false')]
@@ -581,13 +668,34 @@ describe('Moor event snapshots and cursors', () => {
       'retired v1 schema',
       encoder.encode(new TextDecoder().decode(exitedLifecycleBody()).replace('{"v":2', '{"v":1'))
     ],
-    ['retired terminated mechanism', exitedLifecycleBody({ ended: 'terminated', method: 'forced' })],
     [
       'Windows signalled mechanism',
       exitedLifecycleBody({ encoding: 'windows-wtf8', ended: 'signalled', method: 'forced' })
     ],
     ['POSIX exit code 256', exitedLifecycleBody({ code: 256 })]
   ] as const)('rejects %s lifecycle records', async (_label, body) => {
+    const directory = await store({
+      body0: body,
+      commit0: commitRecord({
+        slot: 0,
+        kind: MoorStoreKind.Exit,
+        generation: 7,
+        epoch: 1,
+        index: 2n,
+        start: 12n,
+        end: 12n,
+        bytes: body
+      })
+    });
+
+    await expect(readMoorStoreSnapshot(directory, MoorStoreKind.Exit, 7)).rejects.toMatchObject({
+      code: 'CORRUPT'
+    });
+  });
+
+  it('rejects the retired ended:=terminated branch in a v2 lifecycle record', async () => {
+    const body = exitedLifecycleBody({ ended: 'terminated', method: 'forced' });
+    expect(new TextDecoder().decode(body)).toContain('{"v":2,"type":"lifecycle"');
     const directory = await store({
       body0: body,
       commit0: commitRecord({

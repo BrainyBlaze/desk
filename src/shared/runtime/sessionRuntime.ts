@@ -32,7 +32,6 @@ export interface SessionRuntimeDeps {
    */
   sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
-  onExit?: (exit: { code: number; signal: number }) => void;
 }
 
 /**

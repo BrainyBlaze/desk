@@ -268,21 +268,6 @@ export class DaemonCore {
         this.d.sendMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterResize: (rows, cols, surfaceId) =>
         this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
-      onExit: (exit) => {
-        this.authority.markExited(sessionId, generation, {
-          code: exit.code,
-          signal: exit.signal === 0 ? null : String(exit.signal),
-          origin: 'observed',
-          reason: null,
-          // The supervised worker path reports a POSIX code/signal pair
-          // directly; the tagged outcome states which of the two it was.
-          outcome:
-            exit.signal === 0 || exit.signal === undefined
-              ? { kind: 'exited', code: exit.code ?? 0, method: 'none' }
-              : { kind: 'signalled', signal: Number(exit.signal), method: 'none' },
-          diagnostic: null
-        });
-      }
     });
     this.sessions.set(sessionId, { runtime, lease: createLeaseState(), generation });
   }

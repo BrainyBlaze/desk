@@ -156,8 +156,7 @@ macro_rules! syscall {
     };
 }
 
-crate::schema!(struct Config<'a> fields; path: &'a Path, root: PathBuf, launch: LaunchSeed, event: Option<EventTarget>, lifecycle: StoreTarget, log: Option<StoreTarget>, stage: Stage,
-    command: Vec<OsString>, options: &'a Options, invoked: &'a OsStr, terminal: (Option<libc::termios>, libc::winsize), stderr: Option<File>, instrument: Option<PreparedInstrument>);
+crate::schema!(struct Config<'a> fields; path: &'a Path, root: PathBuf, launch: LaunchSeed, event: Option<EventTarget>, lifecycle: StoreTarget, log: Option<StoreTarget>, stage: Stage, command: Vec<OsString>, options: &'a Options, invoked: &'a OsStr, terminal: (Option<libc::termios>, libc::winsize), stderr: Option<File>, instrument: Option<PreparedInstrument>);
 crate::schema!(struct UnixNative fields; control: File, group: i32, child: Child);
 crate::schema!(struct ViewerTerminal derive [Clone, Copy] fields; fd: i32, saved: libc::termios);
 crate::schema!(struct LaunchSeed fields; generation: u32, supervised: bool, incarnation: [u8; 16], semantic_token: [u8; 16], identity: Vec<u8>, start: (u64, u64, [u8; 16]));
@@ -280,10 +279,7 @@ pub(crate) fn create(
     options: &Options,
     invoked: &OsStr,
 ) -> CommandResult<i32> {
-    let interactive = matches!(
-        mode,
-        CreateMode::Bare | CreateMode::New | CreateMode::LegacyA | CreateMode::LegacyC
-    );
+    let interactive = matches!(mode, CreateMode::Bare | CreateMode::New);
     let terminal = terminal_config(interactive)?;
     let root = root(invoked)?;
     let event = validate_event_target(options.events.as_deref(), &root, path)?;
@@ -382,7 +378,7 @@ pub(crate) fn create(
         instrument,
     };
     crate::return_if!(
-        matches!(mode, CreateMode::Run | CreateMode::LegacyRun),
+        matches!(mode, CreateMode::Run),
         Ok(holder(config, listener, None)?)
     );
     let (parent, child) = UnixStream::pair().text()?;
@@ -623,7 +619,7 @@ fn holder(
     else {
         return Ok(125);
     };
-    let (exit, durable) = state.finish_exit(&running, status, None);
+    let (exit, durable) = state.finish_exit(&running, status, state.termination_method());
     let owned = fs::symlink_metadata(path)
         .is_ok_and(|meta| meta.file_type().is_socket() && owned(&meta) && file_id(&meta) == marker);
     let unlinked = durable && owned && fs::remove_file(path).is_ok();
@@ -639,7 +635,7 @@ fn finalize_unpublished_exit(
     ready: &mut shared::LaunchReporter<UnixStream>,
 ) -> Result<i32> {
     let status = state.drive(|_, _| None, || None)?.unwrap_or(observed);
-    let (exit, durable) = state.finish_exit(running, status, None);
+    let (exit, durable) = state.finish_exit(running, status, state.termination_method());
     if durable {
         config.retain_stores();
     }
@@ -660,7 +656,9 @@ fn abort_unpublished(
     error: String,
     diagnose: bool,
 ) -> Result<i32> {
-    let deadline = Instant::now() + Duration::from_millis(25);
+    // Give an already-triggered natural exit the same bounded scheduling
+    // allowance used by launch teardown before forcing the unpublished group.
+    let deadline = Instant::now() + Duration::from_millis(250);
     let observed = loop {
         if let Some(observed) = state.observe_exit()? {
             break Some(observed);
@@ -960,6 +958,7 @@ fn holder_setup(
             event_identity: event_manifest,
             instrument_identity: instrument_manifest,
             event_store: None,
+            event_directory: None,
             stores: Some(shared::ArtifactStores {
                 lifecycle: lifecycle_store,
                 event: event_store,
@@ -1085,9 +1084,8 @@ impl Drop for RawTerminal {
     }
 }
 
-fn connected(path: &Path, timeout: Duration, stream: LocalStream) -> Result<WireClient> {
+fn connected(path: &Path, deadline: Instant, stream: LocalStream) -> Result<WireClient> {
     crate::ensure!(peer_owned(&stream), "holder peer identity mismatch");
-    let deadline = Instant::now() + timeout;
     stream
         .set_send_timeout(Some(Duration::from_millis(250)))
         .text()?;
@@ -1095,8 +1093,35 @@ fn connected(path: &Path, timeout: Duration, stream: LocalStream) -> Result<Wire
 }
 
 fn bounded(path: &Path, timeout: Duration) -> Result<WireClient> {
-    let (_parent, stream) = socket_stream(path).map_err(|(error, _)| error)?;
-    connected(path, timeout, stream)
+    // ONE absolute deadline, taken before the first connect and then shared:
+    // the same value admits each retry and bounds the protocol phase, so the
+    // retries cannot hand the identity exchange a fresh budget of its own.
+    bounded_at(path, Instant::now() + timeout)
+}
+
+/// Run the two phases of one probe against a single deadline.
+///
+/// The connect phase and the protocol phase that follows it are handed the
+/// SAME value — not two windows computed independently, which is how the
+/// identity exchange used to open a fresh budget after the connect had already
+/// spent wall clock the caller granted. Threading it through one seam makes
+/// that an observable property rather than a discipline each call site must
+/// remember to keep.
+fn within_deadline<S, T, E>(
+    deadline: Instant,
+    dial: impl FnOnce(Instant) -> std::result::Result<S, E>,
+    speak: impl FnOnce(Instant, S) -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let carried = dial(deadline)?;
+    speak(deadline, carried)
+}
+
+fn bounded_at(path: &Path, deadline: Instant) -> Result<WireClient> {
+    within_deadline(
+        deadline,
+        |deadline| socket_stream(path, deadline).map_err(|(error, _)| error),
+        |deadline, (_parent, stream)| connected(path, deadline, stream),
+    )
 }
 
 pub(crate) fn connect(path: &Path) -> Result<WireClient> {
@@ -1159,8 +1184,13 @@ fn inspect(path: &Path, status: bool, timeout: Duration) -> shared::SessionState
                 .is_ok_and(|meta| meta.file_type().is_socket() && owned(&meta))
         },
         || {
-            let (_parent, stream) = socket_stream(path).map_err(|(_, refused)| refused)?;
-            connected(path, timeout, stream).map_err(|_| false)
+            // The same absolute deadline covers the connect retries and the
+            // identity exchange that follows them.
+            within_deadline(
+                Instant::now() + timeout,
+                |deadline| socket_stream(path, deadline).map_err(|(_, refused)| refused),
+                |deadline, (_parent, stream)| connected(path, deadline, stream).map_err(|_| false),
+            )
         },
     )
 }
@@ -1863,15 +1893,76 @@ fn publish_exclusive(parent: &File, stage: &OsStr, destination: &OsStr) -> Resul
     parent.sync_all().text()
 }
 
-fn socket_stream(path: &Path) -> std::result::Result<(File, LocalStream), (String, bool)> {
+/// The most connect calls one probe may make, counting the first. The budget
+/// is stated in calls rather than retries so the storm witness can pin the
+/// exact number instead of a tolerant range.
+const MAX_CONNECT_ATTEMPTS: usize = 16;
+
+/// Retry an operation the kernel interrupted, within a call budget and the
+/// caller's absolute deadline.
+///
+/// EINTR is not an answer: it reports that a signal arrived while the call was
+/// in flight, and says nothing about the peer. Every other kind is returned
+/// untouched on the first call — a refusal, a permission denial and a timeout
+/// are real answers, and retrying them would either spin or invite treating one
+/// as another. Exhausting the budget or the deadline yields the last
+/// interruption, which stays indeterminate: fail closed, never a claim about
+/// liveness.
+///
+/// The bound governs when a retry may BEGIN. It makes no claim about a call
+/// already in flight: nothing here can shorten a `connect` the kernel is
+/// running, so the guarantee is that attempt N+1 never starts once the budget
+/// is spent or the deadline is reached.
+fn retry_interrupted<T>(
+    deadline: Instant,
+    now: impl Fn() -> Instant,
+    mut open: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        let outcome = open();
+        attempts += 1;
+        let interrupted = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.kind() == io::ErrorKind::Interrupted);
+        if !interrupted || attempts == MAX_CONNECT_ATTEMPTS || now() >= deadline {
+            return outcome;
+        }
+    }
+}
+
+/// Does this connect failure positively prove nothing is listening?
+///
+/// Only a refusal does. The kernel answers ECONNREFUSED when the path is bound
+/// but no listener stands behind it, which is exactly the stale-residue shape.
+/// Every other failure — permission, timeout, an interruption that outlived its
+/// budget, anything unknown — leaves the question open, and the caller must
+/// keep treating it as indeterminate. Widening this predicate would convert a
+/// question into a liveness claim, so it is named and tested per kind rather
+/// than written inline.
+fn connect_refused(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ConnectionRefused
+}
+
+fn socket_stream(
+    path: &Path,
+    deadline: Instant,
+) -> std::result::Result<(File, LocalStream), (String, bool)> {
     let parent = socket_parent(path).map_err(|error| (error, false))?;
     let leaf = path
         .file_name()
         .ok_or_else(|| ("rendezvous has no name".into(), false))?;
     let mut refused = false;
     let stream = socket_name(&parent, leaf, |name| {
-        LocalStream::connect(name).inspect_err(|error| {
-            refused = error.kind() == io::ErrorKind::ConnectionRefused;
+        // The io::Error survives here, where the refusal decision is made; the
+        // caller's boundary stays the same bool, so no production output,
+        // shared type, or platform beyond this function sees any change.
+        retry_interrupted(deadline, Instant::now, || {
+            LocalStream::connect(name.clone())
+        })
+        .inspect_err(|error| {
+            refused = connect_refused(error);
         })
     })
     .map_err(|error| (error, refused))?;
@@ -2095,9 +2186,13 @@ fn headless_termios() -> libc::termios {
 fn terminal_config(interactive: bool) -> Result<(Option<libc::termios>, libc::winsize)> {
     crate::return_if!(!interactive, Ok((Some(headless_termios()), window(24, 80))));
     let terminal = ViewerTerminal::detect(libc::STDIN_FILENO).ok_or("no controlling terminal")?;
+    // v4: the creation size obeys the same §4 bound the descriptor's reader
+    // enforces — Windows already validated with valid_size while this path
+    // only rejected zeros, so a pathological terminal could seed a geometry
+    // every consumer would then refuse. Symmetric now.
     let (rows, columns) = terminal
         .size()
-        .filter(|(rows, columns)| *rows != 0 && *columns != 0)
+        .filter(|size| crate::wire::valid_size(*size))
         .ok_or("no controlling terminal")?;
     Ok((Some(terminal.saved), window(rows, columns)))
 }
@@ -2309,69 +2404,8 @@ fn uid() -> u32 {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::*;
-    use std::sync::mpsc::sync_channel;
-
-    #[test]
-    fn descriptor_relative_socket_name_never_changes_process_cwd() {
-        let before = std::env::current_dir().unwrap();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("moor-thread-cwd-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        let parent = open_directory(&path).unwrap();
-        let (entered, wait) = sync_channel(0);
-        let (observed, receive) = sync_channel(0);
-        let observer = thread::spawn(move || {
-            wait.recv().unwrap();
-            observed.send(std::env::current_dir().unwrap()).unwrap();
-        });
-        let during = socket_name(&parent, OsStr::new("probe"), move |_| {
-            entered.send(()).unwrap();
-            Ok::<_, io::Error>(receive.recv().unwrap())
-        })
-        .unwrap();
-        observer.join().unwrap();
-        assert_eq!(during, before);
-        assert_eq!(std::env::current_dir().unwrap(), before);
-        fs::remove_dir(path).unwrap();
-    }
-
-    #[test]
-    fn accepted_socket_is_blocking_before_runtime_io_starts() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "moor-blocking-accept-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
-        let parent = open_directory(&path).unwrap();
-        let leaf = OsStr::new("probe");
-        let listener = socket_name(&parent, leaf, |name| {
-            ListenerOptions::new()
-                .name(name)
-                .reclaim_name(false)
-                .nonblocking(ListenerNonblockingMode::Accept)
-                .create_sync()
-        })
-        .unwrap();
-        let client = socket_name(&parent, leaf, LocalStream::connect).unwrap();
-        let accepted = accept_blocking(&listener).expect("pending local connection");
-        let LocalStream::UdSocket(accepted) = accepted;
-        let flags = fcntl(accepted.as_fd(), FcntlArg::F_GETFL).unwrap();
-        assert_eq!(flags & libc::O_NONBLOCK, 0);
-        drop(client);
-        drop(listener);
-        fs::remove_file(path.join(leaf)).unwrap();
-        fs::remove_dir(path).unwrap();
-    }
+    include!("../tests/unit/unix_macos.rs");
 }
 
 #[cfg(test)]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/unit/unix.rs"));
+include!("../tests/unit/unix.rs");

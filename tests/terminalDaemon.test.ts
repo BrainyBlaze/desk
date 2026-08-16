@@ -113,19 +113,25 @@ function moorCommitRecord(
 function writeCurrentExitStore(
   sessionPath: string,
   generation: number,
-  code: number,
+  outcome:
+    | { ended: 'exited'; code: number }
+    | { ended: 'signalled'; signal: number },
   outputEnd = 0n,
   method: 'none' | 'graceful' | 'forced' = 'none'
 ): void {
   const identity = Buffer.from(moorStoreIdentity(sessionPath)).toString('base64');
   const nonce = Buffer.alloc(16).toString('base64');
+  const encodedOutcome =
+    outcome.ended === 'exited'
+      ? `"ended":"exited","code":${outcome.code}`
+      : `"ended":"signalled","signal":${outcome.signal}`;
   const body = encoder.encode(
     `{"v":2,"type":"lifecycle","phase":"exited","session":"${identity}",` +
       `"generation":${generation},"wire_generation":${generation},` +
       `"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1",` +
       `"boot_id":"${nonce}","path_encoding":"posix-bytes",` +
       `"event_path":null,"instrument_path":null,"end_wall_ms":"2",` +
-      `"output_end":"${outputEnd}","ended":"exited","code":${code},"method":"${method}"}\n`
+      `"output_end":"${outputEnd}",${encodedOutcome},"method":"${method}"}\n`
   );
   const directory = `${sessionPath}.exit`;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -752,7 +758,7 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
       store.append('state', 2, ',"state":"busy","title":"work","truncated":false');
       store.append('state', 3, ',"state":"idle","title":"done","truncated":false');
       store.append('exit', 4, ',"ended":"exited","code":0,"method":"none"');
-      writeCurrentExitStore(sessionPath, 2, 0);
+      writeCurrentExitStore(sessionPath, 2, { ended: 'exited', code: 0 });
       vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
         fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
       );
@@ -804,7 +810,39 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
       const storeDir = moorEventStoreDir(moorEventStoreRoot('/opt/moor'), 'sess-1', 2);
       const store = new MoorStoreFixture(storeDir, 2, moorStoreIdentity(sessionPath));
       store.append('exit', 1, ',"ended":"exited","code":0,"method":"forced"');
-      writeCurrentExitStore(sessionPath, 2, 0, 0n, 'none');
+      writeCurrentExitStore(sessionPath, 2, { ended: 'exited', code: 0 }, 0n, 'none');
+      vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
+        fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
+      );
+
+      await expect(daemon.reconcileMoorEvents('sess-1', 2)).resolves.toBe(false);
+      expect(daemon.router.sessions.stateSnapshot('sess-1')?.exit?.origin).not.toBe('observed');
+    } finally {
+      daemon.dispose();
+    }
+  });
+
+  it('rejects signalled lifecycle/event agreement when only the exit method differs', async () => {
+    const daemon = createTerminalDaemon({
+      homeRoot: home,
+      moorBinPath: '/opt/moor',
+      moorSocketRoot: home,
+      httpServer: new FakeUpgradeServer()
+    });
+    try {
+      const ensured = daemon.router.sessions.ensure('sess-1', { rows: 24, cols: 80 });
+      expect(ensured).toMatchObject({ ok: true, generation: 2 });
+      const sessionPath = join(home, 'sess-1');
+      const storeDir = moorEventStoreDir(moorEventStoreRoot('/opt/moor'), 'sess-1', 2);
+      const store = new MoorStoreFixture(storeDir, 2, moorStoreIdentity(sessionPath));
+      store.append('exit', 1, ',"ended":"signalled","signal":15,"method":"none"');
+      writeCurrentExitStore(
+        sessionPath,
+        2,
+        { ended: 'signalled', signal: 15 },
+        0n,
+        'forced'
+      );
       vi.spyOn(daemon.router.sessions, 'moorStatus').mockReturnValue(
         fakeMoorStatus(sessionPath, 2, storeDir, store.frontier())
       );
