@@ -38,6 +38,10 @@ import {
 } from './moorMasterClient.js';
 import { MOOR_PRESERVE_GEOMETRY, type MoorStatus } from '../../shared/moorWire/messages.js';
 import { spawnMoorMaster } from './moorSpawnMaster.js';
+import {
+  rendezvousPathWithinCapacity,
+  unixSocketPathCapacity
+} from '../../shared/moorPaths.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, unlinkSync } from 'node:fs';
 import { type MoorSessionEvent } from './moorEventObserver.js';
@@ -1586,6 +1590,23 @@ export class SessionManager {
     } catch {
       return { ok: false, reason: 'spawn-failed' };
     }
+    // A rendezvous whose ABSOLUTE path exceeds the platform Unix-domain sun_path
+    // capacity (macOS 103, Linux 107 bytes) is bindable by the holder relative
+    // to its parent (spec 2.2) yet unreachable by Desk's absolute node:net
+    // connect: libuv truncates the address into sun_path and connect(2) then
+    // fails ENOENT on a spelling no holder published. Refuse before any
+    // allocation or launch, as a result -- so a ready-but-unaddressable holder
+    // is never created -- and name the cause explicitly, since the generic
+    // spawn-failed reason cannot carry it.
+    if (!rendezvousPathWithinCapacity(opts.sessionPath)) {
+      console.error(
+        `moor rendezvous is unaddressable by node:net on ${process.platform}: ` +
+          `${Buffer.byteLength(opts.sessionPath, 'utf8')} bytes exceeds the ` +
+          `${unixSocketPathCapacity()}-byte sun_path ceiling; shorten ` +
+          `DESK_MOOR_SOCKET_ROOT or the session name — ${opts.sessionPath}`
+      );
+      return { ok: false, reason: 'spawn-failed' };
+    }
     // Foreign-rendezvous preflight BEFORE any durable allocation (same wedge
     // logic as ever), with the no-follow type/identity fence: only a SOCKET
     // node can be a moor tombstone. Anything else at the path — a regular
@@ -2382,6 +2403,18 @@ export class SessionManager {
         };
       }
       if (existsSync(sockPath)) {
+        // The socket exists (stat has no sun_path limit), but if the absolute
+        // path is over-capacity a node:net connect would be truncated to a
+        // different spelling, so socketHasListener could never prove THIS socket
+        // is unlistened. Refuse the unlink rather than delete a possibly-live
+        // holder's rendezvous on unprovable absence.
+        if (!rendezvousPathWithinCapacity(sockPath)) {
+          return {
+            ok: false,
+            reason: 'retire-failed',
+            error: `cannot clean up session ${sessionId}: its rendezvous path exceeds the ${unixSocketPathCapacity()}-byte sun_path ceiling, so a connect cannot prove the socket is unlistened`
+          };
+        }
         if (await socketHasListener(sockPath)) {
           return {
             ok: false,
@@ -2571,6 +2604,12 @@ async function probeMoorHolder(
   generation: number,
   onClient?: (client: MoorMasterClient) => void
 ): Promise<'authenticated-live' | 'absent' | 'indeterminate'> {
+  // An over-capacity path is truncated by node:net, so its ENOENT is a FALSE
+  // absence. Unaddressable is never positively absent: classify indeterminate
+  // before connecting. (MoorMasterClient.connect enforces the same ceiling; the
+  // explicit check here keeps the classification legible and independently
+  // testable.)
+  if (!rendezvousPathWithinCapacity(sessionPath)) return 'indeterminate';
   const probe = new MoorMasterClient(sessionPath, generation);
   onClient?.(probe);
   try {
@@ -2607,6 +2646,11 @@ export async function probeRendezvous(
   path: string,
   timeoutMs = 250
 ): Promise<'live' | 'stale' | 'indeterminate'> {
+  // An over-capacity absolute path is truncated by libuv before connect, so its
+  // ENOENT would be a FALSE positive-absence. It is unaddressable, never proven
+  // stale: classify indeterminate before any Node connect (moor spec 2.2 lets a
+  // holder bind such a path relative to its parent).
+  if (!rendezvousPathWithinCapacity(path)) return 'indeterminate';
   return new Promise((resolve) => {
     const socket = createConnection({ path });
     const settle = (result: 'live' | 'stale' | 'indeterminate'): void => {

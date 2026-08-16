@@ -68,6 +68,66 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
     while (cleanups.length > 0) await cleanups.pop()!();
   });
 
+  it('refuses a rendezvous past the platform sun_path ceiling before any launch, with a named cause', async () => {
+    // Desk half of the Unix-socket address-capacity disposition. A holder can
+    // bind a deep rendezvous relative to its parent (moor spec 2.2), but Desk's
+    // absolute node:net connect truncates anything past sun_path and then fails
+    // ENOENT on a spelling no holder published. spawnAndAttachMoor must refuse
+    // such a path as a result, before any allocation or launch, and name the
+    // cause. The path is a valid canonical rendezvous spelling -- absolute,
+    // lexically resolved, valid session-id leaf -- whose only defect is length,
+    // so it clears the identity guard and reaches the capacity guard. The named
+    // console diagnostic is asserted so the refusal is attributable to THIS
+    // guard rather than an unrelated spawn failure (removing the guard lets the
+    // launch proceed and still fail, but without the diagnostic).
+    const manager = new SessionManager({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
+      emulatorFactory: { create: () => new ByteSinkEmu() },
+      now: () => Date.now(),
+      sendBrowser: () => undefined
+    });
+    const overlongSessionPath = `/tmp/${'d'.repeat(100)}/oversize-session`;
+    expect(Buffer.byteLength(overlongSessionPath, 'utf8')).toBeGreaterThan(107);
+    const killSpec = {
+      binPath: process.execPath,
+      args: [...NODE_IMPORT_ARGS, 'kill', overlongSessionPath],
+      staleCleanupSpec: {
+        binPath: process.execPath,
+        args: [...NODE_IMPORT_ARGS, 'rm', overlongSessionPath]
+      }
+    };
+    const diagnostics: string[] = [];
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      diagnostics.push(args.map(String).join(' '));
+    });
+    let preallocationInvoked = false;
+    try {
+      const result = await manager.spawnAndAttachMoor('oversize-session', {
+        binPath: process.execPath,
+        binArgs: NODE_IMPORT_ARGS,
+        sessionPath: overlongSessionPath,
+        command: ['sh', '-c', 'true'],
+        geometry: { rows: 24, cols: 80 },
+        killSpec,
+        preallocateSpawn: async () => {
+          preallocationInvoked = true;
+          return { ok: true };
+        },
+        readyTimeoutMs: 1_000
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe('spawn-failed');
+      expect(diagnostics.some((line) => /sun_path|unaddressable/.test(line))).toBe(true);
+      // The refusal precedes every effect: the stateful preallocation hook was
+      // never authorized and no generation or session was allocated.
+      expect(preallocationInvoked).toBe(false);
+      expect(manager.sessionCount).toBe(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it(
     'spawns supervised, attaches natively, fans output to the browser, round-trips input, and retires',
     async () => {

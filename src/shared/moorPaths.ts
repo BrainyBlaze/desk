@@ -22,13 +22,57 @@ import { tmpdir } from 'node:os';
 import { delimiter, join, resolve as resolvePath } from 'node:path';
 import { findPackageRoot } from './packageRoot.js';
 
-export function resolveMoorSocketRoot(env: NodeJS.ProcessEnv = process.env): string {
+export function resolveMoorSocketRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): string {
   const explicit = env.DESK_MOOR_SOCKET_ROOT?.trim();
   if (explicit !== undefined && explicit.length > 0) {
     return explicit;
   }
   const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'nouid';
-  return join(tmpdir(), `desk-moor-${uid}`);
+  return join(moorSocketRootBase(platform), `desk-moor-${uid}`);
+}
+
+// The default socket root's base directory. Unix-domain rendezvous paths are
+// bounded by sockaddr_un.sun_path (see unixSocketPathCapacity). os.tmpdir() on
+// macOS is /var/folders/<...>/T -- about 50 bytes before Desk adds
+// `desk-moor-<uid>` and then `/<sessionId>`, which the 3-64 char sessionId
+// grammar overruns past the 103-byte macOS ceiling, producing a holder that
+// binds by leaf (spec 2.2) but that Desk's absolute node:net connect can never
+// reach. /tmp (short, standard, present on both platforms) keeps the worst-case
+// rendezvous within the ceiling; the per-uid root is still created 0700 and
+// owner-checked by ensurePrivateSocketRoot, so the shared-/tmp hardening is
+// unchanged. Linux already resolved here via os.tmpdir() === /tmp; only macOS
+// moves off /var/folders for the socket root.
+function moorSocketRootBase(platform: NodeJS.Platform): string {
+  return platform === 'darwin' ? '/tmp' : tmpdir();
+}
+
+/**
+ * Usable Unix-domain pathname bytes before the terminating NUL. sun_path is 104
+ * bytes on macOS and 108 on Linux, so a bound or connected ABSOLUTE rendezvous
+ * path may be at most 103 (macOS) or 107 (Linux) bytes. libuv copies a connect
+ * path into sun_path with a bounded strncpy, so a longer absolute path is
+ * silently truncated and connect(2) then fails ENOENT on a spelling no holder
+ * published. Moor binds/connects relative to the rendezvous parent (spec 2.2),
+ * so only its final component must fit there; Desk's node:net client addresses
+ * the absolute path and is the party this ceiling binds.
+ */
+export function unixSocketPathCapacity(platform: NodeJS.Platform = process.platform): number {
+  return platform === 'darwin' ? 103 : 107;
+}
+
+/**
+ * Whether an absolute rendezvous path is addressable by node:net on this
+ * platform. Measured in BYTES (sun_path is a byte buffer; a multibyte session
+ * name costs more than its character count).
+ */
+export function rendezvousPathWithinCapacity(
+  rendezvousPath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return Buffer.byteLength(rendezvousPath, 'utf8') <= unixSocketPathCapacity(platform);
 }
 
 /**

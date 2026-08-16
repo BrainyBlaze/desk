@@ -22,6 +22,10 @@ import { connect, type Socket } from 'node:net';
 import { MoorCodec } from '../../shared/moorWire/codec.js';
 import { MoorWireError } from '../../shared/moorWire/schema.js';
 import {
+  rendezvousPathWithinCapacity,
+  unixSocketPathCapacity
+} from '../../shared/moorPaths.js';
+import {
   decodeMoorHolderMessage,
   encodeMoorSupervisedRequest,
   type MoorControllerRequest,
@@ -122,6 +126,24 @@ export class MoorIdentityError extends Error {
   constructor(message: string) {
     super(`IDENTITY_MISMATCH: ${message}`);
     this.name = 'MoorIdentityError';
+  }
+}
+
+// A rendezvous whose absolute path exceeds the platform sun_path capacity is
+// unreachable by this node:net client: libuv truncates the address, so a
+// connect would target a spelling no holder bound and fail ENOENT. The code is
+// deliberately NOT 'ENOENT'/'ECONNREFUSED', so callers that read those as
+// POSITIVE absence classify this as indeterminate instead (moor spec 2.2 lets a
+// holder bind such a path relative to its parent; only the absolute client is
+// bounded).
+export class MoorRendezvousCapacityError extends Error {
+  readonly code = 'RENDEZVOUS_UNADDRESSABLE';
+  constructor(sockPath: string) {
+    super(
+      `RENDEZVOUS_UNADDRESSABLE: ${Buffer.byteLength(sockPath, 'utf8')} bytes exceeds the ` +
+        `${unixSocketPathCapacity()}-byte Unix-domain sun_path ceiling`
+    );
+    this.name = 'MoorRendezvousCapacityError';
   }
 }
 
@@ -360,9 +382,17 @@ export class MoorMasterClient {
     }
     this.phase = 'connecting';
     return new Promise((resolve, reject) => {
+      this.pendingConnect = { reject };
+      // Refuse before connect when the absolute rendezvous path exceeds the
+      // platform sun_path ceiling: node:net would otherwise truncate it and
+      // connect a spelling no holder bound, surfacing as a false ENOENT that a
+      // caller could read as positive absence. teardown rejects pendingConnect.
+      if (!rendezvousPathWithinCapacity(this.sockPath)) {
+        this.teardown(new MoorRendezvousCapacityError(this.sockPath));
+        return;
+      }
       const sock = connect(this.sockPath);
       this.sock = sock;
-      this.pendingConnect = { reject };
       const onConnectError = (error: Error): void => {
         if (this.phase === 'connecting' && this.sock === sock) this.teardown(error);
       };
