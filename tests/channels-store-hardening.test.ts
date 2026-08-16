@@ -17,7 +17,6 @@ import {
   listChannels,
   saveChannelFile
 } from '../src/server/channelsStore.js';
-import { PreCutoverStoreError } from '../src/shared/supportFloor.js';
 
 describe('boot sweep: boot-time orphan-temp sweep', () => {
   let home: string;
@@ -168,7 +167,7 @@ describe('upload-only buckets', () => {
   });
 });
 
-describe('pre-cutover member manifests: the refusal is not swallowed by the "unreadable manifest" skip', () => {
+describe('pre-cutover member manifests: the member is carried, not silently dropped', () => {
   let home: string;
 
   beforeEach(() => {
@@ -179,23 +178,22 @@ describe('pre-cutover member manifests: the refusal is not swallowed by the "unr
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('listChannelMembers surfaces the named refusal instead of silently dropping the member', () => {
+  it('listChannelMembers lists the member with its retired binding, and never as a live session', () => {
     ensureChannelsHome(home);
     createChannel(home, 'deep-kca', 'goal');
     // The shape Desk v0.3.1 wrote for an agent member (real file, shortened):
-    // the identity rides a `tmux:` line, there is no `session:` line.
+    // the identity rides the retired line, there is no `session:` line. The
+    // v0.3.2 migration left such a line in place when the session was gone, so
+    // the member survives — but with a binding this version cannot resolve.
+    // The store must neither drop the member (the old catch-all skip did) nor
+    // give it a live sessionId it does not have.
     writeFileSync(
       join(home, 'deep-kca', '_members', 'zohar-glm.md'),
       ['---', 'name: zohar-glm', 'type: bash', 'status: active', 'joined: 2026-06-29 10:19:58', 'tmux: agentdesk-zohar-main-glm-798c36d0', '---', '', '# @zohar-glm', ''].join('\n')
     );
-    let caught: unknown;
-    try {
-      listChannelMembers(home, 'deep-kca');
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(PreCutoverStoreError);
-    expect((caught as Error).message).toContain('zohar-glm');
-    expect((caught as Error).message).toContain('boot Desk v0.3.2 once');
+    const members = listChannelMembers(home, 'deep-kca');
+    const zohar = members.find((candidate) => candidate.name === 'zohar-glm');
+    expect(zohar).toMatchObject({ name: 'zohar-glm', preCutoverSession: 'agentdesk-zohar-main-glm-798c36d0' });
+    expect(zohar?.sessionId).toBeUndefined();
   });
 });
