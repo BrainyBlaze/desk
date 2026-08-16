@@ -10,7 +10,6 @@ import {
   DaemonCore,
   DEFAULT_SUPERVISOR_CONFIG,
   WorkerSupervisor,
-  type BpFrame,
   type EmulatorEvent,
   type EmulatorPort
 } from '../src/shared/runtime/index.js';
