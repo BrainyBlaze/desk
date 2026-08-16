@@ -4,6 +4,7 @@
 // reconnect, input/resize, and error routing.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MoorExitOutcome } from '../src/shared/controlPlane/contract.js';
 import {
   BP_CONN_CHANNEL,
   BpError,
@@ -49,7 +50,7 @@ class FakeSocket implements BinaryBrokerSocket {
 interface Captured {
   output: Uint8Array[];
   snapshot: string[];
-  exit: { code: number; signal: number }[];
+  exit: MoorExitOutcome[];
   error: number[];
   clientError: string[];
   connection: boolean[];
@@ -59,7 +60,7 @@ function handlers(cap: Captured): BinarySurfaceHandlers {
   return {
     onOutput: (b) => cap.output.push(b),
     onSnapshot: (t) => cap.snapshot.push(t),
-    onExit: (code, signal) => cap.exit.push({ code, signal }),
+    onExit: (outcome) => cap.exit.push(outcome),
     onError: (code) => cap.error.push(code),
     onClientError: (message) => cap.clientError.push(message),
     onConnectionChange: (up) => cap.connection.push(up)
@@ -567,12 +568,14 @@ describe('binary terminal broker client (§7.4)', () => {
     expect([...cap.output[0]]).toEqual([2]);
   });
 
-  it('routes EXIT to the owning surface', () => {
+  it('routes EXIT to the owning surface with the tagged outcome intact', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     socket.deliver(ack(1));
-    socket.deliver({ type: BpFrameType.EXIT, channelId: 1, code: 137, signal: 9 });
-    expect(cap.exit).toEqual([{ code: 137, signal: 9 }]);
+    socket.deliver({ type: BpFrameType.EXIT, channelId: 1, outcome: { kind: 'signalled', signal: 9, method: 'forced' } });
+    expect(cap.exit).toEqual([{ kind: 'signalled', signal: 9, method: 'forced' }]);
+    socket.deliver({ type: BpFrameType.EXIT, channelId: 1, outcome: { kind: 'unknown' } });
+    expect(cap.exit).toEqual([{ kind: 'signalled', signal: 9, method: 'forced' }, { kind: 'unknown' }]);
   });
 });

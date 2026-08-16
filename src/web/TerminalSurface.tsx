@@ -4,6 +4,7 @@ import { binaryTerminalBroker } from './binaryTerminalBrokerClient.js';
 import { ReplySuppressionAddon } from './replySuppressionAddon.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
 import { describeBpError } from './terminalBpError.js';
+import { describeSessionExit } from './terminalExitLine.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -874,9 +875,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // Repair the PTY size once if the settled cell differs from the daemon.
         stabilize();
       },
-      onExit: (code, signal) => {
-        const how = signal ? `signal ${signal}` : `code ${code}`;
-        terminal.writeln(`\r\n\x1b[33m[session exited ${how}]\x1b[0m`);
+      onExit: (outcome) => {
+        // The tagged ending as moor reported it: exited N, signalled N, or
+        // unknown -- the word, never a fabricated code 0.
+        terminal.writeln(`\r\n\x1b[33m${describeSessionExit(outcome)}\x1b[0m`);
       },
       onError: (code) => {
         terminal.writeln(`\r\n\x1b[31m${describeBpError(code)}\x1b[0m`);
