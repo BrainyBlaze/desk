@@ -1,14 +1,13 @@
 // SessionManager (spec §3.2/§7.1) — the server-side composition that makes the
 // daemon a complete session pipe: DaemonCore (pure registry) + a per-session
-// the moor master link + browser fan-out. Ensures a session,
+// Moor master link + browser fan-out. Ensures a session,
 // attaches to its master socket, and wires master frames → SessionRuntime →
 // browser and browser input → master. Unexpected controller loss creates one
 // generation/owner-fenced recovery slot; only explicit control or positively
 // proved holder absence ends authority. Node net lives only in the moor client;
 // DaemonCore stays pure and is driven through callbacks (no layering break).
 //
-// Testable against a fake v3 master today; the real moor binary drops in behind
-// the same socket path once its master speaks v3.
+// The fake holder and the vendored Moor binary exercise the same v4 socket path.
 
 import { createConnection } from 'node:net';
 import { GenerationLedger } from '../../shared/controlPlane/generationLedger.js';

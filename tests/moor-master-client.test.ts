@@ -1,7 +1,7 @@
 // #2 integration seam: the daemon-side MOOR controller client that replaces the
 // ATV3 MasterClient. Verified against a fake MOOR holder built on the approved
-// moorWire codec (byte conformance to moor 93d593a is pinned by the wire
-// suites). The attach prefix is the frozen §6 order: ATTACH_ACK →
+// moorWire codec (byte conformance to the vendored Moor source is pinned by
+// the wire suites). The attach prefix is the frozen §6 order: ATTACH_ACK →
 // TERMINAL_STATE (exactly once) → lease/replay/live; a missing, second, or
 // reordered preamble is refused; identity exchange + adoption run
 // under one absolute deadline; every teardown path rejects pending work.

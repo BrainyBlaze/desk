@@ -156,8 +156,8 @@ export class SessionRuntime {
   /**
    * Fan a child-exit to every subscribed surface (cutover parity: the browser
    * receives an explicit EXIT push, not just an authority-snapshot change).
-   * The moor event stream folds a signalled end into its exit code upstream,
-   * so `signal` is 0 unless a caller can still distinguish one.
+   * Moor v4 preserves the terminal outcome; callers pass the POSIX signal for
+   * signalled exits and leave `signal` at 0 for ordinary exit-code outcomes.
    */
   emitExit(code: number, outputEnd: bigint, signal = 0): void | Promise<void> {
     if (this.disposed || this.exitFenced) return this.exitDelivery;

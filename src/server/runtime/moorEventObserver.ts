@@ -161,7 +161,7 @@ const DEFAULT_MAX_CONSECUTIVE_READ_FAILURES = 5;
  * `temp_dir()/.{invoked-basename}-{euid}`. The holder REJECTS any `-T`
  * outside this directory (`outside-root`), so Desk must derive its handed-off
  * store paths from the SAME rule — never from its own socket root. Fidelity
- * to the binary (moor @93d593a):
+ * to the vendored Moor source:
  * - `invoked` is the exact invocation name the spawn sees (argv0 override
  *   when set, else the binary path) — the basename decides the root name;
  *   an empty basename falls back to `moor` exactly like `root()`.

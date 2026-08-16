@@ -1,5 +1,5 @@
 // Daemon-side MOOR controller client — a one-shot connection/handshake state
-// machine over the frozen moor wire v3 (spec/moor-wire-schema.md).
+// machine over the frozen moor wire v4 (spec/moor-wire-schema.md).
 //
 // Frozen contract this file enforces:
 // - §3 identity exchange: supervised HELLO at the ledger-allocated generation
@@ -7,8 +7,8 @@
 //   incarnation. Scope 0 (discovery) is never emitted here.
 // - §4.5/§6 recovery order: HELLO → viewer LEASE_REQUEST(resume) while
 //   unattached → rotated token → ATTACH without the fresh bit → ordinary
-//   terminal preamble/replay. Fresh attach remains TERMINAL_STATE (exactly
-//   once, before ATTACH_ACK) → ATTACH_ACK → optional LEASE_RESULT → replay.
+//   terminal preamble/replay. Fresh attach remains ATTACH_ACK → TERMINAL_STATE
+//   (exactly once) → optional LEASE_RESULT → replay.
 //   A missing/second preamble, changed recovery incarnation, or retained GAP
 //   crossing the delivered cursor fails this connection closed.
 // - Deadline table: identity exchange and adoption must complete within 2 s or
@@ -415,7 +415,7 @@ export class MoorMasterClient {
   /**
    * One-shot supervised handshake. HELLO goes out at the generation scope; the
    * HELLO_ACK adopts identity, then ATTACH; the exact §6 prefix
-   * (TERMINAL_STATE → ATTACH_ACK) resolves the promise. One absolute deadline
+   * (ATTACH_ACK → TERMINAL_STATE) resolves the promise. One absolute deadline
    * covers the whole identity exchange and adoption.
    */
   attach(options: MoorAttachOptions): Promise<MoorStatus> {
