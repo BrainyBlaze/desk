@@ -262,9 +262,14 @@ the home, and the cause, and exits non-zero — a loud, named stop rather than
 an anonymous exception out of a refresh timer.
 
 The former `_engine/engine.pid` ownership record is retired. A home that
-still carries one is refused at startup by name (the operator must stop
-Desk and run the current installer), because a stale pid record is exactly
-the artifact that used to leave a crashed deployment permanently silent.
+still carries one is refused at startup by name, because a stale pid record
+is exactly the artifact that used to leave a crashed deployment permanently
+silent. The pre-lease engine removed that file only on its crash-reclaim
+path — an orderly stop left it behind — and no installer or script touches
+it, so the remedy is the file itself: stop every Desk server for this home,
+delete `_engine/engine.pid`, then restart. Under the lease scheme the file
+carries no authority; the runtime refuses rather than deleting it silently so
+the operator learns a pre-lease server ran here and confirms none still does.
 
 ## Ops console
 

@@ -34,10 +34,16 @@ export function acquireChannelsRuntimeOwner(
   const engineDir = join(home, '_engine');
   mkdirSync(engineDir, { recursive: true });
 
+  // The retired engine's pid record. It removed this file only on its
+  // crash-reclaim path — an orderly stop left it behind — and nothing else
+  // in Desk (installer, scripts, runtime) touches it, so the remedy has to
+  // name the file itself. Under the lease scheme it carries no authority; it
+  // is refused rather than silently deleted so the operator learns that a
+  // pre-lease server ran here and confirms none is still running.
   const obsoleteOwnershipPath = join(engineDir, 'engine.pid');
   if (existsSync(obsoleteOwnershipPath)) {
     throw new Error(
-      `obsolete Channels ownership artifact at ${obsoleteOwnershipPath}; stop Desk and run the current installer before restarting`
+      `obsolete Channels ownership artifact at ${obsoleteOwnershipPath}: a Desk server older than the ownership lease ran here. Stop every Desk server for this home, delete ${obsoleteOwnershipPath}, then restart.`
     );
   }
 
