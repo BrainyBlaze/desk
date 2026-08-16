@@ -314,6 +314,8 @@ probe_host_capabilities() {
   probe_python || MISSING_CAPABILITIES+=("python>=${PYTHON_MIN_VERSION}")
   have make || MISSING_CAPABILITIES+=("make")
   probe_compiler || MISSING_CAPABILITIES+=("working C++ compiler")
+  # Editor search runs on ripgrep alone; without it the server refuses search by name.
+  have rg || MISSING_CAPABILITIES+=("ripgrep")
 }
 
 run_privileged() {
@@ -362,28 +364,28 @@ install_missing_packages() {
   case "$PACKAGE_MANAGER" in
     brew)
       ensure_macos_tooling
-      packages=(git python coreutils gnu-tar)
+      packages=(git python coreutils gnu-tar ripgrep)
       brew install "${packages[@]}"
       ;;
     apt-get)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make g++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make g++ ripgrep)
       run_privileged apt-get update
       run_privileged apt-get install -y "${packages[@]}"
       ;;
     dnf|yum)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc-c++ ripgrep)
       run_privileged "$PACKAGE_MANAGER" install -y "${packages[@]}"
       ;;
     pacman)
-      packages=(ca-certificates curl tar gzip coreutils git python make gcc)
+      packages=(ca-certificates curl tar gzip coreutils git python make gcc ripgrep)
       run_privileged pacman -Sy --needed --noconfirm "${packages[@]}"
       ;;
     zypper)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++ ripgrep)
       run_privileged zypper --non-interactive install "${packages[@]}"
       ;;
     apk)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make build-base)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make build-base ripgrep)
       run_privileged apk add "${packages[@]}"
       ;;
     *) die "unsupported package manager: $PACKAGE_MANAGER" ;;

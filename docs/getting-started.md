@@ -19,8 +19,9 @@ packages, but installation stops before activation because Desk does not yet
 publish a compatible Node toolchain.
 
 The installer detects, installs, and rechecks the required host layer: CA
-certificates, archive and checksum tools, Git 2.30+, Python 3.6+, make, and a
-working C++ compiler. It maintains its own checksum-verified Node 22.23.1,
+certificates, archive and checksum tools, Git 2.30+, Python 3.6+, make, a
+working C++ compiler, and ripgrep (the editor's only search engine — without
+`rg` the server refuses search by name rather than degrading). It maintains its own checksum-verified Node 22.23.1,
 npm 10.9.8, and Bun 1.3.14 under the Desk install root. It does not replace your
 global runtimes.
 

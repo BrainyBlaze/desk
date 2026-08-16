@@ -1,7 +1,5 @@
-import { spawn, spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { isBinary, MAX_EDITABLE_BYTES } from './fsOps.js';
+import { spawn } from 'node:child_process';
+import { DeskApiError } from './apiValidation.js';
 
 export interface ContentMatch {
   path: string; // relative to the search root
@@ -20,7 +18,40 @@ export interface ContentSearchResult {
   truncated: boolean;
 }
 
+export interface SearchOptions {
+  /**
+   * Bytes of rg output after which the run is stopped and reported as
+   * truncated. Exposed so a test can hit the cap with a small tree; production
+   * callers take the default.
+   */
+  outputCapBytes?: number;
+}
+
 export const SEARCH_RESULT_CAP = 500;
+
+/** rg output beyond this is a runaway; the run is killed and marked truncated. */
+export const RIPGREP_OUTPUT_CAP_BYTES = 8_000_000;
+
+/**
+ * Search has exactly one engine: ripgrep. When rg cannot be started there is
+ * nothing weaker to fall through to — the request is refused under this name
+ * so the operator learns which host requirement is missing, instead of getting
+ * a silently smaller answer from a different implementation.
+ */
+export class RipgrepUnavailableError extends DeskApiError {
+  constructor(cause: NodeJS.ErrnoException) {
+    const detail =
+      cause.code === 'ENOENT'
+        ? 'ENOENT: rg is not on PATH'
+        : `${cause.code ?? cause.name}: rg was found but could not be started (${cause.message})`;
+    super(
+      `ripgrep (rg) is required for search but could not be started — ${detail}. Install ripgrep (install.sh provisions it) and search again.`,
+      503,
+      'ripgrep-required'
+    );
+    this.name = 'RipgrepUnavailableError';
+  }
+}
 
 /**
  * Case-insensitive subsequence scorer. -1 = no match. Bonuses: consecutive
@@ -95,130 +126,70 @@ export function parseRipgrepJson(output: string): ContentMatch[] {
   return matches;
 }
 
-let ripgrepAvailable: boolean | undefined;
-
-export function hasRipgrep(): boolean {
-  if (ripgrepAvailable === undefined) {
-    ripgrepAvailable = spawnSync('rg', ['--version'], { encoding: 'utf8' }).status === 0;
-  }
-  return ripgrepAvailable;
-}
-
-export async function searchFiles(root: string, query: string): Promise<FileSearchResult> {
-  const files = hasRipgrep()
-    ? (await runRipgrep(['--files', '--hidden', '--glob', '!.git/**'], root)).split('\n').filter(Boolean)
-    : walkFiles(root);
-  const scored = files
+export async function searchFiles(root: string, query: string, options: SearchOptions = {}): Promise<FileSearchResult> {
+  const run = await runRipgrep(['--files', '--hidden', '--glob', '!.git/**'], root, options.outputCapBytes);
+  const scored = run.stdout
+    .split('\n')
+    .filter(Boolean)
     .map((path) => ({ path, score: scoreFuzzyPath(query, path) }))
     .filter((match) => match.score >= 0)
     .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
   return {
     matches: scored.slice(0, SEARCH_RESULT_CAP),
-    truncated: scored.length > SEARCH_RESULT_CAP
+    truncated: run.capped || scored.length > SEARCH_RESULT_CAP
   };
 }
 
-export async function searchContent(root: string, query: string): Promise<ContentSearchResult> {
-  const matches = hasRipgrep()
-    ? parseRipgrepJson(
-        await runRipgrep(
-          ['--json', '--smart-case', '--hidden', '--glob', '!.git/**', '--max-count', '20', '-e', query, '.'],
-          root
-        )
-      ).map((match) => ({ ...match, path: match.path.replace(/^\.\//, '') }))
-    : walkTextSearch(root, query);
+export async function searchContent(root: string, query: string, options: SearchOptions = {}): Promise<ContentSearchResult> {
+  const run = await runRipgrep(
+    ['--json', '--smart-case', '--hidden', '--glob', '!.git/**', '--max-count', '20', '-e', query, '.'],
+    root,
+    options.outputCapBytes
+  );
+  const matches = parseRipgrepJson(run.stdout).map((match) => ({ ...match, path: match.path.replace(/^\.\//, '') }));
   return {
     matches: matches.slice(0, SEARCH_RESULT_CAP),
-    truncated: matches.length > SEARCH_RESULT_CAP
+    truncated: run.capped || matches.length > SEARCH_RESULT_CAP
   };
 }
 
-function runRipgrep(args: string[], cwd: string): Promise<string> {
+interface RipgrepRun {
+  stdout: string;
+  /** True when the output cap stopped the run: what came back may not be all there is. */
+  capped: boolean;
+}
+
+function runRipgrep(args: string[], cwd: string, outputCapBytes = RIPGREP_OUTPUT_CAP_BYTES): Promise<RipgrepRun> {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn('rg', args, { cwd });
     let stdout = '';
     let stderr = '';
+    let capped = false;
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
-      if (stdout.length > 8_000_000) {
-        child.kill(); // runaway output — cap and use what we have
+      if (!capped && stdout.length > outputCapBytes) {
+        capped = true;
+        child.kill();
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
     });
-    child.on('error', rejectPromise);
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      // Spawn itself failed: rg is absent or not startable. Only rg's own exit
+      // codes are search outcomes; this is a host-requirement failure and is
+      // named as such rather than left for the generic ENOENT → 404 mapping,
+      // which would tell the user the search root does not exist.
+      rejectPromise(new RipgrepUnavailableError(error));
+    });
     child.on('close', (code) => {
-      // rg exits 1 when there are simply no matches.
-      if (code === 0 || code === 1 || stdout.length > 0) {
-        resolvePromise(stdout);
+      // rg exits 1 when there are simply no matches. A capped run was killed
+      // by us and its partial output is the answer, flagged as such.
+      if (capped || code === 0 || code === 1 || stdout.length > 0) {
+        resolvePromise({ stdout, capped });
       } else {
         rejectPromise(new Error(stderr.trim() || `rg exited with code ${code}`));
       }
     });
   });
-}
-
-/** Node fallback: list files (relative paths), hidden included, .git skipped. */
-export function walkFiles(root: string, dir = '', out: string[] = [], depthLeft = 16): string[] {
-  if (depthLeft <= 0 || out.length >= 20_000) {
-    return out;
-  }
-  let entries;
-  try {
-    entries = readdirSync(join(root, dir), { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (entry.name === '.git' || entry.name === 'node_modules') {
-      continue;
-    }
-    const rel = dir ? `${dir}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) {
-      walkFiles(root, rel, out, depthLeft - 1);
-    } else if (entry.isFile()) {
-      out.push(rel);
-    }
-  }
-  return out;
-}
-
-/**
- * Node fallback content search: case-insensitive substring over text files.
- *
- * Collects up to `SEARCH_RESULT_CAP + 1` matches so that callers can detect
- * truncation: if the returned array length equals `SEARCH_RESULT_CAP + 1` the
- * result was cut short. `searchContent` slices to `SEARCH_RESULT_CAP` and
- * sets `truncated: true` accordingly.
- */
-export function walkTextSearch(root: string, query: string): ContentMatch[] {
-  const needle = query.toLowerCase();
-  const limit = SEARCH_RESULT_CAP + 1;
-  const matches: ContentMatch[] = [];
-  for (const path of walkFiles(root)) {
-    if (matches.length >= limit) {
-      break;
-    }
-    let buffer: Buffer;
-    try {
-      if (statSync(join(root, path)).size > MAX_EDITABLE_BYTES) {
-        continue;
-      }
-      buffer = readFileSync(join(root, path));
-    } catch {
-      continue;
-    }
-    if (isBinary(buffer)) {
-      continue;
-    }
-    const lines = buffer.toString('utf8').split('\n');
-    for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
-      const column = lines[index]!.toLowerCase().indexOf(needle);
-      if (column !== -1) {
-        matches.push({ path, line: index + 1, column: column + 1, text: lines[index]!.slice(0, 400) });
-      }
-    }
-  }
-  return matches;
 }
