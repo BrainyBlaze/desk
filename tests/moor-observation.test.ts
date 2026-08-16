@@ -164,7 +164,6 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     mgr.observeMoorEvent('web-1', 2, {
       ts: 1.4,
       type: 'exit',
-      code: 0,
       outcome: { kind: 'exited', code: 0, method: 'none' },
       outputEnd: 0n
     });
