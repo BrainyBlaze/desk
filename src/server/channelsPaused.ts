@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PreCutoverStoreError } from '../shared/supportFloor.js';
 import { writeFileAtomic } from './fsOps.js';
 
 /**
@@ -32,6 +33,8 @@ import { writeFileAtomic } from './fsOps.js';
 
 const PAUSED_FILE = 'paused.json';
 const PAUSED_VERSION = 2;
+/** The store version Desk v0.3.1 wrote: items keyed by the retired per-session identity, not by sessionId. */
+const PRE_CUTOVER_PAUSED_VERSION = 1;
 const SESSION_KEY = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export interface PausedSession {
@@ -62,8 +65,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseStore(raw: string): PausedStore {
+function parseStore(raw: string, path: string): PausedStore {
   const parsed: unknown = JSON.parse(raw);
+  // Version 1 is not corruption: it is the store an older Desk wrote, whose
+  // entries this version cannot attribute (they name sessions by the retired
+  // identity). The migration that rewrote it is gone; say what remains.
+  if (isRecord(parsed) && parsed.version === PRE_CUTOVER_PAUSED_VERSION) {
+    throw new PreCutoverStoreError(
+      `Channels paused store at ${path} is version ${PRE_CUTOVER_PAUSED_VERSION}, written by Desk v0.3.1 or older`
+    );
+  }
   if (!isRecord(parsed) || parsed.version !== PAUSED_VERSION || !Array.isArray(parsed.items)) {
     throw new Error(`expected version ${PAUSED_VERSION} with an items array`);
   }
@@ -98,8 +109,11 @@ function readStore(home: string): PausedStore {
     return { version: PAUSED_VERSION, items: [] };
   }
   try {
-    return parseStore(readFileSync(path, 'utf8'));
+    return parseStore(readFileSync(path, 'utf8'), path);
   } catch (error) {
+    if (error instanceof PreCutoverStoreError) {
+      throw error;
+    }
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`invalid Channels paused store at ${path}: ${detail}`);
   }

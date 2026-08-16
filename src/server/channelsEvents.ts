@@ -1,5 +1,6 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PreCutoverStoreError } from '../shared/supportFloor.js';
 import { writeFileAtomic } from './fsOps.js';
 import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from './channelsProtocol.js';
 
@@ -184,8 +185,24 @@ function nextSeq(home: string): number {
 }
 
 /**
+ * The key Desk v0.3.1 and older used to attribute a record to its session.
+ * Nothing since the cutover writes it, and every live event carries a
+ * sessionId, so a record with this key is session-scoped history under an
+ * identity this version cannot resolve — not a channel-level event, and not
+ * corruption. The migration that re-keyed such records is gone (v0.3.2 was
+ * the last release to carry it, and it kept in place the records it could not
+ * map); reading them as anonymous events would present a session's history as
+ * nobody's, and skipping them would be a lossy read of attributable history.
+ * The reader refuses by name instead. Prune is unaffected: it keeps the newest
+ * records whatever their key, which is how a migrated ring sheds such residue.
+ */
+const PRE_CUTOVER_SESSION_KEY = 'tmuxSession';
+
+/**
  * Reads delivery events matching the optional filter. Returns events in
  * chronological order (oldest first). Falls back to [] on corrupt file.
+ * Refuses (PreCutoverStoreError) a ring that still holds pre-cutover records,
+ * filtered or not: a filtered read is still a read of that ring.
  */
 export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {}): DeliveryEvent[] {
   const path = eventsPath(home);
@@ -199,6 +216,7 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
     return [];
   }
   const events: DeliveryEvent[] = [];
+  let preCutoverRecords = 0;
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
@@ -211,6 +229,10 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
       continue; // skip corrupt lines
     }
     if (typeof parsed.seq !== 'number' || typeof parsed.kind !== 'string') {
+      continue;
+    }
+    if (PRE_CUTOVER_SESSION_KEY in parsed) {
+      preCutoverRecords += 1;
       continue;
     }
     if (filter.sessionId && parsed.sessionId !== filter.sessionId) {
@@ -226,6 +248,11 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
       continue;
     }
     events.push(parsed);
+  }
+  if (preCutoverRecords > 0) {
+    throw new PreCutoverStoreError(
+      `events ring at ${path} holds ${preCutoverRecords} record${preCutoverRecords === 1 ? '' : 's'} keyed by ${PRE_CUTOVER_SESSION_KEY}, written by Desk v0.3.1 or older`
+    );
   }
   if (filter.limit !== undefined && events.length > filter.limit) {
     return events.slice(-filter.limit);
@@ -277,49 +304,4 @@ export function pruneDeliveryEvents(home: string, maxEvents = MAX_EVENTS): numbe
 export function latestEventSeq(home: string): number {
   const events = readDeliveryEvents(home);
   return events.length > 0 ? events[events.length - 1]!.seq : 0;
-}
-
-/**
- * §10 store transform (cutover 3a): one events.jsonl line, re-keyed from the
- * legacy `tmuxSession` field to `sessionId`. PURE and PER-LINE so the
- * migration gate can stream the multi-GiB ring with bounded memory; policy
- * (keep/drop unmapped, carry malformed) belongs to the gate, this only
- * classifies. Lines without a tmuxSession field (channel-level events, blanks)
- * pass through unchanged; an old unmapped record kept as-is stays readable
- * post-cutover (seq/kind are the only required fields).
- */
-export type DeliveryEventLineMigration =
-  | { kind: 'migrated'; line: string }
-  | { kind: 'unchanged'; line: string }
-  | { kind: 'unmapped'; line: string; tmuxSession: string }
-  | { kind: 'malformed'; line: string };
-
-export function migrateDeliveryEventLine(
-  line: string,
-  tmuxToSessionId: ReadonlyMap<string, string>
-): DeliveryEventLineMigration {
-  const trimmed = line.trim();
-  if (trimmed.length === 0) {
-    return { kind: 'unchanged', line };
-  }
-  let parsed: Record<string, unknown>;
-  try {
-    const value: unknown = JSON.parse(trimmed);
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      return { kind: 'malformed', line };
-    }
-    parsed = value as Record<string, unknown>;
-  } catch {
-    return { kind: 'malformed', line };
-  }
-  const tmuxSession = parsed.tmuxSession;
-  if (typeof tmuxSession !== 'string' || tmuxSession.length === 0) {
-    return { kind: 'unchanged', line };
-  }
-  const sessionId = tmuxToSessionId.get(tmuxSession);
-  if (sessionId === undefined) {
-    return { kind: 'unmapped', line, tmuxSession };
-  }
-  const { tmuxSession: _dropped, ...rest } = parsed;
-  return { kind: 'migrated', line: JSON.stringify({ ...rest, sessionId }) };
 }

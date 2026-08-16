@@ -1,6 +1,7 @@
 import YAML from 'yaml';
-import { checkGlobalUniqueness, isValidSessionId } from '../shared/migration/index.js';
+import { checkGlobalUniqueness, isValidSessionId, SESSION_ID_GRAMMAR } from '../shared/sessionId.js';
 import { shellQuote } from '../shared/shell.js';
+import { STORE_SUPPORT_FLOOR_NOTE } from '../shared/supportFloor.js';
 import { isSupportedAgent } from './types.js';
 import type {
   AgentMcpLaunchConfig,
@@ -10,16 +11,11 @@ import type {
   DeskManifest,
   DeskProject,
   DeskSession,
+  DeskSettings,
   SessionSpec
 } from './types.js';
 import { deskClaudeSettingsPath } from './agentHooks.js';
 import { defaultOpencodeConfigDir, opencodePermissionConfigContent } from './opencodeConfig.js';
-import {
-  collectSessions,
-  type LegacyDeskGroup,
-  type LegacyDeskManifest,
-  type LegacyDeskSession
-} from './sessionIdentity.js';
 import {
   isProfileProvider,
   isValidProfileId,
@@ -44,17 +40,47 @@ export class ManifestValidationError extends Error {
   }
 }
 
+/**
+ * The manifest as YAML gives it to us, before session identities are checked:
+ * `sessionId` is not yet trusted and a manifest written by Desk v0.3.1 or
+ * older may still carry the retired `tmuxSession` key. Only
+ * validateSessionIdentities turns this into a DeskManifest.
+ */
+type ParsedSession = Omit<DeskSession, 'sessionId'> & { sessionId?: unknown; tmuxSession?: unknown };
+type ParsedGroup = Omit<DeskGroup, 'sessions'> & { sessions: ParsedSession[] };
+type ParsedProject = Omit<DeskProject, 'groups'> & { groups: ParsedGroup[] };
+interface ParsedManifest {
+  settings?: DeskSettings;
+  profiles?: AgentProfile[];
+  groups: ParsedGroup[];
+  projects?: ParsedProject[];
+}
+
+/** Canonical session traversal: top-level groups in order, then projects in order. */
+export function collectSessions<S>(manifest: {
+  groups: ReadonlyArray<{ sessions: readonly S[] }>;
+  projects?: ReadonlyArray<{ groups: ReadonlyArray<{ sessions: readonly S[] }> }>;
+}): S[] {
+  const out: S[] = [];
+  for (const group of manifest.groups) {
+    out.push(...group.sessions);
+  }
+  for (const project of manifest.projects ?? []) {
+    for (const group of project.groups) {
+      out.push(...group.sessions);
+    }
+  }
+  return out;
+}
+
 export function parseDeskManifest(source: string): DeskManifest {
-  const manifest = parseLegacyDeskManifest(source);
-  validateRuntimeSessionIdentities(manifest);
+  const manifest = parseManifestStructure(source);
+  validateSessionIdentities(manifest);
   return manifest;
 }
 
-/**
- * Migration-only parser for the pre-cutover manifest schema. Runtime callers
- * must use parseDeskManifest, which rejects missing ids and the legacy key.
- */
-export function parseLegacyDeskManifest(source: string): LegacyDeskManifest {
+/** Structural parse and validation of everything except session identities. */
+function parseManifestStructure(source: string): ParsedManifest {
   const parsed = YAML.parse(source) as unknown;
 
   if (!isRecord(parsed)) {
@@ -70,7 +96,7 @@ export function parseLegacyDeskManifest(source: string): LegacyDeskManifest {
   const manifest = {
     // UI settings live in the manifest so they survive reboots and browsers;
     // every write path spreads the manifest, so parse must carry them through.
-    settings: isRecord(parsed.settings) ? (parsed.settings as LegacyDeskManifest['settings']) : undefined,
+    settings: isRecord(parsed.settings) ? (parsed.settings as ParsedManifest['settings']) : undefined,
     // Present-but-not-a-list is a mistake (e.g. an indentation slip turning
     // `groups:` into a scalar), NOT an empty config. Silently coercing it to []
     // dropped every project/session with zero diagnostics, and the next write
@@ -79,9 +105,9 @@ export function parseLegacyDeskManifest(source: string): LegacyDeskManifest {
     // Same rule as groups/projects: absent means none, present-but-not-a-list
     // is a mistake worth throwing rather than silently dropping every profile.
     profiles: requireManifestListOrAbsent(parsed.profiles, 'profiles') as DeskManifest['profiles'],
-    groups: (requireManifestListOrAbsent(parsed.groups, 'groups') ?? []) as LegacyDeskManifest['groups'],
-    projects: requireManifestListOrAbsent(parsed.projects, 'projects') as LegacyDeskManifest['projects']
-  } as LegacyDeskManifest;
+    groups: (requireManifestListOrAbsent(parsed.groups, 'groups') ?? []) as ParsedManifest['groups'],
+    projects: requireManifestListOrAbsent(parsed.projects, 'projects') as ParsedManifest['projects']
+  } as ParsedManifest;
 
   for (const group of manifest.groups) {
     validateGroup(group);
@@ -111,18 +137,33 @@ export function parseLegacyDeskManifest(source: string): LegacyDeskManifest {
   return manifest;
 }
 
-function validateRuntimeSessionIdentities(manifest: LegacyDeskManifest): asserts manifest is DeskManifest {
+/**
+ * Session identity is checked last, and it is where a pre-cutover manifest is
+ * refused. Desk v0.3.1 and older wrote no `sessionId`; a session that had
+ * started also carried the retired `tmuxSession` key. The migration that used
+ * to rewrite such a manifest in place is gone, so the refusal has to name the
+ * only remedy that still exists (the support floor) instead of a migration —
+ * and, because a hand-written session arrives at the same "no sessionId"
+ * check, the grammar such a session must carry.
+ */
+function validateSessionIdentities(manifest: ParsedManifest): asserts manifest is DeskManifest {
   const sessions = collectSessions(manifest);
   for (const session of sessions) {
-    if (!isValidSessionId(session.sessionId)) {
-      const value = session.sessionId === undefined ? 'missing' : JSON.stringify(session.sessionId);
-      throw new ManifestValidationError(`session ${session.name} has ${value} sessionId`);
-    }
     if ('tmuxSession' in session) {
-      throw new ManifestValidationError(`session ${session.name} uses legacy tmuxSession; run the sessionId migration`);
+      throw new ManifestValidationError(
+        `session ${session.name} carries the retired tmuxSession key: this manifest was written by Desk v0.3.1 or older; ${STORE_SUPPORT_FLOOR_NOTE}`
+      );
+    }
+    if (session.sessionId === undefined) {
+      throw new ManifestValidationError(
+        `session ${session.name} has no sessionId: a manifest written by Desk v0.3.1 or older carries none (${STORE_SUPPORT_FLOOR_NOTE}); a session written by hand must carry a sessionId matching ${SESSION_ID_GRAMMAR}, unique across the manifest`
+      );
+    }
+    if (!isValidSessionId(session.sessionId)) {
+      throw new ManifestValidationError(`session ${session.name} has ${JSON.stringify(session.sessionId)} sessionId`);
     }
   }
-  const unique = checkGlobalUniqueness(sessions.map((session) => session.sessionId!));
+  const unique = checkGlobalUniqueness(sessions.map((session) => session.sessionId as string));
   if (!unique.ok) {
     throw new ManifestValidationError(`duplicate sessionId "${unique.duplicate}"`);
   }
@@ -244,7 +285,7 @@ export function expandHome(path: string, homeDir: string): string {
   return path;
 }
 
-function validateGroup(group: LegacyDeskGroup): void {
+function validateGroup(group: ParsedGroup): void {
   if (!group || typeof group.id !== 'string' || group.id.trim() === '') {
     throw new ManifestValidationError('each group requires an id');
   }
@@ -253,7 +294,7 @@ function validateGroup(group: LegacyDeskGroup): void {
   }
 }
 
-function validateSession(groupId: string, session: LegacyDeskSession, inheritedCwd?: string): void {
+function validateSession(groupId: string, session: ParsedSession, inheritedCwd?: string): void {
   if (!session || typeof session.name !== 'string' || session.name.trim() === '') {
     throw new ManifestValidationError(`group ${groupId} has a session without a name`);
   }

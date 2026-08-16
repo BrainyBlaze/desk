@@ -21,7 +21,7 @@ const RETIRED_DOC_RUNTIME = /\btmux\b|terminal[ -]broker|terminalBroker|capture-
 
 /**
  * The Track B terminal gate: tmux is gone. EVERY source is scanned — the
- * sanctioned migration modules included — and every legacy-token line must
+ * sanctioned refusal sites included — and every legacy-token line must
  * match its file's exact allowlist with a pinned per-file count. See
  * noTmuxScan.ts for the scanner; the mutant suite below proves the gate
  * rejects one extra legacy reference even inside a sanctioned mixed file.
@@ -118,10 +118,10 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
       source: `${realSource}\nconst leaked = spawnSync('tmux', ['kill-server']);\n`
     };
     const violations = scanLegacySurface([mutant]);
-    expect(violations.some((v) => v.includes('outside the migration allowlist'))).toBe(true);
+    expect(violations.some((v) => v.includes('outside the refusal allowlist'))).toBe(true);
   });
 
-  it('rejects an extra reference even when it reuses an allowed migration construct', () => {
+  it('rejects an extra reference even when it reuses an allowed refusal construct', () => {
     const mutant: ScannedFile = {
       rel: sanctionedRel,
       source: `${realSource}\n// one more tmuxSession mention than the sanction pins\n`
@@ -143,20 +143,12 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
     ).toEqual(['docs/concepts-architecture.md:1']);
   });
 
-  it('pins the sanction table itself to the migration surface (no runtime file may be added silently)', () => {
+  it('pins the sanction table itself to the three refusal sites (no runtime file may be added silently)', () => {
+    // The cutover migration and its transforms are gone (PR 78 deleted the
+    // trunk, this change the organs); what may still spell the retired shape
+    // is exactly the reader that refuses it.
     expect(Object.keys(SANCTIONS).sort()).toEqual(
-      [
-        'core/manifest.ts',
-        'core/sessionIdentity.ts',
-        'server/channelsEvents.ts',
-        'server/channelsProtocol.ts',
-        'server/cutoverStoreMigration.ts',
-        'shared/migration/channelsPausedTransform.ts',
-        'shared/migration/durabilityTransform.ts',
-        'shared/migration/index.ts',
-        'shared/migration/manifestTransform.ts',
-        'shared/migration/sessionId.ts'
-      ].sort()
+      ['core/manifest.ts', 'server/channelsEvents.ts', 'server/channelsProtocol.ts'].sort()
     );
   });
 });

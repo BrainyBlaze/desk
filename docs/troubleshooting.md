@@ -40,6 +40,21 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | 
 
 Desk does not switch to Vite when this artifact is absent.
 
+### Desk refuses a store written by Desk v0.3.1 or older
+
+The manifest, the Channels paused store, the delivery-events ring and member
+manifests changed shape at v0.3.2, and v0.3.2 is the last release that migrates
+the older shape in place. The current release does not migrate: a reader that
+meets the older shape refuses it and names the remedy, for example
+`session codex carries the retired tmuxSession key: this manifest was written by
+Desk v0.3.1 or older; this version does not migrate stores written by Desk
+v0.3.1 or older; boot Desk v0.3.2 once against this store (the last release
+that migrates it in place), then upgrade`. Install v0.3.2 with the pinned
+installer (`DESK_VERSION=v0.3.2`), start it once, then rerun the installer for
+the latest release. A session you wrote into `desk.yml` by hand needs a
+`sessionId` matching `^[a-z][a-z0-9-]{2,63}$`, unique across the manifest;
+sessions added through Desk receive one.
+
 ### `desk serve --dev` cannot find Vite
 
 Cause: dependencies are missing in the Desk checkout.
