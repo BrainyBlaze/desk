@@ -266,6 +266,33 @@ describe('channelsEvents', () => {
       expect(readFileSync(path, 'utf8')).toBe(`${current(2)}\n${current(3)}\n`);
       expect(readDeliveryEvents(home)).toHaveLength(2);
     });
+
+    it('prune rewrites a surviving pre-cutover record with its retired key intact — it re-keys nothing', () => {
+      // A prune that actually rewrites (over the cap) and whose surviving set
+      // still contains a pre-cutover record must leave that record on disk in
+      // the shape it found it: prune is a bounded rewrite, not a migration, and
+      // has no map to "promote" the retired key into `preCutoverSession`. The
+      // read-time carry is a projection; laundering it into the file would make
+      // prune assert an attribution it does not have. Here the pre-cutover
+      // record is NOT the oldest, so it survives the prune.
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const path = join(home, '_engine', 'events.jsonl');
+      const current = (seq: number) => JSON.stringify({ seq, at: '2026-08-16T00:00:00.000Z', kind: 'queued', sessionId: 'alpha' });
+      const survivingLegacy = V031_LINE.replace('"seq":1', '"seq":2');
+      writeFileSync(path, `${current(1)}\n${survivingLegacy}\n${current(3)}\n`);
+
+      expect(pruneDeliveryEvents(home, 2)).toBe(1);
+      const onDisk = readFileSync(path, 'utf8');
+      // The surviving legacy record is byte-for-byte its original line: retired
+      // key present, no invented `preCutoverSession` written to the file.
+      expect(onDisk).toBe(`${survivingLegacy}\n${current(3)}\n`);
+      expect(onDisk).toContain('tmuxSession');
+      expect(onDisk).not.toContain('preCutoverSession');
+      // And the read still projects it — the carry lives at the reader, not the file.
+      const carried = readDeliveryEvents(home).find((event) => event.seq === 2);
+      expect(carried).toMatchObject({ preCutoverSession: 'agentdesk-desk-channels-super-2e997e43' });
+      expect(carried).not.toHaveProperty('sessionId');
+    });
   });
 
   it('persists across re-reads (engine restore reads the same file)', () => {
