@@ -435,7 +435,13 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
   it(
     'successor cleanup parses copied predecessor lifecycle, removes external artifacts, and preserves archives',
     async () => {
-      const root = mkdtempSync(join(tmpdir(), 'moor-native-generation-copy-'));
+      // A short private base keeps the rendezvous <root>/<sessionId> within the
+      // macOS sun_path ceiling (103 bytes). os.tmpdir() on macOS is a ~50-byte
+      // /var/folders path that would push this session's longer id past the
+      // ceiling and make the holder unaddressable by Desk -- the same reason
+      // production uses a short /tmp socket root on Darwin. The capacity refusal
+      // itself is witnessed separately, not by this fixture's length.
+      const root = mkdtempSync(join('/tmp', 'mn-gc-'));
       cleanups.push(() => rmSync(root, { recursive: true, force: true }));
       pinTmpdir(root);
       mkdirSync(join(root, '_engine'), { recursive: true, mode: 0o700 });
