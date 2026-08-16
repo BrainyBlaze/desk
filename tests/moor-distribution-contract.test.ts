@@ -3,9 +3,8 @@
 // digest), the build script refuses drift, and the release ships ONLY the
 // `moor` name — no compatibility binary is ever built or shipped. Building is
 // exercised by `npm run fetch:moor` on developer/CI hosts; this contract
-// validates the pinned inputs and (when present) the built artifact.
+// validates the pinned inputs and the release builder's executable output.
 
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   cpSync,
@@ -16,10 +15,19 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs';
+import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
+import { posixMoorIdentity } from '../src/server/runtime/moorMasterClient.js';
+import {
+  MoorCodec,
+  MoorKind,
+  crc32c,
+  encodeMoorDiscoveryHello
+} from '../src/shared/moorWire/index.js';
 import {
   EXPECTED_COMMIT,
   EXPECTED_REPOSITORY,
@@ -35,8 +43,57 @@ const VENDOR = join(ROOT, 'vendor', 'moor');
 const BUNDLED = join(ROOT, 'libexec', 'moor');
 const REQUIRED_VENDOR_COMMIT = '649ea81769591d0c4212af52803e7d69ab127f1c';
 const REQUIRED_SNAPSHOT_DIGEST = '8ad04bde92132a5923796260414f097250cc9256c28303d920a4a0c114e5d9a6';
-const REQUIRED_BINARY_SIZE = 1_340_816;
-const REQUIRED_BINARY_SHA256 = '5ff5fdc635d00010090363c30748996b1b8314dab9f4a503ced7e699461819a7';
+
+async function exchangeHello(
+  sessionPath: string,
+  version: number
+): Promise<ReturnType<MoorCodec['feed']>[number]> {
+  const codec = new MoorCodec();
+  const frame = encodeMoorDiscoveryHello(
+    codec,
+    posixMoorIdentity(sessionPath)
+  );
+  frame[4] = version;
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setUint32(
+    20,
+    crc32c(frame.subarray(0, 20)),
+    true
+  );
+
+  return await new Promise<ReturnType<MoorCodec['feed']>[number]>((resolve, reject) => {
+    const socket = createConnection({ path: sessionPath });
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      socket.destroy();
+      action();
+    };
+
+    timeout = setTimeout(
+      () =>
+        finish(() =>
+          reject(new Error(`timed out waiting for release-built holder to answer v${version}`))
+        ),
+      5_000
+    );
+    socket.on('data', (chunk: Buffer) => {
+      try {
+        const messages = codec.feed(Date.now(), chunk);
+        if (messages.length > 0) finish(() => resolve(messages[0]!));
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    });
+    socket.once('connect', () => socket.write(frame));
+    socket.once('error', (error) => finish(() => reject(error)));
+    socket.once('close', () =>
+      finish(() => reject(new Error(`release-built holder closed before answering v${version}`)))
+    );
+  });
+}
 
 describe('moor distribution contract — provenance-pinned vendor snapshot', () => {
   it('carries a provenance that names the fork, the frozen commit, and the version', () => {
@@ -90,22 +147,86 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
   });
 
   it(
-    'builds the exact Moor v4 binary through the release builder',
-    () => {
+    'builds a protocol-v4 holder through the release builder',
+    async () => {
       const outputRoot = mkdtempSync(join(tmpdir(), 'desk-moor-release-build-'));
       const outfile = join(outputRoot, 'moor');
+      const sessionPath = join(outputRoot, 'distribution-v4');
+      const storeRoot = join(
+        moorEventStoreRoot(outfile, { tmpdir: outputRoot }),
+        'distribution-v4.events'
+      );
+      const runtimeEnv = { ...process.env, TMPDIR: outputRoot };
+      let holderStarted = false;
       try {
         const { provenance } = buildMoor({ root: ROOT, outfile });
         expect(provenance.commit).toBe(REQUIRED_VENDOR_COMMIT);
-        expect(statSync(outfile).size).toBe(REQUIRED_BINARY_SIZE);
-        expect(createHash('sha256').update(readFileSync(outfile)).digest('hex')).toBe(
-          REQUIRED_BINARY_SHA256
+
+        const artifact = statSync(outfile);
+        expect(artifact.isFile()).toBe(true);
+        expect(artifact.size).toBeGreaterThan(0);
+        if (process.platform !== 'win32') expect(artifact.mode & 0o111).not.toBe(0);
+
+        const version = spawnSync(outfile, ['--version'], { encoding: 'utf8' });
+        expect(version.status).toBe(0);
+        expect(version.stdout.trim()).toBe(`moor ${EXPECTED_VERSION}`);
+
+        // The rendezvous wire witness is POSIX-only. Linux CI exercises the
+        // freshly built binary's protocol dialect rather than its host-specific bytes.
+        if (process.platform === 'win32') return;
+
+        const started = spawnSync(
+          outfile,
+          ['start', '-T', storeRoot, sessionPath, 'sh', '-c', 'cat'],
+          {
+            encoding: 'utf8',
+            env: runtimeEnv,
+            timeout: 10_000
+          }
         );
+        expect(started.error).toBeUndefined();
+        expect(started.status, started.stderr).toBe(0);
+        holderStarted = true;
+
+        const firstV4 = await exchangeHello(sessionPath, 4);
+        expect(firstV4.kind).toBe(MoorKind.HELLO_ACK);
+        expect(firstV4.scope).toBeGreaterThan(0);
+        expect(firstV4.payload[0]).toBe(4);
+
+        const v3Refusal = await exchangeHello(sessionPath, 3);
+        expect(v3Refusal).toMatchObject({
+          scope: firstV4.scope,
+          kind: MoorKind.ERROR
+        });
+        expect(
+          new DataView(
+            v3Refusal.payload.buffer,
+            v3Refusal.payload.byteOffset,
+            v3Refusal.payload.byteLength
+          ).getUint16(
+            0,
+            true
+          )
+        ).toBe(1);
+
+        const secondV4 = await exchangeHello(sessionPath, 4);
+        expect(secondV4).toMatchObject({
+          scope: firstV4.scope,
+          kind: MoorKind.HELLO_ACK
+        });
+        expect(secondV4.payload[0]).toBe(4);
       } finally {
+        if (holderStarted) {
+          spawnSync(outfile, ['kill', '-f', sessionPath], {
+            encoding: 'utf8',
+            env: runtimeEnv,
+            timeout: 10_000
+          });
+        }
         rmSync(outputRoot, { recursive: true, force: true });
       }
     },
-    60_000
+    90_000
   );
 });
 
