@@ -15,7 +15,6 @@ import {
   resolveTargets,
   type ChannelMember
 } from '../src/server/channelsProtocol.js';
-import { PreCutoverStoreError } from '../src/shared/supportFloor.js';
 
 const member = (name: string, type = 'claude-code', sessionId?: string): ChannelMember => ({
   name,
@@ -213,10 +212,12 @@ describe('member manifests', () => {
     });
   });
 
-  it('refuses the v0.3.1 member manifest (identity on a `tmux:` line) by name, citing the support floor', () => {
-    // A real pre-cutover member manifest, shortened. Reading it as a member
-    // without a session would turn an agent into a session-less bystander; the
-    // migration that re-keyed the line to `session:` is gone.
+  it('carries the v0.3.1 member binding (identity on the retired line) without inventing a sessionId', () => {
+    // A real pre-cutover member manifest, shortened. The v0.3.2 migration left
+    // the retired line in place whenever the session it named was gone, so this
+    // shape survives a correct migration — the parser cannot resolve it to a
+    // sessionId and does not pretend to. It records the binding under
+    // `preCutoverSession`, leaves `sessionId` unset, and keeps the member.
     const legacy = [
       '---',
       'name: zohar-glm',
@@ -228,19 +229,13 @@ describe('member manifests', () => {
       '',
       '# @zohar-glm'
     ].join('\n');
-    let caught: unknown;
-    try {
-      parseMemberManifest(legacy);
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(PreCutoverStoreError);
-    const message = (caught as Error).message;
-    expect(message).toContain('zohar-glm');
-    expect(message).toContain('tmux:');
-    expect(message).toContain('Desk v0.3.1 or older');
-    expect(message).toContain('boot Desk v0.3.2 once');
-    expect(message).toContain('does not migrate');
+    const member = parseMemberManifest(legacy);
+    expect(member).toMatchObject({
+      name: 'zohar-glm',
+      type: 'bash',
+      preCutoverSession: 'agentdesk-zohar-main-glm-798c36d0'
+    });
+    expect(member?.sessionId).toBeUndefined();
   });
 
   it('rejects manifests without frontmatter', () => {

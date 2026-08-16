@@ -1,6 +1,5 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PreCutoverStoreError } from '../shared/supportFloor.js';
 import { writeFileAtomic } from './fsOps.js';
 import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from './channelsProtocol.js';
 
@@ -86,6 +85,15 @@ export interface DeliveryEvent {
   seq: number;
   at: string;
   sessionId?: string;
+  /**
+   * The retired per-session identity Desk v0.3.1 and older keyed this record
+   * by. Present only on records written before the cutover that the v0.3.2
+   * migration could not map (their session was already gone); such a record
+   * has no `sessionId` and this version cannot give it one, so the reader
+   * carries the identity as it found it and states that it is unresolved,
+   * instead of dropping the record or presenting it as a channel-level event.
+   */
+  preCutoverSession?: string;
   channel?: string;
   messageId?: string;
   kind: DeliveryEventKind;
@@ -186,23 +194,27 @@ function nextSeq(home: string): number {
 
 /**
  * The key Desk v0.3.1 and older used to attribute a record to its session.
- * Nothing since the cutover writes it, and every live event carries a
- * sessionId, so a record with this key is session-scoped history under an
- * identity this version cannot resolve — not a channel-level event, and not
- * corruption. The migration that re-keyed such records is gone (v0.3.2 was
- * the last release to carry it, and it kept in place the records it could not
- * map); reading them as anonymous events would present a session's history as
- * nobody's, and skipping them would be a lossy read of attributable history.
- * The reader refuses by name instead. Prune is unaffected: it keeps the newest
- * records whatever their key, which is how a migrated ring sheds such residue.
+ * Nothing since the cutover writes it. The migration that re-keyed such
+ * records is gone (v0.3.2 was the last release to carry it), and v0.3.2 kept
+ * in place every record whose session no longer existed — so a ring that was
+ * migrated correctly may still hold them, and a never-migrated ring is gated
+ * by the manifest refusal, not here. Refusing the whole ring would therefore
+ * assert "pre-cutover store" about a store that is not, and name a remedy
+ * (boot v0.3.2) that was already applied. What the reader knows about such a
+ * record is exactly this: it is a session's history under an identity this
+ * version cannot resolve. It returns the record with that identity carried
+ * under a named field and no `sessionId` — not dropped, not attributed to
+ * nobody, not attributed to anyone. Prune keeps the newest records whatever
+ * their key, which is how a migrated ring eventually sheds them.
  */
 const PRE_CUTOVER_SESSION_KEY = 'tmuxSession';
 
 /**
  * Reads delivery events matching the optional filter. Returns events in
  * chronological order (oldest first). Falls back to [] on corrupt file.
- * Refuses (PreCutoverStoreError) a ring that still holds pre-cutover records,
- * filtered or not: a filtered read is still a read of that ring.
+ * A record keyed by the retired per-session identity comes back with that
+ * identity under `preCutoverSession` and no `sessionId`; a per-session filter
+ * never matches it, because it cannot be attributed.
  */
 export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {}): DeliveryEvent[] {
   const path = eventsPath(home);
@@ -216,7 +228,6 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
     return [];
   }
   const events: DeliveryEvent[] = [];
-  let preCutoverRecords = 0;
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
@@ -232,8 +243,10 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
       continue;
     }
     if (PRE_CUTOVER_SESSION_KEY in parsed) {
-      preCutoverRecords += 1;
-      continue;
+      const { [PRE_CUTOVER_SESSION_KEY]: retired, ...rest } = parsed as DeliveryEvent & {
+        [PRE_CUTOVER_SESSION_KEY]?: unknown;
+      };
+      parsed = { ...rest, preCutoverSession: String(retired) };
     }
     if (filter.sessionId && parsed.sessionId !== filter.sessionId) {
       continue;
@@ -248,11 +261,6 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
       continue;
     }
     events.push(parsed);
-  }
-  if (preCutoverRecords > 0) {
-    throw new PreCutoverStoreError(
-      `events ring at ${path} holds ${preCutoverRecords} record${preCutoverRecords === 1 ? '' : 's'} keyed by ${PRE_CUTOVER_SESSION_KEY}, written by Desk v0.3.1 or older`
-    );
   }
   if (filter.limit !== undefined && events.length > filter.limit) {
     return events.slice(-filter.limit);

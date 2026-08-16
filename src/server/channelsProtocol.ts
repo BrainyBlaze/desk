@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import type { AgentActivity, SessionLifecycle, WaitOwner } from '../shared/controlPlane/index.js';
-import { PreCutoverStoreError } from '../shared/supportFloor.js';
 
 /**
  * Channels protocol — pure parsing/formatting for the markdown-based
@@ -82,6 +81,14 @@ export interface ChannelMember {
   /** minutes of channel silence before the supervisor is asked to check in
    *  (only meaningful when supervisor=true; defaults to 3 when omitted) */
   supervisorMaxIdleMinutes?: number;
+  /**
+   * The retired per-session identity this member's manifest still binds to
+   * (the retired member field, written by Desk v0.3.1 or older, that the v0.3.2 migration
+   * left in place because the session no longer existed). This version cannot
+   * resolve it to a sessionId: the member is listed with the binding it has,
+   * unresolved, and receives no deliveries — the same fact stated, not hidden.
+   */
+  preCutoverSession?: string;
 }
 
 /**
@@ -524,17 +531,21 @@ const FRONTMATTER_LINE = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/;
 /**
  * The frontmatter field Desk v0.3.1 and older used to bind an agent member to
  * its session. Since the cutover the binding is `session: <sessionId>`; the
- * migration that rewrote the line is gone. A member manifest that still
- * carries this field is an agent this version cannot attribute — reading it
- * as a session-less member would turn the agent into a bystander that never
- * receives a delivery, so the parser refuses by name instead.
+ * migration that rewrote the line is gone, and v0.3.2 left the line in place
+ * whenever the session it named no longer existed. A manifest that still
+ * carries it is therefore an agent bound to an identity this version cannot
+ * resolve — on a correctly migrated store as much as on an unmigrated one, so
+ * refusing the whole channel here would assert more than the parser knows and
+ * name a remedy already applied. The parser keeps the binding under a named
+ * field and gives the member no sessionId: it is exactly what it is, an agent
+ * whose session cannot be found.
  */
 const PRE_CUTOVER_MEMBER_FIELD = 'tmux';
 
 /**
  * Parses a `_members/<name>.md` manifest (frontmatter subset). Returns
- * undefined for a file that is not a member manifest at all; throws
- * PreCutoverStoreError for a manifest written before the cutover.
+ * undefined for a file that is not a member manifest at all. A pre-cutover
+ * binding on the retired member field is carried as `preCutoverSession`, never as a sessionId.
  */
 export function parseMemberManifest(source: string): ChannelMember | undefined {
   const lines = source.split('\n');
@@ -554,11 +565,6 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
   if (!fields.name) {
     return undefined;
   }
-  if (PRE_CUTOVER_MEMBER_FIELD in fields) {
-    throw new PreCutoverStoreError(
-      `member manifest for ${fields.name} binds its session on a \`${PRE_CUTOVER_MEMBER_FIELD}:\` line, written by Desk v0.3.1 or older`
-    );
-  }
   const supervisorRaw = fields.supervisor?.toLowerCase();
   const supervisor = supervisorRaw === 'true' || supervisorRaw === 'yes' || supervisorRaw === '1' ? true : undefined;
   const idleMinutesRaw = Number.parseInt(fields.supervisorMaxIdleMinutes ?? '', 10);
@@ -569,6 +575,7 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
     status: fields.status ?? 'active',
     joined: fields.joined ?? '',
     sessionId: fields.session || undefined,
+    preCutoverSession: fields[PRE_CUTOVER_MEMBER_FIELD] || undefined,
     role: fields.role || undefined,
     functions: fields.functions || undefined,
     supervisor,
