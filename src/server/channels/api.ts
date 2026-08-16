@@ -9,7 +9,8 @@ import {
 } from '../../shared/daemonControlClient.js';
 import type { ChannelMessageDeskEventInput } from '../../shared/controlPlane/index.js';
 import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.js';
-import { buildOnboardingPrompt, ChannelsEngine } from './delivery/engine.js';
+import { ChannelsEngine } from './delivery/engine.js';
+import { buildOnboardingPrompt } from './render/prompts.js';
 import {
   claimDelivering,
   confirmDelivered,

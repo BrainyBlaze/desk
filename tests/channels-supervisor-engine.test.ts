@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  buildSupervisorCheckInPrompt,
-  buildTurnPrompt,
   ChannelsEngine
 } from '../src/server/channels/delivery/engine.js';
+import {
+  buildSupervisorCheckInPrompt,
+  buildTurnPrompt
+} from '../src/server/channels/render/prompts.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
 import { readDeliveryEvents } from '../src/server/channels/delivery/events.js';
 import { addMember, createChannel, updateMemberSupervisor } from '../src/server/channels/store/fileStore.js';

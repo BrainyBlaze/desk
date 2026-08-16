@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  buildDigestPrompt,
-  buildOnboardingPrompt,
-  buildTurnPrompt,
   ChannelsEngine,
   type ChannelsEngineOptions
 } from '../src/server/channels/delivery/engine.js';
+import {
+  buildDigestPrompt,
+  buildOnboardingPrompt,
+  buildTurnPrompt
+} from '../src/server/channels/render/prompts.js';
 import {
   claimDelivering,
   confirmDelivered,
