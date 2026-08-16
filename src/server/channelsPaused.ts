@@ -4,9 +4,9 @@ import { writeFileAtomic } from './fsOps.js';
 
 /**
  * Channels operator-pause store. Engine-internal (NOT user-workspace):
- * lives at `<home>/_engine/paused.json` next to the engine.pid lock + queue
- * dir. Mirrors the channelsFeatured pattern (versioned JSON, atomic writes,
- * server-only writer).
+ * lives at `<home>/_engine/paused.json` next to the server ownership lease and
+ * queue dir. Mirrors the channelsFeatured pattern (versioned JSON, atomic
+ * writes, server-only writer).
  *
  * Each entry records a manual operator pause on a session. The engine
  * reads this on restore (alongside restoreQueues) and applies
@@ -58,25 +58,37 @@ function normalizeOptional(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function parseStore(raw: string): PausedStore {
-  const parsed = JSON.parse(raw) as Partial<PausedStore>;
-  const items = Array.isArray(parsed.items)
-    ? parsed.items.flatMap((item) => {
-        if (
-          item &&
-          typeof item.sessionId === 'string' &&
-          typeof item.pausedAt === 'string' &&
-          SESSION_KEY.test(item.sessionId)
-        ) {
-          return [{
-            sessionId: item.sessionId,
-            pausedAt: item.pausedAt,
-            reason: normalizeOptional(item.reason)
-          }];
-        }
-        return [];
-      })
-    : [];
+  const parsed: unknown = JSON.parse(raw);
+  if (!isRecord(parsed) || parsed.version !== PAUSED_VERSION || !Array.isArray(parsed.items)) {
+    throw new Error(`expected version ${PAUSED_VERSION} with an items array`);
+  }
+  const seen = new Set<string>();
+  const items = parsed.items.map((item, index): PausedSession => {
+    if (
+      !isRecord(item) ||
+      typeof item.sessionId !== 'string' ||
+      !SESSION_KEY.test(item.sessionId) ||
+      typeof item.pausedAt !== 'string' ||
+      !Number.isFinite(Date.parse(item.pausedAt)) ||
+      (item.reason !== undefined && typeof item.reason !== 'string')
+    ) {
+      throw new Error(`invalid paused record at items[${index}]`);
+    }
+    if (seen.has(item.sessionId)) {
+      throw new Error(`duplicate paused session ${item.sessionId}`);
+    }
+    seen.add(item.sessionId);
+    return {
+      sessionId: item.sessionId,
+      pausedAt: item.pausedAt,
+      reason: normalizeOptional(item.reason)
+    };
+  });
   return { version: PAUSED_VERSION, items };
 }
 
@@ -87,8 +99,9 @@ function readStore(home: string): PausedStore {
   }
   try {
     return parseStore(readFileSync(path, 'utf8'));
-  } catch {
-    return { version: PAUSED_VERSION, items: [] };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`invalid Channels paused store at ${path}: ${detail}`);
   }
 }
 

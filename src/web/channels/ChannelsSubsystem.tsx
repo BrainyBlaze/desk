@@ -276,8 +276,6 @@ export function ChannelsSubsystem({
   const [booted, setBooted] = useState(false);
   const [channels, setChannels] = useState<ChannelSummary[]>([]);
   const [delivery, setDelivery] = useState<LifecycleState[]>([]);
-  const [enginePassive, setEnginePassive] = useState(false);
-  const [enginePassiveOwner, setEnginePassiveOwner] = useState<number | undefined>(undefined);
   const [selected, setSelected] = useState<string | null>(() => localStorage.getItem(CHANNEL_STORAGE_KEY));
   const [detail, setDetail] = useState<ChannelDetail | null>(null);
   const activeRef = useRef(active);
@@ -1137,9 +1135,6 @@ export function ChannelsSubsystem({
         deliverySigRef.current = deliverySig;
         setDelivery(state.delivery);
       }
-      setEnginePassive(state.passive === true); // primitive — React bails if unchanged
-      setEnginePassiveOwner(state.passiveOwner);
-
       // Channels can appear after boot (created elsewhere): keep a selection.
       if (!selectedRef.current && state.channels.length > 0) {
         const stored = localStorage.getItem(CHANNEL_STORAGE_KEY);
@@ -1235,8 +1230,6 @@ export function ChannelsSubsystem({
         const state = await channelsState(0, seenIds());
         setChannels(state.channels);
         setDelivery(state.delivery);
-      setEnginePassive(state.passive === true);
-      setEnginePassiveOwner(state.passiveOwner);
         for (const channel of state.channels) {
           if (channel.lastMessage) {
             lastSeenSoundRef.current.set(channel.name, channel.lastMessage.id);
@@ -2269,16 +2262,8 @@ export function ChannelsSubsystem({
         hint: 'Deliveries waiting for busy agents'
       });
     }
-    if (enginePassive) {
-      segments.push({
-        key: 'engine',
-        text: 'engine passive',
-        tone: 'warn',
-        hint: 'Another desk tab owns message delivery'
-      });
-    }
     publishStatus('channels', segments);
-  }, [selected, detail, queueTotal, enginePassive]);
+  }, [selected, detail, queueTotal]);
 
   /* ---------- render ---------- */
 
@@ -2612,14 +2597,6 @@ export function ChannelsSubsystem({
                   </small>
                 ) : null}
                 {queueTotal > 0 ? <Pill tone="warn" title="prompts queued across agents">{queueTotal} queued</Pill> : null}
-                {enginePassive ? (
-                  <Pill
-                    tone="warn"
-                    title={`Another desk process${enginePassiveOwner ? ` (pid ${enginePassiveOwner})` : ''} owns message dispatch for this channels home — this tab only reads. Reclaim by closing that process, or rebuild the engine from the engine console.`}
-                  >
-                    passive
-                  </Pill>
-                ) : null}
                 <span className="chanHeaderSearch">
                   <Search size={11} />
                   <input

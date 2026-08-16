@@ -101,90 +101,14 @@ describe('cross-process thread-reply lost-append race (probabilistic, repeated)'
   }, 120_000);
 });
 
-describe('engine.pid PID-reuse hazard (deterministic)', () => {
-  let home: string;
+// The engine.pid PID/start-time ownership record is GONE: Channels ownership
+// is a heartbeat lease at the runtime boundary (proper-lockfile: a dead owner
+// simply stops refreshing mtime and the lock is reclaimable after staleness),
+// so PID reuse is no longer an input to any ownership decision. The successor
+// contract — second live runtime refused, killed owner reclaimable, obsolete
+// engine.pid artifact fail-closed — is pinned in
+// tests/channels-runtime-ownership.test.ts.
 
-  beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'desk-chan-s3-'));
-  });
-
-  afterEach(() => {
-    rmSync(home, { recursive: true, force: true });
-  });
-
-  // The lock at channelsEngine.ts:537-555 used existsSync + alive(holder) but
-  // never verified the holder was actually a desk engine. If a holder PID died
-  // and the OS reused it for an unrelated process, the real owner was silently
-  // locked out forever. The fix records the holder's raw start-time in the
-  // lockfile and reclaims when the current start-time no longer matches.
-  it('does not lock out the real owner when the holder PID has been reused by an unrelated alive process', () => {
-    mkdirSync(join(home, '_engine'), { recursive: true });
-
-    // Plant a stale lockfile in the post-fix format: holder pid is alive
-    // (the test runner), and the recorded start-time (99999) is INTENTIONALLY
-    // different from what the injected reader will return for that pid (1) —
-    // simulating the original engine dying and the OS giving its pid to an
-    // unrelated process whose start-time differs.
-    writeFileSync(join(home, '_engine', 'engine.pid'), enginePidRecord(process.pid, 99_999n));
-
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      pid: process.pid + 1,
-      pidScopeReader: () => TEST_PID_SCOPE,
-      pidAlive: () => true, // holder reports alive — pre-fix code trusted this alone
-      pidStarttimeReader: () => 1n, // current start-time differs from recorded → stale
-      // minimal options to satisfy the constructor:
-      releaseSettleMs: 0,
-      pumpIntervalMs: 1_000_000, // effectively off — no pump side effects during the test
-      sendText: async () => true,
-      sessionRunning: () => false,
-      capturePane: async () => null
-    });
-
-    try {
-      // RED pre-fix (passive=true, trusts alive() alone).
-      // GREEN post-fix: start-time mismatch reveals reuse → reclaim → passive=false.
-      expect(engine.passive).toBe(false);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  // Positive control for the lock check: when the recorded start-time MATCHES
-  // the current holder's start-time, the lock is valid and the new engine
-  // correctly goes passive. This pins the fix against false-negative
-  // over-stealing (treating a real engine's lock as stale).
-  it('still goes passive when the holder pid is alive and the recorded start-time matches', () => {
-    mkdirSync(join(home, '_engine'), { recursive: true });
-    writeFileSync(join(home, '_engine', 'engine.pid'), enginePidRecord(process.pid, 42n));
-
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      pid: process.pid + 1,
-      pidScopeReader: () => TEST_PID_SCOPE,
-      pidAlive: () => true,
-      pidStarttimeReader: () => 42n, // matches recorded start-time → real owner
-      releaseSettleMs: 0,
-      pumpIntervalMs: 1_000_000,
-      sendText: async () => true,
-      sessionRunning: () => false,
-      capturePane: async () => null
-    });
-
-    try {
-      expect(engine.passive).toBe(true);
-    } finally {
-      engine.dispose();
-    }
-  });
-});
-
-// Durability integration: proves ChannelsEngine.restoreQueues classifies each
-// per-item extension correctly on restart. Restored items get re-enqueued
-// (.json, .delivering) or skipped (.delivered) or preserved for the ops
-// console (.stuck-*).
 describe('durability restore: engine classifies per-item extensions on restart', () => {
   let home: string;
 

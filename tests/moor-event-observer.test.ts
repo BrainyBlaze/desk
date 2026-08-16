@@ -298,7 +298,22 @@ describe('MoorEventObserver', () => {
     await writeSlot(root, 0, body, commitRecord({ slot: 0, bytes: body, index: 1n, start: 1n, end: 2n }));
 
     const { seen, handlers } = collector();
-    const observer = await startObserver(root, handlers);
+    // The claim under test is what drain() says about a store that is GONE.
+    // The background poll must not get to read the store while `rm` is
+    // half-way through it: on a slow runner a 20 ms poll fires mid-removal,
+    // reads a directory with fewer than four slots, and takes the TERMINAL
+    // (corrupt-content) path — after which drain() honestly reports
+    // 'drained' because the observer already stopped. That is a different
+    // (also honest) claim; parking the poll keeps this test on the one it
+    // names.
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 60_000,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
     await rm(root, { recursive: true, force: true });
 
     await expect(observer.drain()).resolves.toBe('unobservable');

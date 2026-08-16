@@ -1686,81 +1686,11 @@ describe('ChannelsEngine delivery gating', () => {
     expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')?.queueDepth).toBe(0);
   });
 
-  it('single-engine guard: a second engine for the same home goes passive', async () => {
-    const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-'));
-    const owner = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 100,
-      pidAlive: () => true,
-      sendText: async () => true,
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-    const intruderSent: string[] = [];
-    const intruder = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 200,
-      pidAlive: (pid) => pid === 100, // owner alive
-      sendText: async (_s, text) => {
-        intruderSent.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-    expect(owner.passive).toBe(false);
-    expect(intruder.passive).toBe(true);
-    intruder.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-13-aaaa', 'human', '@alpha hi') }, members);
-    await flush();
-    expect(intruderSent).toHaveLength(0);
-
-    // Dead owner: the next engine takes over.
-    const successor = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 300,
-      pidAlive: () => false,
-      sendText: async () => true,
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-    expect(successor.passive).toBe(false);
-    owner.dispose();
-    intruder.dispose();
-    successor.dispose();
-    rmSync(lockedHome, { recursive: true, force: true });
-  });
-
-  it('single-engine guard: corrupt engine.pid fails closed instead of dispatching as owner', async () => {
-    const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-corrupt-'));
-    mkdirSync(join(lockedHome, '_engine', 'engine.pid'), { recursive: true });
-    const pushed: string[] = [];
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 400,
-      sendText: async (_session, text) => {
-        pushed.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-
-    expect(engine.passive).toBe(true);
-    expect(engine.lockError).toBe(
-      'channels engine ownership: pidfile read failed (EISDIR)'
-    );
-    expect(engine.lockError).not.toContain(lockedHome);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-lock-corrupt', 'human', '@alpha hi') }, members);
-    await flush();
-    expect(pushed).toHaveLength(0);
-
-    engine.dispose();
-    rmSync(lockedHome, { recursive: true, force: true });
-  });
+  // The single-engine ownership guard moved OUT of the engine: a second live
+  // Desk runtime is refused fail-closed at the runtime boundary, an obsolete
+  // engine.pid artifact refuses startup by name, and a killed owner's lease is
+  // reclaimable — all pinned in tests/channels-runtime-ownership.test.ts. The
+  // engine itself no longer has a passive mode or reads any pidfile.
 
   it('annotates prompts that sat in the queue past the staleness window', async () => {
     const pushed: string[] = [];
@@ -2254,6 +2184,7 @@ describe('engine drain race safety', () => {
   it('invalidates a stale gated drain before force-delivering another queued item', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-generation-'));
     const sent: string[] = [];
+    let now = 1_000;
     let captureCalls = 0;
     let resolveFirstCapture: ((pane: string) => void) | undefined;
     let markFirstCaptureStarted: (() => void) | undefined;
@@ -2266,6 +2197,7 @@ describe('engine drain race safety', () => {
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
       drainWatchdogMs: 10,
+      now: () => now,
       sendText: async (_session, text) => {
         sent.push(text);
         return true;
@@ -2288,7 +2220,9 @@ describe('engine drain race safety', () => {
       engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-force-second');
       const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
       expect(targetSeq).toBeDefined();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(false);
+      expect(sent).toEqual([]);
+      now += 11;
 
       expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(true);
       expect(sent).toEqual(['second prompt']);
@@ -2303,6 +2237,93 @@ describe('engine drain race safety', () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it('reclaims a wedged forced delivery only once the injected clock crosses the watchdog', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-wedged-'));
+    const sent: string[] = [];
+    let captureCalls = 0;
+    const releaseCapture: Array<(pane: string) => void> = [];
+    let markSecondCaptureStarted: (() => void) | undefined;
+    const secondCaptureStarted = new Promise<void>((resolve) => {
+      markSecondCaptureStarted = resolve;
+    });
+    let clock = 1_760_000_000_000;
+    const engine = new ChannelsEngine({
+      sendEnter: async () => true,
+      home,
+      releaseSettleMs: 0,
+      // Background pump parked: every drain below is an explicit tick, so the
+      // queue advances exactly as far as the test asks and no further.
+      pumpIntervalMs: 60_000,
+      blockedAfterCycles: 1,
+      drainWatchdogMs: 1_000,
+      now: () => clock,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        return true;
+      },
+      sessionRunning: () => true,
+      capturePane: async () => {
+        captureCalls += 1;
+        // Captures 1 and 2 wedge their callers pre-paste: the gated drain first,
+        // then the forced delivery that reclaimed the lock from it.
+        if (captureCalls <= 2) {
+          if (captureCalls === 2) {
+            markSecondCaptureStarted?.();
+          }
+          return new Promise<string>((resolve) => {
+            releaseCapture.push(resolve);
+          });
+        }
+        return '❯ ';
+      }
+    });
+    // One deliberate pump tick: a held drain counts a hold cycle, which is what
+    // surfaces `blockedReason` (blockedAfterCycles: 1).
+    const tick = (): Promise<void> =>
+      (engine as unknown as { runPumpTick: () => Promise<void> }).runPumpTick();
+    try {
+      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-wedged-first');
+      await waitFor(() => captureCalls === 1);
+      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-wedged-second');
+      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
+      expect(targetSeq).toBeDefined();
+
+      // Past the first window: the forced delivery takes the lock and stamps it
+      // with the injected clock, then wedges in its own pre-paste capture.
+      clock += 1_001;
+      const forced = engine.forceDeliver('tmux-a', targetSeq);
+      await secondCaptureStarted;
+
+      // Inside the FORCED holder's window: ordinary drains must hold, not reclaim.
+      await tick();
+      let blockedReason: string | undefined;
+      await waitFor(async () => {
+        blockedReason = (await engine.inspectSession('tmux-a')).blockedReason;
+        return blockedReason !== undefined;
+      });
+      expect(blockedReason).toBe('draining');
+      expect(sent).toEqual([]);
+
+      // Past it: the drain reclaims the wedged lock and delivers the queue head.
+      clock += 1_001;
+      await tick();
+      await waitFor(() => sent.length === 1);
+      expect(sent).toEqual(['first prompt']);
+
+      // Both wedged coroutines settle after the reclaim — neither may paste.
+      releaseCapture.forEach((resolve) => resolve('❯ '));
+      expect(await forced).toBe(false);
+      await flush();
+      expect(sent).toEqual(['first prompt']);
+    } finally {
+      releaseCapture.forEach((resolve) => resolve('❯ '));
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
 
   it('keeps a newer forced paste single-flight when a stale gated drain settles', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-stale-finally-'));

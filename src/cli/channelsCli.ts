@@ -1,7 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  appendMessage,
   listChannels,
   readChannelDetail,
   readChannelMessage,
@@ -18,11 +17,10 @@ import { assertAllowedOption, requireOptionValue } from './args.js';
  *   desk channels read <channel> [<parent-msg-id>|--message <msg-id>]
  *   desk channels post <channel> [--thread <parent-msg-id>] [--as <member>] "<body>"
  *
- * Posts go through the desk server (DESK_API, default http://127.0.0.1:5173)
- * so dispatch is immediate; when the server is unreachable the CLI appends to
- * the channel file directly and the server's watcher dispatches on its next
- * scan. Identity comes from the launch env — the server keys members by it
- * to the channel member it backs — with `--as` as the explicit override.
+ * Posts require the desk server (DESK_API, default http://127.0.0.1:5173),
+ * which owns both the authoritative write and dispatch. Identity comes from
+ * the launch env — the server keys members by it to the channel member it
+ * backs — with `--as` as the explicit override.
  */
 
 const HELP = `desk channels — slack-like messaging between desk agents
@@ -60,10 +58,6 @@ export function currentSessionKey(): string {
   return process.env.DESK_SESSION_ID ?? '';
 }
 
-/** The desk server could not be reached at all — the request never left, so a
- *  local file-append fallback is safe (it can't duplicate a server-side post). */
-class ServerUnreachableError extends Error {}
-
 async function apiPost(path: string, payload: unknown): Promise<Record<string, unknown>> {
   let response: Response;
   try {
@@ -74,13 +68,11 @@ async function apiPost(path: string, payload: unknown): Promise<Record<string, u
       signal: AbortSignal.timeout(5000)
     });
   } catch (err) {
-    // A TIMEOUT means the request WAS sent — the server may have processed it —
-    // so falling back to a local append would duplicate the message. Only a
-    // genuine connection failure (server not running) is safe to fall back on.
+    // A TIMEOUT means the request was sent and the server may have processed it.
     if (err instanceof Error && err.name === 'TimeoutError') {
       throw new Error('desk server did not respond within 5s; the message may or may not have posted — check the channel before retrying');
     }
-    throw new ServerUnreachableError('desk server unreachable');
+    throw new Error(`server down at ${apiBase()}: start desk, then repost`);
   }
   // Text-first parse: a reachable-but-misbehaving server (a proxy 502 HTML page,
   // an empty body) must surface its real status, not a SyntaxError misread as
@@ -207,33 +199,15 @@ export async function runChannelsCli(argv: string[]): Promise<number> {
       }
 
       const sessionKey = currentSessionKey();
-      try {
-        const result = await apiPost('/api/channels/post', {
-          channel,
-          body,
-          thread,
-          as,
-          sessionId: sessionKey || undefined
-        });
-        console.log(String(result.id ?? 'posted'));
-        return 0;
-      } catch (error) {
-        // Only a genuine connection failure is safe to fall back on. A protocol
-        // error (server rejected), a timeout (may have posted), or a non-JSON
-        // response must NOT trigger a blind local append — that duplicated the
-        // message. The old regex on the error text misclassified all three.
-        if (!(error instanceof ServerUnreachableError)) {
-          throw error;
-        }
-        // Server unreachable: append directly; the watcher dispatches later.
-        const author = as ?? resolveAuthorOffline(home, channel, sessionKey);
-        if (!readChannelDetail(home, channel).members.some((member) => member.name === author)) {
-          throw new Error(`@${author} is not a member of #${channel}`);
-        }
-        const appended = await appendMessage(home, channel, { author, body, threadParentId: thread });
-        console.log(appended.message.id);
-        return 0;
-      }
+      const result = await apiPost('/api/channels/post', {
+        channel,
+        body,
+        thread,
+        as,
+        sessionId: sessionKey || undefined
+      });
+      console.log(String(result.id ?? 'posted'));
+      return 0;
     }
 
     if (command === 'edit') {
@@ -314,27 +288,7 @@ function assertNoArguments(command: string, args: string[]): void {
   throw new Error(`unexpected argument ${unexpected} for desk channels ${command}`);
 }
 
-function resolveAuthorOffline(home: string, channel: string, sessionKey: string): string {
-  if (sessionKey) {
-    const membersDir = join(home, channel, '_members');
-    if (existsSync(membersDir)) {
-      try {
-        // Mixed-era: a pre-rename host resolves its legacy name — normalize to
-        // the durable id members key by (identity for new-era values).
-        const detail = readChannelDetail(home, channel);
-        const member = detail.members.find((candidate) => candidate.sessionId === sessionKey);
-        if (member) {
-          return member.name;
-        }
-      } catch {
-        // fall through to human
-      }
-    }
-  }
-  return 'human';
-}
-
-/** Used by tests to confirm protocol round-trips through the CLI fallback path. */
+/** Used by tests to confirm protocol round-trips through the CLI read path. */
 export function readRawConversation(home: string, channel: string, file = 'root.md'): ChannelMessage[] {
   return parseConversation(readFileSync(join(home, channel, file), 'utf8')).messages;
 }

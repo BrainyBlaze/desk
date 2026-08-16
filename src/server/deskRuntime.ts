@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
 import { disposeChannelsRuntime, initChannelsRuntime } from './channelsApi.js';
+import type { ChannelsRuntimeOwner } from './channelsRuntimeOwner.js';
 import type { DeskApiHost } from './deskApiTypes.js';
 import type { DeskServices } from './deskServices.js';
 import type { DisposerRegistry } from './disposerRegistry.js';
@@ -23,10 +24,11 @@ interface InstallDeskRuntimeOptions {
   services: DeskServices;
   plugins: DeskPlugin[];
   disposers: DisposerRegistry;
+  channelsOwner: ChannelsRuntimeOwner;
 }
 
 
-export function installDeskRuntime({ host, services, plugins, disposers }: InstallDeskRuntimeOptions): void {
+export function installDeskRuntime({ host, services, plugins, disposers, channelsOwner }: InstallDeskRuntimeOptions): void {
   const { httpServer } = host;
   if (httpServer) {
     disposers.bind(httpServer);
@@ -107,6 +109,9 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
 
   startSystemSampling();
   disposers.add(stopSystemSampling);
-  initChannelsRuntime({ agentSurfaceBroker: services.agentSurfaceBroker });
+  initChannelsRuntime({
+    agentSurfaceBroker: services.agentSurfaceBroker,
+    owner: channelsOwner
+  });
   disposers.add(disposeChannelsRuntime);
 }

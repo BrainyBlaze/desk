@@ -72,6 +72,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentSurfaceBroker } from './agentSurfaceBroker.js';
 import { readAgentStatePulse } from './agentStatePulse.js';
+import {
+  acquireChannelsRuntimeOwner,
+  type ChannelsRuntimeOwner
+} from './channelsRuntimeOwner.js';
 
 /**
  * /api/channels/* — slack-like messaging between desk agents over the
@@ -92,6 +96,7 @@ interface ChannelsRuntime {
   home: string;
   engine: ChannelsEngine;
   watcher: ChannelsWatcher;
+  owner: ChannelsRuntimeOwner;
 }
 
 let runtime: ChannelsRuntime | undefined;
@@ -100,6 +105,7 @@ export interface ChannelsRuntimeOptions {
   home?: string;
   agentSurfaceBroker?: ChannelDeliveryBroker;
   channelEventPublisher?: ChannelEventPublisher;
+  owner?: ChannelsRuntimeOwner;
 }
 
 export type ChannelEventPublisher = (
@@ -114,9 +120,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     return runtime;
   }
   const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
+  const owner = options.owner ?? acquireChannelsRuntimeOwner(home);
   const publishChannelEvent =
     options.channelEventPublisher ?? defaultChannelEventPublisher;
-  let engine!: ChannelsEngine;
+  try {
+    let engine!: ChannelsEngine;
   // Terminal-session delivery rides the daemon control plane — the ONLY
   // transport (Track B: the legacy transport is gone). The uiMode=native broker path is
   // unchanged.
@@ -233,10 +241,14 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     capturePane: nativeTransport.capturePane,
     sendEnter: nativeTransport.sendEnter
   });
-  const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
-  watcher.start();
-  runtime = { home, engine, watcher };
-  return runtime;
+    const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
+    watcher.start();
+    runtime = { home, engine, watcher, owner };
+    return runtime;
+  } catch (error) {
+    owner.release();
+    throw error;
+  }
 }
 
 function pauseEngineSession(home: string, engine: ChannelsEngine, sessionId: string, reason?: string): void {
@@ -256,24 +268,25 @@ function resumeEngineSession(home: string, engine: ChannelsEngine, sessionId: st
  * prompts in the agent terminals.
  */
 export function disposeChannelsRuntime(): void {
-  runtime?.watcher.stop();
-  runtime?.engine.dispose();
+  const current = runtime;
   runtime = undefined;
+  if (!current) {
+    return;
+  }
+  try {
+    current.watcher.stop();
+  } finally {
+    try {
+      current.engine.dispose();
+    } finally {
+      current.owner.release();
+    }
+  }
 }
 
 /** test hook */
 export function resetChannelsRuntime(): void {
   disposeChannelsRuntime();
-}
-
-/**
- * Ops-console recovery: tear the engine down and build a fresh one in-process.
- * The replacement re-reads the persisted disk queues and restarts the pump, so
- * a wedged engine recovers WITHOUT restarting `desk serve`.
- */
-export function rebuildChannelsRuntime(): ChannelsRuntime {
-  disposeChannelsRuntime();
-  return initChannelsRuntime();
 }
 
 /**
@@ -440,21 +453,6 @@ function resolveConversationFile(thread: unknown): string {
   return `thread-${thread}.md`;
 }
 
-function rejectPassiveDeliveryWrite(res: ServerResponse, engine: ChannelsEngine): boolean {
-  if (!engine.passive) {
-    return false;
-  }
-  const owner = engine.passiveOwnerPid;
-  sendJson(res, 503, {
-    ok: false,
-    error: `channels engine is passive${owner === undefined ? '' : `; process ${owner} owns delivery`}`,
-    passive: true,
-    passiveOwner: owner,
-    lockError: engine.lockError
-  });
-  return true;
-}
-
 export async function handleChannelsRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   if (!url.pathname.startsWith('/api/channels/')) {
     return false;
@@ -486,13 +484,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         channels: seen === null ? channels : resolveUnreadSummaries(home, channels, seen),
         delivery: await engine.lifecycleStates(),
         activity: engine.listActivity(since).slice(-100),
-        activitySeq: engine.latestActivitySeq(),
-        // another live desk process owns dispatch for this channels home
-        passive: engine.passive,
-        // bounded ownership diagnostic, including degraded OS identity on an active nonce-backed claim
-        lockError: engine.lockError,
-        // the owning process's pid, so the UI can name the owner + offer recovery
-        passiveOwner: engine.passiveOwnerPid
+        activitySeq: engine.latestActivitySeq()
       });
       return true;
     }
@@ -503,8 +495,6 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const sessions = await engine.inspectAll();
       sendJson(res, 200, {
         home,
-        passive: engine.passive,
-        lockError: engine.lockError,
         pumpAlive: engine.pumpAlive(),
         totalQueued: sessions.reduce((sum, session) => sum + session.queueDepth, 0),
         sessions,
@@ -543,11 +533,6 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         case 'drain-ready-all':
           await engine.drainReady();
           break;
-        case 'rebuild-engine': {
-          const fresh = rebuildChannelsRuntime();
-          sendJson(res, 200, { ok: true, sessions: await fresh.engine.inspectAll() });
-          return true;
-        }
         default:
           throw new Error(`unknown engine action: ${action}`);
       }
@@ -840,9 +825,6 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/post') {
       const body = await readJsonBody(req);
-      if (rejectPassiveDeliveryWrite(res, engine)) {
-        return true;
-      }
       const channel = requireChannel(body.channel);
       const author = resolveAuthor(home, channel, body);
       const appended = await appendMessage(home, channel, {
@@ -860,9 +842,6 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/share') {
       const body = await readJsonBody(req);
-      if (rejectPassiveDeliveryWrite(res, engine)) {
-        return true;
-      }
       const fromChannel = requireChannel(body.fromChannel);
       const toChannel = requireChannel(body.toChannel);
       const messageId = requireString(body.messageId, 'messageId');
