@@ -103,7 +103,5 @@ pub mod runtime;
 pub mod session;
 pub mod store;
 pub mod terminal;
-#[cfg(unix)]
 pub mod unix;
-pub mod windows;
 pub mod wire;

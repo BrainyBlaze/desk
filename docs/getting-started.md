@@ -12,11 +12,11 @@ You need a working `curl` with TLS trust to download the installer. Supported
 release targets are:
 
 - macOS x64 and arm64
-- glibc Linux x64 and arm64, including WSL
+- glibc Linux x64 and arm64
 
-Native Windows is unsupported. Alpine and other musl systems can provision host
-packages, but installation stops before activation because Desk does not yet
-publish a compatible Node toolchain.
+Alpine and other musl systems can provision host packages, but installation
+stops before activation because Desk does not yet publish a compatible Node
+toolchain.
 
 The installer detects, installs, and rechecks the required host layer: CA
 certificates, archive and checksum tools, Git 2.30+, Python 3.6+, make, and a

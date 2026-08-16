@@ -75,15 +75,6 @@ function withoutStaleCarriers(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 export function spawnMoorMaster(options: MoorSpawnOptions): MoorSpawnResult {
-  if (process.platform === 'win32') {
-    // Windows moor parses the selector as the lowercase-hex value of the
-    // actual inherited pipe HANDLE (windows.rs), which Node cannot name for
-    // an fd-numbered stdio slot. Fail closed rather than mis-launch; the
-    // Windows launcher seam ships with the moor #4 Windows conformance lane.
-    throw new Error(
-      'MOOR_WINDOWS_LAUNCH_UNSUPPORTED: supervised Windows launch requires the native inherited-handle launcher seam'
-    );
-  }
   const nonce = randomBytes(16);
   // Encodes AND validates: integer generation in 2..=u32::MAX, nonzero nonce.
   const record = encodeMoorLaunchRecord(options.generation, nonce);

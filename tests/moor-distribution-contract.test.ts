@@ -9,6 +9,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -17,7 +18,7 @@ import {
 } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
@@ -41,8 +42,8 @@ import {
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VENDOR = join(ROOT, 'vendor', 'moor');
 const BUNDLED = join(ROOT, 'libexec', 'moor');
-const REQUIRED_VENDOR_COMMIT = '649ea81769591d0c4212af52803e7d69ab127f1c';
-const REQUIRED_SNAPSHOT_DIGEST = '8ad04bde92132a5923796260414f097250cc9256c28303d920a4a0c114e5d9a6';
+const REQUIRED_VENDOR_COMMIT = '526cbb2df57a61240d8a6c135b55888716cf32c9';
+const REQUIRED_SNAPSHOT_DIGEST = '97dd93458307a513b384f82288723d4bb56c2e1c69a1eef56811359e44e7ae7e';
 const BUILD_MOOR_URL = new URL('../scripts/build-moor.mjs', import.meta.url).href;
 const execFileAsync = promisify(execFile);
 
@@ -133,6 +134,27 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
     expect(() => validateVendor(VENDOR)).not.toThrow();
   });
 
+  it('does not depend on equivalent snapshot root spellings', () => {
+    const relativeVendor = relative(process.cwd(), VENDOR);
+
+    expect(snapshotDigest(`./${relativeVendor}`)).toBe(snapshotDigest(VENDOR));
+  });
+
+  it('distinguishes literal backslashes from directory separators in snapshot paths', () => {
+    const literalRoot = mkdtempSync(join(tmpdir(), 'desk-moor-literal-path-'));
+    const nestedRoot = mkdtempSync(join(tmpdir(), 'desk-moor-nested-path-'));
+    try {
+      writeFileSync(join(literalRoot, 'a\\b'), 'same contents\n');
+      mkdirSync(join(nestedRoot, 'a'));
+      writeFileSync(join(nestedRoot, 'a', 'b'), 'same contents\n');
+
+      expect(snapshotDigest(literalRoot)).not.toBe(snapshotDigest(nestedRoot));
+    } finally {
+      rmSync(literalRoot, { recursive: true, force: true });
+      rmSync(nestedRoot, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a tampered snapshot (digest drift fails closed)', () => {
     const copy = mkdtempSync(join(tmpdir(), 'desk-moor-contract-'));
     try {
@@ -150,7 +172,6 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
     expect(manifest).toContain('license = "MIT OR Apache-2.0"');
     expect(existsSync(join(VENDOR, 'LICENSE-MIT'))).toBe(true);
     expect(existsSync(join(VENDOR, 'LICENSE-APACHE'))).toBe(true);
-    expect(existsSync(join(VENDOR, 'vendor', 'windows-spawn', 'Cargo.toml'))).toBe(true);
     // The build script pins `--bin moor`, so only that target is ever built,
     // and the release ships no second binary under the compatibility name.
     const builder = readFileSync(join(ROOT, 'scripts', 'build-moor.mjs'), 'utf8');
@@ -188,15 +209,11 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
         const artifact = statSync(outfile);
         expect(artifact.isFile()).toBe(true);
         expect(artifact.size).toBeGreaterThan(0);
-        if (process.platform !== 'win32') expect(artifact.mode & 0o111).not.toBe(0);
+        expect(artifact.mode & 0o111).not.toBe(0);
 
         const version = spawnSync(outfile, ['--version'], { encoding: 'utf8' });
         expect(version.status).toBe(0);
         expect(version.stdout.trim()).toBe(`moor ${EXPECTED_VERSION}`);
-
-        // The rendezvous wire witness is POSIX-only. Linux CI exercises the
-        // freshly built binary's protocol dialect rather than its host-specific bytes.
-        if (process.platform === 'win32') return;
 
         const started = spawnSync(
           outfile,

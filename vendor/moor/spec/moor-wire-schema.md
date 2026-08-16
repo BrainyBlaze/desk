@@ -2,7 +2,7 @@
 
 **Companion artefact to [moor-spec.md](./moor-spec.md).** §10.2 of that document fixes what this schema must satisfy; this file fixes the shapes. Where the two disagree the specification wins and this file is a defect.
 
-**Version:** `wire-schema-4`. Revision 4 increments the controller version byte to `04` because it changes frozen layouts: the status descriptor gains a mandatory geometry pair, the superseded event layout `01` is refused, and the reference tool's legacy command grammar is gone. There is no `03` decoder — a v3 peer is refused as an unknown version, which is precisely what a version increment buys over another in-place amendment. The schema label and controller version byte are `04`, and the published document digest identifies this amended dialect. No mixed old/new dialect is supported. Every later frozen-layout change requires a version increment rather than another in-place edit. Semantic-producer frames use their separately versioned `MOOS` header (§14). Integer layouts are portable, while native paths are raw bytes on POSIX and canonical WTF-8 on Windows. This revision freezes the Windows marker (§12), the portable event/log/lifecycle commit record (§13), and private launch records (§15). It is referenced by the specification as *the accompanying vectors* (§0.2).
+**Version:** `wire-schema-4`. Revision 4 increments the controller version byte to `04` because it changes frozen layouts: the status descriptor gains a mandatory geometry pair, the superseded event layout `01` is refused, and the reference tool's legacy command grammar is gone. There is no `03` decoder — a v3 peer is refused as an unknown version, which is precisely what a version increment buys over another in-place amendment. The schema label and controller version byte are `04`, and the published document digest identifies this amended dialect. No mixed old/new dialect is supported. Every later frozen-layout change requires a version increment rather than another in-place edit. Semantic-producer frames use their separately versioned `MOOS` header (§14). Integer layouts are portable, and native paths are raw POSIX bytes. This revision freezes the portable event/log/lifecycle commit record (§13), and private launch records (§15). It is referenced by the specification as *the accompanying vectors* (§0.2).
 
 **Integer encoding:** all multi-byte integers are unsigned, **little-endian**, of the stated width. There is no variable-length encoding anywhere.
 
@@ -50,11 +50,11 @@ Wherever a field is described as *length-prefixed* without the word *wide*, it i
 | 2 | byte count, unsigned, little-endian, `0000..FFFF` (0..65535) |
 | n | the bytes themselves |
 
-The count is the exact byte count; no terminator, alignment, variable-width integer, or implicit character count is present. A field-specific bound may be smaller and wins where stated. **The bytes are raw and opaque unless the field explicitly says text or native path.** POSIX native paths are raw bytes. Windows native paths are canonical WTF-8 converted losslessly from UTF-16, including unpaired surrogates; a decoder MUST reject a non-canonical or non-round-tripping form. A length of zero is legal only where the field says so; it is distinct from absence.
+The count is the exact byte count; no terminator, alignment, variable-width integer, or implicit character count is present. A field-specific bound may be smaller and wins where stated. **The bytes are raw and opaque unless the field explicitly says text or native path.** Native paths are raw POSIX bytes; a decoder MUST reject a non-canonical or non-round-tripping form. A length of zero is legal only where the field says so; it is distinct from absence.
 
 #### 1.1.1 Wide identity and native-path prefixes
 
-Every field explicitly described as *wide-length-prefixed* uses a 4-byte unsigned little-endian byte count followed by that many bytes. The count is at most **1 MiB** (`00100000`); the enclosing frame and reassembled-message bounds still apply independently. Only canonical session identities and native path fields use this form. This is deliberately separate from the plain u16 prefix: a valid Windows native path can exceed 65535 canonical WTF-8 bytes, so applying §1.1's representable limit to a working directory or event-stream path would make an otherwise valid session impossible to describe. An over-limit value is refused before publication rather than truncated.
+Every field explicitly described as *wide-length-prefixed* uses a 4-byte unsigned little-endian byte count followed by that many bytes. The count is at most **1 MiB** (`00100000`); the enclosing frame and reassembled-message bounds still apply independently. Only canonical session identities and native path fields use this form. This is deliberately separate from the plain u16 prefix: a valid native path can exceed 65535 bytes, so applying §1.1's representable limit to a working directory or event-stream path would make an otherwise valid session impossible to describe. An over-limit value is refused before publication rather than truncated.
 
 ### 1.2 Tagged canonical session identity
 
@@ -63,9 +63,8 @@ Every field named *canonical session identity* is one wide-length-prefixed byte 
 | tag | exact following bytes |
 |---|---|
 | `01` | Linux/macOS absolute socket-path bytes after lexical `.`/`..` resolution, without following symbolic links |
-| `02` | Windows marker identity: 8-byte little-endian volume serial number, then the exact 16 bytes of `FILE_ID_INFO.FileId`, queried from the same-directory staged marker and required to match after publication |
 
-Tag `02` therefore has total content length 25. An unknown tag or a wrong fixed length is `IDENTITY_MISMATCH`, never a path to normalise.
+Tag `01` is the only identity tag. An unknown tag or a wrong fixed length is `IDENTITY_MISMATCH`, never a path to normalise.
 
 ## 2. Frame types and their payloads
 
@@ -135,7 +134,7 @@ A mismatch between the two identities is `IDENTITY_MISMATCH` and the connection 
 | 2 | columns |
 | 2 | rows |
 
-Both dimensions zero (`0 x 0`) mean *preserve both* (OB-19). Exactly one zero is `HALF_SPECIFIED_GEOMETRY` and changes nothing. A real geometry has columns and rows independently in `1..32767`; both operands are widened before multiplication and their product must be at most `2,000,000`. A value outside either per-dimension range or above the product bound is `MALFORMED_FRAME`. Windows conversion is checked before either u16 enters a signed operating-system API.
+Both dimensions zero (`0 x 0`) mean *preserve both* (OB-19). Exactly one zero is `HALF_SPECIFIED_GEOMETRY` and changes nothing. A real geometry has columns and rows independently in `1..32767`; both operands are widened before multiplication and their product must be at most `2,000,000`. A value outside either per-dimension range or above the product bound is `MALFORMED_FRAME`.
 
 ---
 
@@ -159,7 +158,7 @@ Carried by `ATTACH_ACK` and `STATUS_REPLY` (OB-39).
 | 16 | **boot identity** — an opaque value stable for the lifetime of the operating-system boot | OB-31 |
 | var | child working directory, wide-length-prefixed native path | OB-32 |
 | 4 | child process identifier | OB-35 |
-| 4 | **child containment-set token** — process-group identifier on Linux/macOS; holder-minted nonzero token unique within the holder incarnation on Windows, never a job-object id | OB-35 |
+| 4 | **child containment-set token** — process-group identifier | OB-35 |
 | 16 | **child birth token** — an opaque value derived at child creation, not reused when a process identifier is | OB-35 |
 | 2 | **terminal columns** — the holder's stored geometry, mandatory and nonzero | §4 |
 | 2 | **terminal rows** — the holder's stored geometry, mandatory and nonzero | §4 |
@@ -181,7 +180,7 @@ Carried by `ATTACH_ACK` and `STATUS_REPLY` (OB-39).
 
 The geometry pair is the holder's own stored size, the same value a `RESIZE` updates, and it is present from child birth onward: an interactive creation takes the viewer's size and a headless one is assigned 24x80, so there is no "unknown" state and no zero encoding. It is written after the child exists and before any replay, updated only after a native resize actually succeeds, and validated against the §4 bounds — a descriptor whose pair is zero, out of range, or over the area cap is malformed. Columns precede rows, matching `RESIZE`. This is the authoritative answer to "what size is this session", so no consumer needs to keep a second copy.
 
-Linux/WSL carries the 16 parsed UUID bytes from `/proc/sys/kernel/random/boot_id`; macOS carries little-endian `kern.boottime` seconds in bytes 0–7, microseconds in bytes 8–11 and ASCII `MAC1` in bytes 12–15; Windows carries documented WMI `LastBootUpTime` converted to UTC FILETIME ticks in little-endian bytes 0–7 with bytes 8–15 zero. Sixteen zero bytes mean unavailable and never compare equal. The matching monotonic clocks and failure rules are frozen in specification §12.6. The active event fields are copied from the same validated layout-`02` commit record a reader would select, not from uncommitted writer state. Layout `00` uses empty event identity, slot `FF`, and zero commit index/length/hash. Disabled logging clears health bit 0 and zeros all four log fields; before child exit a successfully initialized lifecycle store sets health bit 1. Observer exactness is independent of tracked-mode exactness. A probe and an input-only connection never set viewer-presence bit 5.
+Linux carries the 16 parsed UUID bytes from `/proc/sys/kernel/random/boot_id`; macOS carries little-endian `kern.boottime` seconds in bytes 0–7, microseconds in bytes 8–11 and ASCII `MAC1` in bytes 12–15. Sixteen zero bytes mean unavailable and never compare equal. The matching monotonic clocks and failure rules are frozen in specification §12.6. The active event fields are copied from the same validated layout-`02` commit record a reader would select, not from uncommitted writer state. Layout `00` uses empty event identity, slot `FF`, and zero commit index/length/hash. Disabled logging clears health bit 0 and zeros all four log fields; before child exit a successfully initialized lifecycle store sets health bit 1. Observer exactness is independent of tracked-mode exactness. A probe and an input-only connection never set viewer-presence bit 5.
 
 ---
 
@@ -430,8 +429,8 @@ Any mismatch is `REFUSED_IDENTITY` and **nothing is done**.
 | width | field |
 |---|---|
 | 1 | outcome (below) |
-| 1 | **containment result** (§12.4 of the specification): bit 0 = the foreground process group was signalled — Linux and macOS only; bit 1 = the child's containment set was ended, meaning its process group on Linux and macOS or its job object on Windows; bit 2 = escalation to the platform's unconditional mechanism occurred; bit 3 = **at least one known thing the session started outlived it** — platform-neutral; clear means no survivor was observed, not proof that an unobservable detached descendant does not exist |
-| 1 | termination method: `00` none/not applicable, `01` graceful, `02` forced. A Windows holder-caused exit event uses the same known method; reserved values are malformed |
+| 1 | **containment result** (§12.4 of the specification): bit 0 = the foreground process group was signalled — Linux and macOS only; bit 1 = the child's containment set was ended, meaning its process group; bit 2 = escalation to the platform's unconditional mechanism occurred; bit 3 = **at least one known thing the session started outlived it** — platform-neutral; clear means no survivor was observed, not proof that an unobservable detached descendant does not exist |
+| 1 | termination method: `00` none/not applicable, `01` graceful, `02` forced; reserved values are malformed |
 | var | length-prefixed diagnostic: empty exactly for `TERMINATED`/`ALREADY_GONE`, nonempty for every other outcome |
 
 | value | outcome | meaning |
@@ -506,23 +505,9 @@ A closed set. Every refusal names one.
 
 ---
 
-## 12. Windows rendezvous marker
+## 12. (retired)
 
-The addressable Windows path contains exactly one marker record. Its file length is exactly **84 bytes**: 38 fixed bytes plus the 46-byte pipe name.
-
-| offset | width | field |
-|---|---|---|
-| 0 | 8 | magic bytes `4D 4F 4F 52 4D 52 4B 33` (`MOORMRK3`) |
-| 8 | 1 | marker format `01` |
-| 9 | 1 | flags, zero |
-| 10 | 2 | reserved, zero |
-| 12 | 4 | session generation; unsupervised uses `1` |
-| 16 | 16 | holder incarnation |
-| 32 | 2 | named-pipe byte length, exactly 46 (`2E 00`) |
-| 34 | 46 | ASCII `\\.\pipe\moor-` followed by exactly 32 lowercase hexadecimal digits encoding the holder's 16 fresh random bytes |
-| 80 | 4 | CRC-32C over bytes 0–79 |
-
-The marker is parsed only after its regular-file, non-reparse, owner and protected-DACL checks. Wrong total length, pipe length, prefix, case or hexadecimal grammar is malformed; the name is already ASCII and requires no permissive path normalisation. Its pipe name is not a session identity. The tagged marker `FILE_ID_INFO` identity from §1.2 is queried on the staged marker so the initial event header can be committed, then required to match the final marker after atomic publication before any connection is admitted. Replacing the marker necessarily changes that identity.
+This section number is retained so that cross-references into §13 and later stay stable; it carries no content. The only rendezvous object is the POSIX socket path of §1.1.1, tag `01`.
 
 ## 13. Portable event/log/lifecycle commit record
 
@@ -557,15 +542,15 @@ Creation exclusively creates every log/lifecycle directory. The event directory 
 
 Writers never mutate selected-prefix bytes. Growth removes an older uncommitted tail, writes from the selected length, flushes the body, writes the alternate commit at offset zero, truncates it to 92 bytes, and flushes it. Replacement writes/truncates/flushes the inactive body from offset zero, then writes/truncates/flushes the alternate commit that selects it. Namespace creation/removal is durably flushed. Failure before a new commit selects leaves the prior commit authoritative. A commit-flush timeout is ambiguous: either the prior or the one submitted commit may later validate, so the store closes permanently and no rollback or later write is guessed. `WAKEUP`, durable semantic acknowledgement, and durable consumer-cursor advance occur only after selection is durable.
 
-One writer holds the portable exclusive lease on `commit.0` for the store lifetime: nonblocking `flock(LOCK_EX)` on POSIX or an exclusive `LockFileEx` byte-range lock through a non-delete-sharing handle on Windows. Lifecycle, event, then log is the acquisition order; reverse is release order. A reader may validate either slot without acquiring the writer lease. No successor generation adopts any predecessor directory, slot, prefix, or commit.
+One writer holds the portable exclusive lease on `commit.0` for the store lifetime: nonblocking `flock(LOCK_EX)`. Lifecycle, event, then log is the acquisition order; reverse is release order. A reader may validate either slot without acquiring the writer lease. No successor generation adopts any predecessor directory, slot, prefix, or commit.
 
 No counter wraps. Event sequence/epoch/commit exhaustion uses the specification's whole-transaction `seq`, then `epoch`, then `commit` precedence. Log index `FFFFFFFFFFFFFFFF` may select one last suffix/clear, after which logging is unwritable; epoch `FFFFFFFF` is the last replacement epoch. Lifecycle permits exactly initialization and exit, so recovered state unable to admit exit is corrupt. Crash recovery on every platform may select only the prior commit or at most the one submitted candidate—never a torn body, uncommitted tail, equal-index guess, or platform sidecar.
 
 ### 13.1 Canonical lifecycle body
 
-The running lifecycle prefix is exactly one canonical JSON object plus LF with this closed key order: `v`, `type`, `phase`, `session`, `generation`, `wire_generation`, `incarnation`, `start_wall_ms`, `start_mono_ms`, `boot_id`, `path_encoding`, `event_path`, `instrument_path`. Values are respectively `2`, `"lifecycle"`, `"running"`, canonical padded-base64 tagged session identity, allocated u32 or JSON `null`, nonzero wire u32, padded-base64 16-byte incarnation, canonical decimal-string u64 wall/monotonic starts, padded-base64 16-byte boot identity, `"posix-bytes"` or `"windows-wtf8"`, and canonical padded base64 of the exact native event and immutable staged-instrument paths or JSON `null`. `instrument_path` never carries the caller's `-S` spelling.
+The running lifecycle prefix is exactly one canonical JSON object plus LF with this closed key order: `v`, `type`, `phase`, `session`, `generation`, `wire_generation`, `incarnation`, `start_wall_ms`, `start_mono_ms`, `boot_id`, `path_encoding`, `event_path`, `instrument_path`. Values are respectively `2`, `"lifecycle"`, `"running"`, canonical padded-base64 tagged session identity, allocated u32 or JSON `null`, nonzero wire u32, padded-base64 16-byte incarnation, canonical decimal-string u64 wall/monotonic starts, padded-base64 16-byte boot identity, `"posix-bytes"`, and canonical padded base64 of the exact native event and immutable staged-instrument paths or JSON `null`. `instrument_path` never carries the caller's `-S` spelling.
 
-The exited replacement changes phase to `"exited"`, retains those common values, then appends `end_wall_ms`, `output_end`, `ended`, its branch key, and `method`. The first two are canonical decimal-string u64. Revision 4 makes the exit MECHANISM and the holder's termination INTENT two orthogonal, mandatory axes. `ended` names only the mechanism: POSIX normal `ended:"exited",code:<u8>`; POSIX signal `ended:"signalled",signal:<positive platform signal>` with no code; Windows `ended:"exited",code:<u32>`. `method:"none"|"graceful"|"forced"` separately states whether the holder was asked to end the child — `none` means the holder had no termination state, and it never claims who outside the holder caused a signal. This is exactly the distinction the retired Windows-only `ended:"terminated"` branch folded into one value while POSIX carried nothing, which made a holder-initiated wire terminate byte-identical to an external `SIGTERM` and cost a real investigation its answer. The lifecycle record's `v` is `2`; a validator accepts only the v2 shape — there is no dual validator. The foreground shell status is not serialized as the child outcome. The selected lifecycle coordinate equals `output_end` on exit.
+The exited replacement changes phase to `"exited"`, retains those common values, then appends `end_wall_ms`, `output_end`, `ended`, its branch key, and `method`. The first two are canonical decimal-string u64. Revision 4 makes the exit MECHANISM and the holder's termination INTENT two orthogonal, mandatory axes. `ended` names only the mechanism: POSIX normal `ended:"exited",code:<u8>`; POSIX signal `ended:"signalled",signal:<positive platform signal>` with no code. `method:"none"|"graceful"|"forced"` separately states whether the holder was asked to end the child — `none` means the holder had no termination state, and it never claims who outside the holder caused a signal. This is exactly the distinction the retired `ended:"terminated"` branch folded into one value, which made a holder-initiated wire terminate byte-identical to an external `SIGTERM` and cost a real investigation its answer. The lifecycle record's `v` is `2`; a validator accepts only the v2 shape — there is no dual validator. The foreground shell status is not serialized as the child outcome. The selected lifecycle coordinate equals `output_end` on exit.
 
 ## 14. Semantic producer wire — version 1
 
@@ -585,7 +570,7 @@ Semantic frames use the same 24-byte shape as §1 with these substitutions:
 | 16 | 4 | payload length | at most 64 KiB (`00010000`) |
 | 20 | 4 | header CRC-32C | over bytes 0–19 |
 
-Reassembly follows §1/§10.2.2 with a 1 MiB total-message bound and 5-second deadline. Semantic JSON itself is at most 32 KiB. Peer identity is checked before the magic is parsed. On Windows, §12.2 of the specification permits the fixed four-byte pre-authentication accumulation required to establish the impersonation context; it accepts arbitrary short reads, consumes no fifth byte, and leaves the four bytes uninterpreted until the SID check and reversion succeed.
+Reassembly follows §1/§10.2.2 with a 1 MiB total-message bound and 5-second deadline. Semantic JSON itself is at most 32 KiB. Peer identity is checked before the magic is parsed.
 
 Source epochs are unsigned 32-bit counters allocated independently per source id, starting at `1`, and are never reused during a holder incarnation. `FFFFFFFF` may be the last assigned epoch; a later connection for that source is refused with a zero-epoch `SEM_RESOURCE_EXHAUSTED` error rather than wrapping. A rejected hello may receive a zero-epoch `SEMANTIC_ERROR`; no accepted source uses zero.
 
@@ -739,7 +724,7 @@ The whole read including EOF has a 2-second deadline. A selector that is present
 
 ### 15.2 Instrumentation-load acknowledgement
 
-With `-S`, the holder creates a different one-way byte stream and inherits only its write end into the requested initial child. `MOOR_INSTRUMENT_CHANNEL` selects that end using canonical unsigned decimal descriptor text on POSIX or 1–16 lowercase hexadecimal digits without `0x` for a nonzero 64-bit Windows handle. `MOOR_INSTRUMENT_NONCE` is exactly 32 lowercase hexadecimal digits encoding the holder's fresh 16-byte challenge. The module initializer consumes and removes both variables before any application instruction, writes exactly this 36-byte record, and closes the write end.
+With `-S`, the holder creates a different one-way byte stream and inherits only its write end into the requested initial child. `MOOR_INSTRUMENT_CHANNEL` selects that end using canonical unsigned decimal descriptor text. `MOOR_INSTRUMENT_NONCE` is exactly 32 lowercase hexadecimal digits encoding the holder's fresh 16-byte challenge. The module initializer consumes and removes both variables before any application instruction, writes exactly this 36-byte record, and closes the write end.
 
 | offset | width | field |
 |---|---|---|
@@ -751,7 +736,7 @@ With `-S`, the holder creates a different one-way byte stream and inherits only 
 | 16 | 4 | nonzero operating-system PID of the requested initial child |
 | 20 | 16 | exact nonce decoded from `MOOR_INSTRUMENT_NONCE` |
 
-The holder requires the expected generation, requested-child PID and nonce, followed by EOF, within 2 seconds. A selector/nonce with any other grammar, a handle outside the requested child's explicit inheritance set, a non-byte-stream handle, a short or long record, missing EOF, inherited duplicate writer, bad magic/format/reserved field, zero/wrong PID, wrong generation/nonce, or timeout fails the unpublished launch. On POSIX the writer is the module's load constructor. On Windows the injected DLL exports and runs `MoorInstrumentationInitV1` inside the still-suspended requested process as specified in §4.7; its unsigned return value must also be zero. This acknowledgement is separate from §15.1 and cannot establish supervision.
+The holder requires the expected generation, requested-child PID and nonce, followed by EOF, within 2 seconds. A selector/nonce with any other grammar, a handle outside the requested child's explicit inheritance set, a non-byte-stream handle, a short or long record, missing EOF, inherited duplicate writer, bad magic/format/reserved field, zero/wrong PID, wrong generation/nonce, or timeout fails the unpublished launch. The writer is the module's load constructor. This acknowledgement is separate from §15.1 and cannot establish supervision.
 
 ### 15.3 Holder-to-creator background result
 
@@ -861,32 +846,21 @@ Byte-exact records an implementation must produce and accept. Every checksum is 
 72 73 65 64 65 64
 ```
 
-**V12** — Windows marker, generation 7, holder incarnation `00..0F`, local pipe `\\.\pipe\moor-000102030405060708090a0b0c0d0e0f`
-
-```
-4D 4F 4F 52 4D 52 4B 33 01 00 00 00 07 00 00 00
-00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
-2E 00 5C 5C 2E 5C 70 69 70 65 5C 6D 6F 6F 72 2D
-30 30 30 31 30 32 30 33 30 34 30 35 30 36 30 37
-30 38 30 39 30 61 30 62 30 63 30 64 30 65 30 66
-B1 25 D5 68
-```
-
-**V13** — portable initial event commit, using a Windows tag-`02` identity fixture whose volume-serial bytes are `00..07` and file-id bytes are `08..17`. The body is exactly the following 137 UTF-8 bytes, including its final LF:
+**V13** — portable initial event commit, using the POSIX tag-`01` identity `/tmp/.moor-1000/build` (the same identity as V25). The body is exactly the following 133 UTF-8 bytes, including its final LF:
 
 ```jsonl
-{"v":2,"type":"header","ts":0,"session":"AgABAgMEBQYHCAkKCwwNDg8QERITFBUWFw==","generation":7,"epoch":0,"next_seq":0,"first_retained":0}
+{"v":2,"type":"header","ts":0,"session":"AS90bXAvLm1vb3ItMTAwMC9idWlsZA==","generation":7,"epoch":0,"next_seq":0,"first_retained":0}
 ```
 
-Its SHA-256 is `2c71e92870774150f5dbeec34f19052d82874f6eb4ac4bc9f8d4bf7ad743edfb`; kind is event `01`, epoch and coordinates are zero, and commit slot 0/body slot 0/index 1 is exactly 92 bytes:
+Its SHA-256 is `2bbeefb637546612d6a3a6bd7cbdb7be2942d6daddc733395445f9edd788b64b`; kind is event `01`, epoch and coordinates are zero, and commit slot 0/body slot 0/index 1 is exactly 92 bytes:
 
 ```
 4D 4F 4F 52 43 4D 54 31 01 00 00 01 07 00 00 00
 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00
-89 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-00 00 00 00 00 00 00 00 2C 71 E9 28 70 77 41 50
-F5 DB EE C3 4F 19 05 2D 82 87 4F 6E B4 AC 4B C9
-F8 D4 BF 7A D7 43 ED FB 28 95 8D 91
+85 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 2B BE EF B6 37 54 66 12
+D6 A3 A6 BD 7C BD B7 BE 29 42 D6 DA DD C7 33 39
+54 45 F9 ED D7 88 B6 4B C9 B4 ED 03
 ```
 
 **V14** — semantic `HELLO`, generation 7, stateful source `claude`, all three capabilities
@@ -1183,11 +1157,11 @@ Beyond the serialized frames above, each case below is a vector the shipped bina
 
 **Framing and reassembly:** a run split at every single-byte boundary; a sequence gap mid-run; a type change mid-run; a truncated header; a truncated payload; a run exceeding the message bound; a run abandoned past its deadline; a non-zero reserved bit; an unknown type; an unknown version; connection and aggregate-reassembly caps at their limit and one above without eviction or child impact; empty `OUTPUT`; `OUTPUT` at 65536 bytes and a larger child read split into contiguous records; contiguous output offsets, inclusive record range and half-open byte range, including both empty and nonempty status encodings; output acknowledgement zero/at-high-water/above-high-water; record-sequence and byte-offset exhaustion without wrap or silent continuation.
 
-**Identity and rendezvous:** POSIX tag `01`; Windows tag `02` exact 25-byte length; unknown/wrong-length tags refused; plain-u16 prefix boundaries 0/65535/65536 and wide-prefix boundaries, including a status descriptor containing a Windows native path whose canonical WTF-8 encoding exceeds 65535 bytes and a value over 1 MiB refused before publication; a `HELLO` naming a different identity; nonzero hello flags refused; an identity/status probe producing no preamble, attach ACK or lease change; exact expected generation accepted; discovery `HELLO` returning the actual nonzero generation; a supervisor forbidden to use discovery for adoption; a superseded generation on every frame type; generation `1` from an unsupervised holder accepted; generation `0` refused on every controller frame except the initial discovery `HELLO`; marker CRC/length/magic/reserved-field failures; marker replaced between read and connect; wrong pipe prefix, length, case or hexadecimal grammar; marker/root reparse points; inherited or broad DACLs; remote pipe clients; a four-byte pre-authentication preface split at every boundary and still accepted within deadline; EOF/deadline before four bytes refused; impersonation/token-query/reversion failure; wrong `TokenUser` rejected with the four buffered bytes never parsed.
+**Identity and rendezvous:** POSIX tag `01`; unknown/wrong-length tags refused; plain-u16 prefix boundaries 0/65535/65536 and wide-prefix boundaries, including a status descriptor containing a native path longer than 65535 bytes and a value over 1 MiB refused before publication; a `HELLO` naming a different identity; nonzero hello flags refused; an identity/status probe producing no preamble, attach ACK or lease change; exact expected generation accepted; discovery `HELLO` returning the actual nonzero generation; a supervisor forbidden to use discovery for adoption; a superseded generation on every frame type; generation `1` from an unsupervised holder accepted; generation `0` refused on every controller frame except the initial discovery `HELLO`; a socket root that is a symbolic link, wrongly owned or broader than `0700` refused; a wrong-user peer closed before a byte of payload is parsed.
 
-**Private launch channels:** supervised allocation starting at 2 and a discriminator carrying generation 1 refused; missing discriminator with inherited generation variables producing an unsupervised holder with those variables stripped; every selector grammar boundary; exact V21/V22 records; each short prefix, one extra byte, missing EOF, duplicated inherited writer and deadline; wrong magic/format/flags/reserved/generation; instrumentation wrong/zero PID or nonce; selector handles outside the explicit inheritance list; launch selector absent from the requested child; instrumentation selector/nonce present only for that child and removed before its first application instruction; POSIX constructor ACK, descendant preload with no ACK variables, Linux `LD_PRELOAD` colon/dollar/whitespace path refusal, macOS `DYLD_INSERT_LIBRARIES` colon path refusal, and Windows missing export/nonzero initializer/wrong-architecture failure. V31 covers every `MORR` state, wrong magic/format/state, nonzero success result, zero generation, short/long record, failed before adoption, ready before adoption, loss before adoption, and loss after adoption. Every failure leaves no published rendezvous or running requested child, and no private channel substitutes for another.
+**Private launch channels:** supervised allocation starting at 2 and a discriminator carrying generation 1 refused; missing discriminator with inherited generation variables producing an unsupervised holder with those variables stripped; every selector grammar boundary; exact V21/V22 records; each short prefix, one extra byte, missing EOF, duplicated inherited writer and deadline; wrong magic/format/flags/reserved/generation; instrumentation wrong/zero PID or nonce; selector handles outside the explicit inheritance list; launch selector absent from the requested child; instrumentation selector/nonce present only for that child and removed before its first application instruction; POSIX constructor ACK, descendant preload with no ACK variables, Linux `LD_PRELOAD` colon/dollar/whitespace path refusal, and macOS `DYLD_INSERT_LIBRARIES` colon path refusal. V31 covers every `MORR` state, wrong magic/format/state, nonzero success result, zero generation, short/long record, failed before adoption, ready before adoption, loss before adoption, and loss after adoption. Every failure leaves no published rendezvous or running requested child, and no private channel substitutes for another.
 
-**Geometry and CLI numeric fixtures:** V32's preserve pair, both mixed-zero orders, `1`, `32767`, and `32768` per-dimension edges, exact `2,000,000` product, one product above, and widened `32767×61/62` pair; checked Windows signed conversion; ASCII-case-insensitive `k/m/g` and uppercase forms, maximum u64 unsuffixed value, maximum nonoverflowing suffixed value, multiplication overflow, leading zero, trailing byte, and suffix refusal by `tail -n`. The same-size `winch` fixture issues exactly one notification after the frozen attach prefix; ordinary unchanged geometry does not.
+**Geometry and CLI numeric fixtures:** V32's preserve pair, both mixed-zero orders, `1`, `32767`, and `32768` per-dimension edges, exact `2,000,000` product, one product above, and widened `32767×61/62` pair; ASCII-case-insensitive `k/m/g` and uppercase forms, maximum u64 unsuffixed value, maximum nonoverflowing suffixed value, multiplication overflow, leading zero, trailing byte, and suffix refusal by `tail -n`. The same-size `winch` fixture issues exactly one notification after the frozen attach prefix; ordinary unchanged geometry does not.
 
 **Preamble and replay:** all twelve mode groups emitted for exact tracked state in the exact order of §6; alternate-buffer selection preceding scroll-region restoration; arbitrary pre-existing combinations of mouse bits cleared before tracked bits are set; invalid/abandoned state clearing exactness and producing exactly one plain-zero-length preamble before an ACK whose mode-exact bit is clear; V26 `NON_VT` producing the same empty payload while the ACK retains actual exactness; RIS restoring exactness; no cursor position present anywhere in the payload; every representable tracked mode set by the child and restated on attach; a missing, second or pre-`ATTACH_ACK` preamble refused; probes/input-only connections receiving none; exact ACK/preamble/optional-result/replay/live ordering; preamble bytes absent from output/offset arithmetic; empty replay; complete replay from record 1; a 4 MiB whole-record retention boundary; discarded-prefix `GAP` then retained records; output arriving during replay ordered afterwards; a reconnecting controller discarding duplicates; main status bits 2–3 rejected when nonzero; no checkpoint frame or buffer-exactness claim.
 
@@ -1197,12 +1171,12 @@ Beyond the serialized frames above, each case below is a vector the shipped bina
 
 **Receipts and replay:** a fully written input; a pre-write refusal and partial-write refusal; a receipt whose incarnation does not match; replay of each written/refused outcome at exactly the high-water mark with identical flags/correlation/source/bytes returning the cached receipt payload in a newly sequenced frame **with no re-evaluation or second write**; the same id with any metadata or byte difference refused as `BAD_SEQUENCE`; an id below or more than one above refused; request-id exhaustion without wrap; lease-epoch reset and exhaustion without wrap; superseded lease refused. Receipt-required input covers unavailable/edge/wrong-capability source, notice refusal/timeout, producer replacement after prepared ACK, no PTY write before a still-current prepared ACK, write failure plus cancel, application-id conflict while a binding is retained, safe id reuse after resolution under a later never-reused tuple, and a normal transport receipt remaining distinct from the later application event.
 
-**Termination:** each of the five outcomes and method values; POSIX `SIGTERM` foreground-group targeting plus child-group fallback and `SIGKILL` force/escalation; a graceful termination escalating at its deadline; an operation exceeding the whole-operation deadline reported as `INDETERMINATE`; a mismatched incarnation leaving the session untouched; Windows CTRL_BREAK and `TerminateJobObject(..., 0xC000013A)` paths; a breakaway/WMI-created survivor setting the survivor bit without claiming it was terminated.
+**Termination:** each of the five outcomes and method values; POSIX `SIGTERM` foreground-group targeting plus child-group fallback and `SIGKILL` force/escalation; a graceful termination escalating at its deadline; an operation exceeding the whole-operation deadline reported as `INDETERMINATE`; a mismatched incarnation leaving the session untouched; a survivor outside the foreground group setting the survivor bit without claiming it was terminated.
 
-**Status and liveness:** V25 on a native POSIX lane byte-compared through its layout-`02` event commit and appended health/log tail; disabled event/log zero encodings; selected event/log metadata copied only from validated commits; main viewer/child/event bits and requesting-controller lease bit; input-only/probe viewer exclusion; independent tracked/observer exactness; every reserved bit refused. V28 and each individual heartbeat flag transition queue immediately; five-second cadence; a quiet session producing no `WAKEUP` and still heartbeating; 15-second absence invalidating verified-live evidence; stale only after a fresh probe positively establishes listener absence, otherwise `indeterminate`; Linux UUID, macOS `kern.boottime`, and Windows WMI boot identity; unavailable/all-zero identity never matching; age from matching monotonic clock only; Windows WMI timeout without blocking publication.
+**Status and liveness:** V25 on a native POSIX lane byte-compared through its layout-`02` event commit and appended health/log tail; disabled event/log zero encodings; selected event/log metadata copied only from validated commits; main viewer/child/event bits and requesting-controller lease bit; input-only/probe viewer exclusion; independent tracked/observer exactness; every reserved bit refused. V28 and each individual heartbeat flag transition queue immediately; five-second cadence; a quiet session producing no `WAKEUP` and still heartbeating; 15-second absence invalidating verified-live evidence; stale only after a fresh probe positively establishes listener absence, otherwise `indeterminate`; Linux UUID and macOS `kern.boottime` boot identity; unavailable/all-zero identity never matching; age from matching monotonic clock only.
 
-**Portable committed stores on every native OS:** V13 event, V23 empty log, and V24 canonical running lifecycle initial commits; event/log/lifecycle kind and coordinate rules; every body-write/body-flush/commit-write/commit-flush byte boundary for growth and replacement; either slot torn; uncommitted tail ignored; inactive body rewrite; wrong total length/magic/format/self slot/body slot/kind/generation/epoch/flags/index/length/start/end/hash/CRC; any equal independently valid indexes as corruption; no-valid-commit failure; event sequence/epoch/index, log epoch/index, and lifecycle exit-frontier exhaustion without wrap; single writer lease and acquisition order; reader during writer lease; ambiguous final flush selecting only prior/submitted candidate; status matching selected commit; confirmed identity-fenced retirement; no successor adoption. Linux, macOS, and Windows each run the complete event, log, and lifecycle matrix rather than treating one family as the storage oracle.
+**Portable committed stores on every native OS:** V13 event, V23 empty log, and V24 canonical running lifecycle initial commits; event/log/lifecycle kind and coordinate rules; every body-write/body-flush/commit-write/commit-flush byte boundary for growth and replacement; either slot torn; uncommitted tail ignored; inactive body rewrite; wrong total length/magic/format/self slot/body slot/kind/generation/epoch/flags/index/length/start/end/hash/CRC; any equal independently valid indexes as corruption; no-valid-commit failure; event sequence/epoch/index, log epoch/index, and lifecycle exit-frontier exhaustion without wrap; single writer lease and acquisition order; reader during writer lease; ambiguous final flush selecting only prior/submitted candidate; status matching selected commit; confirmed identity-fenced retirement; no successor adoption. Linux and macOS each run the complete event, log, and lifecycle matrix rather than treating one family as the storage oracle.
 
 **Semantic producer:** same-user check before `MOOS`; disabled/unwritable event stream refusing ingress and never issuing a false durable ACK; zero-epoch pre-assignment refusal; stale token/generation; edge vs stateful, including no edge `semantic-source` lifecycle event and refusal of an edge snapshot assertion; stateful replacement and source-epoch fencing/exhaustion without wrap; snapshot required after connect and after degraded recovery; heartbeat loss to degraded and disconnect to disconnected, never idle; JSON duplicate keys/depth/member/UTF-8/size failures; new source sequence skip/reuse/exhaustion without wrap; retries at the newest and oldest retained positions returning their original durable positions in newly sequenced ACK frames; an evicted old sequence refused; event-id/sequence payload conflict; retained-snapshot byte-budget exhaustion refused before state change; tuple-retention exhaustion refused before ACK; durable ACK only after event commit; empty and nonempty provider session/turn ids; all pending-correlation limits/deadlines/expiry reasons with producer/source-epoch provenance; wrong application tuple/source/generation/epoch/producer refused; provider receipt never synthesized by Moor.
 
-**Event stream:** every case in §8.4.5 of the specification, event schema-v2 exact key sets and branch fields, canonical base64, canonical bounded `ts` spellings including 0, a millisecond fraction and the u64-millisecond maximum, Windows full-u32 exit codes and known holder termination method, plus OB-28's limiting-axis precedence and final transaction for seq/epoch/commit with the session continuing after it.
+**Event stream:** every case in §8.4.5 of the specification, event schema-v2 exact key sets and branch fields, canonical base64, canonical bounded `ts` spellings including 0, a millisecond fraction and the u64-millisecond maximum, known holder termination method, plus OB-28's limiting-axis precedence and final transaction for seq/epoch/commit with the session continuing after it.

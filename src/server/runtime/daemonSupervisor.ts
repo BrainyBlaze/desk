@@ -92,8 +92,8 @@ const defaultBackoff = (attempt: number): number => Math.min(500 * 2 ** (attempt
 
 /** True when a path plausibly names a Node runtime (not the Bun-compiled standalone). */
 function looksLikeNodeRuntime(execPath: string): boolean {
-  const base = execPath.split(/[\\/]/).pop() ?? '';
-  return base === 'node' || base === 'node.exe';
+  const base = execPath.split('/').pop() ?? '';
+  return base === 'node';
 }
 
 

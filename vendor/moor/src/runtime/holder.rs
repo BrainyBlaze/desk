@@ -386,7 +386,6 @@ impl<N: Native> Runtime<N> {
         self.geometry = (rows, columns);
         self.scanner.set_rows(rows);
     }
-    #[cfg(unix)]
     pub(crate) fn observe_exit(&mut self) -> Result<Option<NativeExit>> {
         let status = self.native.exited()?;
         if status.is_some() {
@@ -445,9 +444,9 @@ impl<N: Native> Runtime<N> {
         // v4: the exit MECHANISM and the holder's termination INTENT are
         // orthogonal, and both are mandatory on every closed record. `none`
         // states the holder had no termination state — it never claims who
-        // outside the holder caused a signal. The old Windows-only
-        // `terminated` ending folded the two axes into one branch and left
-        // a POSIX wire terminate byte-identical to an external SIGTERM;
+        // outside the holder caused a signal. The retired `terminated`
+        // ending folded the two axes into one branch and left a wire
+        // terminate byte-identical to an external SIGTERM;
         // that asymmetry is exactly what this revision removes.
         let method = match termination {
             None => "none",
@@ -542,8 +541,7 @@ impl<N: Native> Runtime<N> {
         self.tick(monotonic());
     }
 
-    // v4: every platform reports the holder's termination intent in its
-    // closed record, so the accessor is portable, not a Windows detail.
+    // v4: the holder's termination intent is part of every closed record.
     pub(crate) fn termination_method(&self) -> Option<bool> {
         self.machine.termination_forced()
     }

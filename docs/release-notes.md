@@ -11,7 +11,7 @@ This page summarizes the repository changelog. The source of truth is
 ## 0.3.0 — source-backed CLI distribution
 
 - The curl installer now installs the complete `desk` CLI on supported macOS
-  and glibc Linux x64/arm64 hosts, including WSL.
+  and glibc Linux x64/arm64 hosts.
 - Plain `desk serve` launches the private compiled Bun runtime. `desk serve
   --dev` explicitly launches Vite; both modes fail without fallback.
 - Releases publish source, install-manifest, and checksum assets instead of a

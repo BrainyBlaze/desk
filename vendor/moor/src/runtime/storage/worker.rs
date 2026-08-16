@@ -325,8 +325,8 @@ impl Drop for Lane {
     // every event-store OS file handle) is fully released before this returns.
     // #28: the worker used to be a detached thread whose `JoinHandle` was
     // discarded, so `Lane::drop` could return while the worker still held the
-    // event-store handles open — harmless on Unix, but on Windows the live
-    // handle blocked the caller's `remove_dir_all` with OS error 32.
+    // event-store handles open, racing any caller that removes the store
+    // directory right after the drop.
     //
     // Order matters and avoids a teardown deadlock: at drop time the worker is
     // typically parked on `recv` with no pending work. `state.close()` alone

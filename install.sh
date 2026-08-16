@@ -124,7 +124,6 @@ detect_target() {
   case "$os" in
     Darwin) OS_TAG="darwin"; HOST_LIBC="system" ;;
     Linux) OS_TAG="linux" ;;
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) die "native Windows is unsupported; use Desk from WSL (Linux)." ;;
     *) die "unsupported operating system: $os (Desk supports macOS and Linux)." ;;
   esac
   case "$arch" in
@@ -606,7 +605,7 @@ exact(data["moor"], ["schemaVersion","repository","version","commit","coverage",
 if data["node"]["version"]!="22.23.1" or data["node"]["npmVersion"]!="10.9.8": raise SystemExit("unexpected Node/npm pin")
 if data["bun"]["version"]!="1.3.14" or data["bun"]["tag"]!="bun-v1.3.14": raise SystemExit("unexpected Bun pin")
 moor=data["moor"]
-if moor["schemaVersion"] != 2 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
+if moor["schemaVersion"] != 3 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
     raise SystemExit("unexpected Moor release identity")
 # desk#60: the installer serves END USERS, who cannot weigh which release lanes
 # went unverified. It therefore has no approval switch at all and refuses any
@@ -617,8 +616,8 @@ coverage=moor["coverage"]
 if not isinstance(coverage, dict) or "requiredClosure" not in coverage:
     raise SystemExit("Moor pin states no release coverage")
 # The closure is judged BEFORE the key set: a narrowed pin legitimately carries
-# an extra `unverified` list, and complaining about its shape would hide the
-# real reason it is refused.
+# additional fields, and complaining about their shape would hide the real
+# reason the candidate is refused.
 if coverage["requiredClosure"] != "full-matrix":
     raise SystemExit("Moor release closure is not full-matrix: this candidate was not verified on the whole release matrix")
 exact(coverage, ["requiredClosure"], "Moor pin coverage")
@@ -646,8 +645,6 @@ moor_assets={
     "aarch64-unknown-linux-musl":"moor-0.1.0-linux-arm64",
     "x86_64-apple-darwin":"moor-0.1.0-macos-x64",
     "aarch64-apple-darwin":"moor-0.1.0-macos-arm64",
-    "x86_64-pc-windows-msvc":"moor-0.1.0-windows-x64.exe",
-    "aarch64-pc-windows-msvc":"moor-0.1.0-windows-arm64.exe",
 }
 if set(moor["targets"]) != set(moor_assets): raise SystemExit("invalid Moor target set")
 for name, expected_asset in moor_assets.items():

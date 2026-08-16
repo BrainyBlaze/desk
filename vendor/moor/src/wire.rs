@@ -593,7 +593,7 @@ impl StatusTail {
 wire_rules!(pure fn validate_status_base(input: &mut Reader<'_>, expected: Option<(&[u8], u32, [u8; 16])>) -> Result<(u16, u16), WireError> = {
     wire_rules!(read input; identity = input.wide(); generation = input.positive(); incarnation = input.identifier::<16>(); layout = input.byte(); event_identity = input.wide(); slot = input.byte(); commit = input.u64(); body_length = input.u64(); body_hash = input.exact::<32>()); input.exact::<32>()?;
     wire_rules!(read input; directory = input.wide(); _pid = input.positive(); _containment = input.positive(); _birth = input.identifier::<16>(); columns = input.u16(); rows = input.u16());
-    let identity_ok = matches!(identity, [1, b'/', ..]) || identity.len() == 25 && identity.first() == Some(&2);
+    let identity_ok = matches!(identity, [1, b'/', ..]);
     let commit_ok = if layout == 2 { slot <= 1 && commit != 0 && body_length != 0 && nonzero(&body_hash) } else { slot == 0xff && commit == 0 && body_length == 0 && !nonzero(&body_hash) };
     // Layout `01` is the superseded legacy layout: never emitted by any
     // holder (§5 — both platforms report `2`, disabled logging reports `0`),
@@ -616,8 +616,8 @@ impl Heartbeat {
 schema!(struct pub QueryShape derive [Clone, Copy, Debug, Eq, PartialEq] pub fields; class: u8, csi8: bool, mode: Option<u32>);
 
 wire_rules!(pure pub(crate) fn csi(bytes: &[u8]) -> Option<(bool, &[u8])> = bytes.strip_prefix(b"\x1b[").map(|tail| (false, tail)).or_else(|| bytes.strip_prefix(&[0x9b]).map(|tail| (true, tail))));
-// v4: the status descriptor carries a mandatory geometry pair on every
-// platform, so the size rule is portable wire logic, not a Windows detail.
+// v4: the status descriptor carries a mandatory geometry pair, so the size
+// rule is wire logic shared by encoder and decoder.
 wire_rules!(pure pub(crate) fn valid_size(size: (u16, u16)) -> bool = size.0 != 0 && size.1 != 0 && size.0 <= i16::MAX as u16 && size.1 <= i16::MAX as u16 && u32::from(size.0) * u32::from(size.1) <= 2_000_000);
 fn csi_body<'a>(bytes: &'a [u8], prefix: &[u8], suffix: &[u8]) -> Option<&'a [u8]> {
     csi(bytes)?.1.strip_prefix(prefix)?.strip_suffix(suffix)

@@ -54,10 +54,13 @@
   "hex": "4d4f4f5204130000070000000d0000001e000000272c493d09001a0067656e65726174696f6e20332069732073757065727365646564",
   "bytes": 54
  },
- "V12": {
-  "description": "Windows marker, generation 7, holder incarnation `00..0F`, local pipe `\\\\.\\pipe\\moor-000102030405060708090a0b0c0d0e0f`",
-  "hex": "4d4f4f524d524b330100000007000000000102030405060708090a0b0c0d0e0f2e005c5c2e5c706970655c6d6f6f722d3030303130323033303430353036303730383039306130623063306430653066b125d568",
-  "bytes": 84
+ "V13": {
+  "description": "portable initial event commit using POSIX tag-`01` identity `/tmp/.moor-1000/build`; the committed body is exactly 133 UTF-8 bytes including its final LF",
+  "hex": "4d4f4f52434d54310100000107000000000000000000000001000000000000008500000000000000000000000000000000000000000000002bbeefb637546612d6a3a6bd7cbdb7be2942d6daddc733395445f9edd788b64bc9b4ed03",
+  "bytes": 92,
+  "body": "{\"v\":2,\"type\":\"header\",\"ts\":0,\"session\":\"AS90bXAvLm1vb3ItMTAwMC9idWlsZA==\",\"generation\":7,\"epoch\":0,\"next_seq\":0,\"first_retained\":0}\n",
+  "body_bytes": 133,
+  "body_sha256": "2bbeefb637546612d6a3a6bd7cbdb7be2942d6daddc733395445f9edd788b64b"
  },
  "V14": {
   "description": "semantic `HELLO`, generation 7, stateful source `claude`, all three capabilities",
@@ -139,18 +142,47 @@
   "hex": "4d4f525201010000070000004d4f525201020000070000004d4f52520103341207000000",
   "bytes": 36
  },
+ "V32": {
+  "description": "exact geometry, numeric-size, and same-size-redraw fixtures",
+  "geometry": [
+   { "columns": 0, "rows": 0, "hex": "00000000", "result": "preserve-both" },
+   { "columns": 0, "rows": 1, "hex": "00000100", "result": "HALF_SPECIFIED_GEOMETRY" },
+   { "columns": 1, "rows": 0, "hex": "01000000", "result": "HALF_SPECIFIED_GEOMETRY" },
+   { "columns": 1, "rows": 1, "hex": "01000100", "result": "valid" },
+   { "columns": 2000, "rows": 1000, "hex": "d007e803", "result": "valid" },
+   { "columns": 2001, "rows": 1000, "hex": "d107e803", "result": "malformed-product" },
+   { "columns": 32767, "rows": 61, "hex": "ff7f3d00", "result": "valid" },
+   { "columns": 32767, "rows": 62, "hex": "ff7f3e00", "result": "malformed-product" },
+   { "columns": 32768, "rows": 1, "hex": "00800100", "result": "malformed-dimension" }
+  ],
+  "numeric_sizes": [
+   { "operand": "0", "surface": "-C", "result": "0" },
+   { "operand": "1k", "surface": "-C", "result": "1024" },
+   { "operand": "1K", "surface": "-C", "result": "1024" },
+   { "operand": "2m", "surface": "-C", "result": "2097152" },
+   { "operand": "2M", "surface": "-C", "result": "2097152" },
+   { "operand": "3g", "surface": "-C", "result": "3221225472" },
+   { "operand": "3G", "surface": "-C", "result": "3221225472" },
+   { "operand": "18446744073709551615", "surface": "-C", "result": "18446744073709551615" },
+   { "operand": "18014398509481983k", "surface": "-C", "result": "18446744073709550592" },
+   { "operand": "18014398509481984k", "surface": "-C", "result": "invalid-overflow" },
+   { "operand": "01k", "surface": "-C", "result": "invalid-spelling" },
+   { "operand": "1kb", "surface": "-C", "result": "invalid-spelling" },
+   { "operand": "1k", "surface": "tail -n", "result": "invalid-unsuffixed-u32" }
+  ],
+  "same_size_redraw": {
+   "columns": 80,
+   "rows": 24,
+   "lease_won": true,
+   "winch_notifications": 1,
+   "none_notifications": 0,
+   "ctrl_l_hex": "0c"
+  }
+ },
  "V33": {
   "description": "`WAKEUP` interposed between `HELLO_ACK` and `ATTACH_ACK`. `WAKEUP` is legal at EVERY post-`HELLO_ACK` phase (§7), and this is the exceptional pre-attach window an independent implementer would otherwise guess about. The sequence numbers are the real ones: `HELLO_ACK` consumed holder-direction sequence 1, so the interposed `WAKEUP` carries sequence 2, the `ATTACH_ACK` that follows carries sequence 3, and the terminal-state preamble carries sequence 4. The frame is header-only — kind `11`, generation 7, zero payload — and its CRC-32C covers the twenty header bytes:",
   "hex": "4d4f4f520411000007000000020000000000000052175391",
   "bytes": 24
- },
- "V13": {
-  "description": "portable initial event commit, using a Windows tag-`02` identity fixture whose volume-serial bytes are `00..07` and file-id bytes are `08..17`. The body is exac",
-  "hex": [
-   "4d4f4f52434d54310100000107000000000000000000000001000000000000008900000000000000000000000000000000000000000000002c71e92870774150f5dbeec34f19052d82874f6eb4ac4bc9f8d4bf7ad743edfb28958d91"
-  ],
-  "bytes": 92,
-  "blocks": 1
  },
  "V24": {
   "description": "portable canonical-running lifecycle initial commit. The exact 286-byte body, including LF, is:",
@@ -169,8 +201,8 @@
   "blocks": 1
  },
  "_meta": {
-  "source": "moor spec/moor-wire-schema.md §16 @ 649ea81",
-  "cross_checked": "tests/vectors.rs @ 649ea81 — 32/32 verified by content",
-  "note": "multi-frame vectors (V26 attach+preamble, V29 grant+release, V31 three states, V33 hello_ack+wakeup+attack_ack sequence) are concatenated in one hex field here; Rust keeps them as separate string consts — split on 24-byte MOOR headers when consuming frame-wise"
+  "source": "moor spec/moor-wire-schema.md §16 @ 526cbb2df57a61240d8a6c135b55888716cf32c9",
+  "cross_checked": "tests/vectors.rs plus V32 runtime/CLI fixtures @ 526cbb2df57a61240d8a6c135b55888716cf32c9 — 32/32 verified by content",
+  "note": "multi-frame vectors (V26 attach+preamble, V29 grant+release, V31 three states, V33 hello_ack+wakeup+attach_ack sequence) are concatenated in one hex field here; Rust keeps them as separate string consts — split on 24-byte MOOR headers when consuming frame-wise"
  }
 }

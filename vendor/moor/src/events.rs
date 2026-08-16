@@ -31,7 +31,7 @@ const STORE_EVENT_END: u64 = 1 << 53;
 const STORE_EVENT_CAP: u64 = 256 << 10;
 const STORE_HEADER: &str =
     "v:2,type:=header,ts:*,session:*,generation:*,epoch:u,next_seq:*,first_retained:*";
-const STORE_LIFECYCLE: &str = "v:2,type:=lifecycle,phase:t,session:*,generation:*,wire_generation:u,incarnation:b16,start_wall_ms:D,start_mono_ms:D,boot_id:b16,path_encoding:=posix-bytes/windows-wtf8,event_path:n,instrument_path:n";
+const STORE_LIFECYCLE: &str = "v:2,type:=lifecycle,phase:t,session:*,generation:*,wire_generation:u,incarnation:b16,start_wall_ms:D,start_mono_ms:D,boot_id:b16,path_encoding:=posix-bytes,event_path:n,instrument_path:n";
 const STORE_LIFECYCLE_END: &str = "|end_wall_ms:D,output_end:D,ended:=exited,code:u,method:=none/graceful/forced|end_wall_ms:D,output_end:D,ended:=signalled,signal:p,method:=none/graceful/forced";
 
 pub fn event(name: &'static str, ts: u64, fields: &[(&str, Json<'_>)]) -> Event {
@@ -201,8 +201,7 @@ fn stored_header(line: &[u8], generation: u32) -> Option<(u32, u64, u64)> {
         && stored_generation(&fields["generation"], generation))
     .then_some(())?;
     let session = stored_base64(fields["session"].as_str()?)?;
-    (session.starts_with(&[1, b'/']) || session.len() == 25 && session.first() == Some(&2))
-        .then_some(())?;
+    session.starts_with(&[1, b'/']).then_some(())?;
     let epoch = u32::try_from(fields["epoch"].as_u64()?).ok()?;
     let end = fields["next_seq"].as_u64()?;
     let first = fields["first_retained"].as_u64()?;
@@ -240,32 +239,23 @@ pub(crate) fn valid_stored_lifecycle(
     let encoding = text("path_encoding");
     let session = text("session")
         .and_then(stored_base64)
-        .is_some_and(|bytes| match encoding {
-            Some("posix-bytes") => bytes.starts_with(&[1, b'/']),
-            Some("windows-wtf8") => bytes.len() == 25 && bytes.first() == Some(&2),
-            _ => false,
-        });
+        .is_some_and(|bytes| encoding == Some("posix-bytes") && bytes.starts_with(&[1, b'/']));
     let common = store_fields(&fields, 0..13, STORE_LIFECYCLE)
         && store_fields(&fields, 13..fields.len(), STORE_LIFECYCLE_END)
         && session
         && stored_generation(&fields["generation"], generation)
         && fields["wire_generation"].as_u64() == Some(u64::from(generation));
-    let windows = encoding == Some("windows-wtf8");
     let closed = index == 2 && number("output_end") == Some(end);
     (common
         && match (text("phase"), text("ended")) {
             (Some("running"), None) => index == 1 && start == 0 && end == 0,
             (Some("exited"), Some("exited")) => {
-                closed
-                    && fields["code"]
-                        .as_u64()
-                        .is_some_and(|code| windows || code <= 255)
+                closed && fields["code"].as_u64().is_some_and(|code| code <= 255)
             }
             // v4: the mechanism says HOW the child ended; the mandatory
             // `method` field separately says whether the holder was asked to
-            // end it. Signals stay a POSIX mechanism; the old Windows-only
-            // `terminated` ending is gone with its folded axes.
-            (Some("exited"), Some("signalled")) => closed && !windows,
+            // end it. The retired `terminated` ending folded both axes.
+            (Some("exited"), Some("signalled")) => closed,
             _ => false,
         })
     .then_some(())

@@ -15,6 +15,8 @@ only; it adds no behavioural requirements.
 
 `wire-schema-4` and `event-schema-2` are the current revisions; `wire-schema-3` received one in-place amendment before any
 conforming implementation existed. No mixed old/amended dialect is supported.
+A later platform amendment narrowed the supported families to Linux and macOS: identity tag `01` is the only rendezvous
+identity, and `path_encoding` is `posix-bytes` only.
 Every later change to a frozen layout requires the corresponding version
 increment.
 
@@ -40,8 +42,8 @@ The reviewed handoff artifacts have these SHA-256 digests:
 
 | file | SHA-256 |
 |---|---|
-| `moor-spec.md` | `e1e6f73e014521855b66b248132a5913e91cc830665f8b220de7b79595b1b77a` |
-| `moor-wire-schema.md` | `44ebe0865d531d94f4187100109d7f9e456583abd7060c18453bc271542c909f` |
+| `moor-spec.md` | `f76a8ead39292d7f67446813ded5db27e8e6f999289118e2a96425fb6b678e06` |
+| `moor-wire-schema.md` | `d00dc527d41975c29640de6b8ca0fabab47d14a951653e376e9246742e4fd52a` |
 
 Verify them from this directory with:
 

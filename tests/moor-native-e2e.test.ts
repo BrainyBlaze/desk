@@ -2,8 +2,8 @@
 // bundled by Desk from its provenance-pinned vendor snapshot and driven through the REAL
 // Desk stack — daemon provision with full OB-39 descriptor authority, restart
 // re-adoption + reconcile, §9 wire terminate, §7.4 lease release, §10.2.13
-// log clear, and the binary's root/alias fences. Skips cleanly when the
-// binary is absent (override with DESK_MOOR_NATIVE_BIN).
+// log clear, and the binary's root/alias fences. Developer runs may skip when
+// the binary is absent; required native lanes fail before collecting tests.
 
 import { spawnSync } from 'node:child_process';
 import {
@@ -45,6 +45,10 @@ import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulator
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const NATIVE_BIN = process.env.DESK_MOOR_NATIVE_BIN ?? join(ROOT, 'libexec', 'moor');
 const HAVE_BINARY = existsSync(NATIVE_BIN);
+
+if (process.env.RUN_REAL_JOIN === '1' && !HAVE_BINARY) {
+  throw new Error(`RUN_REAL_JOIN=1 requires an executable Moor binary at ${NATIVE_BIN}`);
+}
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
 class FakeUpgradeServer {

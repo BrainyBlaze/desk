@@ -32,10 +32,6 @@ crate::schema!(struct pub ArtifactStores pub fields; lifecycle: Store, event: Op
 crate::schema!(struct pub PreparedStorage pub fields; log: Option<(Store, u64)>, events: Option<EventConfig>, lifecycle: Store);
 crate::schema!(struct pub PreparedArtifacts pub fields; core: CoreConfig, storage: PreparedStorage, status: Vec<u8>, commit_at: usize, running: String);
 
-#[cfg(windows)]
-pub fn rollback_stores(stores: [Option<Store>; 3]) {
-    stores.into_iter().flatten().for_each(Store::rollback);
-}
 crate::schema!(struct Lifecycle derive [Deserialize] fields; session: String, wire_generation: u32, incarnation: String, start_mono_ms: String, boot_id: String, event_path: Option<String>, instrument_path: Option<String>);
 
 pub fn copy_digest(input: &mut fs::File, mut output: Option<&mut fs::File>) -> Result<[u8; 32]> {
@@ -427,9 +423,9 @@ pub fn extend_ancestry(
 
 crate::schema!(enum ordinal pub SessionState; Missing, Live, Attached, Stale, Exited, Indeterminate);
 
-pub fn session_name(name: OsString, insensitive: bool) -> Option<OsString> {
+pub fn session_name(name: OsString) -> Option<OsString> {
     let bytes = name.as_encoded_bytes();
-    match name::artifact_suffix_len(bytes, insensitive) {
+    match name::artifact_suffix_len(bytes) {
         Some(length) if length == b".exit".len() => {
             let at = bytes.len() - length;
             let base = unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[..at]) };
@@ -619,33 +615,11 @@ pub fn holder_artifacts(
             .map(|path| {
                 config.event_store.take().map_or_else(
                     || {
-                        #[cfg(windows)]
-                        let created = config.event_directory.map_or_else(
-                            || create(path, Kind::Event, event_header().as_bytes()),
-                            |directory| {
-                                Store::create_event_at(
-                                    path,
-                                    directory,
-                                    generation.1,
-                                    event_header().as_bytes(),
-                                )
-                                .map_err(|error| format!("store initialization failed: {error:?}"))
-                            },
-                        );
-                        #[cfg(not(windows))]
                         let created = create(path, Kind::Event, event_header().as_bytes());
                         // The event target is caller-supplied, so its creation
                         // failure reports the frozen closure §6.2 row rather
                         // than a generic store message.
                         created.map_err(|_| {
-                            #[cfg(windows)]
-                            let cause = config
-                                .event_directory
-                                .filter(|directory| {
-                                    !crate::windows::valid_store_directory(path, directory)
-                                })
-                                .map_or("io-error", |_| "identity-changed");
-                            #[cfg(not(windows))]
                             let cause = "io-error";
                             format!(
                                 "event store rejected: {} ({cause})",
@@ -660,8 +634,6 @@ pub fn holder_artifacts(
         let event = match event {
             Ok(event) => event,
             Err(error) => {
-                #[cfg(windows)]
-                rollback_stores([None, None, Some(lifecycle)]);
                 return Err(error);
             }
         };
@@ -676,8 +648,6 @@ pub fn holder_artifacts(
                     .err()
                     .cloned()
                     .unwrap_or_else(|| "store initialization timed out".into());
-                #[cfg(windows)]
-                rollback_stores([result.ok().flatten(), event, Some(lifecycle)]);
                 return Err(error);
             }
         };

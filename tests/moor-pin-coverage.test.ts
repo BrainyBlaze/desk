@@ -1,88 +1,34 @@
-// desk#60: the moor release manifest states which lanes of the frozen matrix
-// actually verified the candidate (`coverage`), precisely so a narrowed closure
-// can never pass for a full one. Desk consumes the PIN, not the manifest — and
-// the pin had no field for that, so the guarantee died at the projection
-// boundary: a pin built from a hosted-only candidate was byte-identical to one
-// built from the full six-target matrix.
-//
-// The pin now carries coverage verbatim, its schema version moved so a pin
-// written before this cannot be read as "full", and a narrowed closure is
-// REFUSED unless the operator allows it explicitly and by name.
-
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  assertCoverageAcceptable,
-  MOOR_DEFERRED_TRIPLES,
-  NARROWED_COVERAGE_FLAG,
-  parseFetchMoorArgs,
   fetchMoor,
   MOOR_PIN_SCHEMA_VERSION,
   MOOR_RELEASE_REPOSITORY,
   MOOR_TARGETS,
+  parseFetchMoorArgs,
   PIN_RELATIVE_PATH,
   readMoorPin
 } from '../scripts/fetch-moor.mjs';
 
 const CONTRACT_ASSETS: Record<string, string> = {
-  'x86_64-unknown-linux-musl': 'moor-x86_64-unknown-linux-musl',
-  'aarch64-unknown-linux-musl': 'moor-aarch64-unknown-linux-musl',
-  'x86_64-apple-darwin': 'moor-x86_64-apple-darwin',
-  'aarch64-apple-darwin': 'moor-aarch64-apple-darwin',
-  'x86_64-pc-windows-msvc': 'moor-x86_64-pc-windows-msvc.exe',
-  'aarch64-pc-windows-msvc': 'moor-aarch64-pc-windows-msvc.exe'
+  'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
+  'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
+  'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
+  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64'
 };
-
-// Workflow 31750058794, immutable artifact 9200843447 at f1bd230bdaf0a7a476f4069a95a2cee77996ab48.
-// Keep this literal so Desk's own deferred-triple constant cannot make the witness self-confirming.
-const AUTHORITATIVE_HOSTED_ONLY_COVERAGE = {
-  requiredClosure: 'hosted-only',
-  unverified: [
-    {
-      target: 'x86_64-pc-windows-msvc',
-      gate: 'compatibility',
-      lane: 'windows-10-1809-x64'
-    },
-    {
-      target: 'x86_64-pc-windows-msvc',
-      gate: 'compatibility',
-      lane: 'windows-server-2019-x64'
-    },
-    {
-      target: 'x86_64-pc-windows-msvc',
-      gate: 'native-conformance',
-      lane: 'windows-10-1809-x64'
-    },
-    {
-      target: 'x86_64-pc-windows-msvc',
-      gate: 'native-conformance',
-      lane: 'windows-server-2019-x64'
-    },
-    {
-      target: 'x86_64-unknown-linux-musl',
-      gate: 'compatibility',
-      lane: 'wsl1-ubuntu-22.04-x64'
-    },
-    {
-      target: 'x86_64-unknown-linux-musl',
-      gate: 'compatibility',
-      lane: 'wsl2-ubuntu-22.04-x64'
-    }
-  ]
-} as const;
 
 function pinWith(coverage: unknown, overrides: Record<string, unknown> = {}) {
   const pin: Record<string, unknown> = {
     schemaVersion: MOOR_PIN_SCHEMA_VERSION,
     repository: MOOR_RELEASE_REPOSITORY,
     version: 'v0.1.0',
-    commit: 'f1bd230bdaf0a7a476f4069a95a2cee77996ab48',
+    commit: '526cbb2df57a61240d8a6c135b55888716cf32c9',
     coverage,
     targets: Object.fromEntries(
-      (MOOR_TARGETS as readonly string[]).map((triple) => {
+      MOOR_TARGETS.map((triple) => {
         const bytes = Buffer.from(`binary for ${triple}`);
         return [
           triple,
@@ -102,14 +48,14 @@ function pinWith(coverage: unknown, overrides: Record<string, unknown> = {}) {
 
 let root: string;
 
-function write(pin: unknown): string {
-  return writeSource(JSON.stringify(pin));
-}
-
 function writeSource(source: string): string {
   mkdirSync(join(root, 'scripts', 'distribution'), { recursive: true });
   writeFileSync(join(root, PIN_RELATIVE_PATH), source);
   return root;
+}
+
+function write(pin: unknown): string {
+  return writeSource(JSON.stringify(pin));
 }
 
 beforeEach(() => {
@@ -120,328 +66,129 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe('moor pin coverage (desk#60)', () => {
-  it('accepts a full-matrix pin and hands the coverage to the caller', () => {
+describe('Moor pin closure', () => {
+  it('binds the consumer to the exact four-target matrix', () => {
+    expect(MOOR_TARGETS).toEqual([
+      'x86_64-unknown-linux-musl',
+      'aarch64-unknown-linux-musl',
+      'x86_64-apple-darwin',
+      'aarch64-apple-darwin'
+    ]);
+  });
+
+  it('accepts full-matrix coverage', () => {
     const pin = readMoorPin(write(pinWith({ requiredClosure: 'full-matrix' })));
     expect(pin.coverage).toEqual({ requiredClosure: 'full-matrix' });
   });
 
-  it('carries the unverified lanes verbatim for a narrowed closure', () => {
-    const unverified = [
-      {
-        target: 'x86_64-pc-windows-msvc',
-        gate: 'compatibility',
-        lane: 'windows-10-1809-x64'
-      }
-    ];
-    const pin = readMoorPin(
-      write(pinWith({ requiredClosure: 'partial', unverified }))
-    );
-    expect(pin.coverage.unverified).toEqual(unverified);
-  });
-
-  it('refuses a pin with no coverage at all — the shape that lost the guarantee', () => {
+  it('refuses a pin with no coverage', () => {
     expect(() => readMoorPin(write(pinWith(undefined)))).toThrow(/coverage/);
   });
 
-  it('diagnoses a REAL legacy v1 pin as predating coverage', () => {
-    // A genuine pre-coverage pin carries the old version AND no coverage at
-    // all. Reporting that as a key-set mismatch hides the one fact that
-    // matters, so the version is diagnosed before the key set.
-    const legacy = pinWith(undefined, { schemaVersion: 1 });
-    expect(() => readMoorPin(write(legacy))).toThrow(/predates release coverage/);
+  it('diagnoses a legacy v1 pin as predating coverage', () => {
+    expect(() =>
+      readMoorPin(write(pinWith(undefined, { schemaVersion: 1 })))
+    ).toThrow(/predates release coverage/);
   });
 
-  it('refuses a closure label outside the ratified three', () => {
-    expect(() => readMoorPin(write(pinWith({ requiredClosure: 'mostly' })))).toThrow(
-      /requiredClosure/
-    );
+  it('refuses every closure label except full-matrix', () => {
+    expect(() =>
+      readMoorPin(write(pinWith({ requiredClosure: 'partial' })))
+    ).toThrow(/requiredClosure/);
+  });
+
+  it('refuses secondary coverage fields, including a narrowed shape', () => {
+    expect(() =>
+      readMoorPin(
+        write(
+          pinWith({
+            requiredClosure: 'full-matrix',
+            unverified: []
+          })
+        )
+      )
+    ).toThrow(/exactly \[requiredClosure\]/);
+
+    expect(() =>
+      readMoorPin(
+        write(
+          pinWith({
+            requiredClosure: 'partial',
+            unverified: []
+          })
+        )
+      )
+    ).toThrow(/exactly \[requiredClosure\]|requiredClosure/);
   });
 
   it.each([
-    ['literal', '"requiredClosure":"hosted-only","requiredClosure":"full-matrix"'],
-    ['escaped', '"required\\u0043losure":"hosted-only","requiredClosure":"full-matrix"']
-  ])('refuses %s duplicate coverage discriminators before JSON parsing can collapse them', (_label, duplicate) => {
+    ['literal', '"requiredClosure":"partial","requiredClosure":"full-matrix"'],
+    ['escaped', '"required\\u0043losure":"partial","requiredClosure":"full-matrix"']
+  ])('refuses %s duplicate coverage discriminators', (_label, duplicate) => {
     const source = JSON.stringify(pinWith({ requiredClosure: 'full-matrix' })).replace(
       '"requiredClosure":"full-matrix"',
       duplicate
     );
     expect(() => readMoorPin(writeSource(source))).toThrow(/duplicate JSON key: requiredClosure/);
   });
+});
 
-  it('refuses full-matrix that still lists unverified lanes', () => {
+describe('fetch CLI closure', () => {
+  it('has no approval flags', () => {
+    expect(parseFetchMoorArgs([])).toEqual({});
+  });
+
+  it.each([
+    ['--allow-narrowed-coverage'],
+    ['--allow-narrowed'],
+    ['--force']
+  ])('refuses the retired or unknown argument %s', (argument) => {
+    expect(() => parseFetchMoorArgs([argument])).toThrow(/unknown argument/);
+  });
+});
+
+describe('release builder closure', () => {
+  it('accepts a full four-target pin', async () => {
+    const { validateMoorPin } = await import('../scripts/create-release-assets.mjs');
+    expect(() => validateMoorPin(pinWith({ requiredClosure: 'full-matrix' }))).not.toThrow();
+  });
+
+  it('rejects a legacy pin', async () => {
+    const { validateMoorPin } = await import('../scripts/create-release-assets.mjs');
     expect(() =>
-      readMoorPin(
-        write(
-          pinWith({
-            requiredClosure: 'full-matrix',
-            unverified: [
-              { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' }
-            ]
-          })
-        )
+      validateMoorPin({
+        schemaVersion: 1,
+        repository: MOOR_RELEASE_REPOSITORY,
+        version: 'v0.1.0',
+        commit: 'b'.repeat(40),
+        targets: {}
+      })
+    ).toThrow(/predates release coverage/);
+  });
+
+  it('rejects a narrowed pin', async () => {
+    const { validateMoorPin } = await import('../scripts/create-release-assets.mjs');
+    expect(() =>
+      validateMoorPin(
+        pinWith({
+          requiredClosure: 'partial',
+          unverified: []
+        })
       )
     ).toThrow(/full-matrix/);
   });
-
-  it('refuses a narrowed closure that names nothing — an unfalsifiable claim', () => {
-    expect(() => readMoorPin(write(pinWith({ requiredClosure: 'hosted-only' })))).toThrow(
-      /unverified/
-    );
-    expect(() =>
-      readMoorPin(write(pinWith({ requiredClosure: 'partial', unverified: [] })))
-    ).toThrow(/unverified/);
-  });
-
-  it('refuses a real target paired with an invented gate or lane', () => {
-    expect(() =>
-      readMoorPin(
-        write(
-          pinWith({
-            requiredClosure: 'partial',
-            unverified: [
-              { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-11-x64' }
-            ]
-          })
-        )
-      )
-    ).toThrow(/not one of the deferred triples/);
-  });
-
-  it('refuses a duplicated unverified lane', () => {
-    const entry = {
-      target: 'x86_64-pc-windows-msvc',
-      gate: 'compatibility',
-      lane: 'windows-10-1809-x64'
-    };
-    expect(() =>
-      readMoorPin(write(pinWith({ requiredClosure: 'partial', unverified: [entry, entry] })))
-    ).toThrow(/more than once/);
-  });
-
-  it('refuses unverified lanes that are not in canonical ascending order', () => {
-    const [first, second] = MOOR_DEFERRED_TRIPLES;
-    const parse = (triple: string) => {
-      const [target, gate, lane] = triple.split('/');
-      return { target, gate, lane };
-    };
-    expect(() =>
-      readMoorPin(
-        write(pinWith({ requiredClosure: 'partial', unverified: [parse(second), parse(first)] }))
-      )
-    ).toThrow(/ascend canonically/);
-  });
-
-  it('refuses a label that contradicts how much is actually missing', () => {
-    const parse = (triple: string) => {
-      const [target, gate, lane] = triple.split('/');
-      return { target, gate, lane };
-    };
-    // hosted-only claims the WHOLE deferred set is missing; one entry is not.
-    expect(() =>
-      readMoorPin(
-        write(
-          pinWith({
-            requiredClosure: 'hosted-only',
-            unverified: [parse(MOOR_DEFERRED_TRIPLES[0])]
-          })
-        )
-      )
-    ).toThrow(/contradicts its own list/);
-    // partial claims a proper subset; all six is not a proper subset.
-    expect(() =>
-      readMoorPin(
-        write(
-          pinWith({
-            requiredClosure: 'partial',
-            unverified: MOOR_DEFERRED_TRIPLES.map(parse)
-          })
-        )
-      )
-    ).toThrow(/contradicts its own list/);
-  });
-
-  it('preserves the authoritative hosted-only candidate coverage verbatim', () => {
-    const pin = readMoorPin(write(pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE)));
-    expect(pin.coverage).toEqual(AUTHORITATIVE_HOSTED_ONLY_COVERAGE);
-  });
-
-  it('refuses an unverified entry that is not a real matrix triple', () => {
-    expect(() =>
-      readMoorPin(
-        write(
-          pinWith({
-            requiredClosure: 'partial',
-            unverified: [
-              { target: 'sparc-unknown-none', gate: 'compatibility', lane: 'nowhere' }
-            ]
-          })
-        )
-      )
-    ).toThrow(/not one of the deferred triples/);
-  });
 });
 
-describe('narrowed coverage is an operator decision (desk#60)', () => {
-  // Two of the six deferred lanes missing is a proper subset: `partial`.
-  const narrowed = {
-    requiredClosure: 'partial',
-    unverified: [
-      { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' },
-      { target: 'x86_64-unknown-linux-musl', gate: 'compatibility', lane: 'wsl2-ubuntu-22.04-x64' }
-    ]
-  };
-
-  it('refuses to install a narrowed candidate and names every unverified lane', () => {
-    const pin = readMoorPin(write(pinWith(narrowed)));
-    expect(() => assertCoverageAcceptable(pin, { allowNarrowed: false })).toThrow(
-      /windows-10-1809-x64.*wsl2-ubuntu-22\.04-x64|wsl2-ubuntu-22\.04-x64.*windows-10-1809-x64/s
-    );
-  });
-
-  it('installs a narrowed candidate only when the operator says so by name', () => {
-    const pin = readMoorPin(write(pinWith(narrowed)));
-    expect(() => assertCoverageAcceptable(pin, { allowNarrowed: true })).not.toThrow();
-  });
-
-  it('refuses the authoritative hosted-only candidate unless explicitly approved', () => {
-    const pin = readMoorPin(write(pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE)));
-    let diagnostic = '';
-    try {
-      assertCoverageAcceptable(pin, { allowNarrowed: false });
-    } catch (error) {
-      diagnostic = String(error);
-    }
-
-    expect(diagnostic).toContain('not full-matrix');
-    for (const entry of AUTHORITATIVE_HOSTED_ONLY_COVERAGE.unverified) {
-      expect(diagnostic).toContain(`${entry.target}/${entry.gate}/${entry.lane}`);
-    }
-    expect(() => assertCoverageAcceptable(pin, { allowNarrowed: true })).not.toThrow();
-  });
-
-  it('never gates a full-matrix candidate', () => {
-    const pin = readMoorPin(write(pinWith({ requiredClosure: 'full-matrix' })));
-    expect(() => assertCoverageAcceptable(pin, { allowNarrowed: false })).not.toThrow();
-  });
-});
-
-describe('approval is a command-line decision only (desk#60)', () => {
-  it('does not approve anything by default', () => {
-    expect(parseFetchMoorArgs([])).toEqual({ allowNarrowedCoverage: false });
-  });
-
-  it('approves a narrowed candidate only through the spelled-out flag', () => {
-    expect(parseFetchMoorArgs([NARROWED_COVERAGE_FLAG])).toEqual({
-      allowNarrowedCoverage: true
-    });
-  });
-
-  it('refuses an unknown argument instead of ignoring it', () => {
-    // A silently dropped flag is how an operator believes they approved
-    // something they did not.
-    expect(() => parseFetchMoorArgs(['--allow-narrowed'])).toThrow(/unknown argument/);
-    expect(() => parseFetchMoorArgs([NARROWED_COVERAGE_FLAG, '--force'])).toThrow(
-      /unknown argument/
-    );
-  });
-
-  it('cannot be approved by an environment variable', () => {
-    // The env opt-in was replaced deliberately: a variable set once in a shell
-    // profile turns a deliberate decision into a permanent default.
-    process.env.DESK_MOOR_ALLOW_NARROWED_COVERAGE = '1';
-    try {
-      const pin = readMoorPin(
-        write(
-          pinWith({
-            requiredClosure: 'partial',
-            unverified: [
-              { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' }
-            ]
-          })
-        )
-      );
-      expect(() => assertCoverageAcceptable(pin)).toThrow(/not full-matrix/);
-    } finally {
-      delete process.env.DESK_MOOR_ALLOW_NARROWED_COVERAGE;
-    }
-  });
-});
-
-describe('the release builder refuses a pin that cannot state its closure (desk#60)', () => {
-  it('rejects a true legacy v1 pin instead of publishing from it', async () => {
-    const { validateMoorPin } = await import('../scripts/create-release-assets.mjs');
-    const legacy = {
-      schemaVersion: 1,
-      repository: MOOR_RELEASE_REPOSITORY,
-      version: 'v0.1.0',
-      commit: 'b'.repeat(40),
-      targets: {}
-    };
-    // By NAME, not a generic key-set complaint: the builder claims this
-    // diagnostic, so the test must hold it to exactly that claim.
-    expect(() => validateMoorPin(legacy)).toThrow(/predates release coverage/);
-  });
-
-  it('refuses to publish the authoritative hosted-only candidate', async () => {
-    const { validateMoorPin } = await import('../scripts/create-release-assets.mjs');
-    // A developer may install a narrowed candidate deliberately; end users must
-    // never receive one baked into a release asset.
-    const narrowed = pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE);
-    expect(() => validateMoorPin(narrowed)).toThrow(/full-matrix/);
-  });
-});
-
-describe('the public fetch path refuses fail-open approval (desk#60)', () => {
-  const narrowed = {
-    requiredClosure: 'partial',
-    unverified: [
-      { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' }
-    ]
-  };
-
-  it('refuses a repeated approval flag rather than collapsing it to one', async () => {
-    // Verified ad hoc during implementation, which protects nothing: a witness
-    // that is not committed cannot fail when someone relaxes the parser.
-    expect(() =>
-      parseFetchMoorArgs([NARROWED_COVERAGE_FLAG, NARROWED_COVERAGE_FLAG])
-    ).toThrow(/at most once/);
-  });
-
-  it.each([['false'], [1], [{}], [[]]])(
-    'refuses %s as programmatic approval through the public fetchMoor entry',
-    async (value) => {
-      write(pinWith(narrowed));
-      await expect(
-        fetchMoor({ root, allowNarrowedCoverage: value as never })
-      ).rejects.toThrow(/literal boolean/);
-    }
-  );
-
-  it('still refuses the authoritative hosted-only candidate when approval is absent', async () => {
-    write(pinWith(AUTHORITATIVE_HOSTED_ONLY_COVERAGE));
-    await expect(fetchMoor({ root })).rejects.toThrow(/not full-matrix/);
-  });
-});
-
-// Two gaps found while writing the projector (desk#60). Both are places where
-// the code is laxer than the document it implements, and in both the laxness
-// only shows up on inputs nobody has produced yet — which is exactly when a
-// contract stops being enforced and starts being assumed.
-describe('the pin version grammar matches the release document (desk#60)', () => {
+describe('pin version grammar', () => {
   it('refuses a version component with a leading zero', async () => {
-    // docs/release-manifest-v1.md: "a stable SemVer core (vMAJOR.MINOR.PATCH,
-    // with no leading zero, prerelease, or build suffix)". `v01.2.3` and
-    // `v1.2.3` would name two different tags while denoting one version, so a
-    // consumer that accepts both cannot say which release it pinned.
     write(pinWith({ requiredClosure: 'full-matrix' }, { version: 'v01.2.3' }));
     await expect(fetchMoor({ root })).rejects.toThrow(/canonical tag/);
   });
 
-  it('still accepts every canonical form, including a zero component', async () => {
-    // The fix must not overshoot: `v0.1.0` is the actual first release, and a
-    // bare `0` is not a leading zero.
+  it('accepts canonical zero components before attempting acquisition', async () => {
     write(pinWith({ requiredClosure: 'full-matrix' }, { version: 'v0.1.0' }));
-    await expect(fetchMoor({ root })).rejects.toThrow(/download|fetch|network|ENOTFOUND|getaddrinfo/i);
+    await expect(
+      fetchMoor({ root, baseUrl: `file://${join(root, 'missing')}` })
+    ).rejects.toThrow(/ENOENT/);
   });
 });

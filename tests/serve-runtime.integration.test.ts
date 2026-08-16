@@ -80,7 +80,7 @@ function trackCli(child: ChildProcess): TrackedCli {
 
 function startNpxCli(argv: string[], port: number): TrackedCli {
   return trackCli(
-    spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tsx', 'src/cli/main.ts', ...argv], {
+    spawn('npx', ['tsx', 'src/cli/main.ts', ...argv], {
       cwd: process.cwd(),
       detached: true,
       env: {
@@ -110,7 +110,7 @@ function startDirectCli(argv: string[]): TrackedCli {
 
 function processGroupIsAlive(pid: number): boolean {
   try {
-    process.kill(process.platform === 'win32' ? pid : -pid, 0);
+    process.kill(-pid, 0);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
@@ -122,7 +122,7 @@ function processGroupIsAlive(pid: number): boolean {
 
 function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
   try {
-    process.kill(process.platform === 'win32' ? pid : -pid, signal);
+    process.kill(-pid, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
       throw error;

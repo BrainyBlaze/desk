@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MoorCodec } from '../src/shared/moorWire/codec.js';
@@ -16,9 +17,44 @@ interface FrozenVector {
   readonly bytes: number;
 }
 
+interface FrozenEventCommitVector extends FrozenVector {
+  readonly body: string;
+  readonly body_bytes: number;
+  readonly body_sha256: string;
+}
+
+interface FrozenV32 {
+  readonly description: string;
+  readonly geometry: readonly {
+    readonly columns: number;
+    readonly rows: number;
+    readonly hex: string;
+    readonly result: string;
+  }[];
+  readonly numeric_sizes: readonly {
+    readonly operand: string;
+    readonly surface: string;
+    readonly result: string;
+  }[];
+  readonly same_size_redraw: {
+    readonly columns: number;
+    readonly rows: number;
+    readonly lease_won: boolean;
+    readonly winch_notifications: number;
+    readonly none_notifications: number;
+    readonly ctrl_l_hex: string;
+  };
+}
+
+interface CorpusMeta {
+  readonly source: string;
+  readonly cross_checked: string;
+  readonly note: string;
+}
+
 const corpus = JSON.parse(
   readFileSync(new URL('./fixtures/moor-v4-vectors.json', import.meta.url), 'utf8')
-) as Record<string, FrozenVector | Record<string, string>>;
+) as Record<string, FrozenVector | FrozenV32 | CorpusMeta>;
 
 const fromHex = (value: string): Uint8Array => {
   const compact = value.replace(/\s+/gu, '');
@@ -36,11 +72,92 @@ function vector(name: string): Uint8Array {
   return bytes;
 }
 
+function v32(): FrozenV32 {
+  const entry = corpus.V32;
+  if (entry === undefined || !('geometry' in entry)) {
+    throw new Error('missing structured Moor vector V32');
+  }
+  return entry;
+}
+
 describe('Moor v4 frozen wire conformance', () => {
-  it('commits all 32 content-verified serialized vectors without truncation', () => {
+  it('commits all 32 content-verified normative vectors without truncation', () => {
     const names = Object.keys(corpus).filter((name) => /^V\d+$/u.test(name));
     expect(names).toHaveLength(32);
-    for (const name of names) vector(name);
+    for (const name of names) {
+      if (name === 'V32') v32();
+      else vector(name);
+    }
+  });
+
+  it('freezes the portable POSIX V13 event commit byte-for-byte', () => {
+    const entry = corpus.V13;
+    if (entry === undefined || !('body' in entry)) {
+      throw new Error('missing event-commit details for Moor vector V13');
+    }
+    const eventCommit = entry as FrozenEventCommitVector;
+    const body = Buffer.from(eventCommit.body, 'utf8');
+
+    expect(body).toHaveLength(eventCommit.body_bytes);
+    expect(createHash('sha256').update(body).digest('hex')).toBe(eventCommit.body_sha256);
+    expect(vector('V13')).toEqual(
+      fromHex(
+        '4D 4F 4F 52 43 4D 54 31 01 00 00 01 07 00 00 00 ' +
+          '00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 ' +
+          '85 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ' +
+          '00 00 00 00 00 00 00 00 2B BE EF B6 37 54 66 12 ' +
+          'D6 A3 A6 BD 7C BD B7 BE 29 42 D6 DA DD C7 33 39 ' +
+          '54 45 F9 ED D7 88 B6 4B C9 B4 ED 03'
+      )
+    );
+  });
+
+  it('freezes every V32 geometry, numeric-size, and redraw fixture', () => {
+    const entry = v32();
+    expect(entry).toEqual({
+      description: 'exact geometry, numeric-size, and same-size-redraw fixtures',
+      geometry: [
+        { columns: 0, rows: 0, hex: '00000000', result: 'preserve-both' },
+        { columns: 0, rows: 1, hex: '00000100', result: 'HALF_SPECIFIED_GEOMETRY' },
+        { columns: 1, rows: 0, hex: '01000000', result: 'HALF_SPECIFIED_GEOMETRY' },
+        { columns: 1, rows: 1, hex: '01000100', result: 'valid' },
+        { columns: 2000, rows: 1000, hex: 'd007e803', result: 'valid' },
+        { columns: 2001, rows: 1000, hex: 'd107e803', result: 'malformed-product' },
+        { columns: 32767, rows: 61, hex: 'ff7f3d00', result: 'valid' },
+        { columns: 32767, rows: 62, hex: 'ff7f3e00', result: 'malformed-product' },
+        { columns: 32768, rows: 1, hex: '00800100', result: 'malformed-dimension' }
+      ],
+      numeric_sizes: [
+        { operand: '0', surface: '-C', result: '0' },
+        { operand: '1k', surface: '-C', result: '1024' },
+        { operand: '1K', surface: '-C', result: '1024' },
+        { operand: '2m', surface: '-C', result: '2097152' },
+        { operand: '2M', surface: '-C', result: '2097152' },
+        { operand: '3g', surface: '-C', result: '3221225472' },
+        { operand: '3G', surface: '-C', result: '3221225472' },
+        { operand: '18446744073709551615', surface: '-C', result: '18446744073709551615' },
+        { operand: '18014398509481983k', surface: '-C', result: '18446744073709550592' },
+        { operand: '18014398509481984k', surface: '-C', result: 'invalid-overflow' },
+        { operand: '01k', surface: '-C', result: 'invalid-spelling' },
+        { operand: '1kb', surface: '-C', result: 'invalid-spelling' },
+        { operand: '1k', surface: 'tail -n', result: 'invalid-unsuffixed-u32' }
+      ],
+      same_size_redraw: {
+        columns: 80,
+        rows: 24,
+        lease_won: true,
+        winch_notifications: 1,
+        none_notifications: 0,
+        ctrl_l_hex: '0c'
+      }
+    });
+    for (const geometry of entry.geometry) {
+      const bytes = fromHex(geometry.hex);
+      expect(bytes).toHaveLength(4);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      expect(view.getUint16(0, true)).toBe(geometry.columns);
+      expect(view.getUint16(2, true)).toBe(geometry.rows);
+    }
   });
 
   it('matches the Moor HELLO frame byte-for-byte', () => {

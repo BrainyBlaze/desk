@@ -27,9 +27,7 @@ const MOOR_ASSETS = {
   'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
   'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
   'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
-  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64',
-  'x86_64-pc-windows-msvc': 'moor-0.1.0-windows-x64.exe',
-  'aarch64-pc-windows-msvc': 'moor-0.1.0-windows-arm64.exe'
+  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64'
 } as const;
 
 interface MoorTargetPin {
@@ -39,7 +37,7 @@ interface MoorTargetPin {
 }
 
 interface MoorPin {
-  schemaVersion: 2;
+  schemaVersion: 3;
   repository: typeof MOOR_REPOSITORY;
   version: typeof MOOR_VERSION;
   commit: string;
@@ -142,7 +140,7 @@ esac
       };
     }
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       repository: MOOR_REPOSITORY,
       version: MOOR_VERSION,
       commit: MOOR_COMMIT,

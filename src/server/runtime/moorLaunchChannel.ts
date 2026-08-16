@@ -197,11 +197,8 @@ export class MoorLaunchResultDecoder {
   }
 }
 
-export function moorGenerationEnvKey(
-  invokedPath: string | Uint8Array,
-  platform: string = process.platform
-): string {
-  return moorEnvKey(invokedPath, GENERATION_SUFFIX, platform);
+export function moorGenerationEnvKey(invokedPath: string | Uint8Array): string {
+  return moorEnvKey(invokedPath, GENERATION_SUFFIX);
 }
 
 /**
@@ -210,11 +207,8 @@ export function moorGenerationEnvKey(
  * launcher sets it by the name it invokes — a `moor-copy` invocation must
  * yield the same key on both sides.
  */
-export function moorLaunchChannelEnvKey(
-  invokedPath: string | Uint8Array,
-  platform: string = process.platform
-): string {
-  return moorEnvKey(invokedPath, LAUNCH_CHANNEL_SUFFIX, platform);
+export function moorLaunchChannelEnvKey(invokedPath: string | Uint8Array): string {
+  return moorEnvKey(invokedPath, LAUNCH_CHANNEL_SUFFIX);
 }
 
 // One derivation for every invocation-derived carrier, frozen by moor spec
@@ -225,11 +219,10 @@ export function moorLaunchChannelEnvKey(
 // suffix.len()) over the raw basename bytes).
 function moorEnvKey(
   invokedPath: string | Uint8Array,
-  suffix: string,
-  platform: string
+  suffix: string
 ): string {
   const raw = typeof invokedPath === 'string' ? Buffer.from(invokedPath) : invokedPath;
-  const basename = fileName(raw, platform) ?? Uint8Array.of(0x6d, 0x6f, 0x6f, 0x72);
+  const basename = fileName(raw) ?? Uint8Array.of(0x6d, 0x6f, 0x6f, 0x72);
   const maximum = 127 - suffix.length;
   let key = '';
   for (const byte of basename.subarray(0, maximum)) {
@@ -238,16 +231,10 @@ function moorEnvKey(
   return key + suffix;
 }
 
-// Mirrors the holder's own basename derivation: Rust Path::file_name on the
-// platform the HOLDER runs on. Windows splits on both `\` and `/`; POSIX
-// splits ONLY on `/` — a backslash (or a drive-lettered spelling) is a legal
-// POSIX filename and must survive into the key. Path shape proves nothing
-// about the host, so the platform is an EXPLICIT parameter; Desk spawns the
-// holder on its own platform, so callers pass process.platform.
-function fileName(path: Uint8Array, platform: string): Uint8Array | undefined {
-  const windows = platform === 'win32';
-  const separator = (byte: number | undefined): boolean =>
-    byte === 0x2f || (windows && byte === 0x5c);
+// Mirrors the holder's POSIX basename derivation. A backslash is a legal
+// filename byte and therefore survives into the environment key.
+function fileName(path: Uint8Array): Uint8Array | undefined {
+  const separator = (byte: number | undefined): boolean => byte === 0x2f;
   let end = path.length;
   while (end > 0 && separator(path[end - 1])) end -= 1;
   if (end === 0) return undefined;

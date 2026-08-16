@@ -457,8 +457,19 @@ async function holder(argv: string[]): Promise<void> {
   // The requested child must actually start before anything is published:
   // a spawn failure (missing executable) fails the launch with no rendezvous.
   const child = command.length > 0
-    ? spawn(command[0]!, command.slice(1), { stdio: ['pipe', 'pipe', 'ignore'] })
+    ? spawn(command[0]!, command.slice(1), {
+        detached: true,
+        stdio: ['pipe', 'pipe', 'ignore']
+      })
     : undefined;
+  const signalChildGroup = (signal: NodeJS.Signals): void => {
+    if (child?.pid === undefined) return;
+    try {
+      process.kill(-child.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  };
   // EPIPE from a child that closed fd 0 surfaces on the write callback; the
   // stream-level 'error' event must not crash the holder.
   child?.stdin?.on('error', () => undefined);
@@ -738,11 +749,11 @@ async function holder(argv: string[]): Promise<void> {
             if (child !== undefined && child.exitCode === null && child.signalCode === null) {
               child.once('exit', () => setImmediate(finish));
               exitMethod = 'graceful';
-              child.kill('SIGTERM');
+              signalChildGroup('SIGTERM');
               const escalate = setTimeout(() => {
                 try {
                   exitMethod = 'forced';
-                  child.kill('SIGKILL');
+                  signalChildGroup('SIGKILL');
                 } catch {
                   /* already gone */
                 }
@@ -909,13 +920,13 @@ async function holder(argv: string[]): Promise<void> {
     // 'exit' listener appends the signalled record; finish runs after it.
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       child.once('exit', () => setImmediate(finish));
-      child.kill('SIGTERM');
+      signalChildGroup('SIGTERM');
       // A child that ignores SIGTERM is escalated to SIGKILL — uncatchable, so
       // the exit (and its store transition) always arrives before the
       // rendezvous is unpublished; the child can never be leaked past kill.
       const escalate = setTimeout(() => {
         try {
-          child.kill('SIGKILL');
+          signalChildGroup('SIGKILL');
         } catch {
           /* already gone */
         }

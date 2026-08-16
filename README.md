@@ -108,8 +108,8 @@ work.
 The installer provisions missing host requirements, downloads checksum-verified
 Desk source plus pinned Node 22.23.1 and Bun 1.3.14 toolchains, builds an immutable
 release, and installs the complete `desk` CLI in the first safe directory already
-on `PATH`. It supports macOS and glibc Linux; WSL follows the Linux path. Native
-Windows and musl Linux are not currently supported release targets.
+on `PATH`. It supports macOS and glibc Linux on x64 and arm64. Musl Linux is not
+currently a supported release target.
 
 `desk serve` always launches the private Bun runtime. Use `desk serve --dev` when
 you explicitly want Vite. A missing or broken runtime fails; Desk never falls back

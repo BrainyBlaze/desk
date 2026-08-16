@@ -14,8 +14,7 @@ import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import {
   MoorMasterClient,
-  posixMoorIdentity,
-  windowsMoorIdentity
+  posixMoorIdentity
 } from '../src/server/runtime/moorMasterClient.js';
 
 const GENERATION = 7;
@@ -238,12 +237,6 @@ describe('MoorMasterClient', () => {
     expect(
       () => new MoorMasterClient('/tmp/x', GENERATION, {}, { identity: Uint8Array.of(9, 1, 2) })
     ).toThrowError(/IDENTITY/);
-    // A well-formed injected Windows identity is accepted on any platform.
-    const windows = windowsMoorIdentity(0x1122334455667788n, new Uint8Array(16).fill(7));
-    expect(windows).toHaveLength(25);
-    expect(new MoorMasterClient('/tmp/x', GENERATION, {}, { identity: windows })).toBeInstanceOf(
-      MoorMasterClient
-    );
   });
 
   it('sends supervised HELLO at the allocated generation scope with the tagged path identity', async () => {

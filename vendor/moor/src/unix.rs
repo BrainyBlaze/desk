@@ -1129,9 +1129,8 @@ pub(crate) fn connect(path: &Path) -> Result<WireClient> {
 }
 
 pub(crate) fn attach(path: &Path, options: Options) -> CommandResult<i32> {
-    // §13.1 gives attach without a controlling terminal status 1; the Windows
-    // path already refused it. Proceeding produced a viewer that wrote the
-    // preamble to a pipe and detached at EOF.
+    // §13.1 gives attach without a controlling terminal status 1. Proceeding
+    // produced a viewer that wrote the preamble to a pipe and detached at EOF.
     let terminal = ViewerTerminal::detect(libc::STDIN_FILENO)
         .ok_or_else(|| String::from("no controlling terminal"))?;
     let geometry = terminal.size().unwrap_or((0, 0));
@@ -1206,7 +1205,7 @@ pub(crate) fn sessions(invoked: &OsStr, status: bool) -> Result<Vec<shared::Sess
     let root = root(invoked)?;
     shared::discover_sessions(
         &root,
-        |name| shared::session_name(name, false),
+        shared::session_name,
         // OB-8 bounds the whole listing at 2 s, so each entry keeps its own
         // short slice of that budget rather than the full exchange deadline.
         |path, remaining| inspect(path, status, remaining.min(Duration::from_millis(250))),
@@ -2187,9 +2186,8 @@ fn terminal_config(interactive: bool) -> Result<(Option<libc::termios>, libc::wi
     crate::return_if!(!interactive, Ok((Some(headless_termios()), window(24, 80))));
     let terminal = ViewerTerminal::detect(libc::STDIN_FILENO).ok_or("no controlling terminal")?;
     // v4: the creation size obeys the same §4 bound the descriptor's reader
-    // enforces — Windows already validated with valid_size while this path
-    // only rejected zeros, so a pathological terminal could seed a geometry
-    // every consumer would then refuse. Symmetric now.
+    // enforces; this path once rejected only zeros, so a pathological terminal
+    // could seed a geometry every consumer would then refuse. Symmetric now.
     let (rows, columns) = terminal
         .size()
         .filter(|size| crate::wire::valid_size(*size))

@@ -9,10 +9,7 @@ use crate::session::{
     LeaseOperation, LeaseRequest, LeaseResult, LeaseRole, ResultOutcome, ResultReason,
 };
 use crate::store::{Kind, Store};
-#[cfg(unix)]
 use crate::unix as platform;
-#[cfg(windows)]
-use crate::windows as platform;
 use crate::wire::{
     Codec, InputReceipt, Message, Profile, StatusTail, controller_hello,
     decode_controller_hello_ack, decode_error_payload, decode_log_clear_result,

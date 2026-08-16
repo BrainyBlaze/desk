@@ -93,17 +93,12 @@ const V24_LIFECYCLE_BODY = encoder.encode(
 );
 
 function exitedLifecycleBody(options: {
-  encoding?: 'posix-bytes' | 'windows-wtf8';
   ended?: 'exited' | 'signalled' | 'terminated';
   method?: 'none' | 'graceful' | 'forced' | 'unknown' | null;
   code?: number;
   signal?: number;
 } = {}): Uint8Array {
-  const encoding = options.encoding ?? 'posix-bytes';
-  const identity =
-    encoding === 'posix-bytes'
-      ? sessionIdentity()
-      : Uint8Array.of(2, ...new Uint8Array(24));
+  const identity = sessionIdentity();
   const ended = options.ended ?? 'exited';
   const mechanism =
     ended === 'signalled'
@@ -111,7 +106,7 @@ function exitedLifecycleBody(options: {
       : `,"code":${options.code ?? 0}`;
   const method = options.method === null ? '' : `,"method":"${options.method ?? 'none'}"`;
   return encoder.encode(
-    `{"v":2,"type":"lifecycle","phase":"exited","session":"${Buffer.from(identity).toString('base64')}","generation":7,"wire_generation":7,"incarnation":"AgICAgICAgICAgICAgICAg==","start_wall_ms":"1","start_mono_ms":"2","boot_id":"AwMDAwMDAwMDAwMDAwMDAw==","path_encoding":"${encoding}","event_path":null,"instrument_path":null,"end_wall_ms":"3","output_end":"12","ended":"${ended}"${mechanism}${method}}\n`
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${Buffer.from(identity).toString('base64')}","generation":7,"wire_generation":7,"incarnation":"AgICAgICAgICAgICAgICAg==","start_wall_ms":"1","start_mono_ms":"2","boot_id":"AwMDAwMDAwMDAwMDAwMDAw==","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"3","output_end":"12","ended":"${ended}"${mechanism}${method}}\n`
   );
 }
 
@@ -668,10 +663,6 @@ describe('Moor event snapshots and cursors', () => {
       'retired v1 schema',
       encoder.encode(new TextDecoder().decode(exitedLifecycleBody()).replace('{"v":2', '{"v":1'))
     ],
-    [
-      'Windows signalled mechanism',
-      exitedLifecycleBody({ encoding: 'windows-wtf8', ended: 'signalled', method: 'forced' })
-    ],
     ['POSIX exit code 256', exitedLifecycleBody({ code: 256 })]
   ] as const)('rejects %s lifecycle records', async (_label, body) => {
     const directory = await store({
@@ -718,8 +709,7 @@ describe('Moor event snapshots and cursors', () => {
   it('accepts the canonical platform numeric boundaries', async () => {
     const bodies = [
       exitedLifecycleBody({ code: 255 }),
-      exitedLifecycleBody({ ended: 'signalled', signal: 0xffff_ffff, method: 'forced' }),
-      exitedLifecycleBody({ encoding: 'windows-wtf8', code: 0xffff_ffff, method: 'graceful' })
+      exitedLifecycleBody({ ended: 'signalled', signal: 0xffff_ffff, method: 'forced' })
     ];
 
     for (const body of bodies) {

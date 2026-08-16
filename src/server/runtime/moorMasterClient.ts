@@ -14,10 +14,7 @@
 // - Deadline table: identity exchange and adoption must complete within 2 s or
 //   the connection closes.
 // - §1.2 canonical session identity is an INPUT, distinct from the transport
-//   endpoint: tag 01 = lexically resolved absolute POSIX socket path bytes;
-//   tag 02 = Windows volume serial + FILE_ID_INFO.FileId (25 bytes). This
-//   constructor validates the POSIX derivation and requires explicit injection
-//   where derivation would be a guess (Windows, noncanonical paths).
+//   endpoint: tag 01 = lexically resolved absolute POSIX socket path bytes.
 // - Unified close: any teardown (local close, holder close, wire violation,
 //   deadline) rejects pending work and makes every later write throw.
 
@@ -89,8 +86,7 @@ export interface MoorMasterClientOptions {
   /**
    * Canonical session identity (§1.2), injected from the authoritative
    * adoption path. When omitted, the transport path is validated as a
-   * lexically resolved absolute POSIX path and used as the tag-01 identity;
-   * anything else (Windows, relative, unresolved) must be injected.
+   * lexically resolved absolute POSIX path and used as the tag-01 identity.
    */
   identity?: Uint8Array;
   /** Identity-exchange + adoption deadline (spec table: 2 s). */
@@ -152,28 +148,14 @@ export function posixMoorIdentity(path: string): Uint8Array {
   return identity;
 }
 
-/** Tag-02 identity: Windows volume serial + FILE_ID_INFO.FileId (§1.2, 25 bytes). */
-export function windowsMoorIdentity(volumeSerial: bigint, fileId: Uint8Array): Uint8Array {
-  if (fileId.length !== 16) {
-    throw new MoorIdentityError('Windows session identity requires the exact 16-byte FileId');
-  }
-  const identity = new Uint8Array(25);
-  identity[0] = 2;
-  new DataView(identity.buffer).setBigUint64(1, volumeSerial, true);
-  identity.set(fileId, 9);
-  return identity;
-}
-
 function validateIdentity(identity: Uint8Array): Uint8Array {
   // An injected tag-01 identity carries the SAME lexical contract as a derived
   // one (§1.2: absolute bytes after `.`/`..` resolution) — tag/length checks
   // alone would accept a noncanonical path the holder will refuse.
   if (identity[0] === 1 && identity.length >= 2) {
     assertResolvedPosixPath(Buffer.from(identity.subarray(1)).toString());
-  } else if (identity[0] !== 2 || identity.length !== 25) {
-    throw new MoorIdentityError(
-      'canonical session identity must be tag 01 (absolute POSIX path) or tag 02 (25 bytes)'
-    );
+  } else {
+    throw new MoorIdentityError('canonical session identity must be tag 01 (absolute POSIX path)');
   }
   return identity.slice(); // defensive copy: the caller must not mutate it later
 }
@@ -313,15 +295,7 @@ export class MoorMasterClient {
       );
     }
     this.identity =
-      options.identity !== undefined
-        ? validateIdentity(options.identity)
-        : process.platform === 'win32'
-          ? (() => {
-              throw new MoorIdentityError(
-                'Windows requires an injected tag-02 identity from the verified marker'
-              );
-            })()
-          : posixMoorIdentity(sockPath);
+      options.identity !== undefined ? validateIdentity(options.identity) : posixMoorIdentity(sockPath);
     this.attachDeadlineMs = options.attachDeadlineMs ?? DEFAULT_ATTACH_DEADLINE_MS;
     this.livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
     this.autoAck = options.autoAckOutput ?? false;

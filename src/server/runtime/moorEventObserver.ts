@@ -173,12 +173,8 @@ const DEFAULT_MAX_CONSECUTIVE_READ_FAILURES = 5;
  */
 export function moorEventStoreRoot(
   invoked: string,
-  opts: { tmpdir?: string; euid?: number; platform?: NodeJS.Platform } = {}
+  opts: { tmpdir?: string; euid?: number } = {}
 ): string {
-  if ((opts.platform ?? process.platform) === 'win32') {
-    // The Windows launcher seam ships with the moor #4 conformance lane.
-    throw new Error('MOOR_WINDOWS_LAUNCH_UNSUPPORTED: no event-store root derivation yet');
-  }
   const name = basename(invoked);
   const euid = opts.euid ?? process.geteuid!();
   const base = opts.tmpdir ?? process.env.TMPDIR ?? '/tmp';

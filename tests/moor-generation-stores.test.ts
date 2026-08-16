@@ -191,7 +191,7 @@ describe('generation-scoped Moor companion retention', () => {
   it('selects supported POSIX descriptor aliases and keeps Darwin no-op archival available', async () => {
     expect(moorDescriptorDirectoryAlias(17, 'linux')).toBe('/proc/self/fd/17');
     expect(moorDescriptorDirectoryAlias(17, 'darwin')).toBe('/dev/fd/17');
-    expect(() => moorDescriptorDirectoryAlias(17, 'win32')).toThrow(
+    expect(() => moorDescriptorDirectoryAlias(17, 'sunos')).toThrow(
       'unsupported platform'
     );
 

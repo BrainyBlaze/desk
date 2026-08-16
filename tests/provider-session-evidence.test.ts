@@ -760,7 +760,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideRoot,
       path.join(homeDir, '.claude'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -790,7 +790,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideProject,
       path.join(projectsRoot, '-workspace-absent-project-symlink'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -1042,7 +1042,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedProject,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2132,7 +2132,7 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
-  test.runIf(process.platform !== 'win32')(
+  test(
     'rejects a numeric Codex hierarchy entry that is a FIFO',
     async () => {
       const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
@@ -2256,7 +2256,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideSessions,
       path.join(providerRoot, 'sessions'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -2285,7 +2285,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideYear,
       path.join(sessionsRoot, '2026'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -2343,7 +2343,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedYear,
               yearPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             replaced = true;
           }
@@ -2397,7 +2397,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedYear,
               yearPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2452,7 +2452,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedSessions,
               sessionsRoot,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2491,7 +2491,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedSessions,
               sessionsRoot,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2772,7 +2772,7 @@ describe('verifyProviderSessionEvidence', () => {
       `${JSON.stringify({ type: 'user', sessionId: providerSessionId, cwd })}\n`,
       'utf8'
     );
-    await symlink(outsideProject, linkedProject, process.platform === 'win32' ? 'junction' : 'dir');
+    await symlink(outsideProject, linkedProject, 'dir');
 
     await expect(
       verifyProviderSessionEvidence({
@@ -2806,7 +2806,7 @@ describe('verifyProviderSessionEvidence', () => {
       `${JSON.stringify({ type: 'user', sessionId: providerSessionId, cwd })}\n`,
       'utf8'
     );
-    await symlink(realProject, linkedProject, process.platform === 'win32' ? 'junction' : 'dir');
+    await symlink(realProject, linkedProject, 'dir');
 
     await expect(
       verifyProviderSessionEvidence({
@@ -2858,7 +2858,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               movedProjectPath,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
           }
         }
@@ -3084,7 +3084,7 @@ describe('verifyProviderSessionEvidence', () => {
     expect(swapped).toBe(true);
   });
 
-  test.runIf(process.platform !== 'win32' && typeof constants.O_NONBLOCK === 'number')(
+  test.runIf(typeof constants.O_NONBLOCK === 'number')(
     'opens a final-race FIFO nonblocking and returns a typed unsafe result without an unblocker',
     async () => {
       const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
@@ -3247,7 +3247,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               movedProjectPath,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
           }
         }
@@ -3294,7 +3294,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               movedProjectPath,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
           }
         }

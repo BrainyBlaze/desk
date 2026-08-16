@@ -83,16 +83,16 @@ describe('source-backed installer contract', () => {
     expect(existsSync(value.launcher())).toBe(false);
   });
 
-  it('rejects native Windows explicitly', () => {
+  it('rejects any operating system outside the Linux/macOS support policy', () => {
     const value = fixture();
     const uname = join(value.binDir, 'uname');
-    writeFileSync(uname, '#!/usr/bin/env bash\nprintf "MINGW64_NT-10.0\\n"\n');
+    writeFileSync(uname, '#!/usr/bin/env bash\nprintf "Plan9\\n"\n');
     chmodSync(uname, 0o755);
 
     const result = value.run();
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/native Windows.*unsupported/i);
+    expect(result.stderr).toMatch(/unsupported operating system.*macOS and Linux/i);
   });
 
   it('rejects noncanonical install paths before network or activation', () => {
@@ -319,19 +319,14 @@ exec /bin/chmod "$@"
     expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);
 
-  it('refuses a narrowed release closure — the end user has no approval switch (desk#60)', () => {
-    // install.sh serves end users, who cannot weigh which release lanes went
-    // unverified. Accepting a narrowed candidate is a developer decision taken
-    // explicitly through fetch-moor; the installer has no flag for it at all.
+  it('refuses any release closure other than full-matrix', () => {
     const value = fixture();
     const manifest = value.readManifest() as {
       moor: { coverage: Record<string, unknown> };
     };
     manifest.moor.coverage = {
       requiredClosure: 'partial',
-      unverified: [
-        { target: 'x86_64-pc-windows-msvc', gate: 'compatibility', lane: 'windows-10-1809-x64' }
-      ]
+      unverified: []
     };
     value.writeManifest(manifest);
 
@@ -364,7 +359,7 @@ exec /bin/chmod "$@"
     const manifest = value.readManifest() as {
       moor: { targets: Record<string, unknown> };
     };
-    delete manifest.moor.targets['aarch64-pc-windows-msvc'];
+    delete manifest.moor.targets['aarch64-apple-darwin'];
     value.writeManifest(manifest);
 
     const result = value.run();

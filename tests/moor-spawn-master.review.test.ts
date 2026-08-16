@@ -6,28 +6,13 @@ import { moorGenerationEnvKey } from '../src/server/runtime/moorLaunchChannel.js
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 
 describe('spawnMoorMaster adversarial review', () => {
-  it.runIf(process.platform === 'win32')('derives the generation carrier from a Windows invoked basename', () => {
-    expect(moorGenerationEnvKey(String.raw`C:\Program Files\Desk\moor.exe`)).toBe(
-      'MOOR_EXE_GENERATION'
-    );
-  });
-
-  it.runIf(process.platform !== 'win32')(
-    'does not infer Windows semantics from a Windows-shaped POSIX argv0',
-    () => {
-      expect(moorGenerationEnvKey(String.raw`C:\Program Files\Desk\moor.exe`)).toBe(
-        'C__PROGRAM_FILES_DESK_MOOR_EXE_GENERATION'
-      );
-    }
-  );
-
   it('preserves POSIX basename semantics for a literal backslash', () => {
     expect(moorGenerationEnvKey(String.raw`/opt/desk/moor\alias`)).toBe(
       'MOOR_ALIAS_GENERATION'
     );
   });
 
-  it.runIf(process.platform !== 'win32')(
+  it(
     'contains launch-channel errors when the executable cannot start',
     async () => {
       const { child } = spawnMoorMaster({

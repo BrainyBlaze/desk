@@ -1,6 +1,6 @@
 // Binding tests for the moor acquirer against the reviewed release contract
-// (moor repo docs/release-manifest-v1.md @ f1bd230): the Desk pin projection's
-// exact key sets, the six literal v0.1.0 asset filenames, the production URL
+// (moor repo docs/release-manifest-v1.md @ 526cbb2): the Desk pin projection's
+// exact key sets, the four literal v0.1.0 asset filenames, the production URL
 // derivation, and the fail-closed download/verify/install pipeline over an
 // explicit file:// fixture base (the contract's candidate-override mechanism).
 
@@ -28,9 +28,7 @@ const CONTRACT_ASSETS: Record<string, string> = {
   'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
   'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
   'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
-  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64',
-  'x86_64-pc-windows-msvc': 'moor-0.1.0-windows-x64.exe',
-  'aarch64-pc-windows-msvc': 'moor-0.1.0-windows-arm64.exe'
+  'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64'
 };
 
 function pinFor(bytesByTarget: Record<string, Buffer>) {
@@ -41,7 +39,7 @@ function pinFor(bytesByTarget: Record<string, Buffer>) {
     // exercise the full frozen matrix, so they carry the full-matrix closure.
     coverage: { requiredClosure: 'full-matrix' },
     version: 'v0.1.0',
-    commit: 'f1bd230bdaf0a7a476f4069a95a2cee77996ab48',
+    commit: '526cbb2df57a61240d8a6c135b55888716cf32c9',
     targets: Object.fromEntries(
       (MOOR_TARGETS as readonly string[]).map((triple) => {
         const bytes = bytesByTarget[triple] ?? Buffer.from(`binary for ${triple}`);
@@ -70,7 +68,7 @@ function writeFixture(root: string, pin: unknown, bytesByTarget: Record<string, 
   return pathToFileURL(assets).href;
 }
 
-describe('moor acquirer × reviewed release contract (f1bd230)', () => {
+describe('moor acquirer × reviewed release contract (526cbb2)', () => {
   it('accepts the contract pin projection and derives the production URL exactly', () => {
     const root = mkdtempSync(join(tmpdir(), 'moor-pin-'));
     try {
@@ -92,8 +90,6 @@ describe('moor acquirer × reviewed release contract (f1bd230)', () => {
     expect(moorTargetTriple({ platform: 'linux', arch: 'arm64' })).toBe('aarch64-unknown-linux-musl');
     expect(moorTargetTriple({ platform: 'darwin', arch: 'x64' })).toBe('x86_64-apple-darwin');
     expect(moorTargetTriple({ platform: 'darwin', arch: 'arm64' })).toBe('aarch64-apple-darwin');
-    expect(moorTargetTriple({ platform: 'win32', arch: 'x64' })).toBe('x86_64-pc-windows-msvc');
-    expect(moorTargetTriple({ platform: 'win32', arch: 'arm64' })).toBe('aarch64-pc-windows-msvc');
     expect(() => moorTargetTriple({ platform: 'freebsd', arch: 'x64' })).toThrow(/unsupported platform/);
     expect(() => moorTargetTriple({ platform: 'linux', arch: 'ia32' })).toThrow(/unsupported CPU/);
   });
@@ -192,13 +188,13 @@ describe('moor acquirer × reviewed release contract (f1bd230)', () => {
         ['extra top-level key', (p) => { p.mirror = 'https://evil'; }],
         ['missing commit', (p) => { delete p.commit; }],
         // Relative to the supported version, so this case keeps its meaning
-        // the next time the pin schema moves (it moved to 2 for desk#60).
+        // the next time the pin schema moves.
         ['wrong schemaVersion', (p) => { p.schemaVersion = MOOR_PIN_SCHEMA_VERSION + 1; }],
         ['foreign repository', (p) => { p.repository = 'https://github.com/evil/moor'; }],
         ['noncanonical version', (p) => { p.version = '0.1.0'; }],
         ['rc version', (p) => { p.version = 'v0.1.0-rc1'; }],
         ['missing target', (p) => { delete (p.targets as Record<string, unknown>)['x86_64-apple-darwin']; }],
-        ['seventh target', (p) => { (p.targets as Record<string, unknown>)['x86_64-unknown-linux-gnu'] = (p.targets as Record<string, unknown>)['x86_64-unknown-linux-musl']; }],
+        ['fifth target', (p) => { (p.targets as Record<string, unknown>)['x86_64-unknown-linux-gnu'] = (p.targets as Record<string, unknown>)['x86_64-unknown-linux-musl']; }],
         ['extra target key', (p) => { ((p.targets as Record<string, Record<string, unknown>>)['x86_64-apple-darwin']).url = 'x'; }],
         ['traversal asset', (p) => { ((p.targets as Record<string, Record<string, unknown>>)['x86_64-apple-darwin']).asset = '../../etc/passwd'; }],
         ['whitespace asset', (p) => { ((p.targets as Record<string, Record<string, unknown>>)['x86_64-apple-darwin']).asset = 'moor bin'; }],
