@@ -12,6 +12,7 @@ import {
   readDeliveryEvents,
   resetDeliveryEventSeqCache
 } from '../src/server/channelsEvents.js';
+import { PreCutoverStoreError } from '../src/shared/supportFloor.js';
 
 describe('channelsEvents', () => {
   let home: string;
@@ -176,6 +177,72 @@ describe('channelsEvents', () => {
   it('returns [] when the events file does not exist', () => {
     expect(readDeliveryEvents(home)).toEqual([]);
     expect(latestEventSeq(home)).toBe(0);
+  });
+
+  describe('a ring Desk v0.3.1 wrote (records keyed by the retired per-session identity)', () => {
+    // A real v0.3.1 record, values shortened: session-scoped, keyed by
+    // `tmuxSession`, no `sessionId`. Nothing since the cutover writes that key,
+    // and no live event is session-less, so reading such a record as an
+    // anonymous event would present a session's history as nobody's. The
+    // migration that used to re-key it is gone; the reader refuses by name and
+    // states the floor.
+    const V031_LINE = JSON.stringify({
+      kind: 'delivering',
+      tmuxSession: 'agentdesk-desk-channels-super-2e997e43',
+      channel: 'channels',
+      messageId: 'msg-20260618-221813-5077',
+      preview: '[#channels] New message from @desk-channels-codex',
+      seq: 1,
+      at: '2026-06-18T22:30:28.506Z'
+    });
+
+    it('refuses to read the ring, naming the file, the record count and the support floor', () => {
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const path = join(home, '_engine', 'events.jsonl');
+      writeFileSync(path, `${V031_LINE}\n${V031_LINE.replace('"seq":1', '"seq":2')}\n`);
+
+      let caught: unknown;
+      try {
+        readDeliveryEvents(home);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(PreCutoverStoreError);
+      const message = (caught as Error).message;
+      expect(message).toContain(path);
+      expect(message).toContain('2 record');
+      expect(message).toContain('tmuxSession');
+      expect(message).toContain('Desk v0.3.1 or older');
+      expect(message).toContain('boot Desk v0.3.2 once');
+      expect(message).toContain('does not migrate');
+      expect(() => latestEventSeq(home)).toThrow(PreCutoverStoreError);
+    });
+
+    it('refuses even when the record is filtered out, because a filtered read is still a read of that ring', () => {
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      writeFileSync(join(home, '_engine', 'events.jsonl'), `${V031_LINE}\n{"seq":2,"at":"2026-08-16T00:00:00.000Z","kind":"queued","sessionId":"alpha"}\n`);
+      expect(() => readDeliveryEvents(home, { sessionId: 'alpha' })).toThrow(PreCutoverStoreError);
+    });
+
+    it('does not mistake a current record that merely lacks a sessionId for a pre-cutover one', () => {
+      appendDeliveryEvent(home, { kind: 'queued' });
+      expect(readDeliveryEvents(home)).toHaveLength(1);
+    });
+
+    it('prune keeps such records byte-for-byte while they are among the newest, and lets them age out otherwise', () => {
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const path = join(home, '_engine', 'events.jsonl');
+      const current = (seq: number) => JSON.stringify({ seq, at: '2026-08-16T00:00:00.000Z', kind: 'queued', sessionId: 'alpha' });
+      writeFileSync(path, `${V031_LINE}\n${current(2)}\n${current(3)}\n`);
+      // Under the cap: nothing rewritten, the old record is left as it is.
+      expect(pruneDeliveryEvents(home, 3)).toBe(0);
+      expect(readFileSync(path, 'utf8')).toBe(`${V031_LINE}\n${current(2)}\n${current(3)}\n`);
+      // Over the cap: the oldest goes, and the oldest is the pre-cutover one —
+      // that is how a migrated ring sheds the residue v0.3.2 could not map.
+      expect(pruneDeliveryEvents(home, 2)).toBe(1);
+      expect(readFileSync(path, 'utf8')).toBe(`${current(2)}\n${current(3)}\n`);
+      expect(readDeliveryEvents(home)).toHaveLength(2);
+    });
   });
 
   it('persists across re-reads (engine restore reads the same file)', () => {

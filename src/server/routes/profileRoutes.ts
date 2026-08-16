@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { readManifestFile, resolveManifestPath, updateManifestFile } from '../../core/config.js';
-import { collectSessions } from '../../core/sessionIdentity.js';
+import { collectSessions } from '../../core/manifest.js';
 import { isProfileProvider, isValidProfileId, profileRoot } from '../../shared/agentProfiles.js';
 import type { AgentProfile, DeskManifest, ProfileProvider } from '../../core/types.js';
 import { ApiValidationError, readRequiredString } from '../apiValidation.js';

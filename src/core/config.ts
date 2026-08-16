@@ -14,14 +14,13 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
-import { mintSessionId } from '../shared/migration/index.js';
+import { mintSessionId } from '../shared/sessionId.js';
 import {
   isProviderSessionProvider,
   isValidProviderSessionId,
   type ProviderSessionProvider
 } from '../shared/providerSessionIdentity.js';
-import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
-import { collectSessions } from './sessionIdentity.js';
+import { buildSessionSpecs, collectSessions, parseDeskManifest } from './manifest.js';
 import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, DeskSessionDraft, SessionSpec } from './types.js';
 
 export class ManifestMutationError extends Error {

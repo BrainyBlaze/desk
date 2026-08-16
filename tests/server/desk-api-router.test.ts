@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FileLockBusyError } from '../../src/shared/fileLock.js';
 import { ManifestMutationError } from '../../src/core/config.js';
 import { ManifestValidationError } from '../../src/core/manifest.js';
+import { PreCutoverStoreError } from '../../src/shared/supportFloor.js';
 import { ApiConflictError, ApiNotFoundError, readRequiredString } from '../../src/server/apiValidation.js';
 import { createDeskApiMiddleware } from '../../src/server/deskApiRouter.js';
 import { readJsonBody } from '../../src/server/httpUtil.js';
@@ -181,6 +182,24 @@ describe('createDeskApiMiddleware', () => {
       error: 'group alpha already exists',
       code: 'manifest-conflict'
     });
+  });
+
+  it('surfaces a pre-cutover store refusal with its full floor sentence instead of a generic 500', async () => {
+    // The refusal is only useful if the operator can read it in the UI: a
+    // generic "Internal server error" would hide the one remedy it names.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = response();
+    const route: DeskRoute = async () => {
+      throw new PreCutoverStoreError('events ring at /x/_engine/events.jsonl holds 2 records keyed by tmuxSession');
+    };
+
+    await createDeskApiMiddleware([route])(request('/api/channels/events'), res, vi.fn());
+
+    expect(res.statusCode).toBe(422);
+    const body = JSON.parse(res.body ?? '') as { error: string; code: string };
+    expect(body.code).toBe('pre-cutover-store');
+    expect(body.error).toContain('events ring at /x/_engine/events.jsonl holds 2 records keyed by tmuxSession');
+    expect(body.error).toContain('boot Desk v0.3.2 once');
   });
 
   it('surfaces manifest validation failures without treating them as server faults', async () => {

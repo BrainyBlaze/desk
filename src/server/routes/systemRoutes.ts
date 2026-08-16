@@ -1,8 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { resolveManifestPath } from '../../core/config.js';
-import { loadDesk } from '../../core/runner.js';
 import {
   observationEnvelope,
   type AgentObservationScope
@@ -458,50 +454,6 @@ function providerObservationFailure(
   return { status, body: safe };
 }
 
-/**
- * The session-identity map for the pre-React localStorage migration (cutover
- * step 4): the committed legacy-name→sessionId mappings plus the CURRENT
- * strict-manifest sessionIds (so post-cutover additions are preserved rather
- * than dropped). Read-only. Before the migration marker exists the map is
- * simply not available (409); AFTER the gate a missing or malformed map file
- * is corruption and fails closed (500) — the browser must not half-migrate.
- */
-export function readSessionIdentityMap(
-  manifestPath: string = resolveManifestPath()
-):
-  | { ok: true; payload: { version: 1; mappings: [string, string][]; sessionIds: string[] } }
-  | { ok: false; status: 409 | 500; error: string; code: 'not-migrated' | 'identity-map-corrupt' } {
-  const migrationRoot = join(dirname(manifestPath), '_migration', 'session-id-v1');
-  if (!existsSync(join(migrationRoot, 'migration.done'))) {
-    return { ok: false, status: 409, error: 'session identity migration has not committed', code: 'not-migrated' };
-  }
-  const mapPath = join(migrationRoot, 'session-id-map.json');
-  let mappings: [string, string][];
-  try {
-    const parsed = JSON.parse(readFileSync(mapPath, 'utf8')) as { version?: unknown; entries?: unknown };
-    if (
-      parsed.version !== 1 ||
-      !Array.isArray(parsed.entries) ||
-      !parsed.entries.every(
-        (entry: unknown): entry is [string, string] =>
-          Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && typeof entry[1] === 'string'
-      )
-    ) {
-      return { ok: false, status: 500, error: `session identity map is malformed: ${mapPath}`, code: 'identity-map-corrupt' };
-    }
-    mappings = parsed.entries;
-  } catch (error) {
-    return {
-      ok: false,
-      status: 500,
-      error: `session identity map unreadable: ${error instanceof Error ? error.message : String(error)}`,
-      code: 'identity-map-corrupt'
-    };
-  }
-  const sessionIds = loadDesk({ manifestPath }).sessions.map((session) => session.sessionId);
-  return { ok: true, payload: { version: 1, mappings, sessionIds } };
-}
-
 export function createSystemRoutes(
   managedAgentLsp: ManagedAgentLifecycle,
   options: SystemRoutesOptions = {}
@@ -533,16 +485,6 @@ export function createSystemRoutes(
   return async (req, res, url) => {
     if (req.method === 'GET' && url.pathname === '/api/desk') {
       sendJson(res, 200, buildDeskSnapshot());
-      return true;
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/session-identity-map') {
-      const result = readSessionIdentityMap();
-      if (!result.ok) {
-        sendJson(res, result.status, { error: result.error, code: result.code });
-        return true;
-      }
-      sendJson(res, 200, result.payload);
       return true;
     }
 
