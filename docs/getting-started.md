@@ -131,6 +131,12 @@ A same-version run creates and verifies a new immutable instance instead of
 modifying the active one. After activation, Desk retains the current and previous
 instances for rollback.
 
+Stores written by Desk v0.3.1 or older are not migrated by the current release.
+Desk v0.3.2 is the last release that migrates them in place; a machine still on
+v0.3.1 or older must boot v0.3.2 once against its store before upgrading
+further. A newer Desk that meets an unmigrated store refuses it by name and
+says so — see [Troubleshooting](troubleshooting.md).
+
 ## Uninstall the managed application
 
 ```bash

@@ -2,6 +2,7 @@ import type { Connect } from 'vite';
 import { ManifestMutationError } from '../core/config.js';
 import { ManifestValidationError } from '../core/manifest.js';
 import { FileLockBusyError } from '../shared/fileLock.js';
+import { PreCutoverStoreError } from '../shared/supportFloor.js';
 import { DeskApiError } from './apiValidation.js';
 import { HttpBodyError, sendJson } from './httpUtil.js';
 import type { DeskRoute } from './plugin.js';
@@ -60,6 +61,14 @@ function mapDeskApiError(error: unknown): DeskApiErrorResponse {
     };
   }
   if (error instanceof ManifestValidationError) {
+    return {
+      statusCode: 422,
+      body: { error: error.message, code: error.code }
+    };
+  }
+  // A store this version refuses to read carries its remedy in the message
+  // (the support floor); the operator must see that sentence, not a 500.
+  if (error instanceof PreCutoverStoreError) {
     return {
       statusCode: 422,
       body: { error: error.message, code: error.code }

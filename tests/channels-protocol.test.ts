@@ -15,6 +15,7 @@ import {
   resolveTargets,
   type ChannelMember
 } from '../src/server/channelsProtocol.js';
+import { PreCutoverStoreError } from '../src/shared/supportFloor.js';
 
 const member = (name: string, type = 'claude-code', sessionId?: string): ChannelMember => ({
   name,
@@ -210,6 +211,36 @@ describe('member manifests', () => {
       status: 'active',
       sessionId: 'agentdesk-x-main-forge-1234'
     });
+  });
+
+  it('refuses the v0.3.1 member manifest (identity on a `tmux:` line) by name, citing the support floor', () => {
+    // A real pre-cutover member manifest, shortened. Reading it as a member
+    // without a session would turn an agent into a session-less bystander; the
+    // migration that re-keyed the line to `session:` is gone.
+    const legacy = [
+      '---',
+      'name: zohar-glm',
+      'type: bash',
+      'status: active',
+      'joined: 2026-06-29 10:19:58',
+      'tmux: agentdesk-zohar-main-glm-798c36d0',
+      '---',
+      '',
+      '# @zohar-glm'
+    ].join('\n');
+    let caught: unknown;
+    try {
+      parseMemberManifest(legacy);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PreCutoverStoreError);
+    const message = (caught as Error).message;
+    expect(message).toContain('zohar-glm');
+    expect(message).toContain('tmux:');
+    expect(message).toContain('Desk v0.3.1 or older');
+    expect(message).toContain('boot Desk v0.3.2 once');
+    expect(message).toContain('does not migrate');
   });
 
   it('rejects manifests without frontmatter', () => {

@@ -19,6 +19,7 @@ import {
 } from './channelsProtocol.js';
 import { writeFileAtomic, writeFileAtomicCreate } from './fsOps.js';
 import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
+import { PreCutoverStoreError } from '../shared/supportFloor.js';
 
 /**
  * Channels store — the filesystem side of the messaging protocol.
@@ -304,7 +305,12 @@ export function listChannelMembers(home: string, channel: string): ChannelMember
       if (parsed) {
         members.push(parsed);
       }
-    } catch {
+    } catch (error) {
+      // A pre-cutover manifest is a named refusal, not an unreadable file:
+      // skipping it would silently drop the member the refusal is about.
+      if (error instanceof PreCutoverStoreError) {
+        throw error;
+      }
       // unreadable manifest — skip
     }
   }

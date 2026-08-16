@@ -1,19 +1,15 @@
-// Identity migration — sessionId grammar + minting (spec §10). Pure module.
-// sessionId replaces tmuxSession as the durable per-session identity. Grammar:
-// `^[a-z][a-z0-9-]{2,63}$` — starts with a letter, 3–64 chars, lowercase
-// alnum + dash. Globally unique within a per-user runtime; collision → reject.
+// The durable per-session identity: sessionId grammar + minting (spec §10).
+// Pure module. Grammar: `^[a-z][a-z0-9-]{2,63}$` — starts with a letter, 3–64
+// chars, lowercase alnum + dash. Globally unique within a per-user runtime;
+// a collision is rejected, never renamed around.
 
-export const SESSION_ID_RE = /^[a-z][a-z0-9-]{2,63}$/;
+const SESSION_ID_RE = /^[a-z][a-z0-9-]{2,63}$/;
+
+/** The grammar as text, for refusals that must tell the operator what a valid id looks like. */
+export const SESSION_ID_GRAMMAR = SESSION_ID_RE.source;
 
 export function isValidSessionId(id: unknown): id is string {
   return typeof id === 'string' && SESSION_ID_RE.test(id);
-}
-
-/** Assert grammar + uniqueness at create; a collision is a hard reject (§10). */
-export function assertMintable(id: string, taken: ReadonlySet<string>): { ok: true } | { ok: false; reason: 'grammar' | 'collision' } {
-  if (!isValidSessionId(id)) return { ok: false, reason: 'grammar' };
-  if (taken.has(id)) return { ok: false, reason: 'collision' };
-  return { ok: true };
 }
 
 /**
@@ -40,8 +36,8 @@ export function mintSessionId(name: string, taken: ReadonlySet<string>): string 
 }
 
 /**
- * Validate global uniqueness across a migrated set (§10 phase 4). Returns the
- * first duplicate so the migration can abort BEFORE commit (fail-closed).
+ * Validate global uniqueness across a manifest's ids. Returns the first
+ * duplicate so the caller can refuse BEFORE anything is written (fail-closed).
  */
 export function checkGlobalUniqueness(ids: readonly string[]): { ok: true } | { ok: false; duplicate: string } {
   const seen = new Set<string>();
