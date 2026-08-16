@@ -12,7 +12,7 @@ You need a working `curl` with TLS trust to download the installer. Supported
 release targets are:
 
 - macOS x64 and arm64
-- glibc Linux x64 and arm64
+- glibc Linux x64 and arm64, including WSL
 
 Alpine and other musl systems can provision host packages, but installation
 stops before activation because Desk does not yet publish a compatible Node

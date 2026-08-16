@@ -1266,7 +1266,7 @@ export class ChannelsWatcher {
       }
       this.scheduleScan(channel, fileName);
     });
-    // Reconciliation sweep: filesystem events are best-effort (network
+    // Reconciliation sweep: filesystem events are best-effort (WSL2 and network
     // filesystems can drop them); a missed event would otherwise mean a message
     // that never dispatches. Cheap thanks to the per-file mtime guard.
     this.sweepTimer = setInterval(() => this.sweepNow(), this.sweepIntervalMs);

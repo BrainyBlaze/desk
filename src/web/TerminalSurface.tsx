@@ -1093,7 +1093,7 @@ function supportsWebgl2(): boolean {
 
 /**
  * True only for HARDWARE-accelerated WebGL2. Software GL (SwiftShader, llvmpipe,
- * Mesa software) is common on remote desktops and GPU-less VMs, and there
+ * Mesa software) is common on WSL2, remote desktops and GPU-less VMs, and there
  * xterm's WebGL renderer is SLOWER to create and run
  * than its DOM renderer — WebGL context creation alone was measured at hundreds
  * of ms to seconds per group switch under SwiftShader, versus ~50-100ms for the

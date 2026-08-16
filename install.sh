@@ -123,8 +123,9 @@ detect_target() {
   arch="$(uname -m)"
   case "$os" in
     Darwin) OS_TAG="darwin"; HOST_LIBC="system" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) die "native Windows is unsupported; run Desk from WSL, which is Linux and fully supported." ;;
     Linux) OS_TAG="linux" ;;
-    *) die "unsupported operating system: $os (Desk supports macOS and Linux)." ;;
+    *) die "unsupported operating system: $os (Desk supports macOS and Linux, including WSL)." ;;
   esac
   case "$arch" in
     x86_64|amd64) ARCH_TAG="x64" ;;
