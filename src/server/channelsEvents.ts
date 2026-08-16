@@ -81,17 +81,27 @@ export type DeliveryEventKind =
   | 'resumed'          // -specific: operator resumed
   | 'dropped';         // -specific: item dropped (operator or overflow)
 
+/**
+ * The kinds a LIVE producer may write. It is the read vocabulary minus
+ * `delivery-ack-timeout`, a state no path has emitted since delivery ACK
+ * outcomes were retired: it survives ONLY in historical rings, so admitting it
+ * at a write would fabricate a retired state. The read model keeps it.
+ */
+export type WritableDeliveryEventKind = Exclude<DeliveryEventKind, 'delivery-ack-timeout'>;
+
 export interface DeliveryEvent {
   seq: number;
   at: string;
   sessionId?: string;
   /**
    * The retired per-session identity Desk v0.3.1 and older keyed this record
-   * by. Present only on records written before the cutover that the v0.3.2
-   * migration could not map (their session was already gone); such a record
-   * has no `sessionId` and this version cannot give it one, so the reader
-   * carries the identity as it found it and states that it is unresolved,
-   * instead of dropping the record or presenting it as a channel-level event.
+   * by, carried by the reader AS FOUND. A record the v0.3.2 migration could not
+   * map (its session was already gone) has this and no `sessionId`; a record
+   * the migration DID map can still carry a stray retired key alongside its
+   * `sessionId`, and both are kept — losing the resolved id to honour the
+   * unresolved one would throw away real knowledge. This is a READ-only field:
+   * no live write path sets it (see WritableDeliveryEventKind / the write input
+   * type), so it never labels a freshly produced event.
    */
   preCutoverSession?: string;
   channel?: string;
@@ -120,12 +130,46 @@ function eventsPath(home: string): string {
 }
 
 /**
+ * What a live producer hands to a write: the read model minus the fields and
+ * kinds that exist ONLY in history. `seq`/`at` are assigned here; `kind` is
+ * narrowed to the writable vocabulary (no `delivery-ack-timeout`); and
+ * `preCutoverSession` is pinned to `never`, not merely omitted. Omitting it
+ * would only drop it from the declared surface — a producer VARIABLE (as
+ * opposed to a fresh inline literal, which excess-property checks would catch)
+ * carrying an extra `preCutoverSession` stays structurally assignable to an
+ * Omit-based input. Typing the field `never` rejects any value for it whether
+ * it arrives inline or through a variable. This is what stops the type system
+ * from silently permitting a producer to fabricate retired history.
+ */
+export type DeliveryEventInput = Omit<DeliveryEvent, 'seq' | 'at' | 'kind' | 'preCutoverSession'> & {
+  kind: WritableDeliveryEventKind;
+  at?: string;
+  preCutoverSession?: never;
+};
+
+// Compile-time boundary witnesses (verified by `npm run check`, which type-checks
+// src/). Each asserts a NEGATIVE — that a producer value carrying a retired form
+// is NOT assignable to the write input — using a VARIABLE-shaped source, because
+// that is the assignment excess-property checks do not police. If a future edit
+// re-admits either form, its `NotAssignable` flips to `false`, the `AssertTrue`
+// stops satisfying `extends true`, and tsc fails here: the boundary cannot rot
+// silently.
+type AssertTrue<T extends true> = T;
+type NotAssignable<TSource, TTarget> = TSource extends TTarget ? false : true;
+type _WriteInputRejectsRetiredKindVariable = AssertTrue<
+  NotAssignable<{ kind: 'delivery-ack-timeout' }, DeliveryEventInput>
+>;
+type _WriteInputRejectsHistoricalFieldVariable = AssertTrue<
+  NotAssignable<{ kind: 'queued'; preCutoverSession: string }, DeliveryEventInput>
+>;
+
+/**
  * Appends a single delivery event. The `seq` is auto-assigned from the current
  * file's line count + 1; `at` defaults to now. Sync, atomic per-line.
  */
 export function appendDeliveryEvent(
   home: string,
-  event: Omit<DeliveryEvent, 'seq' | 'at'> & { at?: string },
+  event: DeliveryEventInput,
   now = new Date()
 ): DeliveryEvent {
   mkdirSync(eventsDir(home), { recursive: true });
