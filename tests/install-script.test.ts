@@ -174,6 +174,50 @@ describe('source-backed installer contract', () => {
     expect(readFileSync(log, 'utf8')).toMatch(/update|install/);
     expect(existsSync(`${value.deskHome}.install-lock`)).toBe(false);
   });
+
+  it('provisions ripgrep with the other host capabilities and probes for it (desk#70 item 6)', () => {
+    // Search has exactly one engine, ripgrep. The installer used to provision
+    // git/python/make/compiler and not rg, so an rg-less host was a real,
+    // supported population on which search silently ran a weaker walker. The
+    // walker is gone; the installer now owns rg like every other host
+    // requirement. Witnessed on the actual command line handed to the package
+    // manager, not on the script text.
+    const value = fixture();
+    const log = join(value.root, 'package-manager.log');
+    const git = join(value.binDir, 'git');
+    const packageManager = join(value.binDir, process.platform === 'darwin' ? 'brew' : 'apt-get');
+    const sudo = join(value.binDir, 'sudo');
+    writeFileSync(git, '#!/usr/bin/env bash\nprintf "git version 2.20.0\\n"\n');
+    writeFileSync(
+      packageManager,
+      '#!/usr/bin/env bash\n[ "${1:-}" = "shellenv" ] && exit 0\nprintf "%s\\n" "$*" >> "$PACKAGE_LOG"\n[ "${1:-}" = "update" ] && exit 0\nexit 73\n'
+    );
+    writeFileSync(sudo, '#!/usr/bin/env bash\nexec "$@"\n');
+    chmodSync(git, 0o755);
+    chmodSync(packageManager, 0o755);
+    chmodSync(sudo, 0o755);
+
+    const result = value.run({ env: { PACKAGE_LOG: log } });
+
+    expect(result.status).toBe(73);
+    const installLine = readFileSync(log, 'utf8')
+      .split('\n')
+      .find((line) => /install/.test(line));
+    expect(installLine).toMatch(/\bripgrep\b/);
+
+    const source = readFileSync(INSTALLER, 'utf8');
+    expect(source).toContain('have rg || MISSING_CAPABILITIES+=("ripgrep")');
+    // Every package manager the installer speaks provisions rg by its distro
+    // name; a manager that omitted it would leave that host without search
+    // and with no installer step to blame.
+    const start = source.indexOf('install_missing_packages() {');
+    const body = source.slice(start, source.indexOf('\n}\n', start));
+    const packageLists = body.split('\n').filter((line) => /^\s*packages=\(/.test(line));
+    expect(packageLists).toHaveLength(6); // brew, apt-get, dnf|yum, pacman, zypper, apk
+    for (const line of packageLists) {
+      expect(line).toMatch(/\bripgrep\b/);
+    }
+  });
 });
 
 describe('installer lifecycle', () => {

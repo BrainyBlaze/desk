@@ -192,7 +192,9 @@ A file explorer over any root (hidden files, create/rename/delete,
 drag-and-drop moves) feeding Monaco editor tabs: every language, IntelliSense
 for TS/JS/JSON/CSS/HTML, minimap, multi-cursor. Files are watched live,
 saves are mtime-guarded against external edits, tabs restore after reload,
-and filename/content search is ripgrep-powered.
+and filename/content search runs on ripgrep — a host requirement the installer
+provisions; without `rg` the server refuses search by name instead of
+degrading to a weaker engine.
 
 A shared language-server layer backs the editor with real diagnostics,
 go-to-definition, and hover — and the same servers are surfaced to your agents
