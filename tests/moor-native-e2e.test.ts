@@ -113,6 +113,29 @@ function compileInstrument(root: string): string {
   return object;
 }
 
+function compileInstrumentedChild(root: string): string {
+  // The instrumented predecessor is a locally compiled program, not `sh`:
+  // §4.7 requires the instrument's architecture to match the initial child
+  // and a loader that honours the preload variable. On macOS the system shell
+  // is a SIP-protected arm64e/universal platform binary — inserting the test's
+  // dylib into it aborts on Apple silicon and is not a supported shape on any
+  // Mac — so the child that carries the instrument is built here, exactly like
+  // Moor's own conformance suite does. It prints, lingers long enough to be
+  // attached, and exits 7.
+  const source = join(root, 'predecessor.c');
+  const program = join(root, 'predecessor');
+  writeFileSync(
+    source,
+    '#include <stdio.h>\n#include <unistd.h>\nint main(void) {\n  printf("predecessor-output\\n");\n  fflush(stdout);\n  sleep(1);\n  return 7;\n}\n',
+    { mode: 0o600 }
+  );
+  const built = spawnSync('cc', ['-O2', '-o', program, source], { encoding: 'utf8' });
+  if (built.status !== 0) {
+    throw new Error(`could not compile the instrumented predecessor: ${built.stderr}`);
+  }
+  return program;
+}
+
 function decodeManifestPath(value: unknown): string {
   if (typeof value !== 'string') throw new Error('native lifecycle omitted an external path');
   return Buffer.from(value, 'base64').toString();
@@ -428,13 +451,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       const sessionPath = join(root, sessionId);
 
       const predecessor = await daemon.provision(sessionId, {
-        command: [
-          '-S',
-          instrument,
-          'sh',
-          '-c',
-          'printf predecessor-output; sleep 1; exit 7'
-        ],
+        command: ['-S', instrument, compileInstrumentedChild(root)],
         geometry: { rows: 24, cols: 80 },
         subject: { kind: 'terminal' }
       });
