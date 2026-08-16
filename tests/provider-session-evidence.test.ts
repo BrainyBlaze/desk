@@ -501,13 +501,12 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
-  test('accepts Claude evidence through the Darwin real-path traversal branch', async () => {
-    // Exercises directoryTraversalBasePath's platform === 'darwin' branch from a
-    // Linux run: with the platform test option set to 'darwin', the trusted
-    // directory traverses the real validated path rather than the /dev/fd
-    // descriptor alias. Real paths traverse on every platform, so a correct
-    // darwin branch still finds the evidence here; the authoritative fdesc-
-    // specific coverage is the hosted macOS lane and the descriptor-alias probe.
+  test('routes trusted-directory traversal through the real path under platform darwin', async () => {
+    // directoryTraversalBasePath is not observable through a nominal accept
+    // alone: on Linux both the real path and the /dev/fd alias traverse, so a
+    // regression that made the darwin branch reuse the alias would still accept.
+    // The assertion below observes the branch selection directly, via the
+    // recorded child lstat candidates, with no new production seam.
     const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
     temporaryHomes.push(homeDir);
     const providerSessionId = '234e5678-e89b-42d3-a456-426614174099';
@@ -529,6 +528,7 @@ describe('verifyProviderSessionEvidence', () => {
       'utf8'
     );
 
+    const issuedAliases: string[] = [];
     const result = await verifyProviderSessionEvidence(
       {
         provider: 'claude',
@@ -537,7 +537,14 @@ describe('verifyProviderSessionEvidence', () => {
         homeDir,
         notBeforeMs: Date.now() - 1_000
       },
-      { platform: 'darwin' }
+      {
+        platform: 'darwin',
+        directoryDescriptorPath: (descriptor) => {
+          const alias = `/dev/fd/${descriptor}`;
+          issuedAliases.push(alias);
+          return alias;
+        }
+      }
     );
 
     expect(result).toEqual({
@@ -546,6 +553,20 @@ describe('verifyProviderSessionEvidence', () => {
       providerSessionId,
       evidencePath: await realpath(evidencePath)
     });
+    // At least one descriptor alias was issued for the capability identity
+    // probe, so the negative assertion below is not vacuous.
+    expect(issuedAliases.length).toBeGreaterThanOrEqual(1);
+    // Under the darwin arm, child resolution uses join(parent.traversalPath,
+    // name) = the real validated path, so no child lstat is ever issued under
+    // `${alias}/`. A regression that reused descriptorPath on darwin would lstat
+    // `${alias}/<child>` and turn this red. (The passthrough lstat mock
+    // installed in afterEach records every call.)
+    const lstatCandidates = fsPromisesMocks.lstat.mock.calls.map(([candidate]) =>
+      String(candidate)
+    );
+    for (const alias of issuedAliases) {
+      expect(lstatCandidates.some((candidate) => candidate.startsWith(`${alias}/`))).toBe(false);
+    }
   });
 
   test('accepts Codex evidence only from the selected profile root', async () => {
