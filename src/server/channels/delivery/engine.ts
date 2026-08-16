@@ -13,7 +13,8 @@ import { join } from 'node:path';
 
 import { type ChannelMember, type ChannelMessage } from '../protocol/format.js';
 import { isShellAgent, type LifecycleState, type DeliveryStatus, type ChannelActivityEvent, type SessionResumeInfo, type SubmitState, type DeliveryBlockReason, type QueuedPrompt, type QueuedItemMeta, type BlockedItemMeta, type SessionDiagnostic } from '../protocol/delivery.js';
-import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from '../store/fileStore.js';
+import type { IncomingChannelMessage } from '../store/fileStore.js';
+import { FileChannelStore, type ChannelStore } from '../store/channelStore.js';
 import {
   classifyQueueFile,
   dropStuckItem,
@@ -133,6 +134,8 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  /** Where conversations are read from. Defaults to the filesystem store. */
+  store?: ChannelStore;
   /** Decides who a message is for. Defaults to the stock @mention router. */
   router?: MessageRouter;
   /** One canonical authority batch per Channels decision. */
@@ -224,6 +227,7 @@ export class ChannelsEngine {
   private readonly sessionInfo: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
   private readonly now: () => number;
   private readonly router: MessageRouter;
+  private readonly store: ChannelStore;
   private pumpTimer: NodeJS.Timeout | undefined;
   /** delivered (session:messageId) pairs — dispatch dedupe across all paths */
   private readonly delivered = new Set<string>();
@@ -246,6 +250,7 @@ export class ChannelsEngine {
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
     this.now = options.now ?? Date.now;
     this.router = options.router ?? new MentionRouter();
+    this.store = options.store ?? new FileChannelStore(options.home);
     this.restorePausedSessions();
     this.restoreQueues();
     this.startPump(options.pumpIntervalMs ?? 2500);
@@ -343,7 +348,7 @@ export class ChannelsEngine {
     for (const channel of this.supervision.watched()) {
       let members: ChannelMember[];
       try {
-        members = listChannelMembers(this.options.home, channel);
+        members = this.store.listMembers(channel);
       } catch (error) {
         // R1: never drop a failure blind. A channel disappearing mid-pump
         // (destroy race) is expected; a broken manifest is not. Log both
@@ -681,7 +686,7 @@ export class ChannelsEngine {
     const preview = message.body.replace(/\s+/g, ' ').slice(0, 140);
     this.pushActivity({ kind: 'message', channel, file, messageId: message.id, author: message.author, preview });
 
-    const members = membersOverride ?? listChannelMembers(this.options.home, channel);
+    const members = membersOverride ?? this.store.listMembers(channel);
     const decision = this.router.route({
       channel,
       file,
@@ -739,7 +744,7 @@ export class ChannelsEngine {
 
   private threadParentAuthor(channel: string, parentId: string): string | undefined {
     try {
-      return readChannelMessage(this.options.home, channel, parentId).author;
+      return this.store.readMessage(channel, parentId).author;
     } catch {
       return undefined;
     }

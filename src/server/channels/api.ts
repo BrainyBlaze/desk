@@ -10,6 +10,7 @@ import {
 import type { ChannelMessageDeskEventInput } from '../../shared/controlPlane/index.js';
 import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.js';
 import { ChannelsEngine } from './delivery/engine.js';
+import { FileChannelStore, type ChannelStore, type Unsubscribe } from './store/channelStore.js';
 import { buildOnboardingPrompt } from './render/prompts.js';
 import {
   claimDelivering,
@@ -21,7 +22,6 @@ import {
   addMemberWithUniqueHandle,
   appendMessage,
   channelFilePath,
-  ChannelsWatcher,
   createChannel,
   deleteMessage,
   destroyChannel,
@@ -89,7 +89,9 @@ const UPLOAD_ONLY_CHANNELS = new Set(['agent-files']);
 interface ChannelsRuntime {
   home: string;
   engine: ChannelsEngine;
-  watcher: ChannelsWatcher;
+  store: ChannelStore;
+  /** stops the store handing finalised messages to this engine */
+  unsubscribe: Unsubscribe;
   owner: ChannelsRuntimeOwner;
 }
 
@@ -123,6 +125,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   // transport (Track B: the legacy transport is gone). The uiMode=native broker path is
   // unchanged.
   const nativeTransport = createNativeChannelsTransport();
+  const store: ChannelStore = new FileChannelStore(home);
   const sendChannelDelivery = createChannelDeliverySender({
     agentSurfaceBroker: options.agentSurfaceBroker,
     terminalSender: nativeTransport.sendText,
@@ -230,11 +233,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     },
     readAgentStates: readAgentStatePulse,
     capturePane: nativeTransport.capturePane,
-    sendEnter: nativeTransport.sendEnter
+    sendEnter: nativeTransport.sendEnter,
+    store
   });
-    const watcher = new ChannelsWatcher(home, (incoming) => engine.handleMessage(incoming));
-    watcher.start();
-    runtime = { home, engine, watcher, owner };
+    const unsubscribe = store.onFinalized((incoming) => engine.handleMessage(incoming));
+    runtime = { home, engine, store, unsubscribe, owner };
     return runtime;
   } catch (error) {
     owner.release();
@@ -265,7 +268,7 @@ export function disposeChannelsRuntime(): void {
     return;
   }
   try {
-    current.watcher.stop();
+    current.unsubscribe();
   } finally {
     try {
       current.engine.dispose();
@@ -448,7 +451,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
   if (!url.pathname.startsWith('/api/channels/')) {
     return false;
   }
-  const { home, engine, watcher } = initChannelsRuntime();
+  const { home, engine, store } = initChannelsRuntime();
 
   try {
     if (req.method === 'GET' && url.pathname === '/api/channels/state') {
@@ -771,7 +774,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         author: 'human',
         body: `@${member.name} joined #${channel} — ${[spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')} (${member.type}).`
       });
-      watcher.markSeen(channel, joinNotice.file, joinNotice.message.id);
+      store.markSeen(channel, joinNotice.file, joinNotice.message.id);
 
       // Onboarding briefing rides the same gated queue as channel dispatches:
       // it lands when the agent's TUI is actually ready for input.
@@ -826,7 +829,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       engine.handleMessage({ channel, file: appended.file, message: appended.message });
       // Mark seen only after dispatch succeeds. If the engine callback throws,
       // the watcher/sweep path still sees this finalized message and retries it.
-      watcher.markSeen(channel, appended.file, appended.message.id);
+      store.markSeen(channel, appended.file, appended.message.id);
       sendJson(res, 200, { ok: true, id: appended.message.id, file: appended.file });
       return true;
     }
@@ -852,7 +855,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const shared = formatSharedMessage(message, fromChannel, typeof body.comment === 'string' ? body.comment : undefined);
       const appended = await appendMessage(home, toChannel, { author, body: shared });
       engine.handleMessage({ channel: toChannel, file: appended.file, message: appended.message });
-      watcher.markSeen(toChannel, appended.file, appended.message.id);
+      store.markSeen(toChannel, appended.file, appended.message.id);
       sendJson(res, 200, { ok: true, id: appended.message.id });
       return true;
     }
