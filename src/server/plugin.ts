@@ -22,7 +22,7 @@
 // who its embedders are or what they gate on.
 import type { IncomingMessage, ServerResponse, Server as NodeHttpServer } from 'node:http';
 import type { Connect } from 'vite';
-import type { AgentDelivery, ChannelStore, MessageRouter, PromptRenderer } from './channels/ports.js';
+import type { AgentDelivery, ChannelFiles, ChannelStore, MessageRouter, PromptRenderer } from './channels/ports.js';
 
 /**
  * An extra `/api` route ("ручка"). Inspect the request; return `true` (or a
@@ -58,6 +58,8 @@ export interface DeskPluginContext {
 export interface ChannelsProviders {
   /** Where conversations live and how a finalised message is noticed. */
   store?: (base: ChannelStore) => ChannelStore;
+  /** Where attachments live. Separate from the store: bytes, not conversation. */
+  files?: (base: ChannelFiles) => ChannelFiles;
   /** Who a message is for. Pure: given a message and a roster, name the recipients. */
   router?: (base: MessageRouter) => MessageRouter;
   /** What reaches an agent: send, states, probe, submit. */

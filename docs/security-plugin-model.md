@@ -103,9 +103,9 @@ export default {
 };
 ```
 
-The four ports are `store` (where conversations live and how a finalised message
-is noticed), `router` (who a message is for), `delivery` (what reaches an agent),
-and `renderer` (what an agent sees). Providers apply in plugin order, each
+The five ports are `store` (where conversations live and how a finalised message
+is noticed), `files` (where attachments live), `router` (who a message is for),
+`delivery` (what reaches an agent), and `renderer` (what an agent sees). Providers apply in plugin order, each
 wrapping the previous result; a provider that returns its argument is a no-op,
 and declaring none leaves Channels exactly as it ships. The contracts are in
 `src/server/channels/ports.ts`.

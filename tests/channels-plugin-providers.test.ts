@@ -7,6 +7,7 @@
 // changes nothing.
 
 import { mkdtempSync, rmSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -15,8 +16,10 @@ import { createChannel } from '../src/server/channels/store/fileStore.js';
 import {
   agentDelivery,
   defaultPromptRenderer,
+  FileChannelFiles,
   MentionRouter,
   type AgentDelivery,
+  type ChannelFiles,
   type ChannelStore,
   type MessageRouter,
   type PromptRenderer,
@@ -158,6 +161,29 @@ describe('Channels plugin providers', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.session).toBe('alpha-1');
     expect(sent[0]?.text).toContain('desk channels read ops');
+  });
+
+  it('lets a files provider serve an attachment the filesystem does not hold', () => {
+    const base = new FileChannelFiles(home);
+    const files = compose<ChannelFiles>(
+      base,
+      [
+        {
+          files: (inner) => ({
+            ...inner,
+            open: (channel, name) =>
+              name === 'virtual.txt'
+                ? { size: 5, open: () => Readable.from(['hello']) }
+                : inner.open(channel, name)
+          })
+        }
+      ],
+      (p) => p.files
+    );
+    // Served by the provider: nothing was ever written to disk under this name.
+    expect(files.open('ops', 'virtual.txt')?.size).toBe(5);
+    // Anything else still falls through to the stock implementation.
+    expect(files.open('ops', 'absent.txt')).toBeUndefined();
   });
 
   it('accepts a store provider without the engine noticing which store it got', () => {

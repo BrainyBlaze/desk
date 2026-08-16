@@ -1,4 +1,3 @@
-import { createReadStream, existsSync, statSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname } from 'node:path';
 import { readJsonBody, sendJson } from '../httpUtil.js';
@@ -11,6 +10,7 @@ import type { ChannelMessageDeskEventInput } from '../../shared/controlPlane/ind
 import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.js';
 import { ChannelsEngine } from './delivery/engine.js';
 import { FileChannelStore, type ChannelStore, type Unsubscribe } from './store/channelStore.js';
+import { FileChannelFiles, type ChannelFiles } from './store/channelFiles.js';
 import { MentionRouter, type MessageRouter } from './routing/router.js';
 import { defaultPromptRenderer, type PromptRenderer } from './render/prompts.js';
 import { agentDelivery, type AgentDelivery } from './delivery/transport.js';
@@ -24,7 +24,7 @@ import {
 } from './delivery/durability.js';
 // Construction only: where the default filesystem store lives and how it is
 // prepared. Everything the routes DO to a channel goes through ChannelStore.
-import { channelFilePath, ensureChannelsHome, ensureUploadFileBucket, resolveChannelsHome, saveChannelFile } from './store/fileStore.js';
+import { ensureChannelsHome, resolveChannelsHome } from './store/fileStore.js';
 import { addFeatured, listFeaturedItems, removeFeatured } from './store/featured.js';
 import {
   addReaction,
@@ -71,6 +71,7 @@ interface ChannelsRuntime {
   home: string;
   engine: ChannelsEngine;
   store: ChannelStore;
+  files: ChannelFiles;
   /** stops the store handing finalised messages to this engine */
   unsubscribe: Unsubscribe;
   owner: ChannelsRuntimeOwner;
@@ -117,6 +118,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     providers.reduce((current, provider) => pick(provider)?.(current) ?? current, base);
 
   const store = compose<ChannelStore>(new FileChannelStore(home), (p) => p.store);
+  const files = compose<ChannelFiles>(new FileChannelFiles(home), (p) => p.files);
   const router = compose<MessageRouter>(new MentionRouter(), (p) => p.router);
   const renderer = compose<PromptRenderer>(defaultPromptRenderer, (p) => p.renderer);
   const sendChannelDelivery = createChannelDeliverySender({
@@ -240,7 +242,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     )
   });
     const unsubscribe = store.onFinalized((incoming) => engine.handleMessage(incoming));
-    runtime = { home, engine, store, unsubscribe, owner };
+    runtime = { home, engine, store, files, unsubscribe, owner };
     return runtime;
   } catch (error) {
     owner.release();
@@ -454,7 +456,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
   if (!url.pathname.startsWith('/api/channels/')) {
     return false;
   }
-  const { home, engine, store } = initChannelsRuntime();
+  const { home, engine, store, files } = initChannelsRuntime();
 
   try {
     if (req.method === 'GET' && url.pathname === '/api/channels/state') {
@@ -674,15 +676,15 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'GET' && url.pathname === '/api/channels/file') {
       const channel = requireChannel(url.searchParams.get('channel'));
       const name = requireString(url.searchParams.get('name'), 'name');
-      const filePath = channelFilePath(home, channel, name);
-      if (!existsSync(filePath)) {
+      const attachment = files.open(channel, name);
+      if (!attachment) {
         sendJson(res, 404, { error: `file not found: ${name}` });
         return true;
       }
       const inlineType = FILE_CONTENT_TYPES[extname(name).toLowerCase()];
       res.statusCode = 200;
       res.setHeader('content-type', inlineType ?? 'application/octet-stream');
-      res.setHeader('content-length', statSync(filePath).size);
+      res.setHeader('content-length', attachment.size);
       // Uploads are untrusted: never let them run script on the app origin.
       res.setHeader('content-security-policy', "default-src 'none'; sandbox");
       res.setHeader('x-content-type-options', 'nosniff');
@@ -690,7 +692,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         'content-disposition',
         `${inlineType ? 'inline' : 'attachment'}; filename="${encodeURIComponent(name)}"`
       );
-      createReadStream(filePath).pipe(res);
+      attachment.open().pipe(res);
       return true;
     }
 
@@ -898,9 +900,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         return true;
       }
       if (UPLOAD_ONLY_CHANNELS.has(channel)) {
-        ensureUploadFileBucket(home, channel);
+        files.ensureBucket(channel);
       }
-      const saved = saveChannelFile(home, channel, name, bytes);
+      const saved = files.save(channel, name, bytes);
       sendJson(res, 200, { ok: true, file: saved, markdown: `[${saved}](_files/${saved})` });
       return true;
     }

@@ -1,6 +1,6 @@
 // The Channels subsystem.
 //
-// Everything outside this directory should enter here. The subsystem is four
+// Everything outside this directory should enter here. The subsystem is five
 // replaceable parts (see `ports.ts`) assembled behind an HTTP surface and a
 // runtime lifecycle; which file happens to hold which part is nobody else's
 // business, and has changed twice already.
