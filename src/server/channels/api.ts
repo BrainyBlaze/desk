@@ -60,14 +60,7 @@ import {
 } from './delivery/paused.js';
 import { readDeliveryEvents, latestEventSeq } from './delivery/events.js';
 import { exportChannelToMarkdown } from './store/export.js';
-import {
-  formatSharedMessage,
-  isValidChannelName,
-  parseConversation,
-  qualifiedMemberHandle,
-  type ReactionKind,
-  type ViewFilter
-} from './protocol/format.js';
+import { formatSharedMessage, isValidChannelName, parseConversation, qualifiedMemberHandle, type ReactionKind, type ViewFilter } from './protocol/format.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';

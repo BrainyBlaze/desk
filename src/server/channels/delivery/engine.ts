@@ -11,23 +11,9 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 
-import {
-  isShellAgent,
-  mentionsHuman,
-  resolveTargets,
-  type ChannelMember,
-  type ChannelMessage,
-  type LifecycleState,
-  type DeliveryStatus,
-  type ChannelActivityEvent,
-  type SessionResumeInfo,
-  type SubmitState,
-  type DeliveryBlockReason,
-  type QueuedPrompt,
-  type QueuedItemMeta,
-  type BlockedItemMeta,
-  type SessionDiagnostic
-} from '../protocol/format.js';
+import { type ChannelMember, type ChannelMessage } from '../protocol/format.js';
+import { mentionsHuman, resolveTargets } from '../protocol/routing.js';
+import { isShellAgent, type LifecycleState, type DeliveryStatus, type ChannelActivityEvent, type SessionResumeInfo, type SubmitState, type DeliveryBlockReason, type QueuedPrompt, type QueuedItemMeta, type BlockedItemMeta, type SessionDiagnostic } from '../protocol/delivery.js';
 import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from '../store/fileStore.js';
 import {
   classifyQueueFile,

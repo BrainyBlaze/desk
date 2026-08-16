@@ -4,19 +4,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { watch } from 'chokidar';
 import type { FSWatcher } from 'chokidar';
-import {
-  formatChannelPreamble,
-  formatMemberManifest,
-  formatMessageBlock,
-  formatThreadPreamble,
-  generateMessageId,
-  isValidChannelName,
-  messageTimestamp,
-  parseConversation,
-  parseMemberManifest,
-  type ChannelMember,
-  type ChannelMessage
-} from '../protocol/format.js';
+import { formatChannelPreamble, formatMemberManifest, formatMessageBlock, formatThreadPreamble, generateMessageId, isValidChannelName, messageTimestamp, parseConversation, parseMemberManifest, type ChannelMember, type ChannelMessage } from '../protocol/format.js';
 import { writeFileAtomic, writeFileAtomicCreate } from '../../fsOps.js';
 import { withFileLock, withFileLockSync } from '../../../shared/fileLock.js';
 

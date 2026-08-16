@@ -4,7 +4,7 @@ import type {
   SessionLifecycle,
   SessionStateSnapshot
 } from '../../../shared/controlPlane/index.js';
-import type { DeliveryBlockReason } from '../protocol/format.js';
+import type { DeliveryBlockReason } from '../protocol/delivery.js';
 
 export interface AgentStateBatch {
   ok: boolean;

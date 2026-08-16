@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../../fsOps.js';
-import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from '../protocol/format.js';
+import type { HistoricalSubmitState, SubmitState, DeliveryStatus } from '../protocol/delivery.js';
 
 /**
  * Channels delivery-history events ring. Engine-internal durable record

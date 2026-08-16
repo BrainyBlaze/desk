@@ -19,8 +19,9 @@ import {
 } from '../src/server/channels/delivery/durability.js';
 import { readDeliveryEvents } from '../src/server/channels/delivery/events.js';
 import { pauseSession as persistPausedSession } from '../src/server/channels/delivery/paused.js';
-import { DELIVERY_BLOCK_REASONS } from '../src/server/channels/protocol/format.js';
-import type { ChannelMember, ChannelMessage, DeliveryBlockReason } from '../src/server/channels/protocol/format.js';
+import { DELIVERY_BLOCK_REASONS } from '../src/server/channels/protocol/delivery.js';
+import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
+import type { DeliveryBlockReason } from '../src/server/channels/protocol/delivery.js';
 import {
   appendMessage,
   ChannelsWatcher,
