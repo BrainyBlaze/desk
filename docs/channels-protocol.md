@@ -146,12 +146,13 @@ turn prompt and onboarding briefing remind agents of this.
 
 ## Subsystem shape
 
-Channels lives under `src/server/channels/` and is five replaceable parts:
+Channels lives under `src/server/channels/` and is six replaceable parts:
 
 | Port | What it owns |
 |---|---|
 | `ChannelStore` | where the conversation lives, and how a finalised message is noticed |
 | `ChannelFiles` | where attachments live — bytes, a different medium from conversation |
+| `ChannelViews` | saved view filters — operator preference, not channel data |
 | `MessageRouter` | who a message is for — pure, no I/O, no queue |
 | `AgentDelivery` | what reaches an agent: send, states, probe, submit |
 | `PromptRenderer` | what an agent sees |

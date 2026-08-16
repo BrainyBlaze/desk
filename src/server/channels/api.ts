@@ -11,6 +11,7 @@ import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.j
 import { ChannelsEngine } from './delivery/engine.js';
 import { FileChannelStore, type ChannelStore, type Unsubscribe } from './store/channelStore.js';
 import { FileChannelFiles, type ChannelFiles } from './store/channelFiles.js';
+import { FileChannelViews, type ChannelViews } from './store/channelViews.js';
 import { MentionRouter, type MessageRouter } from './routing/router.js';
 import { defaultPromptRenderer, type PromptRenderer } from './render/prompts.js';
 import { agentDelivery, type AgentDelivery } from './delivery/transport.js';
@@ -25,25 +26,13 @@ import {
 // Construction only: where the default filesystem store lives and how it is
 // prepared. Everything the routes DO to a channel goes through ChannelStore.
 import { ensureChannelsHome, resolveChannelsHome } from './store/fileStore.js';
-import { addFeatured, listFeaturedItems, removeFeatured } from './store/featured.js';
-import {
-  addReaction,
-  clearReactionsForMessage,
-  listReactions,
-  removeReaction
-} from './store/reactions.js';
-import {
-  addView,
-  listViews,
-  removeView
-} from './store/views.js';
 import {
   listPausedSessions,
   pauseSession as persistPausedSession,
   resumeSession as persistResumedSession
 } from './delivery/paused.js';
 import { readDeliveryEvents, latestEventSeq } from './delivery/events.js';
-import { exportChannelToMarkdown } from './store/export.js';
+import { exportChannelToMarkdown } from './render/transcript.js';
 import { formatSharedMessage, isValidChannelName, qualifiedMemberHandle, type ReactionKind, type ViewFilter } from './protocol/format.js';
 import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
 import { readAgentStatePulse } from '../agentStatePulse.js';
@@ -72,6 +61,7 @@ interface ChannelsRuntime {
   engine: ChannelsEngine;
   store: ChannelStore;
   files: ChannelFiles;
+  views: ChannelViews;
   /** stops the store handing finalised messages to this engine */
   unsubscribe: Unsubscribe;
   owner: ChannelsRuntimeOwner;
@@ -119,6 +109,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
 
   const store = compose<ChannelStore>(new FileChannelStore(home), (p) => p.store);
   const files = compose<ChannelFiles>(new FileChannelFiles(home), (p) => p.files);
+  const views = compose<ChannelViews>(new FileChannelViews(home), (p) => p.views);
   const router = compose<MessageRouter>(new MentionRouter(), (p) => p.router);
   const renderer = compose<PromptRenderer>(defaultPromptRenderer, (p) => p.renderer);
   const sendChannelDelivery = createChannelDeliverySender({
@@ -242,7 +233,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     )
   });
     const unsubscribe = store.onFinalized((incoming) => engine.handleMessage(incoming));
-    runtime = { home, engine, store, files, unsubscribe, owner };
+    runtime = { home, engine, store, files, views, unsubscribe, owner };
     return runtime;
   } catch (error) {
     owner.release();
@@ -456,7 +447,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
   if (!url.pathname.startsWith('/api/channels/')) {
     return false;
   }
-  const { home, engine, store, files } = initChannelsRuntime();
+  const { home, engine, store, files, views } = initChannelsRuntime();
 
   try {
     if (req.method === 'GET' && url.pathname === '/api/channels/state') {
@@ -570,7 +561,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     }
 
     if (req.method === 'GET' && url.pathname === '/api/channels/reactions') {
-      sendJson(res, 200, { items: listReactions(home) });
+      sendJson(res, 200, { items: store.listReactions() });
       return true;
     }
 
@@ -584,23 +575,23 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         kind: requireReactionKind(body.kind)
       };
       if (action === 'add') {
-        addReaction(home, {
+        store.addReaction({
           ...input,
           author: typeof body.author === 'string' ? body.author : undefined
         });
       } else if (action === 'remove') {
-        removeReaction(home, input);
+        store.removeReaction(input);
       } else if (action === 'clear') {
-        clearReactionsForMessage(home, input.channel, input.file, input.id);
+        store.clearReactions(input.channel, input.file, input.id);
       } else {
         throw new Error(`unknown reactions action: ${action}`);
       }
-      sendJson(res, 200, { ok: true, items: listReactions(home) });
+      sendJson(res, 200, { ok: true, items: store.listReactions() });
       return true;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/channels/views') {
-      sendJson(res, 200, { items: listViews(home) });
+      sendJson(res, 200, { items: views.list() });
       return true;
     }
 
@@ -608,16 +599,16 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const body = await readJsonBody(req);
       const action = typeof body.action === 'string' ? body.action : 'add';
       if (action === 'add') {
-        addView(home, {
+        views.add({
           name: requireString(body.name, 'name'),
           filter: optionalViewFilter(body.filter)
         });
       } else if (action === 'remove') {
-        removeView(home, requireString(body.name, 'name'));
+        views.remove(requireString(body.name, 'name'));
       } else {
         throw new Error(`unknown views action: ${action}`);
       }
-      sendJson(res, 200, { ok: true, items: listViews(home) });
+      sendJson(res, 200, { ok: true, items: views.list() });
       return true;
     }
 
@@ -669,7 +660,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     }
 
     if (req.method === 'GET' && url.pathname === '/api/channels/featured') {
-      sendJson(res, 200, { items: listFeaturedItems(home) });
+      sendJson(res, 200, { items: store.listFeatured() });
       return true;
     }
 
@@ -879,13 +870,13 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         tag: typeof body.tag === 'string' ? body.tag : undefined
       };
       if (action === 'remove') {
-        removeFeatured(home, input);
+        store.removeFeatured(input);
       } else if (action === 'add') {
-        addFeatured(home, input);
+        store.addFeatured(input);
       } else {
         throw new Error(`unknown featured action: ${action}`);
       }
-      sendJson(res, 200, { ok: true, items: listFeaturedItems(home) });
+      sendJson(res, 200, { ok: true, items: store.listFeatured() });
       return true;
     }
 
@@ -929,7 +920,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'GET' && url.pathname === '/api/channels/export') {
       const channel = requireChannel(url.searchParams.get('channel'));
       const thread = url.searchParams.get('thread');
-      const markdown = exportChannelToMarkdown(home, channel, thread ?? undefined);
+      const markdown = exportChannelToMarkdown(store, channel, thread ?? undefined);
       res.statusCode = 200;
       res.setHeader('content-type', 'text/markdown; charset=utf-8');
       res.setHeader('content-disposition', `attachment; filename="${channel}${thread ? `-thread-${thread}` : ''}.md"`);

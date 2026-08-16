@@ -1,10 +1,11 @@
-// The five things Channels is made of.
+// The six things Channels is made of.
 //
 // Channels does three jobs over two media and renders one surface, and until
 // these were named they were one file each other could reach into:
 //
 //   ChannelStore     where the conversation lives, and how a new one is noticed
 //   ChannelFiles     where attachments live — bytes, a different medium
+//   ChannelViews     saved view filters — operator preference, not channel data
 //   MessageRouter    who a message is for — pure, no I/O, no queue
 //   AgentDelivery    what reaches an agent: send, states, probe, submit
 //   PromptRenderer   what an agent sees
@@ -22,6 +23,9 @@ export { FileChannelStore } from './store/channelStore.js';
 
 export type { ChannelFiles, ChannelAttachment } from './store/channelFiles.js';
 export { FileChannelFiles } from './store/channelFiles.js';
+
+export type { ChannelViews } from './store/channelViews.js';
+export { FileChannelViews } from './store/channelViews.js';
 
 export type { MessageRouter, RouteInput, RoutingDecision, Recipient } from './routing/router.js';
 export { MentionRouter, threadParentIdFromFile } from './routing/router.js';

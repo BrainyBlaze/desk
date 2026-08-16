@@ -17,10 +17,13 @@ import {
   agentDelivery,
   defaultPromptRenderer,
   FileChannelFiles,
+  FileChannelStore,
+  FileChannelViews,
   MentionRouter,
   type AgentDelivery,
   type ChannelFiles,
   type ChannelStore,
+  type ChannelViews,
   type MessageRouter,
   type PromptRenderer,
   type Recipient
@@ -28,6 +31,7 @@ import {
 import type { ChannelsProviders } from '../src/server/plugin.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
+import type { SavedView } from '../src/server/channels/store/views.js';
 
 /** The same composition the Channels runtime performs over plugin providers. */
 function compose<T>(base: T, providers: ChannelsProviders[], pick: (p: ChannelsProviders) => ((base: T) => T) | undefined): T {
@@ -184,6 +188,55 @@ describe('Channels plugin providers', () => {
     expect(files.open('ops', 'virtual.txt')?.size).toBe(5);
     // Anything else still falls through to the stock implementation.
     expect(files.open('ops', 'absent.txt')).toBeUndefined();
+  });
+
+  it('carries reactions and stars with the store, so a replacement cannot leave half behind', () => {
+    const kept: string[] = [];
+    const store = compose<ChannelStore>(
+      new FileChannelStore(home),
+      [
+        {
+          store: (base) => ({
+            ...base,
+            addReaction: (input) => {
+              kept.push(`${input.channel}/${input.id}:${input.kind}`);
+              return base.addReaction(input);
+            },
+            // Answered entirely by the provider: nothing is read from disk.
+            listReactions: () => []
+          })
+        }
+      ],
+      (p) => p.store
+    );
+    store.addReaction({ channel: 'ops', file: 'root.md', id: 'msg-20260816-120000-abcd', kind: 'ack' });
+    expect(kept).toEqual(['ops/msg-20260816-120000-abcd:ack']);
+    expect(store.listReactions()).toEqual([]);
+  });
+
+  it('lets a views provider hold saved filters somewhere the store knows nothing about', () => {
+    const held: SavedView[] = [];
+    const views = compose<ChannelViews>(
+      new FileChannelViews(home),
+      [
+        {
+          views: () => ({
+            list: () => held,
+            add: (input) => {
+              const view = { name: input.name, filter: input.filter, created: '2026-08-16 12:00:00' };
+              held.push(view);
+              return view;
+            },
+            remove: () => false
+          })
+        }
+      ],
+      (p) => p.views
+    );
+    views.add({ name: 'mine', filter: { mentionsMe: true } });
+    expect(views.list().map((v) => v.name)).toEqual(['mine']);
+    // The stock store never saw it.
+    expect(new FileChannelViews(home).list()).toEqual([]);
   });
 
   it('accepts a store provider without the engine noticing which store it got', () => {

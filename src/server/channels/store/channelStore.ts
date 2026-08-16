@@ -12,6 +12,10 @@
 //     and prepare a filesystem path. That is how a FileChannelStore is built,
 //     not something a store does, and requiring it would mean every
 //     implementation has to have a home directory.
+//   - saved view filters. A `{name, filter}` never references a message, a
+//     channel or an author: it is operator preference, and requiring it here
+//     would make anyone writing a conversation backend also implement UI
+//     settings storage. See `ChannelViews`.
 //   - attachments. Bytes are a different medium from conversation, and the old
 //     `channelFilePath` handed a caller an absolute path to run its own
 //     `createReadStream` on — a store that is not a filesystem could not
@@ -52,6 +56,22 @@ import {
   type MessageSliceOpts,
   type MessageWindow
 } from './fileStore.js';
+import {
+  addReaction,
+  clearReactionsForMessage,
+  listReactions,
+  removeReaction,
+  type ReactionInput,
+  type ReactionRef
+} from './reactions.js';
+import {
+  addFeatured,
+  listFeaturedItems,
+  removeFeatured,
+  type FeaturedInput,
+  type FeaturedItem,
+  type FeaturedRef
+} from './featured.js';
 import type { ChannelMember, ChannelMessage } from '../protocol/format.js';
 
 export type Unsubscribe = () => void;
@@ -101,6 +121,23 @@ export interface ChannelStore {
     supervisor: boolean,
     maxIdleMinutes?: number
   ): ChannelMember | undefined;
+
+  // ---- annotations --------------------------------------------------------
+  //
+  // Reactions and stars are anchored to a message by (channel, file, id), so
+  // they are channel data: an implementation that moves conversations somewhere
+  // else must move these too, or half of a channel stays behind on local disk.
+  // They live on THIS interface rather than a sibling one precisely so that
+  // cannot be done by halves.
+
+  listReactions(): ReactionRef[];
+  addReaction(input: ReactionInput): ReactionRef;
+  removeReaction(ref: Pick<ReactionRef, 'channel' | 'file' | 'id' | 'kind'>): boolean;
+  clearReactions(channel: string, file: string, id: string): number;
+
+  listFeatured(): FeaturedItem[];
+  addFeatured(input: FeaturedInput): FeaturedRef;
+  removeFeatured(ref: Pick<FeaturedRef, 'channel' | 'file' | 'id'>): boolean;
 
   // ---- change notification ------------------------------------------------
 
@@ -199,6 +236,34 @@ export class FileChannelStore implements ChannelStore {
     maxIdleMinutes?: number
   ): ChannelMember | undefined {
     return updateMemberSupervisor(this.home, channel, name, supervisor, maxIdleMinutes);
+  }
+
+  listReactions(): ReactionRef[] {
+    return listReactions(this.home);
+  }
+
+  addReaction(input: ReactionInput): ReactionRef {
+    return addReaction(this.home, input);
+  }
+
+  removeReaction(ref: Pick<ReactionRef, 'channel' | 'file' | 'id' | 'kind'>): boolean {
+    return removeReaction(this.home, ref);
+  }
+
+  clearReactions(channel: string, file: string, id: string): number {
+    return clearReactionsForMessage(this.home, channel, file, id);
+  }
+
+  listFeatured(): FeaturedItem[] {
+    return listFeaturedItems(this.home);
+  }
+
+  addFeatured(input: FeaturedInput): FeaturedRef {
+    return addFeatured(this.home, input);
+  }
+
+  removeFeatured(ref: Pick<FeaturedRef, 'channel' | 'file' | 'id'>): boolean {
+    return removeFeatured(this.home, ref);
   }
 
   onFinalized(handler: (incoming: IncomingChannelMessage) => void): Unsubscribe {

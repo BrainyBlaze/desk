@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createChannel, appendMessage } from '../src/server/channels/store/fileStore.js';
-import { exportChannelToMarkdown } from '../src/server/channels/store/export.js';
+import { exportChannelToMarkdown } from '../src/server/channels/render/transcript.js';
+import { FileChannelStore } from '../src/server/channels/ports.js';
 
 describe('channelsExport', () => {
   let home: string;
@@ -21,7 +22,7 @@ describe('channelsExport', () => {
     await appendMessage(home, 'ops', { author: 'human', body: 'hello team' });
     await appendMessage(home, 'ops', { author: 'agent-a', body: 'starting work on **build**' });
 
-    const md = exportChannelToMarkdown(home, 'ops');
+    const md = exportChannelToMarkdown(new FileChannelStore(home), 'ops');
     expect(md).toContain('# #ops');
     expect(md).toContain('> ship the release');
     expect(md).toContain('_Exported:');
@@ -44,7 +45,7 @@ describe('channelsExport', () => {
       threadParentId: parent.message.id
     });
 
-    const md = exportChannelToMarkdown(home, 'ops', parent.message.id);
+    const md = exportChannelToMarkdown(new FileChannelStore(home), 'ops', parent.message.id);
     expect(md).toContain(`# Thread: ${parent.message.id}`);
     expect(md).toContain('1 replies');
     expect(md).toContain('## @agent-a ·');
@@ -52,11 +53,11 @@ describe('channelsExport', () => {
   });
 
   it('throws when the channel does not exist', () => {
-    expect(() => exportChannelToMarkdown(home, 'nonexistent')).toThrow(/not found/);
+    expect(() => exportChannelToMarkdown(new FileChannelStore(home), 'nonexistent')).toThrow(/not found/);
   });
 
   it('throws when the thread does not exist', () => {
     createChannel(home, 'ops', 'goal');
-    expect(() => exportChannelToMarkdown(home, 'ops', 'msg-nope')).toThrow(/not found/);
+    expect(() => exportChannelToMarkdown(new FileChannelStore(home), 'ops', 'msg-nope')).toThrow(/not found/);
   });
 });
