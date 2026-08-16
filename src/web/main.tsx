@@ -17,4 +17,3 @@ function requireRoot(): HTMLElement {
 }
 
 createRoot(requireRoot()).render(<App />);
-
