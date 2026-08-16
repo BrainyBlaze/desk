@@ -2,6 +2,7 @@
 // 14 frame types byte-exactly. Owns its LE byte primitives (ByteWriter /
 // ByteReader below); protocol-level validation surfaces as
 // BrowserProtocolError with a BpError code the server can echo in an ERROR frame.
+import type { MoorExitOutcome } from '../controlPlane/contract.js';
 import {
   BP_HEADER_LEN,
   BP_MAX_FRAME_BYTES,
@@ -9,6 +10,8 @@ import {
   BP_MAX_QUERY_BYTES,
   BP_VERSION,
   BpError,
+  BpExitKind,
+  BpExitMethod,
   BpFrameType
 } from './frames.js';
 
@@ -226,9 +229,14 @@ export interface Gap {
 export interface Exit {
   type: BpFrameType.EXIT;
   channelId: number;
-  /** i32 exit code (-1 when signal-terminated). */
-  code: number;
-  signal: number;
+  /**
+   * The holder's ending exactly as moor reported it — the durable record's own
+   * tagged type, carried whole: u8 BpExitKind, then exited -> u32 code + u8
+   * method; signalled -> u32 signal + u8 method; unknown -> nothing. An
+   * unprovable ending crosses this wire as `unknown`; the frame never folds it
+   * into a number.
+   */
+  outcome: MoorExitOutcome;
 }
 export interface Heartbeat {
   type: BpFrameType.HEARTBEAT;
@@ -311,7 +319,8 @@ export function encodeBpFrame(f: BpFrame): Uint8Array {
       w.u32(f.channelId).u64(f.from).u64(f.to);
       break;
     case BpFrameType.EXIT:
-      w.u32(f.channelId).u32(f.code >>> 0).u16(f.signal);
+      w.u32(f.channelId);
+      encodeExitOutcome(w, f.outcome);
       break;
     case BpFrameType.HEARTBEAT:
       break;
@@ -392,8 +401,10 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
     }
     case BpFrameType.GAP:
       return { type, channelId: r.u32(), from: r.u64(), to: r.u64() };
-    case BpFrameType.EXIT:
-      return { type, channelId: r.u32(), code: r.u32() | 0, signal: r.u16() };
+    case BpFrameType.EXIT: {
+      const channelId = r.u32();
+      return { type, channelId, outcome: decodeExitOutcome(r) };
+    }
     case BpFrameType.HEARTBEAT:
       return { type };
     case BpFrameType.ERROR:
@@ -408,5 +419,82 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
     }
     default:
       throw new BrowserProtocolError(BpError.UNKNOWN_TYPE, `type ${type}`);
+  }
+}
+
+// ---- EXIT outcome (tag + per-kind payload) -----------------------------------
+/**
+ * moor states `code` and `signal` as u32. A value outside that range is a
+ * caller bug and is refused — silently wrapping it would put a DIFFERENT
+ * number on the wire, which is the one thing this frame must never do. (POSIX
+ * exit codes are 0..255 and signals small positives; the u32 bound is the
+ * defensive outer edge, not an invitation to a wider value.)
+ */
+function checkU32(v: number, what: string): number {
+  if (!Number.isInteger(v) || v < 0 || v > 0xffff_ffff) {
+    throw new BrowserProtocolError(BpError.INTERNAL, `${what} ${v} is not a u32`);
+  }
+  return v;
+}
+
+function methodByte(method: 'none' | 'graceful' | 'forced'): number {
+  switch (method) {
+    case 'none':
+      return BpExitMethod.NONE;
+    case 'graceful':
+      return BpExitMethod.GRACEFUL;
+    case 'forced':
+      return BpExitMethod.FORCED;
+  }
+}
+
+function encodeExitOutcome(w: ByteWriter, outcome: MoorExitOutcome): void {
+  switch (outcome.kind) {
+    case 'exited':
+      w.u8(BpExitKind.EXITED).u32(checkU32(outcome.code, 'exit code')).u8(methodByte(outcome.method));
+      break;
+    case 'signalled':
+      w.u8(BpExitKind.SIGNALLED).u32(checkU32(outcome.signal, 'exit signal')).u8(methodByte(outcome.method));
+      break;
+    case 'unknown':
+      w.u8(BpExitKind.UNKNOWN);
+      break;
+    default: {
+      const _exhaustive: never = outcome;
+      throw new BrowserProtocolError(BpError.INTERNAL, `exit kind ${(_exhaustive as { kind: string }).kind}`);
+    }
+  }
+}
+
+/**
+ * A method byte the decoder does not know is refused, never defaulted onto
+ * `none` — mapping an unknown method onto "the child ended on its own" would
+ * fabricate the holder-intent axis the tag exists to preserve.
+ */
+function decodeMethod(byte: number): 'none' | 'graceful' | 'forced' {
+  switch (byte) {
+    case BpExitMethod.NONE:
+      return 'none';
+    case BpExitMethod.GRACEFUL:
+      return 'graceful';
+    case BpExitMethod.FORCED:
+      return 'forced';
+    default:
+      throw new BrowserProtocolError(BpError.UNKNOWN_TYPE, `exit method ${byte}`);
+  }
+}
+
+/** A tag the decoder does not know is refused, never mapped onto some ending. */
+function decodeExitOutcome(r: ByteReader): MoorExitOutcome {
+  const kind = r.u8();
+  switch (kind) {
+    case BpExitKind.EXITED:
+      return { kind: 'exited', code: r.u32(), method: decodeMethod(r.u8()) };
+    case BpExitKind.SIGNALLED:
+      return { kind: 'signalled', signal: r.u32(), method: decodeMethod(r.u8()) };
+    case BpExitKind.UNKNOWN:
+      return { kind: 'unknown' };
+    default:
+      throw new BrowserProtocolError(BpError.UNKNOWN_TYPE, `exit kind ${kind}`);
   }
 }

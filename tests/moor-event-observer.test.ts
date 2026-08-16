@@ -172,7 +172,7 @@ describe('MoorEventObserver', () => {
     });
   });
 
-  it('projects a signalled exit to 128+signal independently of method', async () => {
+  it('emits a signalled exit as the tagged outcome alone -- no folded number rides along (desk#70)', async () => {
     for (const method of ['none', 'graceful', 'forced'] as const) {
       const root = await makeStore();
       const body = eventBody([
@@ -196,9 +196,10 @@ describe('MoorEventObserver', () => {
       await startObserver(root, handlers);
       expect(seen[1]!.event).toMatchObject({
         type: 'exit',
-        code: 143,
         outcome: { kind: 'signalled', signal: 15, method }
       });
+      // The observer attaches no numeric view; the durable model derives its own.
+      expect(seen[1]!.event).not.toHaveProperty('code');
     }
   });
 

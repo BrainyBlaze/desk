@@ -419,16 +419,11 @@ export class DaemonCore {
    * be strengthened by the holder's real exit long after its runtime is gone;
    * that correction belongs in the durable record, not on a wire whose surfaces
    * were already torn down. The lookup makes it a no-op rather than relying on
-   * callers to remember, and the number itself is a compatibility view derived
-   * at this boundary — never the durable truth.
+   * callers to remember. The outcome crosses this boundary as-is: the same
+   * tagged value the durable record persists, `unknown` included.
    */
-  emitExit(
-    sessionId: string,
-    code: number,
-    outputEnd: bigint,
-    signal = 0
-  ): void | Promise<void> {
-    return this.sessions.get(sessionId)?.runtime.emitExit(code, outputEnd, signal);
+  emitExit(sessionId: string, outcome: MoorExitOutcome, outputEnd: bigint): void | Promise<void> {
+    return this.sessions.get(sessionId)?.runtime.emitExit(outcome, outputEnd);
   }
 
   /**
