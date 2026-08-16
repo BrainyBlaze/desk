@@ -3374,6 +3374,7 @@ select {
 .gitRef-branch { border-color: var(--desk-accent); color: var(--desk-accent); }
 .gitRef-remote { border-color: var(--desk-line-strong); color: var(--desk-text-dim); }
 .gitRef-tag { border-color: #ffd166; color: #ffd166; }
+.gitRef-other { border-color: var(--desk-line-strong); color: var(--desk-text-dim); font-style: italic; }
 .gitCommitFiles {
   margin: 0 8px 6px 22px; padding: 2px 0;
   border-left: 1px solid var(--desk-line);

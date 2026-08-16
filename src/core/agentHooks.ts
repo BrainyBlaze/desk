@@ -399,16 +399,16 @@ process.stdin.on('end', async () => {
     return idx >= 0 ? args[idx + 1] : undefined;
   };
   const hook = arg('--event') || '';
-  // The ARGUMENT wins over the environment, not the other way round. Desk
-  // writes the --agent flag into the hook command at install time, so it
-  // states which provider this specific hook belongs to; DESK_AGENT is
-  // ambient and describes whatever session happens to surround the process.
-  // Letting the ambient value outrank the explicit one mislabels the producer
-  // of any hook that fires under a different session's environment — a
-  // nested shell, a spawned helper — and a mislabelled producer is worse than
-  // a silent one, because it is accepted as evidence about the wrong agent.
-  // The env stays as a FALLBACK for a hand-written hook that names no agent.
-  deskUseProvider(arg('--agent') || process.env.DESK_AGENT || '');
+  // The ARGUMENT is the only source of the provider. Desk writes the --agent
+  // flag into the hook command at install time, so it states which provider
+  // this specific hook belongs to; DESK_AGENT is ambient and describes
+  // whatever session happens to surround the process. Reading it — even as
+  // a fallback for a hand-written hook that names no agent — mislabels the
+  // producer of any hook that fires under a different session's environment
+  // (a nested shell, a spawned helper), and a mislabelled producer is worse
+  // than a silent one, because it is accepted as evidence about the wrong
+  // agent. An agent-less hook is therefore unattributed and stays silent.
+  deskUseProvider(arg('--agent') || '');
   if (!hook) {
     finish(hook);
     return;
@@ -594,7 +594,7 @@ type JsonObjectRead =
 
 /** Read a JSON object, distinguishing a missing file (safe to create fresh)
  *  from one that exists but does not parse to an object (must NOT be
- *  overwritten). Unlike readJsonFileOr, which collapses both to the fallback. */
+ *  overwritten) — a degrade-to-fallback reader would collapse both to the fallback. */
 function readJsonObjectClassified(path: string): JsonObjectRead {
   if (!existsSync(path)) {
     return { kind: 'missing' };

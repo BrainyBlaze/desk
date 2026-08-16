@@ -28,6 +28,26 @@ describe('desk config', () => {
     expect(resolveDefaultManifestPath({ homeDir: `${HOME}` })).toBe(`${HOME}/.config/desk/desk.yml`);
   });
 
+  it('refuses a resume id on a session that names no agent instead of presuming codex', () => {
+    // A draft with neither `agent` nor `command` is launched as a plain shell.
+    // Validating its resume id against codex's grammar — and binding it
+    // exclusively — was a fossil of codex-as-the-default-agent acted on as
+    // fact: the shell will never resume anything, so the only honest answer
+    // is the same refusal a `command` session already gets.
+    const manifest = createEmptyManifest();
+    expect(() =>
+      addSessionToManifest(manifest, {
+        groupId: 'research',
+        groupLabel: 'Research',
+        session: {
+          name: 'plain-shell',
+          cwd: '~/projects/sample',
+          resume: '00000000-0000-7000-8000-000000000000'
+        }
+      })
+    ).toThrow(/resume id requires a managed provider session/);
+  });
+
   it('adds sessions to groups in manifest data', () => {
     const manifest = createEmptyManifest();
     const updated = addSessionToManifest(manifest, {

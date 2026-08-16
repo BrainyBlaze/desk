@@ -43,30 +43,56 @@ export function formatStorage(usedBytes: number | undefined, totalBytes: number 
 }
 
 /** Append a sample to a fixed-window history ring (mutates in place). */
-export function pushSparkSample(samples: number[], value: number, window = 60): void {
-  samples.push(Number.isFinite(value) ? Math.max(0, value) : 0);
+/**
+ * One sparkline tick: a measured value, or `undefined` for a tick that was
+ * NOT measured (first tick without a delta baseline, an unreadable /proc, a
+ * probe that failed). The gap is carried, never invented as zero — a zero is
+ * a measurement, and drawing one for an unmeasured tick puts a confident
+ * trough on screen next to a tile that honestly says 'init'.
+ */
+export type SparkSample = number | undefined;
+
+export function pushSparkSample(samples: SparkSample[], value: SparkSample, window = 60): void {
+  // A non-finite or negative reading is a broken measurement, not a small
+  // one: it enters the buffer as a gap.
+  samples.push(value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined);
   if (samples.length > window) {
     samples.splice(0, samples.length - window);
   }
 }
 
 /**
- * SVG polyline points for a 100x24 viewBox. The scale ceiling is the larger
- * of floorMax and the window peak, so percent series stay 0-100 anchored
- * while rate series (network) autoscale to their own recent peak.
+ * SVG path data (`d`) for a 100x24 viewBox: one polyline per measured run,
+ * with gaps (unmeasured ticks) left BLANK — a new `M` starts each run, so the
+ * renderer neither bridges nor plots the span nobody measured. The scale
+ * ceiling is the larger of floorMax and the window peak, so percent series
+ * stay 0-100 anchored while rate series (network) autoscale to their own
+ * recent peak.
  */
-export function sparklinePoints(samples: number[], floorMax: number): string {
+export function sparklinePath(samples: SparkSample[], floorMax: number): string {
   if (samples.length < 2) {
     return '';
   }
-  const top = Math.max(floorMax, ...samples) || 1;
-  return samples
-    .map((value, index) => {
-      const x = ((index / (samples.length - 1)) * 100).toFixed(1);
-      const y = (23 - (Math.min(value, top) / top) * 22).toFixed(1);
-      return `${x},${y}`;
-    })
-    .join(' ');
+  const measured = samples.filter((value): value is number => value !== undefined);
+  if (measured.length === 0) {
+    return '';
+  }
+  const top = Math.max(floorMax, ...measured) || 1;
+  // Every sample, gap or not, keeps its x slot so time stays linear across
+  // the window; a run of measured samples is one M…L… subpath.
+  const parts: string[] = [];
+  let inRun = false;
+  samples.forEach((value, index) => {
+    if (value === undefined) {
+      inRun = false;
+      return;
+    }
+    const x = ((index / (samples.length - 1)) * 100).toFixed(1);
+    const y = (23 - (Math.min(value, top) / top) * 22).toFixed(1);
+    parts.push(`${inRun ? 'L' : 'M'}${x},${y}`);
+    inRun = true;
+  });
+  return parts.join(' ');
 }
 
 export function formatUptime(seconds: number): string {

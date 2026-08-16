@@ -704,9 +704,12 @@ function materializeAddedSession(manifest: DeskManifest, draft: DeskSessionDraft
 function managedProviderFor(
   session: Pick<DeskSessionDraft, 'agent' | 'command'>
 ): ProviderSessionProvider | undefined {
-  if (session.command !== undefined) return undefined;
-  const provider = session.agent ?? 'codex';
-  return isProviderSessionProvider(provider) ? provider : undefined;
+  // A session with a command, or with no agent at all, launches as a plain
+  // shell (see manifest.ts): it is managed by no provider and can resume
+  // nothing. Presuming codex here was a fossil of codex-as-the-default-agent
+  // acted on as fact.
+  if (session.command !== undefined || session.agent === undefined) return undefined;
+  return isProviderSessionProvider(session.agent) ? session.agent : undefined;
 }
 
 function cwdMatches(candidate: string, target: string): boolean {

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -14,17 +14,3 @@ export function writeTextFileAtomic(path: string, content: string): void {
   renameSync(tmp, path);
 }
 
-// Read + parse JSON, returning `fallback` for a missing file, unreadable file, or
-// malformed/non-object JSON — so a hand-edited config with a typo degrades to the
-// fallback instead of throwing and aborting the caller.
-export function readJsonFileOr<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) {
-    return fallback;
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}

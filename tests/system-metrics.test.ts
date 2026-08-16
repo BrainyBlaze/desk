@@ -30,6 +30,16 @@ MemAvailable:    250000 kB
     });
   });
 
+  it('reports memory as unmeasured when meminfo lacks its load-bearing fields, never as zero', () => {
+    // An empty or foreign meminfo (non-Linux, a container quirk) used to
+    // yield {totalBytes: 0, usedPercent: 0} in NON-optional fields — a
+    // measurement nobody took. Now it is simply absent, like CPU usage on a
+    // tick with no delta baseline.
+    expect(parseMemInfo('')).toBeUndefined();
+    expect(parseMemInfo('MemTotal:       1000000 kB\n')).toBeUndefined();
+    expect(parseMemInfo('MemFree:        1000000 kB\nMemAvailable:    250000 kB\n')).toBeUndefined();
+  });
+
   it('sums active network interface counters', () => {
     expect(
       parseNetDev(`

@@ -193,11 +193,12 @@ export type FileOpApplyResult =
   | { ok: true; operation: FileOperationDescriptor; path: string; changedFiles: string[]; resourceOps: LspFileResourceOperation[] }
   | { ok: false; error: string; reason?: string; affectedPaths?: string[] };
 
-// Back-compat aliases for the single-file rename call sites.
-export type RenamePreviewResult = FileOpPreviewResult;
-export type RenameApplyResult = FileOpApplyResult;
-
-/** Coerce a parsed preview/apply result so `resourceOps` is always an array (older/text-only previews omit it). */
+/**
+ * Coerce a parsed preview/apply result so `resourceOps` is always an array.
+ * This is load-bearing today, not compatibility with anything older: the
+ * CURRENT server omits `resourceOps` entirely when a text-only edit produced
+ * none (see lspWorkspaceEdit's empty-array elision).
+ */
 function normalizeResourceOps<T extends { ok: boolean }>(result: T): T {
   const record = result as { ok: boolean; resourceOps?: unknown };
   if (record.ok && !Array.isArray(record.resourceOps)) {

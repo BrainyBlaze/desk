@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   DESK_EVENT_SCHEMA_VERSION,
@@ -15,6 +15,14 @@ import {
   type DeskEventGateway,
   type SystemRoutesOptions
 } from '../../src/server/routes/systemRoutes.js';
+import { startSystemSampling, stopSystemSampling } from '../../src/server/systemSampler.js';
+
+// The routes serve the background sampler's cached snapshot and REFUSE when
+// it was never started (a hidden one-off collect would make the route appear
+// to work in a process where nothing is sampling). Production starts it in
+// installDeskRuntime before any route can serve; the test does the same.
+beforeAll(() => startSystemSampling(60_000));
+afterAll(() => stopSystemSampling());
 
 interface Captured {
   handled: boolean;
