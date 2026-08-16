@@ -111,7 +111,9 @@ export function installDeskRuntime({ host, services, plugins, disposers, channel
   disposers.add(stopSystemSampling);
   initChannelsRuntime({
     agentSurfaceBroker: services.agentSurfaceBroker,
-    owner: channelsOwner
+    owner: channelsOwner,
+    // Plugin order is provider order: each wraps the previous result.
+    providers: plugins.map((plugin) => plugin.channels).filter((entry) => entry !== undefined)
   });
   disposers.add(disposeChannelsRuntime);
 }

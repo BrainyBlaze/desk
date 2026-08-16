@@ -11,6 +11,10 @@ import type { ChannelMessageDeskEventInput } from '../../shared/controlPlane/ind
 import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.js';
 import { ChannelsEngine } from './delivery/engine.js';
 import { FileChannelStore, type ChannelStore, type Unsubscribe } from './store/channelStore.js';
+import { MentionRouter, type MessageRouter } from './routing/router.js';
+import { defaultPromptRenderer, type PromptRenderer } from './render/prompts.js';
+import { agentDelivery, type AgentDelivery } from './delivery/transport.js';
+import type { ChannelsProviders } from '../plugin.js';
 import { buildOnboardingPrompt } from './render/prompts.js';
 import {
   claimDelivering,
@@ -99,6 +103,12 @@ let runtime: ChannelsRuntime | undefined;
 
 export interface ChannelsRuntimeOptions {
   home?: string;
+  /**
+   * Channels providers contributed by plugins, in plugin order. Each wraps the
+   * result of the previous, so several embedders compose instead of the last
+   * one winning.
+   */
+  providers?: ChannelsProviders[];
   agentSurfaceBroker?: ChannelDeliveryBroker;
   channelEventPublisher?: ChannelEventPublisher;
   owner?: ChannelsRuntimeOwner;
@@ -125,7 +135,13 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   // transport (Track B: the legacy transport is gone). The uiMode=native broker path is
   // unchanged.
   const nativeTransport = createNativeChannelsTransport();
-  const store: ChannelStore = new FileChannelStore(home);
+  const providers = options.providers ?? [];
+  const compose = <T,>(base: T, pick: (p: ChannelsProviders) => ((base: T) => T) | undefined): T =>
+    providers.reduce((current, provider) => pick(provider)?.(current) ?? current, base);
+
+  const store = compose<ChannelStore>(new FileChannelStore(home), (p) => p.store);
+  const router = compose<MessageRouter>(new MentionRouter(), (p) => p.router);
+  const renderer = compose<PromptRenderer>(defaultPromptRenderer, (p) => p.renderer);
   const sendChannelDelivery = createChannelDeliverySender({
     agentSurfaceBroker: options.agentSurfaceBroker,
     terminalSender: nativeTransport.sendText,
@@ -234,7 +250,18 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     readAgentStates: readAgentStatePulse,
     capturePane: nativeTransport.capturePane,
     sendEnter: nativeTransport.sendEnter,
-    store
+    store,
+    router,
+    renderer,
+    delivery: compose<AgentDelivery>(
+      agentDelivery({
+        sendText: sendChannelDelivery,
+        capturePane: nativeTransport.capturePane,
+        sendEnter: nativeTransport.sendEnter,
+        readAgentStates: readAgentStatePulse
+      }),
+      (p) => p.delivery
+    )
   });
     const unsubscribe = store.onFinalized((incoming) => engine.handleMessage(incoming));
     runtime = { home, engine, store, unsubscribe, owner };

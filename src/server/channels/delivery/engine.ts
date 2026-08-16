@@ -129,6 +129,12 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  /**
+   * The composed transport. When absent it is built from the primitives above,
+   * which is how the runtime and every test supply one; an embedder that wraps
+   * delivery passes the wrapped port here and the primitives are unused.
+   */
+  delivery?: AgentDelivery;
   /** Renders what an agent sees. Defaults to the stock prompts. */
   renderer?: PromptRenderer;
   /** Where conversations are read from. Defaults to the filesystem store. */
@@ -232,7 +238,7 @@ export class ChannelsEngine {
   /** queue metadata retained after delivery shift so async submit-state events can be attributed */
   private readonly deliveryEventContext = new Map<string, DeliveryEventContext>();
   constructor(private readonly options: ChannelsEngineOptions) {
-    this.delivery = agentDelivery({
+    this.delivery = options.delivery ?? agentDelivery({
       sendText: options.sendText,
       capturePane: options.capturePane,
       sendEnter: options.sendEnter,
