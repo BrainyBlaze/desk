@@ -12,7 +12,6 @@ import {
 import { join } from 'node:path';
 
 import { type ChannelMember, type ChannelMessage } from '../protocol/format.js';
-import { mentionsHuman, resolveTargets } from '../protocol/routing.js';
 import { isShellAgent, type LifecycleState, type DeliveryStatus, type ChannelActivityEvent, type SessionResumeInfo, type SubmitState, type DeliveryBlockReason, type QueuedPrompt, type QueuedItemMeta, type BlockedItemMeta, type SessionDiagnostic } from '../protocol/delivery.js';
 import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from '../store/fileStore.js';
 import {
@@ -39,6 +38,7 @@ import {
   type CanonicalAgentView
 } from './strategy.js';
 import { readAgentStatePulse } from '../../agentStatePulse.js';
+import { MentionRouter, type MessageRouter } from '../routing/router.js';
 import {
   buildDigestPrompt,
   buildOnboardingPrompt,
@@ -59,11 +59,11 @@ import {
  * Queues survive server restarts via _engine/queue/<sessionId>/<seq>.json files.
  */
 
-// MemberDeliveryState / PaneState / SubmitState / DeliveryBlockReason /
-// QueuedItemMeta / SessionDiagnostic are DEFINED in protocol/format.ts now —
-// one source shared with the web client (channelsClient re-exports the same
-// definitions). Imported above for local use and re-exported here so existing
-// server-side importers keep resolving against the engine module.
+// SubmitState / DeliveryBlockReason / QueuedItemMeta / SessionDiagnostic and
+// friends are DEFINED in protocol/delivery.ts — one source shared with the web
+// client (channelsClient re-exports the same definitions). Imported above for
+// local use and re-exported here so existing server-side importers keep
+// resolving against the engine module.
 export type {
   LifecycleState,
   DeliveryStatus,
@@ -131,6 +131,8 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  /** Decides who a message is for. Defaults to the stock @mention router. */
+  router?: MessageRouter;
   /** One canonical authority batch per Channels decision. */
   readAgentStates?: () => Promise<AgentStateBatch>;
   /** Clock used for working-lease validation and deterministic tests. */
@@ -142,9 +144,6 @@ const MAX_DELIVERED_MEMORY = 2000;
 /** Runaway-conversation backstop: a session's queue never grows past this. */
 const MAX_QUEUE_PER_SESSION = 50;
 
-function threadParentIdFromFile(file: string): string | undefined {
-  return /^thread-(msg-[A-Za-z0-9-]+)\.md$/.exec(file)?.[1];
-}
 const DELIVERY_SEND_TIMEOUT_MS = 30_000;
 const DELIVERY_CAPTURE_TIMEOUT_MS = 4_000;
 
@@ -155,7 +154,6 @@ function delay(ms: number): Promise<void> {
 function captureFingerprint(capture: string): string {
   return createHash('sha256').update(capture.slice(-16_384)).digest('hex');
 }
-
 
 interface MemberRuntime {
   sessionId: string;
@@ -240,6 +238,7 @@ export class ChannelsEngine {
   private readonly sessionInfo: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
   private readonly readAgentStates: () => Promise<AgentStateBatch>;
   private readonly now: () => number;
+  private readonly router: MessageRouter;
   private pumpTimer: NodeJS.Timeout | undefined;
   /** delivered (session:messageId) pairs — dispatch dedupe across all paths */
   private readonly delivered = new Set<string>();
@@ -259,6 +258,7 @@ export class ChannelsEngine {
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
     this.readAgentStates = options.readAgentStates ?? readAgentStatePulse;
     this.now = options.now ?? Date.now;
+    this.router = options.router ?? new MentionRouter();
     this.restorePausedSessions();
     this.restoreQueues();
     this.startPump(options.pumpIntervalMs ?? 2500);
@@ -713,7 +713,11 @@ export class ChannelsEngine {
     }
   }
 
-  /** Entry point for every finalised message (server appends + watcher finds). */
+  /**
+   * Entry point for every finalised message (server appends + watcher finds).
+   * Maps the router's decision onto this engine's queues; it does not decide
+   * who the message is for, and it never re-derives what the router answered.
+   */
   handleMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): void {
     if (this.disposed) {
       return;
@@ -723,33 +727,33 @@ export class ChannelsEngine {
     this.pushActivity({ kind: 'message', channel, file, messageId: message.id, author: message.author, preview });
 
     const members = membersOverride ?? listChannelMembers(this.options.home, channel);
+    const decision = this.router.route({
+      channel,
+      file,
+      message,
+      members,
+      threadAuthor: (parentId) => this.threadParentAuthor(channel, parentId)
+    });
+
     // The author just posted to this channel — record it so stuck-detection
     // knows they reported back on any in-flight prompt from this channel.
     const authorMember = members.find((member) => member.name === message.author);
-    const authorIsSupervisor = authorMember?.supervisor === true;
-    if (authorMember && !authorIsSupervisor && authorMember.type !== 'human') {
+    if (authorMember && !decision.authorIsSupervisor && authorMember.type !== 'human') {
       this.recordWorkerPost(channel, authorMember.name);
     }
 
-    const pingsHuman = message.author !== 'human' && mentionsHuman(message.body);
-    if (pingsHuman) {
+    if (decision.pingsOperator) {
       this.pushActivity({ kind: 'human-mention', channel, file, messageId: message.id, author: message.author, preview });
     }
-    this.options.onChannelMessage?.(channel, file, message, pingsHuman);
+    this.options.onChannelMessage?.(channel, file, message, decision.pingsOperator);
 
-    const threadParentId = threadParentIdFromFile(file);
-    const threadAuthor = threadParentId ? this.threadParentAuthor(channel, threadParentId) : undefined;
-    const authorSession = members.find((member) => member.name === message.author)?.sessionId;
-    for (const target of resolveTargets(message.author, message.body, members, { isThread: Boolean(threadParentId), threadAuthor })) {
-      if (!target.sessionId || target.sessionId === authorSession) {
-        continue;
-      }
+    for (const target of decision.recipients) {
       // Record that THIS channel handed target a prompt (only for non-supervisor
       // workers, and only when the AUTHOR is not a supervisor). Supervisor
       // messages don't count as "assigned work" — the supervisor decides on
       // its own when to re-nudge, so we don't want its own check-in question
       // to open a fresh check-in window for the same worker forever.
-      if (target.supervisor !== true && target.type !== 'human' && !authorIsSupervisor) {
+      if (target.supervisor !== true && target.type !== 'human' && !decision.authorIsSupervisor) {
         this.recordWorkerPrompt(channel, target.name);
       }
       const prompt = buildTurnPrompt({
