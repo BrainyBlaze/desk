@@ -86,7 +86,7 @@ async function installRestoredDirectoryMembershipRace(
   const actual = await vi.importActual<typeof import('node:fs/promises')>(
     'node:fs/promises'
   );
-  const canonicalDirectoryPath = await actual.realpath(directoryPath);
+  const expectedDirectory = await actual.stat(directoryPath, { bigint: true });
   const childName = path.basename(childPath);
   const state: DirectoryMembershipRaceState = {
     descriptorOpened: false,
@@ -96,13 +96,21 @@ async function installRestoredDirectoryMembershipRace(
 
   fsPromisesMocks.opendir.mockImplementation(async (openedPath, options) => {
     const directory = await actual.opendir(openedPath, options);
-    let canonicalOpenedPath: string;
+    // Recognize the directory under test by capability (dev+ino), not by a
+    // realpath string: production traverses the /dev/fd/N alias on Linux and the
+    // real directory path on macOS (the fdesc alias does not resolve there), yet
+    // both stat to the same inode. Inode identity is the platform-neutral seam.
+    let openedIdentity: BigIntStats;
     try {
-      canonicalOpenedPath = await actual.realpath(String(openedPath));
+      openedIdentity = await actual.stat(String(openedPath), { bigint: true });
     } catch {
       return directory;
     }
-    if (state.descriptorOpened || canonicalOpenedPath !== canonicalDirectoryPath) {
+    if (
+      state.descriptorOpened ||
+      openedIdentity.dev !== expectedDirectory.dev ||
+      openedIdentity.ino !== expectedDirectory.ino
+    ) {
       return directory;
     }
     state.descriptorOpened = true;

@@ -95,4 +95,4 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify macOS-sensitive Desk units on real Darwin /dev/fd semantics
-        run: npx vitest run tests/provider-session-evidence.test.ts tests/moor-generation-stores.test.ts tests/moor-generation-stores-alias-flags.test.ts
+        run: npx vitest run tests/provider-session-evidence.test.ts tests/provider-evidence-descriptor-alias-probe.test.ts tests/moor-generation-stores.test.ts tests/moor-generation-stores-alias-flags.test.ts
