@@ -77,13 +77,31 @@ describe('Channels runtime ownership', () => {
     expect(() => initChannelsRuntime({ home })).not.toThrow();
   }, 15_000);
 
-  it('fails directly when an obsolete ownership artifact reaches the runtime boundary', () => {
+  it('fails directly when an obsolete ownership artifact reaches the runtime boundary, naming the real remedy', () => {
     const engineDir = join(home, '_engine');
     mkdirSync(engineDir, { recursive: true });
-    writeFileSync(join(engineDir, 'engine.pid'), '123\n456\n');
+    const artifact = join(engineDir, 'engine.pid');
+    writeFileSync(artifact, '123\n456\n');
 
-    expect(() => initChannelsRuntime({ home })).toThrow(
-      /obsolete Channels ownership artifact/
-    );
+    // The refusal must tell the operator what to actually DO. The retired
+    // engine only removed this file on its crash-reclaim path — an orderly
+    // stop leaves it behind — and no installer or script touches it, so a
+    // remedy that points at "the installer" points at a mechanism that does
+    // not exist. The honest remedy is the file itself: stop every Desk
+    // server for this home, delete the artifact, restart. Nothing else reads
+    // it, and it carries no authority under the lease scheme.
+    let message = '';
+    try {
+      initChannelsRuntime({ home });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/obsolete Channels ownership artifact/);
+    expect(message).toMatch(/stop every Desk server for this home/i);
+    // The instruction itself must name the file to delete — not merely the
+    // "artifact at <path>" prefix, which would survive a remedy that forgot
+    // the path.
+    expect(message).toContain(`delete ${artifact}`);
+    expect(message).not.toMatch(/installer/);
   });
 });

@@ -180,6 +180,15 @@ configuration are active. Custom commands may require manual event integration.
 
 ## Channels
 
+### Desk refuses to start: "obsolete Channels ownership artifact at …/_engine/engine.pid"
+
+A Desk server older than the ownership lease ran against this channels home
+and left its pid record behind (that engine removed the file only when it
+recovered from a crash; an orderly stop kept it). The file carries no
+authority any more, and nothing removes it for you: stop every Desk server
+for this home (`pgrep -f desk-standalone` should print nothing), delete
+`~/.config/desk/channels/_engine/engine.pid`, then start Desk again.
+
 ### Agent did not receive a channel mention
 
 Open the channel delivery diagnostics console. Check whether the item is queued,
