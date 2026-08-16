@@ -40,7 +40,7 @@ import {
 } from './strategy.js';
 import { readAgentStatePulse } from '../../agentStatePulse.js';
 import { agentDelivery, type AgentDelivery } from './transport.js';
-import { MentionRouter, type MessageRouter } from '../routing/router.js';
+import { MentionRouter, threadParentIdFromFile, type MessageRouter } from '../routing/router.js';
 import { ChannelSupervision } from '../routing/supervision.js';
 import { defaultPromptRenderer, type PromptRenderer } from '../render/prompts.js';
 
@@ -216,6 +216,8 @@ export class ChannelsEngine {
   private readonly activity: ChannelActivityEvent[] = [];
   /** Per-channel record of work handed out and not yet reported back. */
   private readonly supervision = new ChannelSupervision();
+  /** Serialises dispatch so messages are handled in the order they arrive. */
+  private dispatchChain: Promise<void> = Promise.resolve();
   private activitySeq = 0;
   private queueSeq = 0;
   private disposed = false;
@@ -338,7 +340,7 @@ export class ChannelsEngine {
         this.resetHold(runtime);
       }
     }
-    this.checkSupervisorIdle(batch);
+    await this.checkSupervisorIdle(batch);
   }
 
   /** Every pump tick: for each channel with a supervisor member, look for
@@ -348,12 +350,12 @@ export class ChannelsEngine {
    *  outside this channel is invisible here (roles live per-channel, so
    *  supervision does too). If there is at least one stuck worker, ping the
    *  supervisor with names so it can nudge by @name instead of @channel. */
-  private checkSupervisorIdle(batch: AgentStateBatch): void {
+  private async checkSupervisorIdle(batch: AgentStateBatch): Promise<void> {
     const now = this.now();
     for (const channel of this.supervision.watched()) {
       let members: ChannelMember[];
       try {
-        members = this.store.listMembers(channel);
+        members = await this.store.listMembers(channel);
       } catch (error) {
         // R1: never drop a failure blind. A channel disappearing mid-pump
         // (destroy race) is expected; a broken manifest is not. Log both
@@ -679,11 +681,23 @@ export class ChannelsEngine {
   }
 
   /**
-   * Entry point for every finalised message (server appends + watcher finds).
-   * Maps the router's decision onto this engine's queues; it does not decide
-   * who the message is for, and it never re-derives what the router answered.
+   * Entry point for every finalised message (server appends + change feed).
+   *
+   * Dispatch is SERIALISED. Reading the roster and a thread's parent author is
+   * I/O, so two messages handed over back to back would otherwise interleave
+   * and land in the activity ring — and in an agent's digest — in whatever
+   * order their reads happened to finish. The change feed delivers a file's
+   * messages in file order, and that is the order a reader expects to see.
+   * Callers still get their own promise, with their own result and their own
+   * error; the chain only fixes the order they run in.
    */
-  handleMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): void {
+  handleMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): Promise<void> {
+    const next = this.dispatchChain.then(() => this.dispatchMessage(incoming, membersOverride));
+    this.dispatchChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async dispatchMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -691,13 +705,14 @@ export class ChannelsEngine {
     const preview = message.body.replace(/\s+/g, ' ').slice(0, 140);
     this.pushActivity({ kind: 'message', channel, file, messageId: message.id, author: message.author, preview });
 
-    const members = membersOverride ?? this.store.listMembers(channel);
+    const members = membersOverride ?? (await this.store.listMembers(channel));
+    const parentId = threadParentIdFromFile(file);
     const decision = this.router.route({
       channel,
       file,
       message,
       members,
-      threadAuthor: (parentId) => this.threadParentAuthor(channel, parentId)
+      threadAuthor: parentId === undefined ? undefined : await this.threadParentAuthor(channel, parentId)
     });
 
     // The author just posted to this channel — record it so stuck-detection
@@ -747,9 +762,9 @@ export class ChannelsEngine {
     }
   }
 
-  private threadParentAuthor(channel: string, parentId: string): string | undefined {
+  private async threadParentAuthor(channel: string, parentId: string): Promise<string | undefined> {
     try {
-      return this.store.readMessage(channel, parentId).author;
+      return (await this.store.readMessage(channel, parentId)).author;
     } catch {
       return undefined;
     }

@@ -67,7 +67,7 @@ describe('native-mode channel delivery', () => {
     });
 
     engine.pauseSession('tmux-a', 'hold before delivery');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-native-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-native-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
     await flush();
     expect(terminalSent).toEqual([]);
     expect(nativeSent).toEqual([]);
@@ -111,7 +111,7 @@ describe('native-mode channel delivery', () => {
     });
 
     engine.pauseSession('tmux-a', 'hold before delivery');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-terminal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-terminal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
     await flush();
 
     uiMode = 'terminal';
@@ -178,7 +178,7 @@ describe('native-mode channel delivery', () => {
       capturePane: async () => READY_PANE
     });
 
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fatal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fatal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
     await waitFor(async () => (await engine.lifecycleStates()).some((state) => state.sessionId === 'tmux-a' && state.pausedByOperator));
 
     expect(readdirSync(join(home, '_engine', 'queue', 'tmux-a'))).toEqual(['0000000001.json']);

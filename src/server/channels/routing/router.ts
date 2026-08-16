@@ -2,9 +2,9 @@
 //
 // The routing decision is a pure function of one message and the channel
 // roster: which members must be notified, whether the operator was addressed,
-// and the thread context that shaped the answer. It performs no I/O — a thread
-// reply needs its parent's author, so the caller supplies a lookup rather than
-// the router reaching for a store.
+// and the thread context that shaped the answer. It performs no I/O and is
+// synchronous — a thread reply needs its parent's author, and the caller
+// resolves that before asking, rather than the router reaching for a store.
 //
 // What it deliberately does NOT decide: how a recipient is reached, whether a
 // queue exists for them, or what text they will see. `handleMessage` maps the
@@ -23,10 +23,11 @@ export interface RouteInput {
   message: ChannelMessage;
   members: ChannelMember[];
   /**
-   * Author of the thread's root message. Called only when `file` names a
-   * thread, so a caller that never threads never pays for the lookup.
+   * Author of the thread's root message, when `file` names a thread. The caller
+   * resolves it — reading a message is I/O, and this module performs none.
+   * `threadParentIdFromFile` is exported so the caller knows whether to bother.
    */
-  threadAuthor?: (parentId: string) => string | undefined;
+  threadAuthor?: string;
 }
 
 export interface RoutingDecision {
@@ -68,11 +69,9 @@ export class MentionRouter implements MessageRouter {
     const authorSession = authorMember?.sessionId;
 
     const threadParentId = threadParentIdFromFile(file);
-    const threadAuthor = threadParentId ? input.threadAuthor?.(threadParentId) : undefined;
-
     const targets = resolveTargets(message.author, message.body, members, {
       isThread: Boolean(threadParentId),
-      threadAuthor
+      threadAuthor: threadParentId ? input.threadAuthor : undefined
     });
 
     const recipients = targets.filter(

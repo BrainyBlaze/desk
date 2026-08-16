@@ -158,7 +158,11 @@ Channels lives under `src/server/channels/` and is six replaceable parts:
 | `PromptRenderer` | what an agent sees |
 
 The contracts are stated in `ports.ts` and the subsystem is entered through
-`index.ts`. Each part is replaceable on its own: a plugin swaps one and the
+`index.ts`. Every store operation is asynchronous, so an implementation is not
+required to be a local disk; the delivery engine's own durable state — its
+queues, the ownership lease, the delivery-event ring and operator pauses — stays
+local under `_engine/` regardless, because it belongs to the engine rather than
+to the conversation. Each part is replaceable on its own: a plugin swaps one and the
 others do not notice (see [plugins](/security-plugin-model)), and a test
 supplies one without needing a filesystem for the rest.
 

@@ -33,9 +33,22 @@ import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
 import type { SavedView } from '../src/server/channels/store/views.js';
 
-/** The same composition the Channels runtime performs over plugin providers. */
-function compose<T>(base: T, providers: ChannelsProviders[], pick: (p: ChannelsProviders) => ((base: T) => T) | undefined): T {
-  return providers.reduce((current, provider) => pick(provider)?.(current) ?? current, base);
+/** The same lazy composition the Channels runtime performs over plugin providers. */
+function compose<T>(
+  make: () => T,
+  providers: ChannelsProviders[],
+  pick: (p: ChannelsProviders) => ((base: () => T) => T) | undefined
+): T {
+  let built: { value: T } | undefined;
+  let current: () => T = () => (built ??= { value: make() }).value;
+  for (const provider of providers) {
+    const wrap = pick(provider);
+    if (!wrap) continue;
+    const inner = current;
+    let made: { value: T } | undefined;
+    current = () => (made ??= { value: wrap(inner) }).value;
+  }
+  return current();
 }
 
 const members: ChannelMember[] = [
@@ -83,9 +96,9 @@ describe('Channels plugin providers', () => {
       sendEnter: async () => true,
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
-      delivery: compose<AgentDelivery>(baseDelivery(), providers, (p) => p.delivery),
-      router: compose<MessageRouter>(new MentionRouter(), providers, (p) => p.router),
-      renderer: compose<PromptRenderer>(defaultPromptRenderer, providers, (p) => p.renderer)
+      delivery: compose<AgentDelivery>(baseDelivery, providers, (p) => p.delivery),
+      router: compose<MessageRouter>(() => new MentionRouter(), providers, (p) => p.router),
+      renderer: compose<PromptRenderer>(() => defaultPromptRenderer, providers, (p) => p.renderer)
     });
     engines.push(engine);
     return engine;
@@ -98,15 +111,15 @@ describe('Channels plugin providers', () => {
     const engine = engineWith([
       {
         delivery: (base) => ({
-          ...base,
+          ...base(),
           send: (sessionId, text) => {
             seen.push(sessionId);
-            return base.send(sessionId, text);
+            return base().send(sessionId, text);
           }
         })
       }
     ]);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
     await flush();
     expect(seen).toEqual(['alpha-1']);
     expect(sent).toHaveLength(1);
@@ -116,15 +129,15 @@ describe('Channels plugin providers', () => {
     const order: string[] = [];
     const tag = (name: string): ChannelsProviders => ({
       delivery: (base) => ({
-        ...base,
+        ...base(),
         send: (sessionId, text) => {
           order.push(name);
-          return base.send(sessionId, text);
+          return base().send(sessionId, text);
         }
       })
     });
     const engine = engineWith([tag('first'), tag('second')]);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
     await flush();
     // The last provider wraps the outside, so it runs first and delegates inward.
     expect(order).toEqual(['second', 'first']);
@@ -135,14 +148,14 @@ describe('Channels plugin providers', () => {
       {
         router: (base) => ({
           route: (input) => {
-            const decision = base.route(input);
+            const decision = base().route(input);
             const beta = input.members.filter((m): m is Recipient => m.name === 'beta' && Boolean(m.sessionId));
             return { ...decision, recipients: beta };
           }
         })
       }
     ]);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
     await flush();
     expect(sent.map((entry) => entry.session)).toEqual(['beta-1']);
   });
@@ -150,17 +163,17 @@ describe('Channels plugin providers', () => {
   it('lets a renderer provider change what the agent sees', async () => {
     const engine = engineWith([
       {
-        renderer: (base) => ({ ...base, turn: (options) => `PREFIX\n${base.turn(options)}` })
+        renderer: (base) => ({ ...base(), turn: (options) => `PREFIX\n${base().turn(options)}` })
       }
     ]);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
     await flush();
     expect(sent[0]?.text.startsWith('PREFIX\n')).toBe(true);
   });
 
   it('is a no-op when a provider returns its argument', async () => {
-    const engine = engineWith([{ delivery: (base) => base, router: (base) => base, renderer: (base) => base }]);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
+    const engine = engineWith([{ delivery: (base) => base(), router: (base) => base(), renderer: (base) => base() }]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('@alpha go') }, members);
     await flush();
     expect(sent).toHaveLength(1);
     expect(sent[0]?.session).toBe('alpha-1');
@@ -170,15 +183,15 @@ describe('Channels plugin providers', () => {
   it('lets a files provider serve an attachment the filesystem does not hold', () => {
     const base = new FileChannelFiles(home);
     const files = compose<ChannelFiles>(
-      base,
+      () => base,
       [
         {
           files: (inner) => ({
-            ...inner,
+            ...inner(),
             open: (channel, name) =>
               name === 'virtual.txt'
                 ? { size: 5, open: () => Readable.from(['hello']) }
-                : inner.open(channel, name)
+                : inner().open(channel, name)
           })
         }
       ],
@@ -190,34 +203,34 @@ describe('Channels plugin providers', () => {
     expect(files.open('ops', 'absent.txt')).toBeUndefined();
   });
 
-  it('carries reactions and stars with the store, so a replacement cannot leave half behind', () => {
+  it('carries reactions and stars with the store, so a replacement cannot leave half behind', async () => {
     const kept: string[] = [];
     const store = compose<ChannelStore>(
-      new FileChannelStore(home),
+      () => new FileChannelStore(home),
       [
         {
           store: (base) => ({
-            ...base,
+            ...base(),
             addReaction: (input) => {
               kept.push(`${input.channel}/${input.id}:${input.kind}`);
-              return base.addReaction(input);
+              return base().addReaction(input);
             },
             // Answered entirely by the provider: nothing is read from disk.
-            listReactions: () => []
+            listReactions: async () => []
           })
         }
       ],
       (p) => p.store
     );
-    store.addReaction({ channel: 'ops', file: 'root.md', id: 'msg-20260816-120000-abcd', kind: 'ack' });
+    await store.addReaction({ channel: 'ops', file: 'root.md', id: 'msg-20260816-120000-abcd', kind: 'ack' });
     expect(kept).toEqual(['ops/msg-20260816-120000-abcd:ack']);
-    expect(store.listReactions()).toEqual([]);
+    expect(await store.listReactions()).toEqual([]);
   });
 
   it('lets a views provider hold saved filters somewhere the store knows nothing about', () => {
     const held: SavedView[] = [];
     const views = compose<ChannelViews>(
-      new FileChannelViews(home),
+      () => new FileChannelViews(home),
       [
         {
           views: () => ({
@@ -239,24 +252,65 @@ describe('Channels plugin providers', () => {
     expect(new FileChannelViews(home).list()).toEqual([]);
   });
 
-  it('accepts a store provider without the engine noticing which store it got', () => {
+  it('never builds the stock store when a provider replaces it outright', async () => {
+    let stockBuilt = 0;
+    const replacement = {
+      listMembers: async () => members,
+      readMessage: async () => message('parent')
+    } as unknown as ChannelStore;
+
+    const store = compose<ChannelStore>(
+      () => {
+        stockBuilt += 1;
+        return new FileChannelStore(home);
+      },
+      [{ store: () => replacement }],
+      (p) => p.store
+    );
+
+    // The factory was never called: a store that lives elsewhere does not get a
+    // filesystem one constructed underneath it first.
+    expect(stockBuilt).toBe(0);
+    expect(await store.listMembers('ops')).toEqual(members);
+  });
+
+  it('builds the stock store exactly once when a provider wraps it', async () => {
+    let stockBuilt = 0;
+    const store = compose<ChannelStore>(
+      () => {
+        stockBuilt += 1;
+        return new FileChannelStore(home);
+      },
+      [
+        // Two calls to base() inside one wrapper, plus a second wrapper: the
+        // factory is memoised, so all of them see the same instance.
+        { store: (base) => ({ ...base(), listMembers: (channel) => base().listMembers(channel) }) },
+        { store: (base) => base() }
+      ],
+      (p) => p.store
+    );
+    await store.listMembers('ops');
+    expect(stockBuilt).toBe(1);
+  });
+
+  it('accepts a store provider without the engine noticing which store it got', async () => {
     let asked = 0;
     const engine = engineWith([]);
     const wrapped: ChannelsProviders = {
       store: (base) => ({
-        ...base,
+        ...base(),
         listMembers: (channel) => {
           asked += 1;
-          return base.listMembers(channel);
+          return base().listMembers(channel);
         }
       })
     };
     const store = compose<ChannelStore>(
-      (engine as unknown as { store: ChannelStore }).store,
+      () => (engine as unknown as { store: ChannelStore }).store,
       [wrapped],
       (p) => p.store
     );
-    expect(store.listMembers('ops')).toEqual(expect.any(Array));
+    expect(await store.listMembers('ops')).toEqual(expect.any(Array));
     expect(asked).toBe(1);
   });
 });

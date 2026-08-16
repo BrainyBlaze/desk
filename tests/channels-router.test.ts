@@ -31,7 +31,7 @@ function route(author: string, body: string, file = 'root.md', threadAuthor?: st
     file,
     message: message(author, body),
     members: roster,
-    threadAuthor: () => threadAuthor
+    threadAuthor
   });
 }
 

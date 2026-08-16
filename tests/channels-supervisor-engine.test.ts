@@ -266,7 +266,7 @@ describe('checkSupervisorIdle measures silence on the injected clock', () => {
   });
 
   it('fires AT the stuck threshold on the injected clock and not one tick before', async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do the thing') },
       membersFixture()
     );
@@ -302,12 +302,12 @@ describe('checkSupervisorIdle measures silence on the injected clock', () => {
     // to the prompt that follows, so the worker still counts as stuck. This only
     // holds if the post stamp and the prompt stamp share the clock that measures
     // them — mixed sources make the earlier post look like the newer one.
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-post-1', 'agent-a', 'unrelated status from before') },
       membersFixture()
     );
     clock += 1_000;
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@agent-a do the thing') },
       membersFixture()
     );
@@ -380,7 +380,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     // handleMessage runs but the message is authored by a human with no mention,
     // so resolveTargets returns all agents and agent-a gets a prompt; then we
     // wipe the recorded activity to simulate "worker never got channel work".
-    engine.handleMessage(
+    await engine.handleMessage(
       // Addressed to the operator only: resolveTargets hands no agent a prompt,
       // so this channel has no open task to supervise.
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'agent-a', '@human idle chatter') },
@@ -391,7 +391,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   });
 
   it('fires ONE check-in when this channel handed the worker a prompt and they went silent past the threshold', async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do the thing') },
       membersFixture()
     );
@@ -408,12 +408,12 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   });
 
   it("does NOT fire a check-in when the worker already replied to this channel's prompt", async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do X') },
       membersFixture()
     );
     // agent-a posts back a reply — lastPostAt is updated to now.
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'agent-a', 'done, results: ...') },
       membersFixture()
     );
@@ -426,7 +426,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   });
 
   it('does NOT fire a check-in while the worker is currently busy on the task', async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do it') },
       membersFixture()
     );
@@ -440,7 +440,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   });
 
   it('does fire after a working lease expires because stale working projects as unknown', async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-expired-1', 'human', '@agent-a do it') },
       membersFixture()
     );
@@ -453,7 +453,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   });
 
   it("a supervisor's OWN message does NOT open a new check-in window", async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do X') },
       membersFixture()
     );
@@ -463,7 +463,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     expect(supervisionOf(engine).checkedIn('ops')).toBe(true);
 
     // Supervisor posts back — must NOT reset the guard.
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-supe-1', 'supe', '@agent-a status?') },
       membersFixture()
     );
@@ -473,7 +473,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
   });
 
   it('a new @agent-a prompt opens a fresh check-in window after the guard reset', async () => {
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do X') },
       membersFixture()
     );
@@ -482,7 +482,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(1);
 
     // A fresh prompt from the channel to agent-a → recordPrompt closes the window.
-    engine.handleMessage(
+    await engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@agent-a still stuck?') },
       membersFixture()
     );

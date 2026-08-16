@@ -53,28 +53,33 @@ export interface DeskPluginContext {
 /**
  * Replace or wrap parts of the Channels subsystem.
  *
- * Each provider receives the implementation Desk would otherwise use and
- * returns the one to use instead. Taking the base means a plugin can WRAP —
- * log every delivery, deny a route, mirror a store — without reimplementing
- * behaviour it does not care about, and it means several plugins compose:
- * providers are applied in plugin order, each wrapping the previous result.
+ * Each provider receives a FACTORY for the implementation Desk would otherwise
+ * use, and returns the one to use instead. A plugin that wraps calls the
+ * factory and delegates to it — log every delivery, mirror a store, prefix a
+ * prompt — without reimplementing behaviour it does not care about. A plugin
+ * that replaces outright never calls it, and Desk never builds the stock
+ * implementation: no channels home is created for a store that lives in a
+ * database, no watcher is started for a store that pushes its own changes.
  *
- * A plugin that returns its argument unchanged is a no-op, and a subsystem with
- * no providers behaves exactly as it always has.
+ * Providers apply in plugin order, each wrapping the previous result. The
+ * factory is memoised, so calling it twice yields the same instance.
+ *
+ * A plugin whose provider returns `base()` unchanged is a no-op, and a
+ * subsystem with no providers behaves exactly as it always has.
  */
 export interface ChannelsProviders {
   /** Where conversations live and how a finalised message is noticed. */
-  store?: (base: ChannelStore) => ChannelStore;
+  store?: (base: () => ChannelStore) => ChannelStore;
   /** Where attachments live. Separate from the store: bytes, not conversation. */
-  files?: (base: ChannelFiles) => ChannelFiles;
+  files?: (base: () => ChannelFiles) => ChannelFiles;
   /** Where saved view filters live. Operator preference, not channel data. */
-  views?: (base: ChannelViews) => ChannelViews;
+  views?: (base: () => ChannelViews) => ChannelViews;
   /** Who a message is for. Pure: given a message and a roster, name the recipients. */
-  router?: (base: MessageRouter) => MessageRouter;
+  router?: (base: () => MessageRouter) => MessageRouter;
   /** What reaches an agent: send, states, probe, submit. */
-  delivery?: (base: AgentDelivery) => AgentDelivery;
+  delivery?: (base: () => AgentDelivery) => AgentDelivery;
   /** What an agent sees: the turn prompt, the digest, the briefing, the check-in. */
-  renderer?: (base: PromptRenderer) => PromptRenderer;
+  renderer?: (base: () => PromptRenderer) => PromptRenderer;
 }
 
 export interface DeskPlugin {

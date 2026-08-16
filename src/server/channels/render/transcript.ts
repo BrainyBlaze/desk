@@ -14,18 +14,18 @@
 import type { ChannelStore } from '../store/channelStore.js';
 import type { ChannelMessage } from '../protocol/format.js';
 
-export function exportChannelToMarkdown(
+export async function exportChannelToMarkdown(
   store: ChannelStore,
   channel: string,
   threadParentId?: string
-): string {
+): Promise<string> {
   return threadParentId ? exportThread(store, channel, threadParentId) : exportRoot(store, channel);
 }
 
-function exportRoot(store: ChannelStore, channel: string): string {
+async function exportRoot(store: ChannelStore, channel: string): Promise<string> {
   // Throws when the channel does not exist, which is what the route reports.
-  const detail = store.readChannel(channel, { limit: 0 });
-  const { messages } = store.readMessages(channel, { limit: Number.MAX_SAFE_INTEGER });
+  const detail = await store.readChannel(channel, { limit: 0 });
+  const { messages } = await store.readMessages(channel, { limit: Number.MAX_SAFE_INTEGER });
   const lines: string[] = [`# #${channel}`, ''];
   if (detail.goal) {
     lines.push(`> ${detail.goal}`, '');
@@ -46,8 +46,8 @@ function exportRoot(store: ChannelStore, channel: string): string {
   return lines.join('\n');
 }
 
-function exportThread(store: ChannelStore, channel: string, parentId: string): string {
-  const messages = store.readThread(channel, parentId);
+async function exportThread(store: ChannelStore, channel: string, parentId: string): Promise<string> {
+  const messages = await store.readThread(channel, parentId);
   if (messages.length === 0) {
     throw new Error(`thread '${parentId}' not found in #${channel}`);
   }

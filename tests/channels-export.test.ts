@@ -22,7 +22,7 @@ describe('channelsExport', () => {
     await appendMessage(home, 'ops', { author: 'human', body: 'hello team' });
     await appendMessage(home, 'ops', { author: 'agent-a', body: 'starting work on **build**' });
 
-    const md = exportChannelToMarkdown(new FileChannelStore(home), 'ops');
+    const md = await exportChannelToMarkdown(new FileChannelStore(home), 'ops');
     expect(md).toContain('# #ops');
     expect(md).toContain('> ship the release');
     expect(md).toContain('_Exported:');
@@ -45,19 +45,19 @@ describe('channelsExport', () => {
       threadParentId: parent.message.id
     });
 
-    const md = exportChannelToMarkdown(new FileChannelStore(home), 'ops', parent.message.id);
+    const md = await exportChannelToMarkdown(new FileChannelStore(home), 'ops', parent.message.id);
     expect(md).toContain(`# Thread: ${parent.message.id}`);
     expect(md).toContain('1 replies');
     expect(md).toContain('## @agent-a ·');
     expect(md).toContain('reply in thread');
   });
 
-  it('throws when the channel does not exist', () => {
-    expect(() => exportChannelToMarkdown(new FileChannelStore(home), 'nonexistent')).toThrow(/not found/);
+  it('rejects when the channel does not exist', async () => {
+    await expect(exportChannelToMarkdown(new FileChannelStore(home), 'nonexistent')).rejects.toThrow(/not found/);
   });
 
-  it('throws when the thread does not exist', () => {
+  it('rejects when the thread does not exist', async () => {
     createChannel(home, 'ops', 'goal');
-    expect(() => exportChannelToMarkdown(new FileChannelStore(home), 'ops', 'msg-nope')).toThrow(/not found/);
+    await expect(exportChannelToMarkdown(new FileChannelStore(home), 'ops', 'msg-nope')).rejects.toThrow(/not found/);
   });
 });

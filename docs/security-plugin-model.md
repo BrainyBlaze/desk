@@ -84,19 +84,19 @@ A plugin can provide:
 
 ### Channels providers
 
-`channels` takes one provider per Channels port. Each receives the
-implementation Desk would otherwise use and returns the one to use instead, so a
-plugin can wrap rather than reimplement:
+`channels` takes one provider per Channels port. Each receives a **factory** for
+the implementation Desk would otherwise use and returns the one to use instead,
+so a plugin can wrap rather than reimplement:
 
 ```js
 export default {
   name: "delivery-audit",
   channels: {
     delivery: (base) => ({
-      ...base,
+      ...base(),
       async send(sessionId, text) {
         auditLog(sessionId, text.length);
-        return base.send(sessionId, text);
+        return base().send(sessionId, text);
       }
     })
   }
@@ -106,9 +106,16 @@ export default {
 The six ports are `store` (where conversations live, their reactions and stars,
 and how a finalised message is noticed), `files` (where attachments live),
 `views` (saved view filters), `router` (who a message is for), `delivery` (what
-reaches an agent), and `renderer` (what an agent sees). Providers apply in plugin order, each
-wrapping the previous result; a provider that returns its argument is a no-op,
-and declaring none leaves Channels exactly as it ships. The contracts are in
+reaches an agent), and `renderer` (what an agent sees). Providers apply in plugin order, each wrapping the previous result; the factory
+is memoised, so calling it twice yields the same instance.
+
+A provider that never calls the factory replaces the part outright, and Desk
+does not build the stock implementation at all — no watcher is started for a
+store that pushes its own changes. A provider that returns `base()` unchanged is
+a no-op, and declaring none leaves Channels exactly as it ships.
+
+Every store operation is asynchronous, so an implementation may be backed by
+anything reachable over a network, not only a local disk. The contracts are in
 `src/server/channels/ports.ts`.
 
 A Channels provider is the most intrusive thing a plugin can do: it sits on the

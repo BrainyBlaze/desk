@@ -89,21 +89,21 @@ export interface ChannelStore {
   // ---- channels -----------------------------------------------------------
 
   /** Summaries for every channel. With `seen`, unread counts are resolved too. */
-  listChannels(opts?: { seen?: SeenCursors }): ChannelSummary[];
-  createChannel(name: string, goal: string): void;
-  destroyChannel(name: string): void;
-  setGoal(name: string, goal: string): void;
+  listChannels(opts?: { seen?: SeenCursors }): Promise<ChannelSummary[]>;
+  createChannel(name: string, goal: string): Promise<void>;
+  destroyChannel(name: string): Promise<void>;
+  setGoal(name: string, goal: string): Promise<void>;
 
   // ---- conversation -------------------------------------------------------
 
   /** A channel with a window of its messages — the initial view. */
-  readChannel(channel: string, window?: MessageSliceOpts): ChannelDetail;
+  readChannel(channel: string, window?: MessageSliceOpts): Promise<ChannelDetail>;
   /** A further window of messages — scroll paging. */
-  readMessages(channel: string, window: MessageSliceOpts): MessageWindow;
+  readMessages(channel: string, window: MessageSliceOpts): Promise<MessageWindow>;
   /** One message by id, wherever in the channel it lives (root or any thread). */
-  readMessage(channel: string, id: string): ChannelMessage;
-  readThread(channel: string, parentId: string): ChannelMessage[];
-  search(opts: ChannelSearchOptions): ChannelSearchResult[];
+  readMessage(channel: string, id: string): Promise<ChannelMessage>;
+  readThread(channel: string, parentId: string): Promise<ChannelMessage[]>;
+  search(opts: ChannelSearchOptions): Promise<ChannelSearchResult[]>;
 
   append(channel: string, options: AppendMessageOptions): Promise<AppendedMessage>;
   editMessage(channel: string, file: string, id: string, body: string): Promise<ChannelMessage>;
@@ -111,16 +111,16 @@ export interface ChannelStore {
 
   // ---- roster -------------------------------------------------------------
 
-  listMembers(channel: string): ChannelMember[];
-  addMember(channel: string, handle: string, spec: NewMemberSpec): ChannelMember;
-  removeMember(channel: string, name: string): void;
-  updateMemberRole(channel: string, name: string, role?: string, functions?: string): ChannelMember | undefined;
+  listMembers(channel: string): Promise<ChannelMember[]>;
+  addMember(channel: string, handle: string, spec: NewMemberSpec): Promise<ChannelMember>;
+  removeMember(channel: string, name: string): Promise<void>;
+  updateMemberRole(channel: string, name: string, role?: string, functions?: string): Promise<ChannelMember | undefined>;
   updateMemberSupervisor(
     channel: string,
     name: string,
     supervisor: boolean,
     maxIdleMinutes?: number
-  ): ChannelMember | undefined;
+  ): Promise<ChannelMember | undefined>;
 
   // ---- annotations --------------------------------------------------------
   //
@@ -130,14 +130,14 @@ export interface ChannelStore {
   // They live on THIS interface rather than a sibling one precisely so that
   // cannot be done by halves.
 
-  listReactions(): ReactionRef[];
-  addReaction(input: ReactionInput): ReactionRef;
-  removeReaction(ref: Pick<ReactionRef, 'channel' | 'file' | 'id' | 'kind'>): boolean;
-  clearReactions(channel: string, file: string, id: string): number;
+  listReactions(): Promise<ReactionRef[]>;
+  addReaction(input: ReactionInput): Promise<ReactionRef>;
+  removeReaction(ref: Pick<ReactionRef, 'channel' | 'file' | 'id' | 'kind'>): Promise<boolean>;
+  clearReactions(channel: string, file: string, id: string): Promise<number>;
 
-  listFeatured(): FeaturedItem[];
-  addFeatured(input: FeaturedInput): FeaturedRef;
-  removeFeatured(ref: Pick<FeaturedRef, 'channel' | 'file' | 'id'>): boolean;
+  listFeatured(): Promise<FeaturedItem[]>;
+  addFeatured(input: FeaturedInput): Promise<FeaturedRef>;
+  removeFeatured(ref: Pick<FeaturedRef, 'channel' | 'file' | 'id'>): Promise<boolean>;
 
   // ---- change notification ------------------------------------------------
 
@@ -154,7 +154,7 @@ export interface ChannelStore {
    * not hand it over a second time. Callers mark AFTER dispatch succeeds: if
    * dispatch throws, the message stays undispatched and is picked up again.
    */
-  markSeen(channel: string, file: string, id: string): void;
+  markSeen(channel: string, file: string, id: string): Promise<void>;
 }
 
 /** The filesystem store: conversations as markdown under a channels home. */
@@ -164,40 +164,40 @@ export class FileChannelStore implements ChannelStore {
 
   constructor(private readonly home: string) {}
 
-  listChannels(opts: { seen?: SeenCursors } = {}): ChannelSummary[] {
+  async listChannels(opts: { seen?: SeenCursors } = {}): Promise<ChannelSummary[]> {
     const summaries = listChannels(this.home);
     return opts.seen === undefined ? summaries : resolveUnreadSummaries(this.home, summaries, opts.seen);
   }
 
-  createChannel(name: string, goal: string): void {
+  async createChannel(name: string, goal: string): Promise<void> {
     createChannel(this.home, name, goal);
   }
 
-  destroyChannel(name: string): void {
+  async destroyChannel(name: string): Promise<void> {
     destroyChannel(this.home, name);
   }
 
-  setGoal(name: string, goal: string): void {
+  async setGoal(name: string, goal: string): Promise<void> {
     editChannelGoal(this.home, name, goal);
   }
 
-  readChannel(channel: string, window?: MessageSliceOpts): ChannelDetail {
+  async readChannel(channel: string, window?: MessageSliceOpts): Promise<ChannelDetail> {
     return readChannelDetail(this.home, channel, window);
   }
 
-  readMessages(channel: string, window: MessageSliceOpts): MessageWindow {
+  async readMessages(channel: string, window: MessageSliceOpts): Promise<MessageWindow> {
     return readChannelMessages(this.home, channel, window);
   }
 
-  readMessage(channel: string, id: string): ChannelMessage {
+  async readMessage(channel: string, id: string): Promise<ChannelMessage> {
     return readChannelMessage(this.home, channel, id);
   }
 
-  readThread(channel: string, parentId: string): ChannelMessage[] {
+  async readThread(channel: string, parentId: string): Promise<ChannelMessage[]> {
     return readThread(this.home, channel, parentId);
   }
 
-  search(opts: ChannelSearchOptions): ChannelSearchResult[] {
+  async search(opts: ChannelSearchOptions): Promise<ChannelSearchResult[]> {
     return searchChannelMessages(this.home, opts);
   }
 
@@ -213,56 +213,56 @@ export class FileChannelStore implements ChannelStore {
     return deleteMessage(this.home, channel, file, id);
   }
 
-  listMembers(channel: string): ChannelMember[] {
+  async listMembers(channel: string): Promise<ChannelMember[]> {
     return listChannelMembers(this.home, channel);
   }
 
-  addMember(channel: string, handle: string, spec: NewMemberSpec): ChannelMember {
+  async addMember(channel: string, handle: string, spec: NewMemberSpec): Promise<ChannelMember> {
     return addMemberWithUniqueHandle(this.home, channel, handle, spec);
   }
 
-  removeMember(channel: string, name: string): void {
+  async removeMember(channel: string, name: string): Promise<void> {
     removeMember(this.home, channel, name);
   }
 
-  updateMemberRole(channel: string, name: string, role?: string, functions?: string): ChannelMember | undefined {
+  async updateMemberRole(channel: string, name: string, role?: string, functions?: string): Promise<ChannelMember | undefined> {
     return updateMemberRole(this.home, channel, name, role, functions);
   }
 
-  updateMemberSupervisor(
+  async updateMemberSupervisor(
     channel: string,
     name: string,
     supervisor: boolean,
     maxIdleMinutes?: number
-  ): ChannelMember | undefined {
+  ): Promise<ChannelMember | undefined> {
     return updateMemberSupervisor(this.home, channel, name, supervisor, maxIdleMinutes);
   }
 
-  listReactions(): ReactionRef[] {
+  async listReactions(): Promise<ReactionRef[]> {
     return listReactions(this.home);
   }
 
-  addReaction(input: ReactionInput): ReactionRef {
+  async addReaction(input: ReactionInput): Promise<ReactionRef> {
     return addReaction(this.home, input);
   }
 
-  removeReaction(ref: Pick<ReactionRef, 'channel' | 'file' | 'id' | 'kind'>): boolean {
+  async removeReaction(ref: Pick<ReactionRef, 'channel' | 'file' | 'id' | 'kind'>): Promise<boolean> {
     return removeReaction(this.home, ref);
   }
 
-  clearReactions(channel: string, file: string, id: string): number {
+  async clearReactions(channel: string, file: string, id: string): Promise<number> {
     return clearReactionsForMessage(this.home, channel, file, id);
   }
 
-  listFeatured(): FeaturedItem[] {
+  async listFeatured(): Promise<FeaturedItem[]> {
     return listFeaturedItems(this.home);
   }
 
-  addFeatured(input: FeaturedInput): FeaturedRef {
+  async addFeatured(input: FeaturedInput): Promise<FeaturedRef> {
     return addFeatured(this.home, input);
   }
 
-  removeFeatured(ref: Pick<FeaturedRef, 'channel' | 'file' | 'id'>): boolean {
+  async removeFeatured(ref: Pick<FeaturedRef, 'channel' | 'file' | 'id'>): Promise<boolean> {
     return removeFeatured(this.home, ref);
   }
 
@@ -285,7 +285,7 @@ export class FileChannelStore implements ChannelStore {
     };
   }
 
-  markSeen(channel: string, file: string, id: string): void {
+  async markSeen(channel: string, file: string, id: string): Promise<void> {
     // Before any subscriber exists there is no watcher to inform, and nothing
     // to dedupe against: the message has not been observed by anyone.
     this.watcher?.markSeen(channel, file, id);

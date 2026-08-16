@@ -104,14 +104,33 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   // unchanged.
   const nativeTransport = createNativeChannelsTransport();
   const providers = options.providers ?? [];
-  const compose = <T,>(base: T, pick: (p: ChannelsProviders) => ((base: T) => T) | undefined): T =>
-    providers.reduce((current, provider) => pick(provider)?.(current) ?? current, base);
+  // The base is a FACTORY, built at most once and only if something asks for
+  // it. A provider that replaces a part outright never calls it, so Desk never
+  // constructs the stock implementation — which is the difference between an
+  // interface and a suggestion: a database-backed store must not have a
+  // filesystem one built underneath it first.
+  const compose = <T,>(
+    make: () => T,
+    pick: (p: ChannelsProviders) => ((base: () => T) => T) | undefined
+  ): T => {
+    let built: { value: T } | undefined;
+    const base = (): T => (built ??= { value: make() }).value;
+    let current: (() => T) = base;
+    for (const provider of providers) {
+      const wrap = pick(provider);
+      if (!wrap) continue;
+      const inner = current;
+      let made: { value: T } | undefined;
+      current = () => (made ??= { value: wrap(inner) }).value;
+    }
+    return current();
+  };
 
-  const store = compose<ChannelStore>(new FileChannelStore(home), (p) => p.store);
-  const files = compose<ChannelFiles>(new FileChannelFiles(home), (p) => p.files);
-  const views = compose<ChannelViews>(new FileChannelViews(home), (p) => p.views);
-  const router = compose<MessageRouter>(new MentionRouter(), (p) => p.router);
-  const renderer = compose<PromptRenderer>(defaultPromptRenderer, (p) => p.renderer);
+  const store = compose<ChannelStore>(() => new FileChannelStore(home), (p) => p.store);
+  const files = compose<ChannelFiles>(() => new FileChannelFiles(home), (p) => p.files);
+  const views = compose<ChannelViews>(() => new FileChannelViews(home), (p) => p.views);
+  const router = compose<MessageRouter>(() => new MentionRouter(), (p) => p.router);
+  const renderer = compose<PromptRenderer>(() => defaultPromptRenderer, (p) => p.renderer);
   const sendChannelDelivery = createChannelDeliverySender({
     agentSurfaceBroker: options.agentSurfaceBroker,
     terminalSender: nativeTransport.sendText,
@@ -163,10 +182,10 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
           break;
       }
     },
-    onChannelMessage: (channel, file, message, pingsHuman) => {
-      const authorSession = store
-        .listMembers(channel)
-        .find((member) => member.name === message.author)?.sessionId;
+    onChannelMessage: async (channel, file, message, pingsHuman) => {
+      const authorSession = (await store.listMembers(channel)).find(
+        (member) => member.name === message.author
+      )?.sessionId;
       const event: ChannelMessageDeskEventInput = {
         ...(authorSession === undefined ? {} : { sessionId: authorSession }),
         channel,
@@ -223,7 +242,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     router,
     renderer,
     delivery: compose<AgentDelivery>(
-      agentDelivery({
+      () => agentDelivery({
         sendText: sendChannelDelivery,
         capturePane: nativeTransport.capturePane,
         sendEnter: nativeTransport.sendEnter,
@@ -232,7 +251,18 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       (p) => p.delivery
     )
   });
-    const unsubscribe = store.onFinalized((incoming) => engine.handleMessage(incoming));
+    // handleMessage is async now that the store is. A rejection here has no
+    // caller to surface it, so name it rather than letting it become an
+    // unhandled rejection: an undispatched message is exactly the failure the
+    // watcher exists to prevent.
+    const unsubscribe = store.onFinalized((incoming) => {
+      void engine.handleMessage(incoming).catch((error: unknown) => {
+        console.error(
+          `[desk-channels] dispatch failed for ${incoming.channel}/${incoming.message.id}:`,
+          error
+        );
+      });
+    });
     runtime = { home, engine, store, files, views, unsubscribe, owner };
     return runtime;
   } catch (error) {
@@ -407,8 +437,8 @@ function requireChannel(value: unknown): string {
  *    free-text input;
  *  - otherwise the human operator.
  */
-function resolveAuthor(store: ChannelStore, channel: string, body: Record<string, unknown>): string {
-  const members = store.listMembers(channel);
+async function resolveAuthor(store: ChannelStore, channel: string, body: Record<string, unknown>): Promise<string> {
+  const members = await store.listMembers(channel);
   if (typeof body.as === 'string' && body.as.length > 0) {
     if (body.as !== 'human' && !members.some((member) => member.name === body.as)) {
       throw new Error(`@${String(body.as)} is not a member of #${channel}`);
@@ -470,7 +500,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       }
       sendJson(res, 200, {
         home,
-        channels: store.listChannels({ seen: seen ?? undefined }),
+        channels: await store.listChannels({ seen: seen ?? undefined }),
         delivery: await engine.lifecycleStates(),
         activity: engine.listActivity(since).slice(-100),
         activitySeq: engine.latestActivitySeq()
@@ -535,7 +565,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       sendJson(
         res,
         200,
-        store.readChannel(requireChannel(url.searchParams.get('name')), {
+        await store.readChannel(requireChannel(url.searchParams.get('name')), {
           since,
           limit: CHANNEL_PAGE_INITIAL,
           contextAbove: CHANNEL_UNREAD_CONTEXT
@@ -550,18 +580,18 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       // channel (`all=1`, used when the operator activates the filter box).
       const channel = requireChannel(url.searchParams.get('name'));
       if (url.searchParams.get('all') === '1') {
-        sendJson(res, 200, store.readMessages(channel, { limit: Number.MAX_SAFE_INTEGER }));
+        sendJson(res, 200, await store.readMessages(channel, { limit: Number.MAX_SAFE_INTEGER }));
         return true;
       }
       const before = url.searchParams.get('before') ?? undefined;
       const after = url.searchParams.get('after') ?? undefined;
       const around = url.searchParams.get('around') ?? undefined;
-      sendJson(res, 200, store.readMessages(channel, { before, after, around, limit: CHANNEL_PAGE_MORE }));
+      sendJson(res, 200, await store.readMessages(channel, { before, after, around, limit: CHANNEL_PAGE_MORE }));
       return true;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/channels/reactions') {
-      sendJson(res, 200, { items: store.listReactions() });
+      sendJson(res, 200, { items: await store.listReactions() });
       return true;
     }
 
@@ -575,18 +605,18 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         kind: requireReactionKind(body.kind)
       };
       if (action === 'add') {
-        store.addReaction({
+        await store.addReaction({
           ...input,
           author: typeof body.author === 'string' ? body.author : undefined
         });
       } else if (action === 'remove') {
-        store.removeReaction(input);
+        await store.removeReaction(input);
       } else if (action === 'clear') {
-        store.clearReactions(input.channel, input.file, input.id);
+        await store.clearReactions(input.channel, input.file, input.id);
       } else {
         throw new Error(`unknown reactions action: ${action}`);
       }
-      sendJson(res, 200, { ok: true, items: store.listReactions() });
+      sendJson(res, 200, { ok: true, items: await store.listReactions() });
       return true;
     }
 
@@ -636,7 +666,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const channel = url.searchParams.get('channel');
       const limit = Number(url.searchParams.get('limit') ?? '50');
       sendJson(res, 200, {
-        items: store.search({
+        items: await store.search({
           query: url.searchParams.get('q') ?? url.searchParams.get('query') ?? '',
           channel: channel ? requireChannel(channel) : undefined,
           author: url.searchParams.get('author') ?? undefined,
@@ -655,12 +685,12 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'GET' && url.pathname === '/api/channels/thread') {
       const channel = requireChannel(url.searchParams.get('name'));
       const parent = requireString(url.searchParams.get('parent'), 'parent');
-      sendJson(res, 200, { messages: store.readThread(channel, parent) });
+      sendJson(res, 200, { messages: await store.readThread(channel, parent) });
       return true;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/channels/featured') {
-      sendJson(res, 200, { items: store.listFeatured() });
+      sendJson(res, 200, { items: await store.listFeatured() });
       return true;
     }
 
@@ -690,16 +720,16 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST' && url.pathname === '/api/channels/create') {
       const body = await readJsonBody(req);
       const name = requireChannel(body.name);
-      store.createChannel(name, typeof body.goal === 'string' ? body.goal : '');
-      sendJson(res, 200, { ok: true, channels: store.listChannels() });
+      await store.createChannel(name, typeof body.goal === 'string' ? body.goal : '');
+      sendJson(res, 200, { ok: true, channels: await store.listChannels() });
       return true;
     }
 
     if (req.method === 'POST' && url.pathname === '/api/channels/edit') {
       const body = await readJsonBody(req);
       const name = requireChannel(body.name);
-      store.setGoal(name, typeof body.goal === 'string' ? body.goal : '');
-      sendJson(res, 200, { ok: true, channels: store.listChannels() });
+      await store.setGoal(name, typeof body.goal === 'string' ? body.goal : '');
+      sendJson(res, 200, { ok: true, channels: await store.listChannels() });
       return true;
     }
 
@@ -725,8 +755,8 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
 
     if (req.method === 'POST' && url.pathname === '/api/channels/destroy') {
       const body = await readJsonBody(req);
-      store.destroyChannel(requireChannel(body.name));
-      sendJson(res, 200, { ok: true, channels: store.listChannels() });
+      await store.destroyChannel(requireChannel(body.name));
+      sendJson(res, 200, { ok: true, channels: await store.listChannels() });
       return true;
     }
 
@@ -741,7 +771,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         sendJson(res, 404, { error: `no desk session backs ${sessionId}` });
         return true;
       }
-      if (store.listMembers(channel).some((member) => member.sessionId === sessionKey)) {
+      if ((await store.listMembers(channel)).some((member) => member.sessionId === sessionKey)) {
         sendJson(res, 409, { error: `that agent is already a member of #${channel}` });
         return true;
       }
@@ -755,7 +785,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
           groupLabel: candidate.groupLabel
         }))
       });
-      const member = store.addMember(channel, handle, {
+      const member = await store.addMember(channel, handle, {
         type: MEMBER_TYPE_BY_AGENT[spec.agent ?? ''] ?? 'bash',
         sessionId: sessionKey,
         agentLabel: [spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')
@@ -764,12 +794,12 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       // Join notice: visible in the feed and discoverable by later reads, but
       // deliberately NOT dispatched (markSeen, no handleMessage) — adding N
       // agents must not blast N×(N-1) join prompts into terminals.
-      const detail = store.readChannel(channel);
+      const detail = await store.readChannel(channel);
       const joinNotice = await store.append(channel, {
         author: 'human',
         body: `@${member.name} joined #${channel} — ${[spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')} (${member.type}).`
       });
-      store.markSeen(channel, joinNotice.file, joinNotice.message.id);
+      await store.markSeen(channel, joinNotice.file, joinNotice.message.id);
 
       // Onboarding briefing rides the same gated queue as channel dispatches:
       // it lands when the agent's TUI is actually ready for input.
@@ -788,7 +818,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         }),
         `onboard-${channel}`
       );
-      sendJson(res, 200, { ok: true, member, members: store.listMembers(channel) });
+      sendJson(res, 200, { ok: true, member, members: await store.listMembers(channel) });
       return true;
     }
 
@@ -803,28 +833,28 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const body = await readJsonBody(req);
       const channel = requireChannel(body.channel);
       const name = requireString(body.name, 'name');
-      const member = store.listMembers(channel).find((candidate) => candidate.name === name);
-      store.removeMember(channel, name);
+      const member = (await store.listMembers(channel)).find((candidate) => candidate.name === name);
+      await store.removeMember(channel, name);
       if (member?.sessionId) {
         engine.dropQueue(member.sessionId);
       }
-      sendJson(res, 200, { ok: true, members: store.listMembers(channel) });
+      sendJson(res, 200, { ok: true, members: await store.listMembers(channel) });
       return true;
     }
 
     if (req.method === 'POST' && url.pathname === '/api/channels/post') {
       const body = await readJsonBody(req);
       const channel = requireChannel(body.channel);
-      const author = resolveAuthor(store, channel, body);
+      const author = await resolveAuthor(store, channel, body);
       const appended = await store.append(channel, {
         author,
         body: requireString(body.body, 'body'),
         threadParentId: typeof body.thread === 'string' && body.thread.length > 0 ? body.thread : undefined
       });
-      engine.handleMessage({ channel, file: appended.file, message: appended.message });
+      await engine.handleMessage({ channel, file: appended.file, message: appended.message });
       // Mark seen only after dispatch succeeds. If the engine callback throws,
       // the watcher/sweep path still sees this finalized message and retries it.
-      store.markSeen(channel, appended.file, appended.message.id);
+      await store.markSeen(channel, appended.file, appended.message.id);
       sendJson(res, 200, { ok: true, id: appended.message.id, file: appended.file });
       return true;
     }
@@ -845,16 +875,16 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       // shares the right message instead of getting a 404.
       let message;
       try {
-        message = store.readMessage(fromChannel, messageId);
+        message = await store.readMessage(fromChannel, messageId);
       } catch {
         sendJson(res, 404, { error: `message ${messageId} not found in #${fromChannel}` });
         return true;
       }
-      const author = resolveAuthor(store, toChannel, body);
+      const author = await resolveAuthor(store, toChannel, body);
       const shared = formatSharedMessage(message, fromChannel, typeof body.comment === 'string' ? body.comment : undefined);
       const appended = await store.append(toChannel, { author, body: shared });
-      engine.handleMessage({ channel: toChannel, file: appended.file, message: appended.message });
-      store.markSeen(toChannel, appended.file, appended.message.id);
+      await engine.handleMessage({ channel: toChannel, file: appended.file, message: appended.message });
+      await store.markSeen(toChannel, appended.file, appended.message.id);
       sendJson(res, 200, { ok: true, id: appended.message.id });
       return true;
     }
@@ -870,13 +900,13 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         tag: typeof body.tag === 'string' ? body.tag : undefined
       };
       if (action === 'remove') {
-        store.removeFeatured(input);
+        await store.removeFeatured(input);
       } else if (action === 'add') {
-        store.addFeatured(input);
+        await store.addFeatured(input);
       } else {
         throw new Error(`unknown featured action: ${action}`);
       }
-      sendJson(res, 200, { ok: true, items: store.listFeatured() });
+      sendJson(res, 200, { ok: true, items: await store.listFeatured() });
       return true;
     }
 
@@ -920,7 +950,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'GET' && url.pathname === '/api/channels/export') {
       const channel = requireChannel(url.searchParams.get('channel'));
       const thread = url.searchParams.get('thread');
-      const markdown = exportChannelToMarkdown(store, channel, thread ?? undefined);
+      const markdown = await exportChannelToMarkdown(store, channel, thread ?? undefined);
       res.statusCode = 200;
       res.setHeader('content-type', 'text/markdown; charset=utf-8');
       res.setHeader('content-disposition', `attachment; filename="${channel}${thread ? `-thread-${thread}` : ''}.md"`);
@@ -934,7 +964,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const member = requireString(body.member, 'member');
       const role = typeof body.role === 'string' ? body.role : undefined;
       const functions = typeof body.functions === 'string' ? body.functions : undefined;
-      const updated = store.updateMemberRole(channel, member, role, functions);
+      const updated = await store.updateMemberRole(channel, member, role, functions);
       if (!updated) {
         sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
         return true;
@@ -946,7 +976,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'GET' && url.pathname === '/api/channels/member-role') {
       const channel = requireChannel(url.searchParams.get('channel'));
       const member = requireString(url.searchParams.get('member'), 'member');
-      const found = store.listMembers(channel).find((m) => m.name === member);
+      const found = (await store.listMembers(channel)).find((m) => m.name === member);
       if (!found) {
         sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
         return true;
@@ -962,7 +992,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const supervisor = Boolean(body.supervisor);
       const rawMinutes = Number(body.supervisorMaxIdleMinutes);
       const supervisorMaxIdleMinutes = Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : undefined;
-      const updated = store.updateMemberSupervisor(channel, member, supervisor, supervisorMaxIdleMinutes);
+      const updated = await store.updateMemberSupervisor(channel, member, supervisor, supervisorMaxIdleMinutes);
       if (!updated) {
         sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
         return true;
