@@ -43,7 +43,7 @@ import {
   retryStuckItem,
   sweepDeliveredTtl
 } from './channelsDurability.js';
-import { appendDeliveryEvent, type DeliveryEvent } from './channelsEvents.js';
+import { appendDeliveryEvent, type DeliveryEvent, type DeliveryEventInput } from './channelsEvents.js';
 import { listPausedSessions } from './channelsPaused.js';
 import { writeFileAtomic } from './fsOps.js';
 import {
@@ -882,7 +882,7 @@ export class ChannelsEngine {
     return entry;
   }
 
-  private pushDeliveryEvent(event: Omit<DeliveryEvent, 'seq' | 'at'>): void {
+  private pushDeliveryEvent(event: DeliveryEventInput): void {
     try {
       appendDeliveryEvent(this.options.home, event);
     } catch {
