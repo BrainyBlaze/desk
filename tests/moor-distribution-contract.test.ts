@@ -5,7 +5,7 @@
 // exercised by `npm run fetch:moor` on developer/CI hosts; this contract
 // validates the pinned inputs and the release builder's executable output.
 
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -19,6 +19,7 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
 import { posixMoorIdentity } from '../src/server/runtime/moorMasterClient.js';
@@ -32,7 +33,6 @@ import {
   EXPECTED_COMMIT,
   EXPECTED_REPOSITORY,
   EXPECTED_VERSION,
-  buildMoor,
   readProvenance,
   snapshotDigest,
   validateVendor
@@ -43,6 +43,27 @@ const VENDOR = join(ROOT, 'vendor', 'moor');
 const BUNDLED = join(ROOT, 'libexec', 'moor');
 const REQUIRED_VENDOR_COMMIT = '649ea81769591d0c4212af52803e7d69ab127f1c';
 const REQUIRED_SNAPSHOT_DIGEST = '8ad04bde92132a5923796260414f097250cc9256c28303d920a4a0c114e5d9a6';
+const BUILD_MOOR_URL = new URL('../scripts/build-moor.mjs', import.meta.url).href;
+const execFileAsync = promisify(execFile);
+
+interface ReleaseBuildResult {
+  provenance: { commit: string };
+}
+
+async function buildMoorInChild(outfile: string): Promise<ReleaseBuildResult> {
+  const invocation = [
+    `import { buildMoor } from ${JSON.stringify(BUILD_MOOR_URL)};`,
+    `const result = buildMoor(${JSON.stringify({ root: ROOT, outfile })});`,
+    'process.stdout.write(JSON.stringify(result));'
+  ].join('\n');
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ['--input-type=module', '--eval', invocation],
+    { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
+  );
+  return JSON.parse(stdout) as ReleaseBuildResult;
+}
 
 async function exchangeHello(
   sessionPath: string,
@@ -159,7 +180,9 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
       const runtimeEnv = { ...process.env, TMPDIR: outputRoot };
       let holderStarted = false;
       try {
-        const { provenance } = buildMoor({ root: ROOT, outfile });
+        // Keep the Vitest worker responsive while the release builder performs
+        // its intentionally synchronous Cargo build in an isolated child.
+        const { provenance } = await buildMoorInChild(outfile);
         expect(provenance.commit).toBe(REQUIRED_VENDOR_COMMIT);
 
         const artifact = statSync(outfile);
@@ -226,7 +249,7 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
         rmSync(outputRoot, { recursive: true, force: true });
       }
     },
-    90_000
+    120_000
   );
 });
 
