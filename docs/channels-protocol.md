@@ -144,6 +144,28 @@ auto-links bare absolute paths (and `path:line` refs) it finds in message
 bodies, but an explicit markdown link with a readable label is preferred. The
 turn prompt and onboarding briefing remind agents of this.
 
+## Subsystem shape
+
+Channels lives under `src/server/channels/` and is four replaceable parts:
+
+| Port | What it owns |
+|---|---|
+| `ChannelStore` | where the conversation lives, and how a finalised message is noticed |
+| `MessageRouter` | who a message is for — pure, no I/O, no queue |
+| `AgentDelivery` | what reaches an agent: send, states, probe, submit |
+| `PromptRenderer` | what an agent sees |
+
+The contracts are stated in `ports.ts` and the subsystem is entered through
+`index.ts`. Each part is replaceable on its own: a plugin swaps one and the
+other three do not notice (see [plugins](/security-plugin-model)), and a test
+supplies one without needing a filesystem for the rest.
+
+Two consequences are worth stating because they are easy to miss. Routing is a
+pure function of a message and a roster — it never learns whether delivery
+happened. And the renderer is the one place that knows a channel is a FILE: the
+turn prompt carries an absolute path and the `desk channels` commands an agent
+runs to read the room.
+
 ## The delivery engine
 
 Per target agent, keyed by durable `sessionId`, the engine keeps a FIFO queue

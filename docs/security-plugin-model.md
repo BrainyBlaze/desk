@@ -79,7 +79,40 @@ A plugin can provide:
 - `middleware`: Connect middleware mounted before the core `/api` router
 - `routes`: extra `/api` route handlers tried after core routes and before the 404
 - `upgradeGuard`: a central predicate for WebSocket upgrades
+- `channels`: providers that replace or wrap parts of the Channels subsystem
 - `setup`: lifecycle code that runs when Desk installs the plugin
+
+### Channels providers
+
+`channels` takes one provider per Channels port. Each receives the
+implementation Desk would otherwise use and returns the one to use instead, so a
+plugin can wrap rather than reimplement:
+
+```js
+export default {
+  name: "delivery-audit",
+  channels: {
+    delivery: (base) => ({
+      ...base,
+      async send(sessionId, text) {
+        auditLog(sessionId, text.length);
+        return base.send(sessionId, text);
+      }
+    })
+  }
+};
+```
+
+The four ports are `store` (where conversations live and how a finalised message
+is noticed), `router` (who a message is for), `delivery` (what reaches an agent),
+and `renderer` (what an agent sees). Providers apply in plugin order, each
+wrapping the previous result; a provider that returns its argument is a no-op,
+and declaring none leaves Channels exactly as it ships. The contracts are in
+`src/server/channels/ports.ts`.
+
+A Channels provider is the most intrusive thing a plugin can do: it sits on the
+path that types text into a live agent session. Treat it with the same care as
+`upgradeGuard`.
 
 Runtime plugin modules can export a plain plugin object:
 
