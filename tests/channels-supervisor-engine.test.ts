@@ -41,13 +41,12 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 2000): Promise<void
   }
 };
 
-/** Reach into the engine's private per-channel activity map. Tests use this to
- *  back-date prompt timestamps so the stuck-detection threshold is exceeded
- *  without waiting minutes. */
-type WorkerState = { lastPromptAt: number; lastPostAt: number };
-type ChannelEntry = { workers: Map<string, WorkerState>; lastCheckInAt: number };
-const activityMap = (engine: ChannelsEngine): Map<string, ChannelEntry> =>
-  (engine as unknown as { channelWorkerActivity: Map<string, ChannelEntry> }).channelWorkerActivity;
+/** The engine's supervision read model. Tests drive it directly to back-date a
+ *  prompt so the stuck-detection threshold is exceeded without waiting minutes:
+ *  recordPrompt/recordPost take the clock as an argument, so "this channel
+ *  prompted agent-a two minutes ago" is a call rather than a nested mutation. */
+const supervisionOf = (engine: ChannelsEngine): ChannelSupervision =>
+  (engine as unknown as { supervision: ChannelSupervision }).supervision;
 
 function agentSnapshot(
   sessionId: string,
@@ -382,10 +381,11 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     // so resolveTargets returns all agents and agent-a gets a prompt; then we
     // wipe the recorded activity to simulate "worker never got channel work".
     engine.handleMessage(
-      { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', 'idle chatter') },
+      // Addressed to the operator only: resolveTargets hands no agent a prompt,
+      // so this channel has no open task to supervise.
+      { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'agent-a', '@human idle chatter') },
       membersFixture()
     );
-    activityMap(engine).delete('ops');
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(0);
   });
@@ -396,9 +396,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       membersFixture()
     );
     // Back-date agent-a's lastPromptAt so the 1-min threshold is exceeded.
-    const entry = activityMap(engine).get('ops')!;
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
-    entry.lastCheckInAt = 0;
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
     await waitFor(() => sent.some((entry) => entry.text.includes('Supervisor check-in')));
     const checkIns = sent.filter((entry) => entry.text.includes('Supervisor check-in'));
     expect(checkIns).toHaveLength(1);
@@ -419,12 +417,10 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       { channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'agent-a', 'done, results: ...') },
       membersFixture()
     );
-    const state = activityMap(engine).get('ops')?.workers.get('agent-a');
-    expect(state?.lastPostAt).toBeGreaterThanOrEqual(state?.lastPromptAt ?? 0);
-    // Back-date lastPromptAt only — lastPostAt stays fresh → NOT stuck.
-    const entry = activityMap(engine).get('ops')!;
-    const prev = entry.workers.get('agent-a')!;
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: prev.lastPostAt });
+    expect(supervisionOf(engine).hasOpenTask('ops', 'agent-a')).toBe(false);
+    // Back-date the prompt only — the post stays fresh, so no task is open.
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
+    supervisionOf(engine).recordPost('ops', 'agent-a', Date.now());
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(0);
   });
@@ -436,9 +432,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
     );
     // Back-date so the threshold is exceeded, but supply a fresh canonical
     // working lease for the worker.
-    const entry = activityMap(engine).get('ops')!;
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
-    entry.lastCheckInAt = 0;
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
     workerActivity = 'working';
     workerLeaseExpiresAt = Date.now() + 60_000;
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -450,9 +444,7 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       { channel: 'ops', file: 'root.md', message: message('msg-expired-1', 'human', '@agent-a do it') },
       membersFixture()
     );
-    const entry = activityMap(engine).get('ops')!;
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
-    entry.lastCheckInAt = 0;
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
     workerActivity = 'working';
     workerLeaseExpiresAt = Date.now() - 1;
 
@@ -465,20 +457,17 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do X') },
       membersFixture()
     );
-    const entry = activityMap(engine).get('ops')!;
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
-    entry.lastCheckInAt = 0;
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
     await waitFor(() => sent.some((entry) => entry.text.includes('Supervisor check-in')));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(1);
-    const stampAfterFirstCheckIn = entry.lastCheckInAt;
-    expect(stampAfterFirstCheckIn).toBeGreaterThan(0);
+    expect(supervisionOf(engine).checkedIn('ops')).toBe(true);
 
     // Supervisor posts back — must NOT reset the guard.
     engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-supe-1', 'supe', '@agent-a status?') },
       membersFixture()
     );
-    expect(entry.lastCheckInAt).toEqual(stampAfterFirstCheckIn);
+    expect(supervisionOf(engine).checkedIn('ops')).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(1);
   });
@@ -488,18 +477,16 @@ describe('checkSupervisorIdle pump behaviour (per-channel task tracking)', () =>
       { channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@agent-a do X') },
       membersFixture()
     );
-    const entry = activityMap(engine).get('ops')!;
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
-    entry.lastCheckInAt = 0;
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
     await waitFor(() => sent.some((entry) => entry.text.includes('Supervisor check-in')));
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in'))).toHaveLength(1);
 
-    // A fresh prompt from the channel to agent-a → recordWorkerPrompt zeros lastCheckInAt.
+    // A fresh prompt from the channel to agent-a → recordPrompt closes the window.
     engine.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@agent-a still stuck?') },
       membersFixture()
     );
-    entry.workers.set('agent-a', { lastPromptAt: Date.now() - 120_000, lastPostAt: 0 });
+    supervisionOf(engine).recordPrompt('ops', 'agent-a', Date.now() - 120_000);
     await waitFor(() => sent.filter((entry) => entry.text.includes('Supervisor check-in')).length >= 2);
     expect(sent.filter((entry) => entry.text.includes('Supervisor check-in')).length).toBeGreaterThanOrEqual(2);
   });
