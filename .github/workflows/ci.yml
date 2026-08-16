@@ -70,3 +70,29 @@ jobs:
         env:
           RUN_REAL_JOIN: 1
         run: npx vitest run tests/moor-native-e2e.test.ts --reporter=verbose
+
+  macos-desk-units:
+    # Positive macOS verification for the Desk-side macOS fixes that the native
+    # lane cannot cover: the provider-session-evidence trust boundary (descriptor
+    # alias re-open by capability) and the moor-generation-stores archive
+    # preflight (descriptor alias opened without O_DIRECTORY). These are pure
+    # unit tests -- no Moor binary, no build -- so they run fast on both Mac
+    # architectures and are independent of the native-moor -S lane.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify runner architecture is macOS
+        run: test "$(uname -s)" = "Darwin"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - run: npm ci
+      - name: Verify macOS-sensitive Desk units on real Darwin /dev/fd semantics
+        run: npx vitest run tests/provider-session-evidence.test.ts tests/moor-generation-stores.test.ts tests/moor-generation-stores-alias-flags.test.ts
