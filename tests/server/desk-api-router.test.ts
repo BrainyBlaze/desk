@@ -190,15 +190,15 @@ describe('createDeskApiMiddleware', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const res = response();
     const route: DeskRoute = async () => {
-      throw new PreCutoverStoreError('events ring at /x/_engine/events.jsonl holds 2 records keyed by tmuxSession');
+      throw new PreCutoverStoreError('Channels paused store at /x/_engine/paused.json is version 1, written by Desk v0.3.1 or older');
     };
 
-    await createDeskApiMiddleware([route])(request('/api/channels/events'), res, vi.fn());
+    await createDeskApiMiddleware([route])(request('/api/channels/paused'), res, vi.fn());
 
     expect(res.statusCode).toBe(422);
     const body = JSON.parse(res.body ?? '') as { error: string; code: string };
     expect(body.code).toBe('pre-cutover-store');
-    expect(body.error).toContain('events ring at /x/_engine/events.jsonl holds 2 records keyed by tmuxSession');
+    expect(body.error).toContain('Channels paused store at /x/_engine/paused.json is version 1');
     expect(body.error).toContain('boot Desk v0.3.2 once');
   });
 
