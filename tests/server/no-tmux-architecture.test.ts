@@ -17,7 +17,10 @@ const SHIPPED_RUNTIME_FILES = [
     .map((name) => `.github/workflows/${name}`)
 ].sort();
 const HISTORICAL_DOC_PAGES = new Set(['release-notes']);
+const HISTORICAL_DOC_FILES = new Set(['release-notes.md']);
 const RETIRED_DOC_RUNTIME = /\btmux\b|terminal[ -]broker|terminalBroker|capture-pane|send-keys|warm[- ]PTY/i;
+const RETIRED_ATCH_DOC_RUNTIME =
+  /(?:^|[^A-Za-z0-9_])atch(?:$|[^A-Za-z0-9_])|DESK_ATCH_BIN|libexec\/atch|vendor\/atch|atch-wire-v3/i;
 
 /**
  * The Track B terminal gate: tmux is gone. EVERY source is scanned — the
@@ -74,6 +77,20 @@ function currentRuntimeDocs(): ScannedFile[] {
   }));
 }
 
+function currentMoorDocs(): ScannedFile[] {
+  const rels = [
+    'README.md',
+    ...readdirSync(DOCS)
+      .filter((name) => name.endsWith('.md') && !HISTORICAL_DOC_FILES.has(name))
+      .map((name) => `docs/${name}`),
+    'docs/images/architecture-runtime.svg'
+  ];
+  return rels.sort().map((rel) => ({
+    rel,
+    source: readFileSync(join(ROOT, rel), 'utf8')
+  }));
+}
+
 function scanRetiredDocRuntime(files: ScannedFile[]): string[] {
   return files.flatMap(({ rel, source }) =>
     source
@@ -82,6 +99,19 @@ function scanRetiredDocRuntime(files: ScannedFile[]): string[] {
       .filter(({ text }) => RETIRED_DOC_RUNTIME.test(text))
       .map(({ line }) => `${rel}:${line}`)
   );
+}
+
+function scanRetiredAtchDocs(files: ScannedFile[]): string[] {
+  return files.flatMap(({ rel, source }) => {
+    const violations = RETIRED_ATCH_DOC_RUNTIME.test(rel) ? [`${rel}:path`] : [];
+    return violations.concat(
+      source
+        .split('\n')
+        .map((text, index) => ({ text, line: index + 1 }))
+        .filter(({ text }) => RETIRED_ATCH_DOC_RUNTIME.test(text))
+        .map(({ line }) => `${rel}:${line}`)
+    );
+  });
 }
 
 describe('no-tmux architecture gate (Track B terminal state)', () => {
@@ -99,6 +129,10 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
 
   it('keeps active public docs on the moor-native runtime', () => {
     expect(scanRetiredDocRuntime(currentRuntimeDocs())).toEqual([]);
+  });
+
+  it('keeps every current product document on Moor terminology and authority', () => {
+    expect(scanRetiredAtchDocs(currentMoorDocs())).toEqual([]);
   });
 
   it('deliberately keeps the pinned holder source outside the Desk vocabulary gate', () => {
@@ -141,6 +175,36 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
         { rel: 'docs/concepts-architecture.md', source: 'The terminal broker attaches through tmux.' }
       ])
     ).toEqual(['docs/concepts-architecture.md:1']);
+  });
+
+  it('rejects retired atch authority without matching attach or ATCH_GENERATION', () => {
+    expect(
+      scanRetiredAtchDocs([
+        {
+          rel: 'docs/concepts-architecture.md',
+          source: 'Attach uses ATCH_GENERATION only as a compatibility-negative carrier.'
+        }
+      ])
+    ).toEqual([]);
+    expect(
+      scanRetiredAtchDocs([
+        { rel: 'docs/concepts-architecture.md', source: 'Desk resolves DESK_ATCH_BIN.' }
+      ])
+    ).toEqual(['docs/concepts-architecture.md:1']);
+  });
+
+  it('rejects standalone retired atch authority in prose', () => {
+    expect(
+      scanRetiredAtchDocs([
+        { rel: 'docs/concepts-architecture.md', source: 'atch owns process lifetime.' }
+      ])
+    ).toEqual(['docs/concepts-architecture.md:1']);
+  });
+
+  it('rejects an empty orphan document whose path restores the retired wire contract', () => {
+    expect(scanRetiredAtchDocs([{ rel: 'docs/atch-wire-v3.md', source: '' }])).toEqual([
+      'docs/atch-wire-v3.md:path'
+    ]);
   });
 
   it('pins the sanction table itself to the three refusal sites (no runtime file may be added silently)', () => {

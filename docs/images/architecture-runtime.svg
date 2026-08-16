@@ -96,7 +96,7 @@
     <line class="edgeflow" x1="501" y1="590" x2="558" y2="590" marker-end="url(#arw)"/>
 
     <rect class="node" x="558" y="556" width="190" height="68" rx="11"/>
-    <text class="nodetext" x="653" y="588" text-anchor="middle">atch masters</text>
+    <text class="nodetext" x="653" y="588" text-anchor="middle">Moor holders</text>
     <text class="nodesub" x="653" y="606" text-anchor="middle">own process lifetime</text>
 
     <line class="edgeflow" x1="748" y1="590" x2="805" y2="590" marker-end="url(#arw)"/>

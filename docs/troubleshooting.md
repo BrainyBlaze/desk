@@ -70,17 +70,18 @@ desk serve --dev
 The development command does not switch to the private Bun runtime when Vite is
 missing.
 
-### Terminals report missing because Desk cannot find `atch`
+### Terminals report missing because Desk cannot find `moor`
 
-Desk preflights the atch executable before starting the terminal daemon. It
+Desk preflights the Moor executable before starting the terminal daemon. It
 logs the failure and keeps non-terminal workspace features available. Resolution
-is `DESK_ATCH_BIN`, same-release `libexec/atch`, then `PATH`, in that order.
-Managed releases and the Docker image include the pinned same-release binary.
+is explicit `DESK_MOOR_BIN`, then an attested same-release `libexec/moor`, then
+an attested absolute `moor` found on `PATH`. Managed releases and the Docker
+image include the pinned same-release binary.
 Reinstall or rebuild a missing or corrupt bundle; use an absolute override only
 when intentionally testing another build:
 
 ```bash
-DESK_ATCH_BIN=/opt/atch/bin/atch desk serve
+DESK_MOOR_BIN=/opt/moor/bin/moor desk serve
 ```
 
 Terminal transport fails closed rather than reporting a healthy runtime that
@@ -131,7 +132,7 @@ Common causes:
 - invalid `cwd`
 - missing agent CLI
 - custom command exits immediately
-- `atch` is missing or not executable
+- `moor` is missing or not executable
 
 ### A terminal cell is blank
 
@@ -142,7 +143,7 @@ desk capture <session-name> --lines 100
 ```
 
 If capture has output but the browser is blank, inspect terminal transport
-health in [Operations](/operations). If capture is empty, attach to the atch
+health in [Operations](/operations). If capture is empty, attach to the Moor
 session directly through Desk:
 
 ```bash
@@ -291,7 +292,7 @@ on a shared or public interface.
 
 ### Does Desk host my agents?
 
-No. Desk launches local atch sessions on the host where the server runs.
+No. Desk launches local Moor sessions on the host where the server runs.
 
 ### Does Desk store my model credentials?
 
@@ -312,7 +313,7 @@ the backup answer below.
 
 ### Can I run multiple browsers?
 
-Yes, but remember each browser is a view onto the same local atch sessions and
+Yes, but remember each browser is a view onto the same local Moor sessions and
 manifest state. Coordinate operator actions when multiple people access the
 same server.
 

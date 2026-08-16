@@ -26,9 +26,11 @@ npm 10.9.8, and Bun 1.3.14 under the Desk install root. It does not replace your
 global runtimes.
 
 <Note>
-The installer builds the pinned bundled atch 1.6-bb1 fork for the host and
-verifies it before activation. Desk resolves `DESK_ATCH_BIN`, same-release
-`libexec/atch`, then `PATH`, in that order.
+  The installer validates the extracted source's committed four-target Moor pin
+  against the install manifest, downloads and verifies the selected host asset,
+  places it at `libexec/moor`, then runs `npm ci` and `npm run build:application`.
+  Desk resolves explicit `DESK_MOOR_BIN`, then an attested same-release
+  `libexec/moor`, then an attested absolute `moor` on `PATH`.
 </Note>
 
 Agent CLIs (`codex`, `claude`, and `opencode`), `gh`, and GPU telemetry commands
@@ -69,7 +71,7 @@ are optional. Install only the integrations you intend to use.
   <Step title="Create your first session">
     In the UI, open **Add session** and choose a session name, agent or command,
     and repository directory. Desk writes the session to
-    `~/.config/desk/desk.yml` and owns its atch lifetime.
+    `~/.config/desk/desk.yml` and owns its Moor lifetime.
   </Step>
 </Steps>
 
@@ -110,7 +112,7 @@ desk capture <name|sessionId|resume> --lines 200
 desk hooks install
 ```
 
-`desk up` starts missing configured sessions without replacing running atch
+`desk up` starts missing configured sessions without replacing running Moor
 sessions.
 
 ## Upgrade, reinstall, or downgrade
@@ -146,7 +148,7 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
 ```
 
 Uninstall verifies Desk ownership before removing the launcher, releases,
-toolchains, and install metadata. It preserves `~/.config/desk`, projects, atch
+toolchains, and install metadata. It preserves `~/.config/desk`, projects, Moor
 sessions, credentials, and optional host tools. To remove configuration too,
 inspect it first and then delete it explicitly:
 
