@@ -549,7 +549,20 @@ async function openTrustedDirectory(
     if (!sameDirectory(expected.directoryMetadata, openedMetadata)) return undefined;
     const descriptorPath =
       testOptions.directoryDescriptorPath?.(handle.fd) ?? `/dev/fd/${handle.fd}`;
-    if ((await realpath(descriptorPath)) !== expected.canonicalPath) return undefined;
+    // The descriptor alias re-confirms the canonical path as defence in depth
+    // on Linux, where /proc- and /dev/fd are magic symlinks that realpath
+    // resolves back to the real directory. macOS /dev/fd is an fdesc device
+    // node, not a symlink, so realpath returns the alias itself and this
+    // comparison can never hold -- which silently degraded every provider
+    // evidence directory to untrusted on macOS. The open handle's identity is
+    // already proven by sameDirectory (dev+ino+size) above, which pins the
+    // exact inode and is stronger than a path check, so the path re-confirmation
+    // is kept where the alias is a resolvable symlink (Linux and the injected
+    // test descriptor paths) and skipped on macOS. NEEDS macOS verification once
+    // a macOS general-test lane exists; there is no macOS CI lane for this file today.
+    if (process.platform !== 'darwin' && (await realpath(descriptorPath)) !== expected.canonicalPath) {
+      return undefined;
+    }
     const trusted: TrustedDirectory = {
       ...expected,
       sourcePath,
