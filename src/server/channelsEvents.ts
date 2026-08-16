@@ -246,7 +246,19 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
       const { [PRE_CUTOVER_SESSION_KEY]: retired, ...rest } = parsed as DeliveryEvent & {
         [PRE_CUTOVER_SESSION_KEY]?: unknown;
       };
-      parsed = { ...rest, preCutoverSession: String(retired) };
+      // Only a NONEMPTY STRING is an identity — exactly what the retired
+      // migrator classified as one (a non-string or empty value was left
+      // `unchanged`, never re-keyed). Carrying it means projecting the value AS
+      // FOUND; `String(retired)` would instead fabricate a plausible identity
+      // out of a malformed one (`String(null) === 'null'`,
+      // `String({}) === '[object Object]'`), which is the very "assert more than
+      // you know" the carry exists to avoid. A malformed retired value is not an
+      // identity, so the record stays a non-attributed event: no
+      // `preCutoverSession`, and the meaningless key dropped.
+      parsed =
+        typeof retired === 'string' && retired.length > 0
+          ? { ...rest, preCutoverSession: retired }
+          : (rest as DeliveryEvent);
     }
     if (filter.sessionId && parsed.sessionId !== filter.sessionId) {
       continue;
