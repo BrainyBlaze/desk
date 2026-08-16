@@ -180,7 +180,13 @@ describe('generation-scoped Moor companion retention', () => {
   let root: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'desk-moor-generation-stores-'));
+    // Short /tmp base so a rendezvous <root>/<sessionId> stays within the macOS
+    // 103-byte Unix-socket ceiling: os.tmpdir() on macOS is a ~50-byte
+    // /var/folders path that would push the real-spawn case below past the
+    // ceiling, tripping the capacity guard before archive preallocation and
+    // hiding the archive-failure seam it exercises. That case asserts its
+    // rendezvous is within the ceiling explicitly.
+    root = mkdtempSync(join('/tmp', 'dmgs-'));
     mkdirSync(join(root, '_engine'), { mode: 0o700 });
   });
 
@@ -1238,6 +1244,12 @@ describe('generation-scoped Moor companion retention', () => {
   it('aborts the real spawn path on archive failure before invoking the Moor launcher', async () => {
     const sessionId = 'codex-launch-fence';
     const sessionPath = join(root, sessionId);
+    // This case exercises a REAL spawn that must allocate generation 2 and then
+    // abort at archival; the rendezvous therefore has to clear the absolute
+    // sun_path ceiling so the capacity guard does not refuse it first. Assert
+    // the fixture is within the macOS ceiling (103 bytes) so this stays the
+    // archive-failure seam and never silently degrades into a capacity refusal.
+    expect(Buffer.byteLength(sessionPath, 'utf8')).toBeLessThanOrEqual(103);
     const unownedLog = encoder.encode('must remain stable\n');
     writeStore(`${sessionPath}.log`, 2, 1, unownedLog);
     const launchMarker = join(root, 'launcher-was-invoked');
