@@ -252,6 +252,36 @@ describe('channelsEvents', () => {
       expect(event).not.toHaveProperty('preCutoverSession');
     });
 
+    it('treats only a nonempty-string retired key as an identity — a malformed value is not string-coerced into a plausible one', () => {
+      // The retired migrator classified ONLY a nonempty string `tmuxSession` as
+      // an identity; a null, object, empty, or numeric value was left unchanged,
+      // never re-keyed. The carry must match that: `String(retired)` would
+      // fabricate `'null'`, `'[object Object]'`, or `''` — a plausible identity
+      // out of a malformed one, the exact over-attribution the carry avoids.
+      // Each such record stays a readable, non-attributed event.
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const line = (extra: string) => `{"seq":SEQ,"at":"2026-08-16T00:00:00.000Z","kind":"queued",${extra}}`;
+      writeFileSync(
+        join(home, '_engine', 'events.jsonl'),
+        [
+          line('"tmuxSession":null').replace('SEQ', '1'),
+          line('"tmuxSession":{"nested":true}').replace('SEQ', '2'),
+          line('"tmuxSession":""').replace('SEQ', '3'),
+          line('"tmuxSession":42').replace('SEQ', '4')
+        ].join('\n') + '\n'
+      );
+      const events = readDeliveryEvents(home);
+      expect(events).toHaveLength(4);
+      for (const event of events) {
+        expect(event).not.toHaveProperty('preCutoverSession');
+        // no laundered identity in any shape
+        expect(JSON.stringify(event)).not.toContain('null');
+        expect(JSON.stringify(event)).not.toContain('[object Object]');
+      }
+      // A per-session filter still cannot attribute any of them.
+      expect(readDeliveryEvents(home, { sessionId: 'null' })).toHaveLength(0);
+    });
+
     it('prune keeps such records byte-for-byte while they are among the newest, and lets them age out otherwise', () => {
       mkdirSync(join(home, '_engine'), { recursive: true });
       const path = join(home, '_engine', 'events.jsonl');
