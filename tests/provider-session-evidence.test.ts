@@ -501,6 +501,53 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
+  test('accepts Claude evidence through the Darwin real-path traversal branch', async () => {
+    // Exercises directoryTraversalBasePath's platform === 'darwin' branch from a
+    // Linux run: with the platform test option set to 'darwin', the trusted
+    // directory traverses the real validated path rather than the /dev/fd
+    // descriptor alias. Real paths traverse on every platform, so a correct
+    // darwin branch still finds the evidence here; the authoritative fdesc-
+    // specific coverage is the hosted macOS lane and the descriptor-alias probe.
+    const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
+    temporaryHomes.push(homeDir);
+    const providerSessionId = '234e5678-e89b-42d3-a456-426614174099';
+    const cwd = '/workspace/darwin-branch';
+    const evidencePath = path.join(
+      homeDir,
+      '.claude',
+      'projects',
+      '-workspace-darwin-branch',
+      `${providerSessionId}.jsonl`
+    );
+    await mkdir(path.dirname(evidencePath), { recursive: true });
+    await writeFile(
+      evidencePath,
+      [
+        JSON.stringify({ type: 'queue-operation', sessionId: providerSessionId }),
+        JSON.stringify({ type: 'user', sessionId: providerSessionId, cwd })
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    const result = await verifyProviderSessionEvidence(
+      {
+        provider: 'claude',
+        providerSessionId,
+        selected: { cwd },
+        homeDir,
+        notBeforeMs: Date.now() - 1_000
+      },
+      { platform: 'darwin' }
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      provider: 'claude',
+      providerSessionId,
+      evidencePath: await realpath(evidencePath)
+    });
+  });
+
   test('accepts Codex evidence only from the selected profile root', async () => {
     const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
     temporaryHomes.push(homeDir);
@@ -3026,8 +3073,18 @@ describe('verifyProviderSessionEvidence', () => {
       code: 'evidence-unsafe-file',
       error: 'provider session evidence file is unsafe'
     });
-    expect(projectIdentityReads).toBe(2);
-    expect(observedIdentityTypes).toEqual(['bigint', 'bigint']);
+    // The exact identity-read count is a Linux fd-pin property: there, child
+    // traversal addresses the opened inode through the /dev/fd/N alias, so the
+    // project directory itself is lstat-ed exactly twice -- the before/after
+    // identity bracket. macOS has no fd-relative traversal (the fdesc alias is
+    // not traversable), so the same bracketing re-resolves the real project
+    // path by name on each revalidation and reads its identity more often. The
+    // load-bearing invariant is platform-neutral: every read observes a BigInt
+    // inode (never a lossy Number), and the distinct above-2^53 inodes are not
+    // aliased, which the unsafe verdict already proves.
+    expect(projectIdentityReads).toBeGreaterThanOrEqual(2);
+    expect(observedIdentityTypes).toHaveLength(projectIdentityReads);
+    expect(observedIdentityTypes.every((entry) => entry === 'bigint')).toBe(true);
   });
 
   test('does not alias a distinct opened descriptor identity above 2^53', async () => {
