@@ -38,6 +38,7 @@ import {
   type CanonicalAgentView
 } from './strategy.js';
 import { readAgentStatePulse } from '../../agentStatePulse.js';
+import { agentDelivery, type AgentDelivery } from './transport.js';
 import { MentionRouter, type MessageRouter } from '../routing/router.js';
 import { ChannelSupervision } from '../routing/supervision.js';
 import {
@@ -212,9 +213,7 @@ export class ChannelsEngine {
   private activitySeq = 0;
   private queueSeq = 0;
   private disposed = false;
-  private readonly sendText: (sessionId: string, text: string) => Promise<boolean>;
-  private readonly capturePane: (sessionId: string) => Promise<string | null>;
-  private readonly sendEnter: (sessionId: string) => Promise<boolean>;
+  private readonly delivery: AgentDelivery;
   private readonly releaseSettleMs: number;
   private readonly drainWatchdogMs: number;
   private readonly enterVerifyDelayMs: number;
@@ -223,7 +222,6 @@ export class ChannelsEngine {
   private readonly onSubmitStateChange?: (sessionId: string, state: SubmitState, context: { seq: number }) => void;
   private readonly staleAfterMs: number;
   private readonly sessionInfo: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
-  private readonly readAgentStates: () => Promise<AgentStateBatch>;
   private readonly now: () => number;
   private readonly router: MessageRouter;
   private pumpTimer: NodeJS.Timeout | undefined;
@@ -232,9 +230,12 @@ export class ChannelsEngine {
   /** queue metadata retained after delivery shift so async submit-state events can be attributed */
   private readonly deliveryEventContext = new Map<string, DeliveryEventContext>();
   constructor(private readonly options: ChannelsEngineOptions) {
-    this.sendText = options.sendText;
-    this.capturePane = options.capturePane;
-    this.sendEnter = options.sendEnter;
+    this.delivery = agentDelivery({
+      sendText: options.sendText,
+      capturePane: options.capturePane,
+      sendEnter: options.sendEnter,
+      readAgentStates: options.readAgentStates ?? readAgentStatePulse
+    });
     this.releaseSettleMs = options.releaseSettleMs ?? 800;
     this.drainWatchdogMs = options.drainWatchdogMs ?? 30_000;
     this.enterVerifyDelayMs = options.enterVerifyDelayMs ?? 1200;
@@ -243,7 +244,6 @@ export class ChannelsEngine {
     this.onSubmitStateChange = options.onSubmitStateChange;
     this.staleAfterMs = options.staleAfterMs ?? 10 * 60 * 1000;
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
-    this.readAgentStates = options.readAgentStates ?? readAgentStatePulse;
     this.now = options.now ?? Date.now;
     this.router = options.router ?? new MentionRouter();
     this.restorePausedSessions();
@@ -285,7 +285,7 @@ export class ChannelsEngine {
 
   private async readStateBatch(): Promise<AgentStateBatch> {
     try {
-      const batch = await this.readAgentStates();
+      const batch = await this.delivery.states();
       if (!batch.ok || batch.revision === null || !Array.isArray(batch.snapshots)) {
         return { ok: false, revision: null, snapshots: [] };
       }
@@ -299,7 +299,7 @@ export class ChannelsEngine {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const captured = await Promise.race([
-        this.capturePane(sessionId).catch(() => null),
+        this.delivery.probe(sessionId).catch(() => null),
         new Promise<null>((resolve) => {
           timeout = setTimeout(() => resolve(null), DELIVERY_CAPTURE_TIMEOUT_MS);
           timeout.unref?.();
@@ -986,7 +986,7 @@ export class ChannelsEngine {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         delivered = await Promise.race([
-          this.sendText(runtime.sessionId, payload),
+          this.delivery.send(runtime.sessionId, payload),
           new Promise<boolean>((resolve) => {
             timeout = setTimeout(() => {
               deliveryTimedOut = true;
@@ -1139,7 +1139,7 @@ export class ChannelsEngine {
         }
       }
       if (view.activity === 'idle') {
-        await this.sendEnter(runtime.sessionId);
+        await this.delivery.submit(runtime.sessionId);
       }
     }
     if (this.disposed) {
