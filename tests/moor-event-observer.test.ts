@@ -172,17 +172,34 @@ describe('MoorEventObserver', () => {
     });
   });
 
-  it('maps exit endings onto Desk exit codes (exited passthrough, signalled 128+signal)', async () => {
-    const root = await makeStore();
-    const body = eventBody([
-      event('ready', 1, 1n),
-      event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')
-    ]);
-    await writeSlot(root, 0, body, commitRecord({ slot: 0, bytes: body, index: 1n, start: 1n, end: 3n }));
+  it('projects a signalled exit to 128+signal independently of method', async () => {
+    for (const method of ['none', 'graceful', 'forced'] as const) {
+      const root = await makeStore();
+      const body = eventBody([
+        event('ready', 1, 1n),
+        event(
+          'exit',
+          1,
+          2n,
+          'transition',
+          `,"ended":"signalled","signal":15,"method":"${method}"`
+        )
+      ]);
+      await writeSlot(
+        root,
+        0,
+        body,
+        commitRecord({ slot: 0, bytes: body, index: 1n, start: 1n, end: 3n })
+      );
 
-    const { seen, handlers } = collector();
-    await startObserver(root, handlers);
-    expect(seen[1]!.event).toMatchObject({ type: 'exit', code: 143 });
+      const { seen, handlers } = collector();
+      await startObserver(root, handlers);
+      expect(seen[1]!.event).toMatchObject({
+        type: 'exit',
+        code: 143,
+        outcome: { kind: 'signalled', signal: 15, method }
+      });
+    }
   });
 
   it('preserves the raw Moor outcome instead of folding it to one number (desk#59)', async () => {
@@ -193,11 +210,13 @@ describe('MoorEventObserver', () => {
     // must survive to the durable model; the legacy number is derived only at
     // the browser compatibility boundary.
     const cases: Array<[string, Record<string, unknown>]> = [
-      [',"ended":"signalled","signal":15', { kind: 'signalled', signal: 15 }],
-      [',"ended":"exited","code":7', { kind: 'exited', code: 7 }],
       [
-        ',"ended":"terminated","code":0,"method":"graceful"',
-        { kind: 'terminated', code: 0, method: 'graceful' }
+        ',"ended":"signalled","signal":15,"method":"forced"',
+        { kind: 'signalled', signal: 15, method: 'forced' }
+      ],
+      [
+        ',"ended":"exited","code":7,"method":"none"',
+        { kind: 'exited', code: 7, method: 'none' }
       ]
     ];
     for (const [tail, expected] of cases) {
@@ -224,13 +243,13 @@ describe('MoorEventObserver', () => {
     expect(seen).toHaveLength(1);
 
     // Written after the observer's last read, exactly like a real death.
-    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')]);
+    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15,"method":"forced"')]);
     await writeSlot(root, 1, second, commitRecord({ slot: 1, bytes: second, index: 2n, start: 1n, end: 3n }));
 
     await expect(observer.drain()).resolves.toBe('drained');
     expect(seen.at(-1)!.event).toMatchObject({
       type: 'exit',
-      outcome: { kind: 'signalled', signal: 15 }
+      outcome: { kind: 'signalled', signal: 15, method: 'forced' }
     });
   });
 
@@ -244,7 +263,7 @@ describe('MoorEventObserver', () => {
     const { seen, handlers } = collector();
     const observer = await startObserver(root, handlers);
 
-    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')]);
+    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15,"method":"forced"')]);
     await writeSlot(root, 1, second, commitRecord({ slot: 1, bytes: second, index: 2n, start: 1n, end: 3n }));
 
     await Promise.all([observer.drain(), observer.drain()]);
@@ -266,7 +285,7 @@ describe('MoorEventObserver', () => {
     const { seen, handlers } = collector();
     const observer = await startObserver(root, handlers);
 
-    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15')]);
+    const second = eventBody([event('ready', 1, 1n), event('exit', 1, 2n, 'transition', ',"ended":"signalled","signal":15,"method":"forced"')]);
     await writeSlot(root, 1, second, commitRecord({ slot: 1, bytes: second, index: 2n, start: 1n, end: 3n }));
 
     // Pinned deliberately: stopping first is irreversible, so the retired

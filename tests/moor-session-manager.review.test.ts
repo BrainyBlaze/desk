@@ -130,7 +130,7 @@ const text = (value: string): Uint8Array => new TextEncoder().encode(value);
 const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4), bytes);
 
 function helloAckPayload(identity: Uint8Array): Uint8Array {
-  return joined(Uint8Array.of(3), integer(GENERATION, 4), INCARNATION, wide(identity));
+  return joined(Uint8Array.of(4), integer(GENERATION, 4), INCARNATION, wide(identity));
 }
 
 function statusPayload(identity: Uint8Array): Uint8Array {
@@ -155,6 +155,8 @@ function statusPayload(identity: Uint8Array): Uint8Array {
     integer(4321, 4),
     integer(1, 4),
     new Uint8Array(16).fill(0xc3),
+    integer(80, 2),
+    integer(24, 2),
     tail
   );
 }
@@ -218,8 +220,8 @@ async function driveAttach(holder: ProtocolHolder, attaching: Promise<boolean>):
   expect((await holder.next())?.kind).toBe(MoorKind.HELLO);
   holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
   expect((await holder.next())?.kind).toBe(MoorKind.ATTACH);
-  holder.send(MoorKind.TERMINAL_STATE, joined(integer(1, 2), Uint8Array.of(0x0f)));
   holder.send(MoorKind.ATTACH_ACK, statusPayload(identity));
+  holder.send(MoorKind.TERMINAL_STATE, joined(integer(1, 2), Uint8Array.of(0x0f)));
   holder.send(MoorKind.LEASE_RESULT, leaseResultPayload());
   return attaching;
 }
@@ -511,8 +513,8 @@ describe('SessionManager Moor production-slice adversarial review', () => {
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     expect((await holder.next())?.kind).toBe(MoorKind.ATTACH);
     holder.sendBatch(
-      [MoorKind.TERMINAL_STATE, joined(integer(1, 2), Uint8Array.of(0x0f))],
       [MoorKind.ATTACH_ACK, statusPayload(identity)],
+      [MoorKind.TERMINAL_STATE, joined(integer(1, 2), Uint8Array.of(0x0f))],
       [MoorKind.LEASE_RESULT, leaseResultPayload()],
       [MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('output-one'))]
     );

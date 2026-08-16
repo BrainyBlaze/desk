@@ -29,12 +29,15 @@ type StoreSlot = (typeof STORE_SLOTS)[number];
 type CompanionKind = 'exit' | 'log';
 
 export type MoorGenerationExitOutcome =
-  | { readonly ended: 'exited'; readonly code: number }
-  | { readonly ended: 'signalled'; readonly signal: number }
   | {
-      readonly ended: 'terminated';
+      readonly ended: 'exited';
       readonly code: number;
-      readonly method: 'graceful' | 'forced';
+      readonly method: 'none' | 'graceful' | 'forced';
+    }
+  | {
+      readonly ended: 'signalled';
+      readonly signal: number;
+      readonly method: 'none' | 'graceful' | 'forced';
     };
 
 export interface MoorGenerationExitEvidence {
@@ -381,16 +384,14 @@ function decodeExitEvidence(
   }
 
   let outcome: MoorGenerationExitOutcome;
+  const method = value.method;
+  if (method !== 'none' && method !== 'graceful' && method !== 'forced') {
+    throw new Error('Moor lifecycle manifest has invalid exit outcome');
+  }
   if (value.ended === 'exited' && typeof value.code === 'number') {
-    outcome = { ended: 'exited', code: value.code };
+    outcome = { ended: 'exited', code: value.code, method };
   } else if (value.ended === 'signalled' && typeof value.signal === 'number') {
-    outcome = { ended: 'signalled', signal: value.signal };
-  } else if (
-    value.ended === 'terminated' &&
-    typeof value.code === 'number' &&
-    (value.method === 'graceful' || value.method === 'forced')
-  ) {
-    outcome = { ended: 'terminated', code: value.code, method: value.method };
+    outcome = { ended: 'signalled', signal: value.signal, method };
   } else {
     throw new Error('Moor lifecycle manifest has invalid exit outcome');
   }

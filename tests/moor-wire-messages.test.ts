@@ -35,6 +35,8 @@ function validStatusPayload(): {
   payload: Uint8Array;
   identity: Uint8Array;
   incarnation: Uint8Array;
+  layoutOffset: number;
+  geometryOffset: number;
 } {
   const identity = joined(Uint8Array.of(1, 0x2f), text('tmp/session'));
   const eventIdentity = joined(Uint8Array.of(1, 0x2f), text('tmp/session/events'));
@@ -59,26 +61,36 @@ function validStatusPayload(): {
   );
   expect(tail).toHaveLength(69);
 
+  const layoutOffset = 4 + identity.length + 4 + incarnation.length;
+  const head = joined(
+    wide(identity),
+    integer(7, 4),
+    incarnation,
+    Uint8Array.of(2),
+    wide(eventIdentity),
+    Uint8Array.of(1),
+    integer(9n, 8),
+    integer(12n, 8),
+    bodyHash,
+    integer(100n, 8),
+    integer(50n, 8),
+    bootIdentity,
+    wide(text('/tmp/session')),
+    integer(1234, 4),
+    integer(5678, 4),
+    birthToken
+  );
+  const geometryOffset = head.length;
+
   return {
     identity,
     incarnation,
+    layoutOffset,
+    geometryOffset,
     payload: joined(
-      wide(identity),
-      integer(7, 4),
-      incarnation,
-      Uint8Array.of(2),
-      wide(eventIdentity),
-      Uint8Array.of(1),
-      integer(9n, 8),
-      integer(12n, 8),
-      bodyHash,
-      integer(100n, 8),
-      integer(50n, 8),
-      bootIdentity,
-      wide(text('/tmp/session')),
-      integer(1234, 4),
-      integer(5678, 4),
-      birthToken,
+      head,
+      integer(80, 2),
+      integer(24, 2),
       tail
     )
   };
@@ -89,7 +101,7 @@ describe('Moor controller payload encoder', () => {
     const identity = text('session-id');
     expect(encodeMoorControllerRequest({ type: 'hello', identity })).toEqual({
       kind: MoorKind.HELLO,
-      payload: joined(text('MOOR'), Uint8Array.of(3, 0, 0), wide(identity))
+      payload: joined(text('MOOR'), Uint8Array.of(4, 0, 0), wide(identity))
     });
     expect(
       encodeMoorControllerRequest({
@@ -197,6 +209,24 @@ describe('Moor controller payload encoder', () => {
     ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
     expect(() =>
       encodeMoorControllerRequest({
+        type: 'attach',
+        columns: 100,
+        rows: 30,
+        requestLease: false,
+        nonVt: false
+      })
+    ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
+    expect(() =>
+      encodeMoorControllerRequest({
+        type: 'attach',
+        columns: 0,
+        rows: 0,
+        requestLease: false,
+        nonVt: false
+      })
+    ).not.toThrow();
+    expect(() =>
+      encodeMoorControllerRequest({
         type: 'lease-request',
         operation: 'resume',
         role: 'viewer',
@@ -206,19 +236,81 @@ describe('Moor controller payload encoder', () => {
       })
     ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
   });
+
+  it.each([
+    [2000, 1000],
+    [32767, 61]
+  ] as const)('accepts bounded controller geometry %sx%s', (columns, rows) => {
+    expect(() =>
+      encodeMoorControllerRequest({
+        type: 'attach',
+        columns,
+        rows,
+        requestLease: true,
+        nonVt: false
+      })
+    ).not.toThrow();
+    expect(() =>
+      encodeMoorControllerRequest({ type: 'resize', epoch: 1, columns, rows })
+    ).not.toThrow();
+  });
+
+  it.each([
+    [2001, 1000],
+    [32767, 62],
+    [32768, 1],
+    [80, 0]
+  ] as const)('rejects controller geometry outside the Moor bound: %sx%s', (columns, rows) => {
+    expect(() =>
+      encodeMoorControllerRequest({
+        type: 'attach',
+        columns,
+        rows,
+        requestLease: false,
+        nonVt: false
+      })
+    ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
+    expect(() =>
+      encodeMoorControllerRequest({ type: 'resize', epoch: 1, columns, rows })
+    ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
+  });
+
+  it('preserves the explicit zero-by-zero controller geometry', () => {
+    expect(
+      encodeMoorControllerRequest({
+        type: 'attach',
+        columns: 0,
+        rows: 0,
+        requestLease: false,
+        nonVt: false
+      }).payload
+    ).toEqual(Uint8Array.of(0, 0, 0, 0, 0));
+    expect(
+      encodeMoorControllerRequest({ type: 'resize', epoch: 1, columns: 0, rows: 0 }).payload
+    ).toEqual(joined(integer(1, 4), new Uint8Array(4)));
+  });
 });
 
 describe('Moor holder payload decoder', () => {
   it('adopts a HELLO_ACK generation only when scope and identity agree', () => {
     const identity = text('session-id');
     const incarnation = nonzero(16, 0x61);
-    const payload = joined(Uint8Array.of(3), integer(7, 4), incarnation, wide(identity));
+    const payload = joined(Uint8Array.of(4), integer(7, 4), incarnation, wide(identity));
     expect(
       decodeMoorHolderMessage(
         { scope: 7, kind: MoorKind.HELLO_ACK, payload },
         { identity, generation: 7 }
       )
     ).toEqual({ type: 'hello-ack', generation: 7, incarnation, identity });
+
+    const retired = payload.slice();
+    retired[0] = 3;
+    expect(() =>
+      decodeMoorHolderMessage(
+        { scope: 7, kind: MoorKind.HELLO_ACK, payload: retired },
+        { identity, generation: 7 }
+      )
+    ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
     expect(() =>
       decodeMoorHolderMessage(
         { scope: 8, kind: MoorKind.HELLO_ACK, payload },
@@ -243,6 +335,8 @@ describe('Moor holder payload decoder', () => {
         generation: 7,
         incarnation,
         layout: 2,
+        columns: 80,
+        rows: 24,
         bodySlot: 1,
         commitIndex: 9n,
         bodyLength: 12n,
@@ -254,6 +348,48 @@ describe('Moor holder payload decoder', () => {
         log: { health: 1, epoch: 4, index: 5n, retainedStart: 0n, retainedEnd: 12n }
       }
     });
+  });
+
+  it('rejects zero status geometry and the retired layout 1 descriptor', () => {
+    const { payload, identity, incarnation, geometryOffset, layoutOffset } = validStatusPayload();
+    const decode = (candidate: Uint8Array): unknown =>
+      decodeMoorHolderMessage(
+        { scope: 7, kind: MoorKind.STATUS_REPLY, payload: candidate },
+        { identity, generation: 7, incarnation }
+      );
+
+    for (const offset of [geometryOffset, geometryOffset + 2]) {
+      const zeroed = payload.slice();
+      zeroed.fill(0, offset, offset + 2);
+      expect(() => decode(zeroed)).toThrowError(
+        expect.objectContaining<MoorWireError>({ code: 'MALFORMED' })
+      );
+    }
+
+    const retired = payload.slice();
+    retired[layoutOffset] = 1;
+    expect(() => decode(retired)).toThrowError(
+      expect.objectContaining<MoorWireError>({ code: 'MALFORMED' })
+    );
+  });
+
+  it.each([
+    [2001, 1000],
+    [32767, 62],
+    [32768, 1]
+  ] as const)('rejects impossible holder status geometry %sx%s', (columns, rows) => {
+    const { payload, identity, incarnation, geometryOffset } = validStatusPayload();
+    const invalid = payload.slice();
+    const view = new DataView(invalid.buffer, invalid.byteOffset);
+    view.setUint16(geometryOffset, columns, true);
+    view.setUint16(geometryOffset + 2, rows, true);
+
+    expect(() =>
+      decodeMoorHolderMessage(
+        { scope: 7, kind: MoorKind.STATUS_REPLY, payload: invalid },
+        { identity, generation: 7, incarnation }
+      )
+    ).toThrowError(expect.objectContaining<MoorWireError>({ code: 'MALFORMED' }));
   });
 
   it('decodes the complete holder response surface with bigint u64 fields', () => {

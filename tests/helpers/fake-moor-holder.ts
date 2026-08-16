@@ -1,5 +1,5 @@
 // Test-double moor binary for join-path witnesses (#2b). Speaks the REAL MOOR
-// wire v3 (via the approved moorWire codec) over a REAL unix socket, consumes
+// wire v4 (via the approved moorWire codec) over a REAL unix socket, consumes
 // the REAL fd-3 launch channel, and materializes a REAL four-slot committed
 // event store — so sessionManager/terminalDaemon orchestration is exercised
 // against the same contracts the production holder enforces.
@@ -98,7 +98,7 @@ function tag01Identity(path: string): Uint8Array {
 }
 
 function helloAckPayload(generation: number, incarnation: Uint8Array, identity: Uint8Array): Uint8Array {
-  return joined(Uint8Array.of(3), integer(generation, 4), incarnation, wide(identity));
+  return joined(Uint8Array.of(4), integer(generation, 4), incarnation, wide(identity));
 }
 
 /** Minimal valid §5 status: lease owned, viewers, running; layout 2 with the
@@ -110,6 +110,8 @@ function statusPayload(
   identity: Uint8Array,
   leaseEpoch: number,
   replay: { first: bigint; last: bigint; start: bigint; end: bigint },
+  columns: number,
+  rows: number,
   store?: {
     directory: string;
     bodySlot: 0 | 1;
@@ -152,6 +154,8 @@ function statusPayload(
     integer(process.pid, 4),
     integer(1, 4),
     new Uint8Array(16).fill(0xc3),
+    integer(columns, 2),
+    integer(rows, 2),
     tail
   );
 }
@@ -209,16 +213,17 @@ function writeCurrentExitStore(
   incarnation: Uint8Array,
   code: number | null,
   signal: NodeJS.Signals | null,
-  outputEnd: bigint
+  outputEnd: bigint,
+  method: 'none' | 'graceful' | 'forced'
 ): void {
   const encodedIdentity = Buffer.from(identity).toString('base64');
   const nonce = Buffer.from(incarnation).toString('base64');
   const outcome =
     signal === null
-      ? `,"ended":"exited","code":${code ?? 0}`
-      : ',"ended":"signalled","signal":15';
+      ? `,"ended":"exited","code":${code ?? 0},"method":"${method}"`
+      : `,"ended":"signalled","signal":15,"method":"${method}"`;
   const body = encoder.encode(
-    `{"v":1,"type":"lifecycle","phase":"exited","session":"${encodedIdentity}",` +
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${encodedIdentity}",` +
       `"generation":${generation},"wire_generation":${generation},` +
       `"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1",` +
       `"boot_id":"${nonce}","path_encoding":"posix-bytes",` +
@@ -470,6 +475,8 @@ async function holder(argv: string[]): Promise<void> {
 
   let outputSequence = 0n;
   let outputOffset = 0n;
+  let columns = 80;
+  let rows = 24;
   /** Retained records for the §6.1 attach replay baseline. */
   const retained: Array<{ sequence: bigint; offset: bigint; bytes: Buffer }> = [];
   const connections = new Set<{ socket: Socket; codec: MoorCodec; attached: boolean }>();
@@ -488,6 +495,7 @@ async function holder(argv: string[]): Promise<void> {
       if (conn.attached) conn.socket.write(conn.codec.encode(generation, MoorKind.OUTPUT, payload));
     }
   });
+  let exitMethod: 'none' | 'graceful' | 'forced' = 'none';
   child?.on('exit', (code, signal) => {
     writeCurrentExitStore(
       sessionPath,
@@ -496,11 +504,14 @@ async function holder(argv: string[]): Promise<void> {
       incarnation,
       code,
       signal,
-      outputOffset
+      outputOffset,
+      exitMethod
     );
     store?.append(
       'exit',
-      signal !== null ? `,"ended":"signalled","signal":${15}` : `,"ended":"exited","code":${code ?? 0}`
+      signal !== null
+        ? `,"ended":"signalled","signal":${15},"method":"${exitMethod}"`
+        : `,"ended":"exited","code":${code ?? 0},"method":"${exitMethod}"`
     );
     for (const conn of connections) {
       const wakeup = conn.codec.encode(generation, MoorKind.WAKEUP, new Uint8Array());
@@ -509,7 +520,7 @@ async function holder(argv: string[]): Promise<void> {
   });
 
   const server = createServer((socket) => {
-    const conn = { socket, codec: new MoorCodec(), attached: false };
+    const conn = { socket, codec: new MoorCodec(), attached: false, hasLease: false };
     connections.add(conn);
     const inbound = new MoorCodec();
     let heartbeat: NodeJS.Timeout | undefined;
@@ -549,7 +560,7 @@ async function holder(argv: string[]): Promise<void> {
               socket.destroy();
               return;
             }
-            // Frozen §6 prefix: TERMINAL_STATE → ATTACH_ACK → LEASE_RESULT
+            // Frozen §6 prefix: ATTACH_ACK → TERMINAL_STATE → LEASE_RESULT
             // when requested → the retained replay baseline → live output.
             const replay = {
               first: retained.length > 0 ? 1n : 0n,
@@ -563,7 +574,24 @@ async function holder(argv: string[]): Promise<void> {
               wantsLease &&
               leaseBusyFile !== undefined &&
               existsSync(leaseBusyFile);
-            socket.write(conn.codec.encode(generation, MoorKind.TERMINAL_STATE, integer(0, 2)));
+            const geometry = new DataView(
+              message.payload.buffer,
+              message.payload.byteOffset,
+              message.payload.byteLength
+            );
+            const requestedColumns = geometry.getUint16(0, true);
+            const requestedRows = geometry.getUint16(2, true);
+            const specifiesGeometry = requestedColumns !== 0 || requestedRows !== 0;
+            if (specifiesGeometry && !wantsLease && !conn.hasLease) {
+              socket.destroy();
+              return;
+            }
+            const ownsLease = conn.hasLease || (wantsLease && !leaseBusy);
+            if (specifiesGeometry && ownsLease) {
+              columns = requestedColumns;
+              rows = requestedRows;
+            }
+            if (wantsLease && !leaseBusy) conn.hasLease = true;
             socket.write(
               conn.codec.encode(
                 generation,
@@ -574,13 +602,21 @@ async function holder(argv: string[]): Promise<void> {
                   identity,
                   1,
                   replay,
+                  columns,
+                  rows,
                   store === undefined || storeDir === undefined
                     ? undefined
                     : { directory: storeDir, ...store.frontier() },
-                  !leaseBusy
+                  ownsLease
                 )
               )
             );
+            const failAfterAckFile = process.env.FAKE_MOOR_FAIL_AFTER_ATTACH_ACK_FILE;
+            if (failAfterAckFile !== undefined && existsSync(failAfterAckFile)) {
+              socket.destroy();
+              return;
+            }
+            socket.write(conn.codec.encode(generation, MoorKind.TERMINAL_STATE, integer(0, 2)));
             if (wantsLease) {
               socket.write(
                 conn.codec.encode(
@@ -701,9 +737,11 @@ async function holder(argv: string[]): Promise<void> {
             };
             if (child !== undefined && child.exitCode === null && child.signalCode === null) {
               child.once('exit', () => setImmediate(finish));
+              exitMethod = 'graceful';
               child.kill('SIGTERM');
               const escalate = setTimeout(() => {
                 try {
+                  exitMethod = 'forced';
                   child.kill('SIGKILL');
                 } catch {
                   /* already gone */
@@ -722,6 +760,7 @@ async function holder(argv: string[]): Promise<void> {
             if (leaseBusyFile !== undefined) {
               appendFileSync(`${sessionPath}.viewer-lease-requests`, 'request\n');
             }
+            if (!leaseBusy) conn.hasLease = true;
             socket.write(
               conn.codec.encode(
                 generation,
@@ -738,7 +777,10 @@ async function holder(argv: string[]): Promise<void> {
             const epoch = view.getUint32(0, true);
             const token = message.payload.subarray(4, 20);
             const exact = epoch === 1 && token.every((byte) => byte === 0xd4);
-            if (exact) writeFileSync(`${sessionPath}.lease-released`, '1');
+            if (exact) {
+              conn.hasLease = false;
+              writeFileSync(`${sessionPath}.lease-released`, '1');
+            }
             socket.write(
               conn.codec.encode(
                 generation,
@@ -814,6 +856,8 @@ async function holder(argv: string[]): Promise<void> {
                     start: 0n,
                     end: outputOffset
                   },
+                  columns,
+                  rows,
                   store === undefined || storeDir === undefined
                     ? undefined
                     : { directory: storeDir, ...store.frontier() }
@@ -821,10 +865,19 @@ async function holder(argv: string[]): Promise<void> {
               )
             );
             break;
-          case MoorKind.RESIZE:
+          case MoorKind.RESIZE: {
             // desk#62 witness: RESIZE carries u32 lease epoch, then geometry.
-            appendGeometryWitness(sessionPath, 'resize', message.payload.subarray(4));
+            const geometryPayload = message.payload.subarray(4);
+            appendGeometryWitness(sessionPath, 'resize', geometryPayload);
+            const geometry = new DataView(
+              geometryPayload.buffer,
+              geometryPayload.byteOffset,
+              geometryPayload.byteLength
+            );
+            columns = geometry.getUint16(0, true);
+            rows = geometry.getUint16(2, true);
             break;
+          }
           default:
             break; // OUTPUT_ACK / LEASE_KEEPALIVE: accepted silently
         }

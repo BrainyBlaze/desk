@@ -278,8 +278,8 @@ export class DaemonCore {
           // directly; the tagged outcome states which of the two it was.
           outcome:
             exit.signal === 0 || exit.signal === undefined
-              ? { kind: 'exited', code: exit.code ?? 0 }
-              : { kind: 'signalled', signal: Number(exit.signal) },
+              ? { kind: 'exited', code: exit.code ?? 0, method: 'none' }
+              : { kind: 'signalled', signal: Number(exit.signal), method: 'none' },
           diagnostic: null
         });
       }

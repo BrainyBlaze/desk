@@ -683,9 +683,9 @@ export class SessionManager {
             )
             .catch(() => false);
           return terminalStateReady.then((ready) => {
-            // The Moor client serializes this promise before ATTACH_ACK. Mark
-            // the barrier open here so replay and later live OUTPUT both take
-            // the same asynchronous delivery path and cannot overtake.
+            // The Moor client serializes this promise before the remaining
+            // prefix and replay frames. Mark the barrier open here so replay
+            // and later live OUTPUT cannot overtake terminal-state handling.
             if (ready) preambleDrained = true;
           });
         },
@@ -832,10 +832,10 @@ export class SessionManager {
       client.close();
       return false;
     }
-    // The §6 preamble precedes the ACK on the wire, so every parser write is
-    // already CHAINED; adoption completes only after that work drains clean —
-    // and only then does buffered replay/live output reach the emulator, in
-    // arrival order. A failed drain discards the buffer with the connection.
+    // The §6 status ACK precedes terminal state on the wire. The client chains
+    // terminal-state handling before every later prefix/replay frame; adoption
+    // completes only after that work drains clean, then buffered replay/live
+    // output reaches the emulator in arrival order. A failed drain discards it.
     if (!(await terminalStateReady)) {
       client.close();
       return false;

@@ -150,7 +150,7 @@ describe('FileDeskEventJournal', () => {
         signal: '15',
         origin: 'observed' as const,
         reason: null,
-        outcome: { kind: 'signalled' as const, signal: 15 },
+        outcome: { kind: 'signalled' as const, signal: 15, method: 'forced' as const },
         diagnostic: null
       }
     };
@@ -179,7 +179,7 @@ describe('FileDeskEventJournal', () => {
       origin: 'observed',
       code: 143,
       signal: '15',
-      outcome: { kind: 'signalled', signal: 15 }
+      outcome: { kind: 'signalled', signal: 15, method: 'forced' }
     });
     restarted.close();
   });

@@ -25,6 +25,33 @@ function sessionIdentity(): Uint8Array {
   return Uint8Array.of(1, 0x2f, ...encoder.encode('tmp/session'));
 }
 
+const V24_LIFECYCLE_BODY = encoder.encode(
+  '{"v":2,"type":"lifecycle","phase":"running","session":"AS9z","generation":7,"wire_generation":7,"incarnation":"AgICAgICAgICAgICAgICAg==","start_wall_ms":"1","start_mono_ms":"2","boot_id":"AwMDAwMDAwMDAwMDAwMDAw==","path_encoding":"posix-bytes","event_path":null,"instrument_path":null}\n'
+);
+
+function exitedLifecycleBody(options: {
+  encoding?: 'posix-bytes' | 'windows-wtf8';
+  ended?: 'exited' | 'signalled' | 'terminated';
+  method?: 'none' | 'graceful' | 'forced' | 'unknown' | null;
+  code?: number;
+  signal?: number;
+} = {}): Uint8Array {
+  const encoding = options.encoding ?? 'posix-bytes';
+  const identity =
+    encoding === 'posix-bytes'
+      ? sessionIdentity()
+      : Uint8Array.of(2, ...new Uint8Array(24));
+  const ended = options.ended ?? 'exited';
+  const mechanism =
+    ended === 'signalled'
+      ? `,"signal":${options.signal ?? 15}`
+      : `,"code":${options.code ?? 0}`;
+  const method = options.method === null ? '' : `,"method":"${options.method ?? 'none'}"`;
+  return encoder.encode(
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${Buffer.from(identity).toString('base64')}","generation":7,"wire_generation":7,"incarnation":"AgICAgICAgICAgICAgICAg==","start_wall_ms":"1","start_mono_ms":"2","boot_id":"AwMDAwMDAwMDAwMDAwMDAw==","path_encoding":"${encoding}","event_path":null,"instrument_path":null,"end_wall_ms":"3","output_end":"12","ended":"${ended}"${mechanism}${method}}\n`
+  );
+}
+
 function header(generation: number, epoch: number, first: bigint, next: bigint): string {
   const encodedGeneration = generation === 1 ? 'null' : String(generation);
   return `{"v":2,"type":"header","ts":1,"session":"${Buffer.from(sessionIdentity()).toString('base64')}","generation":${encodedGeneration},"epoch":${epoch},"next_seq":${next},"first_retained":${first}}\n`;
@@ -490,6 +517,119 @@ describe('Moor event snapshots and cursors', () => {
     const result = eventsAfterMoorCursor(snapshot);
     expect(result.streamExhausted).toBe(true);
     expect(result.events.at(-1)).toMatchObject({ type: 'stream-exhausted', sequence: 2n });
+  });
+
+  it('accepts the exact 286-byte V24 canonical running lifecycle body', async () => {
+    expect(V24_LIFECYCLE_BODY).toHaveLength(286);
+    const directory = await store({
+      body0: V24_LIFECYCLE_BODY,
+      commit0: commitRecord({
+        slot: 0,
+        kind: MoorStoreKind.Exit,
+        generation: 7,
+        epoch: 1,
+        index: 1n,
+        start: 0n,
+        end: 0n,
+        bytes: V24_LIFECYCLE_BODY
+      })
+    });
+
+    await expect(readMoorStoreSnapshot(directory, MoorStoreKind.Exit, 7)).resolves.toMatchObject({
+      bytes: V24_LIFECYCLE_BODY
+    });
+  });
+
+  it.each([
+    ['exited', 'none'],
+    ['exited', 'graceful'],
+    ['exited', 'forced'],
+    ['signalled', 'none'],
+    ['signalled', 'graceful'],
+    ['signalled', 'forced']
+  ] as const)('accepts canonical POSIX %s lifecycle outcomes with method %s', async (ended, method) => {
+    const body = exitedLifecycleBody({ ended, method });
+    const directory = await store({
+      body0: body,
+      commit0: commitRecord({
+        slot: 0,
+        kind: MoorStoreKind.Exit,
+        generation: 7,
+        epoch: 1,
+        index: 2n,
+        start: 12n,
+        end: 12n,
+        bytes: body
+      })
+    });
+
+    await expect(readMoorStoreSnapshot(directory, MoorStoreKind.Exit, 7)).resolves.toMatchObject({
+      bytes: body
+    });
+  });
+
+  it.each([
+    ['missing method', exitedLifecycleBody({ method: null })],
+    ['unknown method', exitedLifecycleBody({ method: 'unknown' })],
+    [
+      'noncanonical extra key',
+      encoder.encode(
+        new TextDecoder().decode(exitedLifecycleBody()).replace('}\n', ',"extra":0}\n')
+      )
+    ],
+    [
+      'retired v1 schema',
+      encoder.encode(new TextDecoder().decode(exitedLifecycleBody()).replace('{"v":2', '{"v":1'))
+    ],
+    ['retired terminated mechanism', exitedLifecycleBody({ ended: 'terminated', method: 'forced' })],
+    [
+      'Windows signalled mechanism',
+      exitedLifecycleBody({ encoding: 'windows-wtf8', ended: 'signalled', method: 'forced' })
+    ],
+    ['POSIX exit code 256', exitedLifecycleBody({ code: 256 })]
+  ] as const)('rejects %s lifecycle records', async (_label, body) => {
+    const directory = await store({
+      body0: body,
+      commit0: commitRecord({
+        slot: 0,
+        kind: MoorStoreKind.Exit,
+        generation: 7,
+        epoch: 1,
+        index: 2n,
+        start: 12n,
+        end: 12n,
+        bytes: body
+      })
+    });
+
+    await expect(readMoorStoreSnapshot(directory, MoorStoreKind.Exit, 7)).rejects.toMatchObject({
+      code: 'CORRUPT'
+    });
+  });
+
+  it('accepts the canonical platform numeric boundaries', async () => {
+    const bodies = [
+      exitedLifecycleBody({ code: 255 }),
+      exitedLifecycleBody({ ended: 'signalled', signal: 0xffff_ffff, method: 'forced' }),
+      exitedLifecycleBody({ encoding: 'windows-wtf8', code: 0xffff_ffff, method: 'graceful' })
+    ];
+
+    for (const body of bodies) {
+      const directory = await store({
+        body0: body,
+        commit0: commitRecord({
+          slot: 0,
+          kind: MoorStoreKind.Exit,
+          generation: 7,
+          epoch: 1,
+          index: 2n,
+          start: 12n,
+          end: 12n,
+          bytes: body
+        })
+      });
+      await expect(readMoorStoreSnapshot(directory, MoorStoreKind.Exit, 7)).resolves.toBeDefined();
+    }
   });
 });
 

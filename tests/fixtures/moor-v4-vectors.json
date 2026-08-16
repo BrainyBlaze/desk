@@ -1,0 +1,176 @@
+{
+ "V1": {
+  "description": "side-effect-free `HELLO`, exact generation 7, sequence 1; hello flags are reserved zero",
+  "hex": "4d4f4f52040100000700000001000000210000003ec8f1244d4f4f5204000016000000012f746d702f2e6d6f6f722d313030302f6275696c64",
+  "bytes": 57
+ },
+ "V2": {
+  "description": "`OUTPUT`, record sequence 42, byte offset 4096, payload `hi`",
+  "hex": "4d4f4f52040600000700000009000000120000009d65ed092a0000000000000000100000000000006869",
+  "bytes": 42
+ },
+ "V3": {
+  "description": "`ATTACH` with geometry 0×0 — *preserve both* (OB-19) — requesting the lease",
+  "hex": "4d4f4f52040300000700000002000000050000002d90af9c0000000001",
+  "bytes": 29
+ },
+ "V4": {
+  "description": "`RESIZE`, lease epoch 3, geometry 80×24 — payload is 8 bytes: epoch then geometry",
+  "hex": "4d4f4f52040b0000070000000b000000080000006662c8f50300000050001800",
+  "bytes": 32
+ },
+ "V5": {
+  "description": "`RESIZE` with 80×0 — half-specified, MUST be refused with `HALF_SPECIFIED_GEOMETRY`",
+  "hex": "4d4f4f52040b0000070000000c000000080000006267910f0300000050000000",
+  "bytes": 32
+ },
+ "V6": {
+  "description": "any frame with generation 0 — MUST be refused; shown as `OUTPUT_ACK`",
+  "hex": "4d4f4f5204070000000000000300000008000000c2bb32880100000000000000",
+  "bytes": 32
+ },
+ "V7": {
+  "description": "a `MORE` run of two `INPUT` frames. The first carries lease epoch 3, request id 1 and flags `00`, then `AAAA`; the continuation carries `BB` and no metadata. They reassemble to one request whose data is `AAAABB`",
+  "hex": "4d4f4f52040901000700000014000000110000002bbda39003000000010000000000000000414141414d4f4f52040900000700000015000000020000004eadde064242",
+  "bytes": 67
+ },
+ "V8": {
+  "description": "the `INPUT_RECEIPT` answering V7: lease epoch 3, request id 1, 6 bytes written, status `00`, result code zero. This is the receipt payload the holder caches",
+  "hex": "4d4f4f52040a0000070000000a0000002b000000f27f7d6e03000000010000000000000007000000000102030405060708090a0b0c0d0e0f0600000000000000000000",
+  "bytes": 67
+ },
+ "V9": {
+  "description": "**a replay of V7** — same lease epoch 3, same request id 1, identical bytes. The holder MUST write nothing and return the cached V8 receipt payload in a newly sequenced frame (V18)",
+  "hex": "4d4f4f5204090000070000001600000013000000a231bbe903000000010000000000000000414141414242",
+  "bytes": 43
+ },
+ "V10": {
+  "description": "**same request id, different bytes** — lease epoch 3, request id 1, payload `DIFFERENT`. MUST be refused with `BAD_SEQUENCE` and **nothing written**",
+  "hex": "4d4f4f5204090000070000001700000016000000ced7e00603000000010000000000000000444946464552454e54",
+  "bytes": 46
+ },
+ "V11": {
+  "description": "`ERROR` carrying `GENERATION_MISMATCH` (9)",
+  "hex": "4d4f4f5204130000070000000d0000001e000000272c493d09001a0067656e65726174696f6e20332069732073757065727365646564",
+  "bytes": 54
+ },
+ "V12": {
+  "description": "Windows marker, generation 7, holder incarnation `00..0F`, local pipe `\\\\.\\pipe\\moor-000102030405060708090a0b0c0d0e0f`",
+  "hex": "4d4f4f524d524b330100000007000000000102030405060708090a0b0c0d0e0f2e005c5c2e5c706970655c6d6f6f722d3030303130323033303430353036303730383039306130623063306430653066b125d568",
+  "bytes": 84
+ },
+ "V14": {
+  "description": "semantic `HELLO`, generation 7, stateful source `claude`, all three capabilities",
+  "hex": "4d4f4f530101000000000000010000002e000000c8420c36000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0700000001070600636c61756465",
+  "bytes": 70
+ },
+ "V15": {
+  "description": "semantic `APPLICATION_RECEIPT`, source epoch 5/source sequence 2, accepted, provider ids `sess`/`turn`",
+  "hex": "4d4f4f5301040000050000000300000041000000c2d35c3f000102030405060708090a0b0c0d0e0f0200000000000000101112131415161718191a1b1c1d1e1f0300000001000000000000000004007365737304007475726e",
+  "bytes": 89
+ },
+ "V16": {
+  "description": "controller `INPUT` requiring a receipt from source `claude`, application id `20..2F`, data `hello`",
+  "hex": "4d4f4f5204090000070000001e0000002a0000009059c0be03000000020000000000000001202122232425262728292a2b2c2d2e2f0600636c6175646568656c6c6f",
+  "bytes": 66
+ },
+ "V17": {
+  "description": "matching semantic `INPUT_NOTICE`; the final 32 bytes are SHA-256(`hello`)",
+  "hex": "4d4f4f53010500000500000004000000440000008cb0ec04202122232425262728292a2b2c2d2e2f03000000020000000000000005000000000000002cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+  "bytes": 92
+ },
+ "V18": {
+  "description": "the replay response to V9. Its payload is byte-identical to V8, while its holder-to-controller frame sequence advances from 10 to 11",
+  "hex": "4d4f4f52040a0000070000000b0000002b000000d502412703000000010000000000000007000000000102030405060708090a0b0c0d0e0f0600000000000000000000",
+  "bytes": 67
+ },
+ "V19": {
+  "description": "the accepted durable `SEMANTIC_ACK` for V15, with status `00`, result code zero, at event epoch 2/sequence 9",
+  "hex": "4d4f4f530107000005000000050000002900000068846dae000102030405060708090a0b0c0d0e0f02000000000000000000000200000009000000000000000000",
+  "bytes": 65
+ },
+ "V20": {
+  "description": "the duplicate response after V15 is retried with the next producer frame sequence. Status is `01`, result code stays zero, and the ACK frame sequence advances from V19 while the original durable position remains epoch 2/sequence 9",
+  "hex": "4d4f4f530107000005000000060000002900000001032975000102030405060708090a0b0c0d0e0f02000000000000000100000200000009000000000000000000",
+  "bytes": 65
+ },
+ "V21": {
+  "description": "supervised-launch discriminator, generation 7, nonce `00..0F`; exactly 32 bytes followed by EOF",
+  "hex": "4d4f4f524c4348330100000007000000000102030405060708090a0b0c0d0e0f",
+  "bytes": 32
+ },
+ "V22": {
+  "description": "instrumentation-load acknowledgement, generation 7, requested-child PID `0x00001234`, nonce `10..1F`; exactly 36 bytes followed by EOF",
+  "hex": "4d4f4f52494e5333010000000700000034120000101112131415161718191a1b1c1d1e1f",
+  "bytes": 36
+ },
+ "V23": {
+  "description": "portable empty-log initial commit: generation 7, epoch 1, kind `02`, index 1, empty body and coordinates `[0,0)`. The empty-body SHA-256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.",
+  "hex": "4d4f4f52434d5431010000020700000001000000000000000100000000000000000000000000000000000000000000000000000000000000e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855ce64f3a0",
+  "bytes": 92
+ },
+ "V26": {
+  "description": "`NON_VT` attach and its required empty preamble. The attach preserves geometry and sets only flag bit 1. The preamble payload is the plain u16 zero length, not an absent frame; tracked exactness may remain set in the ACK. The attach uses controller-direction sequence 2; under revision 4's status-first prefix the empty preamble FOLLOWS the sequence-2 `ATTACH_ACK`, so it carries holder-direction sequence 3:",
+  "hex": "4d4f4f52040300000700000002000000050000002d90af9c00000000024d4f4f5204050000070000000300000002000000372d59980000",
+  "bytes": 55
+ },
+ "V27": {
+  "description": "private-mode query/reply with correlation `0102030405060708`, lease epoch 3, echoed class `04`, and plain u16 byte lengths. The query is `CSI7 ?2004$p`; the accepted reply is `CSI7 ?2004;1$y`. Both directions use frame sequence 3:",
+  "hex": "4d4f4f52041400000700000003000000180000005ac7163b0807060504030201030000000409001b5b3f3230303424704d4f4f52040c000007000000030000001a000000f671b4d2080706050403020103000000040b001b5b3f323030343b312479",
+  "bytes": 98
+ },
+ "V28": {
+  "description": "expanded `HEARTBEAT`, generation 7/sequence 4, monotonic value `0102030405060708`, with all five defined health bits set and reserved bits clear:",
+  "hex": "4d4f4f52041200000700000004000000090000002ca1a4a108070605040302011f",
+  "bytes": 33
+ },
+ "V29": {
+  "description": "fresh viewer lease grant followed by explicit release. The fresh request carries operation/role zero and 36 zero freshness bytes; the grant allocates epoch 3 and token `00..0F`; release echoes that tuple; released result carries outcome `02`, epoch 3, and zero token. Controller sequences are 4 then 5; holder sequences are 5 then 6:",
+  "hex": "4d4f4f5204150000070000000400000028000000e99a8098000000000000000000000000000000000000000000000000000000000000000000000000000000004d4f4f52041600000700000005000000180000007b456e470000000003000000000102030405060708090a0b0c0d0e0f4d4f4f52041700000700000005000000140000006fea86ad03000000000102030405060708090a0b0c0d0e0f4d4f4f520416000007000000060000001800000012c22a9c020000000300000000000000000000000000000000000000",
+  "bytes": 204
+ },
+ "V30": {
+  "description": "ordered clear request and every `LOG_CLEAR_RESULT` row. The request uses incarnation `00..0F`, observed index `P=5`, generation 7, controller sequence 6:",
+  "hex": "4d4f4f5204190000070000000600000018000000ff342d9d000102030405060708090a0b0c0d0e0f0500000000000000",
+  "bytes": 48
+ },
+ "V31": {
+  "description": "all private background-result states, each exactly 12 bytes. Generation is 7; store-adopted and ready use result zero and are the two-record success sequence. Failed uses frozen sample code `0x1234` as an independent alternative and never follows ready:",
+  "hex": "4d4f525201010000070000004d4f525201020000070000004d4f52520103341207000000",
+  "bytes": 36
+ },
+ "V33": {
+  "description": "`WAKEUP` interposed between `HELLO_ACK` and `ATTACH_ACK`. `WAKEUP` is legal at EVERY post-`HELLO_ACK` phase (§7), and this is the exceptional pre-attach window an independent implementer would otherwise guess about. The sequence numbers are the real ones: `HELLO_ACK` consumed holder-direction sequence 1, so the interposed `WAKEUP` carries sequence 2, the `ATTACH_ACK` that follows carries sequence 3, and the terminal-state preamble carries sequence 4. The frame is header-only — kind `11`, generation 7, zero payload — and its CRC-32C covers the twenty header bytes:",
+  "hex": "4d4f4f520411000007000000020000000000000052175391",
+  "bytes": 24
+ },
+ "V13": {
+  "description": "portable initial event commit, using a Windows tag-`02` identity fixture whose volume-serial bytes are `00..07` and file-id bytes are `08..17`. The body is exac",
+  "hex": [
+   "4d4f4f52434d54310100000107000000000000000000000001000000000000008900000000000000000000000000000000000000000000002c71e92870774150f5dbeec34f19052d82874f6eb4ac4bc9f8d4bf7ad743edfb28958d91"
+  ],
+  "bytes": 92,
+  "blocks": 1
+ },
+ "V24": {
+  "description": "portable canonical-running lifecycle initial commit. The exact 286-byte body, including LF, is:",
+  "hex": [
+   "4d4f4f52434d54310100000307000000010000000000000001000000000000001e0100000000000000000000000000000000000000000000fae71fcf6cad5e79d0abe5fe8463803409e50ec83f2cf57993660c8ba0c5224ed7288f9e"
+  ],
+  "bytes": 92,
+  "blocks": 1
+ },
+ "V25": {
+  "description": "POSIX `STATUS_REPLY`, layout `02`. Session identity is tag `01` plus `/tmp/.moor-1000/build`; event path is `/tmp/events`; holder incarnation is `00..0F`; selec",
+  "hex": [
+   "4d4f4f52040e00000700000001000000f800000068d0951e16000000012f746d702f2e6d6f6f722d313030302f6275696c6407000000000102030405060708090a0b0c0d0e0f020b0000002f746d702f6576656e747300010000000000000085000000000000002bbeefb637546612d6a3a6bd7cbdb7be2942d6daddc733395445f9edd788b64b0100000000000000020000000000000003030303030303030303030303030303040000002f746d703412000078560000101112131415161718191a1b1c1d1e1f500018000000000000000000000000000000000000000000000000000000000000000000e3030000000000000f01000000010000000000000000000000000000000000000000000000"
+  ],
+  "bytes": 272,
+  "blocks": 1
+ },
+ "_meta": {
+  "source": "moor spec/moor-wire-schema.md §16 @ 649ea81",
+  "cross_checked": "tests/vectors.rs @ 649ea81 — 32/32 verified by content",
+  "note": "multi-frame vectors (V26 attach+preamble, V29 grant+release, V31 three states, V33 hello_ack+wakeup+attack_ack sequence) are concatenated in one hex field here; Rust keeps them as separate string consts — split on 24-byte MOOR headers when consuming frame-wise"
+ }
+}

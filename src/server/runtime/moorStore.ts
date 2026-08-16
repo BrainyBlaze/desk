@@ -126,15 +126,15 @@ const EVENT_SCHEMAS: Readonly<Record<string, string>> = {
   'stream-exhausted':
     'type:=stream-exhausted,ts:*,epoch:u,seq:*,kind:=transition,axis:=seq/epoch/commit',
   exit:
-    'type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=exited,code:u|type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=signalled,signal:p|type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=terminated,code:u,method:=graceful/forced',
+    'type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=exited,code:u,method:=none/graceful/forced|type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=signalled,signal:p,method:=none/graceful/forced',
   'observer-degraded':
     'type:=observer-degraded,ts:*,epoch:u,seq:*,kind:=transition,scanner:=osc/query,reason:=deadline/limit/cancelled/malformed'
 };
 
 const LIFECYCLE_BASE =
-  'v:1,type:=lifecycle,phase:t,session:*,generation:*,wire_generation:u,incarnation:b16,start_wall_ms:D,start_mono_ms:D,boot_id:b16,path_encoding:=posix-bytes/windows-wtf8,event_path:n,instrument_path:n';
+  'v:2,type:=lifecycle,phase:t,session:*,generation:*,wire_generation:u,incarnation:b16,start_wall_ms:D,start_mono_ms:D,boot_id:b16,path_encoding:=posix-bytes/windows-wtf8,event_path:n,instrument_path:n';
 const LIFECYCLE_END =
-  '|end_wall_ms:D,output_end:D,ended:=exited,code:u|end_wall_ms:D,output_end:D,ended:=signalled,signal:p|end_wall_ms:D,output_end:D,ended:=terminated,code:u,method:=graceful/forced';
+  '|end_wall_ms:D,output_end:D,ended:=exited,code:u,method:=none/graceful/forced|end_wall_ms:D,output_end:D,ended:=signalled,signal:p,method:=none/graceful/forced';
 
 export async function readMoorStoreSnapshot(
   directory: string,
@@ -544,7 +544,6 @@ function validLifecycle(bytes: Uint8Array, commit: MoorCommit): boolean {
     return closed && safeU32(value.code) <= (encoding === 'windows-wtf8' ? 0xffff_ffff : 255);
   }
   if (value.ended === 'signalled') return closed && encoding === 'posix-bytes';
-  if (value.ended === 'terminated') return closed && encoding === 'windows-wtf8';
   return false;
 }
 

@@ -4,7 +4,7 @@
 // MoorMasterClient (supervised §6 attach prefix), MoorEventObserver (committed
 // -T store), and the moor-shaped kill/rm teardown. This is the orchestration
 // contract sessionManager/terminalDaemon adopt in the seam rewire.
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +56,7 @@ describe('moor join path (real modules, real fake-holder process)', () => {
       const root = mkdtempSync(join(tmpdir(), 'moor-join-'));
       cleanups.push(() => rmSync(root, { recursive: true, force: true }));
       const sessionPath = join(root, 'session');
+      const leaseBusyFile = join(root, 'lease-busy');
       // The holder fences -T inside temp_dir()/.{invoked}-{euid}; the spawn
       // TMPDIR points at the per-test root so the store dies with it.
       const storeDir = join(moorEventStoreRoot(process.execPath, { tmpdir: root }), 'events');
@@ -65,7 +66,11 @@ describe('moor join path (real modules, real fake-holder process)', () => {
         binPath: process.execPath,
         args: [...NODE_ARGS.slice(0, 2), FAKE, 'start', '-T', storeDir, sessionPath, 'sh', '-c', 'printf hello; cat'],
         generation: GENERATION,
-        env: { ...process.env, TMPDIR: root }
+        env: {
+          ...process.env,
+          TMPDIR: root,
+          FAKE_MOOR_VIEWER_LEASE_BUSY_FILE: leaseBusyFile
+        }
       });
       expect(await awaitExit(launcher)).toBe(0);
       expect(existsSync(sessionPath)).toBe(true);
@@ -91,7 +96,22 @@ describe('moor join path (real modules, real fake-holder process)', () => {
       const status = await client.attach({ columns: 80, rows: 24, requestLease: true });
       expect(status.generation).toBe(GENERATION);
       expect(status.ownsLease).toBe(true);
+      expect(status.columns).toBe(80);
+      expect(status.rows).toBe(24);
       expect(client.verifiedLive).toBe(true);
+
+      // A second fresh viewer may request its preferred size, but a busy
+      // lease makes it an observer: the ACK must retain the owner's geometry.
+      writeFileSync(leaseBusyFile, 'busy');
+      const observer = new MoorMasterClient(sessionPath, GENERATION);
+      cleanups.push(() => observer.close());
+      await observer.connect();
+      const observerStatus = await observer.attach({
+        columns: 100,
+        rows: 30,
+        requestLease: true
+      });
+      expect(observerStatus).toMatchObject({ ownsLease: false, columns: 80, rows: 24 });
 
       // ---- output + input round trip ---------------------------------------
       await waitFor(() => outputs.join('').includes('hello'), 'initial child output');
@@ -102,15 +122,15 @@ describe('moor join path (real modules, real fake-holder process)', () => {
 
       // ---- committed event store through the real observer -----------------
       const events: MoorSessionEvent[] = [];
-      const observer = new MoorEventObserver({
+      const eventObserver = new MoorEventObserver({
         directory: storeDir,
         generation: GENERATION,
         pollIntervalMs: 50,
         onEvent: (event) => events.push(event),
         onDiagnostic: () => undefined
       });
-      cleanups.push(() => observer.stop());
-      expect(await observer.start()).toBe(true);
+      cleanups.push(() => eventObserver.stop());
+      expect(await eventObserver.start()).toBe(true);
       expect(events.map((event) => event.type)).toEqual(['ready']);
 
       // ---- teardown: moor-shaped kill removes the published socket ---------

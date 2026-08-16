@@ -18,6 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createConnection } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTerminalDaemon } from '../src/server/runtime/terminalDaemon.js';
 import { archiveMoorGenerationStores } from '../src/server/runtime/moorGenerationStores.js';
@@ -32,6 +33,11 @@ import {
   MoorStoreKind,
   readMoorStoreSnapshot
 } from '../src/server/runtime/moorStore.js';
+import {
+  MoorCodec,
+  crc32c,
+  encodeMoorDiscoveryHello
+} from '../src/shared/moorWire/index.js';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
@@ -121,6 +127,38 @@ function expectIndependentCopies(stable: string, archive: string): void {
   }
 }
 
+async function sendV3Hello(sessionPath: string): Promise<Uint8Array> {
+  const frame = encodeMoorDiscoveryHello(
+    new MoorCodec(),
+    new TextEncoder().encode(sessionPath)
+  );
+  frame[4] = 3;
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setUint32(
+    20,
+    crc32c(frame.subarray(0, 20)),
+    true
+  );
+
+  return await new Promise<Uint8Array>((resolve, reject) => {
+    const socket = createConnection({ path: sessionPath });
+    const chunks: Buffer[] = [];
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('timed out waiting for native v3 refusal'));
+    }, 5_000);
+    socket.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    socket.once('connect', () => socket.write(frame));
+    socket.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.once('close', () => {
+      clearTimeout(timeout);
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
 describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', () => {
   const cleanups: Array<() => void | Promise<void>> = [];
   let priorTmpdir: string | undefined;
@@ -136,6 +174,54 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
     // the SAME variable — both sides agree on temp_dir()=root.
     process.env.TMPDIR = root;
   }
+
+  it(
+    'refuses a CRC-valid v3 client before attach while the v4 owner remains live',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'moor-native-v3-refusal-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      pinTmpdir(root);
+      mkdirSync(join(root, '_engine'), { recursive: true });
+      const daemon = createTerminalDaemon({
+        homeRoot: root,
+        moorBinPath: NATIVE_BIN,
+        moorSocketRoot: root,
+        httpServer: new FakeUpgradeServer()
+      });
+      cleanups.push(() => daemon.dispose());
+
+      const provisioned = await daemon.provision('native-v3', {
+        command: ['sh', '-c', 'cat'],
+        geometry: { rows: 24, cols: 80 },
+        subject: { kind: 'terminal' }
+      });
+      expect(provisioned).toMatchObject({ ok: true, generation: 2 });
+      const sessionPath = join(root, 'native-v3');
+      cleanups.push(async () => {
+        await daemon.retire('native-v3').catch(() => undefined);
+      });
+
+      const refusal = await sendV3Hello(sessionPath);
+      const messages = new MoorCodec().feed(Date.now(), refusal);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ scope: 2, kind: 0x13 });
+      expect(
+        new DataView(messages[0]!.payload.buffer, messages[0]!.payload.byteOffset).getUint16(
+          0,
+          true
+        )
+      ).toBe(1);
+
+      expect(daemon.input('native-v3', new TextEncoder().encode('printf v4-still-live\n'))).toBe(
+        true
+      );
+      await waitFor(
+        () => (daemon.tail('native-v3', 24)?.lines ?? []).join('\n').includes('v4-still-live'),
+        'v4 owner after v3 refusal'
+      );
+    },
+    30_000
+  );
 
   it(
     'daemon provision joins the real holder with full OB-39 descriptor authority and retires over the wire',
@@ -217,7 +303,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       const first = makeDaemon();
       const provisioned = await first.provision('native-r', {
         command: ['sh', '-c', 'printf survived-native; cat'],
-        geometry: { rows: 24, cols: 80 },
+        geometry: { rows: 48, cols: 100 },
         subject: { kind: 'terminal' }
       });
       expect(provisioned).toMatchObject({ ok: true, generation: 2 });
@@ -257,13 +343,16 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       // the OB-39 authority for the restart observer.
       const second = makeDaemon();
       cleanups.push(() => second.dispose());
+      cleanups.push(async () => {
+        await second.retire('native-r').catch(() => undefined);
+      });
       const restored = await second.router.sessions.restoreAndAttachMoor('native-r', {
         sessionPath,
         killSpec: { binPath: NATIVE_BIN, args: ['kill', '-f', sessionPath] }
       });
       expect(restored).toMatchObject({ ok: true, generation: 2 });
       if (!restored.ok) return;
-      expect(restored.moorStatus?.layout).toBe(2);
+      expect(restored.moorStatus).toMatchObject({ layout: 2, columns: 100, rows: 48 });
       await expect(second.reconcileMoorEvents('native-r', 2)).resolves.toBe(true);
 
       // The re-adopted link is FUNCTIONAL: input round-trips.
@@ -271,7 +360,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
         true
       );
       await waitFor(
-        () => (second.tail('native-r', 24)?.lines ?? []).join('\n').includes('back-again'),
+        () => (second.tail('native-r', 48)?.lines ?? []).join('\n').includes('back-again'),
         'input echoed through the re-adopted real link'
       );
 
@@ -357,9 +446,21 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
         2
       );
       const manifest = JSON.parse(new TextDecoder().decode(lifecycle.bytes)) as {
+        v?: unknown;
+        type?: unknown;
+        ended?: unknown;
+        code?: unknown;
+        method?: unknown;
         event_path?: unknown;
         instrument_path?: unknown;
       };
+      expect(manifest).toMatchObject({
+        v: 2,
+        type: 'lifecycle',
+        ended: 'exited',
+        code: 7,
+        method: 'none'
+      });
       const priorEvent = decodeManifestPath(manifest.event_path);
       const priorInstrument = decodeManifestPath(manifest.instrument_path);
       expect(existsSync(priorEvent)).toBe(true);

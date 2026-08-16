@@ -192,7 +192,7 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 /**
  * Connection phases, strictly forward:
- * created → connecting → connected → hello-sent → adopted → preamble →
+ * created → connecting → connected → hello-sent → adopted → status-prefix → preamble →
  * (lease-pending when the attach requested a fresh viewer lease) → attached,
  * with `closed` reachable (terminally) from every phase. `lease-pending`
  * models the §6 prefix position where ONLY the requested LEASE_RESULT may
@@ -205,6 +205,7 @@ type Phase =
   | 'hello-sent'
   | 'resume-pending'
   | 'adopted'
+  | 'status-prefix'
   | 'preamble'
   | 'lease-pending'
   | 'attached'
@@ -1014,17 +1015,22 @@ export class MoorMasterClient {
         return;
       }
       case 'terminal-state': {
-        // §6: exactly once per attaching connection, before ATTACH_ACK.
-        this.requirePhase(decoded.type, this.phase === 'adopted');
+        // §6 v4: exactly once per attaching connection, after ATTACH_ACK.
+        this.requirePhase(decoded.type, this.phase === 'status-prefix');
         this.preambleBytes = decoded.bytes;
         this.phase = 'preamble';
-        return this.h.onTerminalState?.(decoded.bytes);
+        const delivered = this.h.onTerminalState?.(decoded.bytes);
+        if (delivered instanceof Promise) {
+          return delivered.then(() => this.completeTerminalStatePrefix());
+        }
+        this.completeTerminalStatePrefix();
+        return;
       }
       case 'attach-ack': {
-        // §6 order is exact: an ACK without the preceding preamble is refused,
+        // §6 v4 order is exact: the status ACK precedes the terminal-state run,
         // and this viewer attach is fully attached before the ACK is queued —
         // an ACK that does not reflect viewer presence is a contract breach.
-        this.requirePhase(decoded.type, this.phase === 'preamble');
+        this.requirePhase(decoded.type, this.phase === 'adopted');
         if (!decoded.status.viewers) {
           throw new MoorWireError(
             'BAD_SEQUENCE',
@@ -1052,34 +1058,8 @@ export class MoorMasterClient {
           decoded.status.replay.first > 1n
             ? { last: decoded.status.replay.first - 1n }
             : undefined;
-        // A requested fresh viewer lease occupies the next prefix slot; until
-        // its LEASE_RESULT arrives the attach is incomplete: the deadline keeps
-        // running, the promise stays pending, and no replay/live frame may
-        // overtake the slot.
-        if (this.attachLeaseMode === 'fresh') {
-          this.phase = 'lease-pending';
-          this.h.onAttachAck?.(decoded.status);
-          return;
-        }
-        if (this.attachLeaseMode === 'resumed') {
-          if (
-            this.lease === undefined ||
-            !decoded.status.ownsLease ||
-            decoded.status.leaseEpoch !== this.lease.epoch
-          ) {
-            throw new MoorWireError(
-              'BAD_SEQUENCE',
-              'ATTACH_ACK does not preserve the resumed viewer lease'
-            );
-          }
-          this.keepaliveEmitted = false;
-          this.scheduleKeepalive();
-        }
-        this.phase = 'attached';
-        this.live = true; // the authenticated exchange is verified-live evidence
-        this.armLiveness();
+        this.phase = 'status-prefix';
         this.h.onAttachAck?.(decoded.status);
-        this.completeAttachIfReplayDelivered();
         return;
       }
       case 'lease-result': {
@@ -1464,6 +1444,8 @@ export class MoorMasterClient {
         this.requirePhase(
           decoded.type,
           this.phase === 'adopted' ||
+            this.phase === 'resume-pending' ||
+            this.phase === 'status-prefix' ||
             this.phase === 'preamble' ||
             this.phase === 'lease-pending' ||
             this.phase === 'attached'
@@ -1479,6 +1461,33 @@ export class MoorMasterClient {
     }
   }
 
+  private completeTerminalStatePrefix(): void {
+    this.requirePhase('terminal-state', this.phase === 'preamble');
+    const status = this.status!;
+    if (this.attachLeaseMode === 'fresh') {
+      this.phase = 'lease-pending';
+      return;
+    }
+    if (this.attachLeaseMode === 'resumed') {
+      if (
+        this.lease === undefined ||
+        !status.ownsLease ||
+        status.leaseEpoch !== this.lease.epoch
+      ) {
+        throw new MoorWireError(
+          'BAD_SEQUENCE',
+          'ATTACH_ACK does not preserve the resumed viewer lease'
+        );
+      }
+      this.keepaliveEmitted = false;
+      this.scheduleKeepalive();
+    }
+    this.phase = 'attached';
+    this.live = true;
+    this.armLiveness();
+    this.completeAttachIfReplayDelivered();
+  }
+
   private sendAttach(mode: 'fresh' | 'resumed' | 'none'): void {
     const pending = this.pendingAttach;
     if (pending === undefined) {
@@ -1491,6 +1500,7 @@ export class MoorMasterClient {
       columns: pending.options.columns,
       rows: pending.options.rows,
       requestLease: mode === 'fresh',
+      resumedLease: mode === 'resumed',
       nonVt: pending.options.nonVt ?? false
     });
   }

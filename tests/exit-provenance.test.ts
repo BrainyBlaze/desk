@@ -14,6 +14,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AgentStateAuthority,
+  parseSessionStateSnapshot,
   type SessionStateTransition
 } from '../src/shared/controlPlane/index.js';
 
@@ -69,7 +70,7 @@ describe('exit provenance (desk#59)', () => {
     const upgrade = authority.markExited(
       's',
       1,
-      { code: 143, signal: 'SIGTERM', origin: 'observed', reason: null, outcome: { kind: 'signalled', signal: 15 }, diagnostic: null },
+      { code: 143, signal: 'SIGTERM', origin: 'observed', reason: null, outcome: { kind: 'signalled', signal: 15, method: 'forced' }, diagnostic: null },
       2_028
     );
 
@@ -89,7 +90,7 @@ describe('exit provenance (desk#59)', () => {
     authority.markExited(
       's',
       1,
-      { code: 143, signal: 'SIGTERM', origin: 'observed', reason: null, outcome: { kind: 'signalled', signal: 15 }, diagnostic: null },
+      { code: 143, signal: 'SIGTERM', origin: 'observed', reason: null, outcome: { kind: 'signalled', signal: 15, method: 'forced' }, diagnostic: null },
       2_000
     );
     const clobber = authority.markExited(
@@ -105,6 +106,35 @@ describe('exit provenance (desk#59)', () => {
       signal: 'SIGTERM',
       origin: 'observed'
     });
+  });
+
+  it('requires a method on both canonical mechanisms and rejects terminated', () => {
+    const { authority } = authorityWithRunningSession();
+    authority.markExited(
+      's',
+      1,
+      { code: 7, signal: null, origin: 'observed', reason: null, outcome: { kind: 'exited', code: 7, method: 'none' }, diagnostic: null },
+      2_000
+    );
+    const snapshot = authority.snapshot('s')!;
+
+    expect(parseSessionStateSnapshot(snapshot).exit?.outcome).toEqual({
+      kind: 'exited',
+      code: 7,
+      method: 'none'
+    });
+    expect(() =>
+      parseSessionStateSnapshot({
+        ...snapshot,
+        exit: { ...snapshot.exit, outcome: { kind: 'exited', code: 7 } }
+      })
+    ).toThrow();
+    expect(() =>
+      parseSessionStateSnapshot({
+        ...snapshot,
+        exit: { ...snapshot.exit, outcome: { kind: 'terminated', code: 0, method: 'forced' } }
+      })
+    ).toThrow();
   });
 
   it('treats a second retire as settled rather than re-committing', () => {
@@ -203,7 +233,7 @@ describe('observation failure is recorded without overwriting the retire reason 
         signal: 'SIGTERM',
         origin: 'observed',
         reason: null,
-        outcome: { kind: 'signalled', signal: 15 },
+        outcome: { kind: 'signalled', signal: 15, method: 'forced' },
         diagnostic: null
       },
       2_000

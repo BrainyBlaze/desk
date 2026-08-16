@@ -318,12 +318,15 @@ const exitSchema = z.strictObject({
    */
   outcome: z
     .discriminatedUnion('kind', [
-      z.strictObject({ kind: z.literal('exited'), code: z.number().int() }),
-      z.strictObject({ kind: z.literal('signalled'), signal: z.number().int() }),
       z.strictObject({
-        kind: z.literal('terminated'),
+        kind: z.literal('exited'),
         code: z.number().int(),
-        method: z.enum(['graceful', 'forced'])
+        method: z.enum(['none', 'graceful', 'forced'])
+      }),
+      z.strictObject({
+        kind: z.literal('signalled'),
+        signal: z.number().int(),
+        method: z.enum(['none', 'graceful', 'forced'])
       }),
       z.strictObject({ kind: z.literal('unknown') })
     ])

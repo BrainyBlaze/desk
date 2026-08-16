@@ -34,7 +34,7 @@ const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4),
 const identity = (path: string): Uint8Array => joined(Uint8Array.of(1), text(path));
 
 function helloAckPayload(path: string): Uint8Array {
-  return joined(Uint8Array.of(3), integer(GENERATION, 4), INCARNATION, wide(identity(path)));
+  return joined(Uint8Array.of(4), integer(GENERATION, 4), INCARNATION, wide(identity(path)));
 }
 
 function statusPayload(
@@ -89,6 +89,8 @@ function statusPayload(
     integer(4321, 4),
     integer(1, 4),
     new Uint8Array(16).fill(0xc3),
+    integer(80, 2),
+    integer(24, 2),
     tail
   );
 }
@@ -207,8 +209,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     return { holder, client };
@@ -258,8 +260,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('early')));
     expect(await settle(attached)).toBe('rejected');
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -273,8 +275,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath, { viewers: false }));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     expect(await settle(attached)).toBe('rejected');
   });
 
@@ -285,8 +287,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
 
@@ -306,8 +308,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     await vi.advanceTimersByTimeAsync(2_400);
@@ -330,11 +332,11 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, { ownsLease: false, viewers: true, leaseEpoch: 5 })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     expect(await settle(attached)).toBe('rejected');
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -356,7 +358,6 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       await holder.next();
       holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
       await holder.next();
-      holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
       holder.send(
         MoorKind.ATTACH_ACK,
         statusPayload(holder.sockPath, {
@@ -365,6 +366,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
           leaseEpoch: 5
         })
       );
+      holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
       holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(outcome, 0));
 
       expect(await settle(attached)).toBe('rejected');
@@ -382,11 +384,11 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, { ownsLease: false, viewers: true, leaseEpoch: 5 })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(3, 1, 6));
 
     expect(await settle(attached)).toBe('rejected');
@@ -399,11 +401,11 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, { ownsLease: false, viewers: true })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(3, 1));
     await attached;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -417,8 +419,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -438,8 +440,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -459,15 +461,15 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       onProtocolError: (error) => protocolErrors.push(error.code),
       onOutput: (output) => outputs.push(output.sequence)
     });
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, { ownsLease: false, viewers: true, leaseEpoch: 0 })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     await attached;
 
     holder.send(MoorKind.OUTPUT, joined(integer(2n, 8), integer(0n, 8), text('skipped')));
@@ -483,12 +485,11 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       onProtocolError: (error) => protocolErrors.push(error.code),
       onOutput: (output) => outputs.push(output.offset)
     });
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, {
@@ -497,6 +498,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
         replay: { first: 3n, last: 3n, start: 100n, end: 101n, complete: false }
       })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(999n, 8), text('x')));
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -513,12 +515,11 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       onProtocolError: (error) => protocolErrors.push(error.code),
       onOutput: (output) => outputs.push(output.sequence)
     });
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, {
@@ -527,6 +528,7 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
         replay: { first: 1n, last: 1n, start: 0n, end: 1n, complete: true }
       })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('xx')));
     await new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -537,15 +539,15 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
 
   it('does not emit OUTPUT_ACK above the highest record delivered', async () => {
     const { holder, client } = await start();
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, { ownsLease: false, viewers: true, leaseEpoch: 0 })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     await attached;
 
     expect(() => client.ackOutput(1n)).toThrow(/sequence|output|ack/i);
@@ -562,8 +564,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -582,8 +584,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -609,8 +611,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
 
@@ -633,15 +635,15 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       { onProtocolError: (error) => protocolErrors.push(error.code) },
       { resumeCursor: { sequence: 5n, incarnation: INCARNATION } }
     );
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(holder.sockPath, { ownsLease: false, leaseEpoch: 0 })
     );
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
 
     expect(await settle(attached)).toBe('rejected');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
@@ -653,8 +655,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
     client.requestStatus();
@@ -674,8 +676,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached;
 
@@ -717,20 +719,16 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     expect(outcome).toBe('rejected');
   });
 
-  it('refuses ATTACH_ACK when the required terminal-state frame is missing', async () => {
-    const protocolErrors: string[] = [];
-    const { holder, client } = await start({
-      onProtocolError: (error) => protocolErrors.push(error.code)
-    });
+  it('keeps the attach pending until the missing terminal-state slot times out', async () => {
+    const { holder, client } = await start({}, { attachDeadlineMs: 60 });
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
-    expect(await settle(attached)).toBe('rejected');
-    expect(protocolErrors).not.toHaveLength(0);
+    expect(await settle(attached, 20)).toBe('pending');
+    await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
   });
-
   it('makes writes fail after an attached holder closes cleanly', async () => {
     let closed = false;
     const protocolErrors: string[] = [];
@@ -742,8 +740,8 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(holder.sockPath));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.ATTACH_ACK, statusPayload(holder.sockPath));
+    holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(0, 0));
     await attached.catch((error: Error) => {
       throw new Error(`attach failed with protocol errors ${protocolErrors.join(',')}`, {

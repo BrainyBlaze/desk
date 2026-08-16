@@ -101,12 +101,12 @@ function writeCurrentExitStore(
   const identity = Buffer.from(pathIdentity(sessionPath)).toString('base64');
   const nonce = Buffer.alloc(16).toString('base64');
   const body = encoder.encode(
-    `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}",` +
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${identity}",` +
       `"generation":${generation},"wire_generation":${generation},` +
       `"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1",` +
       `"boot_id":"${nonce}","path_encoding":"posix-bytes",` +
       `"event_path":null,"instrument_path":null,"end_wall_ms":"2",` +
-      `"output_end":"${outputEnd}","ended":"exited","code":${code}}\n`
+      `"output_end":"${outputEnd}","ended":"exited","code":${code},"method":"none"}\n`
   );
   const commit = new Uint8Array(92);
   const view = new DataView(commit.buffer);
@@ -507,7 +507,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
         storeDir = prepared!.storeDir!;
         const frontier = writeMoorStore(storeDir, ensured.generation, options.sessionPath, [
           '{"type":"ready","ts":2,"epoch":0,"seq":0,"kind":"transition"}\n',
-          '{"type":"exit","ts":3,"epoch":0,"seq":1,"kind":"transition","ended":"exited","code":0}\n'
+          '{"type":"exit","ts":3,"epoch":0,"seq":1,"kind":"transition","ended":"exited","code":0,"method":"none"}\n'
         ]);
         writeCurrentExitStore(options.sessionPath, ensured.generation, 0);
         return {

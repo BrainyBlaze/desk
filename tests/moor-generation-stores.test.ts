@@ -86,26 +86,28 @@ function sessionIdentity(sessionPath: string): Uint8Array {
 function lifecycleBody(
   sessionPath: string,
   generation: number,
-  exitCode = 1
+  exitCode = 1,
+  method: 'none' | 'graceful' | 'forced' = 'none'
 ): Uint8Array {
   const identity = Buffer.from(sessionIdentity(sessionPath)).toString('base64');
   const nonce = Buffer.alloc(16).toString('base64');
   const allocatedGeneration = generation === 1 ? 'null' : String(generation);
   return encoder.encode(
-    `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}","generation":${allocatedGeneration},"wire_generation":${generation},"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"0","ended":"exited","code":${exitCode}}\n`
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${identity}","generation":${allocatedGeneration},"wire_generation":${generation},"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"0","ended":"exited","code":${exitCode},"method":"${method}"}\n`
   );
 }
 
 function signalledLifecycleBody(
   sessionPath: string,
   generation: number,
-  signal = 15
+  signal = 15,
+  method: 'none' | 'graceful' | 'forced' = 'forced'
 ): Uint8Array {
   const identity = Buffer.from(sessionIdentity(sessionPath)).toString('base64');
   const nonce = Buffer.alloc(16).toString('base64');
   const allocatedGeneration = generation === 1 ? 'null' : String(generation);
   return encoder.encode(
-    `{"v":1,"type":"lifecycle","phase":"exited","session":"${identity}","generation":${allocatedGeneration},"wire_generation":${generation},"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"0","ended":"signalled","signal":${signal}}\n`
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${identity}","generation":${allocatedGeneration},"wire_generation":${generation},"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"0","ended":"signalled","signal":${signal},"method":"${method}"}\n`
   );
 }
 
@@ -313,7 +315,7 @@ describe('generation-scoped Moor companion retention', () => {
         startWallMs: '1',
         endWallMs: '2',
         outputEnd: '0',
-        outcome: { ended: 'signalled', signal: 15 }
+        outcome: { ended: 'signalled', signal: 15, method: 'forced' }
       }
     ]);
     daemon.dispose();
