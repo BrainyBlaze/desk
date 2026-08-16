@@ -478,18 +478,38 @@ async function revalidateDirectorySource(
   }
 }
 
+// Proves a descriptor alias (for example /dev/fd/N) still names the expected
+// directory by CAPABILITY rather than by path: re-open it read-only and require
+// the same dev+ino identity as the trusted directory. A realpath comparison
+// only works where the alias is a magic symlink (Linux /proc and /dev/fd);
+// macOS /dev/fd is an fdesc node whose realpath returns the alias itself, so a
+// path comparison there could never hold and silently degraded every provider
+// directory to untrusted. Opening the alias and fstat-ing it works on both
+// platforms and is fail-closed: any open/stat failure or a dev+ino mismatch
+// (a bad or swapped alias) yields false. Identity is enforced on `probed`.
+async function descriptorAliasHasDirectoryIdentity(
+  descriptorPath: string,
+  expected: BigIntStats
+): Promise<boolean> {
+  let probe: FileHandle | undefined;
+  try {
+    probe = await open(descriptorPath, constants.O_RDONLY);
+    return sameDirectory(expected, await probe.stat({ bigint: true }));
+  } catch {
+    return false;
+  } finally {
+    await probe?.close().catch(() => undefined);
+  }
+}
+
 async function revalidateTrustedDirectory(directory: TrustedDirectory): Promise<boolean> {
   try {
-    const [reachable, openedMetadata, canonicalDescriptor] = await Promise.all([
+    const [reachable, openedMetadata, descriptorHasIdentity] = await Promise.all([
       revalidateDirectorySource(directory, directory.sourcePath),
       directory.handle.stat({ bigint: true }),
-      realpath(directory.descriptorPath)
+      descriptorAliasHasDirectoryIdentity(directory.descriptorPath, directory.directoryMetadata)
     ]);
-    return (
-      reachable &&
-      sameDirectory(directory.directoryMetadata, openedMetadata) &&
-      canonicalDescriptor === directory.canonicalPath
-    );
+    return reachable && sameDirectory(directory.directoryMetadata, openedMetadata) && descriptorHasIdentity;
   } catch {
     return false;
   }
@@ -549,18 +569,11 @@ async function openTrustedDirectory(
     if (!sameDirectory(expected.directoryMetadata, openedMetadata)) return undefined;
     const descriptorPath =
       testOptions.directoryDescriptorPath?.(handle.fd) ?? `/dev/fd/${handle.fd}`;
-    // The descriptor alias re-confirms the canonical path as defence in depth
-    // on Linux, where /proc- and /dev/fd are magic symlinks that realpath
-    // resolves back to the real directory. macOS /dev/fd is an fdesc device
-    // node, not a symlink, so realpath returns the alias itself and this
-    // comparison can never hold -- which silently degraded every provider
-    // evidence directory to untrusted on macOS. The open handle's identity is
-    // already proven by sameDirectory (dev+ino+size) above, which pins the
-    // exact inode and is stronger than a path check, so the path re-confirmation
-    // is kept where the alias is a resolvable symlink (Linux and the injected
-    // test descriptor paths) and skipped on macOS. NEEDS macOS verification once
-    // a macOS general-test lane exists; there is no macOS CI lane for this file today.
-    if (process.platform !== 'darwin' && (await realpath(descriptorPath)) !== expected.canonicalPath) {
+    // Re-confirm the descriptor alias by capability (dev+ino), cross-platform
+    // and fail-closed -- see descriptorAliasHasDirectoryIdentity. The same
+    // invariant is re-checked by revalidateTrustedDirectory below and on every
+    // later revalidation, so trust never rests on a Linux-only realpath.
+    if (!(await descriptorAliasHasDirectoryIdentity(descriptorPath, expected.directoryMetadata))) {
       return undefined;
     }
     const trusted: TrustedDirectory = {

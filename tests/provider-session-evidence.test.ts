@@ -2726,6 +2726,56 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
+  test('fails closed when the bound directory descriptor alias names a DIFFERENT directory (capability identity, not path)', async () => {
+    // The descriptor alias re-confirmation now proves the fd still names the
+    // expected directory by dev+ino identity, not by a realpath path match
+    // (which is Linux-only -- macOS /dev/fd is not a symlink). This must stay
+    // fail-closed: an alias that opens a real but WRONG directory has a
+    // different identity and must be rejected, on every platform. A decoy
+    // directory is injected as the descriptor path; its inode differs, so trust
+    // must be denied even though the path itself opens successfully.
+    const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
+    temporaryHomes.push(homeDir);
+    const providerSessionId = '2e934567-e89b-42d3-a456-426614174099';
+    const cwd = '/workspace/wrong-directory-alias';
+    const evidencePath = path.join(
+      homeDir,
+      '.codex',
+      'sessions',
+      '2026',
+      '08',
+      '13',
+      `rollout-2026-08-13T10-00-00-${providerSessionId}.jsonl`
+    );
+    await mkdir(path.dirname(evidencePath), { recursive: true });
+    await writeFile(
+      evidencePath,
+      `${JSON.stringify({ type: 'session_meta', payload: { id: providerSessionId, cwd } })}\n`,
+      'utf8'
+    );
+    const decoyDirectory = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-decoy-'));
+    temporaryHomes.push(decoyDirectory);
+
+    await expect(
+      verifyProviderSessionEvidence(
+        {
+          provider: 'codex',
+          providerSessionId,
+          selected: { cwd },
+          homeDir,
+          notBeforeMs: Date.now() - 1_000
+        },
+        {
+          directoryDescriptorPath: () => decoyDirectory
+        }
+      )
+    ).resolves.toEqual({
+      ok: false,
+      code: 'evidence-unsafe-file',
+      error: 'provider session evidence file is unsafe'
+    });
+  });
+
   test('rejects a non-regular evidence candidate with a typed unsafe-file error', async () => {
     const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
     temporaryHomes.push(homeDir);
