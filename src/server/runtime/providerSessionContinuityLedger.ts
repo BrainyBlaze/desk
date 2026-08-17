@@ -15,9 +15,14 @@ import {
   writeSync
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { isValidProviderSessionId } from '../../shared/providerSessionIdentity.js';
+import {
+  isProviderSessionProvider,
+  isValidProviderSessionId,
+  PROVIDER_SESSION_PROVIDERS,
+  type ProviderSessionProvider
+} from '../../shared/providerSessionIdentity.js';
 
-export type ProviderSessionContinuityProvider = 'claude' | 'codex';
+export type ProviderSessionContinuityProvider = ProviderSessionProvider;
 
 export interface IssueProviderLaunchProofInput {
   deskSessionId: string;
@@ -104,10 +109,7 @@ type TransitionRecord = ProviderSessionTransition & {
 
 type ContinuityRecord = ProofRecord | TransitionRecord;
 
-const PROVIDERS = new Set<ProviderSessionContinuityProvider>([
-  'claude',
-  'codex'
-]);
+const PROVIDERS = new Set<ProviderSessionContinuityProvider>(PROVIDER_SESSION_PROVIDERS);
 
 export class FileProviderSessionContinuityLedger {
   private readonly proofsBySession = new Map<string, ProofRecord>();
@@ -698,7 +700,7 @@ function parseRecord(input: unknown, offset: number): ContinuityRecord {
     if (
       keys !== 'deskSessionId,generation,issuedAt,launchProof,provider,type,version' ||
       typeof record.deskSessionId !== 'string' ||
-      (record.provider !== 'claude' && record.provider !== 'codex') ||
+      !isProviderSessionProvider(record.provider) ||
       typeof record.launchProof !== 'string' ||
       decodeLaunchProof(record.launchProof) === undefined ||
       !Number.isSafeInteger(record.generation) ||
@@ -729,7 +731,7 @@ function parseRecord(input: unknown, offset: number): ContinuityRecord {
     (state !== 'pending' && state !== 'resolved' && state !== 'cancelled-by-reset') ||
     typeof record.transitionId !== 'string' ||
     typeof record.deskSessionId !== 'string' ||
-    (record.provider !== 'claude' && record.provider !== 'codex') ||
+    !isProviderSessionProvider(record.provider) ||
     typeof record.expectedProviderSessionId !== 'string' ||
     typeof record.observedProviderSessionId !== 'string' ||
     typeof record.evidencePath !== 'string' ||

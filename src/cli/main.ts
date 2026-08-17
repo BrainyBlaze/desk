@@ -281,9 +281,9 @@ export async function main(argv: string[]): Promise<number> {
           'rebind-provider-session target must be a session name or sessionId'
         );
       }
-      if (session.agent !== 'claude' && session.agent !== 'codex') {
+      if (!isProviderSessionProvider(session.agent)) {
         throw new Error(
-          `Desk session ${session.sessionId} is not configured for Claude or Codex`
+          `Desk session ${session.sessionId} is not configured for a provider-session agent`
         );
       }
       if (!isValidProviderSessionId(session.agent, targetProviderSessionId)) {

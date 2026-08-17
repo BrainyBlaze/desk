@@ -129,6 +129,7 @@ import {
   type MoorGenerationExitEvidence
 } from './moorGenerationStores.js';
 import {
+  isEvidenceCapableProvider,
   verifyProviderSessionEvidence,
   type ProviderSessionEvidenceResult
 } from '../providerSessionEvidence.js';
@@ -562,8 +563,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   ): Promise<SessionSpawnPreallocationResult> | SessionSpawnPreallocationResult => {
     if (
       context.subject.kind !== 'agent' ||
-      (context.subject.provider !== 'claude' &&
-        context.subject.provider !== 'codex')
+      !isProviderSessionProvider(context.subject.provider)
     ) {
       return authorizeProviderSessionLaunch(context, spec);
     }
@@ -1311,6 +1311,18 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         `Desk session ${input.deskSessionId} is not configured for ${input.provider}`
       );
     }
+    // Providers without an on-disk session store reader are authenticated by
+    // the launch proof alone: it is per-generation, random, and already
+    // verified before this point, while their stores (sqlite, per-cwd chats)
+    // have no bounded evidence file to read.
+    if (!isEvidenceCapableProvider(input.provider)) {
+      return {
+        ok: true,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        evidencePath: 'launch-proof'
+      };
+    }
     return evidenceVerifier({
       provider: input.provider,
       providerSessionId: input.providerSessionId,
@@ -1342,7 +1354,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         if (
           !input ||
           !isSafeDaemonSessionId(input.deskSessionId) ||
-          (input.provider !== 'claude' && input.provider !== 'codex') ||
+          !isProviderSessionProvider(input.provider) ||
           !isValidProviderSessionId(input.provider, input.providerSessionId) ||
           !Number.isSafeInteger(input.generation) ||
           input.generation < 2 ||
@@ -2508,7 +2520,7 @@ export function createDaemonControlHandler(
             Object.keys(body).sort().join(',') !==
               'deskSessionId,generation,hook,launchProof,provider,providerSessionId' ||
             !isSafeDaemonSessionId(body.deskSessionId) ||
-            (body.provider !== 'claude' && body.provider !== 'codex') ||
+            !isProviderSessionProvider(body.provider) ||
             typeof body.providerSessionId !== 'string' ||
             !isValidProviderSessionId(
               body.provider,
