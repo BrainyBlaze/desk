@@ -1065,6 +1065,144 @@ export async function appendMessage(home: string, channel: string, options: Appe
   );
 }
 
+export interface IngestMessageInput {
+  /** preserved verbatim; must be protocol-shaped */
+  id: string;
+  author: string;
+  /** preserved verbatim; one line, rendered into the author line of the block */
+  timestamp: string;
+  body: string;
+  /** when set, the message goes to thread-<parentId>.md; the parent must exist */
+  threadParentId?: string;
+}
+
+export interface IngestResult {
+  /** false when a message with this id already exists — the write was a no-op */
+  applied: boolean;
+  /** conversation file name the block lives in (root.md or thread-…) */
+  file: string;
+}
+
+/** Hooks for the store wrapper that owns the change-feed watcher. */
+export interface IngestWriteHooks {
+  /** Invoked after validation and dedupe, immediately before the block is written. */
+  onBeforeWrite?: (file: string) => void;
+}
+
+/**
+ * A thread reply whose parent is absent. Distinguishable by `code` so a caller
+ * that ingests out-of-order material can park the reply and retry after the
+ * parent arrives, instead of pattern-matching an error string.
+ */
+export class IngestParentNotFoundError extends Error {
+  readonly code = 'parent-not-found';
+  constructor(channel: string, parentId: string) {
+    super(`message '${parentId}' not found in #${channel} — a thread reply cannot be ingested before its parent`);
+  }
+}
+
+const PROTOCOL_MESSAGE_ID = /^msg-[A-Za-z0-9-]+$/;
+const PROTOCOL_MEMBER_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
+/** One message by id with the conversation file it lives in, or undefined. */
+function findChannelMessage(home: string, channel: string, messageId: string): { message: ChannelMessage; file: string } | undefined {
+  const dir = channelDir(home, channel);
+  const root = parseConversation(readFileSync(join(dir, 'root.md'), 'utf8')).messages.find((message) => message.id === messageId);
+  if (root) {
+    return { message: root, file: 'root.md' };
+  }
+  for (const entry of readdirSync(dir).sort()) {
+    if (!/^thread-msg-[A-Za-z0-9-]+\.md$/.test(entry)) {
+      continue;
+    }
+    const found = parseConversation(readFileSync(join(dir, entry), 'utf8')).messages.find((message) => message.id === messageId);
+    if (found) {
+      return { message: found, file: entry };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Applies a message that already HAS an identity — id, author, timestamp —
+ * preserving it verbatim. `appendMessage` mints both, which is right for a
+ * live post and wrong for everything that re-enters the store: a restore from
+ * an export, a transfer between homes, a replay of externally produced blocks.
+ * Threads reference the parent's id and reactions reference the message's id,
+ * so re-minting identity severs both, and re-running a restore without
+ * idempotence duplicates every message.
+ *
+ * Contract, binding for every ChannelStore implementation:
+ *
+ *   - idempotent by id across the whole channel (root and threads): a match
+ *     returns `applied: false` without writing. The conversation itself is the
+ *     dedupe journal, so idempotence survives restarts for free.
+ *   - an `applied: false` match is compared against the incoming author/body,
+ *     and a mismatch is logged loudly — the one observable symptom of an id
+ *     collision or an out-of-band edit, otherwise merged silently.
+ *   - a thread reply whose parent is not in root.md throws
+ *     IngestParentNotFoundError (`code: 'parent-not-found'`) — no orphans.
+ *   - rendering and locking are the same as appendMessage: one block format,
+ *     one parser, `serialized` + the cross-process channel lock.
+ */
+export async function ingestMessage(home: string, channel: string, input: IngestMessageInput, hooks: IngestWriteHooks = {}): Promise<IngestResult> {
+  return serialized(channel, () =>
+    withChannelLock(home, channel, () => {
+      const dir = channelDir(home, channel);
+      const rootFile = join(dir, 'root.md');
+      if (!existsSync(rootFile)) {
+        throw new Error(`channel '${channel}' not found`);
+      }
+      if (!PROTOCOL_MESSAGE_ID.test(input.id)) {
+        throw new Error(`invalid message id: ${input.id}`);
+      }
+      if (!PROTOCOL_MEMBER_NAME.test(input.author)) {
+        throw new Error(`invalid author: ${input.author}`);
+      }
+      if (!input.timestamp || input.timestamp.trim().length === 0 || input.timestamp.includes('\n') || input.timestamp.includes('**')) {
+        throw new Error(`invalid timestamp: ${input.timestamp}`);
+      }
+      requireBody(input.body);
+
+      const existing = findChannelMessage(home, channel, input.id);
+      if (existing) {
+        const incomingBody = input.body.replace(/\r\n/g, '\n').trim();
+        if (existing.message.author !== input.author || existing.message.body !== incomingBody) {
+          console.warn(
+            `[desk-channels] ingest of '${input.id}' into #${channel} matched an existing message with different content — id collision or out-of-band edit; the existing message wins`
+          );
+        }
+        return { applied: false, file: existing.file };
+      }
+
+      const block = formatMessageBlock({ id: input.id, author: input.author, timestamp: input.timestamp, body: input.body });
+      let fileName = 'root.md';
+      if (input.threadParentId) {
+        const threadFile = threadFilePath(home, channel, input.threadParentId);
+        fileName = basename(threadFile);
+        if (!existsSync(threadFile)) {
+          const root = parseConversation(readFileSync(rootFile, 'utf8'));
+          const parent = root.messages.find((message) => message.id === input.threadParentId);
+          if (!parent) {
+            throw new IngestParentNotFoundError(channel, input.threadParentId);
+          }
+          hooks.onBeforeWrite?.(fileName);
+          writeFileAtomic(threadFile, `${formatThreadPreamble(parent, channel)}\n${block}`);
+        } else {
+          hooks.onBeforeWrite?.(fileName);
+          appendBlockAtomic(threadFile, block);
+        }
+        updateParentThreadLink(home, channel, input.threadParentId);
+      } else {
+        hooks.onBeforeWrite?.(fileName);
+        appendBlockAtomic(rootFile, block);
+      }
+      invalidateChannelSummary(home, channel);
+      return { applied: true, file: fileName };
+    })
+  );
+}
+
 /**
  * Inserts (or refreshes) the `**thread**: …` link line under the parent
  * message header in root.md so threads stay discoverable in the protocol.
