@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { watch } from 'chokidar';
 import type { FSWatcher } from 'chokidar';
-import { formatChannelPreamble, formatMemberManifest, formatMessageBlock, formatThreadPreamble, generateMessageId, isValidChannelName, messageTimestamp, parseConversation, parseMemberManifest, type ChannelMember, type ChannelMessage } from '../protocol/format.js';
+import { END_TURN, formatChannelPreamble, formatMemberManifest, formatMessageBlock, formatThreadPreamble, generateMessageId, isValidChannelName, messageTimestamp, parseConversation, parseMemberManifest, type ChannelMember, type ChannelMessage } from '../protocol/format.js';
 import { writeFileAtomic, writeFileAtomicCreate } from '../../fsOps.js';
 import { withFileLock, withFileLockSync } from '../../../shared/fileLock.js';
 
@@ -251,12 +251,28 @@ const CONVERSATION_FILE = /^(root|thread-msg-[A-Za-z0-9-]+)\.md$/;
 /** Hard cap on a single message body — protocol files must stay readable. */
 export const MAX_MESSAGE_BYTES = 16 * 1024;
 
+/** A body line that parseConversation would read as a message header. */
+const BODY_FORGES_HEADER = /^### msg-[A-Za-z0-9-]+\s*$/m;
+
 function requireBody(body: string | undefined): string {
   if (!body || body.trim().length === 0) {
     throw new Error('message body cannot be empty');
   }
   if (Buffer.byteLength(body, 'utf8') > MAX_MESSAGE_BYTES) {
     throw new Error(`message body exceeds ${MAX_MESSAGE_BYTES / 1024} KiB — upload a file and link it instead`);
+  }
+  // Bodies are written verbatim, so a line the parser reads as a message
+  // header forges a phantom message under any author, and an END_TURN marker
+  // truncates the body on re-parse — what was read stops matching what was
+  // written. Both are one careless quote away for an agent; refuse them and
+  // name a fix that actually works: a leading backtick defuses the header
+  // line (headers match at line start), while the end-of-turn marker matches
+  // anywhere in a line, so only dropping the comment wrapper defuses it.
+  if (BODY_FORGES_HEADER.test(body.replace(/\r\n/g, '\n'))) {
+    throw new Error('message body contains a line that parses as a protocol message header (### msg-…) — prefix it with a backtick');
+  }
+  if (body.includes(END_TURN)) {
+    throw new Error(`message body contains the protocol end-of-turn marker (${END_TURN}) — write END_TURN without the comment wrapper`);
   }
   return body;
 }
