@@ -5,12 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
-  readlinkSync,
-  realpathSync,
   rmSync,
   statSync,
   writeFileSync
@@ -37,15 +36,24 @@ type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) 
  * kernel's own fd table. A disposal test that only asserts `close()` was
  * called proves the call, not the release — and a leaked append fd is a
  * kernel-side fact, so that is where it has to be checked.
+ *
+ * Portable: /dev/fd lists this process's open descriptors on both Linux (a
+ * symlink to /proc/self/fd) and macOS (the fdesc filesystem). Identity is by
+ * capability — fstat of each descriptor compared to the target's dev+ino —
+ * rather than by resolving a /proc magic-symlink target, which does not exist
+ * on macOS.
  */
 function openDescriptorCount(path: string): number {
-  const resolved = realpathSync(path);
+  const target = statSync(path);
   let count = 0;
-  for (const entry of readdirSync('/proc/self/fd')) {
+  for (const entry of readdirSync('/dev/fd')) {
+    const fd = Number(entry);
+    if (!Number.isInteger(fd)) continue;
     try {
-      if (readlinkSync(join('/proc/self/fd', entry)) === resolved) count += 1;
+      const opened = fstatSync(fd);
+      if (opened.dev === target.dev && opened.ino === target.ino) count += 1;
     } catch {
-      // The descriptor readdir itself opened has already gone.
+      // A descriptor readdir itself opened, or one already closed.
     }
   }
   return count;
