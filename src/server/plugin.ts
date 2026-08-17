@@ -58,8 +58,10 @@ export interface DeskPluginContext {
  * factory and delegates to it — log every delivery, mirror a store, prefix a
  * prompt — without reimplementing behaviour it does not care about. A plugin
  * that replaces outright never calls it, and Desk never builds the stock
- * implementation: no channels home is created for a store that lives in a
- * database, no watcher is started for a store that pushes its own changes.
+ * implementation: no filesystem store is created underneath a database-backed
+ * store, and no filesystem watcher is started for a store that pushes its own
+ * changes. The runtime still owns its channels home for engine and delivery
+ * durability.
  *
  * Providers apply in plugin order, each wrapping the previous result. The
  * factory is memoised, so calling it twice yields the same instance.

@@ -147,12 +147,13 @@ export interface ChannelStore {
    * exactly that, and this is the only reason it works — a consumer should not
    * have to know which door was used, or that a watcher exists.
    */
-  onFinalized(handler: (incoming: IncomingChannelMessage) => void): Unsubscribe;
+  onFinalized(handler: (incoming: IncomingChannelMessage) => void | Promise<void>): Unsubscribe;
 
   /**
    * Record that a message has already been dispatched, so the change feed does
    * not hand it over a second time. Callers mark AFTER dispatch succeeds: if
-   * dispatch throws, the message stays undispatched and is picked up again.
+   * dispatch throws or rejects, the message stays undispatched and is picked up
+   * again.
    */
   markSeen(channel: string, file: string, id: string): Promise<void>;
 }
@@ -160,7 +161,7 @@ export interface ChannelStore {
 /** The filesystem store: conversations as markdown under a channels home. */
 export class FileChannelStore implements ChannelStore {
   private watcher: ChannelsWatcher | undefined;
-  private readonly handlers = new Set<(incoming: IncomingChannelMessage) => void>();
+  private readonly handlers = new Set<(incoming: IncomingChannelMessage) => void | Promise<void>>();
 
   constructor(private readonly home: string) {}
 
@@ -266,12 +267,12 @@ export class FileChannelStore implements ChannelStore {
     return removeFeatured(this.home, ref);
   }
 
-  onFinalized(handler: (incoming: IncomingChannelMessage) => void): Unsubscribe {
+  onFinalized(handler: (incoming: IncomingChannelMessage) => void | Promise<void>): Unsubscribe {
     this.handlers.add(handler);
     if (!this.watcher) {
-      this.watcher = new ChannelsWatcher(this.home, (incoming) => {
+      this.watcher = new ChannelsWatcher(this.home, async (incoming) => {
         for (const fn of this.handlers) {
-          fn(incoming);
+          await fn(incoming);
         }
       });
       this.watcher.start();

@@ -1895,7 +1895,7 @@ describe('channels store', () => {
     const watcher = new ChannelsWatcher(home, () => undefined);
     watcher.prewarm();
     writeFileSync(rootFile, readFileSync(rootFile, 'utf8').replace('first', 'other'));
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     const afterExternalEdit = listChannels(home)[0].contentRevision;
     expect(afterExternalEdit).not.toBe(afterAppend);
     expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterExternalEdit);
@@ -1932,12 +1932,12 @@ describe('channels store', () => {
     const incoming: string[] = [];
     const watcher = new ChannelsWatcher(home, (event) => incoming.push(event.message.id));
     watcher.prewarm();
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([]); // history is pre-warmed, not re-dispatched
 
     const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'new arrival' });
-    watcher.scanFile('ops', 'root.md');
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([fresh.message.id]); // seen-set dedupes the second scan
   });
 
@@ -1954,12 +1954,12 @@ describe('channels store', () => {
     watcher.stop();
   });
 
-  it('watcher leaves a message retryable when dispatch throws', async () => {
+  it('watcher leaves a message retryable when async dispatch rejects', async () => {
     createChannel(home, 'ops', 'goal');
     await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
 
     const incoming: string[] = [];
-    const watcher = new ChannelsWatcher(home, (event) => {
+    const watcher = new ChannelsWatcher(home, async (event) => {
       incoming.push(event.message.id);
       if (incoming.length === 1) {
         throw new Error('transient dispatch failure');
@@ -1968,11 +1968,81 @@ describe('channels store', () => {
     watcher.prewarm();
     const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'retry me' });
 
-    expect(() => watcher.scanFile('ops', 'root.md')).toThrow('transient dispatch failure');
+    await expect(watcher.scanFile('ops', 'root.md')).rejects.toThrow('transient dispatch failure');
     expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(false);
 
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([fresh.message.id, fresh.message.id]);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(true);
+  });
+
+  it('watcher keeps an async dispatch unseen without duplicating a concurrent scan', async () => {
+    createChannel(home, 'ops', 'goal');
+    await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
+
+    let releaseDispatch!: () => void;
+    const dispatchPending = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const incoming: string[] = [];
+    const watcher = new ChannelsWatcher(home, async (event) => {
+      incoming.push(event.message.id);
+      await dispatchPending;
+    });
+    watcher.prewarm();
+    const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'dispatch once' });
+
+    const firstScan = watcher.scanFile('ops', 'root.md');
+    expect(incoming).toEqual([fresh.message.id]);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(false);
+
+    const secondScan = watcher.scanFile('ops', 'root.md');
+    expect(incoming).toEqual([fresh.message.id]);
+
+    releaseDispatch();
+    await Promise.all([firstScan, secondScan]);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(true);
+  });
+
+  it('sweep retries the same mtime when an event-driven async dispatch rejects', async () => {
+    createChannel(home, 'ops', 'goal');
+    await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
+
+    let releaseFirstDispatch!: () => void;
+    const firstDispatchPending = new Promise<void>((resolve) => {
+      releaseFirstDispatch = resolve;
+    });
+    let attempts = 0;
+    const errors: Error[] = [];
+    const watcher = new ChannelsWatcher(
+      home,
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          await firstDispatchPending;
+          throw new Error('event dispatch failed');
+        }
+      },
+      30_000,
+      (error) => errors.push(error)
+    );
+    watcher.prewarm();
+    await watcher.sweepNow();
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'retry after event' });
+    const eventScan = watcher.scanFile('ops', 'root.md');
+    expect(attempts).toBe(1);
+
+    const overlappingSweep = watcher.sweepNow();
+    releaseFirstDispatch();
+    await expect(eventScan).rejects.toThrow('event dispatch failed');
+    await overlappingSweep;
+    expect(errors.map((error) => error.message)).toEqual(['event dispatch failed']);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(false);
+
+    await watcher.sweepNow();
+    expect(attempts).toBe(2);
     expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(true);
   });
 
@@ -2041,7 +2111,7 @@ describe('channels store', () => {
     const incoming: string[] = [];
     const watcher = new ChannelsWatcher(home, (event) => incoming.push(event.message.id));
     watcher.prewarm();
-    watcher.sweepNow(); // primes mtimes; history already seen
+    await watcher.sweepNow(); // primes mtimes; history already seen
     expect(incoming).toEqual([]);
 
     // Simulate a missed inotify event: the file changes, no watcher callback.
@@ -2049,9 +2119,9 @@ describe('channels store', () => {
     // so the append lands with a different timestamp than the primed one.)
     await new Promise((resolve) => setTimeout(resolve, 25));
     const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'event was dropped' });
-    watcher.sweepNow();
+    await watcher.sweepNow();
     expect(incoming).toEqual([fresh.message.id]);
-    watcher.sweepNow(); // unchanged mtime → no rescan, no duplicate
+    await watcher.sweepNow(); // unchanged mtime → no rescan, no duplicate
     expect(incoming).toEqual([fresh.message.id]);
     watcher.stop();
   });

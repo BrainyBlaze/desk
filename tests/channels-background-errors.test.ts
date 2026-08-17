@@ -85,6 +85,39 @@ describe('background dispatch never crashes the process', () => {
     expect(rejections, 'an unreachable daemon must not become an unhandled rejection').toEqual([]);
     expect(engine.pumpAlive()).toBe(true);
   });
+
+  it('contains an async channel-event failure without dropping normal queueing', async () => {
+    engine = new ChannelsEngine({
+      home,
+      sendEnter: async () => true,
+      sendText: async () => true,
+      capturePane: async () => READY_PANE,
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a']),
+      onChannelMessage: async () => {
+        throw new Error('event projection failed');
+      }
+    });
+    engine.pauseSession('tmux-a', 'hold delivery for inspection');
+
+    await engine.handleMessage(
+      {
+        channel: 'ops',
+        file: 'root.md',
+        message: {
+          id: 'msg-bg-event-1',
+          author: 'human',
+          body: '@alpha inspect this',
+          createdAt: '2026-08-17T00:00:00.000Z',
+          reactions: []
+        }
+      },
+      [{ name: 'alpha', type: 'codex', sessionId: 'tmux-a' }]
+    );
+    await settle();
+
+    expect(rejections, 'an async event callback must not become an unhandled rejection').toEqual([]);
+    expect(engine.queuedItems('tmux-a')).toHaveLength(1);
+  });
 });
 
 describe('an unverifiable delivery is never blind-repasted', () => {

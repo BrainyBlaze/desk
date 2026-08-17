@@ -138,6 +138,34 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       pauseEngineSession(home, engine, sessionId, `native channel delivery failed (${error.code}): ${error.message}`);
     }
   });
+  const durableSendChannelDelivery = async (sessionId: string, text: string): Promise<boolean> => {
+    const ok = await sendChannelDelivery(sessionId, text);
+    if (!ok) {
+      revertAllDeliveringToJson(home, sessionId);
+    }
+    return ok;
+  };
+  const selectedDelivery = compose<AgentDelivery>(
+    () => agentDelivery({
+      sendText: sendChannelDelivery,
+      capturePane: nativeTransport.capturePane,
+      sendEnter: nativeTransport.sendEnter,
+      readAgentStates: readAgentStatePulse
+    }),
+    (p) => p.delivery
+  );
+  const durableDelivery: AgentDelivery = {
+    send: async (sessionId, text) => {
+      const ok = await selectedDelivery.send(sessionId, text);
+      if (!ok) {
+        revertAllDeliveringToJson(home, sessionId);
+      }
+      return ok;
+    },
+    states: () => selectedDelivery.states(),
+    probe: (sessionId) => selectedDelivery.probe(sessionId),
+    submit: (sessionId) => selectedDelivery.submit(sessionId)
+  };
   engine = new ChannelsEngine({
     home,
     // sendText wrapper: on a false return (daemon unreachable / session vanished),
@@ -146,13 +174,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     // the set of .delivering files at this point is exactly the digest fan-out
     // for this single failed send. The pump then re-drains the reverted items
     // when the session becomes reachable again.
-    sendText: async (sessionId, text) => {
-      const ok = await sendChannelDelivery(sessionId, text);
-      if (!ok) {
-        revertAllDeliveringToJson(home, sessionId);
-      }
-      return ok;
-    },
+    sendText: durableSendChannelDelivery,
     // onSubmitStateChange drives the per-item durability renames. Fires on
     // every transition (synchronous 'delivering' claim + async terminal
     // states from verifySubmitted). Each helper is idempotent — a re-fire
@@ -241,27 +263,21 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     store,
     router,
     renderer,
-    delivery: compose<AgentDelivery>(
-      () => agentDelivery({
-        sendText: sendChannelDelivery,
-        capturePane: nativeTransport.capturePane,
-        sendEnter: nativeTransport.sendEnter,
-        readAgentStates: readAgentStatePulse
-      }),
-      (p) => p.delivery
-    )
+    delivery: durableDelivery
   });
-    // handleMessage is async now that the store is. A rejection here has no
-    // caller to surface it, so name it rather than letting it become an
-    // unhandled rejection: an undispatched message is exactly the failure the
-    // watcher exists to prevent.
-    const unsubscribe = store.onFinalized((incoming) => {
-      void engine.handleMessage(incoming).catch((error: unknown) => {
+    // Return the dispatch promise so the watcher records the message as seen
+    // only after delivery succeeds. Log before rethrowing so event-triggered
+    // failures remain visible while the unchanged file stays retryable.
+    const unsubscribe = store.onFinalized(async (incoming) => {
+      try {
+        await engine.handleMessage(incoming);
+      } catch (error: unknown) {
         console.error(
           `[desk-channels] dispatch failed for ${incoming.channel}/${incoming.message.id}:`,
           error
         );
-      });
+        throw error;
+      }
     });
     runtime = { home, engine, store, files, views, unsubscribe, owner };
     return runtime;

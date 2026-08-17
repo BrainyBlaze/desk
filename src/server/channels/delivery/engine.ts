@@ -90,7 +90,12 @@ export interface ChannelsEngineOptions {
    * (human-authored included); `file` locates it (root.md / thread-…),
    * `pingsHuman` marks agent messages that mention @human explicitly.
    */
-  onChannelMessage?: (channel: string, file: string, message: ChannelMessage, pingsHuman: boolean) => void;
+  onChannelMessage?: (
+    channel: string,
+    file: string,
+    message: ChannelMessage,
+    pingsHuman: boolean
+  ) => void | Promise<void>;
   /** ms between the literal body push and the Enter key (TUIs drop same-burst CR) */
   enterDelayMs?: number;
   /** ms to let the terminal settle after a release signal before draining */
@@ -725,7 +730,12 @@ export class ChannelsEngine {
     if (decision.pingsOperator) {
       this.pushActivity({ kind: 'human-mention', channel, file, messageId: message.id, author: message.author, preview });
     }
-    this.options.onChannelMessage?.(channel, file, message, decision.pingsOperator);
+    const onChannelMessage = this.options.onChannelMessage;
+    if (onChannelMessage) {
+      this.background(`channel event ${channel}/${message.id}`, () =>
+        Promise.resolve(onChannelMessage(channel, file, message, decision.pingsOperator))
+      );
+    }
 
     for (const target of decision.recipients) {
       // Record that THIS channel handed target a prompt (only for non-supervisor
