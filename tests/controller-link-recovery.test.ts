@@ -307,6 +307,12 @@ class ExpiringLeaseHolder {
   readonly recoveryAttached = new Promise<void>((resolve) => {
     this.recoveryAttachedResolve = resolve;
   });
+  private holdRecoveryAttach = false;
+  private releaseRecoveryAttach: (() => void) | undefined;
+  private recoveryAttachSeenResolve!: () => void;
+  readonly recoveryAttachSeen = new Promise<void>((resolve) => {
+    this.recoveryAttachSeenResolve = resolve;
+  });
   private disappearedResolve!: () => void;
   readonly disappeared = new Promise<void>((resolve) => { this.disappearedResolve = resolve; });
   private inputReceivedResolve!: () => void;
@@ -387,6 +393,12 @@ class ExpiringLeaseHolder {
         }
         return;
       case MoorKind.ATTACH:
+        if (connection >= 3 && this.holdRecoveryAttach) {
+          this.holdRecoveryAttach = false;
+          this.releaseRecoveryAttach = () => this.route(socket, codec, connection, message);
+          this.recoveryAttachSeenResolve();
+          return;
+        }
         if (
           (connection === 1 && this.attachReplayBurst) ||
           (connection >= 3 && this.recoveryReplayBurst)
@@ -612,6 +624,17 @@ class ExpiringLeaseHolder {
     this.recoveryHello?.();
   }
 
+  holdNextRecoveryAttach(): void {
+    this.holdRecoveryAttach = true;
+  }
+
+  allowRecoveryAttach(): void {
+    const release = this.releaseRecoveryAttach;
+    if (release === undefined) throw new Error('no recovery attach is pending');
+    this.releaseRecoveryAttach = undefined;
+    release();
+  }
+
   async close(): Promise<void> {
     for (const socket of this.sockets) socket.destroy();
     await new Promise<void>((resolve) => this.server?.close(() => resolve()) ?? resolve());
@@ -721,6 +744,55 @@ async function startRecoveryHarness(
 
 describe('SessionManager controller-link recovery', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('does not strand future input when hide revokes a retained request before recovery attach completes', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      harness.holder.holdNextRecoveryAttach();
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttachSeen;
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+      harness.holder.allowRecoveryAttach();
+
+      await waitForSocketCondition(
+        () => harness.manager.stateSnapshot('session')?.health.status === 'healthy',
+        'recovery health after pre-attach retained input revocation'
+      );
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, true)).toBe(true);
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('after-pre-attach-revoke')
+        )
+      ).toBe(true);
+
+      await waitForSocketCondition(
+        () => harness.holder.inputs.includes('after-pre-attach-revoke'),
+        'post-reveal input after pre-attach retained request revocation'
+      );
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'after-pre-attach-revoke']);
+      expect(harness.holder.inputRequests.at(-1)).toMatchObject({
+        connection: 3,
+        epoch: 2,
+        requestId: 1n
+      });
+      expect(harness.browserErrors).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
 
   it('desk#66 gates ambiguous input retransmission on late observer acceptance', async () => {
     const acceptance = deferred<boolean>();
