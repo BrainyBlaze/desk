@@ -507,10 +507,6 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       if (strategy === 'local') {
         terminal.scrollLines(normalizedLines);
         updateScrollRail();
-        return;
-      }
-      if (normalizedLines < 0) {
-        enterScrollback(-normalizedLines);
       }
     };
     const handleWheel = (event: WheelEvent): void => {
@@ -542,9 +538,6 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       event.stopPropagation();
       const activeSession = sessionRef.current;
       if (activeSession?.state === 'running' && terminal.buffer.active.baseY <= 0) {
-        // The live broker view has no local scrollback: any rail interaction enters frozen scrollback,
-        // where the overlay's native scrollbar takes over.
-        enterScrollback(terminal.rows * 3);
         return;
       }
       const thumb = scrollThumbRef.current;
