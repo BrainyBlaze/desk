@@ -37,11 +37,17 @@ export type MemberDotState = 'running' | 'missing' | 'unbound';
  * empty ring, the same "no evidence" language the agent status dot uses.
  */
 export function memberDotState(
-  member: { type: string; sessionId?: string },
+  member: { name: string; type: string; sessionId?: string },
   resolved: { state: string } | undefined
 ): MemberDotState {
   if (member.type === 'human') {
-    return 'running';
+    // Nobody has an online status in desk — no session, no heartbeat. For the
+    // LITERAL operator the green dot is the one evidence-free assertion that
+    // is true by observation: this is their desk, and the dot is only ever on
+    // a screen they are looking at. Any OTHER human-typed member (a
+    // hand-written manifest for a second human) carries no such tautology —
+    // painting them green asserts a presence nothing tracks.
+    return member.name.toLowerCase() === 'human' ? 'running' : 'unbound';
   }
   if (!member.sessionId || !resolved) {
     return 'unbound';

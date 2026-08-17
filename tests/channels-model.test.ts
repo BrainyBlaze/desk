@@ -814,11 +814,18 @@ describe('applyWindow poll reconcile', () => {
 });
 
 describe('memberDotState', () => {
-  const agent = (sessionId?: string) => ({ type: 'codex-cli', ...(sessionId === undefined ? {} : { sessionId }) });
+  const agent = (sessionId?: string) => ({ name: 'worker', type: 'codex-cli', ...(sessionId === undefined ? {} : { sessionId }) });
 
   it('is green for the operator and for a member whose session is running', () => {
-    expect(memberDotState({ type: 'human' }, undefined)).toBe('running');
+    expect(memberDotState({ name: 'human', type: 'human' }, undefined)).toBe('running');
     expect(memberDotState(agent('sess-a'), { state: 'running' })).toBe('running');
+  });
+
+  it('does not paint OTHER human-typed members green — nothing tracks their presence', () => {
+    // The literal operator's green is true by observation (it is their desk,
+    // their screen). A second hand-written human member has no such tautology.
+    expect(memberDotState({ name: 'guest', type: 'human' }, undefined)).toBe('unbound');
+    expect(memberDotState({ name: 'Human', type: 'human' }, undefined)).toBe('running');
   });
 
   it('is red ONLY when this desk knows the session and it is not running', () => {
