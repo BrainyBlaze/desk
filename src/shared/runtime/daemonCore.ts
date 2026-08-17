@@ -88,6 +88,7 @@ export interface DaemonCoreDeps {
     now: () => number;
   }) => AgentStateIntakeStore;
   onStateTransition?: (transition: SessionStateTransition) => void;
+  onStateTransitionError?: (error: unknown, transition: SessionStateTransition) => void;
 }
 
 interface SessionEntry {
@@ -177,7 +178,14 @@ export class DaemonCore {
       now: deps.now,
       workingLeaseMs: deps.workingLeaseMs ?? 15_000,
       openToolLeaseMs: deps.openToolLeaseMs ?? 30 * 60_000,
-      ...(deps.onStateTransition === undefined ? {} : { onTransition: deps.onStateTransition })
+      ...(deps.onStateTransition === undefined ? {} : { onTransition: deps.onStateTransition }),
+      onTransitionError:
+        deps.onStateTransitionError ??
+        ((error, transition) => {
+          console.error(
+            `[desk] state transition sink failed for ${transition.sessionId} generation ${transition.generation} revision ${transition.revision}: ${error instanceof Error ? error.message : String(error)}`
+          );
+        })
     });
     const intakeDependencies = {
       currentGeneration: (sessionId: string) => this.d.ledger.current(sessionId),

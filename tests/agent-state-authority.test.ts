@@ -948,6 +948,51 @@ describe('observeHolderLiveness (§10 indeterminate state)', () => {
     expect(authority.observeHolderLiveness('shell', 2, true).kind).toBe('noop');
   });
 
+  it('keeps terminal-title evidence valid beneath a holder-link health overlay', () => {
+    let at = 10;
+    const authority = new AgentStateAuthority({
+      openToolLeaseMs: 500,
+      now: () => at,
+      workingLeaseMs: 50,
+      onTransition: (transition) => {
+        parseSessionStateSnapshot(transition.to);
+      }
+    });
+    registerAgent(authority, INSTANCE_ID);
+
+    at = 20;
+    authority.observeTitleActivity(SESSION_ID, GENERATION, 'working', at);
+
+    at = 30;
+    expect(() =>
+      authority.observeHolderLiveness(
+        SESSION_ID,
+        GENERATION,
+        false,
+        'controller-link-recovery'
+      )
+    ).not.toThrow();
+    expect(authority.snapshot(SESSION_ID)).toMatchObject({
+      health: {
+        status: 'degraded',
+        reason: MOOR_LIVENESS_REASON,
+        detail: 'controller-link-recovery'
+      },
+      subject: {
+        evidence: { source: 'terminal-title', observedAt: 20 }
+      }
+    });
+
+    at = 40;
+    expect(authority.observeHolderLiveness(SESSION_ID, GENERATION, true).kind).toBe('applied');
+    expect(authority.snapshot(SESSION_ID)).toMatchObject({
+      health: { status: 'degraded', reason: 'title-fallback', since: 20 },
+      subject: {
+        evidence: { source: 'terminal-title', observedAt: 20 }
+      }
+    });
+  });
+
   it("restores a producer's own degradation verbatim after a liveness round-trip", () => {
     const authority = new AgentStateAuthority({ openToolLeaseMs: 500, now: () => 10, workingLeaseMs: 50 });
     registerAgent(authority); // degraded 'awaiting-reconciliation' since 10

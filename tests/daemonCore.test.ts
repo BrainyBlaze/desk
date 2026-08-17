@@ -2,7 +2,7 @@
 // generation ledger, the fail-closed cap, per-session runtimes, and the lease
 // into a callable daemon — tested with a fake emulator.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BpFrameType } from '../src/shared/browserProtocol/index.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -97,6 +97,7 @@ function makeCore(
     maxLiveWorkers: number;
     initialAgentHealth: NonNullable<DaemonCoreDeps['initialAgentHealth']>;
     onStateTransition: (transition: SessionStateTransition) => void;
+    onStateTransitionError: (error: unknown, transition: SessionStateTransition) => void;
     createEmulator: () => EmulatorPort;
   }> = {}
 ) {
@@ -119,7 +120,10 @@ function makeCore(
       : { initialAgentHealth: over.initialAgentHealth }),
     ...(over.onStateTransition === undefined
       ? {}
-      : { onStateTransition: over.onStateTransition })
+      : { onStateTransition: over.onStateTransition }),
+    ...(over.onStateTransitionError === undefined
+      ? {}
+      : { onStateTransitionError: over.onStateTransitionError })
   };
   return { core: new DaemonCore(deps), browserOut, masterOut, masterResizes, clock };
 }
@@ -450,6 +454,24 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       event: { acceptanceId: accepted.kind === 'accepted' ? accepted.event.acceptanceId : '' }
     });
     expect(core.stateSnapshot('s1')?.revision).toBe(revision);
+  });
+
+  it('contains and reports transition sink failures after committing state', () => {
+    const failure = new Error('journal rejected transition');
+    const onStateTransitionError = vi.fn();
+    const { core } = makeCore({
+      onStateTransition: () => {
+        throw failure;
+      },
+      onStateTransitionError
+    });
+
+    expect(() => core.ensure('s1', { rows: 1, cols: 1 }, agentSubject)).not.toThrow();
+    expect(core.stateSnapshot('s1')).toMatchObject({ sessionId: 's1', generation: 2 });
+    expect(onStateTransitionError).toHaveBeenCalledWith(
+      failure,
+      expect.objectContaining({ sessionId: 's1', generation: 2 })
+    );
   });
 
   it('applies a generation-fenced health assessment without changing agent state', () => {
