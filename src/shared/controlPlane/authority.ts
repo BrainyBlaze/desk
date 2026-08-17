@@ -1,6 +1,7 @@
 import {
   AGENT_PRODUCER_BINDINGS,
   AGENT_STATE_SCHEMA_VERSION,
+  MOOR_HOLDER_HEALTH_REASONS,
   type AcceptedAgentStateEvent,
   type AgentProducer,
   type AgentHealthInput,
@@ -19,7 +20,7 @@ import {
  * §10: the dedicated health reason for a holder whose verified-live heartbeat
  * evidence lapsed. Only THIS reason is cleared back to healthy on restoration.
  */
-export const MOOR_LIVENESS_REASON = 'moor-holder-liveness';
+export const MOOR_LIVENESS_REASON = MOOR_HOLDER_HEALTH_REASONS[0];
 
 /**
  * desk#64: the dedicated health reason for a session Desk holds NO link to
@@ -32,10 +33,10 @@ export const MOOR_LIVENESS_REASON = 'moor-holder-liveness';
  * lapsed" send an operator to different places. Cleared by the same
  * restoration as the liveness reason — an adoption ends both.
  */
-export const MOOR_UNADOPTED_REASON = 'moor-holder-unadopted';
+export const MOOR_UNADOPTED_REASON = MOOR_HOLDER_HEALTH_REASONS[1];
 
 /** The health degradations THIS module owns, and may therefore clear. */
-const MOOR_HOLDER_REASONS: readonly string[] = [MOOR_LIVENESS_REASON, MOOR_UNADOPTED_REASON];
+const MOOR_HOLDER_REASONS: readonly string[] = MOOR_HOLDER_HEALTH_REASONS;
 
 export type SessionRegistration =
   | {
@@ -106,6 +107,7 @@ export interface AgentStateAuthorityOptions {
   openToolLeaseMs: number;
   now: () => number;
   onTransition?: (transition: SessionStateTransition) => void;
+  onTransitionError?: (error: unknown, transition: SessionStateTransition) => void;
 }
 
 function clone<T>(value: T): T {
@@ -847,7 +849,15 @@ export class AgentStateAuthority {
       from: from === null ? null : clone(from),
       to
     };
-    this.options.onTransition?.(clone(transition));
+    try {
+      this.options.onTransition?.(clone(transition));
+    } catch (error) {
+      try {
+        this.options.onTransitionError?.(error, clone(transition));
+      } catch {
+        // An observer failure must not roll back an already-committed authority state.
+      }
+    }
     return transition;
   }
 

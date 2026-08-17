@@ -439,15 +439,10 @@ export class AgentSurfaceBroker {
     if (event.seq <= session.lastSeq) {
       return; // already accepted (idempotent — protects against host re-emits on reconnect)
     }
-    if (event.kind === 'session-info') {
-      if (!event.agentSessionId) {
-        await this.rejectProviderIdentity(
-          session,
-          host,
-          'session-info did not include a provider session id'
-        );
-        return;
-      }
+    if (event.kind === 'session-info' && !event.agentSessionId && host.providerSessionId !== null) {
+      return;
+    }
+    if (event.kind === 'session-info' && event.agentSessionId) {
       if (
         host.providerSessionId !== null &&
         host.providerSessionId !== event.agentSessionId
@@ -499,28 +494,18 @@ export class AgentSurfaceBroker {
           this.now()
         );
       }
-    } else if (host.providerSessionId === null) {
-      if (event.kind === 'agent-error' && event.fatal) {
-        this.retainHostEvent(session, event);
-        this.fanEventToSurfaces(session, event);
-        return;
-      }
-      await this.rejectProviderIdentity(
-        session,
-        host,
-        `host emitted ${event.kind} before provider session identity authorization`
-      );
-      return;
     }
 
     this.retainHostEvent(session, event);
-    this.publishNativeObservation(
-      session,
-      host,
-      event,
-      eventOccurredAt(event, this.now()),
-      correlationFor(event)
-    );
+    if (host.providerSessionId !== null) {
+      this.publishNativeObservation(
+        session,
+        host,
+        event,
+        eventOccurredAt(event, this.now()),
+        correlationFor(event)
+      );
+    }
     this.fanEventToSurfaces(session, event);
   }
 
