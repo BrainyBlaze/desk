@@ -1302,6 +1302,85 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
+  it('hide removes input already transferred to the live client queue', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('in-flight')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['in-flight']);
+
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('cancel-after-hide')
+        )
+      ).toBe(true);
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+
+      harness.holder.acknowledgeLatestInput(1);
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual(['in-flight']);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('hide removes input waiting in the recovery queue', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      await harness.enterRecovery();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('cancel-during-recovery')
+        )
+      ).toBe(true);
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('hide cancels a retained lease tuple before recovery can replay it', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('unsubscribe removes input already transferred to the attached client queue', async () => {
     const harness = await startRecoveryHarness();
     try {

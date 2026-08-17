@@ -1971,15 +1971,7 @@ export class SessionManager {
   unsubscribeChannels(channelIds: number[]): void {
     for (const channelId of channelIds) {
       const sessionId = this.core.sessionOfChannel(channelId);
-      const recovery = sessionId === undefined ? undefined : this.recoveries.get(sessionId);
-      if (recovery !== undefined) {
-        recovery.inputQueue = recovery.inputQueue.filter((pending) => {
-          if (pending.surfaceId !== channelId) return true;
-          recovery.inputBytes -= pending.bytes.length;
-          return false;
-        });
-      }
-      if (sessionId !== undefined) this.masters.get(sessionId)?.cancelQueuedInput(channelId);
+      if (sessionId !== undefined) this.revokeQueuedBrowserInput(sessionId, channelId);
     }
     for (const handoff of this.core.unsubscribeChannels(channelIds)) {
       // A departing owner handed off: the successor's geometry is what a
@@ -2007,10 +1999,31 @@ export class SessionManager {
   onBrowserVisibilityByChannel(channelId: number, visible: boolean): boolean {
     const sessionId = this.core.sessionOfChannel(channelId);
     const outcome = this.core.onBrowserVisibilityByChannel(channelId, visible);
+    if (!visible && sessionId !== undefined && outcome.routed) {
+      this.revokeQueuedBrowserInput(sessionId, channelId);
+    }
     if (sessionId !== undefined && outcome.commanded !== undefined) {
       this.noteCommandedGeometry(sessionId, outcome.commanded);
     }
     return outcome.routed;
+  }
+
+  /** Revoke bytes accepted while this browser surface still held input authority. */
+  private revokeQueuedBrowserInput(sessionId: string, channelId: number): void {
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery !== undefined) {
+      recovery.inputQueue = recovery.inputQueue.filter((pending) => {
+        if (pending.surfaceId !== channelId) return true;
+        recovery.inputBytes -= pending.bytes.length;
+        return false;
+      });
+      const retained = recovery.snapshot?.lease?.pendingInput;
+      if (retained?.surfaceId === channelId) {
+        delete recovery.snapshot!.lease!.pendingInput;
+        recovery.retainedInputQueuedAt = undefined;
+      }
+    }
+    this.masters.get(sessionId)?.cancelQueuedInput(channelId);
   }
 
   /** Carry a COMMANDED geometry into an in-flight link recovery (§7.5, desk#68). */

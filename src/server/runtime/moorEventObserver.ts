@@ -212,6 +212,7 @@ export class MoorEventObserver {
   /** Consecutive failed store reads; any successful read resets it to zero. */
   private readFailures = 0;
   private unavailable = false;
+  private mismatchFingerprint: string | undefined;
   /** desk#59 — fences a drain read that completes after its own deadline. */
   private drainEpoch = 0;
 
@@ -353,11 +354,33 @@ export class MoorEventObserver {
   // ---- internals ------------------------------------------------------------
 
   private async readSnapshot() {
-    const selected = await readMoorStoreSnapshot(
-      this.options.directory,
-      MoorStoreKind.Event,
-      this.options.generation
-    );
+    let selected;
+    try {
+      selected = await readMoorStoreSnapshot(
+        this.options.directory,
+        MoorStoreKind.Event,
+        this.options.generation
+      );
+    } catch (error) {
+      if (
+        error instanceof MoorStoreError &&
+        error.code === 'UNAVAILABLE' &&
+        error.mismatchFingerprint !== undefined
+      ) {
+        if (error.mismatchFingerprint === this.mismatchFingerprint) {
+          throw new MoorStoreError(
+            'CORRUPT',
+            'Moor store commit/body mismatch remained unchanged across consecutive reads',
+            { cause: error }
+          );
+        }
+        this.mismatchFingerprint = error.mismatchFingerprint;
+      } else {
+        this.mismatchFingerprint = undefined;
+      }
+      throw error;
+    }
+    this.mismatchFingerprint = undefined;
     const snapshot = decodeMoorEventSnapshot(selected.bytes, selected.commit);
     const expected = this.options.identity;
     if (expected !== undefined && !identityEquals(snapshot.sessionIdentity, expected)) {

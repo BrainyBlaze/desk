@@ -366,10 +366,77 @@ describe('a transient store read failure must not kill a live session', () => {
       (observer as unknown as { poll: () => Promise<void> }).poll();
     await poll();
 
-    expect(terminalCount()).toBe(1);
+    expect(terminalCount()).toBe(0);
     expect(availability).toEqual([]);
     expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toMatch(/CORRUPT/);
+    expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
+
+    await poll();
+
+    expect(terminalCount()).toBe(1);
+    expect(availability).toEqual([]);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[1]).toMatch(/CORRUPT/);
+  });
+
+  it('keeps changing two-slot hash mismatch fingerprints retryable', async () => {
+    const root = await readyStore();
+    const { seen, diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 5,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const rotatedBody = eventBody([
+      event('ready', 1, 1n),
+      event('link', 1, 2n, ',\"uri\":\"https://example.test/two-rotation\",\"truncated\":false')
+    ]);
+    const rotatedCommit = commitRecord({
+      slot: 1,
+      bytes: rotatedBody,
+      index: 2n,
+      start: 1n,
+      end: 3n
+    });
+    await writeSlot(root, 1, rotatedBody, rotatedCommit);
+
+    const oldBodyMismatch = eventBody([event('ready', 1, 1n)]);
+    oldBodyMismatch[0] = oldBodyMismatch[0]! ^ 0x01;
+    const rotatedBodyMismatch = rotatedBody.slice();
+    rotatedBodyMismatch[0] = rotatedBodyMismatch[0]! ^ 0x01;
+    await Promise.all([
+      writeFile(join(root, 'body.0'), oldBodyMismatch, { mode: 0o600 }),
+      writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 })
+    ]);
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    await poll();
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
+
+    rotatedBodyMismatch[1] = rotatedBodyMismatch[1]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 });
+    await poll();
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[1]).toMatch(/UNAVAILABLE/);
+
+    await writeFile(join(root, 'body.1'), rotatedBody, { mode: 0o600 });
+    await poll();
+
+    expect(seen.at(-1)).toMatchObject({
+      type: 'link',
+      uri: 'https://example.test/two-rotation'
+    });
+    expect(terminalCount()).toBe(0);
+    expect(availability).toEqual([]);
   });
 
   it('treats a compaction gap as terminal on the FIRST read, with no retry', async () => {

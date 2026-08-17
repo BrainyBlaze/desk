@@ -83,9 +83,10 @@ emulator snapshots, and generation state.
 Operational guards include:
 
 - visible-only output delivery so hidden cells do not parse terminal streams
-- server-enforced input suppression for hidden retained channels
+- server-enforced input suppression and queued-input revocation for hidden retained channels
 - snapshot-on-reveal from the daemon's xterm emulator
 - per-session generation fencing so stale output cannot corrupt a new process
+- retryable Moor store rotations; only a repeated unchanged hash mismatch is corruption
 - bounded frame sizes, heartbeat detection, and resubscription after gaps
 - private, per-user Moor socket roots
 

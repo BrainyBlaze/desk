@@ -74,9 +74,10 @@ theme state. Closing the browser does not stop Moor sessions.
 
 The browser uses one binary WebSocket at `/ws/terminal` for the tab's terminal
 surfaces. Hiding sends `VISIBILITY false` while retaining the channel; the
-daemon suppresses its input, resize authority, and output deltas. Reveal uses
-the same channel and requests a fresh emulator snapshot before live output
-resumes. Only actual surface removal or transport loss unsubscribes. The
+daemon revokes its input and resize authority, cancels its queued input, and
+suppresses output deltas. Reveal uses the same channel and requests a fresh
+emulator snapshot before live output resumes. Only actual surface removal or
+transport loss unsubscribes. The
 WebSocket bridge routes frames to the terminal daemon; the daemon owns the Moor
 holder connections and per-session generation state.
 
