@@ -333,6 +333,8 @@ describe('sharing and naming', () => {
   });
 
   it('generates protocol-shaped message ids', () => {
-    expect(generateMessageId(new Date(2026, 5, 11, 15, 30, 12))).toMatch(/^msg-20260611-153012-[0-9a-f]{4}$/);
+    // 8 hex chars = 4 random bytes: the same-second collision space that makes
+    // dedupe-by-id trustworthy on a busy channel.
+    expect(generateMessageId(new Date(2026, 5, 11, 15, 30, 12))).toMatch(/^msg-20260611-153012-[0-9a-f]{8}$/);
   });
 });
