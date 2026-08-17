@@ -10,6 +10,7 @@
 // and the web server proxies /ws/terminal to it. Instantiating it directly is
 // how tests and a hand-run daemon (DESK_DAEMON_EXTERNAL) compose the pieces.
 
+import { isRealSessionGeometry, type SessionGeometry } from '../../shared/runtime/sessionGeometryStore.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { homedir } from 'node:os';
@@ -2043,15 +2044,21 @@ function readSessionSubject(value: unknown): SessionRegistration['subject'] | un
   };
 }
 
-/** Clamp a client-supplied geometry so it can neither zero nor blow up the grid allocation (R4.3). */
-function readProvisionGeometry(value: unknown): { rows: number; cols: number } {
-  const geometry = (value ?? {}) as { rows?: unknown; cols?: unknown };
-  const rows = Number(geometry.rows);
-  const cols = Number(geometry.cols);
-  return {
-    rows: Number.isFinite(rows) && rows > 0 ? Math.min(Math.floor(rows), 1000) : 24,
-    cols: Number.isFinite(cols) && cols > 0 ? Math.min(Math.floor(cols), 1000) : 80
-  };
+export const PROVISION_GEOMETRY_ERROR =
+  'provision geometry must be an object with integer rows and cols, each 1..32767, rows*cols at most 2000000';
+
+/**
+ * The caller-supplied provision geometry, exactly as supplied and validated
+ * against the moor wire bound, or undefined when it is absent or malformed.
+ * Nothing is clamped or defaulted: a caller that wants the creation size sends
+ * SESSION_CREATION_GEOMETRY, and a malformed request is refused (400) rather
+ * than recorded as a size somebody asked for.
+ */
+function readProvisionGeometry(value: unknown): SessionGeometry | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const { rows, cols } = value as { rows?: unknown; cols?: unknown };
+  if (typeof rows !== 'number' || typeof cols !== 'number') return undefined;
+  return isRealSessionGeometry({ rows, cols }) ? { rows, cols } : undefined;
 }
 
 function readAgentObservationScope(
@@ -2294,9 +2301,14 @@ export function createDaemonControlHandler(
               return;
             }
           }
+          const geometry = readProvisionGeometry(body.geometry);
+          if (geometry === undefined) {
+            sendJson(res, 400, { ok: false, error: PROVISION_GEOMETRY_ERROR });
+            return;
+          }
           const ens = await daemon.provision(body.sessionId, {
             command: body.command,
-            geometry: readProvisionGeometry(body.geometry),
+            geometry,
             subject,
             ...(providerSessionId === undefined ? {} : { providerSessionId })
           });

@@ -26,6 +26,8 @@ import { type EmulatorFactory } from './emulatorPort.js';
 import { SessionRuntime, type CommandedGeometry } from './sessionRuntime.js';
 import {
   InMemorySessionGeometryStore,
+  SESSION_CREATION_GEOMETRY,
+  type SessionGeometry,
   type SessionGeometryStore
 } from './sessionGeometryStore.js';
 import { createLeaseState, claim, release, type ClaimResult, type LeaseState } from '../lease/index.js';
@@ -44,7 +46,7 @@ export type ExitDiagnostic = NonNullable<SessionExit['diagnostic']>;
  * MOOR_PRESERVE_GEOMETRY, so the child is never told a size by the reconcile
  * pass.
  */
-const UNRECORDED_SESSION_GEOMETRY = { rows: 24, cols: 80 } as const;
+const UNRECORDED_SESSION_GEOMETRY: SessionGeometry = SESSION_CREATION_GEOMETRY;
 
 export interface DaemonCoreDeps {
   ledger: GenerationLedger;

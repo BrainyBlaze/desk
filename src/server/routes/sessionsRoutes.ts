@@ -37,7 +37,7 @@ import {
 import {
   restartSessionNativeAware,
   retireNativeSession,
-  retireStaleIdentityForEdit,
+  editIdentityContradiction,
   startSessionNativeAware
 } from '../runtime/nativeSessionControl.js';
 import type {
@@ -713,14 +713,13 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
             handoff: { manifestSource, manifest, next, oldSpec, newSpec }
           };
         }
-        // Fail closed (R2.1): a native edit that changes the session's identity
-        // (possible for a legacy entry without a persisted sessionId) must retire
-        // the master under its OLD identity, BEFORE the manifest edit commits. If
-        // it can't be retired (e.g. daemon down), abort — neither orphan the old
-        // moor holder nor desync the manifest against a still-running master.
-        const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
-        if (!staleGuard.ok) {
-          return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };
+        // Fail closed: the persisted sessionId is the durable identity and an
+        // edit never re-mints it, so a differing id is a contradiction in the
+        // edit itself — abort before the manifest commits and before anything
+        // native runs (no holder is retired or provisioned under a wrong id).
+        const contradiction = editIdentityContradiction(oldSpec, newSpec);
+        if (contradiction !== undefined) {
+          return { updated: null, respawnError: `session edit aborted: ${contradiction}` };
         }
         // Liveness is consulted only when the respawn decision actually hinges
         // on it, and then it must be the authority's answer. Fail closed for

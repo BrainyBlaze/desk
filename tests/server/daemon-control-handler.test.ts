@@ -1,7 +1,8 @@
 import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createDaemonControlHandler, isSafeDaemonSessionId } from '../../src/server/runtime/terminalDaemon.js';
+import { createDaemonControlHandler, isSafeDaemonSessionId, PROVISION_GEOMETRY_ERROR } from '../../src/server/runtime/terminalDaemon.js';
+import { SESSION_CREATION_GEOMETRY } from '../../src/shared/runtime/sessionGeometryStore.js';
 import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../src/shared/daemonControlClient.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -280,6 +281,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'spawntest',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['codex'],
       subject: agentSubject,
       providerSessionId: 7
@@ -309,6 +311,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['sh', '-c', 'bash'],
         subject: agentSubject,
         continuity
@@ -338,6 +341,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['sh', '-c', 'bash'],
         subject: agentSubject,
         continuity: {
@@ -382,6 +386,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['claude'],
         subject: agentSubject,
         claudeMemory
@@ -409,6 +414,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['claude'],
         subject: agentSubject,
         claudeMemory: {
@@ -426,11 +432,46 @@ describe('daemon control handler', () => {
     expect(daemon.provision).toHaveBeenCalledOnce();
   });
 
-  it('defaults geometry when absent', async () => {
+  it('refuses a provision without geometry instead of inventing one (400, nothing provisioned)', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'sess-a',
+      command: ['bash'],
+      subject: terminalSubject
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ ok: false, error: PROVISION_GEOMETRY_ERROR });
+    expect(daemon.provision).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['zero rows', { rows: 0, cols: 80 }],
+    ['negative cols', { rows: 24, cols: -1 }],
+    ['fractional rows', { rows: 24.5, cols: 80 }],
+    ['string dimensions', { rows: '24', cols: '80' }],
+    ['a dimension above 32767', { rows: 32_768, cols: 80 }],
+    ['an area above 2000000', { rows: 2000, cols: 1001 }],
+    ['an array', [24, 80]],
+    ['null', null]
+  ])('refuses %s geometry rather than clamping it (400, nothing provisioned)', async (_label, geometry) => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'sess-a',
+      command: ['bash'],
+      geometry,
+      subject: terminalSubject
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ ok: false, error: PROVISION_GEOMETRY_ERROR });
+    expect(daemon.provision).not.toHaveBeenCalled();
+  });
+
+  it('passes a valid geometry through exactly, including the creation size, without rewriting it', async () => {
     const daemon = daemonMock();
     await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
       command: ['bash'],
+      geometry: SESSION_CREATION_GEOMETRY,
       subject: terminalSubject
     });
     expect(daemon.provision).toHaveBeenCalledWith('sess-a', {
@@ -444,6 +485,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: '../escape',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['bash'],
       subject: terminalSubject
     });
@@ -456,6 +498,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: [],
       subject: terminalSubject
     });
@@ -467,6 +510,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock({ ok: false, reason: 'cap-exceeded' });
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['bash'],
       subject: terminalSubject
     });
@@ -483,6 +527,7 @@ describe('daemon control handler', () => {
     });
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['codex'],
       subject: agentSubject
     });
@@ -508,6 +553,7 @@ describe('daemon control handler', () => {
     });
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['codex'],
       subject: agentSubject
     });
@@ -529,6 +575,7 @@ describe('daemon control handler', () => {
     const daemon = { ...daemonMock(), provision: vi.fn().mockRejectedValue(new Error('spawn failed')) };
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['bash'],
       subject: terminalSubject
     });

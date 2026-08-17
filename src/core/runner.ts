@@ -1,3 +1,4 @@
+import { SESSION_CREATION_GEOMETRY } from '../shared/runtime/sessionGeometryStore.js';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -365,7 +366,7 @@ async function provisionPreparedSession(
   const result = await controlFor(options)('/control/provision', {
     sessionId: session.sessionId,
     command: buildAtchCommand(session),
-    geometry: { rows: 24, cols: 80 },
+    geometry: SESSION_CREATION_GEOMETRY,
     subject: sessionStateSubjectFor(session),
     ...(session.resume === undefined
       ? {}
