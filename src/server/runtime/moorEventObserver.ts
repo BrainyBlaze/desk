@@ -14,6 +14,7 @@
 import type { MoorExitOutcome } from '../../shared/controlPlane/contract.js';
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import {
   MoorStoreError,
   MoorStoreKind,
@@ -131,6 +132,16 @@ const DEFAULT_DRAIN_DEADLINE_MS = 2_000;
 const DEFAULT_POLL_INTERVAL_MS = 200;
 
 /**
+ * A body-first Moor rotation can leave an old commit pointing at its rewritten
+ * body while the body fsync is still in progress. Identical samples therefore
+ * become a corruption decision only after a sustained monotonic-time window,
+ * not merely after two adjacent polls. Five seconds is 25 default poll periods:
+ * long enough to absorb loaded local-disk flushes while still bounding a
+ * permanently inconsistent store.
+ */
+const DEFAULT_MISMATCH_STABILITY_MS = 5_000;
+
+/**
  * Five consecutive failures at the default 200 ms interval means the store has
  * been unreadable for a full second before observation is declared unavailable.
  * Polling then continues so the same observer can recover without replacing or
@@ -212,7 +223,9 @@ export class MoorEventObserver {
   /** Consecutive failed store reads; any successful read resets it to zero. */
   private readFailures = 0;
   private unavailable = false;
-  private mismatchFingerprint: string | undefined;
+  private mismatchWitness:
+    | { fingerprint: string; firstObservedAt: number }
+    | undefined;
   /** desk#59 — fences a drain read that completes after its own deadline. */
   private drainEpoch = 0;
 
@@ -367,20 +380,30 @@ export class MoorEventObserver {
         error.code === 'UNAVAILABLE' &&
         error.mismatchFingerprint !== undefined
       ) {
-        if (error.mismatchFingerprint === this.mismatchFingerprint) {
-          throw new MoorStoreError(
-            'CORRUPT',
-            'Moor store commit/body mismatch remained unchanged across consecutive reads',
-            { cause: error }
-          );
+        const observedAt = performance.now();
+        if (error.mismatchFingerprint === this.mismatchWitness?.fingerprint) {
+          if (
+            observedAt - this.mismatchWitness.firstObservedAt >=
+            DEFAULT_MISMATCH_STABILITY_MS
+          ) {
+            throw new MoorStoreError(
+              'CORRUPT',
+              'Moor store commit/body mismatch remained unchanged beyond the stability window',
+              { cause: error }
+            );
+          }
+        } else {
+          this.mismatchWitness = {
+            fingerprint: error.mismatchFingerprint,
+            firstObservedAt: observedAt
+          };
         }
-        this.mismatchFingerprint = error.mismatchFingerprint;
       } else {
-        this.mismatchFingerprint = undefined;
+        this.mismatchWitness = undefined;
       }
       throw error;
     }
-    this.mismatchFingerprint = undefined;
+    this.mismatchWitness = undefined;
     const snapshot = decodeMoorEventSnapshot(selected.bytes, selected.commit);
     const expected = this.options.identity;
     if (expected !== undefined && !identityEquals(snapshot.sessionIdentity, expected)) {

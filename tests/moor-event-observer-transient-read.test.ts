@@ -27,7 +27,8 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { performance } from 'node:perf_hooks';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { MoorStoreKind } from '../src/server/runtime/moorStore.js';
 import {
@@ -41,6 +42,7 @@ const encoder = new TextEncoder();
 const observers: MoorEventObserver[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (observers.length > 0) observers.pop()!.stop();
   // Permissions are restored before removal: a test that leaves a store
   // unreadable would otherwise defeat its own cleanup.
@@ -364,6 +366,7 @@ describe('a transient store read failure must not kill a live session', () => {
 
     const poll = () =>
       (observer as unknown as { poll: () => Promise<void> }).poll();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
     await poll();
 
     expect(terminalCount()).toBe(0);
@@ -371,12 +374,50 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
 
+    now.mockReturnValue(5_000);
     await poll();
 
     expect(terminalCount()).toBe(1);
     expect(availability).toEqual([]);
     expect(diagnostics).toHaveLength(2);
     expect(diagnostics[1]).toMatch(/CORRUPT/);
+  });
+
+  it('keeps observing when two identical mismatch samples are followed by a valid commit', async () => {
+    const root = await readyStore();
+    const { seen, diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 5,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const validBody = eventBody([event('ready', 1, 1n)]);
+    const transientBody = validBody.slice();
+    transientBody[0] = transientBody[0]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), transientBody, { mode: 0o600 });
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    await poll();
+    now.mockReturnValue(200);
+    await poll();
+
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics.every((diagnostic) => diagnostic.includes('UNAVAILABLE'))).toBe(true);
+
+    await writeFile(join(root, 'body.0'), validBody, { mode: 0o600 });
+    await poll();
+
+    expect(seen.map((value) => value.type)).toEqual(['ready']);
+    expect(terminalCount()).toBe(0);
+    expect(availability).toEqual([]);
   });
 
   it('keeps changing two-slot hash mismatch fingerprints retryable', async () => {

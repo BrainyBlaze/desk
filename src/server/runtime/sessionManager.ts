@@ -640,6 +640,10 @@ export class SessionManager {
       this.owners.set(sessionId, owner);
     }
     let link: SessionMasterLink | undefined;
+    // Capture before any connect/attach await: visibility or unsubscribe can
+    // revoke the mutable recovery snapshot after the client constructor copies
+    // this tuple but before ATTACH finishes.
+    const resumedPendingInput = opts.resumeSnapshot?.lease?.pendingInput;
     let attached = false;
     /** §6: parser preamble work must DRAIN before adoption is complete. */
     let terminalStateReady: Promise<boolean> = Promise.resolve(true);
@@ -655,6 +659,15 @@ export class SessionManager {
     /** Bytes queued behind the outstanding §7.3 input request. */
     let inputQueue: Array<{ bytes: Uint8Array; surfaceId: number; queuedAt: number }> = [];
     let inputSealed = false;
+    let leaseReset: Promise<void> | undefined;
+    let discardLeaseOnClose = false;
+    let leaseResetResize: { rows: number; cols: number; surfaceId: number } | undefined;
+    const queueInput = (bytes: Uint8Array, surfaceId: number, queuedAt: number): boolean => {
+      const queuedBytes = inputQueue.reduce((sum, pending) => sum + pending.bytes.length, 0);
+      if (queuedBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) return false;
+      inputQueue.push({ bytes: bytes.slice(), surfaceId, queuedAt });
+      return true;
+    };
     const flushQueue = (client: MoorMasterClient): void => {
       if (inputSealed) return;
       const next = inputQueue.shift();
@@ -753,6 +766,7 @@ export class SessionManager {
           // replaces only link/status state with an exact-generation recovery
           // slot; it never retires, terminates, kills, or allocates.
           if (attached && link !== undefined && this.masters.get(sessionId) === link) {
+            const reconnectSnapshot = client.reconnectSnapshot();
             this.beginControllerRecovery({
               sessionId,
               sessionPath,
@@ -760,13 +774,24 @@ export class SessionManager {
               generation: opts.generation,
               owner,
               link,
-              snapshot: client.reconnectSnapshot(),
+              snapshot:
+                discardLeaseOnClose && reconnectSnapshot !== undefined
+                  ? {
+                      output: {
+                        sequence: reconnectSnapshot.output.sequence,
+                        incarnation: reconnectSnapshot.output.incarnation.slice()
+                      }
+                    }
+                  : reconnectSnapshot,
               queuedInput: inputQueue.map((pending) => ({
                 bytes: pending.bytes.slice(),
                 binary: false,
                 surfaceId: pending.surfaceId,
                 queuedAt: pending.queuedAt
-              }))
+              })),
+              ...(leaseResetResize === undefined
+                ? {}
+                : { pendingResize: { ...leaseResetResize } })
             });
           }
         },
@@ -888,9 +913,49 @@ export class SessionManager {
     attached = true;
     const retainedPendingInput =
       client.leaseContinuity === 'resumed'
-        ? opts.resumeSnapshot?.lease?.pendingInput
+        ? resumedPendingInput
         : undefined;
     let retainedInputRetried = false;
+    const resetRevokedRetainedInputLease = (): void => {
+      if (leaseReset !== undefined || retainedPendingInput === undefined) return;
+      const copiedPending = client.reconnectSnapshot()?.lease?.pendingInput;
+      if (copiedPending?.requestId !== retainedPendingInput.requestId) return;
+      // Once the retained request loses browser authority, its old lease epoch
+      // is also unusable: skipping the identical retry while keeping the
+      // client's private pending slot would block every later request. Release
+      // that epoch, acquire a fresh viewer lease, then flush only still-
+      // authorized bytes. Any indeterminate exchange reconnects from output
+      // continuity alone so the revoked tuple cannot be resurrected.
+      discardLeaseOnClose = true;
+      leaseReset = (async () => {
+        try {
+          const released = await client.releaseLease();
+          if (released !== 'released') throw new Error('holder refused the revoked input lease release');
+          const acquired = await client.acquireViewerLease();
+          if (acquired !== 'granted') throw new Error('fresh viewer lease is busy after revoked input');
+          if (inputSealed || this.masters.get(sessionId) !== link) {
+            client.close();
+            return;
+          }
+          discardLeaseOnClose = false;
+          const pendingResize = leaseResetResize;
+          leaseResetResize = undefined;
+          if (pendingResize !== undefined) {
+            client.sendResize(pendingResize.cols, pendingResize.rows);
+          }
+          flushQueue(client);
+        } catch (error) {
+          console.error(
+            `[desk] revoked retained input lease reset failed for ${sessionId} generation ${opts.generation}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          client.close();
+        } finally {
+          leaseReset = undefined;
+        }
+      })();
+    };
     const retryPendingInput =
       retainedPendingInput === undefined
         ? undefined
@@ -899,7 +964,10 @@ export class SessionManager {
             retainedInputRetried = true;
             // Input expiry or a completed continuity refusal consumes this
             // exact snapshot tuple; never recreate it from the client copy.
-            if (opts.resumeSnapshot?.lease?.pendingInput !== retainedPendingInput) return;
+            if (opts.resumeSnapshot?.lease?.pendingInput !== retainedPendingInput) {
+              resetRevokedRetainedInputLease();
+              return;
+            }
             try {
               client.retryPendingInput();
             } catch (error) {
@@ -913,15 +981,13 @@ export class SessionManager {
     link = {
       sendInput: (bytes, _binary, surfaceId, queuedAt) => {
         if (inputSealed) return false;
+        if (leaseReset !== undefined) return queueInput(bytes, surfaceId, queuedAt);
         try {
           client.sendInput(bytes, surfaceId);
           return true;
         } catch (error) {
           if (error instanceof Error && /in flight/.test(error.message)) {
-            const queuedBytes = inputQueue.reduce((sum, pending) => sum + pending.bytes.length, 0);
-            if (queuedBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) return false;
-            inputQueue.push({ bytes: bytes.slice(), surfaceId, queuedAt });
-            return true;
+            return queueInput(bytes, surfaceId, queuedAt);
           }
           return false;
         }
@@ -941,8 +1007,12 @@ export class SessionManager {
           }
         }
       },
-      sendResize: (rows, cols) => {
+      sendResize: (rows, cols, surfaceId) => {
         if (inputSealed) return;
+        if (leaseReset !== undefined) {
+          leaseResetResize = { rows, cols, surfaceId };
+          return;
+        }
         try {
           client.sendResize(cols, rows);
         } catch {
@@ -1019,6 +1089,7 @@ export class SessionManager {
     link: SessionMasterLink;
     snapshot: MoorReconnectSnapshot | undefined;
     queuedInput: MoorRecoverySlot['inputQueue'];
+    pendingResize?: MoorRecoverySlot['pendingResize'];
   }): void {
     if (this.masters.get(input.sessionId) !== input.link) return;
     if (this.owners.get(input.sessionId) !== input.owner) return;
@@ -1085,6 +1156,7 @@ export class SessionManager {
     owner: symbol;
     snapshot: MoorReconnectSnapshot | undefined;
     queuedInput: MoorRecoverySlot['inputQueue'];
+    pendingResize?: MoorRecoverySlot['pendingResize'];
   }): void {
     const previous = this.recoveries.get(input.sessionId);
     if (previous?.timer !== undefined) clearTimeout(previous.timer);
@@ -1106,9 +1178,11 @@ export class SessionManager {
         : input.snapshot?.lease?.pendingInput === undefined
           ? {}
           : { retainedInputQueuedAt: this.now() }),
-      ...(previous?.pendingResize === undefined
-        ? {}
-        : { pendingResize: { ...previous.pendingResize } })
+      ...(previous?.pendingResize !== undefined
+        ? { pendingResize: { ...previous.pendingResize } }
+        : input.pendingResize === undefined
+          ? {}
+          : { pendingResize: { ...input.pendingResize } })
     };
     this.recoveries.set(input.sessionId, slot);
     void this.runControllerRecovery(slot, slot.episode).catch((error) => {
