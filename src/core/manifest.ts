@@ -498,12 +498,17 @@ export function buildAgentCommand(
   }
   const launch = agentProvider(session.agent)?.launch;
   if (launch && session.agent) {
+    // Agents that read MCP servers only from their global settings file get the
+    // per-session desk_lsp environment through the launch env instead of a
+    // per-session config flag; desk-lsp-mcp resolves the file from its own env.
+    const lspEnv =
+      launch.settingsMcp && agentMcp ? ` DESK_LSP_ENV_FILE=${shellQuote(agentMcp.envFilePath)}` : '';
     const args = [session.agent];
     if (session.bypassPermissions && launch.bypassFlag) {
       args.push(launch.bypassFlag);
     }
     if (!session.resume) {
-      return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}`;
+      return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}`;
     }
     // A resume id is a HINT, not a guarantee: qwen mints a fresh session id on
     // every launch and only persists a resumable session after the first
@@ -516,7 +521,7 @@ export function buildAgentCommand(
       `printf 'desk: %s resume failed with exit %s; leaving pane open — run \`%s\` to start a fresh session\\n' ` +
       `${shellQuote(session.agent)} "$desk_resume_status" ${shellQuote(session.agent)} >&2; ` +
       `printf 'desk: resume id: %s\\n' ${resumeArg} >&2;`;
-    return `cd ${shellQuote(cwd)} && ${env} ${args.join(' ')}; ${resumeFailureGuard('desk_resume_status', diagnostics)}`;
+    return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}; ${resumeFailureGuard('desk_resume_status', diagnostics)}`;
   }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }

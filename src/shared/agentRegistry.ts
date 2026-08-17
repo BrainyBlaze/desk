@@ -13,7 +13,7 @@ interface AgentDescriptor {
   sessionIdShape?: AgentSessionIdShape;
   profileEnvVar?: string;
   hooks?: AgentHooksStyle;
-  launch?: { resumeFlag: string; bypassFlag?: string };
+  launch?: { resumeFlag: string; bypassFlag?: string; settingsMcp?: boolean };
 }
 
 export const AGENTS = [
@@ -61,7 +61,7 @@ export const AGENTS = [
     sessionIdField: 'session_id',
     sessionIdShape: 'uuid',
     hooks: 'qwen',
-    launch: { resumeFlag: '--resume', bypassFlag: '--yolo' }
+    launch: { resumeFlag: '--resume', bypassFlag: '--yolo', settingsMcp: true }
   },
   {
     id: 'kimi',

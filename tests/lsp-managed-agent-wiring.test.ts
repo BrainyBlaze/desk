@@ -127,3 +127,20 @@ function enabledSettings(): DeskSettings {
     }
   };
 }
+
+describe('qwen lsp wiring', () => {
+  it('prepares an env file for qwen without a claude config', () => {
+    const wiring = createWiring();
+    const launch = wiring.prepare({ ...baseSession(), agent: 'qwen', name: 'qwen', sessionId: 'qwen' }, enabledSettings());
+    expect(launch?.envFilePath).toBeTruthy();
+    expect(launch?.claudeConfigPath).toBeUndefined();
+    if (launch) wiring.cleanup('qwen');
+  });
+
+  it('still declines kimi and grok', () => {
+    const wiring = createWiring();
+    for (const agent of ['kimi', 'grok'] as const) {
+      expect(wiring.prepare({ ...baseSession(), agent, name: agent, sessionId: agent }, enabledSettings())).toBeUndefined();
+    }
+  });
+});

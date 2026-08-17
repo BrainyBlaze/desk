@@ -130,6 +130,12 @@ Qwen sessions launch as `qwen` (Qwen Code, a Gemini-CLI fork). Desk supports:
 - resume ids (`--resume <id>`, a UUID)
 - hook settings for state reporting and resume capture
 
+When LSP agent access is enabled, Desk wires `desk_lsp` for Qwen too: the
+server is registered once in `~/.qwen/settings.json` (Qwen has no per-session
+MCP flag), and each Desk launch carries the session's `DESK_LSP_ENV_FILE` in
+the environment. Outside Desk the entry is inert — the tools resolve their
+token from that variable and report an error without it.
+
 Qwen's hooks are Claude-compatible and live in:
 
 ```text
@@ -195,7 +201,9 @@ and the bypass checkbox is hidden for it. Grok also fires `SessionStart` lazily
 on the first prompt (not at launch), so a freshly launched Grok pane reads
 `unknown` until the first message, and its tool hooks fire only for the bash
 tool — long non-bash tool runs rest on the heartbeat rather than a tool
-interval.
+interval. Grok cannot join `desk_lsp` yet: it reads MCP servers only from its
+global settings and spawns them with a sanitized environment, so the
+per-session token cannot reach the server.
 
 <Note>
 `desk hooks install` only writes a new agent's hook config when that CLI's
@@ -279,7 +287,7 @@ Hook configuration is read when a session launches. A session started before
 
 ## Agent LSP access
 
-When LSP is enabled and agent LSP access is enabled, Desk wires the `desk_lsp` MCP server into supported managed agents.
+When LSP is enabled and agent LSP access is enabled, Desk wires the `desk_lsp` MCP server into supported managed agents (Codex, Claude, and Qwen).
 
 The server exposes language-server tools such as hover, definitions, references, diagnostics, symbols, completions, rename preparation, rename edits, formatting, and code actions.
 

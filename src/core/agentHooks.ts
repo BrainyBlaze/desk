@@ -193,7 +193,13 @@ export function buildClaudeHooksSettings(shimPath: string): ClaudeHooksSettings 
  * take the same directives through launch env.
  */
 const QWEN_DESK_TERMINAL_SETTINGS = {
-  ui: { mouseTracking: false, useTerminalBuffer: false }
+  ui: { mouseTracking: false, useTerminalBuffer: false },
+  // desk_lsp is registered globally because qwen has no per-session MCP config
+  // flag. The server starts as a no-op outside Desk: its tools resolve the
+  // per-session token from DESK_LSP_ENV_FILE, which only Desk launches carry.
+  mcpServers: {
+    desk_lsp: { command: 'desk-lsp-mcp', args: [] }
+  }
 } as const;
 
 const QWEN_HOOK_EVENTS = [

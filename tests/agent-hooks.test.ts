@@ -580,6 +580,26 @@ describe('probe and merge maintenance for the new terminal agents', () => {
     }
   });
 
+  it('registers desk_lsp in qwen mcpServers without displacing operator servers', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-qwen-mcp-'));
+    try {
+      const qwenPath = join(home, '.qwen', 'settings.json');
+      mkdirSync(dirname(qwenPath), { recursive: true });
+      writeFileSync(
+        qwenPath,
+        JSON.stringify({ mcpServers: { operator_tool: { command: 'my-tool', args: ['--x'] } } })
+      );
+
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
+      expect(qwen.mcpServers.desk_lsp).toEqual({ command: 'desk-lsp-mcp', args: [] });
+      expect(qwen.mcpServers.operator_tool).toEqual({ command: 'my-tool', args: ['--x'] });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('writes qwen terminal-context settings alongside hooks and preserves operator ui keys', () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-qwen-ui-'));
     try {

@@ -786,6 +786,35 @@ groups:
     expect(launch[1].command).toContain("resume 'abc123'");
     expect(base[0].command).not.toContain('/tmp/app-lsp-managed-agents');
   });
+
+  it('passes the desk_lsp env file to qwen through the launch environment', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: qwen
+            sessionId: qwen
+            agent: qwen
+          - name: kimi
+            sessionId: kimi
+            agent: kimi
+          - name: grok
+            sessionId: grok
+            agent: grok
+`);
+    const launch = buildSessionSpecs(manifest, {
+      homeDir: '/workspace',
+      agentMcp: () => ({
+        envFilePath: '/tmp/app-lsp-managed-agents/123/session/env.json'
+      })
+    });
+    expect(launch[0].command).toContain("DESK_LSP_ENV_FILE='/tmp/app-lsp-managed-agents/123/session/env.json'");
+    expect(launch[1].command).not.toContain('DESK_LSP_ENV_FILE');
+    expect(launch[2].command).not.toContain('DESK_LSP_ENV_FILE');
+  });
 });
 
 describe('claude resume command shell safety', () => {
