@@ -146,6 +146,31 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 3000): Promise<void
   }
 };
 
+/**
+ * Wait until the geometry witness contains `requiredLine` AND its line count has
+ * held steady for `settleMs` — the holder may still be flushing a final witness
+ * line after the links close, and a snapshot taken mid-flush would miss a late
+ * duplicate that then appears between the snapshot and the next event.
+ */
+const waitForWitnessQuiescence = async (
+  sessionPath: string,
+  requiredLine: string,
+  settleMs = 200
+): Promise<void> => {
+  await waitFor(() => witnessLines(sessionPath).includes(requiredLine));
+  let lastCount = -1;
+  let steadySince = Date.now();
+  await waitFor(() => {
+    const count = witnessLines(sessionPath).length;
+    if (count !== lastCount) {
+      lastCount = count;
+      steadySince = Date.now();
+      return false;
+    }
+    return Date.now() - steadySince >= settleMs;
+  });
+};
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -576,6 +601,11 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
       await waitFor(() => witnessLines(sock).includes('resize 100x48'));
       one.manager.closeAllLinks(); // the daemon departs; the holder survives
       first.close();
+      // The holder can still be flushing the resize witness when the links
+      // close; snapshot only after the witness settles, so a late duplicate
+      // resize cannot appear between beforeRestart and the post-restart attach
+      // and break the exact-equality assertion below.
+      await waitForWitnessQuiescence(sock, 'resize 100x48');
       const beforeRestart = witnessLines(sock);
 
       // --- daemon incarnation 2: it comes back ------------------------------
