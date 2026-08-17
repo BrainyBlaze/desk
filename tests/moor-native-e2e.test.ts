@@ -462,8 +462,13 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
         subject: { kind: 'terminal' }
       });
       expect(predecessor).toMatchObject({ ok: true, generation: 2 });
+      // Holder unlink and committed lifecycle bytes can precede Desk finishing
+      // controller recovery. The exited state is published after that slot clears.
       await waitFor(
-        () => !existsSync(sessionPath) && existsSync(`${sessionPath}.exit/body.0`),
+        () =>
+          !existsSync(sessionPath) &&
+          existsSync(`${sessionPath}.exit/body.0`) &&
+          daemon.router.sessions.stateSnapshot(sessionId)?.lifecycle === 'exited',
         'real predecessor exit companions'
       );
 
