@@ -100,5 +100,9 @@ export function resolveTargets(author: string, body: string, members: ChannelMem
 
 /** True when the body addresses the human operator. */
 export function mentionsHuman(body: string): boolean {
-  return extractMentions(body).includes('human');
+  // Case-insensitive, like every other mention comparison in this module.
+  // extractMentions preserves the writer's casing, and `@Human` used to fall
+  // through: resolveTargets treated it as addressing (no agents notified)
+  // while this predicate missed it (no operator ping) — nobody got told.
+  return extractMentions(body).some((mention) => mention.toLowerCase() === 'human');
 }

@@ -86,6 +86,14 @@ describe('mentions', () => {
     expect(mentionsHuman('@human look at this')).toBe(true);
     expect(mentionsHuman('plain message')).toBe(false);
   });
+
+  it('mentionsHuman is case-insensitive, like every other mention comparison', () => {
+    // `@Human` used to slip through: resolveTargets read it as addressing (no
+    // agents notified) while the ping predicate missed it — nobody was told.
+    expect(mentionsHuman('@Human please take a look')).toBe(true);
+    expect(mentionsHuman('@HUMAN decision needed')).toBe(true);
+    expect(mentionsHuman('mail me@humanreadable.org')).toBe(false);
+  });
 });
 
 describe('resolveTargets: mentions that name nobody in the channel (desk#44)', () => {
