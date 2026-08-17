@@ -295,6 +295,56 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(terminalCount()).toBe(0);
   });
 
+  it('recovers when a rotation exposes a partial commit and no valid candidate', async () => {
+    const root = await readyStore();
+    const { seen, diagnostics, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      // Keep the timer out of the mutation window; this test invokes the poll
+      // directly so the filesystem state at the read is deterministic.
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 5,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const rotatedBody = eventBody([
+      event('ready', 1, 1n),
+      event('link', 1, 2n, ',\"uri\":\"https://example.test/rotation\",\"truncated\":false')
+    ]);
+    const rotatedCommit = commitRecord({
+      slot: 1,
+      bytes: rotatedBody,
+      index: 2n,
+      start: 1n,
+      end: 3n
+    });
+    const invalidatedOldBody = eventBody([event('ready', 1, 1n)]);
+    invalidatedOldBody[0] = invalidatedOldBody[0]! ^ 0x01;
+
+    // A fast replace can invalidate the body referenced by the old commit while
+    // the replacement commit file is only partly written. There is briefly no
+    // valid candidate, but the in-progress commit is direct evidence that this
+    // is a transient read window rather than a completed corruption decision.
+    await writeFile(join(root, 'body.1'), rotatedBody, { mode: 0o600 });
+    await writeFile(join(root, 'body.0'), invalidatedOldBody, { mode: 0o600 });
+    await writeFile(join(root, 'commit.1'), rotatedCommit.subarray(0, 17), { mode: 0o600 });
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    await poll();
+    expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
+    expect(terminalCount()).toBe(0);
+
+    await writeFile(join(root, 'commit.1'), rotatedCommit, { mode: 0o600 });
+    await poll();
+    expect(seen.some((value) => value.type === 'link')).toBe(true);
+    expect(seen.at(-1)).toMatchObject({ type: 'link', uri: 'https://example.test/rotation' });
+    expect(terminalCount()).toBe(0);
+  });
+
   it('treats a compaction gap as terminal on the FIRST read, with no retry', async () => {
     const root = await readyStore();
     const { diagnostics, terminalCount, handlers } = collector();
