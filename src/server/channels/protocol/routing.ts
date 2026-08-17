@@ -47,7 +47,11 @@ export interface ResolveTargetOptions {
  * Humans are excluded — UI notification handles @human separately.
  */
 export function resolveTargets(author: string, body: string, members: ChannelMember[], options: ResolveTargetOptions = {}): ChannelMember[] {
-  const agents = members.filter((member) => member.type !== 'human' && member.name !== author);
+  // Author comparison is case-insensitive, like mention comparison below: an
+  // author whose casing differs from their manifest must still be excluded
+  // from a broadcast, or their own message comes back to them as a prompt.
+  const authorLower = author.toLowerCase();
+  const agents = members.filter((member) => member.type !== 'human' && member.name.toLowerCase() !== authorLower);
   const supervisors = agents.filter((member) => member.supervisor === true);
   const mentions = new Set(extractMentions(body).map((mention) => mention.toLowerCase()));
   const agentNames = new Set(members.filter((member) => member.type !== 'human').map((member) => member.name.toLowerCase()));

@@ -94,6 +94,13 @@ describe('mentions', () => {
     expect(mentionsHuman('@HUMAN decision needed')).toBe(true);
     expect(mentionsHuman('mail me@humanreadable.org')).toBe(false);
   });
+
+  it('resolveTargets excludes the author case-insensitively', () => {
+    // Manifest says Alpha, the author line says alpha: still the same member,
+    // and their own broadcast must not come back to them as a prompt.
+    const members = [member('Alpha'), member('agent-b', 'agent-cli'), member('human', 'human')];
+    expect(resolveTargets('alpha', 'status update', members).map((m) => m.name)).toEqual(['agent-b']);
+  });
 });
 
 describe('resolveTargets: mentions that name nobody in the channel (desk#44)', () => {

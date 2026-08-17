@@ -679,7 +679,10 @@ export class ChannelsEngine {
 
     // The author just posted to this channel — record it so stuck-detection
     // knows they reported back on any in-flight prompt from this channel.
-    const authorMember = members.find((member) => member.name === message.author);
+    // Case-insensitive, like the router's author lookup: a casing mismatch
+    // must not silently drop the report-back.
+    const authorLower = message.author.toLowerCase();
+    const authorMember = members.find((member) => member.name.toLowerCase() === authorLower);
     if (authorMember && !decision.authorIsSupervisor && authorMember.type !== 'human') {
       this.supervision.recordPost(channel, authorMember.name, this.now());
     }

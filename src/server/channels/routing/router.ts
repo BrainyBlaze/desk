@@ -64,7 +64,10 @@ export function threadParentIdFromFile(file: string): string | undefined {
 export class MentionRouter implements MessageRouter {
   route(input: RouteInput): RoutingDecision {
     const { channel: _channel, file, message, members } = input;
-    const authorMember = members.find((member) => member.name === message.author);
+    // Case-insensitive, matching mention resolution: a casing mismatch between
+    // the author line and the manifest must not lose the member behind it.
+    const authorLower = message.author.toLowerCase();
+    const authorMember = members.find((member) => member.name.toLowerCase() === authorLower);
     const authorIsSupervisor = authorMember?.supervisor === true;
     const authorSession = authorMember?.sessionId;
 
