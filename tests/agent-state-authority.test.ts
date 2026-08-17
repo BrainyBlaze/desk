@@ -972,7 +972,8 @@ describe('observeHolderLiveness (§10 indeterminate state)', () => {
         'controller-link-recovery'
       )
     ).not.toThrow();
-    expect(authority.snapshot(SESSION_ID)).toMatchObject({
+    const overlay = authority.snapshot(SESSION_ID);
+    expect(overlay).toMatchObject({
       health: {
         status: 'degraded',
         reason: MOOR_LIVENESS_REASON,
@@ -982,6 +983,7 @@ describe('observeHolderLiveness (§10 indeterminate state)', () => {
         evidence: { source: 'terminal-title', observedAt: 20 }
       }
     });
+    expect(parseSessionStateSnapshot(overlay!)).toEqual(overlay);
 
     at = 40;
     expect(authority.observeHolderLiveness(SESSION_ID, GENERATION, true).kind).toBe('applied');

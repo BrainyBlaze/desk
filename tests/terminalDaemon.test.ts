@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createTerminalDaemon, provisionSessions, runTerminalDaemon, startTerminalDaemonServer } from '../src/server/runtime/terminalDaemon.js';
+import { FileDeskEventJournal } from '../src/server/runtime/fileDeskEventJournal.js';
 import {
   MoorEventObserver,
   moorEventStoreDir,
@@ -642,7 +643,7 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
     daemon.dispose();
   });
 
-  it('stops observing on an internal lifecycle exit without deleting the published store', async () => {
+  it('stops observing on an internal lifecycle exit even when the transition journal rejects it', async () => {
     const daemon = createTerminalDaemon({
       homeRoot: home,
       moorBinPath: '/opt/moor',
@@ -675,8 +676,12 @@ describe('terminal daemon assembly (cutover Step 3)', () => {
     const storeDir = moorEventStoreDir(moorEventStoreRoot('/opt/moor'), 'sess-1', result.generation);
     expect(existsSync(storeDir)).toBe(true);
 
+    const stop = vi.spyOn(MoorEventObserver.prototype, 'stop');
+    vi.spyOn(FileDeskEventJournal.prototype, 'appendTransition').mockImplementation(() => {
+      throw new Error('journal rejected transition');
+    });
     daemon.router.sessions.retire('sess-1');
-    await Promise.resolve();
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
     // §11.6: observation is torn down, but the published store is the
     // holder's to remove — Desk leaves it in place.
     expect(existsSync(storeDir)).toBe(true);
