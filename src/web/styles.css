@@ -1299,8 +1299,7 @@ select:focus {
 
 .terminalSurface .xterm-viewport {
   height: 100% !important;
-  scrollbar-color: rgba(95, 247, 255, 0.45) rgba(0, 11, 13, 0.96);
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 /* xterm 6 ships its own hover-overlay scrollbar (.xterm-scrollable-element >
@@ -1386,22 +1385,8 @@ select:focus {
 }
 
 .terminalSurface .xterm-viewport::-webkit-scrollbar {
-  width: 9px;
-}
-
-.terminalSurface .xterm-viewport::-webkit-scrollbar-track {
-  background: var(--desk-term-bg, rgba(0, 11, 13, 0.96));
-  border-left: 1px solid rgba(95, 247, 255, 0.12);
-}
-
-.terminalSurface .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(95, 247, 255, 0.38);
-  border: 2px solid rgba(0, 11, 13, 0.96);
-  border-radius: 0;
-}
-
-.terminalSurface .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 209, 102, 0.72);
+  width: 0;
+  height: 0;
 }
 
 .terminalScrollRail {
