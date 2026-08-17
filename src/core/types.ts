@@ -85,6 +85,14 @@ export interface DeskManifest {
   profiles?: AgentProfile[];
   groups: DeskGroup[];
   projects?: DeskProject[];
+  /**
+   * Durable, operator-editable configuration for installed plugins, one
+   * namespaced value per plugin name. Desk never interprets the values — it
+   * stores them, hands them to the owning plugin, and tells it when they
+   * change. Lives in the manifest for the same reason `settings` does: this
+   * is the one config file an operator already knows to edit and back up.
+   */
+  plugins?: Record<string, unknown>;
 }
 
 /** Providers that support an isolated credential directory today. */
