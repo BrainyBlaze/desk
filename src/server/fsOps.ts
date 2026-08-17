@@ -106,7 +106,10 @@ export function writeFileAtomic(path: string, content: string, expectedMtimeMs?:
     }
   }
   mkdirSync(dirname(path), { recursive: true });
-  const temp = join(dirname(path), `.${basename(path)}.desk-tmp-${process.pid}`);
+  // pid + time + random, like writeFileAtomicCreate below: a pid alone is not
+  // unique across containers sharing a mount (or across pid reuse), and two
+  // writers picking the same temp name interleave their bytes before rename.
+  const temp = join(dirname(path), `.${basename(path)}.desk-tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   writeFileSync(temp, content, 'utf8');
   renameSync(temp, path);
   return { ok: true, mtimeMs: statSync(path).mtimeMs };
