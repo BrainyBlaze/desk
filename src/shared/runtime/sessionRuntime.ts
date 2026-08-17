@@ -490,16 +490,18 @@ export class SessionRuntime {
   /**
    * Forward browser input to the master (§7.6, two channels).
    *
-   * NOT gated on the resize owner (desk#68 seam): §7.5 puts INPUT and RESIZE
-   * under one owner, but this change enforces the RESIZE half only. Any
-   * subscriber may still type.
+   * Input is not gated on resize ownership: any VISIBLE subscriber may type.
+   * Hidden subscribers retain their channel only for continuity and have no
+   * input authority until a VISIBILITY reveal reactivates them.
    */
   onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    const subscriber = this.subscribers.get(channelId);
     if (
       this.disposed ||
       this.pendingExit !== undefined ||
       this.exitFenced ||
-      !this.subscribers.has(channelId)
+      subscriber === undefined ||
+      !subscriber.visible
     ) {
       return false;
     }

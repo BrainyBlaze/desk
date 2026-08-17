@@ -345,6 +345,33 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(terminalCount()).toBe(0);
   });
 
+  it('treats a stable committed body hash mismatch as terminal corruption', async () => {
+    const root = await readyStore();
+    const { diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 3,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const corrupted = eventBody([event('ready', 1, 1n)]);
+    corrupted[0] = corrupted[0]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), corrupted, { mode: 0o600 });
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    await poll();
+
+    expect(terminalCount()).toBe(1);
+    expect(availability).toEqual([]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatch(/CORRUPT/);
+  });
+
   it('treats a compaction gap as terminal on the FIRST read, with no retry', async () => {
     const root = await readyStore();
     const { diagnostics, terminalCount, handlers } = collector();

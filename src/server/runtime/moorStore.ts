@@ -438,9 +438,11 @@ async function readCandidate(
     const length = exactAllocationLength(commit.length);
     const bytes = await readExact(slots[commit.bodySlot]!, length);
     if (!equal(sha256(bytes), commit.hash)) {
-      // Bodies are rewritten before their replacement commit. A reader can
-      // therefore observe the old commit against the new body during rotation.
-      return { generationMismatch: false, unavailable: true };
+      // A completed commit whose selected body does not match is not itself
+      // evidence of an in-progress write. Rotation remains retryable when the
+      // OTHER candidate exposes a partial commit or explicit I/O unavailability;
+      // without that evidence, no valid candidate means committed corruption.
+      return { generationMismatch: false };
     }
     if (!bodyValid(commit, bytes)) {
       return { generationMismatch: false };
