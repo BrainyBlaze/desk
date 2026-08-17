@@ -383,7 +383,7 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(diagnostics[1]).toMatch(/CORRUPT/);
   });
 
-  it('keeps observing when two identical mismatch samples are followed by a valid commit', async () => {
+  it('restarts mismatch stability after a valid commit', async () => {
     const root = await readyStore();
     const { seen, diagnostics, availability, terminalCount, handlers } = collector();
     const observer = new MoorEventObserver({
@@ -418,6 +418,17 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(seen.map((value) => value.type)).toEqual(['ready']);
     expect(terminalCount()).toBe(0);
     expect(availability).toEqual([]);
+
+    await writeFile(join(root, 'body.0'), transientBody, { mode: 0o600 });
+    now.mockReturnValue(6_000);
+    await poll();
+
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(3);
+    now.mockReturnValue(11_000);
+    await poll();
+    expect(terminalCount()).toBe(1);
+    expect(diagnostics[3]).toMatch(/CORRUPT/);
   });
 
   it('keeps changing two-slot hash mismatch fingerprints retryable', async () => {
@@ -457,6 +468,7 @@ describe('a transient store read failure must not kill a live session', () => {
 
     const poll = () =>
       (observer as unknown as { poll: () => Promise<void> }).poll();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
     await poll();
     expect(terminalCount()).toBe(0);
     expect(diagnostics).toHaveLength(1);
@@ -464,10 +476,20 @@ describe('a transient store read failure must not kill a live session', () => {
 
     rotatedBodyMismatch[1] = rotatedBodyMismatch[1]! ^ 0x01;
     await writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 });
+    now.mockReturnValue(3_000);
     await poll();
     expect(terminalCount()).toBe(0);
     expect(diagnostics).toHaveLength(2);
     expect(diagnostics[1]).toMatch(/UNAVAILABLE/);
+
+    rotatedBodyMismatch[1] = rotatedBodyMismatch[1]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 });
+    now.mockReturnValue(6_000);
+    await poll();
+    now.mockReturnValue(6_001);
+    await poll();
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(4);
 
     await writeFile(join(root, 'body.1'), rotatedBody, { mode: 0o600 });
     await poll();
