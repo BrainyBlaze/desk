@@ -174,6 +174,11 @@ const envelopeSchema = z
 
 export type AgentStateEnvelope = z.infer<typeof envelopeSchema>;
 
+export const MOOR_HOLDER_HEALTH_REASONS = [
+  'moor-holder-liveness',
+  'moor-holder-unadopted'
+] as const;
+
 const sessionHealthSchema = z.discriminatedUnion('status', [
   z.strictObject({
     status: z.literal('healthy'),
@@ -383,11 +388,21 @@ const snapshotSchema = z
         value.subject.evidence.source === 'terminal-title';
       const titleFallbackHealth =
         value.health.status === 'degraded' && value.health.reason === 'title-fallback';
-      if (value.lifecycle !== 'exited' && titleEvidence !== titleFallbackHealth) {
+      const degradedHealthReason =
+        value.health.status === 'degraded' ? value.health.reason : undefined;
+      const holderLinkOverlayHealth =
+        degradedHealthReason !== undefined &&
+        MOOR_HOLDER_HEALTH_REASONS.some((reason) => reason === degradedHealthReason);
+      if (
+        value.lifecycle !== 'exited' &&
+        ((titleEvidence && !titleFallbackHealth && !holderLinkOverlayHealth) ||
+          (!titleEvidence && titleFallbackHealth))
+      ) {
         context.addIssue({
           code: 'custom',
           path: titleEvidence ? ['health'] : ['subject', 'evidence'],
-          message: 'terminal title evidence and title-fallback health must appear together'
+          message:
+            'terminal title evidence requires title-fallback or holder-link health; title-fallback requires terminal title evidence'
         });
       }
     }

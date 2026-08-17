@@ -682,6 +682,18 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return undefined;
     },
     onStateTransition: (transition) => {
+      if (transition.cause === 'lifecycle-exited') {
+        // desk#59: an OBSERVED exit already carries the truth, so its observer
+        // may stop at once. A RETIRED placeholder is Desk tearing the session
+        // down without knowing how the child died — stopping there is what
+        // discarded the evidence, so that path drains first. Queue this before
+        // the downstream journal so cleanup survives a rejected feed write.
+        scheduleMoorObserverCleanup(
+          transition.sessionId,
+          transition.generation,
+          transition.to.exit?.origin === 'observed' ? 'observed' : 'retired'
+        );
+      }
       const key = moorTransitionKey(transition.sessionId, transition.generation);
       if (replayingMoorTransitions.has(key)) {
         // Replay: keep only the LAST transition — it carries the final
@@ -689,17 +701,6 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         suppressedReplayTransitions.set(key, transition);
       } else {
         eventJournal.appendTransition(transition);
-      }
-      if (transition.cause === 'lifecycle-exited') {
-        // desk#59: an OBSERVED exit already carries the truth, so its observer
-        // may stop at once. A RETIRED placeholder is Desk tearing the session
-        // down without knowing how the child died — stopping there is what
-        // discarded the evidence, so that path drains first.
-        scheduleMoorObserverCleanup(
-          transition.sessionId,
-          transition.generation,
-          transition.to.exit?.origin === 'observed' ? 'observed' : 'retired'
-        );
       }
     },
     createAgentStateIntakeStore: (dependencies) => {
