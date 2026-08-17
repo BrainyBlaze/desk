@@ -3,14 +3,13 @@ import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BpFrameType } from '../src/shared/browserProtocol/index.js';
+import { BpFrameType, decodeBpFrame, encodeBpFrame, type BpFrame } from '../src/shared/browserProtocol/index.js';
 import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import {
   DaemonCore,
   DEFAULT_SUPERVISOR_CONFIG,
   WorkerSupervisor,
-  type BpFrame,
   type EmulatorEvent,
   type EmulatorPort
 } from '../src/shared/runtime/index.js';
@@ -39,15 +38,19 @@ function eventBody(sessionPath: string, code: number): Uint8Array {
   const session = Buffer.from(identity(sessionPath)).toString('base64');
   return encoder.encode(
     `{"v":2,"type":"header","ts":1,"session":"${session}","generation":2,"epoch":1,"next_seq":2,"first_retained":1}\n` +
-      `{"type":"exit","ts":1,"epoch":1,"seq":1,"kind":"transition","ended":"exited","code":${code}}\n`
+      `{"type":"exit","ts":1,"epoch":1,"seq":1,"kind":"transition","ended":"exited","code":${code},"method":"none"}\n`
   );
 }
 
-function lifecycleBody(sessionPath: string, code: number): Uint8Array {
+function lifecycleBody(
+  sessionPath: string,
+  code: number,
+  method: 'none' | 'graceful' | 'forced' = 'none'
+): Uint8Array {
   const session = Buffer.from(identity(sessionPath)).toString('base64');
   const nonce = Buffer.alloc(16).toString('base64');
   return encoder.encode(
-    `{"v":1,"type":"lifecycle","phase":"exited","session":"${session}","generation":2,"wire_generation":2,"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"2","ended":"exited","code":${code}}\n`
+    `{"v":2,"type":"lifecycle","phase":"exited","session":"${session}","generation":2,"wire_generation":2,"incarnation":"${nonce}","start_wall_ms":"1","start_mono_ms":"1","boot_id":"${nonce}","path_encoding":"posix-bytes","event_path":null,"instrument_path":null,"end_wall_ms":"2","output_end":"2","ended":"exited","code":${code},"method":"${method}"}\n`
   );
 }
 
@@ -184,12 +187,13 @@ describe('Moor current exit output boundary', () => {
         if (
           evidence.outcome.ended !== 'exited' ||
           event.outcome.kind !== 'exited' ||
-          evidence.outcome.code !== event.outcome.code
+          evidence.outcome.code !== event.outcome.code ||
+          evidence.outcome.method !== event.outcome.method
         ) {
           throw new Error('lifecycle/event exit mismatch');
         }
         exitApplications += 1;
-        await core.emitExit('session', event.code, BigInt(evidence.outputEnd));
+        await core.emitExit('session', event.outcome, BigInt(evidence.outputEnd));
       },
       onEventError: classifyExitError,
       onDiagnostic: () => undefined
@@ -205,7 +209,7 @@ describe('Moor current exit output boundary', () => {
     expect(await readCurrentMoorGenerationExitEvidence(sessionPath, 2)).toMatchObject({
       generation: 2,
       outputEnd: '2',
-      outcome: { ended: 'exited', code: 7 }
+      outcome: { ended: 'exited', code: 7, method: 'none' }
     });
     await waitFor(() => core.hasPendingExitBoundary('session'), 'validated exit boundary');
 
@@ -225,6 +229,17 @@ describe('Moor current exit output boundary', () => {
       BpFrameType.OUTPUT,
       BpFrameType.EXIT
     ]);
+    // The EXIT frame must carry the exact tagged outcome the evidence proved,
+    // and it must be a VALID wire payload: encode then decode it, so a
+    // malformed outcome (e.g. an undefined passed to emitExit) fails encoding
+    // here instead of passing a type-only frame-shape check.
+    const exitFrame = browserOut.find(
+      (frame): frame is Extract<BpFrame, { type: BpFrameType.EXIT }> => frame.type === BpFrameType.EXIT
+    );
+    expect(exitFrame).toBeDefined();
+    expect(exitFrame!.outcome).toEqual({ kind: 'exited', code: 7, method: 'none' });
+    const roundTripped = decodeBpFrame(encodeBpFrame(exitFrame!)) as Extract<BpFrame, { type: BpFrameType.EXIT }>;
+    expect(roundTripped.outcome).toEqual({ kind: 'exited', code: 7, method: 'none' });
     observer.stop();
   });
 
@@ -238,7 +253,7 @@ describe('Moor current exit output boundary', () => {
     await writeStore(
       `${sessionPath}.exit`,
       MoorStoreKind.Exit,
-      lifecycleBody(sessionPath, 9),
+      lifecycleBody(sessionPath, 7, 'forced'),
       2n,
       2n,
       2n
@@ -255,7 +270,8 @@ describe('Moor current exit output boundary', () => {
         if (
           evidence.outcome.ended !== 'exited' ||
           event.outcome.kind !== 'exited' ||
-          evidence.outcome.code !== event.outcome.code
+          evidence.outcome.code !== event.outcome.code ||
+          evidence.outcome.method !== event.outcome.method
         ) {
           throw new Error('lifecycle/event exit mismatch');
         }

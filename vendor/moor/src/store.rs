@@ -4,11 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-#[cfg(unix)]
 use fs2::FileExt as _;
-#[cfg(unix)]
 use nix::fcntl::OFlag;
-#[cfg(unix)]
 use nix::sys::stat::{Mode, fchmod};
 
 const LIMITS: [u64; 4] = [0, 320 << 10, u64::MAX, 4 << 20];
@@ -27,6 +24,7 @@ type Result<T> = std::result::Result<T, StoreError>;
 type Slots = [File; 4];
 type Meta = (u8, u8, u32, [u64; 3]);
 type Mutation<'a> = (Commit, Sha256, u64, &'a [u8], bool);
+type Rollback = (File, Vec<[u8; 24]>, bool);
 
 fn require(valid: bool) -> Result<()> {
     valid.then_some(()).ok_or(StoreError::Corrupt)
@@ -40,8 +38,7 @@ impl From<io::Error> for StoreError {
 #[doc(hidden)]
 schema!(enum pub StoreStep [Clone, Copy, Debug, Eq, PartialEq]; Body, Commit, Flush);
 
-schema!(struct pub Commit derive [Clone, Copy, Debug, Eq, PartialEq] pub fields; slot: u8, body: u8, kind: Kind, generation: u32, epoch: u32,
-    index: u64, length: u64, start: u64, end: u64, hash: [u8; 32]);
+schema!(struct pub Commit derive [Clone, Copy, Debug, Eq, PartialEq] pub fields; slot: u8, body: u8, kind: Kind, generation: u32, epoch: u32, index: u64, length: u64, start: u64, end: u64, hash: [u8; 32]);
 
 impl Commit {
     fn valid(&self) -> bool {
@@ -114,12 +111,10 @@ fn commit(kind: Kind, generation: u32, meta: Meta, bytes: &[u8]) -> Result<(Comm
     Ok((selected, hash))
 }
 
-schema!(struct pub Store fields; slots: Slots, selected: Commit, hash: Sha256);
+schema!(struct pub Store fields; slots: Slots, selected: Commit, hash: Sha256, _rollback: Option<Rollback>);
 
-#[cfg(unix)]
 pub struct PreparedStore(Slots);
 
-#[cfg(unix)]
 impl PreparedStore {
     pub fn raw_descriptors(&self) -> [std::os::fd::RawFd; 4] {
         raw_descriptors(&self.0)
@@ -161,7 +156,6 @@ impl PreparedStore {
 }
 
 impl Store {
-    #[cfg(unix)]
     pub fn raw_descriptors(&self) -> [std::os::fd::RawFd; 4] {
         raw_descriptors(&self.slots)
     }
@@ -183,42 +177,21 @@ impl Store {
     ) -> Result<Self> {
         initial_commit(kind, generation, initial, start..end)?;
         if kind == Kind::Event && path.exists() {
-            let meta = fs::symlink_metadata(path)?;
-            require(
-                meta.is_dir()
-                    && protected(path, &meta, 0o700)
-                    && fs::read_dir(path)?.next().is_none(),
-            )?;
+            validate_event_directory(path)?;
         } else {
             create_directory(path)?;
         }
-        #[cfg(unix)]
-        {
-            let directory = crate::unix::open_directory(path)?;
-            let prepared = Self::prepare_at(&directory)?;
-            let store = prepared
-                .lease_at(&directory, kind, generation, initial, start, end)
-                .inspect_err(|_| prepared.rollback_at(&directory))?;
-            prepared
-                .initialize_leased_at(&directory, &store, initial)
-                .inspect_err(|_| prepared.rollback_at(&directory))?;
-            Ok(store)
-        }
-        #[cfg(windows)]
-        {
-            let (selected, hash) = initial_commit(kind, generation, initial, start..end)?;
-            for name in NAMES {
-                crate::windows::create_store_path(&path.join(name), false)?;
-            }
-            sync_dir(path)?;
-            let slots = open_slots(path, true)?;
-            durable(&slots[0], 0, initial)?;
-            durable(&slots[2], 0, &selected.encode())?;
-            Ok(Self::from_parts(slots, selected, hash))
-        }
+        let directory = crate::unix::open_directory(path)?;
+        let prepared = Self::prepare_at(&directory)?;
+        let store = prepared
+            .lease_at(&directory, kind, generation, initial, start, end)
+            .inspect_err(|_| prepared.rollback_at(&directory))?;
+        prepared
+            .initialize_leased_at(&directory, &store, initial)
+            .inspect_err(|_| prepared.rollback_at(&directory))?;
+        Ok(store)
     }
 
-    #[cfg(unix)]
     pub fn prepare_at(directory: &File) -> Result<PreparedStore> {
         prepare_at(directory).map(PreparedStore)
     }
@@ -350,6 +323,7 @@ impl Store {
             slots,
             selected,
             hash,
+            _rollback: None,
         }
     }
 }
@@ -388,45 +362,19 @@ fn four(mut open: impl FnMut(usize) -> Result<File>) -> Result<Slots> {
     Ok([open(0)?, open(1)?, open(2)?, open(3)?])
 }
 
-#[cfg(unix)]
 fn try_lease(file: &File) -> io::Result<()> {
     file.try_lock_exclusive()
-}
-
-#[cfg(windows)]
-fn try_lease(file: &File) -> io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::{
-        Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx},
-        System::IO::OVERLAPPED,
-    };
-
-    // Lock a sentinel beyond the fixed commit record. Windows byte ranges are
-    // mandatory even between handles in one process, so locking the record
-    // itself would prevent live readers from recovering the selected commit.
-    let mut range = OVERLAPPED::default();
-    let locked = unsafe {
-        range.Anonymous.Anonymous.Offset = 92;
-        LockFileEx(
-            file.as_raw_handle(),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            1,
-            0,
-            &mut range,
-        )
-    };
-    if locked == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 fn open_slots(path: &Path, write: bool) -> Result<Slots> {
     let slots = four(|at| {
         open_slot(&path.join(NAMES[at]), write, write && at == 2).map_err(|_| StoreError::Corrupt)
     })?;
+    validate_slots(path, &slots, write)?;
+    Ok(slots)
+}
+
+fn validate_slots(path: &Path, slots: &Slots, write: bool) -> Result<()> {
     let directory = fs::symlink_metadata(path)?;
     require(directory.is_dir() && protected(path, &directory, 0o700))?;
     let mut seen = 0u8;
@@ -445,39 +393,25 @@ fn open_slots(path: &Path, write: bool) -> Result<Slots> {
         seen |= 1 << at;
     }
     require(seen == 0b1111)?;
-    #[cfg(windows)]
-    require(crate::windows::valid_store_slots(path, &slots))?;
     if write {
         try_lease(&slots[2])?;
     }
-    Ok(slots)
+    Ok(())
 }
 
 fn open_slot(path: &Path, write: bool, _lease: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(write);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options
-            .custom_flags(0x00200000)
-            .share_mode(if _lease { 3 } else { 7 });
-    }
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     options.open(path).map_err(Into::into)
 }
 
-#[cfg(unix)]
 fn raw_descriptors(slots: &Slots) -> [std::os::fd::RawFd; 4] {
     use std::os::fd::AsRawFd;
     slots.each_ref().map(|slot| slot.as_raw_fd())
 }
 
-#[cfg(unix)]
 fn prepare_at(directory: &File) -> Result<Slots> {
     let meta = directory.metadata()?;
     require(meta.is_dir() && protected(Path::new(""), &meta, 0o700))?;
@@ -490,7 +424,6 @@ fn prepare_at(directory: &File) -> Result<Slots> {
     Ok(slots.try_into().unwrap())
 }
 
-#[cfg(unix)]
 fn open_prepared(directory: &File, prepared: &Slots) -> Result<Slots> {
     let slots = four(|at| slot_at(directory, at, false))?;
     validate_at(directory, prepared)?;
@@ -501,7 +434,6 @@ fn open_prepared(directory: &File, prepared: &Slots) -> Result<Slots> {
     Ok(slots)
 }
 
-#[cfg(unix)]
 fn slot_at(directory: &File, at: usize, create: bool) -> Result<File> {
     let mut flags = OFlag::O_RDWR | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
     if create {
@@ -520,7 +452,6 @@ fn slot_at(directory: &File, at: usize, create: bool) -> Result<File> {
     Ok(file)
 }
 
-#[cfg(unix)]
 fn validate_at(directory_file: &File, slots: &[File]) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let mut seen = 0u8;
@@ -546,7 +477,6 @@ fn validate_at(directory_file: &File, slots: &[File]) -> Result<()> {
     require(seen == 0b1111)
 }
 
-#[cfg(unix)]
 fn remove_slot_at(directory: &File, at: usize, slot: &File) {
     use std::os::unix::fs::MetadataExt;
     if let (Ok(opened), Ok(entry)) = (
@@ -559,7 +489,6 @@ fn remove_slot_at(directory: &File, at: usize, slot: &File) {
     }
 }
 
-#[cfg(unix)]
 fn remove_at(directory: &File, slots: &[File]) {
     for (at, slot) in slots.iter().enumerate().rev() {
         remove_slot_at(directory, at, slot);
@@ -602,21 +531,11 @@ fn read_commit(
         .then_some((commit, hash, body))
 }
 
-#[cfg(unix)]
 fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
     std::os::unix::fs::FileExt::read_at(file, bytes, offset)
 }
-#[cfg(windows)]
-fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
-    std::os::windows::fs::FileExt::seek_read(file, bytes, offset)
-}
-#[cfg(unix)]
 fn write_at(file: &File, bytes: &[u8], offset: u64) -> io::Result<usize> {
     std::os::unix::fs::FileExt::write_at(file, bytes, offset)
-}
-#[cfg(windows)]
-fn write_at(file: &File, bytes: &[u8], offset: u64) -> io::Result<usize> {
-    std::os::windows::fs::FileExt::seek_write(file, bytes, offset)
 }
 
 fn read_range(file: &File, offset: u64, length: u64) -> Result<Vec<u8>> {
@@ -693,37 +612,20 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
 
-#[cfg(unix)]
 fn protected(_: &Path, meta: &fs::Metadata, mode: u32) -> bool {
     crate::unix::protected(meta, mode)
         && (mode == 0o700 || std::os::unix::fs::MetadataExt::nlink(meta) == 1)
 }
-#[cfg(windows)]
-fn protected(path: &Path, _: &fs::Metadata, mode: u32) -> bool {
-    crate::windows::protected_store_path(path, mode == 0o700)
-}
-#[cfg(unix)]
 fn same_file(path: &fs::Metadata, handle: &fs::Metadata) -> bool {
     crate::unix::file_id(path) == crate::unix::file_id(handle)
-}
-#[cfg(windows)]
-fn same_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
-    true
 }
 
 pub(crate) fn private_directory(path: &Path, create: bool) -> io::Result<bool> {
     let created = match fs::symlink_metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
             let result = create_directory(path);
-            #[cfg(unix)]
             if let Err(error) = result
                 && error.kind() != io::ErrorKind::AlreadyExists
-            {
-                return Err(error);
-            }
-            #[cfg(windows)]
-            if let Err(error) = result
-                && fs::symlink_metadata(path).is_err()
             {
                 return Err(error);
             }
@@ -740,36 +642,26 @@ pub(crate) fn private_directory(path: &Path, create: bool) -> io::Result<bool> {
 }
 
 fn create_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
+    use std::os::unix::fs::DirBuilderExt;
+    crate::unix::with_umask(0o077, || fs::DirBuilder::new().mode(0o700).create(path))?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
     {
-        use std::os::unix::fs::DirBuilderExt;
-        crate::unix::with_umask(0o077, || fs::DirBuilder::new().mode(0o700).create(path))?;
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            sync_dir(parent)?;
-        }
+        sync_dir(parent)?;
     }
-    #[cfg(windows)]
-    crate::windows::create_store_path(path, true)?;
     Ok(())
 }
 
+fn validate_event_directory(path: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    require(meta.is_dir() && protected(path, &meta, 0o700) && fs::read_dir(path)?.next().is_none())
+}
+
 fn sync_dir(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
     File::open(path)?.sync_all()?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .write(true)
-            .custom_flags(0x02000000)
-            .open(path)?
-            .sync_all()?;
-    }
     Ok(())
 }
 
 #[cfg(test)]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/unit/store.rs"));
+include!("../tests/unit/store.rs");

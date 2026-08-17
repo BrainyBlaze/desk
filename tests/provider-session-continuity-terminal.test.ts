@@ -45,9 +45,24 @@ const FAKE_MOOR = fileURLToPath(
 interface LaunchRecord {
   argv: string[];
   cwd: string;
+  pid: number;
   launchProof?: string;
   codexHome?: string;
   claudeConfigDir?: string;
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`provider process ${pid} survived holder retirement`);
 }
 
 function waitForRecords(path: string, count: number): Promise<LaunchRecord[]> {
@@ -145,7 +160,7 @@ describe('provider continuity at the real terminal child boundary', () => {
       const providerShim = join(bin, provider);
       writeFileSync(
         providerShim,
-        `#!${process.execPath}\nconst fs = require('node:fs');\nfs.appendFileSync(process.env.ARGV_LOG, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), launchProof: process.env.DESK_PROVIDER_LAUNCH_PROOF, codexHome: process.env.CODEX_HOME, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }) + '\\n');\nsetInterval(() => {}, 1_000);\n`
+        `#!${process.execPath}\nconst fs = require('node:fs');\nfs.appendFileSync(process.env.ARGV_LOG, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), pid: process.pid, launchProof: process.env.DESK_PROVIDER_LAUNCH_PROOF, codexHome: process.env.CODEX_HOME, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }) + '\\n');\nsetInterval(() => {}, 1_000);\n`
       );
       chmodSync(providerShim, 0o755);
 
@@ -240,6 +255,7 @@ describe('provider continuity at the real terminal child boundary', () => {
       ).toMatchObject({ ok: true, kind: 'rebound' });
 
       expect(await daemon.retire('alpha')).toMatchObject({ ok: true });
+      await waitForProcessExit(first.pid);
       const reboundSpec = buildSessionSpecs(readManifestFile(manifestPath), {
         homeDir: root
       })[0]!;
@@ -284,6 +300,7 @@ describe('provider continuity at the real terminal child boundary', () => {
         reason: 'provider-session-rebind-required'
       });
       expect(await daemon.retire('alpha')).toMatchObject({ ok: true });
+      await waitForProcessExit(second.pid);
       expect(
         await daemon.provision('alpha', {
           command: moorCommandFor(reboundSpec),

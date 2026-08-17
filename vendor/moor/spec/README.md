@@ -13,8 +13,10 @@ If the two artifacts disagree, the behavioural specification wins and the wire
 schema must be reported as defective. This README defines the handoff procedure
 only; it adds no behavioural requirements.
 
-`wire-schema-3` and `event-schema-2` received one in-place amendment before any
+`wire-schema-4` and `event-schema-2` are the current revisions; `wire-schema-3` received one in-place amendment before any
 conforming implementation existed. No mixed old/amended dialect is supported.
+A later platform amendment narrowed the supported families to Linux and macOS: identity tag `01` is the only rendezvous
+identity, and `path_encoding` is `posix-bytes` only.
 Every later change to a frozen layout requires the corresponding version
 increment.
 
@@ -40,8 +42,8 @@ The reviewed handoff artifacts have these SHA-256 digests:
 
 | file | SHA-256 |
 |---|---|
-| `moor-spec.md` | `ec1e9bd3ae2cf9207e42480ef909099cf7d13403e5c993ed407d539ed28fefba` |
-| `moor-wire-schema.md` | `d87ed30d764cafc300859b10c087dd36224328207a2a4bb3abd6073a67e8daed` |
+| `moor-spec.md` | `cd96b7ba0ed317da9cb75bca9df2b07032894b5fe85bd972f1bb9057eaaf343f` |
+| `moor-wire-schema.md` | `d00dc527d41975c29640de6b8ca0fabab47d14a951653e376e9246742e4fd52a` |
 
 Verify them from this directory with:
 

@@ -76,7 +76,7 @@ login does not carry over. See
 ## 4. Boot the fleet
 
 Press **Up** in the header (or run `desk up`) to start every missing session.
-Each session becomes a durable atch session — closing the browser, dropping
+Each session becomes a durable Moor session — closing the browser, dropping
 the network, or restarting Desk never kills an agent. The RUN/MISS chips in
 the header track fleet state live, and the MISS chip is itself a button that
 boots whatever is down.

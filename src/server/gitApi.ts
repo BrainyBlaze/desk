@@ -704,7 +704,7 @@ function requireRepoFile(raw: string | null, repo: string): string {
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`path escapes the repository: ${value}`);
   }
-  return rel.split('\\').join('/');
+  return rel;
 }
 
 function readRepoFiles(value: unknown, repo: string, options: { optional?: boolean } = {}): string[] {

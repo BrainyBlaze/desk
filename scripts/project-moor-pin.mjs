@@ -8,11 +8,11 @@
 // before changing anything here.
 //
 // The pin is the ONLY artifact Desk consumes, so the projection is the point at
-// which a narrowed candidate could quietly become indistinguishable from a
-// complete one. It therefore REFUSES rather than repairs: a manifest that is not
+// which incomplete release evidence could quietly become a complete claim. It
+// therefore REFUSES rather than repairs: a manifest that is not
 // v1, that is missing a projected input, whose target matrix is not exactly the
-// ratified six, or whose coverage does not match one of the three specified
-// branches produces an error naming that specific problem and NO output. A
+// ratified four, or whose coverage is not exactly full-matrix produces an error
+// naming that specific problem and NO output. A
 // partially-projected pin is never written.
 //
 // Nothing here re-derives a size or a digest. Every projected value except
@@ -25,7 +25,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   MOOR_CLOSURE_LABELS,
-  MOOR_DEFERRED_TRIPLES,
   MOOR_PIN_SCHEMA_VERSION,
   MOOR_TARGETS,
   PIN_RELATIVE_PATH,
@@ -40,12 +39,11 @@ export const MANIFEST_SCHEMA_VERSION = 1;
 /**
  * The schema of the document this projector WRITES. This is the one key the
  * projection sets rather than copies: the manifest states 1 (its own schema)
- * and the pin states 2 (the consumer schema). The two documents version
+ * and the pin states 3 (the consumer schema). The two documents version
  * independently, so copying that number would claim the pin is something it is
- * not — and, worse, a pin stamped 1 is exactly the pre-coverage document the
- * consumer refuses by name.
+ * not.
  */
-export const PIN_SCHEMA_VERSION = 2;
+export const PIN_SCHEMA_VERSION = 3;
 
 // The consumer owns the pin schema. If it moves, the projection is no longer
 // known to satisfy it, so fail at load rather than emit a document claiming a
@@ -59,7 +57,7 @@ if (MOOR_PIN_SCHEMA_VERSION !== PIN_SCHEMA_VERSION) {
 }
 
 /**
- * The ratified six-target matrix in the canonical row order of the moor release
+ * The ratified four-target matrix in the canonical row order of the moor release
  * manifest's target table. Spelled out literally because the ORDER is normative
  * for the canonical bytes and the consumer's own constant is only ever compared
  * as a set; the cross-check below keeps the two from drifting apart.
@@ -68,9 +66,7 @@ export const CANONICAL_TARGET_ORDER = Object.freeze([
   'x86_64-unknown-linux-musl',
   'aarch64-unknown-linux-musl',
   'x86_64-apple-darwin',
-  'aarch64-apple-darwin',
-  'x86_64-pc-windows-msvc',
-  'aarch64-pc-windows-msvc'
+  'aarch64-apple-darwin'
 ]);
 
 {
@@ -98,111 +94,37 @@ function sortedKeys(value) {
   return Object.keys(value ?? {}).sort();
 }
 
-/**
- * Validate the manifest's coverage object against the three branches moor
- * defines. The pin copies this object VERBATIM, so anything wrong here would
- * either be copied into the pin (and refused at install time, far from the
- * mistake) or — worse, for the label/list disagreement — be copied into a pin
- * that validates while lying about how much verified the candidate.
- *
- * The LABEL is checked before the key set: a coverage object states, first of
- * all, which of the two situations produced the candidate, and reporting a key
- * mismatch on an object whose closure is nonsense hides the fact that actually
- * explains the failure.
- */
+/** Validate the only coverage object the hosted four-target matrix can emit. */
 function validateManifestCoverage(coverage) {
   if (!isPlainObject(coverage)) {
     throw new Error(
       `moor release manifest coverage must be an object stating which lanes verified this candidate; got ${JSON.stringify(coverage) ?? String(coverage)}`
     );
   }
-  if (!MOOR_CLOSURE_LABELS.includes(coverage.requiredClosure)) {
-    throw new Error(
-      `moor release manifest coverage requiredClosure must be one of [${MOOR_CLOSURE_LABELS.join(', ')}]; got ${JSON.stringify(coverage.requiredClosure)}`
-    );
-  }
-  const full = coverage.requiredClosure === 'full-matrix';
   const keys = sortedKeys(coverage);
-  // "full-matrix" asserts every deferred pair verified too, so the array would
-  // be empty — and this format never encodes an empty array.
-  const expected = full ? ['requiredClosure'] : ['requiredClosure', 'unverified'];
+  const expected = ['requiredClosure'];
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw new Error(
-      full
-        ? `moor release manifest full-matrix coverage must carry exactly [${expected.join(', ')}]; got [${keys.join(', ')}]`
-        : `moor release manifest narrowed coverage must carry exactly [${expected.join(', ')}]; got [${keys.join(', ')}]`
+      `moor release manifest coverage must carry exactly [${expected.join(', ')}]; got [${keys.join(', ')}]`
     );
   }
-  if (full) return;
-  if (!Array.isArray(coverage.unverified) || coverage.unverified.length === 0) {
+  if (!MOOR_CLOSURE_LABELS.includes(coverage.requiredClosure)) {
     throw new Error(
-      'moor release manifest narrowed coverage must list every unverified lane — a narrowed closure that names nothing cannot be checked'
-    );
-  }
-  // The deferred vocabulary is the consumer's binding constant, reused rather
-  // than restated: a projector that accepted a lane string the consumer rejects
-  // would emit a pin that fails at install time instead of at projection time.
-  let previous = '';
-  for (const entry of coverage.unverified) {
-    const entryKeys = sortedKeys(entry);
-    const expectedEntry = ['gate', 'lane', 'target'];
-    if (entryKeys.length !== expectedEntry.length || entryKeys.some((key, index) => key !== expectedEntry[index])) {
-      throw new Error(
-        `moor release manifest unverified entry must carry exactly [target, gate, lane]; got [${entryKeys.join(', ')}]`
-      );
-    }
-    const triple = `${entry.target}/${entry.gate}/${entry.lane}`;
-    if (!MOOR_DEFERRED_TRIPLES.includes(triple)) {
-      throw new Error(
-        `moor release manifest unverified lane ${triple} is not one of the deferred lanes of the frozen matrix: [${MOOR_DEFERRED_TRIPLES.join(', ')}]`
-      );
-    }
-    if (triple === previous) {
-      throw new Error(`moor release manifest lists the unverified lane ${triple} more than once`);
-    }
-    if (triple < previous) {
-      throw new Error(
-        `moor release manifest unverified lanes must ascend canonically; ${triple} follows ${previous}`
-      );
-    }
-    previous = triple;
-  }
-  // The label is a CLAIM about how much is missing, and it is the part of the
-  // object a reader trusts at a glance, so it must agree with what is listed.
-  const missing = coverage.unverified.length;
-  const expectedLabel = missing === MOOR_DEFERRED_TRIPLES.length ? 'hosted-only' : 'partial';
-  if (coverage.requiredClosure !== expectedLabel) {
-    throw new Error(
-      `moor release manifest closure ${coverage.requiredClosure} contradicts its own list: ${missing} of ${MOOR_DEFERRED_TRIPLES.length} deferred lanes are unverified, which is ${expectedLabel}`
+      `moor release manifest coverage requiredClosure must be ${MOOR_CLOSURE_LABELS[0]}; got ${JSON.stringify(coverage.requiredClosure)}`
     );
   }
 }
 
-/**
- * Copy one deferred-lane entry with its keys in the canonical order the manifest
- * defines (`target`, `gate`, `lane`). Values are untouched; only the emission
- * order is fixed, so two projections of one manifest are byte-identical.
- */
-function projectUnverifiedEntry(entry) {
-  return { target: entry.target, gate: entry.gate, lane: entry.lane };
-}
-
-/** Copy coverage verbatim, key order fixed to the branch the manifest declares. */
+/** Copy coverage verbatim with canonical key order. */
 function projectCoverage(coverage) {
-  if (coverage.requiredClosure === 'full-matrix') {
-    return { requiredClosure: coverage.requiredClosure };
-  }
-  return {
-    requiredClosure: coverage.requiredClosure,
-    unverified: coverage.unverified.map(projectUnverifiedEntry)
-  };
+  return { requiredClosure: coverage.requiredClosure };
 }
 
 /**
  * Project a parsed moor release manifest into the pin object. Pure: it reads the
  * manifest, returns a fresh object, and never touches the filesystem.
  *
- * The projection is a WHITELIST — it copies the six keys it names and nothing
+ * The projection is a WHITELIST — it copies the keys it names and nothing
  * else. An exclusion list would leak the next field added to the manifest into
  * the pin, and because the consumer rejects unknown keys that leak would surface
  * as a fail-closed refusal at install time on a developer's machine rather than
@@ -234,7 +156,7 @@ export function projectMoorPin(manifest) {
   validateManifestCoverage(manifest.coverage);
 
   if (!isPlainObject(manifest.targets)) {
-    throw new Error('moor release manifest targets must be an object carrying the ratified 6-target matrix');
+    throw new Error('moor release manifest targets must be an object carrying the ratified four-target matrix');
   }
   const targetKeys = sortedKeys(manifest.targets);
   const expectedTargets = [...CANONICAL_TARGET_ORDER].sort();
@@ -243,7 +165,7 @@ export function projectMoorPin(manifest) {
     targetKeys.some((key, index) => key !== expectedTargets[index])
   ) {
     throw new Error(
-      `moor release manifest targets must be exactly the ratified 6-target matrix [${expectedTargets.join(', ')}]; got [${targetKeys.join(', ')}]`
+      `moor release manifest targets must be exactly the ratified four-target matrix [${expectedTargets.join(', ')}]; got [${targetKeys.join(', ')}]`
     );
   }
 

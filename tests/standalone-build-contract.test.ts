@@ -58,6 +58,9 @@ describe('standalone build dependency contract', () => {
 
     expect(text).toContain("resolve(root, 'libexec', 'desk-standalone')");
     expect(text).not.toContain(`resolve(root, 'desk-${'server'}')`);
+    expect(text).toContain("filter: /\\/(lspResolver|uiAsset|ptyBackend)\\.js$/");
+    expect(text).toContain("filter: /node-pty\\/lib\\/utils\\.js$/");
+    expect(text).not.toContain('[\\\\/]');
   });
 
   it('uses the bundled moor while isolating daemon state and never kills an unverified descendant pid', () => {

@@ -86,7 +86,7 @@ async function installRestoredDirectoryMembershipRace(
   const actual = await vi.importActual<typeof import('node:fs/promises')>(
     'node:fs/promises'
   );
-  const canonicalDirectoryPath = await actual.realpath(directoryPath);
+  const expectedDirectory = await actual.stat(directoryPath, { bigint: true });
   const childName = path.basename(childPath);
   const state: DirectoryMembershipRaceState = {
     descriptorOpened: false,
@@ -96,13 +96,21 @@ async function installRestoredDirectoryMembershipRace(
 
   fsPromisesMocks.opendir.mockImplementation(async (openedPath, options) => {
     const directory = await actual.opendir(openedPath, options);
-    let canonicalOpenedPath: string;
+    // Recognize the directory under test by capability (dev+ino), not by a
+    // realpath string: production traverses the /dev/fd/N alias on Linux and the
+    // real directory path on macOS (the fdesc alias does not resolve there), yet
+    // both stat to the same inode. Inode identity is the platform-neutral seam.
+    let openedIdentity: BigIntStats;
     try {
-      canonicalOpenedPath = await actual.realpath(String(openedPath));
+      openedIdentity = await actual.stat(String(openedPath), { bigint: true });
     } catch {
       return directory;
     }
-    if (state.descriptorOpened || canonicalOpenedPath !== canonicalDirectoryPath) {
+    if (
+      state.descriptorOpened ||
+      openedIdentity.dev !== expectedDirectory.dev ||
+      openedIdentity.ino !== expectedDirectory.ino
+    ) {
       return directory;
     }
     state.descriptorOpened = true;
@@ -493,6 +501,74 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
+  test('routes trusted-directory traversal through the real path under platform darwin', async () => {
+    // directoryTraversalBasePath is not observable through a nominal accept
+    // alone: on Linux both the real path and the /dev/fd alias traverse, so a
+    // regression that made the darwin branch reuse the alias would still accept.
+    // The assertion below observes the branch selection directly, via the
+    // recorded child lstat candidates, with no new production seam.
+    const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
+    temporaryHomes.push(homeDir);
+    const providerSessionId = '234e5678-e89b-42d3-a456-426614174099';
+    const cwd = '/workspace/darwin-branch';
+    const evidencePath = path.join(
+      homeDir,
+      '.claude',
+      'projects',
+      '-workspace-darwin-branch',
+      `${providerSessionId}.jsonl`
+    );
+    await mkdir(path.dirname(evidencePath), { recursive: true });
+    await writeFile(
+      evidencePath,
+      [
+        JSON.stringify({ type: 'queue-operation', sessionId: providerSessionId }),
+        JSON.stringify({ type: 'user', sessionId: providerSessionId, cwd })
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    const issuedAliases: string[] = [];
+    const result = await verifyProviderSessionEvidence(
+      {
+        provider: 'claude',
+        providerSessionId,
+        selected: { cwd },
+        homeDir,
+        notBeforeMs: Date.now() - 1_000
+      },
+      {
+        platform: 'darwin',
+        directoryDescriptorPath: (descriptor) => {
+          const alias = `/dev/fd/${descriptor}`;
+          issuedAliases.push(alias);
+          return alias;
+        }
+      }
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      provider: 'claude',
+      providerSessionId,
+      evidencePath: await realpath(evidencePath)
+    });
+    // At least one descriptor alias was issued for the capability identity
+    // probe, so the negative assertion below is not vacuous.
+    expect(issuedAliases.length).toBeGreaterThanOrEqual(1);
+    // Under the darwin arm, child resolution uses join(parent.traversalPath,
+    // name) = the real validated path, so no child lstat is ever issued under
+    // `${alias}/`. A regression that reused descriptorPath on darwin would lstat
+    // `${alias}/<child>` and turn this red. (The passthrough lstat mock
+    // installed in afterEach records every call.)
+    const lstatCandidates = fsPromisesMocks.lstat.mock.calls.map(([candidate]) =>
+      String(candidate)
+    );
+    for (const alias of issuedAliases) {
+      expect(lstatCandidates.some((candidate) => candidate.startsWith(`${alias}/`))).toBe(false);
+    }
+  });
+
   test('accepts Codex evidence only from the selected profile root', async () => {
     const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
     temporaryHomes.push(homeDir);
@@ -760,7 +836,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideRoot,
       path.join(homeDir, '.claude'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -790,7 +866,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideProject,
       path.join(projectsRoot, '-workspace-absent-project-symlink'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -1042,7 +1118,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedProject,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2132,7 +2208,7 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
-  test.runIf(process.platform !== 'win32')(
+  test(
     'rejects a numeric Codex hierarchy entry that is a FIFO',
     async () => {
       const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
@@ -2256,7 +2332,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideSessions,
       path.join(providerRoot, 'sessions'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -2285,7 +2361,7 @@ describe('verifyProviderSessionEvidence', () => {
     await symlink(
       outsideYear,
       path.join(sessionsRoot, '2026'),
-      process.platform === 'win32' ? 'junction' : 'dir'
+      'dir'
     );
 
     await expect(
@@ -2343,7 +2419,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedYear,
               yearPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             replaced = true;
           }
@@ -2397,7 +2473,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedYear,
               yearPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2452,7 +2528,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedSessions,
               sessionsRoot,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2491,7 +2567,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               displacedSessions,
               sessionsRoot,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
             moved = true;
           }
@@ -2726,6 +2802,56 @@ describe('verifyProviderSessionEvidence', () => {
     });
   });
 
+  test('fails closed when the bound directory descriptor alias names a DIFFERENT directory (capability identity, not path)', async () => {
+    // The descriptor alias re-confirmation now proves the fd still names the
+    // expected directory by dev+ino identity, not by a realpath path match
+    // (which is Linux-only -- macOS /dev/fd is not a symlink). This must stay
+    // fail-closed: an alias that opens a real but WRONG directory has a
+    // different identity and must be rejected, on every platform. A decoy
+    // directory is injected as the descriptor path; its inode differs, so trust
+    // must be denied even though the path itself opens successfully.
+    const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
+    temporaryHomes.push(homeDir);
+    const providerSessionId = '2e934567-e89b-42d3-a456-426614174099';
+    const cwd = '/workspace/wrong-directory-alias';
+    const evidencePath = path.join(
+      homeDir,
+      '.codex',
+      'sessions',
+      '2026',
+      '08',
+      '13',
+      `rollout-2026-08-13T10-00-00-${providerSessionId}.jsonl`
+    );
+    await mkdir(path.dirname(evidencePath), { recursive: true });
+    await writeFile(
+      evidencePath,
+      `${JSON.stringify({ type: 'session_meta', payload: { id: providerSessionId, cwd } })}\n`,
+      'utf8'
+    );
+    const decoyDirectory = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-decoy-'));
+    temporaryHomes.push(decoyDirectory);
+
+    await expect(
+      verifyProviderSessionEvidence(
+        {
+          provider: 'codex',
+          providerSessionId,
+          selected: { cwd },
+          homeDir,
+          notBeforeMs: Date.now() - 1_000
+        },
+        {
+          directoryDescriptorPath: () => decoyDirectory
+        }
+      )
+    ).resolves.toEqual({
+      ok: false,
+      code: 'evidence-unsafe-file',
+      error: 'provider session evidence file is unsafe'
+    });
+  });
+
   test('rejects a non-regular evidence candidate with a typed unsafe-file error', async () => {
     const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
     temporaryHomes.push(homeDir);
@@ -2772,7 +2898,7 @@ describe('verifyProviderSessionEvidence', () => {
       `${JSON.stringify({ type: 'user', sessionId: providerSessionId, cwd })}\n`,
       'utf8'
     );
-    await symlink(outsideProject, linkedProject, process.platform === 'win32' ? 'junction' : 'dir');
+    await symlink(outsideProject, linkedProject, 'dir');
 
     await expect(
       verifyProviderSessionEvidence({
@@ -2806,7 +2932,7 @@ describe('verifyProviderSessionEvidence', () => {
       `${JSON.stringify({ type: 'user', sessionId: providerSessionId, cwd })}\n`,
       'utf8'
     );
-    await symlink(realProject, linkedProject, process.platform === 'win32' ? 'junction' : 'dir');
+    await symlink(realProject, linkedProject, 'dir');
 
     await expect(
       verifyProviderSessionEvidence({
@@ -2858,7 +2984,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               movedProjectPath,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
           }
         }
@@ -2968,8 +3094,18 @@ describe('verifyProviderSessionEvidence', () => {
       code: 'evidence-unsafe-file',
       error: 'provider session evidence file is unsafe'
     });
-    expect(projectIdentityReads).toBe(2);
-    expect(observedIdentityTypes).toEqual(['bigint', 'bigint']);
+    // The exact identity-read count is a Linux fd-pin property: there, child
+    // traversal addresses the opened inode through the /dev/fd/N alias, so the
+    // project directory itself is lstat-ed exactly twice -- the before/after
+    // identity bracket. macOS has no fd-relative traversal (the fdesc alias is
+    // not traversable), so the same bracketing re-resolves the real project
+    // path by name on each revalidation and reads its identity more often. The
+    // load-bearing invariant is platform-neutral: every read observes a BigInt
+    // inode (never a lossy Number), and the distinct above-2^53 inodes are not
+    // aliased, which the unsafe verdict already proves.
+    expect(projectIdentityReads).toBeGreaterThanOrEqual(2);
+    expect(observedIdentityTypes).toHaveLength(projectIdentityReads);
+    expect(observedIdentityTypes.every((entry) => entry === 'bigint')).toBe(true);
   });
 
   test('does not alias a distinct opened descriptor identity above 2^53', async () => {
@@ -3084,7 +3220,7 @@ describe('verifyProviderSessionEvidence', () => {
     expect(swapped).toBe(true);
   });
 
-  test.runIf(process.platform !== 'win32' && typeof constants.O_NONBLOCK === 'number')(
+  test.runIf(typeof constants.O_NONBLOCK === 'number')(
     'opens a final-race FIFO nonblocking and returns a typed unsafe result without an unblocker',
     async () => {
       const homeDir = await mkdtemp(path.join(tmpdir(), 'desk-provider-evidence-'));
@@ -3247,7 +3383,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               movedProjectPath,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
           }
         }
@@ -3294,7 +3430,7 @@ describe('verifyProviderSessionEvidence', () => {
             await symlink(
               movedProjectPath,
               projectPath,
-              process.platform === 'win32' ? 'junction' : 'dir'
+              'dir'
             );
           }
         }

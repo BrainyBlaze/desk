@@ -14,7 +14,7 @@ The one CLI exposes two explicit runtime shapes:
 
 Both bind to `127.0.0.1:5173` by default, supervise their child process group,
 and fail without switching modes. Each server supervises the terminal daemon.
-If no executable atch binary can be resolved, terminal transport fails closed
+If no executable Moor binary can be resolved, terminal transport fails closed
 and reports missing while the rest of the workspace remains available. Send
 Ctrl-C to the CLI process for clean shutdown. See
 [Distribution and deployment](/distribution-deployment) for runtime and release
@@ -74,7 +74,7 @@ Touching a terminal acknowledges that session's unread events. The events drawer
 ## Terminal health
 
 Desk keeps one binary terminal WebSocket per browser tab and subscribes it only
-to visible terminal surfaces. The supervised terminal daemon owns atch master
+to visible terminal surfaces. The supervised terminal daemon owns Moor holder
 connections, emulator snapshots, and generation state.
 
 Operational guards include:
@@ -83,7 +83,7 @@ Operational guards include:
 - snapshot-on-reveal from the daemon's xterm emulator
 - per-session generation fencing so stale output cannot corrupt a new process
 - bounded frame sizes, heartbeat detection, and resubscription after gaps
-- private, per-user atch socket roots
+- private, per-user Moor socket roots
 
 ## Session controls
 
@@ -95,7 +95,7 @@ The agents toolbar and session rows expose recovery actions:
 - repair a terminal
 - inspect session metadata
 - delete configured sessions
-- open or attach to an atch session
+- open or attach to a Moor session
 
 `desk up` has the same start-missing behavior as the UI **Up** control. It does not replace running sessions.
 
@@ -106,10 +106,10 @@ host-level supported-agent process sweep.
 
 It terminates:
 
-- every atch session in the active manifest, through the terminal daemon
+- every Moor session in the active manifest, through the terminal daemon
 - any remaining host `codex` or `claude` CLI process found by `ps`
 
-The atch retirement is manifest-scoped, but the process sweep is host-wide.
+The Moor retirement is manifest-scoped, but the process sweep is host-wide.
 Treat it as a host-wide stop control for Codex and Claude work.
 
 ## Channels diagnostics

@@ -1138,7 +1138,7 @@ function loadMcpEnvironment(env: DeskLspMcpEnvironment): DeskLspMcpEnvironment |
     if (rel.startsWith('..') || rel === '' || rel.includes('\0')) {
       return undefined;
     }
-    const relParts = rel.split(/[\\/]+/);
+    const relParts = rel.split(/\/+/);
     if (relParts.length !== 3 || relParts.some((part) => part === '') || relParts[2] !== 'env.json') {
       return undefined;
     }

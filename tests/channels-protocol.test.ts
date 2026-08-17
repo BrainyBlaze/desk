@@ -212,6 +212,32 @@ describe('member manifests', () => {
     });
   });
 
+  it('carries the v0.3.1 member binding (identity on the retired line) without inventing a sessionId', () => {
+    // A real pre-cutover member manifest, shortened. The v0.3.2 migration left
+    // the retired line in place whenever the session it named was gone, so this
+    // shape survives a correct migration — the parser cannot resolve it to a
+    // sessionId and does not pretend to. It records the binding under
+    // `preCutoverSession`, leaves `sessionId` unset, and keeps the member.
+    const legacy = [
+      '---',
+      'name: zohar-glm',
+      'type: bash',
+      'status: active',
+      'joined: 2026-06-29 10:19:58',
+      'tmux: agentdesk-zohar-main-glm-798c36d0',
+      '---',
+      '',
+      '# @zohar-glm'
+    ].join('\n');
+    const member = parseMemberManifest(legacy);
+    expect(member).toMatchObject({
+      name: 'zohar-glm',
+      type: 'bash',
+      preCutoverSession: 'agentdesk-zohar-main-glm-798c36d0'
+    });
+    expect(member?.sessionId).toBeUndefined();
+  });
+
   it('rejects manifests without frontmatter', () => {
     expect(parseMemberManifest('# nope')).toBeUndefined();
   });

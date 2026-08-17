@@ -67,7 +67,7 @@ describe('late holder exit after retire, on the real observer path (desk#59)', (
     const observed = mgr.observeMoorEvent('sess', generation, {
       type: 'exit',
       code: 143,
-      outcome: { kind: 'signalled', signal: 15 },
+      outcome: { kind: 'signalled', signal: 15, method: 'forced' },
       ts: 1.028
     } as never);
 
@@ -78,7 +78,7 @@ describe('late holder exit after retire, on the real observer path (desk#59)', (
       signal: '15',
       // The record now names the ending itself, not just a number that could
       // equally have come from a child exiting 143 on its own.
-      outcome: { kind: 'signalled', signal: 15 }
+      outcome: { kind: 'signalled', signal: 15, method: 'forced' }
     });
   });
 
@@ -91,7 +91,7 @@ describe('late holder exit after retire, on the real observer path (desk#59)', (
     const stale = mgr.observeMoorEvent('sess', generation + 1, {
       type: 'exit',
       code: 7,
-      outcome: { kind: 'exited', code: 7 },
+      outcome: { kind: 'exited', code: 7, method: 'none' },
       ts: 1.028
     } as never);
 
@@ -228,7 +228,7 @@ describe('the legacy EXIT frame stays live-only (desk#59)', () => {
     mgr.observeMoorEvent('sess', generation, {
       type: 'exit',
       code: 143,
-      outcome: { kind: 'signalled', signal: 15 },
+      outcome: { kind: 'signalled', signal: 15, method: 'forced' },
       ts: 1.028
     } as never);
 

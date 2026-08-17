@@ -9,7 +9,7 @@ use crate::store::{Kind, PreparedStore, Store, StoreError};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{
-    GenericFilePath, Listener as LocalListener, ListenerNonblockingMode, ListenerOptions, Name,
+    GenericFilePath, Listener as LocalListener, ListenerNonblockingMode, ListenerOptions,
     Stream as LocalStream,
 };
 #[cfg(not(target_os = "macos"))]
@@ -94,6 +94,19 @@ impl Drop for ThreadDirectory {
     }
 }
 
+/// Run `operation` with the calling thread's working directory set to `parent`
+/// and restored afterwards. /dev/fd entries are not traversable directories on
+/// macOS, so the bare leaf is resolved through Darwin's per-thread working
+/// directory (`pthread_fchdir_np`), never the process-wide directory that
+/// schema section 2.2 forbids changing; other threads observe no change.
+#[cfg(target_os = "macos")]
+fn in_directory<T>(parent: &File, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let directory = ThreadDirectory::enter(parent.as_raw_fd())?;
+    let result = operation();
+    directory.restore()?;
+    result
+}
+
 #[cfg(target_os = "macos")]
 fn pthread_directory(status: libc::c_int) -> io::Result<()> {
     if status == 0 {
@@ -156,8 +169,7 @@ macro_rules! syscall {
     };
 }
 
-crate::schema!(struct Config<'a> fields; path: &'a Path, root: PathBuf, launch: LaunchSeed, event: Option<EventTarget>, lifecycle: StoreTarget, log: Option<StoreTarget>, stage: Stage,
-    command: Vec<OsString>, options: &'a Options, invoked: &'a OsStr, terminal: (Option<libc::termios>, libc::winsize), stderr: Option<File>, instrument: Option<PreparedInstrument>);
+crate::schema!(struct Config<'a> fields; path: &'a Path, root: PathBuf, launch: LaunchSeed, event: Option<EventTarget>, lifecycle: StoreTarget, log: Option<StoreTarget>, stage: Stage, command: Vec<OsString>, options: &'a Options, invoked: &'a OsStr, terminal: (Option<libc::termios>, libc::winsize), stderr: Option<File>, instrument: Option<PreparedInstrument>);
 crate::schema!(struct UnixNative fields; control: File, group: i32, child: Child);
 crate::schema!(struct ViewerTerminal derive [Clone, Copy] fields; fd: i32, saved: libc::termios);
 crate::schema!(struct LaunchSeed fields; generation: u32, supervised: bool, incarnation: [u8; 16], semantic_token: [u8; 16], identity: Vec<u8>, start: (u64, u64, [u8; 16]));
@@ -166,17 +178,23 @@ crate::schema!(struct PreparedInstrument fields; source: File, stage: File, pare
 crate::schema!(struct EventTarget fields; operand: PathBuf, target: StoreTarget);
 crate::schema!(struct StoreTarget fields; parent: File, leaf: OsString, directory: File, identity: (u64, u64), prepared: PreparedStore, validator: Option<Store>, exact_selection: bool, owned: bool, armed: bool);
 struct RawTerminal(ViewerTerminal);
-struct ChildGuard(Option<Child>);
+// The requested child together with the pseudo-terminal master it was
+// spawned under: a teardown must hang the terminal up before it reaps.
+struct ChildGuard(Option<(Child, File)>);
 struct PendingEvent(PathBuf, File, OsString, Option<File>);
 struct Stage(File, OsString, (u64, u64), bool);
 struct SetupError(String, bool);
 
 impl ChildGuard {
     fn child(&mut self) -> &mut Child {
-        self.0.as_mut().unwrap()
+        &mut self.0.as_mut().unwrap().0
     }
 
-    fn release(mut self) -> Child {
+    fn master(&self) -> &File {
+        &self.0.as_ref().unwrap().1
+    }
+
+    fn release(mut self) -> (Child, File) {
         self.0.take().unwrap()
     }
 }
@@ -230,7 +248,7 @@ impl Config<'_> {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let Some(child) = self.0.as_mut() else {
+        let Some((mut child, master)) = self.0.take() else {
             return;
         };
         let group = i32::try_from(child.id()).unwrap_or_default();
@@ -238,6 +256,17 @@ impl Drop for ChildGuard {
             unsafe { libc::kill(-group, libc::SIGKILL) };
         }
         let _ = child.kill();
+        // Hang the pseudo-terminal up BEFORE reaping. The child is the session
+        // leader of that terminal, and on macOS a session leader that exits
+        // while output is still queued in the slave blocks inside the kernel's
+        // tty close path until every master descriptor is closed or the queue
+        // is drained; nothing here reads the master, so waiting first would
+        // deadlock a failed launch against its own child (observed as a
+        // launcher that only reports "holder failed before launch" ten seconds
+        // later). Every other master clone belongs to locals declared after
+        // this guard, so it is already gone by the time this runs and closing
+        // this descriptor is the hangup.
+        drop(master);
         let _ = child.wait();
     }
 }
@@ -260,6 +289,16 @@ pub(crate) fn preflight_create(
     if let Some(event) = options.events.as_deref() {
         crate::ensure!(event.is_absolute(), event_rejection(event, "not-absolute"));
     }
+    // §2.2: parents may be arbitrarily deep, but a final component that cannot
+    // fit a local socket address is refused here, before any effect — the
+    // per-user root is not created and nothing is published under a name no
+    // address can reach. The diagnostic still names the resolved path.
+    let marker = resolve_without_effect(session, invoked)?;
+    let leaf = marker.file_name().map_or(0, |leaf| leaf.len());
+    crate::ensure!(
+        leaf <= socket_address_capacity(),
+        rejected("rendezvous", &marker, "too-long")
+    );
     let marker = resolve(session, invoked)?;
     if let Some(event) = options.events.as_deref() {
         let resolved = absolute(event).map_err(|_| event_rejection(event, "io-error"))?;
@@ -280,10 +319,7 @@ pub(crate) fn create(
     options: &Options,
     invoked: &OsStr,
 ) -> CommandResult<i32> {
-    let interactive = matches!(
-        mode,
-        CreateMode::Bare | CreateMode::New | CreateMode::LegacyA | CreateMode::LegacyC
-    );
+    let interactive = matches!(mode, CreateMode::Bare | CreateMode::New);
     let terminal = terminal_config(interactive)?;
     let root = root(invoked)?;
     let event = validate_event_target(options.events.as_deref(), &root, path)?;
@@ -338,18 +374,7 @@ pub(crate) fn create(
     let leaf = OsString::from(format!(".moor-{}.stage", hex(shared::random_array()?)));
     // A restrictive temporary umask gives the unpredictable staged name its
     // exact mode at bind time, even when the caller supplied a stricter mask.
-    let listener = with_umask(0o177, || {
-        socket_name(&parent, &leaf, |stage_name| {
-            let options = ListenerOptions::new()
-                .name(stage_name)
-                .reclaim_name(false)
-                .nonblocking(ListenerNonblockingMode::Accept);
-            #[cfg(not(target_os = "macos"))]
-            let options = options.mode(0o600);
-            options.create_sync()
-        })
-    });
-    let listener = listener?;
+    let listener = with_umask(0o177, || bind_leaf(&parent, &leaf)).text()?;
     let identity = entry_identity(&parent, &leaf, SFlag::S_IFSOCK, Some(0o600))
         .text()?
         .ok_or_else(|| "staged rendezvous identity changed".to_string())?;
@@ -382,7 +407,7 @@ pub(crate) fn create(
         instrument,
     };
     crate::return_if!(
-        matches!(mode, CreateMode::Run | CreateMode::LegacyRun),
+        matches!(mode, CreateMode::Run),
         Ok(holder(config, listener, None)?)
     );
     let (parent, child) = UnixStream::pair().text()?;
@@ -623,7 +648,7 @@ fn holder(
     else {
         return Ok(125);
     };
-    let (exit, durable) = state.finish_exit(&running, status, None);
+    let (exit, durable) = state.finish_exit(&running, status, state.termination_method());
     let owned = fs::symlink_metadata(path)
         .is_ok_and(|meta| meta.file_type().is_socket() && owned(&meta) && file_id(&meta) == marker);
     let unlinked = durable && owned && fs::remove_file(path).is_ok();
@@ -639,7 +664,7 @@ fn finalize_unpublished_exit(
     ready: &mut shared::LaunchReporter<UnixStream>,
 ) -> Result<i32> {
     let status = state.drive(|_, _| None, || None)?.unwrap_or(observed);
-    let (exit, durable) = state.finish_exit(running, status, None);
+    let (exit, durable) = state.finish_exit(running, status, state.termination_method());
     if durable {
         config.retain_stores();
     }
@@ -660,7 +685,9 @@ fn abort_unpublished(
     error: String,
     diagnose: bool,
 ) -> Result<i32> {
-    let deadline = Instant::now() + Duration::from_millis(25);
+    // Give an already-triggered natural exit the same bounded scheduling
+    // allowance used by launch teardown before forcing the unpublished group.
+    let deadline = Instant::now() + Duration::from_millis(250);
     let observed = loop {
         if let Some(observed) = state.observe_exit()? {
             break Some(observed);
@@ -960,6 +987,7 @@ fn holder_setup(
             event_identity: event_manifest,
             instrument_identity: instrument_manifest,
             event_store: None,
+            event_directory: None,
             stores: Some(shared::ArtifactStores {
                 lifecycle: lifecycle_store,
                 event: event_store,
@@ -1000,15 +1028,15 @@ fn holder_setup(
             true,
         )
     })?;
-    let mut child = ChildGuard(Some(child));
+    let mut child = ChildGuard(Some((child, master)));
     instrument_ack(
         instrument,
         child.child().id(),
         generation,
         options.instrument.as_deref(),
     )?;
-    let reader = master.try_clone().text()?;
-    let pty = Duplex::tracked(reader, master.try_clone().text()?, 1 << 20);
+    let reader = child.master().try_clone().text()?;
+    let pty = Duplex::tracked(reader, child.master().try_clone().text()?, 1 << 20);
     let cwd = absolute(options.directory.as_deref().unwrap_or(Path::new(".")))?;
     let pid = child.child().id();
     crate::wire::put_wide(&mut artifacts.status, cwd.as_os_str().as_bytes())
@@ -1020,6 +1048,7 @@ fn holder_setup(
         .extend_from_slice(&shared::random_array::<16>()?);
     let exited = child.child().try_wait().text()?.map(native_exit);
     let running = std::mem::take(&mut artifacts.running);
+    let (child, master) = child.release();
     let mut holder = artifacts.runtime(
         pty,
         (
@@ -1027,7 +1056,7 @@ fn holder_setup(
             UnixNative {
                 control: master,
                 group: pid as i32,
-                child: child.release(),
+                child,
             },
         ),
     );
@@ -1085,9 +1114,8 @@ impl Drop for RawTerminal {
     }
 }
 
-fn connected(path: &Path, timeout: Duration, stream: LocalStream) -> Result<WireClient> {
+fn connected(path: &Path, deadline: Instant, stream: LocalStream) -> Result<WireClient> {
     crate::ensure!(peer_owned(&stream), "holder peer identity mismatch");
-    let deadline = Instant::now() + timeout;
     stream
         .set_send_timeout(Some(Duration::from_millis(250)))
         .text()?;
@@ -1095,8 +1123,35 @@ fn connected(path: &Path, timeout: Duration, stream: LocalStream) -> Result<Wire
 }
 
 fn bounded(path: &Path, timeout: Duration) -> Result<WireClient> {
-    let (_parent, stream) = socket_stream(path).map_err(|(error, _)| error)?;
-    connected(path, timeout, stream)
+    // ONE absolute deadline, taken before the first connect and then shared:
+    // the same value admits each retry and bounds the protocol phase, so the
+    // retries cannot hand the identity exchange a fresh budget of its own.
+    bounded_at(path, Instant::now() + timeout)
+}
+
+/// Run the two phases of one probe against a single deadline.
+///
+/// The connect phase and the protocol phase that follows it are handed the
+/// SAME value — not two windows computed independently, which is how the
+/// identity exchange used to open a fresh budget after the connect had already
+/// spent wall clock the caller granted. Threading it through one seam makes
+/// that an observable property rather than a discipline each call site must
+/// remember to keep.
+fn within_deadline<S, T, E>(
+    deadline: Instant,
+    dial: impl FnOnce(Instant) -> std::result::Result<S, E>,
+    speak: impl FnOnce(Instant, S) -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let carried = dial(deadline)?;
+    speak(deadline, carried)
+}
+
+fn bounded_at(path: &Path, deadline: Instant) -> Result<WireClient> {
+    within_deadline(
+        deadline,
+        |deadline| socket_stream(path, deadline).map_err(|(error, _)| error),
+        |deadline, (_parent, stream)| connected(path, deadline, stream),
+    )
 }
 
 pub(crate) fn connect(path: &Path) -> Result<WireClient> {
@@ -1104,9 +1159,8 @@ pub(crate) fn connect(path: &Path) -> Result<WireClient> {
 }
 
 pub(crate) fn attach(path: &Path, options: Options) -> CommandResult<i32> {
-    // §13.1 gives attach without a controlling terminal status 1; the Windows
-    // path already refused it. Proceeding produced a viewer that wrote the
-    // preamble to a pipe and detached at EOF.
+    // §13.1 gives attach without a controlling terminal status 1. Proceeding
+    // produced a viewer that wrote the preamble to a pipe and detached at EOF.
     let terminal = ViewerTerminal::detect(libc::STDIN_FILENO)
         .ok_or_else(|| String::from("no controlling terminal"))?;
     let geometry = terminal.size().unwrap_or((0, 0));
@@ -1159,8 +1213,13 @@ fn inspect(path: &Path, status: bool, timeout: Duration) -> shared::SessionState
                 .is_ok_and(|meta| meta.file_type().is_socket() && owned(&meta))
         },
         || {
-            let (_parent, stream) = socket_stream(path).map_err(|(_, refused)| refused)?;
-            connected(path, timeout, stream).map_err(|_| false)
+            // The same absolute deadline covers the connect retries and the
+            // identity exchange that follows them.
+            within_deadline(
+                Instant::now() + timeout,
+                |deadline| socket_stream(path, deadline).map_err(|(_, refused)| refused),
+                |deadline, (_parent, stream)| connected(path, deadline, stream).map_err(|_| false),
+            )
         },
     )
 }
@@ -1176,7 +1235,7 @@ pub(crate) fn sessions(invoked: &OsStr, status: bool) -> Result<Vec<shared::Sess
     let root = root(invoked)?;
     shared::discover_sessions(
         &root,
-        |name| shared::session_name(name, false),
+        shared::session_name,
         // OB-8 bounds the whole listing at 2 s, so each entry keeps its own
         // short slice of that budget rather than the full exchange deadline.
         |path, remaining| inspect(path, status, remaining.min(Duration::from_millis(250))),
@@ -1196,7 +1255,20 @@ pub(crate) fn resolve(session: &OsStr, invoked: &OsStr) -> Result<PathBuf> {
     }
 }
 
-fn root(invoked: &OsStr) -> Result<PathBuf> {
+/// The resolved absolute path `resolve` would produce, computed without
+/// creating or validating the per-user root, for decisions that must precede
+/// every effect. A relative TMPDIR still yields the absolute spelling §13.3
+/// requires of the diagnostic.
+fn resolve_without_effect(session: &OsStr, invoked: &OsStr) -> Result<PathBuf> {
+    let path = PathBuf::from(session);
+    if session.as_bytes().contains(&b'/') {
+        absolute(&path)
+    } else {
+        absolute(&root_path(invoked).join(path))
+    }
+}
+
+fn root_path(invoked: &OsStr) -> PathBuf {
     let base = Path::new(invoked)
         .file_name()
         .filter(|name| !name.is_empty())
@@ -1204,7 +1276,11 @@ fn root(invoked: &OsStr) -> Result<PathBuf> {
     let mut directory = OsString::from(".");
     directory.push(base);
     directory.push(format!("-{}", uid()));
-    let root = std::env::temp_dir().join(directory);
+    std::env::temp_dir().join(directory)
+}
+
+fn root(invoked: &OsStr) -> Result<PathBuf> {
+    let root = root_path(invoked);
     let private = crate::store::private_directory(&root, true)
         .map_err(|_| rejected("session root", &root, "io-error"))?;
     if !private {
@@ -1787,39 +1863,103 @@ fn socket_parent(path: &Path) -> Result<File> {
     open_directory(parent).text()
 }
 
-fn socket_name<T, E: std::fmt::Display>(
-    parent: &File,
-    leaf: &OsStr,
-    open: impl FnOnce(Name<'_>) -> std::result::Result<T, E>,
-) -> Result<T> {
+/// The longest final component a local socket address can carry: `sun_path`
+/// less its terminating NUL (107 bytes on Linux, 103 on macOS). Both
+/// platforms address the bare leaf from the verified parent directory (below),
+/// so this is exactly the §2.2 bound on the final component. A zeroed
+/// `sockaddr_un` is a valid value, so the array length is read, not hard-coded.
+fn socket_address_capacity() -> usize {
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_path.len() - 1
+}
+
+/// Bind a listener at the bare final component relative to the verified parent
+/// directory: an owner-only node with a non-blocking accept queue that is never
+/// unlinked on drop (the stage is published by rename and withdrawn under its
+/// own identity fence). The process-wide working directory never changes (§2.2).
+fn bind_leaf(parent: &File, leaf: &OsStr) -> io::Result<LocalListener> {
     #[cfg(target_os = "macos")]
     {
-        // /dev/fd entries are not traversable directories on macOS. Resolve
-        // the short leaf using Darwin's per-thread working directory, never
-        // mutating the process-wide directory forbidden by schema section 2.2.
-        let directory = ThreadDirectory::enter(parent.as_raw_fd()).text()?;
-        let result = Path::new(leaf)
-            .to_fs_name::<GenericFilePath>()
-            .text()
-            .and_then(|name| open(name).text());
-        directory.restore().text()?;
-        result
+        in_directory(parent, || {
+            ListenerOptions::new()
+                .name(Path::new(leaf).to_fs_name::<GenericFilePath>()?)
+                .reclaim_name(false)
+                .nonblocking(ListenerNonblockingMode::Accept)
+                .create_sync()
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let alias = descriptor_path(parent).join(leaf);
-        let name = alias.as_os_str().to_fs_name::<GenericFilePath>().text()?;
-        open(name).text()
+        // The staged leaf is short and fixed-length, so spelling it through the
+        // parent's descriptor alias always fits; the caller's final component
+        // only ever arrives by rename and is never bound by name.
+        let alias = descriptor_path(parent.as_raw_fd()).join(leaf);
+        let name = alias.as_os_str().to_fs_name::<GenericFilePath>()?;
+        ListenerOptions::new()
+            .name(name)
+            .reclaim_name(false)
+            .nonblocking(ListenerNonblockingMode::Accept)
+            .mode(0o600)
+            .create_sync()
+    }
+}
+
+/// Connect to the rendezvous named by the bare final component relative to the
+/// verified parent directory, retrying an interrupted connect until `deadline`.
+/// The whole `sun_path` capacity stays available to the final component and the
+/// process-wide working directory never changes (§2.2).
+fn connect_leaf(parent: &File, leaf: &OsStr, deadline: Instant) -> io::Result<LocalStream> {
+    #[cfg(target_os = "macos")]
+    {
+        in_directory(parent, || {
+            let name = Path::new(leaf).to_fs_name::<GenericFilePath>()?;
+            retry_interrupted(deadline, Instant::now, || {
+                LocalStream::connect(name.clone())
+            })
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux has no per-thread working directory, container seccomp
+        // profiles refuse unshare(CLONE_FS), and spelling the leaf through the
+        // parent's alias would spend the leaf's own address budget. Instead the
+        // final component is opened relative to the parent with
+        // O_PATH|O_NOFOLLOW, pinned as an owner-private socket node, and
+        // connected through /proc/self/fd/<node> while that descriptor stays
+        // open: the alias names the exact inode and is at most 24 bytes long
+        // (a positive c_int spelling), far below sun_path.
+        let node = openat(
+            parent,
+            leaf,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+        let meta = fs::metadata(descriptor_path(node.as_raw_fd()))?;
+        if !meta.file_type().is_socket() || !owned(&meta) {
+            // Not an owner-private socket: neither live nor positively absent,
+            // so the answer stays indeterminate rather than claiming staleness.
+            return Err(io::Error::other(
+                "rendezvous is not an owner-private socket",
+            ));
+        }
+        let alias = descriptor_path(node.as_raw_fd());
+        let name = alias.as_os_str().to_fs_name::<GenericFilePath>()?;
+        let stream = retry_interrupted(deadline, Instant::now, || {
+            LocalStream::connect(name.clone())
+        });
+        drop(node);
+        stream
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn descriptor_path(file: &File) -> PathBuf {
+fn descriptor_path(fd: libc::c_int) -> PathBuf {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let root = "/proc/self/fd";
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let root = "/dev/fd";
-    Path::new(root).join(file.as_raw_fd().to_string())
+    Path::new(root).join(fd.to_string())
 }
 
 fn native_name(name: &OsStr) -> Result<CString> {
@@ -1863,18 +2003,71 @@ fn publish_exclusive(parent: &File, stage: &OsStr, destination: &OsStr) -> Resul
     parent.sync_all().text()
 }
 
-fn socket_stream(path: &Path) -> std::result::Result<(File, LocalStream), (String, bool)> {
+/// The most connect calls one probe may make, counting the first. The budget
+/// is stated in calls rather than retries so the storm witness can pin the
+/// exact number instead of a tolerant range.
+const MAX_CONNECT_ATTEMPTS: usize = 16;
+
+/// Retry an operation the kernel interrupted, within a call budget and the
+/// caller's absolute deadline.
+///
+/// EINTR is not an answer: it reports that a signal arrived while the call was
+/// in flight, and says nothing about the peer. Every other kind is returned
+/// untouched on the first call — a refusal, a permission denial and a timeout
+/// are real answers, and retrying them would either spin or invite treating one
+/// as another. Exhausting the budget or the deadline yields the last
+/// interruption, which stays indeterminate: fail closed, never a claim about
+/// liveness.
+///
+/// The bound governs when a retry may BEGIN. It makes no claim about a call
+/// already in flight: nothing here can shorten a `connect` the kernel is
+/// running, so the guarantee is that attempt N+1 never starts once the budget
+/// is spent or the deadline is reached.
+fn retry_interrupted<T>(
+    deadline: Instant,
+    now: impl Fn() -> Instant,
+    mut open: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        let outcome = open();
+        attempts += 1;
+        let interrupted = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.kind() == io::ErrorKind::Interrupted);
+        if !interrupted || attempts == MAX_CONNECT_ATTEMPTS || now() >= deadline {
+            return outcome;
+        }
+    }
+}
+
+/// Does this connect failure positively prove nothing is listening?
+///
+/// Only a refusal does. The kernel answers ECONNREFUSED when the path is bound
+/// but no listener stands behind it, which is exactly the stale-residue shape.
+/// Every other failure — permission, timeout, an interruption that outlived its
+/// budget, anything unknown — leaves the question open, and the caller must
+/// keep treating it as indeterminate. Widening this predicate would convert a
+/// question into a liveness claim, so it is named and tested per kind rather
+/// than written inline.
+fn connect_refused(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ConnectionRefused
+}
+
+fn socket_stream(
+    path: &Path,
+    deadline: Instant,
+) -> std::result::Result<(File, LocalStream), (String, bool)> {
     let parent = socket_parent(path).map_err(|error| (error, false))?;
     let leaf = path
         .file_name()
         .ok_or_else(|| ("rendezvous has no name".into(), false))?;
-    let mut refused = false;
-    let stream = socket_name(&parent, leaf, |name| {
-        LocalStream::connect(name).inspect_err(|error| {
-            refused = error.kind() == io::ErrorKind::ConnectionRefused;
-        })
-    })
-    .map_err(|error| (error, refused))?;
+    // The io::Error survives here, where the refusal decision is made; the
+    // caller's boundary stays the same bool, so no production output, shared
+    // type, or platform beyond this function sees any change.
+    let stream = connect_leaf(&parent, leaf, deadline)
+        .map_err(|error| (error.to_string(), connect_refused(&error)))?;
     Ok((parent, stream))
 }
 
@@ -2095,9 +2288,12 @@ fn headless_termios() -> libc::termios {
 fn terminal_config(interactive: bool) -> Result<(Option<libc::termios>, libc::winsize)> {
     crate::return_if!(!interactive, Ok((Some(headless_termios()), window(24, 80))));
     let terminal = ViewerTerminal::detect(libc::STDIN_FILENO).ok_or("no controlling terminal")?;
+    // v4: the creation size obeys the same §4 bound the descriptor's reader
+    // enforces; this path once rejected only zeros, so a pathological terminal
+    // could seed a geometry every consumer would then refuse. Symmetric now.
     let (rows, columns) = terminal
         .size()
-        .filter(|(rows, columns)| *rows != 0 && *columns != 0)
+        .filter(|size| crate::wire::valid_size(*size))
         .ok_or("no controlling terminal")?;
     Ok((Some(terminal.saved), window(rows, columns)))
 }
@@ -2309,69 +2505,8 @@ fn uid() -> u32 {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::*;
-    use std::sync::mpsc::sync_channel;
-
-    #[test]
-    fn descriptor_relative_socket_name_never_changes_process_cwd() {
-        let before = std::env::current_dir().unwrap();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("moor-thread-cwd-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        let parent = open_directory(&path).unwrap();
-        let (entered, wait) = sync_channel(0);
-        let (observed, receive) = sync_channel(0);
-        let observer = thread::spawn(move || {
-            wait.recv().unwrap();
-            observed.send(std::env::current_dir().unwrap()).unwrap();
-        });
-        let during = socket_name(&parent, OsStr::new("probe"), move |_| {
-            entered.send(()).unwrap();
-            Ok::<_, io::Error>(receive.recv().unwrap())
-        })
-        .unwrap();
-        observer.join().unwrap();
-        assert_eq!(during, before);
-        assert_eq!(std::env::current_dir().unwrap(), before);
-        fs::remove_dir(path).unwrap();
-    }
-
-    #[test]
-    fn accepted_socket_is_blocking_before_runtime_io_starts() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "moor-blocking-accept-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
-        let parent = open_directory(&path).unwrap();
-        let leaf = OsStr::new("probe");
-        let listener = socket_name(&parent, leaf, |name| {
-            ListenerOptions::new()
-                .name(name)
-                .reclaim_name(false)
-                .nonblocking(ListenerNonblockingMode::Accept)
-                .create_sync()
-        })
-        .unwrap();
-        let client = socket_name(&parent, leaf, LocalStream::connect).unwrap();
-        let accepted = accept_blocking(&listener).expect("pending local connection");
-        let LocalStream::UdSocket(accepted) = accepted;
-        let flags = fcntl(accepted.as_fd(), FcntlArg::F_GETFL).unwrap();
-        assert_eq!(flags & libc::O_NONBLOCK, 0);
-        drop(client);
-        drop(listener);
-        fs::remove_file(path.join(leaf)).unwrap();
-        fs::remove_dir(path).unwrap();
-    }
+    include!("../tests/unit/unix_macos.rs");
 }
 
 #[cfg(test)]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/unit/unix.rs"));
+include!("../tests/unit/unix.rs");

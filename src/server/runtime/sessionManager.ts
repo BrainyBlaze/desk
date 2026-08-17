@@ -1,14 +1,13 @@
 // SessionManager (spec §3.2/§7.1) — the server-side composition that makes the
 // daemon a complete session pipe: DaemonCore (pure registry) + a per-session
-// the moor master link + browser fan-out. Ensures a session,
+// Moor master link + browser fan-out. Ensures a session,
 // attaches to its master socket, and wires master frames → SessionRuntime →
 // browser and browser input → master. Unexpected controller loss creates one
 // generation/owner-fenced recovery slot; only explicit control or positively
 // proved holder absence ends authority. Node net lives only in the moor client;
 // DaemonCore stays pure and is driven through callbacks (no layering break).
 //
-// Testable against a fake v3 master today; the real moor binary drops in behind
-// the same socket path once its master speaks v3.
+// The fake holder and the vendored Moor binary exercise the same v4 socket path.
 
 import { createConnection } from 'node:net';
 import { GenerationLedger } from '../../shared/controlPlane/generationLedger.js';
@@ -27,6 +26,7 @@ import {
 import {
   MOOR_UNADOPTED_REASON,
   type AuthorityMutationResult,
+  type MoorExitOutcome,
   type SessionRegistration,
   type SessionStateSnapshot
 } from '../../shared/controlPlane/index.js';
@@ -38,6 +38,10 @@ import {
 } from './moorMasterClient.js';
 import { MOOR_PRESERVE_GEOMETRY, type MoorStatus } from '../../shared/moorWire/messages.js';
 import { spawnMoorMaster } from './moorSpawnMaster.js';
+import {
+  rendezvousPathWithinCapacity,
+  unixSocketPathCapacity
+} from '../../shared/moorPaths.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, unlinkSync } from 'node:fs';
 import { type MoorSessionEvent } from './moorEventObserver.js';
@@ -126,7 +130,7 @@ export interface TerminalObservationSnapshot {
   activityAt: number | null;
   title: string | null;
   link: { uri: string; at: number } | null;
-  exit: { code: number; at: number } | null;
+  exit: { code: number | null; at: number } | null;
   updatedAt: number;
 }
 
@@ -174,6 +178,25 @@ export type ProviderSessionResetLivenessResult<T> =
       reason: 'session-live' | 'retire-failed';
       error: string;
     };
+
+/**
+ * The durable numeric view of an ending, derived where the record is written
+ * and persisted ALONGSIDE the tagged outcome, never in its place: exited passes
+ * its code through, signalled follows the POSIX shell 128+signal convention,
+ * and an unprovable ending has no code at all -- null, not zero, because a zero
+ * would be indistinguishable from a clean exit. Nothing on the browser path
+ * reads this; the EXIT frame carries the outcome itself.
+ */
+function durableExitCode(outcome: MoorExitOutcome): number | null {
+  switch (outcome.kind) {
+    case 'exited':
+      return outcome.code;
+    case 'signalled':
+      return 128 + outcome.signal;
+    case 'unknown':
+      return null;
+  }
+}
 
 /**
  * Run a detached-master kill command to completion, BOUNDED: spawn error,
@@ -683,9 +706,9 @@ export class SessionManager {
             )
             .catch(() => false);
           return terminalStateReady.then((ready) => {
-            // The Moor client serializes this promise before ATTACH_ACK. Mark
-            // the barrier open here so replay and later live OUTPUT both take
-            // the same asynchronous delivery path and cannot overtake.
+            // The Moor client serializes this promise before the remaining
+            // prefix and replay frames. Mark the barrier open here so replay
+            // and later live OUTPUT cannot overtake terminal-state handling.
             if (ready) preambleDrained = true;
           });
         },
@@ -832,10 +855,10 @@ export class SessionManager {
       client.close();
       return false;
     }
-    // The §6 preamble precedes the ACK on the wire, so every parser write is
-    // already CHAINED; adoption completes only after that work drains clean —
-    // and only then does buffered replay/live output reach the emulator, in
-    // arrival order. A failed drain discards the buffer with the connection.
+    // The §6 status ACK precedes terminal state on the wire. The client chains
+    // terminal-state handling before every later prefix/replay frame; adoption
+    // completes only after that work drains clean, then buffered replay/live
+    // output reaches the emulator in arrival order. A failed drain discards it.
     if (!(await terminalStateReady)) {
       client.close();
       return false;
@@ -1567,6 +1590,23 @@ export class SessionManager {
     } catch {
       return { ok: false, reason: 'spawn-failed' };
     }
+    // A rendezvous whose ABSOLUTE path exceeds the platform Unix-domain sun_path
+    // capacity (macOS 103, Linux 107 bytes) is bindable by the holder relative
+    // to its parent (spec 2.2) yet unreachable by Desk's absolute node:net
+    // connect: libuv truncates the address into sun_path and connect(2) then
+    // fails ENOENT on a spelling no holder published. Refuse before any
+    // allocation or launch, as a result -- so a ready-but-unaddressable holder
+    // is never created -- and name the cause explicitly, since the generic
+    // spawn-failed reason cannot carry it.
+    if (!rendezvousPathWithinCapacity(opts.sessionPath)) {
+      console.error(
+        `moor rendezvous is unaddressable by node:net on ${process.platform}: ` +
+          `${Buffer.byteLength(opts.sessionPath, 'utf8')} bytes exceeds the ` +
+          `${unixSocketPathCapacity()}-byte sun_path ceiling; shorten ` +
+          `DESK_MOOR_SOCKET_ROOT or the session name — ${opts.sessionPath}`
+      );
+      return { ok: false, reason: 'spawn-failed' };
+    }
     // Foreign-rendezvous preflight BEFORE any durable allocation (same wedge
     // logic as ever), with the no-follow type/identity fence: only a SOCKET
     // node can be a moor tombstone. Anything else at the path — a regular
@@ -2077,15 +2117,18 @@ export class SessionManager {
         }
         next.link = { uri: event.uri, at };
         break;
-      case 'exit':
+      case 'exit': {
+        // desk#59: an unprovable ending has no honest number. Persisting 0
+        // would make it indistinguishable from a clean exit; null says "no
+        // code". The browser is not told this number at all -- its EXIT frame
+        // carries the tagged outcome, so `unknown` reaches the surface as the
+        // word, never as a zero.
+        const code = durableExitCode(event.outcome);
         authority = this.core.markExited(
           sessionId,
           generation,
           {
-            // desk#59: an unprovable ending has no honest number. Persisting 0
-            // would make it indistinguishable from a clean exit; null says
-            // "no code", and the browser EXIT boundary maps that to 0 itself.
-            code: event.outcome.kind === 'unknown' ? null : event.code,
+            code,
             signal:
               event.outcome.kind === 'signalled' ? String(event.outcome.signal) : null,
             origin: 'observed',
@@ -2107,12 +2150,7 @@ export class SessionManager {
               `[desk] observed Moor exit for ${sessionId} generation ${generation} has no validated output boundary`
             );
           } else {
-            const delivery = this.core.emitExit(
-              sessionId,
-              event.code,
-              event.outputEnd,
-              event.outcome.kind === 'signalled' ? event.outcome.signal : 0
-            );
+            const delivery = this.core.emitExit(sessionId, event.outcome, event.outputEnd);
             this.sealInputForObservedExit(sessionId);
             if (delivery instanceof Promise) {
               void delivery
@@ -2129,8 +2167,9 @@ export class SessionManager {
             }
           }
         }
-        next.exit = { code: event.code, at };
+        next.exit = { code, at };
         break;
+      }
     }
 
     next.updatedAt = Math.max(next.updatedAt, at);
@@ -2364,6 +2403,18 @@ export class SessionManager {
         };
       }
       if (existsSync(sockPath)) {
+        // The socket exists (stat has no sun_path limit), but if the absolute
+        // path is over-capacity a node:net connect would be truncated to a
+        // different spelling, so socketHasListener could never prove THIS socket
+        // is unlistened. Refuse the unlink rather than delete a possibly-live
+        // holder's rendezvous on unprovable absence.
+        if (!rendezvousPathWithinCapacity(sockPath)) {
+          return {
+            ok: false,
+            reason: 'retire-failed',
+            error: `cannot clean up session ${sessionId}: its rendezvous path exceeds the ${unixSocketPathCapacity()}-byte sun_path ceiling, so a connect cannot prove the socket is unlistened`
+          };
+        }
         if (await socketHasListener(sockPath)) {
           return {
             ok: false,
@@ -2553,6 +2604,12 @@ async function probeMoorHolder(
   generation: number,
   onClient?: (client: MoorMasterClient) => void
 ): Promise<'authenticated-live' | 'absent' | 'indeterminate'> {
+  // An over-capacity path is truncated by node:net, so its ENOENT is a FALSE
+  // absence. Unaddressable is never positively absent: classify indeterminate
+  // before connecting. (MoorMasterClient.connect enforces the same ceiling; the
+  // explicit check here keeps the classification legible and independently
+  // testable.)
+  if (!rendezvousPathWithinCapacity(sessionPath)) return 'indeterminate';
   const probe = new MoorMasterClient(sessionPath, generation);
   onClient?.(probe);
   try {
@@ -2589,6 +2646,11 @@ export async function probeRendezvous(
   path: string,
   timeoutMs = 250
 ): Promise<'live' | 'stale' | 'indeterminate'> {
+  // An over-capacity absolute path is truncated by libuv before connect, so its
+  // ENOENT would be a FALSE positive-absence. It is unaddressable, never proven
+  // stale: classify indeterminate before any Node connect (moor spec 2.2 lets a
+  // holder bind such a path relative to its parent).
+  if (!rendezvousPathWithinCapacity(path)) return 'indeterminate';
   return new Promise((resolve) => {
     const socket = createConnection({ path });
     const settle = (result: 'live' | 'stale' | 'indeterminate'): void => {

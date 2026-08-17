@@ -2,8 +2,8 @@
 // bundled by Desk from its provenance-pinned vendor snapshot and driven through the REAL
 // Desk stack — daemon provision with full OB-39 descriptor authority, restart
 // re-adoption + reconcile, §9 wire terminate, §7.4 lease release, §10.2.13
-// log clear, and the binary's root/alias fences. Skips cleanly when the
-// binary is absent (override with DESK_MOOR_NATIVE_BIN).
+// log clear, and the binary's root/alias fences. Developer runs may skip when
+// the binary is absent; required native lanes fail before collecting tests.
 
 import { spawnSync } from 'node:child_process';
 import {
@@ -18,6 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createConnection } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTerminalDaemon } from '../src/server/runtime/terminalDaemon.js';
 import { archiveMoorGenerationStores } from '../src/server/runtime/moorGenerationStores.js';
@@ -32,6 +33,11 @@ import {
   MoorStoreKind,
   readMoorStoreSnapshot
 } from '../src/server/runtime/moorStore.js';
+import {
+  MoorCodec,
+  crc32c,
+  encodeMoorDiscoveryHello
+} from '../src/shared/moorWire/index.js';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
@@ -39,6 +45,10 @@ import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulator
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const NATIVE_BIN = process.env.DESK_MOOR_NATIVE_BIN ?? join(ROOT, 'libexec', 'moor');
 const HAVE_BINARY = existsSync(NATIVE_BIN);
+
+if (process.env.RUN_REAL_JOIN === '1' && !HAVE_BINARY) {
+  throw new Error(`RUN_REAL_JOIN=1 requires an executable Moor binary at ${NATIVE_BIN}`);
+}
 
 type UpgradeListener = (request: IncomingMessage, socket: Duplex, head: Buffer) => void;
 class FakeUpgradeServer {
@@ -103,6 +113,29 @@ function compileInstrument(root: string): string {
   return object;
 }
 
+function compileInstrumentedChild(root: string): string {
+  // The instrumented predecessor is a locally compiled program, not `sh`:
+  // §4.7 requires the instrument's architecture to match the initial child
+  // and a loader that honours the preload variable. On macOS the system shell
+  // is a SIP-protected arm64e/universal platform binary — inserting the test's
+  // dylib into it aborts on Apple silicon and is not a supported shape on any
+  // Mac — so the child that carries the instrument is built here, exactly like
+  // Moor's own conformance suite does. It prints, lingers long enough to be
+  // attached, and exits 7.
+  const source = join(root, 'predecessor.c');
+  const program = join(root, 'predecessor');
+  writeFileSync(
+    source,
+    '#include <stdio.h>\n#include <unistd.h>\nint main(void) {\n  printf("predecessor-output\\n");\n  fflush(stdout);\n  sleep(1);\n  return 7;\n}\n',
+    { mode: 0o600 }
+  );
+  const built = spawnSync('cc', ['-O2', '-o', program, source], { encoding: 'utf8' });
+  if (built.status !== 0) {
+    throw new Error(`could not compile the instrumented predecessor: ${built.stderr}`);
+  }
+  return program;
+}
+
 function decodeManifestPath(value: unknown): string {
   if (typeof value !== 'string') throw new Error('native lifecycle omitted an external path');
   return Buffer.from(value, 'base64').toString();
@@ -121,6 +154,38 @@ function expectIndependentCopies(stable: string, archive: string): void {
   }
 }
 
+async function sendV3Hello(sessionPath: string): Promise<Uint8Array> {
+  const frame = encodeMoorDiscoveryHello(
+    new MoorCodec(),
+    new TextEncoder().encode(sessionPath)
+  );
+  frame[4] = 3;
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setUint32(
+    20,
+    crc32c(frame.subarray(0, 20)),
+    true
+  );
+
+  return await new Promise<Uint8Array>((resolve, reject) => {
+    const socket = createConnection({ path: sessionPath });
+    const chunks: Buffer[] = [];
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('timed out waiting for native v3 refusal'));
+    }, 5_000);
+    socket.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    socket.once('connect', () => socket.write(frame));
+    socket.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.once('close', () => {
+      clearTimeout(timeout);
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
 describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', () => {
   const cleanups: Array<() => void | Promise<void>> = [];
   let priorTmpdir: string | undefined;
@@ -136,6 +201,54 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
     // the SAME variable — both sides agree on temp_dir()=root.
     process.env.TMPDIR = root;
   }
+
+  it(
+    'refuses a CRC-valid v3 client before attach while the v4 owner remains live',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'moor-native-v3-refusal-'));
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+      pinTmpdir(root);
+      mkdirSync(join(root, '_engine'), { recursive: true });
+      const daemon = createTerminalDaemon({
+        homeRoot: root,
+        moorBinPath: NATIVE_BIN,
+        moorSocketRoot: root,
+        httpServer: new FakeUpgradeServer()
+      });
+      cleanups.push(() => daemon.dispose());
+
+      const provisioned = await daemon.provision('native-v3', {
+        command: ['sh', '-c', 'cat'],
+        geometry: { rows: 24, cols: 80 },
+        subject: { kind: 'terminal' }
+      });
+      expect(provisioned).toMatchObject({ ok: true, generation: 2 });
+      const sessionPath = join(root, 'native-v3');
+      cleanups.push(async () => {
+        await daemon.retire('native-v3').catch(() => undefined);
+      });
+
+      const refusal = await sendV3Hello(sessionPath);
+      const messages = new MoorCodec().feed(Date.now(), refusal);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ scope: 2, kind: 0x13 });
+      expect(
+        new DataView(messages[0]!.payload.buffer, messages[0]!.payload.byteOffset).getUint16(
+          0,
+          true
+        )
+      ).toBe(1);
+
+      expect(daemon.input('native-v3', new TextEncoder().encode('printf v4-still-live\n'))).toBe(
+        true
+      );
+      await waitFor(
+        () => (daemon.tail('native-v3', 24)?.lines ?? []).join('\n').includes('v4-still-live'),
+        'v4 owner after v3 refusal'
+      );
+    },
+    30_000
+  );
 
   it(
     'daemon provision joins the real holder with full OB-39 descriptor authority and retires over the wire',
@@ -217,7 +330,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       const first = makeDaemon();
       const provisioned = await first.provision('native-r', {
         command: ['sh', '-c', 'printf survived-native; cat'],
-        geometry: { rows: 24, cols: 80 },
+        geometry: { rows: 48, cols: 100 },
         subject: { kind: 'terminal' }
       });
       expect(provisioned).toMatchObject({ ok: true, generation: 2 });
@@ -257,13 +370,16 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       // the OB-39 authority for the restart observer.
       const second = makeDaemon();
       cleanups.push(() => second.dispose());
+      cleanups.push(async () => {
+        await second.retire('native-r').catch(() => undefined);
+      });
       const restored = await second.router.sessions.restoreAndAttachMoor('native-r', {
         sessionPath,
         killSpec: { binPath: NATIVE_BIN, args: ['kill', '-f', sessionPath] }
       });
       expect(restored).toMatchObject({ ok: true, generation: 2 });
       if (!restored.ok) return;
-      expect(restored.moorStatus?.layout).toBe(2);
+      expect(restored.moorStatus).toMatchObject({ layout: 2, columns: 100, rows: 48 });
       await expect(second.reconcileMoorEvents('native-r', 2)).resolves.toBe(true);
 
       // The re-adopted link is FUNCTIONAL: input round-trips.
@@ -271,7 +387,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
         true
       );
       await waitFor(
-        () => (second.tail('native-r', 24)?.lines ?? []).join('\n').includes('back-again'),
+        () => (second.tail('native-r', 48)?.lines ?? []).join('\n').includes('back-again'),
         'input echoed through the re-adopted real link'
       );
 
@@ -319,7 +435,13 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
   it(
     'successor cleanup parses copied predecessor lifecycle, removes external artifacts, and preserves archives',
     async () => {
-      const root = mkdtempSync(join(tmpdir(), 'moor-native-generation-copy-'));
+      // A short private base keeps the rendezvous <root>/<sessionId> within the
+      // macOS sun_path ceiling (103 bytes). os.tmpdir() on macOS is a ~50-byte
+      // /var/folders path that would push this session's longer id past the
+      // ceiling and make the holder unaddressable by Desk -- the same reason
+      // production uses a short /tmp socket root on Darwin. The capacity refusal
+      // itself is witnessed separately, not by this fixture's length.
+      const root = mkdtempSync(join('/tmp', 'mn-gc-'));
       cleanups.push(() => rmSync(root, { recursive: true, force: true }));
       pinTmpdir(root);
       mkdirSync(join(root, '_engine'), { recursive: true, mode: 0o700 });
@@ -335,13 +457,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       const sessionPath = join(root, sessionId);
 
       const predecessor = await daemon.provision(sessionId, {
-        command: [
-          '-S',
-          instrument,
-          'sh',
-          '-c',
-          'printf predecessor-output; sleep 1; exit 7'
-        ],
+        command: ['-S', instrument, compileInstrumentedChild(root)],
         geometry: { rows: 24, cols: 80 },
         subject: { kind: 'terminal' }
       });
@@ -357,9 +473,21 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
         2
       );
       const manifest = JSON.parse(new TextDecoder().decode(lifecycle.bytes)) as {
+        v?: unknown;
+        type?: unknown;
+        ended?: unknown;
+        code?: unknown;
+        method?: unknown;
         event_path?: unknown;
         instrument_path?: unknown;
       };
+      expect(manifest).toMatchObject({
+        v: 2,
+        type: 'lifecycle',
+        ended: 'exited',
+        code: 7,
+        method: 'none'
+      });
       const priorEvent = decodeManifestPath(manifest.event_path);
       const priorInstrument = decodeManifestPath(manifest.instrument_path);
       expect(existsSync(priorEvent)).toBe(true);

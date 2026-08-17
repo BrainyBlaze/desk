@@ -1,19 +1,10 @@
 use std::{borrow::Cow, ffi::OsStr, fmt::Write as _};
-#[cfg(not(any(unix, windows)))]
-compile_error!("Moor supports only Unix-family systems and Windows");
+#[cfg(not(unix))]
+compile_error!("Moor supports only Unix-family systems (Linux and macOS)");
 
-#[cfg(unix)]
 fn bytes(value: &OsStr) -> Cow<'_, [u8]> {
     use std::os::unix::ffi::OsStrExt;
     Cow::Borrowed(value.as_bytes())
-}
-
-#[cfg(windows)]
-fn bytes(value: &OsStr) -> Cow<'_, [u8]> {
-    use std::os::windows::ffi::OsStrExt;
-    Cow::Owned(crate::windows::wtf8_encode(
-        &value.encode_wide().collect::<Vec<_>>(),
-    ))
 }
 
 fn render_bytes(raw: &[u8]) -> String {
@@ -40,16 +31,15 @@ pub fn program(value: &OsStr) -> String {
 }
 
 fn separator(byte: u8) -> bool {
-    byte == b'/' || cfg!(windows) && byte == b'\\'
+    byte == b'/'
 }
 
-pub(crate) fn artifact_suffix_len(raw: &[u8], insensitive: bool) -> Option<usize> {
+pub(crate) fn artifact_suffix_len(raw: &[u8]) -> Option<usize> {
     [b".log".as_slice(), b".events", b".exit", b".instrument"]
         .into_iter()
         .find_map(|suffix| {
             let tail = raw.get(raw.len().checked_sub(suffix.len())?..)?;
-            (tail == suffix || insensitive && tail.eq_ignore_ascii_case(suffix))
-                .then_some(suffix.len())
+            (tail == suffix).then_some(suffix.len())
         })
 }
 
@@ -62,13 +52,5 @@ pub fn valid_session(value: &OsStr) -> bool {
     if final_part.is_empty() || matches!(final_part, b"." | b"..") {
         return false;
     }
-    #[cfg(windows)]
-    if final_part.contains(&b':')
-        || final_part
-            .last()
-            .is_some_and(|byte| matches!(*byte, b' ' | b'.'))
-    {
-        return false;
-    }
-    artifact_suffix_len(final_part, cfg!(windows)).is_none()
+    artifact_suffix_len(final_part).is_none()
 }

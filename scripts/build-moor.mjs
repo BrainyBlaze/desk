@@ -21,15 +21,16 @@ import {
 } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const EXPECTED_REPOSITORY = 'https://github.com/BrainyBlaze/moor.git';
-export const EXPECTED_COMMIT = '237a62cbb7fa1abd9c4416cd08b99a57760d2bb5';
+export const EXPECTED_COMMIT = 'aa26a26f5308aa31091d143c6600d5f5dd1c1bf1';
 export const EXPECTED_VERSION = '0.1.0';
 
 export function snapshotDigest(root) {
+  const snapshotRoot = resolve(root);
   const files = [];
   const visit = (directory) => {
     for (const name of readdirSync(directory).sort()) {
@@ -42,10 +43,10 @@ export function snapshotDigest(root) {
       }
     }
   };
-  visit(root);
+  visit(snapshotRoot);
   const hash = createHash('sha256');
   for (const path of files) {
-    hash.update(path.slice(root.length + 1).split('\\').join('/'));
+    hash.update(relative(snapshotRoot, path));
     hash.update('\0');
     hash.update(readFileSync(path));
     hash.update('\0');

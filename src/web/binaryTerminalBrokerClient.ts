@@ -34,6 +34,7 @@ import {
   SubscriptionResync,
   type BpFrame
 } from '../shared/browserProtocol/index.js';
+import type { MoorExitOutcome } from '../shared/controlPlane/contract.js';
 import { subscribeBridgeRetry } from './terminalHeartbeat.js';
 
 /** Minimal binary-WebSocket surface so tests can inject a fake transport. */
@@ -52,7 +53,8 @@ export interface BinarySurfaceHandlers {
   onOutput: (bytes: Uint8Array) => void;
   /** Baseline snapshot (SerializeAddon restorable string); do terminal.reset() then write. */
   onSnapshot: (text: string) => void;
-  onExit?: (code: number, signal: number) => void;
+  /** The session ended; `outcome` is the holder's tagged ending as the EXIT frame carried it (`unknown` included). */
+  onExit?: (outcome: MoorExitOutcome) => void;
   /** Protocol-level error for this surface (a BpError code). */
   onError?: (code: number) => void;
   /** Client-side failure that has no browser-protocol error code. */
@@ -552,7 +554,7 @@ export class BinaryTerminalBrokerClient {
       case BpFrameType.GAP:
         return this.onGap(frame.channelId);
       case BpFrameType.EXIT:
-        return this.onExit(frame.channelId, frame.code, frame.signal);
+        return this.onExit(frame.channelId, frame.outcome);
       case BpFrameType.HEARTBEAT:
         return; // liveness only; lastFrameAt already bumped
       case BpFrameType.ERROR:
@@ -635,8 +637,8 @@ export class BinaryTerminalBrokerClient {
     }
   }
 
-  private onExit(channelId: number, code: number, signal: number): void {
-    this.surfaceOf(channelId)?.handlers.onExit?.(code, signal);
+  private onExit(channelId: number, outcome: MoorExitOutcome): void {
+    this.surfaceOf(channelId)?.handlers.onExit?.(outcome);
   }
 
   private onError(channelId: number, code: number): void {

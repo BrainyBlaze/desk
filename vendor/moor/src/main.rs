@@ -1,10 +1,6 @@
 use moor::{cli, name};
 
 fn main() {
-    #[cfg(windows)]
-    if let Some(status) = moor::windows::bootstrap() {
-        std::process::exit(status);
-    }
     let mut args: Vec<_> = std::env::args_os().collect();
     let invoked = args.first_mut().map(std::mem::take).unwrap_or_default();
     let program = name::program(&invoked);

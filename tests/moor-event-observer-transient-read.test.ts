@@ -171,6 +171,7 @@ describe('a transient store read failure must not kill a live session', () => {
     observers.push(observer);
     expect(await observer.start()).toBe(true);
     expect(seen.map((value) => value.type)).toEqual(['ready']);
+    const records = [event('ready', 1, 1n)];
 
     // The store goes unreachable for a moment — exactly what an interrupted
     // syscall or a directory in flux looks like from here — and does so TWICE,
@@ -182,23 +183,51 @@ describe('a transient store read failure must not kill a live session', () => {
       await chmod(root, 0o000);
       await waitFor(() => diagnostics.length >= before + 3, `three failed polls (outage ${outage})`);
       await chmod(root, 0o700);
-      // Prove the recovery is real before the next outage begins: one clean
-      // poll must land, or the two outages were never actually separated.
-      const recovered = diagnostics.length;
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(diagnostics.length).toBe(recovered);
+      // Event delivery is the causal witness that a successful store read
+      // landed and reset the consecutive-failure count before another outage.
+      records.push(
+        event(
+          'link',
+          1,
+          BigInt(records.length + 1),
+          `,"uri":"https://example.test/recovery-${outage}","truncated":false`
+        )
+      );
+      const recoveredBody = eventBody(records);
+      const recoveredSlot = (outage % 2) as 0 | 1;
+      await writeSlot(
+        root,
+        recoveredSlot,
+        recoveredBody,
+        commitRecord({
+          slot: recoveredSlot,
+          bytes: recoveredBody,
+          index: BigInt(outage + 1),
+          start: 1n,
+          end: BigInt(records.length + 1)
+        })
+      );
+      await waitFor(
+        () => seen.length === records.length,
+        `successful recovery read (outage ${outage})`
+      );
     }
 
     // It is readable again, and the holder commits another event. A live
     // observer MUST deliver it; a terminated one never will.
-    const body = eventBody([
-      event('ready', 1, 1n),
-      event('link', 1, 2n, ',"uri":"https://example.test/x","truncated":false')
-    ]);
-    await writeSlot(root, 1, body, commitRecord({ slot: 1, bytes: body, index: 2n, start: 1n, end: 3n }));
+    records.push(
+      event(
+        'link',
+        1,
+        BigInt(records.length + 1),
+        ',"uri":"https://example.test/x","truncated":false'
+      )
+    );
+    const body = eventBody(records);
+    await writeSlot(root, 1, body, commitRecord({ slot: 1, bytes: body, index: 4n, start: 1n, end: 5n }));
 
-    await waitFor(() => seen.length === 2, 'live event after the store recovered');
-    expect(seen[1]).toMatchObject({ type: 'link', uri: 'https://example.test/x' });
+    await waitFor(() => seen.length === 4, 'live event after the store recovered');
+    expect(seen[3]).toMatchObject({ type: 'link', uri: 'https://example.test/x' });
     // And the session was never declared dead over a stumble it recovered from.
     expect(terminalCount()).toBe(0);
   });

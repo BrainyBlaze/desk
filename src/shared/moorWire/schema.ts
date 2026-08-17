@@ -1,5 +1,5 @@
 export const MOOR_MAGIC = Uint8Array.of(0x4d, 0x4f, 0x4f, 0x52);
-export const MOOR_VERSION = 3;
+export const MOOR_VERSION = 4;
 export const MOOR_HEADER_SIZE = 24;
 export const MOOR_MAX_FRAME_PAYLOAD = 1 << 20;
 export const MOOR_MAX_MESSAGE_PAYLOAD = 16 << 20;

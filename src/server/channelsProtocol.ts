@@ -81,6 +81,14 @@ export interface ChannelMember {
   /** minutes of channel silence before the supervisor is asked to check in
    *  (only meaningful when supervisor=true; defaults to 3 when omitted) */
   supervisorMaxIdleMinutes?: number;
+  /**
+   * The retired per-session identity this member's manifest still binds to
+   * (the retired member field, written by Desk v0.3.1 or older, that the v0.3.2 migration
+   * left in place because the session no longer existed). This version cannot
+   * resolve it to a sessionId: the member is listed with the binding it has,
+   * unresolved, and receives no deliveries — the same fact stated, not hidden.
+   */
+  preCutoverSession?: string;
 }
 
 /**
@@ -520,8 +528,25 @@ export function mentionsHuman(body: string): boolean {
 }
 
 const FRONTMATTER_LINE = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/;
+/**
+ * The frontmatter field Desk v0.3.1 and older used to bind an agent member to
+ * its session. Since the cutover the binding is `session: <sessionId>`; the
+ * migration that rewrote the line is gone, and v0.3.2 left the line in place
+ * whenever the session it named no longer existed. A manifest that still
+ * carries it is therefore an agent bound to an identity this version cannot
+ * resolve — on a correctly migrated store as much as on an unmigrated one, so
+ * refusing the whole channel here would assert more than the parser knows and
+ * name a remedy already applied. The parser keeps the binding under a named
+ * field and gives the member no sessionId: it is exactly what it is, an agent
+ * whose session cannot be found.
+ */
+const PRE_CUTOVER_MEMBER_FIELD = 'tmux';
 
-/** Parses a `_members/<name>.md` manifest (frontmatter subset). */
+/**
+ * Parses a `_members/<name>.md` manifest (frontmatter subset). Returns
+ * undefined for a file that is not a member manifest at all. A pre-cutover
+ * binding on the retired member field is carried as `preCutoverSession`, never as a sessionId.
+ */
 export function parseMemberManifest(source: string): ChannelMember | undefined {
   const lines = source.split('\n');
   if (lines[0]?.trim() !== '---') {
@@ -550,6 +575,7 @@ export function parseMemberManifest(source: string): ChannelMember | undefined {
     status: fields.status ?? 'active',
     joined: fields.joined ?? '',
     sessionId: fields.session || undefined,
+    preCutoverSession: fields[PRE_CUTOVER_MEMBER_FIELD] || undefined,
     role: fields.role || undefined,
     functions: fields.functions || undefined,
     supervisor,
@@ -694,42 +720,4 @@ export function qualifiedMemberHandle(options: {
   }
   // No project to qualify with — fall back to the group.
   return qualify(options.groupLabel, options.sessionName) || base;
-}
-
-/**
- * §10 store transform (cutover 3a): member-manifest content re-keyed from the
- * legacy `tmux:` field line to `session: <sessionId>`. Textual and
- * line-preserving — everything except the identity line stays byte-identical
- * (roles/functions/supervisor blocks untouched). The migration gate owns the
- * file IO and the unmapped policy; the 3b parser flip reads `session:` into
- * the member's sessionId.
- */
-export interface MemberManifestMigration {
-  content: string;
-  /** True when at least one tmux: line was re-keyed. */
-  migrated: boolean;
-  /** tmux: values with no sessionId (session gone from the manifest) — left in place, reported. */
-  unmapped: string[];
-}
-
-export function migrateMemberManifestContent(
-  content: string,
-  tmuxToSessionId: ReadonlyMap<string, string>
-): MemberManifestMigration {
-  const unmapped: string[] = [];
-  let migrated = false;
-  const lines = content.split('\n').map((line) => {
-    const match = /^tmux:\s*(.+?)\s*$/.exec(line);
-    if (match === null) {
-      return line;
-    }
-    const sessionId = tmuxToSessionId.get(match[1]);
-    if (sessionId === undefined) {
-      unmapped.push(match[1]);
-      return line;
-    }
-    migrated = true;
-    return `session: ${sessionId}`;
-  });
-  return { content: lines.join('\n'), migrated, unmapped };
 }

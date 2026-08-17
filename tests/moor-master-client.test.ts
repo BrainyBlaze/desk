@@ -1,9 +1,9 @@
 // #2 integration seam: the daemon-side MOOR controller client that replaces the
 // ATV3 MasterClient. Verified against a fake MOOR holder built on the approved
-// moorWire codec (byte conformance to moor 93d593a is pinned by the wire
-// suites). The attach prefix is the frozen §6 order: TERMINAL_STATE (exactly
-// once, before ATTACH_ACK) → ATTACH_ACK → lease/replay/live; a missing,
-// second, or post-ACK preamble is refused; identity exchange + adoption run
+// moorWire codec (byte conformance to the vendored Moor source is pinned by
+// the wire suites). The attach prefix is the frozen §6 order: ATTACH_ACK →
+// TERMINAL_STATE (exactly once) → lease/replay/live; a missing, second, or
+// reordered preamble is refused; identity exchange + adoption run
 // under one absolute deadline; every teardown path rejects pending work.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,8 +14,7 @@ import { MoorCodec, type MoorMessage } from '../src/shared/moorWire/codec.js';
 import { MoorKind } from '../src/shared/moorWire/messages.js';
 import {
   MoorMasterClient,
-  posixMoorIdentity,
-  windowsMoorIdentity
+  posixMoorIdentity
 } from '../src/server/runtime/moorMasterClient.js';
 
 const GENERATION = 7;
@@ -46,7 +45,7 @@ function integer(value: number | bigint, bytes: 2 | 4 | 8): Uint8Array {
 const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4), bytes);
 
 function helloAckPayload(identity: Uint8Array, incarnation = INCARNATION): Uint8Array {
-  return joined(Uint8Array.of(3), integer(GENERATION, 4), incarnation, wide(identity));
+  return joined(Uint8Array.of(4), integer(GENERATION, 4), incarnation, wide(identity));
 }
 
 /** Minimal valid §5 status descriptor: layout 0 (no event store), lease owned. */
@@ -88,6 +87,8 @@ function statusPayload(
     integer(4321, 4), // pid
     integer(1, 4), // containment
     new Uint8Array(16).fill(0xc3), // birthToken
+    integer(80, 2), // columns
+    integer(24, 2), // rows
     tail
   );
 }
@@ -118,13 +119,14 @@ class FakeHolder {
   readonly sockPath = join(this.root, 'session');
   private server: Server | undefined;
   connection: Socket | undefined;
-  private readonly codec = new MoorCodec();
+  private codec = new MoorCodec();
   private readonly inbox: MoorMessage[] = [];
   private waiters: Array<(message: MoorMessage) => void> = [];
 
   async listen(): Promise<void> {
     this.server = createServer((socket) => {
       this.connection = socket;
+      this.codec = new MoorCodec();
       socket.on('data', (chunk: Buffer) => {
         const messages = this.codec.feed(
           Date.now(),
@@ -191,7 +193,7 @@ describe('MoorMasterClient', () => {
     return { holder, client, identity: posixMoorIdentity(holder.sockPath) };
   }
 
-  /** Drive the full frozen §6 prefix: HELLO→HELLO_ACK→ATTACH→preamble→ACK→LEASE_RESULT. */
+  /** Drive the full frozen §6 prefix: HELLO→HELLO_ACK→ATTACH→ACK→preamble→LEASE_RESULT. */
   async function completeAttach(
     holder: FakeHolder,
     client: MoorMasterClient,
@@ -201,8 +203,8 @@ describe('MoorMasterClient', () => {
     await holder.next(); // HELLO
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next(); // ATTACH
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5)); // requested prefix slot
     return attached;
   }
@@ -235,12 +237,6 @@ describe('MoorMasterClient', () => {
     expect(
       () => new MoorMasterClient('/tmp/x', GENERATION, {}, { identity: Uint8Array.of(9, 1, 2) })
     ).toThrowError(/IDENTITY/);
-    // A well-formed injected Windows identity is accepted on any platform.
-    const windows = windowsMoorIdentity(0x1122334455667788n, new Uint8Array(16).fill(7));
-    expect(windows).toHaveLength(25);
-    expect(new MoorMasterClient('/tmp/x', GENERATION, {}, { identity: windows })).toBeInstanceOf(
-      MoorMasterClient
-    );
   });
 
   it('sends supervised HELLO at the allocated generation scope with the tagged path identity', async () => {
@@ -250,7 +246,7 @@ describe('MoorMasterClient', () => {
     const hello = await holder.next();
     expect(hello.kind).toBe(MoorKind.HELLO);
     expect(hello.scope).toBe(GENERATION);
-    expect(hello.payload).toEqual(joined(text('MOOR'), Uint8Array.of(3, 0, 0), wide(identity)));
+    expect(hello.payload).toEqual(joined(text('MOOR'), Uint8Array.of(4, 0, 0), wide(identity)));
   });
 
   it('walks the exact §6 prefix and resolves attach with the ACK status', async () => {
@@ -260,22 +256,27 @@ describe('MoorMasterClient', () => {
       onTerminalState: () => events.push('terminal-state'),
       onAttachAck: () => events.push('attach-ack')
     });
-    const status = await completeAttach(holder, client, identity);
-    const resolved = await status;
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    expect(() => client.sendInput(text('early'))).toThrow(/not attached/);
+    expect(() => client.sendResize(120, 40)).toThrow(/not attached/);
+    await waitFor(() => events.length === 2, 'status-first attach ack');
+    expect(events).toEqual(['hello-ack', 'attach-ack']);
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    const resolved = await attached;
     expect(resolved.generation).toBe(GENERATION);
     expect(resolved.ownsLease).toBe(true);
     expect(resolved.leaseEpoch).toBe(5);
-    expect(events).toEqual(['hello-ack', 'terminal-state', 'attach-ack']);
+    expect(resolved.columns).toBe(80);
+    expect(resolved.rows).toBe(24);
+    expect(events).toEqual(['hello-ack', 'attach-ack', 'terminal-state']);
     expect(client.terminalStatePreamble).toEqual(new Uint8Array(0));
   });
-
   it('accepts WAKEUP anywhere after adoption, including mid-attach (OB-30)', async () => {
-    // §10.2.11: WAKEUP is an UNSOLICITED, coalescible notice that the durable
-    // event stream advanced — it owes the §6 attach order no position. A child
-    // that writes while ATTACH is in flight (every shell with a real TERM
-    // prints its prompt immediately) makes the store commit right then, and
-    // rejecting that frame made the whole attach fail: on a clean install no
-    // such session could be attached at all.
     const wakeups: number[] = [];
     const protocolErrors: string[] = [];
     const { holder, client, identity } = await start({
@@ -283,20 +284,20 @@ describe('MoorMasterClient', () => {
       onProtocolError: (error) => protocolErrors.push(error.code)
     });
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
-    await holder.next(); // HELLO
+    await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
-    holder.send(MoorKind.WAKEUP, new Uint8Array()); // adopted, ATTACH in flight
-    await holder.next(); // ATTACH
-    holder.send(MoorKind.WAKEUP, new Uint8Array()); // still before the preamble
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
-    holder.send(MoorKind.WAKEUP, new Uint8Array()); // between preamble and ACK
+    holder.send(MoorKind.WAKEUP, new Uint8Array());
+    await holder.next();
+    holder.send(MoorKind.WAKEUP, new Uint8Array());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.WAKEUP, new Uint8Array());
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.WAKEUP, new Uint8Array());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
     await expect(attached).resolves.toMatchObject({ generation: GENERATION });
     expect(protocolErrors).toEqual([]);
-    expect(wakeups.length).toBe(3);
+    expect(wakeups.length).toBe(4);
   });
-
   it('still refuses WAKEUP before identity adoption', async () => {
     const protocolErrors: string[] = [];
     const wakeups: number[] = [];
@@ -349,8 +350,8 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
 
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('early')));
     await waitFor(() => protocolErrors.length === 1, 'early output refused');
@@ -365,8 +366,8 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     // No LEASE_RESULT: the attach prefix is incomplete and must time out.
     await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
   });
@@ -386,11 +387,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { replay: { first: 1n, last: 1n, start: 0n, end: 1n } })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('x')));
 
@@ -408,8 +409,8 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5)); // ownsLease = true
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     // Refused result contradicts the ACK's ownsLease bit.
     holder.send(
       MoorKind.LEASE_RESULT,
@@ -433,11 +434,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { replay: { first: 3n, last: 4n, start: 100n, end: 120n } })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
 
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
@@ -477,8 +478,8 @@ describe('MoorMasterClient', () => {
       await holder.next();
       holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
       await holder.next();
-      holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
       holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+      holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
       holder.send(MoorKind.LEASE_RESULT, payload);
       await waitFor(() => protocolErrors.length === 1, `${label} result refused`);
       expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
@@ -496,8 +497,8 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5, { ownsLease: false }));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.LEASE_RESULT,
       joined(Uint8Array.of(3, 1, 0, 0), integer(9, 4), new Uint8Array(16))
@@ -519,11 +520,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { replay: { first: 3n, last: 4n, start: 100n, end: 121n } })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
 
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
@@ -633,6 +634,58 @@ describe('MoorMasterClient', () => {
     await waitFor(() => receipts.length === 1, 'receipt after retry');
   });
 
+  it('does not mislabel a lease-free real-geometry attach as resumed', async () => {
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start({
+      onProtocolError: (error) => protocolErrors.push(error.code)
+    });
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    attached.catch(() => undefined);
+
+    expect((await holder.next()).kind).toBe(MoorKind.HELLO);
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+
+    await waitFor(() => protocolErrors.length === 1, 'lease-free geometry refused');
+    expect(protocolErrors).toEqual(['MALFORMED']);
+    await expect(attached).rejects.toThrow(/invalid attach geometry/i);
+  });
+
+  it.each([
+    { label: 'drops ownership', ownsLease: false, leaseEpoch: 5 },
+    { label: 'changes epoch', ownsLease: true, leaseEpoch: 6 }
+  ])('fails a resumed attach when its ACK $label', async ({ ownsLease, leaseEpoch }) => {
+    const protocolErrors: string[] = [];
+    const { holder, client, identity } = await start(
+      { onProtocolError: (error) => protocolErrors.push(error.code) },
+      {
+        resumeLease: {
+          epoch: 5,
+          incarnation: INCARNATION,
+          token: new Uint8Array(16).fill(0xd4),
+          nextRequestId: 1n
+        },
+        requireSameIncarnation: true
+      }
+    );
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    attached.catch(() => undefined);
+
+    expect((await holder.next()).kind).toBe(MoorKind.HELLO);
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    expect((await holder.next()).kind).toBe(MoorKind.LEASE_REQUEST);
+    holder.send(MoorKind.LEASE_RESULT, resumedLeaseResultPayload(5));
+
+    const attach = await holder.next();
+    expect(attach.kind).toBe(MoorKind.ATTACH);
+    expect(attach.payload).toEqual(joined(integer(80, 2), integer(24, 2), Uint8Array.of(0)));
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, leaseEpoch, { ownsLease }));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+
+    await waitFor(() => protocolErrors.length === 1, 'resumed lease contradiction refused');
+    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+    await expect(attached).rejects.toThrow();
+  });
+
   it('resumes the exact viewer lease before attach and restores one ambiguous input tuple', async () => {
     const first = await start();
     await completeAttach(first.holder, first.client, first.identity);
@@ -644,11 +697,21 @@ describe('MoorMasterClient', () => {
 
     const holder = new FakeHolder();
     await holder.listen();
-    const client = new MoorMasterClient(holder.sockPath, GENERATION, {}, {
-      resumeCursor: snapshot?.output,
-      resumeLease: snapshot?.lease,
-      requireSameIncarnation: true
-    });
+    const wakeups: number[] = [];
+    const protocolErrors: string[] = [];
+    const client = new MoorMasterClient(
+      holder.sockPath,
+      GENERATION,
+      {
+        onWakeup: () => wakeups.push(1),
+        onProtocolError: (error) => protocolErrors.push(error.code)
+      },
+      {
+        resumeCursor: snapshot?.output,
+        resumeLease: snapshot?.lease,
+        requireSameIncarnation: true
+      }
+    );
     cleanups.push(() => {
       client.close();
       holder.close();
@@ -668,15 +731,19 @@ describe('MoorMasterClient', () => {
         new Uint8Array(16).fill(0xd4)
       )
     );
+    holder.send(MoorKind.WAKEUP, new Uint8Array());
+    await waitFor(() => wakeups.length === 1, 'wakeup during lease resume');
     holder.send(MoorKind.LEASE_RESULT, resumedLeaseResultPayload(5));
 
     const attach = await holder.next();
     expect(attach.kind).toBe(MoorKind.ATTACH);
     expect(attach.payload[4]! & 1).toBe(0);
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(posixMoorIdentity(holder.sockPath), 5));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     await attaching;
 
+    expect(client.reconnectSnapshot()?.lease?.token).toEqual(new Uint8Array(16).fill(0xe5));
+    expect(protocolErrors).toEqual([]);
     expect(client.retryPendingInput()).toBe(true);
     const retry = await holder.next();
     expect(retry.kind).toBe(MoorKind.INPUT);
@@ -721,8 +788,8 @@ describe('MoorMasterClient', () => {
     const attach = await holder.next();
     expect(attach.kind).toBe(MoorKind.ATTACH);
     expect(attach.payload[4]! & 1).toBe(1);
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 6));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(6));
     await attaching;
 
@@ -741,11 +808,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { ownsLease: false })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.LEASE_RESULT,
       joined(Uint8Array.of(3, 1, 0, 0), integer(5, 4), new Uint8Array(16))
@@ -777,11 +844,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { replay: { first: 3n, last: 5n, start: 100n, end: 130n } })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
 
     // Baseline: GAP{1,2} names records the prior connection consumed — silent.
@@ -806,11 +873,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { replay: { first: 1n, last: 3n, start: 0n, end: 3n } })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
 
     const next = holder.next();
@@ -841,11 +908,11 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(
       MoorKind.ATTACH_ACK,
       statusPayload(identity, 5, { replay: { first: 5n, last: 5n, start: 100n, end: 110n } })
     );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(4n, 8)));
     await waitFor(() => protocolErrors.length === 1, 'unsafe recovery gap refused');
@@ -913,13 +980,13 @@ describe('MoorMasterClient', () => {
       { onProtocolError: (error) => protocolErrors.push(error.code) },
       { resumeCursor: { sequence: 5n, incarnation: INCARNATION } }
     );
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     attached.catch(() => undefined);
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5, { ownsLease: false })); // empty history: high-water 0
     holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
-    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5)); // empty history: high-water 0
     await waitFor(() => protocolErrors.length === 1, 'impossible cursor refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     await expect(attached).rejects.toThrow();
@@ -1028,12 +1095,12 @@ describe('MoorMasterClient', () => {
     const { holder, client, identity } = await start({
       onProtocolError: (error) => protocolErrors.push(error.code)
     });
-    const attached = client.attach({ columns: 80, rows: 24, requestLease: false });
+    const attached = client.attach({ columns: 0, rows: 0, requestLease: false });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5, { ownsLease: false }));
     holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
-    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
     await attached;
 
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
@@ -1041,33 +1108,77 @@ describe('MoorMasterClient', () => {
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
   });
 
-  it('refuses ATTACH_ACK when the required terminal-state preamble is missing', async () => {
+  it('refuses the retired TERMINAL_STATE-before-ATTACH_ACK order', async () => {
     const protocolErrors: string[] = [];
-    let closed = false;
     const { holder, client, identity } = await start({
-      onProtocolError: (error) => protocolErrors.push(error.code),
-      onClose: () => {
-        closed = true;
+      onProtocolError: (error) => protocolErrors.push(error.code)
+    });
+    const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
+    attached.catch(() => undefined);
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    await waitFor(() => protocolErrors.length === 1, 'retired prefix order refused');
+    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+    await expect(attached).rejects.toThrow();
+  });
+
+  it('retains ACK geometry without adopting a lease and accepts the rolled-back epoch on retry', async () => {
+    let observedStatus: { columns: number; rows: number } | undefined;
+    const { holder, client, identity } = await start({
+      onAttachAck: (status) => {
+        observedStatus = status;
       }
     });
+    const firstAttach = client.attach({ columns: 80, rows: 24, requestLease: true });
+    firstAttach.catch(() => undefined);
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    await waitFor(() => observedStatus !== undefined, 'status geometry retained');
+    expect(observedStatus).toMatchObject({ columns: 80, rows: 24 });
+    expect(client.reconnectSnapshot()?.lease).toBeUndefined();
+
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5)); // overtakes TERMINAL_STATE
+    await expect(firstAttach).rejects.toThrow(/BAD_SEQUENCE/);
+    expect(observedStatus).toMatchObject({ columns: 80, rows: 24 });
+    expect(client.reconnectSnapshot()?.lease).toBeUndefined();
+
+    const retry = new MoorMasterClient(holder.sockPath, GENERATION);
+    cleanups.push(() => retry.close());
+    await retry.connect();
+    const retryAttach = retry.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    await holder.next();
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    await expect(retryAttach).resolves.toMatchObject({ leaseEpoch: 5, columns: 80, rows: 24 });
+    expect(retry.reconnectSnapshot()?.lease?.epoch).toBe(5);
+  });
+
+  it('times out with writes blocked when terminal state is missing after ATTACH_ACK', async () => {
+    const { holder, client, identity } = await start({}, { attachDeadlineMs: 60 });
     const attached = client.attach({ columns: 80, rows: 24, requestLease: true });
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5)); // no preamble: refused
-    await expect(attached).rejects.toThrow();
-    await waitFor(() => closed, 'fail-closed close');
-    expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    expect(() => client.sendInput(text('early'))).toThrow(/not attached/);
+    expect(() => client.sendResize(120, 40)).toThrow(/not attached/);
+    await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
   });
-
-  it('refuses a second or post-ATTACH_ACK preamble', async () => {
+  it('refuses a second terminal-state frame after the completed prefix', async () => {
     const protocolErrors: string[] = [];
     const { holder, client, identity } = await start({
       onProtocolError: (error) => protocolErrors.push(error.code)
     });
     await completeAttach(holder, client, identity);
     holder.send(MoorKind.TERMINAL_STATE, emptyPreamble()); // post-ACK: refused
-    await waitFor(() => protocolErrors.length === 1, 'post-ACK preamble refused');
+    await waitFor(() => protocolErrors.length === 1, 'second terminal-state refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
   });
 
@@ -1172,10 +1283,10 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
     await holder.next();
-    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
-
     // Holder replies at the WRONG generation scope: fail closed, never adopt.
     holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5), GENERATION + 1);
+
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     await waitFor(() => protocolErrors.length === 1 && closed, 'fail-closed close');
     await expect(attached).rejects.toThrow();
     expect(() => client.sendInput(text('x'))).toThrow();

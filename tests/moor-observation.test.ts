@@ -101,8 +101,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
       mgr.observeMoorEvent('web-1', 2, {
         ts: 1.4,
         type: 'exit',
-        code: 7,
-        outcome: { kind: 'exited', code: 7 },
+        outcome: { kind: 'exited', code: 7, method: 'none' },
         outputEnd: 0n
       })
     ).toMatchObject({ ok: true });
@@ -122,7 +121,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     expect(exits[0]).toMatchObject({
       sessionId: 'web-1',
       channelId,
-      frame: { type: BpFrameType.EXIT, code: 7, signal: 0 }
+      frame: { type: BpFrameType.EXIT, outcome: { kind: 'exited', code: 7, method: 'none' } }
     });
   });
 
@@ -144,8 +143,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     mgr.observeMoorEvent('web-1', 2, {
       ts: 1.2,
       type: 'exit',
-      code: 0,
-      outcome: { kind: 'exited', code: 0 },
+      outcome: { kind: 'exited', code: 0, method: 'none' },
       outputEnd: 0n
     });
     const exited = mgr.terminalObservation('web-1');
@@ -166,8 +164,7 @@ describe('moor event observation (state machine + browser EXIT parity)', () => {
     mgr.observeMoorEvent('web-1', 2, {
       ts: 1.4,
       type: 'exit',
-      code: 0,
-      outcome: { kind: 'exited', code: 0 },
+      outcome: { kind: 'exited', code: 0, method: 'none' },
       outputEnd: 0n
     });
     expect(browserOut.filter((e) => e.frame.type === BpFrameType.EXIT)).toHaveLength(0);

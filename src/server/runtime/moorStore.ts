@@ -126,15 +126,15 @@ const EVENT_SCHEMAS: Readonly<Record<string, string>> = {
   'stream-exhausted':
     'type:=stream-exhausted,ts:*,epoch:u,seq:*,kind:=transition,axis:=seq/epoch/commit',
   exit:
-    'type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=exited,code:u|type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=signalled,signal:p|type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=terminated,code:u,method:=graceful/forced',
+    'type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=exited,code:u,method:=none/graceful/forced|type:=exit,ts:*,epoch:u,seq:*,kind:=transition,ended:=signalled,signal:p,method:=none/graceful/forced',
   'observer-degraded':
     'type:=observer-degraded,ts:*,epoch:u,seq:*,kind:=transition,scanner:=osc/query,reason:=deadline/limit/cancelled/malformed'
 };
 
 const LIFECYCLE_BASE =
-  'v:1,type:=lifecycle,phase:t,session:*,generation:*,wire_generation:u,incarnation:b16,start_wall_ms:D,start_mono_ms:D,boot_id:b16,path_encoding:=posix-bytes/windows-wtf8,event_path:n,instrument_path:n';
+  'v:2,type:=lifecycle,phase:t,session:*,generation:*,wire_generation:u,incarnation:b16,start_wall_ms:D,start_mono_ms:D,boot_id:b16,path_encoding:=posix-bytes,event_path:n,instrument_path:n';
 const LIFECYCLE_END =
-  '|end_wall_ms:D,output_end:D,ended:=exited,code:u|end_wall_ms:D,output_end:D,ended:=signalled,signal:p|end_wall_ms:D,output_end:D,ended:=terminated,code:u,method:=graceful/forced';
+  '|end_wall_ms:D,output_end:D,ended:=exited,code:u,method:=none/graceful/forced|end_wall_ms:D,output_end:D,ended:=signalled,signal:p,method:=none/graceful/forced';
 
 export async function readMoorStoreSnapshot(
   directory: string,
@@ -261,9 +261,7 @@ export function decodeMoorEventSnapshot(
       corrupt('invalid event header shape');
     }
     const identity = strictBase64(asString(header.session));
-    const identityValid =
-      (identity.length >= 2 && identity[0] === 1 && identity[1] === 0x2f) ||
-      (identity.length === 25 && identity[0] === 2);
+    const identityValid = identity.length >= 2 && identity[0] === 1 && identity[1] === 0x2f;
     const generationValid =
       commit.generation === 1
         ? header.generation === null
@@ -525,12 +523,12 @@ function validLifecycle(bytes: Uint8Array, commit: MoorCommit): boolean {
   const keys = Object.keys(value);
   if (keys.length < 13 || !matchesSchemaRange(value, LIFECYCLE_BASE, 0, 13)) return false;
   if (!matchesSchemaRange(value, LIFECYCLE_END, 13, keys.length)) return false;
-  const encoding = value.path_encoding;
   const session = strictBase64(asString(value.session));
   const sessionValid =
-    encoding === 'posix-bytes'
-      ? session.length >= 2 && session[0] === 1 && session[1] === 0x2f
-      : encoding === 'windows-wtf8' && session.length === 25 && session[0] === 2;
+    value.path_encoding === 'posix-bytes' &&
+    session.length >= 2 &&
+    session[0] === 1 &&
+    session[1] === 0x2f;
   const generationValid =
     commit.generation === 1 ? value.generation === null : value.generation === commit.generation;
   if (!sessionValid || !generationValid || value.wire_generation !== commit.generation) return false;
@@ -541,10 +539,9 @@ function validLifecycle(bytes: Uint8Array, commit: MoorCommit): boolean {
   }
   if (value.phase !== 'exited') return false;
   if (value.ended === 'exited') {
-    return closed && safeU32(value.code) <= (encoding === 'windows-wtf8' ? 0xffff_ffff : 255);
+    return closed && safeU32(value.code) <= 255;
   }
-  if (value.ended === 'signalled') return closed && encoding === 'posix-bytes';
-  if (value.ended === 'terminated') return closed && encoding === 'windows-wtf8';
+  if (value.ended === 'signalled') return closed;
   return false;
 }
 

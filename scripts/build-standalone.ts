@@ -20,7 +20,7 @@ const root = resolve(import.meta.dir, '..');
 const swap: BunPlugin = {
   name: 'desk-standalone-swap',
   setup(build) {
-    build.onResolve({ filter: /[\\/](lspResolver|uiAsset|ptyBackend)\.js$/ }, (args) => ({
+    build.onResolve({ filter: /\/(lspResolver|uiAsset|ptyBackend)\.js$/ }, (args) => ({
       path: resolve(dirname(args.importer), args.path.replace(/\.js$/, '.standalone.ts'))
     }));
   }
@@ -29,9 +29,9 @@ const swap: BunPlugin = {
 const embedNodePty: BunPlugin = {
   name: 'desk-embed-node-pty',
   setup(build) {
-    build.onLoad({ filter: /node-pty[\\/]lib[\\/]utils\.js$/ }, async (args) => {
-      // node-pty's native lands in build/Release on Linux (built from source) or
-      // prebuilds/<platform>-<arch> on macOS/Windows (shipped prebuilds). Embed
+    build.onLoad({ filter: /node-pty\/lib\/utils\.js$/ }, async (args) => {
+      // node-pty's native lands in build/Release when built from source or in
+      // prebuilds/<platform>-<arch> when shipped. Embed
       // the one that exists for THIS build host via a static literal require.
       const ptyRoot = resolve(dirname(args.path), '..');
       const rel = [

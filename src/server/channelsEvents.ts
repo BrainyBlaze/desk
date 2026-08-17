@@ -81,10 +81,29 @@ export type DeliveryEventKind =
   | 'resumed'          // -specific: operator resumed
   | 'dropped';         // -specific: item dropped (operator or overflow)
 
+/**
+ * The kinds a LIVE producer may write. It is the read vocabulary minus
+ * `delivery-ack-timeout`, a state no path has emitted since delivery ACK
+ * outcomes were retired: it survives ONLY in historical rings, so admitting it
+ * at a write would fabricate a retired state. The read model keeps it.
+ */
+export type WritableDeliveryEventKind = Exclude<DeliveryEventKind, 'delivery-ack-timeout'>;
+
 export interface DeliveryEvent {
   seq: number;
   at: string;
   sessionId?: string;
+  /**
+   * The retired per-session identity Desk v0.3.1 and older keyed this record
+   * by, carried by the reader AS FOUND. A record the v0.3.2 migration could not
+   * map (its session was already gone) has this and no `sessionId`; a record
+   * the migration DID map can still carry a stray retired key alongside its
+   * `sessionId`, and both are kept — losing the resolved id to honour the
+   * unresolved one would throw away real knowledge. This is a READ-only field:
+   * no live write path sets it (see WritableDeliveryEventKind / the write input
+   * type), so it never labels a freshly produced event.
+   */
+  preCutoverSession?: string;
   channel?: string;
   messageId?: string;
   kind: DeliveryEventKind;
@@ -111,12 +130,46 @@ function eventsPath(home: string): string {
 }
 
 /**
+ * What a live producer hands to a write: the read model minus the fields and
+ * kinds that exist ONLY in history. `seq`/`at` are assigned here; `kind` is
+ * narrowed to the writable vocabulary (no `delivery-ack-timeout`); and
+ * `preCutoverSession` is pinned to `never`, not merely omitted. Omitting it
+ * would only drop it from the declared surface — a producer VARIABLE (as
+ * opposed to a fresh inline literal, which excess-property checks would catch)
+ * carrying an extra `preCutoverSession` stays structurally assignable to an
+ * Omit-based input. Typing the field `never` rejects any value for it whether
+ * it arrives inline or through a variable. This is what stops the type system
+ * from silently permitting a producer to fabricate retired history.
+ */
+export type DeliveryEventInput = Omit<DeliveryEvent, 'seq' | 'at' | 'kind' | 'preCutoverSession'> & {
+  kind: WritableDeliveryEventKind;
+  at?: string;
+  preCutoverSession?: never;
+};
+
+// Compile-time boundary witnesses (verified by `npm run check`, which type-checks
+// src/). Each asserts a NEGATIVE — that a producer value carrying a retired form
+// is NOT assignable to the write input — using a VARIABLE-shaped source, because
+// that is the assignment excess-property checks do not police. If a future edit
+// re-admits either form, its `NotAssignable` flips to `false`, the `AssertTrue`
+// stops satisfying `extends true`, and tsc fails here: the boundary cannot rot
+// silently.
+type AssertTrue<T extends true> = T;
+type NotAssignable<TSource, TTarget> = TSource extends TTarget ? false : true;
+type _WriteInputRejectsRetiredKindVariable = AssertTrue<
+  NotAssignable<{ kind: 'delivery-ack-timeout' }, DeliveryEventInput>
+>;
+type _WriteInputRejectsHistoricalFieldVariable = AssertTrue<
+  NotAssignable<{ kind: 'queued'; preCutoverSession: string }, DeliveryEventInput>
+>;
+
+/**
  * Appends a single delivery event. The `seq` is auto-assigned from the current
  * file's line count + 1; `at` defaults to now. Sync, atomic per-line.
  */
 export function appendDeliveryEvent(
   home: string,
-  event: Omit<DeliveryEvent, 'seq' | 'at'> & { at?: string },
+  event: DeliveryEventInput,
   now = new Date()
 ): DeliveryEvent {
   mkdirSync(eventsDir(home), { recursive: true });
@@ -184,8 +237,28 @@ function nextSeq(home: string): number {
 }
 
 /**
+ * The key Desk v0.3.1 and older used to attribute a record to its session.
+ * Nothing since the cutover writes it. The migration that re-keyed such
+ * records is gone (v0.3.2 was the last release to carry it), and v0.3.2 kept
+ * in place every record whose session no longer existed — so a ring that was
+ * migrated correctly may still hold them, and a never-migrated ring is gated
+ * by the manifest refusal, not here. Refusing the whole ring would therefore
+ * assert "pre-cutover store" about a store that is not, and name a remedy
+ * (boot v0.3.2) that was already applied. What the reader knows about such a
+ * record is exactly this: it is a session's history under an identity this
+ * version cannot resolve. It returns the record with that identity carried
+ * under a named field and no `sessionId` — not dropped, not attributed to
+ * nobody, not attributed to anyone. Prune keeps the newest records whatever
+ * their key, which is how a migrated ring eventually sheds them.
+ */
+const PRE_CUTOVER_SESSION_KEY = 'tmuxSession';
+
+/**
  * Reads delivery events matching the optional filter. Returns events in
  * chronological order (oldest first). Falls back to [] on corrupt file.
+ * A record keyed by the retired per-session identity comes back with that
+ * identity under `preCutoverSession` and no `sessionId`; a per-session filter
+ * never matches it, because it cannot be attributed.
  */
 export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {}): DeliveryEvent[] {
   const path = eventsPath(home);
@@ -212,6 +285,24 @@ export function readDeliveryEvents(home: string, filter: DeliveryEventFilter = {
     }
     if (typeof parsed.seq !== 'number' || typeof parsed.kind !== 'string') {
       continue;
+    }
+    if (PRE_CUTOVER_SESSION_KEY in parsed) {
+      const { [PRE_CUTOVER_SESSION_KEY]: retired, ...rest } = parsed as DeliveryEvent & {
+        [PRE_CUTOVER_SESSION_KEY]?: unknown;
+      };
+      // Only a NONEMPTY STRING is an identity — exactly what the retired
+      // migrator classified as one (a non-string or empty value was left
+      // `unchanged`, never re-keyed). Carrying it means projecting the value AS
+      // FOUND; `String(retired)` would instead fabricate a plausible identity
+      // out of a malformed one (`String(null) === 'null'`,
+      // `String({}) === '[object Object]'`), which is the very "assert more than
+      // you know" the carry exists to avoid. A malformed retired value is not an
+      // identity, so the record stays a non-attributed event: no
+      // `preCutoverSession`, and the meaningless key dropped.
+      parsed =
+        typeof retired === 'string' && retired.length > 0
+          ? { ...rest, preCutoverSession: retired }
+          : (rest as DeliveryEvent);
     }
     if (filter.sessionId && parsed.sessionId !== filter.sessionId) {
       continue;
@@ -277,49 +368,4 @@ export function pruneDeliveryEvents(home: string, maxEvents = MAX_EVENTS): numbe
 export function latestEventSeq(home: string): number {
   const events = readDeliveryEvents(home);
   return events.length > 0 ? events[events.length - 1]!.seq : 0;
-}
-
-/**
- * §10 store transform (cutover 3a): one events.jsonl line, re-keyed from the
- * legacy `tmuxSession` field to `sessionId`. PURE and PER-LINE so the
- * migration gate can stream the multi-GiB ring with bounded memory; policy
- * (keep/drop unmapped, carry malformed) belongs to the gate, this only
- * classifies. Lines without a tmuxSession field (channel-level events, blanks)
- * pass through unchanged; an old unmapped record kept as-is stays readable
- * post-cutover (seq/kind are the only required fields).
- */
-export type DeliveryEventLineMigration =
-  | { kind: 'migrated'; line: string }
-  | { kind: 'unchanged'; line: string }
-  | { kind: 'unmapped'; line: string; tmuxSession: string }
-  | { kind: 'malformed'; line: string };
-
-export function migrateDeliveryEventLine(
-  line: string,
-  tmuxToSessionId: ReadonlyMap<string, string>
-): DeliveryEventLineMigration {
-  const trimmed = line.trim();
-  if (trimmed.length === 0) {
-    return { kind: 'unchanged', line };
-  }
-  let parsed: Record<string, unknown>;
-  try {
-    const value: unknown = JSON.parse(trimmed);
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      return { kind: 'malformed', line };
-    }
-    parsed = value as Record<string, unknown>;
-  } catch {
-    return { kind: 'malformed', line };
-  }
-  const tmuxSession = parsed.tmuxSession;
-  if (typeof tmuxSession !== 'string' || tmuxSession.length === 0) {
-    return { kind: 'unchanged', line };
-  }
-  const sessionId = tmuxToSessionId.get(tmuxSession);
-  if (sessionId === undefined) {
-    return { kind: 'unmapped', line, tmuxSession };
-  }
-  const { tmuxSession: _dropped, ...rest } = parsed;
-  return { kind: 'migrated', line: JSON.stringify({ ...rest, sessionId }) };
 }

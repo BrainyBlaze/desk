@@ -322,7 +322,7 @@ Custom commands bypass built-in agent launch logic.
   command: npm run dev
 ```
 
-Desk runs the command under atch and exposes it through the terminal daemon,
+Desk runs the command under Moor and exposes it through the terminal daemon,
 but it does not provide agent-specific resume, bypass, or attention hooks
 unless the command implements them itself. A custom command has no Desk hooks,
 so its session reports `unknown` activity — Desk says so rather than inferring

@@ -1,14 +1,14 @@
 ---
 title: "Agents and terminals"
-description: "Durable atch sessions, the multiplexer, terminal rendering, attention signals, native agent chat, and fleet controls"
+description: "Durable Moor sessions, the multiplexer, terminal rendering, attention signals, native agent chat, and fleet controls"
 ---
 
 The agent multiplexer is Desk's core surface. It lets one operator supervise
 many coding-agent sessions without losing process lifetime, terminal state, or
 attention signals.
 
-<Frame caption="A 2x2 group of durable atch sessions with the sidebar tree and fleet telemetry">
-  <img src="/images/agents-multiplexer.png" alt="A 2x2 group of durable atch sessions with the sidebar tree and fleet telemetry" />
+<Frame caption="A 2x2 group of durable Moor sessions with the sidebar tree and fleet telemetry">
+  <img src="/images/agents-multiplexer.png" alt="A 2x2 group of durable Moor sessions with the sidebar tree and fleet telemetry" />
 </Frame>
 
 ## Supported agents
@@ -66,7 +66,7 @@ conversation itself, instead of showing the CLI's terminal UI:
   proposed command or file diff, and resolve inline.
 - **Continuity** — transcripts survive reloads and browser switches: the
   server keeps the session's event history and replays it to every surface,
-  and the agent process itself lives in its atch session, so nothing
+  and the agent process itself lives in its Moor session, so nothing
   dies with the tab.
 
 <Frame caption="The slash palette lists the commands the connected agent advertises">
@@ -77,9 +77,9 @@ Messages sent from [channels](/channels) reach native sessions through the
 same injection path the composer uses, so agent-to-agent delivery works
 identically in both modes.
 
-## Durable atch sessions
+## Durable Moor sessions
 
-Every managed session runs under an atch master keyed by its durable
+Every managed session runs under a Moor holder keyed by its durable
 `sessionId`. This gives Desk
 three important properties:
 
@@ -87,7 +87,7 @@ three important properties:
 - restarting Desk reattaches to running work
 - sessions can be captured, restarted, or booted without changing the UI model
 
-The browser terminal is a view of an atch-backed process, not the process
+The browser terminal is a view of a Moor-backed process, not the process
 owner. Attaching never resurrects a dead session — booting is always an
 explicit action — so an externally killed agent shows as missing instead of
 being silently restarted.
@@ -129,7 +129,7 @@ state.
 Terminal cells — bash sessions, custom commands, and SDK agents running with
 `uiMode: terminal` — use xterm.js in the browser and a server-side terminal
 daemon for transport. One binary WebSocket per browser tab carries all visible
-terminal surfaces. The daemon owns the atch master connections, fans each
+terminal surfaces. The daemon owns the Moor holder connections, fans each
 session to every viewer (a desktop tab and a phone see the same process),
 restores snapshots on reveal, and streams output only to visible cells.
 
@@ -214,7 +214,7 @@ who is screaming from the pager alone.
   running ones; groups and individual cells have their own boot actions.
 - **Restart** kills and relaunches one session (confirmed first).
 - **KILL** is the emergency stop: it kills **all** Claude Code and Codex CLI
-  processes found by the host sweep and retires every configured atch session.
+  processes found by the host sweep and retires every configured Moor session.
   It confirms with an alarm before acting. Use it as a last resort, not a
   routine control.
 

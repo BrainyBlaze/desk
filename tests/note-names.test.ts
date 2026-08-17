@@ -14,7 +14,8 @@ describe('deriveNoteName', () => {
   });
 
   it('replaces filesystem-hostile characters', () => {
-    expect(deriveNoteName('foo/bar: baz?')).toBe('foo bar baz');
+    expect(deriveNoteName('foo/bar\0 baz')).toBe('foo bar baz');
+    expect(deriveNoteName(':\\?*<>|')).toBe(':\\?*<>|');
   });
 
   it('skips leading blank lines and falls back to untitled', () => {
@@ -24,8 +25,8 @@ describe('deriveNoteName', () => {
     expect(deriveNoteName('   \n  ')).toBe('untitled');
   });
 
-  it('never ends with trailing dots', () => {
-    expect(deriveNoteName('notes...')).toBe('notes');
+  it('preserves trailing dots that are valid in POSIX filenames', () => {
+    expect(deriveNoteName('notes...')).toBe('notes...');
   });
 });
 

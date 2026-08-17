@@ -490,10 +490,9 @@ describe('startTerminalDaemonServer socket root', () => {
 
 // ---------------------------------------------------------------------------
 // desk#62 — a daemon restart must not write a geometry no session has onto a
-// live child. The daemon cannot ask the holder how big the child's pty is (the
-// moor status descriptor, wire schema §5, carries no rows/cols), so the only
-// honest sources are the journal of the last geometry Desk COMMANDED and the
-// wire's own "preserve both" encoding (§4/OB-19: columns and rows both zero).
+// live child. V4 exposes the holder's current pty geometry in status, while
+// the re-adopting ATTACH still uses preserve-both (§4: columns/rows both zero)
+// so Desk reads holder truth without replacing it during the prefix.
 // ---------------------------------------------------------------------------
 
 /** Mirrors the fake holder's witness path (the helper is a script, not importable). */
@@ -577,6 +576,7 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
       await waitFor(() => witnessLines(sock).includes('resize 100x48'));
       one.manager.closeAllLinks(); // the daemon departs; the holder survives
       first.close();
+      const beforeRestart = witnessLines(sock);
 
       // --- daemon incarnation 2: it comes back ------------------------------
       const second = new FileSessionGeometryStore(geometryPath);
@@ -591,12 +591,12 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
       // The restored session is the last size Desk commanded (the subscribe
       // acquisition journaled 48x100) — NOT the 24x80 the daemon used to invent.
       expect(two.created).toEqual([{ rows: 48, cols: 100 }]);
+      expect(two.manager.moorStatus('measured')).toMatchObject({ columns: 100, rows: 48 });
       // And nothing was written onto the live child: both re-adopting ATTACHes
       // carry moor's preserve pair, so the pty keeps the size it already has.
-      expect(witnessLines(sock).filter((line) => line.startsWith('attach '))).toEqual([
-        'attach 0x0',
-        'attach 0x0'
-      ]);
+      expect(beforeRestart[0]).toBe('attach 0x0');
+      expect(beforeRestart.slice(1).every((line) => line === 'resize 100x48')).toBe(true);
+      expect(witnessLines(sock)).toEqual([...beforeRestart, 'attach 0x0']);
       second.close();
     } finally {
       await killFakeMoorHolder(sock);
@@ -631,10 +631,52 @@ describe('re-adoption never invents a geometry (desk#62)', () => {
         '/usr/bin/true'
       );
       expect(results).toEqual([{ sessionId: 'unmeasured', ok: true }]);
+      expect(manager.moorStatus('unmeasured')).toMatchObject({ columns: 80, rows: 24 });
       expect(witnessLines(sock)).toEqual(['attach 0x0']);
       manager.closeAllLinks();
       geometryStore.close();
     } finally {
+      await killFakeMoorHolder(sock);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('a failed post-ACK prefix retries with preserve-both and retains holder geometry', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-geo-prefix-retry-'));
+    const sock = join(dir, 'retry');
+    const failAfterAck = join(dir, 'fail-after-ack');
+    writeFileSync(failAfterAck, '1');
+    await spawnFakeMoorHolder(
+      sock,
+      join(moorEventStoreRoot(process.execPath, { tmpdir: dir }), 'retry.events'),
+      2,
+      ['sleep', '30'],
+      dir,
+      { FAKE_MOOR_FAIL_AFTER_ATTACH_ACK_FILE: failAfterAck }
+    );
+    const geometryStore = new FileSessionGeometryStore(
+      join(dir, '_engine', 'session-geometry.ndjson')
+    );
+    const { manager } = makeManagerWithGeometry(new InMemoryGenerationLedger(), geometryStore);
+    expect(manager.ensure('retry', { rows: 37, cols: 111 })).toMatchObject({
+      ok: true,
+      generation: 2
+    });
+    try {
+      await expect(
+        manager.moorAttachMaster('retry', sock, { rows: 37, cols: 111 }, { generation: 2 })
+      ).resolves.toBe(false);
+      expect(manager.moorStatus('retry')).toBeUndefined();
+
+      rmSync(failAfterAck, { force: true });
+      await expect(
+        manager.moorAttachMaster('retry', sock, { rows: 0, cols: 0 }, { generation: 2 })
+      ).resolves.toBe(true);
+      expect(manager.moorStatus('retry')).toMatchObject({ columns: 111, rows: 37 });
+      expect(witnessLines(sock)).toEqual(['attach 111x37', 'attach 0x0']);
+    } finally {
+      manager.closeAllLinks();
+      geometryStore.close();
       await killFakeMoorHolder(sock);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -807,7 +849,7 @@ describe('reconcileExistingSessions', () => {
           signal: null,
           origin: 'observed',
           reason: null,
-          outcome: { kind: 'exited', code: 7 },
+          outcome: { kind: 'exited', code: 7, method: 'none' },
           diagnostic: null
         });
       } finally {

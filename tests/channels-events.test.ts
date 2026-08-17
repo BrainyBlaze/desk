@@ -178,6 +178,153 @@ describe('channelsEvents', () => {
     expect(latestEventSeq(home)).toBe(0);
   });
 
+  describe('a ring Desk v0.3.1 wrote (records keyed by the retired per-session identity)', () => {
+    // A real v0.3.1 record, values shortened: session-scoped, keyed by
+    // `tmuxSession`, no `sessionId`. The v0.3.2 migration kept in place every
+    // record whose session no longer existed, so a correctly migrated ring can
+    // still hold one — refusing the whole ring here would assert "pre-cutover
+    // store" about a store that was already migrated and name a remedy already
+    // applied. What the reader knows is only that this record cannot be
+    // attributed: it carries the retired identity under `preCutoverSession`,
+    // gives it no `sessionId`, and drops neither the record nor the fact.
+    const V031_LINE = JSON.stringify({
+      kind: 'delivering',
+      tmuxSession: 'agentdesk-desk-channels-super-2e997e43',
+      channel: 'channels',
+      messageId: 'msg-20260618-221813-5077',
+      preview: '[#channels] New message from @desk-channels-codex',
+      seq: 1,
+      at: '2026-06-18T22:30:28.506Z'
+    });
+
+    it('reads such a record, carrying the retired identity and refusing to invent a sessionId', () => {
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const path = join(home, '_engine', 'events.jsonl');
+      writeFileSync(path, `${V031_LINE}\n${V031_LINE.replace('"seq":1', '"seq":2')}\n`);
+
+      const events = readDeliveryEvents(home);
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        seq: 1,
+        kind: 'delivering',
+        channel: 'channels',
+        preCutoverSession: 'agentdesk-desk-channels-super-2e997e43'
+      });
+      // The record is not attributed to any live session, and the retired key
+      // is gone from the object — carried only under the named field.
+      expect(events[0]).not.toHaveProperty('sessionId');
+      expect(events[0]).not.toHaveProperty('tmuxSession');
+      // The seq authority reads it like any other record.
+      expect(latestEventSeq(home)).toBe(2);
+    });
+
+    it('never matches a per-session filter, because the record cannot be attributed to that session', () => {
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      writeFileSync(
+        join(home, '_engine', 'events.jsonl'),
+        `${V031_LINE}\n{"seq":2,"at":"2026-08-16T00:00:00.000Z","kind":"queued","sessionId":"alpha"}\n`
+      );
+      // Filtering for the live session returns only the live record — the
+      // pre-cutover one is neither dropped from an unfiltered read nor
+      // smuggled into a session it never belonged to.
+      const filtered = readDeliveryEvents(home, { sessionId: 'alpha' });
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0]).toMatchObject({ seq: 2, sessionId: 'alpha' });
+      expect(readDeliveryEvents(home)).toHaveLength(2);
+    });
+
+    it('keeps a live sessionId when a record carries both it and the retired key', () => {
+      // A record the migration DID map keeps its sessionId; a stray retired key
+      // must not erase that knowledge. The reader carries both facts.
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      writeFileSync(
+        join(home, '_engine', 'events.jsonl'),
+        `${JSON.stringify({ seq: 1, at: '2026-08-16T00:00:00.000Z', kind: 'queued', sessionId: 'beta', tmuxSession: 'legacy-beta' })}\n`
+      );
+      const [event] = readDeliveryEvents(home);
+      expect(event).toMatchObject({ sessionId: 'beta', preCutoverSession: 'legacy-beta' });
+      expect(readDeliveryEvents(home, { sessionId: 'beta' })).toHaveLength(1);
+    });
+
+    it('does not mistake a current record that merely lacks a sessionId for a pre-cutover one', () => {
+      appendDeliveryEvent(home, { kind: 'queued' });
+      const [event] = readDeliveryEvents(home);
+      expect(event).not.toHaveProperty('preCutoverSession');
+    });
+
+    it('treats only a nonempty-string retired key as an identity — a malformed value is not string-coerced into a plausible one', () => {
+      // The retired migrator classified ONLY a nonempty string `tmuxSession` as
+      // an identity; a null, object, empty, or numeric value was left unchanged,
+      // never re-keyed. The carry must match that: `String(retired)` would
+      // fabricate `'null'`, `'[object Object]'`, or `''` — a plausible identity
+      // out of a malformed one, the exact over-attribution the carry avoids.
+      // Each such record stays a readable, non-attributed event.
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const line = (extra: string) => `{"seq":SEQ,"at":"2026-08-16T00:00:00.000Z","kind":"queued",${extra}}`;
+      writeFileSync(
+        join(home, '_engine', 'events.jsonl'),
+        [
+          line('"tmuxSession":null').replace('SEQ', '1'),
+          line('"tmuxSession":{"nested":true}').replace('SEQ', '2'),
+          line('"tmuxSession":""').replace('SEQ', '3'),
+          line('"tmuxSession":42').replace('SEQ', '4')
+        ].join('\n') + '\n'
+      );
+      const events = readDeliveryEvents(home);
+      expect(events).toHaveLength(4);
+      for (const event of events) {
+        expect(event).not.toHaveProperty('preCutoverSession');
+        // no laundered identity in any shape
+        expect(JSON.stringify(event)).not.toContain('null');
+        expect(JSON.stringify(event)).not.toContain('[object Object]');
+      }
+      // A per-session filter still cannot attribute any of them.
+      expect(readDeliveryEvents(home, { sessionId: 'null' })).toHaveLength(0);
+    });
+
+    it('prune keeps such records byte-for-byte while they are among the newest, and lets them age out otherwise', () => {
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const path = join(home, '_engine', 'events.jsonl');
+      const current = (seq: number) => JSON.stringify({ seq, at: '2026-08-16T00:00:00.000Z', kind: 'queued', sessionId: 'alpha' });
+      writeFileSync(path, `${V031_LINE}\n${current(2)}\n${current(3)}\n`);
+      // Under the cap: nothing rewritten, the old record is left as it is.
+      expect(pruneDeliveryEvents(home, 3)).toBe(0);
+      expect(readFileSync(path, 'utf8')).toBe(`${V031_LINE}\n${current(2)}\n${current(3)}\n`);
+      // Over the cap: the oldest goes, and the oldest is the pre-cutover one —
+      // that is how a migrated ring sheds the residue v0.3.2 could not map.
+      expect(pruneDeliveryEvents(home, 2)).toBe(1);
+      expect(readFileSync(path, 'utf8')).toBe(`${current(2)}\n${current(3)}\n`);
+      expect(readDeliveryEvents(home)).toHaveLength(2);
+    });
+
+    it('prune rewrites a surviving pre-cutover record with its retired key intact — it re-keys nothing', () => {
+      // A prune that actually rewrites (over the cap) and whose surviving set
+      // still contains a pre-cutover record must leave that record on disk in
+      // the shape it found it: prune is a bounded rewrite, not a migration, and
+      // has no map to "promote" the retired key into `preCutoverSession`. The
+      // read-time carry is a projection; laundering it into the file would make
+      // prune assert an attribution it does not have. Here the pre-cutover
+      // record is NOT the oldest, so it survives the prune.
+      mkdirSync(join(home, '_engine'), { recursive: true });
+      const path = join(home, '_engine', 'events.jsonl');
+      const current = (seq: number) => JSON.stringify({ seq, at: '2026-08-16T00:00:00.000Z', kind: 'queued', sessionId: 'alpha' });
+      const survivingLegacy = V031_LINE.replace('"seq":1', '"seq":2');
+      writeFileSync(path, `${current(1)}\n${survivingLegacy}\n${current(3)}\n`);
+
+      expect(pruneDeliveryEvents(home, 2)).toBe(1);
+      const onDisk = readFileSync(path, 'utf8');
+      // The surviving legacy record is byte-for-byte its original line: retired
+      // key present, no invented `preCutoverSession` written to the file.
+      expect(onDisk).toBe(`${survivingLegacy}\n${current(3)}\n`);
+      expect(onDisk).toContain('tmuxSession');
+      expect(onDisk).not.toContain('preCutoverSession');
+      // And the read still projects it — the carry lives at the reader, not the file.
+      const carried = readDeliveryEvents(home).find((event) => event.seq === 2);
+      expect(carried).toMatchObject({ preCutoverSession: 'agentdesk-desk-channels-super-2e997e43' });
+      expect(carried).not.toHaveProperty('sessionId');
+    });
+  });
+
   it('persists across re-reads (engine restore reads the same file)', () => {
     appendDeliveryEvent(home, { kind: 'paused', sessionId: 'tmux-a', reason: 'sensitive' });
     appendDeliveryEvent(home, { kind: 'resumed', sessionId: 'tmux-a' });

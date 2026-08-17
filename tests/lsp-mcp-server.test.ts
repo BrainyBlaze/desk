@@ -139,6 +139,26 @@ describe('desk-lsp-mcp lsp_hover', () => {
     expect(calls[0].init.headers).toMatchObject({ authorization: 'Bearer file-token' });
   });
 
+  it('accepts a managed server directory whose POSIX name contains a literal backslash', async () => {
+    const envFile = makeManagedEnvFile(
+      {
+        DESK_API: 'http://127.0.0.1:6123',
+        DESK_LSP_TOKEN: 'file-token',
+        DESK_LSP_WORKSPACE_ROOT: '/workspace'
+      },
+      `server\\name-${process.pid}-${Date.now()}`
+    );
+    const fetch = vi.fn(async () => jsonResponse(200, { ok: true, result: { contents: 'hover ok' } }));
+
+    const result = await callLspHover(
+      { uri: 'file:///workspace/main.ts', position: { line: 0, character: 0 } },
+      { env: { DESK_LSP_ENV_FILE: envFile }, fetch }
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it('rejects invalid DESK_LSP_ENV_FILE inputs without leaking paths', async () => {
     const envFile = makeManagedEnvFile({
       DESK_API: 'http://127.0.0.1:6123',
@@ -1090,8 +1110,11 @@ function toolErrorResult(message: string, code: deskLspMcp.LspToolErrorCode) {
   };
 }
 
-function makeManagedEnvFile(values: Record<string, string>): string {
-  const root = join(tmpdir(), 'desk-lsp-managed-agents', `test-${process.pid}-${Date.now()}-${Math.random()}`);
+function makeManagedEnvFile(
+  values: Record<string, string>,
+  serverName = `test-${process.pid}-${Date.now()}-${Math.random()}`
+): string {
+  const root = join(tmpdir(), 'desk-lsp-managed-agents', serverName);
   const sessionDir = join(root, 'session');
   mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
   chmodSync(root, 0o700);

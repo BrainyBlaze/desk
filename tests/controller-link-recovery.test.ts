@@ -45,7 +45,7 @@ function identityFor(path: string): Uint8Array {
 }
 
 function helloAckPayload(identity: Uint8Array, incarnation = INCARNATION): Uint8Array {
-  return joined(Uint8Array.of(3), integer(GENERATION, 4), incarnation, wide(identity));
+  return joined(Uint8Array.of(4), integer(GENERATION, 4), incarnation, wide(identity));
 }
 
 function statusPayload(
@@ -90,6 +90,8 @@ function statusPayload(
     integer(4321, 4),
     integer(1, 4),
     new Uint8Array(16).fill(0xc3),
+    integer(80, 2),
+    integer(24, 2),
     tail
   );
 }
@@ -388,7 +390,6 @@ class ExpiringLeaseHolder {
               ? [new TextEncoder().encode('a'), new TextEncoder().encode('b')]
               : [new TextEncoder().encode('r')];
           const frames = [
-            codec.encode(GENERATION, MoorKind.TERMINAL_STATE, integer(0, 2)),
             codec.encode(
               GENERATION,
               MoorKind.ATTACH_ACK,
@@ -403,6 +404,7 @@ class ExpiringLeaseHolder {
                 }
               )
             ),
+            codec.encode(GENERATION, MoorKind.TERMINAL_STATE, integer(0, 2)),
             ...(message.payload[4]! & 1
               ? [codec.encode(GENERATION, MoorKind.LEASE_RESULT, leaseGrantPayload())]
               : []),
@@ -422,7 +424,6 @@ class ExpiringLeaseHolder {
           }
           return;
         }
-        this.send(socket, codec, MoorKind.TERMINAL_STATE, integer(0, 2));
         this.send(
           socket,
           codec,
@@ -437,6 +438,7 @@ class ExpiringLeaseHolder {
               : undefined
           )
         );
+        this.send(socket, codec, MoorKind.TERMINAL_STATE, integer(0, 2));
         if ((message.payload[4]! & 1) === 1) {
           this.send(socket, codec, MoorKind.LEASE_RESULT, leaseGrantPayload());
         }
@@ -1145,7 +1147,7 @@ describe('SessionManager controller-link recovery', () => {
           ts: Date.now() / 1_000,
           type: 'exit',
           code: 0,
-          outcome: { kind: 'exited', code: 0 },
+          outcome: { kind: 'exited', code: 0, method: 'none' },
           outputEnd: 1n
         })
       ).toMatchObject({ ok: true, authority: { kind: 'applied' } });
@@ -1588,7 +1590,7 @@ describe('SessionManager controller-link recovery', () => {
           ts: Date.now() / 1_000,
           type: 'exit',
           code: 0,
-          outcome: { kind: 'exited', code: 0 },
+          outcome: { kind: 'exited', code: 0, method: 'none' },
           outputEnd: 1n
         })
       ).toMatchObject({ ok: true, authority: { kind: 'applied' } });

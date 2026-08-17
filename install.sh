@@ -123,9 +123,9 @@ detect_target() {
   arch="$(uname -m)"
   case "$os" in
     Darwin) OS_TAG="darwin"; HOST_LIBC="system" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) die "native Windows is unsupported; run Desk from WSL, which is Linux and fully supported." ;;
     Linux) OS_TAG="linux" ;;
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) die "native Windows is unsupported; use Desk from WSL (Linux)." ;;
-    *) die "unsupported operating system: $os (Desk supports macOS and Linux)." ;;
+    *) die "unsupported operating system: $os (Desk supports macOS and Linux, including WSL)." ;;
   esac
   case "$arch" in
     x86_64|amd64) ARCH_TAG="x64" ;;
@@ -314,6 +314,8 @@ probe_host_capabilities() {
   probe_python || MISSING_CAPABILITIES+=("python>=${PYTHON_MIN_VERSION}")
   have make || MISSING_CAPABILITIES+=("make")
   probe_compiler || MISSING_CAPABILITIES+=("working C++ compiler")
+  # Editor search runs on ripgrep alone; without it the server refuses search by name.
+  have rg || MISSING_CAPABILITIES+=("ripgrep")
 }
 
 run_privileged() {
@@ -362,28 +364,28 @@ install_missing_packages() {
   case "$PACKAGE_MANAGER" in
     brew)
       ensure_macos_tooling
-      packages=(git python coreutils gnu-tar)
+      packages=(git python coreutils gnu-tar ripgrep)
       brew install "${packages[@]}"
       ;;
     apt-get)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make g++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make g++ ripgrep)
       run_privileged apt-get update
       run_privileged apt-get install -y "${packages[@]}"
       ;;
     dnf|yum)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc-c++ ripgrep)
       run_privileged "$PACKAGE_MANAGER" install -y "${packages[@]}"
       ;;
     pacman)
-      packages=(ca-certificates curl tar gzip coreutils git python make gcc)
+      packages=(ca-certificates curl tar gzip coreutils git python make gcc ripgrep)
       run_privileged pacman -Sy --needed --noconfirm "${packages[@]}"
       ;;
     zypper)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make gcc gcc-c++ ripgrep)
       run_privileged zypper --non-interactive install "${packages[@]}"
       ;;
     apk)
-      packages=(ca-certificates curl tar gzip coreutils git python3 make build-base)
+      packages=(ca-certificates curl tar gzip coreutils git python3 make build-base ripgrep)
       run_privileged apk add "${packages[@]}"
       ;;
     *) die "unsupported package manager: $PACKAGE_MANAGER" ;;
@@ -606,7 +608,7 @@ exact(data["moor"], ["schemaVersion","repository","version","commit","coverage",
 if data["node"]["version"]!="22.23.1" or data["node"]["npmVersion"]!="10.9.8": raise SystemExit("unexpected Node/npm pin")
 if data["bun"]["version"]!="1.3.14" or data["bun"]["tag"]!="bun-v1.3.14": raise SystemExit("unexpected Bun pin")
 moor=data["moor"]
-if moor["schemaVersion"] != 2 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
+if moor["schemaVersion"] != 3 or moor["repository"] != expected_repository or moor["version"] != expected_moor_version:
     raise SystemExit("unexpected Moor release identity")
 # desk#60: the installer serves END USERS, who cannot weigh which release lanes
 # went unverified. It therefore has no approval switch at all and refuses any
@@ -617,8 +619,8 @@ coverage=moor["coverage"]
 if not isinstance(coverage, dict) or "requiredClosure" not in coverage:
     raise SystemExit("Moor pin states no release coverage")
 # The closure is judged BEFORE the key set: a narrowed pin legitimately carries
-# an extra `unverified` list, and complaining about its shape would hide the
-# real reason it is refused.
+# additional fields, and complaining about their shape would hide the real
+# reason the candidate is refused.
 if coverage["requiredClosure"] != "full-matrix":
     raise SystemExit("Moor release closure is not full-matrix: this candidate was not verified on the whole release matrix")
 exact(coverage, ["requiredClosure"], "Moor pin coverage")
@@ -646,8 +648,6 @@ moor_assets={
     "aarch64-unknown-linux-musl":"moor-0.1.0-linux-arm64",
     "x86_64-apple-darwin":"moor-0.1.0-macos-x64",
     "aarch64-apple-darwin":"moor-0.1.0-macos-arm64",
-    "x86_64-pc-windows-msvc":"moor-0.1.0-windows-x64.exe",
-    "aarch64-pc-windows-msvc":"moor-0.1.0-windows-arm64.exe",
 }
 if set(moor["targets"]) != set(moor_assets): raise SystemExit("invalid Moor target set")
 for name, expected_asset in moor_assets.items():

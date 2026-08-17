@@ -1071,13 +1071,11 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
           const outcomeMatches =
             (evidence.outcome.ended === 'exited' &&
               event.outcome.kind === 'exited' &&
-              evidence.outcome.code === event.outcome.code) ||
+              evidence.outcome.code === event.outcome.code &&
+              evidence.outcome.method === event.outcome.method) ||
             (evidence.outcome.ended === 'signalled' &&
               event.outcome.kind === 'signalled' &&
-              evidence.outcome.signal === event.outcome.signal) ||
-            (evidence.outcome.ended === 'terminated' &&
-              event.outcome.kind === 'terminated' &&
-              evidence.outcome.code === event.outcome.code &&
+              evidence.outcome.signal === event.outcome.signal &&
               evidence.outcome.method === event.outcome.method);
           if (!outcomeMatches) {
             throw new Error(`lifecycle/event exit mismatch for generation ${generation}`);

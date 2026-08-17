@@ -1,5 +1,5 @@
 import type { MoorMessage } from './codec.js';
-import { MOOR_MAX_MESSAGE_PAYLOAD, MoorWireError } from './schema.js';
+import { MOOR_MAX_MESSAGE_PAYLOAD, MOOR_VERSION, MoorWireError } from './schema.js';
 
 export const MoorKind = {
   HELLO: 1,
@@ -36,14 +36,16 @@ export const MoorKind = {
  * told anything. Exactly one zero is HALF_SPECIFIED_GEOMETRY and changes
  * nothing. This is the encoding a controller uses when it does not know the
  * session's size, which is precisely the position a daemon is in when it
- * re-adopts a holder that outlived it: the status descriptor (§5) carries no
- * rows/cols, so there is nothing to read and nothing honest to send.
+ * re-adopts a holder that outlived it. The v4 status descriptor reports the
+ * holder's retained geometry; preserve-both avoids replacing that holder truth.
  */
 export const MOOR_PRESERVE_GEOMETRY: { readonly rows: 0; readonly cols: 0 } =
   Object.freeze({ rows: 0, cols: 0 } as const);
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const WIDE_MAX = 1 << 20;
+const GEOMETRY_LIMIT = 0x7fff;
+const GEOMETRY_CELLS = 2_000_000;
 const ZERO_16 = new Uint8Array(16);
 
 export type MoorControllerRequest =
@@ -53,6 +55,7 @@ export type MoorControllerRequest =
       readonly columns: number;
       readonly rows: number;
       readonly requestLease: boolean;
+      readonly resumedLease?: boolean;
       readonly nonVt: boolean;
     }
   | { readonly type: 'output-ack'; readonly sequence: bigint }
@@ -131,6 +134,8 @@ export interface MoorStatus {
   readonly pid: number;
   readonly containment: number;
   readonly birthToken: Uint8Array;
+  readonly columns: number;
+  readonly rows: number;
   readonly replay: {
     readonly first: bigint;
     readonly last: bigint;
@@ -217,8 +222,18 @@ export function encodeMoorControllerRequest(
 ): EncodedMoorControllerRequest {
   switch (request.type) {
     case 'hello':
-      return frame(MoorKind.HELLO, join(ascii('MOOR'), Uint8Array.of(3, 0, 0), wide(request.identity)));
+      return frame(
+        MoorKind.HELLO,
+        join(ascii('MOOR'), Uint8Array.of(MOOR_VERSION, 0, 0), wide(request.identity))
+      );
     case 'attach': {
+      const preserveGeometry = request.columns === 0 && request.rows === 0;
+      if (
+        !validMoorGeometry(request.columns, request.rows, true) ||
+        (!preserveGeometry && !request.requestLease && request.resumedLease !== true)
+      ) {
+        malformed('invalid attach geometry');
+      }
       const flags = Number(request.requestLease) | (Number(request.nonVt) << 1);
       return frame(
         MoorKind.ATTACH,
@@ -246,6 +261,9 @@ export function encodeMoorControllerRequest(
       );
     }
     case 'resize':
+      if (!validMoorGeometry(request.columns, request.rows, true)) {
+        malformed('invalid resize geometry');
+      }
       return frame(
         MoorKind.RESIZE,
         join(u32(request.epoch), u16(request.columns), u16(request.rows))
@@ -413,7 +431,7 @@ function decodeHelloAck(
   const identity = input.wide();
   input.end();
   if (
-    accepted !== 3 ||
+    accepted !== MOOR_VERSION ||
     generation === 0 ||
     message.scope !== generation ||
     !equal(identity, context.identity) ||
@@ -445,6 +463,8 @@ function decodeStatus(payload: Uint8Array, context: MoorHolderDecodeContext): Mo
   const pid = input.u32();
   const containment = input.u32();
   const birthToken = input.identifier(16);
+  const columns = input.u16();
+  const rows = input.u16();
   const tail = input.exact(69);
   input.end();
 
@@ -461,12 +481,14 @@ function decodeStatus(payload: Uint8Array, context: MoorHolderDecodeContext): Mo
     generation === 0 ||
     generation !== context.generation ||
     !equal(incarnation, context.incarnation) ||
-    layout > 2 ||
+    (layout !== 0 && layout !== 2) ||
     (eventIdentity.length === 0) !== (layout === 0) ||
     !commitValid ||
     directory.length === 0 ||
     pid === 0 ||
-    containment === 0
+    containment === 0 ||
+    columns === 0 ||
+    !validMoorGeometry(columns, rows, false)
   ) {
     malformed('invalid status descriptor');
   }
@@ -524,6 +546,8 @@ function decodeStatus(payload: Uint8Array, context: MoorHolderDecodeContext): Mo
     pid,
     containment,
     birthToken,
+    columns,
+    rows,
     replay: {
       first,
       last,
@@ -708,6 +732,18 @@ function malformed(message: string): never {
 function numberInRange(value: number, max: number, label: string): number {
   if (!Number.isInteger(value) || value < 0 || value > max) malformed(`${label} is out of range`);
   return value;
+}
+
+function validMoorGeometry(columns: number, rows: number, preserveBoth: boolean): boolean {
+  if (!Number.isInteger(columns) || !Number.isInteger(rows)) return false;
+  if (columns === 0 && rows === 0) return preserveBoth;
+  return (
+    columns > 0 &&
+    rows > 0 &&
+    columns <= GEOMETRY_LIMIT &&
+    rows <= GEOMETRY_LIMIT &&
+    columns * rows <= GEOMETRY_CELLS
+  );
 }
 
 function u16(value: number): Uint8Array {

@@ -4,6 +4,7 @@ import { binaryTerminalBroker } from './binaryTerminalBrokerClient.js';
 import { ReplySuppressionAddon } from './replySuppressionAddon.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
 import { describeBpError } from './terminalBpError.js';
+import { describeSessionExit } from './terminalExitLine.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -874,9 +875,10 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // Repair the PTY size once if the settled cell differs from the daemon.
         stabilize();
       },
-      onExit: (code, signal) => {
-        const how = signal ? `signal ${signal}` : `code ${code}`;
-        terminal.writeln(`\r\n\x1b[33m[session exited ${how}]\x1b[0m`);
+      onExit: (outcome) => {
+        // The tagged ending as moor reported it: exited N, signalled N, or
+        // unknown -- the word, never a fabricated code 0.
+        terminal.writeln(`\r\n\x1b[33m${describeSessionExit(outcome)}\x1b[0m`);
       },
       onError: (code) => {
         terminal.writeln(`\r\n\x1b[31m${describeBpError(code)}\x1b[0m`);
@@ -1091,8 +1093,8 @@ function supportsWebgl2(): boolean {
 
 /**
  * True only for HARDWARE-accelerated WebGL2. Software GL (SwiftShader, llvmpipe,
- * Mesa software, Microsoft Basic Render) is common on WSL2, remote desktops and
- * GPU-less VMs, and there xterm's WebGL renderer is SLOWER to create and run
+ * Mesa software) is common on WSL2, remote desktops and GPU-less VMs, and there
+ * xterm's WebGL renderer is SLOWER to create and run
  * than its DOM renderer — WebGL context creation alone was measured at hundreds
  * of ms to seconds per group switch under SwiftShader, versus ~50-100ms for the
  * DOM renderer. On those machines we stay on the DOM renderer so switches paint
@@ -1108,7 +1110,7 @@ function detectAcceleratedWebgl2(): boolean {
   const renderer = debugInfo
     ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) ?? '')
     : '';
-  if (/swiftshader|llvmpipe|softpipe|software|basic render|microsoft basic/i.test(renderer)) {
+  if (/swiftshader|llvmpipe|softpipe|software/i.test(renderer)) {
     return false;
   }
   return true;

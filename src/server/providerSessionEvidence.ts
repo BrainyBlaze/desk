@@ -39,6 +39,8 @@ export interface ProviderSessionEvidenceTestOptions {
     entry: Dirent | null
   ) => void | Promise<void>;
   directoryDescriptorPath?: (descriptor: number) => string;
+  /** Platform override for descriptor-alias traversal selection (default process.platform). */
+  platform?: NodeJS.Platform;
   readChunk?: (
     handle: FileHandle,
     buffer: Buffer,
@@ -96,6 +98,7 @@ interface ValidatedDirectoryPath {
 interface TrustedDirectory extends ValidatedDirectoryPath {
   readonly sourcePath: string;
   readonly descriptorPath: string;
+  readonly traversalPath: string;
   readonly handle: FileHandle;
 }
 
@@ -196,7 +199,7 @@ async function boundedDirectoryEntries(
   let directory: Dir;
   try {
     if (!(await revalidateTrustedDirectory(directoryPath))) return unsafeEvidenceFile();
-    directory = await opendir(directoryPath.descriptorPath);
+    directory = await opendir(directoryPath.traversalPath);
     if (!(await revalidateTrustedDirectory(directoryPath))) {
       await directory.close().catch(() => undefined);
       return unsafeEvidenceFile();
@@ -242,7 +245,7 @@ async function numericDirectories(
     let sourceMetadata: BigIntStats;
     try {
       if (!(await revalidateTrustedDirectory(directory))) return unsafeEvidenceFile();
-      sourceMetadata = await lstat(join(directory.descriptorPath, entry.name), {
+      sourceMetadata = await lstat(join(directory.traversalPath, entry.name), {
         bigint: true
       });
       if (!(await revalidateTrustedDirectory(directory))) return unsafeEvidenceFile();
@@ -343,6 +346,26 @@ function sameDirectory(pathMetadata: BigIntStats, currentMetadata: BigIntStats):
     pathMetadata.size === currentMetadata.size &&
     pathMetadata.mtimeNs === currentMetadata.mtimeNs &&
     pathMetadata.ctimeNs === currentMetadata.ctimeNs
+  );
+}
+
+// Capability identity of a directory: still a directory and the same inode
+// (dev+ino). This deliberately omits sameDirectory's size/mtime/ctime snapshot.
+// It answers "is this the same directory?", not "has the directory changed?",
+// and is used only to re-confirm a descriptor alias reopened by fd: such an
+// alias names the same inode yet, through the macOS fdesc reopen path, an fstat
+// legitimately reports different directory size/time fields than the path-based
+// snapshot captured at validation. Snapshot equality stays on the source and
+// handle checks, which must detect any mutation.
+function sameDirectoryIdentity(
+  pathMetadata: BigIntStats,
+  currentMetadata: BigIntStats
+): boolean {
+  return (
+    pathMetadata.isDirectory() &&
+    currentMetadata.isDirectory() &&
+    pathMetadata.dev === currentMetadata.dev &&
+    pathMetadata.ino === currentMetadata.ino
   );
 }
 
@@ -478,18 +501,59 @@ async function revalidateDirectorySource(
   }
 }
 
+// Proves a descriptor alias (for example /dev/fd/N) still names the expected
+// directory by CAPABILITY rather than by path: re-open it read-only and require
+// the same dev+ino identity as the trusted directory. A realpath comparison
+// only works where the alias is a magic symlink (Linux /proc and /dev/fd);
+// macOS /dev/fd is an fdesc node whose realpath returns the alias itself, so a
+// path comparison there could never hold and silently degraded every provider
+// directory to untrusted. Opening the alias and fstat-ing it works on both
+// platforms and is fail-closed: any open/stat failure or a dev+ino mismatch
+// (a bad or swapped alias) yields false. Identity is dev+ino only, via
+// sameDirectoryIdentity -- never the size/mtime snapshot, which an fd-reopened
+// alias legitimately reports differently on macOS fdesc.
+async function descriptorAliasHasDirectoryIdentity(
+  descriptorPath: string,
+  expected: BigIntStats
+): Promise<boolean> {
+  let probe: FileHandle | undefined;
+  try {
+    probe = await open(descriptorPath, constants.O_RDONLY);
+    return sameDirectoryIdentity(expected, await probe.stat({ bigint: true }));
+  } catch {
+    return false;
+  } finally {
+    await probe?.close().catch(() => undefined);
+  }
+}
+
+// Selects the path used to *traverse* a pinned trusted directory (its opendir
+// and every child lstat/open). On Linux the descriptor alias (/dev/fd/N, itself
+// a symlink to /proc/self/fd/N) resolves child names relative to the opened
+// inode -- openat(2) semantics with no fd-relative Node API. On macOS /dev/fd is
+// an fdesc device node: the alias reopens to the directory for the fstat
+// identity probe above, but it cannot be traversed -- opendir(alias) and
+// lstat(alias + '/child') fail ENOTDIR, and Node exposes no openat. Darwin
+// therefore traverses the real validated path, whose identity every operation
+// already brackets with a full revalidation before and after (the same TOCTOU
+// posture openBoundParent uses in moorGenerationStores). Linux keeps the pinned
+// alias, so its reviewed behavior is unchanged.
+function directoryTraversalBasePath(
+  descriptorPath: string,
+  realPath: string,
+  platform: NodeJS.Platform
+): string {
+  return platform === 'darwin' ? realPath : descriptorPath;
+}
+
 async function revalidateTrustedDirectory(directory: TrustedDirectory): Promise<boolean> {
   try {
-    const [reachable, openedMetadata, canonicalDescriptor] = await Promise.all([
+    const [reachable, openedMetadata, descriptorHasIdentity] = await Promise.all([
       revalidateDirectorySource(directory, directory.sourcePath),
       directory.handle.stat({ bigint: true }),
-      realpath(directory.descriptorPath)
+      descriptorAliasHasDirectoryIdentity(directory.descriptorPath, directory.directoryMetadata)
     ]);
-    return (
-      reachable &&
-      sameDirectory(directory.directoryMetadata, openedMetadata) &&
-      canonicalDescriptor === directory.canonicalPath
-    );
+    return reachable && sameDirectory(directory.directoryMetadata, openedMetadata) && descriptorHasIdentity;
   } catch {
     return false;
   }
@@ -501,7 +565,7 @@ async function observeChildDirectory(
 ): Promise<ValidatedDirectoryPath | undefined> {
   if (!(await revalidateTrustedDirectory(parent))) return undefined;
   const path = join(parent.path, name);
-  const sourcePath = join(parent.descriptorPath, name);
+  const sourcePath = join(parent.traversalPath, name);
   const observed = await validateDirectoryPath(parent.rootPath, path);
   if (observed === undefined) return undefined;
   if (!(await revalidateDirectorySource(observed, sourcePath))) return undefined;
@@ -547,13 +611,21 @@ async function openTrustedDirectory(
   try {
     const openedMetadata = await handle.stat({ bigint: true });
     if (!sameDirectory(expected.directoryMetadata, openedMetadata)) return undefined;
+    const platform = testOptions.platform ?? process.platform;
     const descriptorPath =
       testOptions.directoryDescriptorPath?.(handle.fd) ?? `/dev/fd/${handle.fd}`;
-    if ((await realpath(descriptorPath)) !== expected.canonicalPath) return undefined;
+    // Re-confirm the descriptor alias by capability (dev+ino), cross-platform
+    // and fail-closed -- see descriptorAliasHasDirectoryIdentity. The same
+    // invariant is re-checked by revalidateTrustedDirectory below and on every
+    // later revalidation, so trust never rests on a Linux-only realpath.
+    if (!(await descriptorAliasHasDirectoryIdentity(descriptorPath, expected.directoryMetadata))) {
+      return undefined;
+    }
     const trusted: TrustedDirectory = {
       ...expected,
       sourcePath,
       descriptorPath,
+      traversalPath: directoryTraversalBasePath(descriptorPath, expected.path, platform),
       handle
     };
     await testOptions.afterDirectoryOpen?.(expected.path);
@@ -660,7 +732,7 @@ async function openExactChildDirectory(
   name: string,
   testOptions: ProviderSessionEvidenceTestOptions
 ): Promise<TrustedDirectoryLookupResult> {
-  const sourcePath = join(parent.descriptorPath, name);
+  const sourcePath = join(parent.traversalPath, name);
   let sourceMetadata: BigIntStats;
   try {
     if (!(await revalidateTrustedDirectory(parent))) return unsafeEvidenceFile();
@@ -837,7 +909,7 @@ async function lookupEvidenceCandidate(
   missingIsNotFound: boolean
 ): Promise<EvidenceCandidateLookupResult> {
   const path = join(parent.path, name);
-  const sourcePath = join(parent.descriptorPath, name);
+  const sourcePath = join(parent.traversalPath, name);
   let sourceMetadata: BigIntStats;
   try {
     if (!(await revalidateTrustedDirectory(parent))) return unsafeEvidenceFile();
@@ -1110,7 +1182,7 @@ async function scanCodexHierarchy(
       const childName = basename(childPath.path);
       const child = await openTrustedDirectory(
         childPath,
-        join(directory.descriptorPath, childName),
+        join(directory.traversalPath, childName),
         testOptions
       );
       if (child === undefined) return unsafeEvidenceFile();

@@ -23,7 +23,7 @@ describe('Moor controller wire schema', () => {
 
   it('exports the frozen controller profile constants', () => {
     expect(Buffer.from(MOOR_MAGIC).toString('ascii')).toBe('MOOR');
-    expect(MOOR_VERSION).toBe(3);
+    expect(MOOR_VERSION).toBe(4);
     expect(MOOR_HEADER_SIZE).toBe(24);
     expect(MOOR_MAX_FRAME_PAYLOAD).toBe(1 << 20);
     expect(MOOR_MAX_MESSAGE_PAYLOAD).toBe(16 << 20);
@@ -108,7 +108,7 @@ describe('Moor controller frame encoder', () => {
 
     expect(header).toEqual({
       magic: 'MOOR',
-      version: 3,
+      version: 4,
       kind: 1,
       more: 0,
       reserved: 0,
@@ -281,7 +281,7 @@ describe('Moor controller streaming decoder', () => {
 
   it.each([
     ['bad magic', rawFrame({ magic: Uint8Array.of(0, 0, 0, 0) }), 'MALFORMED'],
-    ['bad version', rawFrame({ version: 4 }), 'UNKNOWN_VERSION'],
+    ['retired v3 version', rawFrame({ version: 3 }), 'UNKNOWN_VERSION'],
     ['bad reserved byte', rawFrame({ reserved: 1 }), 'MALFORMED'],
     ['bad MORE byte', rawFrame({ more: 2 }), 'MALFORMED'],
     ['zero scope outside HELLO', rawFrame({ scope: 0, kind: 2 }), 'GENERATION_MISMATCH'],

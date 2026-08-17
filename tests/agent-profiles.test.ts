@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSessionSpecs, parseDeskManifest, parseLegacyDeskManifest } from '../src/core/manifest.js';
-import { applyMigratedSessionIds, deskManifestToEntries } from '../src/core/sessionIdentity.js';
-import { migrateManifestSessions } from '../src/shared/migration/index.js';
+import { buildSessionSpecs, parseDeskManifest } from '../src/core/manifest.js';
 import { rewriteNativeLaunchCommand } from '../src/server/agentHostLaunch.js';
 import { readDeskSessionBody } from '../src/server/routes/sessionsRoutes.js';
 import { shouldRespawnAfterEdit } from '../src/server/editRespawn.js';
@@ -318,42 +316,3 @@ describe('profile id minting', () => {
     expect(isValidProfileId(mintProfileId('123', new Set()))).toBe(true);
   });
 });
-
-describe('profiles survive the identity migration (regression: silent data loss)', () => {
-  it('carries top-level profiles through applyMigratedSessionIds byte-for-byte', () => {
-    const legacy = parseLegacyDeskManifest(
-      [
-        'profiles:',
-        '  - id: work',
-        '    provider: claude',
-        '    label: Work account',
-        '  - id: personal',
-        '    provider: codex',
-        '    label: Personal',
-        'groups:',
-        '  - id: main',
-        '    sessions:',
-        '      - name: chat',
-        '        agent: claude',
-        '        cwd: ~/p'
-      ].join('\n')
-    );
-    expect(legacy.profiles).toHaveLength(2);
-
-    const migration = migrateManifestSessions(deskManifestToEntries(legacy));
-    const migrated = applyMigratedSessionIds(legacy, migration);
-
-    // the whole point: the migration REPLACES the manifest, so an omitted
-    // top-level key is silent data loss on the very next write
-    expect(migrated.profiles).toEqual(legacy.profiles);
-    expect(migrated.groups[0].sessions[0].sessionId).toBeTruthy();
-  });
-
-  it('keeps a profile-free manifest profile-free (no empty key invented)', () => {
-    const legacy = parseLegacyDeskManifest(
-      ['groups:', '  - id: main', '    sessions:', '      - name: chat', '        agent: claude', '        cwd: ~/p'].join('\n')
-    );
-    const migrated = applyMigratedSessionIds(legacy, migrateManifestSessions(deskManifestToEntries(legacy)));
-    expect('profiles' in migrated).toBe(false);
-  });
-})

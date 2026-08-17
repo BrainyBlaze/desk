@@ -36,6 +36,9 @@ jobs:
         with:
           node-version: 22.23.1
           cache: npm
+      # The installer probes for ripgrep like any other host capability, and
+      # the fixture-driven lifecycle tests run it against this runner's PATH.
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci
       - name: Verify installer and release behavior with local Moor fixtures
         run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts
@@ -61,14 +64,12 @@ jobs:
             'x86_64-unknown-linux-musl': 'moor-0.1.0-linux-x64',
             'aarch64-unknown-linux-musl': 'moor-0.1.0-linux-arm64',
             'x86_64-apple-darwin': 'moor-0.1.0-macos-x64',
-            'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64',
-            'x86_64-pc-windows-msvc': 'moor-0.1.0-windows-x64.exe',
-            'aarch64-pc-windows-msvc': 'moor-0.1.0-windows-arm64.exe'
+            'aarch64-apple-darwin': 'moor-0.1.0-macos-arm64'
           };
           const bytes = Buffer.from('installer-negative-fixture\n');
           const sha256 = createHash('sha256').update(bytes).digest('hex');
           const pin = {
-            schemaVersion: 2,
+            schemaVersion: 3,
             repository: 'https://github.com/BrainyBlaze/moor',
             version: 'v0.1.0',
             commit: 'b'.repeat(40),
@@ -105,7 +106,7 @@ jobs:
             -v "$RUNNER_TEMP/installer-release:/release:ro" \
             -e DESK_VERSION="${{ steps.fixver.outputs.value }}" \
             "${{ matrix.image }}" \
-            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; git --version; python3 --version || python --version; make --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
+            /bin/sh -c '${{ matrix.bootstrap }} && mkdir -p /tmp/bin /tmp/user && PATH="/tmp/bin:$PATH" HOME=/tmp/user DESK_HOME=/tmp/desk DESK_BIN_DIR=/tmp/bin DESK_RELEASE_BASE_URL=file:///release bash /src/install.sh > /tmp/out 2> /tmp/err; status=$?; cat /tmp/out /tmp/err; test "$status" -ne 0; git --version; python3 --version || python --version; make --version; rg --version; if [ "${{ matrix.name }}" = alpine ]; then grep -qi "unsupported libc" /tmp/err; else grep -qi "pinned.*toolchain\|checksum" /tmp/err; fi'
 
   macos:
     strategy:
@@ -123,8 +124,10 @@ jobs:
         with:
           node-version: 22.23.1
           cache: npm
+      # Same reason as the Linux lane: the lifecycle tests probe this host for rg.
+      - run: brew install ripgrep
       - run: npm ci
       - name: Verify installer and release behavior with local Moor fixtures
         # The slower Intel runner can exceed Vitest 3's fork-RPC deadline even
         # after every assertion passes. Threads preserve the same test coverage.
-        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts --pool=threads
+        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts --pool=threads --testTimeout=20000

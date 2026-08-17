@@ -1,5 +1,5 @@
 // Daemon-side MOOR controller client — a one-shot connection/handshake state
-// machine over the frozen moor wire v3 (spec/moor-wire-schema.md).
+// machine over the frozen moor wire v4 (spec/moor-wire-schema.md).
 //
 // Frozen contract this file enforces:
 // - §3 identity exchange: supervised HELLO at the ledger-allocated generation
@@ -7,23 +7,24 @@
 //   incarnation. Scope 0 (discovery) is never emitted here.
 // - §4.5/§6 recovery order: HELLO → viewer LEASE_REQUEST(resume) while
 //   unattached → rotated token → ATTACH without the fresh bit → ordinary
-//   terminal preamble/replay. Fresh attach remains TERMINAL_STATE (exactly
-//   once, before ATTACH_ACK) → ATTACH_ACK → optional LEASE_RESULT → replay.
+//   terminal preamble/replay. Fresh attach remains ATTACH_ACK → TERMINAL_STATE
+//   (exactly once) → optional LEASE_RESULT → replay.
 //   A missing/second preamble, changed recovery incarnation, or retained GAP
 //   crossing the delivered cursor fails this connection closed.
 // - Deadline table: identity exchange and adoption must complete within 2 s or
 //   the connection closes.
 // - §1.2 canonical session identity is an INPUT, distinct from the transport
-//   endpoint: tag 01 = lexically resolved absolute POSIX socket path bytes;
-//   tag 02 = Windows volume serial + FILE_ID_INFO.FileId (25 bytes). This
-//   constructor validates the POSIX derivation and requires explicit injection
-//   where derivation would be a guess (Windows, noncanonical paths).
+//   endpoint: tag 01 = lexically resolved absolute POSIX socket path bytes.
 // - Unified close: any teardown (local close, holder close, wire violation,
 //   deadline) rejects pending work and makes every later write throw.
 
 import { connect, type Socket } from 'node:net';
 import { MoorCodec } from '../../shared/moorWire/codec.js';
 import { MoorWireError } from '../../shared/moorWire/schema.js';
+import {
+  rendezvousPathWithinCapacity,
+  unixSocketPathCapacity
+} from '../../shared/moorPaths.js';
 import {
   decodeMoorHolderMessage,
   encodeMoorSupervisedRequest,
@@ -89,8 +90,7 @@ export interface MoorMasterClientOptions {
   /**
    * Canonical session identity (§1.2), injected from the authoritative
    * adoption path. When omitted, the transport path is validated as a
-   * lexically resolved absolute POSIX path and used as the tag-01 identity;
-   * anything else (Windows, relative, unresolved) must be injected.
+   * lexically resolved absolute POSIX path and used as the tag-01 identity.
    */
   identity?: Uint8Array;
   /** Identity-exchange + adoption deadline (spec table: 2 s). */
@@ -129,6 +129,24 @@ export class MoorIdentityError extends Error {
   }
 }
 
+// A rendezvous whose absolute path exceeds the platform sun_path capacity is
+// unreachable by this node:net client: libuv truncates the address, so a
+// connect would target a spelling no holder bound and fail ENOENT. The code is
+// deliberately NOT 'ENOENT'/'ECONNREFUSED', so callers that read those as
+// POSITIVE absence classify this as indeterminate instead (moor spec 2.2 lets a
+// holder bind such a path relative to its parent; only the absolute client is
+// bounded).
+export class MoorRendezvousCapacityError extends Error {
+  readonly code = 'RENDEZVOUS_UNADDRESSABLE';
+  constructor(sockPath: string) {
+    super(
+      `RENDEZVOUS_UNADDRESSABLE: ${Buffer.byteLength(sockPath, 'utf8')} bytes exceeds the ` +
+        `${unixSocketPathCapacity()}-byte Unix-domain sun_path ceiling`
+    );
+    this.name = 'MoorRendezvousCapacityError';
+  }
+}
+
 function assertResolvedPosixPath(path: string): void {
   if (!path.startsWith('/')) {
     throw new MoorIdentityError('POSIX session identity requires an absolute path');
@@ -152,28 +170,14 @@ export function posixMoorIdentity(path: string): Uint8Array {
   return identity;
 }
 
-/** Tag-02 identity: Windows volume serial + FILE_ID_INFO.FileId (§1.2, 25 bytes). */
-export function windowsMoorIdentity(volumeSerial: bigint, fileId: Uint8Array): Uint8Array {
-  if (fileId.length !== 16) {
-    throw new MoorIdentityError('Windows session identity requires the exact 16-byte FileId');
-  }
-  const identity = new Uint8Array(25);
-  identity[0] = 2;
-  new DataView(identity.buffer).setBigUint64(1, volumeSerial, true);
-  identity.set(fileId, 9);
-  return identity;
-}
-
 function validateIdentity(identity: Uint8Array): Uint8Array {
   // An injected tag-01 identity carries the SAME lexical contract as a derived
   // one (§1.2: absolute bytes after `.`/`..` resolution) — tag/length checks
   // alone would accept a noncanonical path the holder will refuse.
   if (identity[0] === 1 && identity.length >= 2) {
     assertResolvedPosixPath(Buffer.from(identity.subarray(1)).toString());
-  } else if (identity[0] !== 2 || identity.length !== 25) {
-    throw new MoorIdentityError(
-      'canonical session identity must be tag 01 (absolute POSIX path) or tag 02 (25 bytes)'
-    );
+  } else {
+    throw new MoorIdentityError('canonical session identity must be tag 01 (absolute POSIX path)');
   }
   return identity.slice(); // defensive copy: the caller must not mutate it later
 }
@@ -192,7 +196,7 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 /**
  * Connection phases, strictly forward:
- * created → connecting → connected → hello-sent → adopted → preamble →
+ * created → connecting → connected → hello-sent → adopted → status-prefix → preamble →
  * (lease-pending when the attach requested a fresh viewer lease) → attached,
  * with `closed` reachable (terminally) from every phase. `lease-pending`
  * models the §6 prefix position where ONLY the requested LEASE_RESULT may
@@ -205,6 +209,7 @@ type Phase =
   | 'hello-sent'
   | 'resume-pending'
   | 'adopted'
+  | 'status-prefix'
   | 'preamble'
   | 'lease-pending'
   | 'attached'
@@ -312,15 +317,7 @@ export class MoorMasterClient {
       );
     }
     this.identity =
-      options.identity !== undefined
-        ? validateIdentity(options.identity)
-        : process.platform === 'win32'
-          ? (() => {
-              throw new MoorIdentityError(
-                'Windows requires an injected tag-02 identity from the verified marker'
-              );
-            })()
-          : posixMoorIdentity(sockPath);
+      options.identity !== undefined ? validateIdentity(options.identity) : posixMoorIdentity(sockPath);
     this.attachDeadlineMs = options.attachDeadlineMs ?? DEFAULT_ATTACH_DEADLINE_MS;
     this.livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
     this.autoAck = options.autoAckOutput ?? false;
@@ -385,9 +382,17 @@ export class MoorMasterClient {
     }
     this.phase = 'connecting';
     return new Promise((resolve, reject) => {
+      this.pendingConnect = { reject };
+      // Refuse before connect when the absolute rendezvous path exceeds the
+      // platform sun_path ceiling: node:net would otherwise truncate it and
+      // connect a spelling no holder bound, surfacing as a false ENOENT that a
+      // caller could read as positive absence. teardown rejects pendingConnect.
+      if (!rendezvousPathWithinCapacity(this.sockPath)) {
+        this.teardown(new MoorRendezvousCapacityError(this.sockPath));
+        return;
+      }
       const sock = connect(this.sockPath);
       this.sock = sock;
-      this.pendingConnect = { reject };
       const onConnectError = (error: Error): void => {
         if (this.phase === 'connecting' && this.sock === sock) this.teardown(error);
       };
@@ -414,7 +419,7 @@ export class MoorMasterClient {
   /**
    * One-shot supervised handshake. HELLO goes out at the generation scope; the
    * HELLO_ACK adopts identity, then ATTACH; the exact §6 prefix
-   * (TERMINAL_STATE → ATTACH_ACK) resolves the promise. One absolute deadline
+   * (ATTACH_ACK → TERMINAL_STATE) resolves the promise. One absolute deadline
    * covers the whole identity exchange and adoption.
    */
   attach(options: MoorAttachOptions): Promise<MoorStatus> {
@@ -1014,17 +1019,22 @@ export class MoorMasterClient {
         return;
       }
       case 'terminal-state': {
-        // §6: exactly once per attaching connection, before ATTACH_ACK.
-        this.requirePhase(decoded.type, this.phase === 'adopted');
+        // §6 v4: exactly once per attaching connection, after ATTACH_ACK.
+        this.requirePhase(decoded.type, this.phase === 'status-prefix');
         this.preambleBytes = decoded.bytes;
         this.phase = 'preamble';
-        return this.h.onTerminalState?.(decoded.bytes);
+        const delivered = this.h.onTerminalState?.(decoded.bytes);
+        if (delivered instanceof Promise) {
+          return delivered.then(() => this.completeTerminalStatePrefix());
+        }
+        this.completeTerminalStatePrefix();
+        return;
       }
       case 'attach-ack': {
-        // §6 order is exact: an ACK without the preceding preamble is refused,
+        // §6 v4 order is exact: the status ACK precedes the terminal-state run,
         // and this viewer attach is fully attached before the ACK is queued —
         // an ACK that does not reflect viewer presence is a contract breach.
-        this.requirePhase(decoded.type, this.phase === 'preamble');
+        this.requirePhase(decoded.type, this.phase === 'adopted');
         if (!decoded.status.viewers) {
           throw new MoorWireError(
             'BAD_SEQUENCE',
@@ -1052,34 +1062,8 @@ export class MoorMasterClient {
           decoded.status.replay.first > 1n
             ? { last: decoded.status.replay.first - 1n }
             : undefined;
-        // A requested fresh viewer lease occupies the next prefix slot; until
-        // its LEASE_RESULT arrives the attach is incomplete: the deadline keeps
-        // running, the promise stays pending, and no replay/live frame may
-        // overtake the slot.
-        if (this.attachLeaseMode === 'fresh') {
-          this.phase = 'lease-pending';
-          this.h.onAttachAck?.(decoded.status);
-          return;
-        }
-        if (this.attachLeaseMode === 'resumed') {
-          if (
-            this.lease === undefined ||
-            !decoded.status.ownsLease ||
-            decoded.status.leaseEpoch !== this.lease.epoch
-          ) {
-            throw new MoorWireError(
-              'BAD_SEQUENCE',
-              'ATTACH_ACK does not preserve the resumed viewer lease'
-            );
-          }
-          this.keepaliveEmitted = false;
-          this.scheduleKeepalive();
-        }
-        this.phase = 'attached';
-        this.live = true; // the authenticated exchange is verified-live evidence
-        this.armLiveness();
+        this.phase = 'status-prefix';
         this.h.onAttachAck?.(decoded.status);
-        this.completeAttachIfReplayDelivered();
         return;
       }
       case 'lease-result': {
@@ -1464,6 +1448,8 @@ export class MoorMasterClient {
         this.requirePhase(
           decoded.type,
           this.phase === 'adopted' ||
+            this.phase === 'resume-pending' ||
+            this.phase === 'status-prefix' ||
             this.phase === 'preamble' ||
             this.phase === 'lease-pending' ||
             this.phase === 'attached'
@@ -1479,6 +1465,33 @@ export class MoorMasterClient {
     }
   }
 
+  private completeTerminalStatePrefix(): void {
+    this.requirePhase('terminal-state', this.phase === 'preamble');
+    const status = this.status!;
+    if (this.attachLeaseMode === 'fresh') {
+      this.phase = 'lease-pending';
+      return;
+    }
+    if (this.attachLeaseMode === 'resumed') {
+      if (
+        this.lease === undefined ||
+        !status.ownsLease ||
+        status.leaseEpoch !== this.lease.epoch
+      ) {
+        throw new MoorWireError(
+          'BAD_SEQUENCE',
+          'ATTACH_ACK does not preserve the resumed viewer lease'
+        );
+      }
+      this.keepaliveEmitted = false;
+      this.scheduleKeepalive();
+    }
+    this.phase = 'attached';
+    this.live = true;
+    this.armLiveness();
+    this.completeAttachIfReplayDelivered();
+  }
+
   private sendAttach(mode: 'fresh' | 'resumed' | 'none'): void {
     const pending = this.pendingAttach;
     if (pending === undefined) {
@@ -1491,6 +1504,7 @@ export class MoorMasterClient {
       columns: pending.options.columns,
       rows: pending.options.rows,
       requestLease: mode === 'fresh',
+      resumedLease: mode === 'resumed',
       nonVt: pending.options.nonVt ?? false
     });
   }

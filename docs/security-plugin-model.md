@@ -62,7 +62,7 @@ Treat uploaded files as untrusted, especially when they were produced by an agen
 The kill switch retires configured sessions and performs a host-wide sweep for
 supported agent processes. It can terminate:
 
-- every atch session in the active manifest
+- every Moor session in the active manifest
 - remaining host `codex` or `claude` processes found by process scan
 
 The process sweep is intentionally broader than the active manifest. Use the

@@ -29,12 +29,15 @@ type StoreSlot = (typeof STORE_SLOTS)[number];
 type CompanionKind = 'exit' | 'log';
 
 export type MoorGenerationExitOutcome =
-  | { readonly ended: 'exited'; readonly code: number }
-  | { readonly ended: 'signalled'; readonly signal: number }
   | {
-      readonly ended: 'terminated';
+      readonly ended: 'exited';
       readonly code: number;
-      readonly method: 'graceful' | 'forced';
+      readonly method: 'none' | 'graceful' | 'forced';
+    }
+  | {
+      readonly ended: 'signalled';
+      readonly signal: number;
+      readonly method: 'none' | 'graceful' | 'forced';
     };
 
 export interface MoorGenerationExitEvidence {
@@ -273,10 +276,12 @@ async function openBoundParent(
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_DIRECTORY ?? 0)
   );
   try {
-    const probe = await open(
-      moorDescriptorDirectoryAlias(handle.fd, platform),
-      constants.O_RDONLY | (constants.O_DIRECTORY ?? 0)
-    );
+    // The alias re-open binds the descriptor to its directory identity through
+    // the stat/identity checks below, not through O_DIRECTORY: on macOS the
+    // /dev/fd/N node is not a directory vnode, so open(2) with O_DIRECTORY
+    // fails ENOTDIR even for a directory descriptor, while a plain open of the
+    // alias yields the same directory. Type and mode are enforced on `probed`.
+    const probe = await open(moorDescriptorDirectoryAlias(handle.fd, platform), constants.O_RDONLY);
     try {
       const [pathNow, opened, probed] = await Promise.all([
         lstat(path, { bigint: true }),
@@ -381,16 +386,14 @@ function decodeExitEvidence(
   }
 
   let outcome: MoorGenerationExitOutcome;
+  const method = value.method;
+  if (method !== 'none' && method !== 'graceful' && method !== 'forced') {
+    throw new Error('Moor lifecycle manifest has invalid exit outcome');
+  }
   if (value.ended === 'exited' && typeof value.code === 'number') {
-    outcome = { ended: 'exited', code: value.code };
+    outcome = { ended: 'exited', code: value.code, method };
   } else if (value.ended === 'signalled' && typeof value.signal === 'number') {
-    outcome = { ended: 'signalled', signal: value.signal };
-  } else if (
-    value.ended === 'terminated' &&
-    typeof value.code === 'number' &&
-    (value.method === 'graceful' || value.method === 'forced')
-  ) {
-    outcome = { ended: 'terminated', code: value.code, method: value.method };
+    outcome = { ended: 'signalled', signal: value.signal, method };
   } else {
     throw new Error('Moor lifecycle manifest has invalid exit outcome');
   }

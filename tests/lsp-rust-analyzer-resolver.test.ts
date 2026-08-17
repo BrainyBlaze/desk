@@ -41,25 +41,6 @@ function gzipAsset(bytes: Buffer): { asset: RustAnalyzerAsset; archive: Buffer }
   };
 }
 
-function zipAsset(name: string, bytes: Buffer, externalAttributes = 0): { asset: RustAnalyzerAsset; archive: Buffer } {
-  const archive = createStoredZip(name, bytes, externalAttributes);
-  return {
-    archive,
-    asset: {
-      key: 'test-win32-x64',
-      platform: 'win32',
-      arch: 'x64',
-      assetName: 'rust-analyzer-test.zip',
-      url: `https://github.com/rust-lang/rust-analyzer/releases/download/${RUST_ANALYZER_RELEASE.tag}/rust-analyzer-test.zip`,
-      sha256: cryptoHash(archive),
-      archiveKind: 'zip',
-      binaryName: 'rust-analyzer.exe',
-      maxDownloadBytes: archive.length + 16,
-      maxDecompressedBytes: bytes.length + 16
-    }
-  };
-}
-
 function cryptoHash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -86,104 +67,7 @@ describe('rust-analyzer built-in resolver metadata', () => {
     expect(resolveRustAnalyzerAsset({ platform: 'sunos', arch: 'x64', libc: 'gnu' })).toBeUndefined();
   });
 
-  it('pins the official Windows zip asset metadata without making PATH a fallback', () => {
-    const asset = resolveRustAnalyzerAsset({ platform: 'win32', arch: 'x64' });
-    expect(asset).toMatchObject({
-      assetName: 'rust-analyzer-x86_64-pc-windows-msvc.zip',
-      archiveKind: 'zip',
-      binaryName: 'rust-analyzer.exe',
-      sha256: '0f82e470220986a6b71202f135fe80233fc3baaffb84900f2f19388ba85cbb41'
-    });
-  });
 });
-
-function createStoredZip(name: string, bytes: Buffer, externalAttributes: number): Buffer {
-  const nameBytes = Buffer.from(name);
-  const local = Buffer.alloc(30 + nameBytes.length + bytes.length);
-  let offset = 0;
-  local.writeUInt32LE(0x04034b50, offset);
-  offset += 4;
-  local.writeUInt16LE(20, offset);
-  offset += 2;
-  local.writeUInt16LE(0, offset);
-  offset += 2;
-  local.writeUInt16LE(0, offset);
-  offset += 2;
-  local.writeUInt16LE(0, offset);
-  offset += 2;
-  local.writeUInt16LE(0, offset);
-  offset += 2;
-  local.writeUInt32LE(0, offset);
-  offset += 4;
-  local.writeUInt32LE(bytes.length, offset);
-  offset += 4;
-  local.writeUInt32LE(bytes.length, offset);
-  offset += 4;
-  local.writeUInt16LE(nameBytes.length, offset);
-  offset += 2;
-  local.writeUInt16LE(0, offset);
-  offset += 2;
-  nameBytes.copy(local, offset);
-  offset += nameBytes.length;
-  bytes.copy(local, offset);
-
-  const central = Buffer.alloc(46 + nameBytes.length);
-  offset = 0;
-  central.writeUInt32LE(0x02014b50, offset);
-  offset += 4;
-  central.writeUInt16LE(20, offset);
-  offset += 2;
-  central.writeUInt16LE(20, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt32LE(0, offset);
-  offset += 4;
-  central.writeUInt32LE(bytes.length, offset);
-  offset += 4;
-  central.writeUInt32LE(bytes.length, offset);
-  offset += 4;
-  central.writeUInt16LE(nameBytes.length, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt16LE(0, offset);
-  offset += 2;
-  central.writeUInt32LE(externalAttributes >>> 0, offset);
-  offset += 4;
-  central.writeUInt32LE(0, offset);
-  offset += 4;
-  nameBytes.copy(central, offset);
-
-  const end = Buffer.alloc(22);
-  offset = 0;
-  end.writeUInt32LE(0x06054b50, offset);
-  offset += 4;
-  end.writeUInt16LE(0, offset);
-  offset += 2;
-  end.writeUInt16LE(0, offset);
-  offset += 2;
-  end.writeUInt16LE(1, offset);
-  offset += 2;
-  end.writeUInt16LE(1, offset);
-  offset += 2;
-  end.writeUInt32LE(central.length, offset);
-  offset += 4;
-  end.writeUInt32LE(local.length, offset);
-  offset += 4;
-  end.writeUInt16LE(0, offset);
-  return Buffer.concat([local, central, end]);
-}
 
 describe('ensureRustAnalyzerBinary', () => {
   it('uses a verified cached binary without downloading', async () => {
@@ -222,11 +106,9 @@ describe('ensureRustAnalyzerBinary', () => {
       }
     });
 
-    expect(downloads).toBe(process.platform === 'win32' ? 0 : 1);
-    if (process.platform !== 'win32') {
-      expect(result.cacheHit).toBe(false);
-      expect(readFileSync(result.path)).toEqual(expectedBinary);
-    }
+    expect(downloads).toBe(1);
+    expect(result.cacheHit).toBe(false);
+    expect(readFileSync(result.path)).toEqual(expectedBinary);
   });
 
   it('downloads, verifies, extracts, chmods, and atomically installs a gzip binary', async () => {
@@ -282,50 +164,6 @@ describe('ensureRustAnalyzerBinary', () => {
       ensureRustAnalyzerBinary({
         cacheRoot: root,
         asset: { ...asset, maxDecompressedBytes: 1 },
-        download: async () => archive
-      })
-    ).rejects.toThrow('rust-analyzer resolver failed');
-
-    expect(existsSync(join(root, RUST_ANALYZER_RELEASE.tag, asset.key, asset.binaryName))).toBe(false);
-  });
-
-  it('extracts exactly the expected binary from a valid zip archive', async () => {
-    const expectedBinary = Buffer.from('MZ-binary');
-    const { asset, archive } = zipAsset('rust-analyzer.exe', expectedBinary);
-
-    const result = await ensureRustAnalyzerBinary({
-      cacheRoot: root,
-      asset,
-      download: async () => archive
-    });
-
-    expect(result.cacheHit).toBe(false);
-    expect(readFileSync(result.path)).toEqual(expectedBinary);
-    expect(result.path.endsWith('rust-analyzer.exe')).toBe(true);
-  });
-
-  it('rejects zip path traversal entries and leaves no final binary', async () => {
-    const { asset, archive } = zipAsset('../rust-analyzer.exe', Buffer.from('binary'));
-
-    await expect(
-      ensureRustAnalyzerBinary({
-        cacheRoot: root,
-        asset,
-        download: async () => archive
-      })
-    ).rejects.toThrow('rust-analyzer resolver failed');
-
-    expect(existsSync(join(root, RUST_ANALYZER_RELEASE.tag, asset.key, asset.binaryName))).toBe(false);
-  });
-
-  it('rejects zip symlink entries and leaves no final binary', async () => {
-    const symlinkFileType = 0o120000 << 16;
-    const { asset, archive } = zipAsset('rust-analyzer.exe', Buffer.from('target'), symlinkFileType);
-
-    await expect(
-      ensureRustAnalyzerBinary({
-        cacheRoot: root,
-        asset,
         download: async () => archive
       })
     ).rejects.toThrow('rust-analyzer resolver failed');

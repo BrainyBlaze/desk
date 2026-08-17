@@ -179,21 +179,6 @@ describe('spawnMoorMaster', () => {
     }
   });
 
-  it('derives the carrier key with EXPLICIT platform semantics, never path-shape guessing', async () => {
-    const windowsPath = 'C:\\Program Files\\Desk\\moor.exe';
-    // win32 semantics: Path::file_name splits both separators.
-    expect(moorGenerationEnvKey(windowsPath, 'win32')).toBe('MOOR_EXE_GENERATION');
-    // POSIX semantics: the same spelling is ONE legal filename.
-    expect(moorGenerationEnvKey(windowsPath, 'linux')).toBe(
-      'C__PROGRAM_FILES_DESK_MOOR_EXE_GENERATION'
-    );
-    // The spawn path uses the host platform (POSIX here): the holder would
-    // derive the full-spelling key, so the carrier must match it exactly.
-    const report = await runProbe(windowsPath, 13);
-    expect(report.environment!['C__PROGRAM_FILES_DESK_MOOR_EXE_GENERATION']).toBe('13');
-    expect(report.environment!['MOOR_EXE_GENERATION']).toBeUndefined();
-  });
-
   it('keeps POSIX basename semantics: a literal backslash is a filename byte, not a separator', async () => {
     const report = await runProbe('/opt/desk/moor\\alias', 17);
     expect(report.environment!['MOOR_ALIAS_GENERATION']).toBe('17');

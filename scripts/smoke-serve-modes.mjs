@@ -782,10 +782,6 @@ async function runSmoke(command, cwd) {
   console.log('smoke: private runtime status 37 propagated and the original artifact was restored');
 }
 
-if (process.platform === 'win32') {
-  throw new Error('smoke:serve-modes supports the macOS/Linux distribution targets only');
-}
-
 const options = parseOptions(process.argv.slice(2));
 validateDeskCommand(options.desk);
 const preparedCwd = prepareWorkingDirectory(options.cwd);

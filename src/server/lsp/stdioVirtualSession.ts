@@ -100,7 +100,7 @@ class StdioVirtualSession implements LspVirtualSession {
       env: { ...process.env, ...(this.options.env ?? {}) },
       stdio: 'pipe',
       shell: false,
-      detached: process.platform !== 'win32'
+      detached: true
     });
     trackActiveStdioChild(this.child);
     this.parser = new LspStdioMessageParser((message) => this.handleMessage(message));
@@ -291,7 +291,7 @@ function isChildRunning(child: ChildProcessWithoutNullStreams): boolean {
 }
 
 function killProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): boolean {
-  if (child.pid !== undefined && process.platform !== 'win32') {
+  if (child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal);
       return true;
@@ -302,7 +302,7 @@ function killProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.S
       return false;
     }
   }
-  return child.kill(signal);
+  return false;
 }
 
 function isInitializeResponse(value: unknown): value is JsonRpcResponse {
