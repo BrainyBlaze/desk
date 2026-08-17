@@ -867,7 +867,30 @@ describe('SessionManager controller-link recovery', () => {
       undefined,
       { onLateMoorAdoption }
     );
-    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let replacement: number | undefined;
+    let transferInputAccepted: boolean | undefined;
+    let transferResizeAccepted: boolean | undefined;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation((message) => {
+      const replacementChannel = replacement;
+      if (
+        replacementChannel === undefined ||
+        !String(message).includes('revoked retained input lease reset failed')
+      ) {
+        return;
+      }
+      queueMicrotask(() => {
+        transferInputAccepted = harness.manager.onBrowserInputByChannel(
+          replacementChannel,
+          false,
+          new TextEncoder().encode('during-transfer')
+        );
+        transferResizeAccepted = harness.manager.onBrowserResizeByChannel(
+          replacementChannel,
+          44,
+          132
+        );
+      });
+    });
     try {
       expect(
         harness.manager.onBrowserInputByChannel(
@@ -883,14 +906,22 @@ describe('SessionManager controller-link recovery', () => {
       harness.holder.allowRecovery();
       await callbackStarted.promise;
       harness.manager.unsubscribeChannel(harness.channelId);
-      const replacement = harness.manager.subscribe('session', 'replacement', 31, 101)!;
+      replacement = harness.manager.subscribe('session', 'replacement', 31, 101)!;
 
       acceptance.resolve(true);
+      await waitForSocketCondition(
+        () => transferInputAccepted !== undefined && transferResizeAccepted !== undefined,
+        'authorized work during failed-reset ownership transfer'
+      );
       await harness.holder.secondRecoveryAttemptConnected;
       await settleSocketIo();
       await waitForSocketCondition(
         () => harness.manager.stateSnapshot('session')?.health.status === 'healthy',
         'fresh recovery after refused revoked-lease release'
+      );
+      await waitForSocketCondition(
+        () => harness.holder.inputs.includes('during-transfer'),
+        'authorized input transferred through refused revoked-lease release'
       );
       expect(
         harness.manager.onBrowserInputByChannel(
@@ -899,20 +930,28 @@ describe('SessionManager controller-link recovery', () => {
           new TextEncoder().encode('after-unsubscribe')
         )
       ).toBe(true);
+      harness.holder.acknowledgeLatestInput(5);
       await waitForSocketCondition(
         () => harness.holder.inputs.includes('after-unsubscribe'),
         'replacement-channel input after output-only recovery'
       );
 
-      expect(harness.holder.inputs).toEqual(['ambiguous', 'after-unsubscribe']);
-      expect(harness.holder.inputRequests.at(-1)).toMatchObject({
-        connection: 5,
-        requestId: 1n
-      });
+      expect(transferInputAccepted).toBe(true);
+      expect(transferResizeAccepted).toBe(true);
+      expect(harness.holder.inputs).toEqual([
+        'ambiguous',
+        'during-transfer',
+        'after-unsubscribe'
+      ]);
+      expect(
+        harness.holder.inputRequests
+          .filter((request) => request.connection === 5)
+          .map((request) => request.requestId)
+      ).toEqual([1n, 2n]);
       expect(harness.holder.resizes.at(-1)).toMatchObject({
         connection: 5,
-        columns: 101,
-        rows: 31
+        columns: 132,
+        rows: 44
       });
       expect(harness.browserErrors).toEqual([]);
       expect(errorLog).toHaveBeenCalledWith(

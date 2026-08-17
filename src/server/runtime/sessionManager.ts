@@ -981,7 +981,9 @@ export class SessionManager {
     link = {
       sendInput: (bytes, _binary, surfaceId, queuedAt) => {
         if (inputSealed) return false;
-        if (leaseReset !== undefined) return queueInput(bytes, surfaceId, queuedAt);
+        if (leaseReset !== undefined || discardLeaseOnClose) {
+          return queueInput(bytes, surfaceId, queuedAt);
+        }
         try {
           client.sendInput(bytes, surfaceId);
           return true;
@@ -1009,7 +1011,7 @@ export class SessionManager {
       },
       sendResize: (rows, cols, surfaceId) => {
         if (inputSealed) return;
-        if (leaseReset !== undefined) {
+        if (leaseReset !== undefined || discardLeaseOnClose) {
           leaseResetResize = { rows, cols, surfaceId };
           return;
         }
