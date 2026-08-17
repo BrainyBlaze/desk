@@ -21,6 +21,16 @@ export interface SessionGeometry {
   readonly cols: number;
 }
 
+/**
+ * The size a session is created at when no viewer has measured anything yet:
+ * moor creates a session with no viewer at exactly 80 columns by 24 rows
+ * (moor spec §4.3). Desk commands this same size at provision — it is policy,
+ * not a measurement — and the first real viewer replaces it with a RESIZE. It
+ * is the one place this constant lives; a caller that wants a real viewport
+ * must have measured one.
+ */
+export const SESSION_CREATION_GEOMETRY: SessionGeometry = { rows: 24, cols: 80 };
+
 /** Moor wire schema §4: each dimension 1..32767, product at most 2,000,000. */
 export function isRealSessionGeometry(value: {
   rows: number;

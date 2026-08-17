@@ -6,8 +6,7 @@ import {
   createNativeChannelsTransport,
   provisionNativeSession,
   restartSessionNativeAware,
-  retireStaleIdentityForEdit,
-  staleNativeIdentityAfterEdit,
+  editIdentityContradiction,
   startSessionNativeAware,
 } from '../../src/server/runtime/nativeSessionControl.js';
 
@@ -466,53 +465,23 @@ describe('createNativeChannelsTransport', () => {
   });
 });
 
-describe('staleNativeIdentityAfterEdit', () => {
-  it('returns the OLD identity when a rename changes the minted sessionId (prevents an orphan master)', () => {
+describe('editIdentityContradiction', () => {
+  it('names the contradiction when an edit would change the persisted sessionId (the edit must abort)', () => {
     const oldSpec = { ...baseSpec, name: 'shell', sessionId: 'shell' };
-    const renamed = { ...baseSpec, name: 'workbench', sessionId: 'workbench' };
-    expect(staleNativeIdentityAfterEdit(oldSpec, renamed)).toBe('shell');
+    const reminted = { ...baseSpec, name: 'workbench', sessionId: 'workbench' };
+    expect(editIdentityContradiction(oldSpec, reminted)).toBe(
+      'identity changed from shell to workbench: a session edit never re-mints the persisted sessionId'
+    );
   });
 
-  it('returns undefined when the identity is unchanged (e.g. a model-only edit)', () => {
-    const oldSpec = { ...baseSpec, sessionId: 'shell', model: 'a' };
-    const edited = { ...baseSpec, sessionId: 'shell', model: 'b' };
-    expect(staleNativeIdentityAfterEdit(oldSpec, edited)).toBeUndefined();
+  it('is silent when the identity is intact (a rename or a model-only edit keeps the persisted id)', () => {
+    const oldSpec = { ...baseSpec, name: 'shell', sessionId: 'shell', model: 'a' };
+    const edited = { ...baseSpec, name: 'workbench', sessionId: 'shell', model: 'b' };
+    expect(editIdentityContradiction(oldSpec, edited)).toBeUndefined();
   });
 
-
-  it('returns undefined when either spec is missing', () => {
-    expect(staleNativeIdentityAfterEdit(undefined, baseSpec)).toBeUndefined();
-    expect(staleNativeIdentityAfterEdit(baseSpec, undefined)).toBeUndefined();
-  });
-});
-
-describe('retireStaleIdentityForEdit (fail-closed guard)', () => {
-  const oldSpec = { ...baseSpec, sessionId: 'shell' };
-  const renamed = { ...baseSpec, sessionId: 'renamed' };
-
-
-  it('is a no-op (ok) when the identity is unchanged', async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    expect(await retireStaleIdentityForEdit(oldSpec, { ...baseSpec, sessionId: 'shell', model: 'x' })).toEqual({ ok: true });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('retires the OLD identity and reports ok when the daemon accepts it', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
-    vi.stubGlobal('fetch', fetchMock);
-    expect(await retireStaleIdentityForEdit(oldSpec, renamed)).toEqual({ ok: true });
-    expect(fetchMock.mock.calls[0][0]).toContain('/control/retire');
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('shell');
-  });
-
-  it('reports NOT-ok when the retire fails, so the caller aborts the edit (fail closed)', async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    vi.stubGlobal('fetch', fetchMock);
-    const result = await retireStaleIdentityForEdit(oldSpec, renamed);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toContain('could not retire old identity shell');
-    }
+  it('is silent when either spec is missing (nothing native is involved)', () => {
+    expect(editIdentityContradiction(undefined, baseSpec)).toBeUndefined();
+    expect(editIdentityContradiction(baseSpec, undefined)).toBeUndefined();
   });
 });

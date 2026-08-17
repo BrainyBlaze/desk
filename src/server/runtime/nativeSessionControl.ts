@@ -7,6 +7,7 @@
 // spawn surfaces as a non-ok result the route turns into a non-2xx JSON error,
 // never a silent no-op.
 
+import { SESSION_CREATION_GEOMETRY } from '../../shared/runtime/sessionGeometryStore.js';
 import type { RetireReason as SessionRetireReason } from '../../shared/runtime/daemonCore.js';
 import { daemonControl, daemonControlGet, toOkResult, type DaemonControlResult } from '../../shared/daemonControlClient.js';
 import { loadDeskCached, sessionLivenessFor, type SessionLiveness } from '../../core/runner.js';
@@ -36,7 +37,7 @@ export function provisionNativeSession(spec: SessionSpec): Promise<{ ok: boolean
     daemonControl('/control/provision', {
       sessionId,
       command: moorCommandFor(spec),
-      geometry: { rows: 24, cols: 80 },
+      geometry: SESSION_CREATION_GEOMETRY,
       subject: sessionStateSubjectFor(spec),
       ...(spec.resume === undefined
         ? {}
@@ -63,49 +64,23 @@ export function retireNativeSession(
 }
 
 /**
- * The native identity a session edit leaves behind, or undefined if unchanged.
- *
- * A session's moor holder is keyed by its durable sessionId. A persisted
- * sessionId survives renames, so only a LEGACY entry lacking one (whose id is
- * minted from the name) can change identity on rename — leaving the running
- * master keyed by the old id. The edit path retires the returned id so that
- * master does not orphan (nothing references it again). Returns undefined when
- * nothing changed or either spec is missing.
+ * A native edit never changes a session's identity: the persisted sessionId is
+ * not an editable field (the manifest edit carries it across a rename) and the
+ * store support floor refuses an entry that lacks one, so there is no legacy
+ * shape left whose id could be re-minted from its name. A differing id here is
+ * therefore a contradiction in the edit itself, not a case to repair by
+ * retiring the old holder: the edit MUST abort before anything commits.
+ * Returns the abort reason, or undefined when the identity is intact or either
+ * spec is absent (nothing native is involved then).
  */
-export function staleNativeIdentityAfterEdit(
+export function editIdentityContradiction(
   oldSpec: SessionSpec | undefined,
   newSpec: SessionSpec | undefined
 ): string | undefined {
-  if (!oldSpec || !newSpec) {
+  if (!oldSpec || !newSpec || oldSpec.sessionId === newSpec.sessionId) {
     return undefined;
   }
-  const oldId = oldSpec.sessionId;
-  const newId = newSpec.sessionId;
-  return oldId !== newId ? oldId : undefined;
-}
-
-/**
- * Fail-closed guard for an identity-changing native edit (a legacy entry whose
- * name-minted id changes on rename; a persisted sessionId never does): retire
- * the pre-edit identity BEFORE the manifest rename commits. Returns `ok: false`
- * (the caller MUST abort the edit, leaving the manifest untouched and
- * provisioning nothing) when the retire fails — so a rename can never orphan
- * the old moor holder nor desync the manifest against a still-running master.
- * A no-op (ok) when the flag is off or the identity is unchanged. (R2.1.)
- */
-export async function retireStaleIdentityForEdit(
-  oldSpec: SessionSpec | undefined,
-  newSpec: SessionSpec | undefined
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const stale = staleNativeIdentityAfterEdit(oldSpec, newSpec);
-  if (stale === undefined) {
-    return { ok: true };
-  }
-  const retired = await retireNativeSession(stale, 'stale-identity-after-edit');
-  if (retired.ok) {
-    return { ok: true };
-  }
-  return { ok: false, error: `could not retire old identity ${stale}: ${retired.error}` };
+  return `identity changed from ${oldSpec.sessionId} to ${newSpec.sessionId}: a session edit never re-mints the persisted sessionId`;
 }
 
 /** Start a session: daemon provision (the server enriches the spec first). */
