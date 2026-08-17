@@ -181,6 +181,21 @@ export function buildClaudeHooksSettings(shimPath: string): ClaudeHooksSettings 
   };
 }
 
+/**
+ * Terminal-context settings Desk needs for the qwen pane, which qwen exposes
+ * only through settings.json (it has no env equivalent):
+ *  - mouseTracking:false — the host xterm owns click/selection, so a click no
+ *    longer injects raw SGR mouse-report bytes into the prompt.
+ *  - useTerminalBuffer:false — qwen renders in the main screen instead of an
+ *    alternate-screen viewport, so there is one scrollback (the host's) instead
+ *    of two competing scrollbars.
+ * This mirrors CLAUDE_TERMINAL_ENV / OPENCODE_DISABLE_MOUSE for the CLIs that
+ * take the same directives through launch env.
+ */
+const QWEN_DESK_TERMINAL_SETTINGS = {
+  ui: { mouseTracking: false, useTerminalBuffer: false }
+} as const;
+
 const QWEN_HOOK_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
@@ -483,7 +498,7 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   const notInstalled: string[] = [];
   const qwenSettingsPath = join(homeDir, '.qwen', 'settings.json');
   installOptionalAgentHooks(qwenSettingsPath, notInstalled, skipped, () =>
-    mergeHookConfig(qwenSettingsPath, buildQwenHooksSettings(shimPath), shimPath)
+    mergeHookConfig(qwenSettingsPath, buildQwenHooksSettings(shimPath), shimPath, QWEN_DESK_TERMINAL_SETTINGS)
   );
   const kimiConfigPath = join(homeDir, '.kimi-code', 'config.toml');
   installOptionalAgentHooks(kimiConfigPath, notInstalled, skipped, () =>
@@ -677,20 +692,24 @@ function writeTextIfChanged(path: string, content: string): void {
 function mergeHookConfig(
   path: string,
   desired: { hooks: Record<string, HookGroup[]> },
-  currentShimPath: string
+  currentShimPath: string,
+  deskSettings?: Record<string, Record<string, unknown>>
 ): 'merged' | 'skipped-malformed' {
   // Lock the read-modify-write on this shared user config: `desk hooks install`
   // can race Claude Code (or a second install) writing ~/.claude/settings.json.
   // The atomic write prevents a torn file, not a lost update. Lock a separate
   // `.lock` path, matching the manifest update convention.
   mkdirSync(dirname(path), { recursive: true });
-  return withFileLockSync(`${path}.lock`, () => mergeHookConfigLocked(path, desired, currentShimPath));
+  return withFileLockSync(`${path}.lock`, () =>
+    mergeHookConfigLocked(path, desired, currentShimPath, deskSettings)
+  );
 }
 
 function mergeHookConfigLocked(
   path: string,
   desired: { hooks: Record<string, HookGroup[]> },
-  currentShimPath: string
+  currentShimPath: string,
+  deskSettings?: Record<string, Record<string, unknown>>
 ): 'merged' | 'skipped-malformed' {
   const read = readJsonObjectClassified(path);
   if (read.kind === 'malformed') {
@@ -733,7 +752,18 @@ function mergeHookConfigLocked(
     }
   }
 
-  writeJsonIfChanged(path, { ...current, hooks: mergedHooks });
+  // Desk terminal-context settings the agent CLI has no env lever for. Claude
+  // and OpenCode get the same treatment through launch env
+  // (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN / OPENCODE_DISABLE_MOUSE); qwen exposes
+  // them only through settings.json, so Desk merges them here — shallow per key,
+  // preserving every other operator setting in the same block.
+  const mergedSettings: Record<string, unknown> = {};
+  for (const [block, values] of Object.entries(deskSettings ?? {})) {
+    const currentBlock = isRecord(current[block]) ? (current[block] as Record<string, unknown>) : {};
+    mergedSettings[block] = { ...currentBlock, ...values };
+  }
+
+  writeJsonIfChanged(path, { ...current, ...mergedSettings, hooks: mergedHooks });
   return 'merged';
 }
 

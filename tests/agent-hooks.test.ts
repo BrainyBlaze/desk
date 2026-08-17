@@ -580,6 +580,29 @@ describe('probe and merge maintenance for the new terminal agents', () => {
     }
   });
 
+  it('writes qwen terminal-context settings alongside hooks and preserves operator ui keys', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-qwen-ui-'));
+    try {
+      const qwenPath = join(home, '.qwen', 'settings.json');
+      mkdirSync(dirname(qwenPath), { recursive: true });
+      writeFileSync(
+        qwenPath,
+        JSON.stringify({ ui: { theme: 'dark', mouseTracking: true }, security: { auth: { selectedType: 'openai' } } })
+      );
+
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
+      expect(qwen.ui.mouseTracking).toBe(false);
+      expect(qwen.ui.useTerminalBuffer).toBe(false);
+      expect(qwen.ui.theme).toBe('dark');
+      expect(qwen.security.auth.selectedType).toBe('openai');
+      expect(Object.keys(qwen.hooks)).toContain('SessionStart');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('prunes a desk hook for an event that is no longer installed', () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-prune-'));
     try {
