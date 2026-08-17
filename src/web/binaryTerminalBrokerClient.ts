@@ -17,12 +17,10 @@
  *    connection channel) to the head of a FIFO `pendingAcks` queue. A failed
  *    subscribe must shift that queue too, or every later ACK misbinds.
  *
- *  - There is no client "request snapshot" frame. Both a resync (gap → dirty)
- *    and a reveal (hidden → visible) reduce to "get a fresh baseline", which the
- *    server's existing subscribe path already emits. So visibility rides the
- *    subscribe/unsubscribe lifecycle — hidden = unsubscribed (no channel, no
- *    output: the zero-cost keep-alive win), revealed/dirty = (re)subscribed —
- *    and the frozen protocol needs no snapshot verb.
+ *  - There is no client "request snapshot" frame. A gap still re-subscribes,
+ *    while visibility uses the protocol's VISIBILITY frame on the existing
+ *    channel. The server gates hidden output and emits a fresh same-channel
+ *    snapshot on reveal, so view changes never churn subscription ownership.
  */
 import {
   BP_CONN_CHANNEL,
@@ -162,17 +160,26 @@ export class BinaryTerminalBrokerClient {
       return;
     }
     surface.visible = visible;
+    if (!visible) {
+      // Input queued before the hide belongs to a focus context that no longer
+      // exists and must not replay when the same channel becomes visible again.
+      this.clearPendingInput(surface);
+    }
     if (!this.connected) {
       return; // resubscribeAll on reconnect honors the current visibility
     }
     if (visible) {
-      // Reveal: (re)subscribe to get a fresh snapshot + resume live output.
-      if (surface.channelId === undefined && !surface.awaitingAck) {
+      if (surface.channelId !== undefined) {
+        // The fitted size was measured while hidden. Send it while the server
+        // still considers the channel hidden, then reveal so ownership election
+        // and the fresh snapshot use that exact geometry.
+        this.flushResize(surface);
+        this.sendFrame({ type: BpFrameType.VISIBILITY, channelId: surface.channelId, visible: true });
+      } else if (!surface.awaitingAck) {
         this.sendSubscribe(surface);
       }
-    } else {
-      // Hide: drop the channel so the server stops streaming to this cell.
-      this.closeChannel(surface);
+    } else if (surface.channelId !== undefined) {
+      this.sendFrame({ type: BpFrameType.VISIBILITY, channelId: surface.channelId, visible: false });
     }
   }
 
@@ -495,7 +502,7 @@ export class BinaryTerminalBrokerClient {
     surface.channelId = undefined;
     surface.resync = undefined;
     // Input queued for the channel being closed belongs to that channel's
-    // context (hide, unsubscribe, or resync) — never replay it into whatever
+    // context (unsubscribe or resync) — never replay it into whatever
     // channel a future (re)subscribe opens.
     this.clearPendingInput(surface);
   }
@@ -526,7 +533,7 @@ export class BinaryTerminalBrokerClient {
       // A short reconnect blip must not eat what the user typed during it.
       // Continuity is bounded (bufferPendingInput's byte/age caps), so a
       // stalled reconnect still can't accumulate input forever; a deliberate
-      // close (hide/unsubscribe/resync) goes through closeChannel instead,
+      // close (unsubscribe/resync) goes through closeChannel instead,
       // which does drop it — that context really is gone.
     }
   }
@@ -569,17 +576,12 @@ export class BinaryTerminalBrokerClient {
     if (surface === undefined) {
       return; // stray ack with no outstanding subscribe
     }
-    // The surface was unsubscribed (or hidden) while its ACK was in flight: we
-    // now own a channel with no live consumer — release it server-side.
-    if (this.surfaces.get(surface.surfaceId) !== surface || !surface.visible) {
+    // The surface was actually removed or replaced while its ACK was in flight:
+    // release the orphan. A merely hidden surface keeps this channel.
+    if (this.surfaces.get(surface.surfaceId) !== surface) {
       if (this.connected) {
         this.sendFrame({ type: BpFrameType.UNSUBSCRIBE, channelId });
       }
-      // The ACK resolved this subscribe, so the surface is no longer waiting on
-      // one. Leaving the flag set outlives the hide: setVisible's reveal branch
-      // refuses to re-subscribe while `awaitingAck` is true, so the cell would
-      // come back with no channel, silently swallowing every keystroke and
-      // showing no Reconnect affordance.
       surface.awaitingAck = false;
       this.clearPendingInput(surface);
       return;
@@ -588,6 +590,11 @@ export class BinaryTerminalBrokerClient {
     surface.awaitingAck = false;
     surface.resync = new SubscriptionResync();
     this.channelToSurface.set(channelId, surface);
+    if (!surface.visible) {
+      this.clearPendingInput(surface);
+      this.sendFrame({ type: BpFrameType.VISIBILITY, channelId, visible: false });
+      return;
+    }
     // A resize requested before the channel opened flushes now.
     this.flushResize(surface);
     // Keystrokes typed during the SUBSCRIBE round-trip flush now, in order.
@@ -600,7 +607,7 @@ export class BinaryTerminalBrokerClient {
 
   private onSnapshot(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>): void {
     const surface = this.surfaceOf(channelId);
-    if (!surface || !surface.resync) {
+    if (!surface || !surface.visible || !surface.resync) {
       return;
     }
     const action = surface.resync.onSnapshot({ generation: frame.generation, revision: frame.revision, offset: frame.offset, length: 0 });
@@ -611,7 +618,7 @@ export class BinaryTerminalBrokerClient {
 
   private onOutput(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.OUTPUT }>): void {
     const surface = this.surfaceOf(channelId);
-    if (!surface || !surface.resync) {
+    if (!surface || !surface.visible || !surface.resync) {
       return;
     }
     const action = surface.resync.onOutput({
@@ -629,7 +636,7 @@ export class BinaryTerminalBrokerClient {
 
   private onGap(channelId: number): void {
     const surface = this.surfaceOf(channelId);
-    if (!surface || !surface.resync) {
+    if (!surface || !surface.visible || !surface.resync) {
       return;
     }
     if (surface.resync.onGap() === 'dirty') {

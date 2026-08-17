@@ -422,13 +422,27 @@ async function readCandidate(
 ): Promise<CandidateRead> {
   try {
     const commitFile = slots[2 + slot]!;
-    if ((await commitFile.stat()).size !== 92) return { generationMismatch: false };
+    const commitSize = (await commitFile.stat()).size;
+    if (commitSize !== 92) {
+      return {
+        generationMismatch: false,
+        // A non-empty short commit is an in-progress rewrite, not a completed
+        // store decision. Empty slots remain neutral so an actually malformed
+        // store with one bad committed record still fails as corruption.
+        unavailable: commitSize > 0 && commitSize < 92
+      };
+    }
     const record = await readExact(commitFile, 92);
     const commit = decodeCommit(record, slot, kind);
     if (commit === undefined) return { generationMismatch: false };
     const length = exactAllocationLength(commit.length);
     const bytes = await readExact(slots[commit.bodySlot]!, length);
-    if (!equal(sha256(bytes), commit.hash) || !bodyValid(commit, bytes)) {
+    if (!equal(sha256(bytes), commit.hash)) {
+      // Bodies are rewritten before their replacement commit. A reader can
+      // therefore observe the old commit against the new body during rotation.
+      return { generationMismatch: false, unavailable: true };
+    }
+    if (!bodyValid(commit, bytes)) {
       return { generationMismatch: false };
     }
     if (expectedGeneration !== undefined && commit.generation !== expectedGeneration) {

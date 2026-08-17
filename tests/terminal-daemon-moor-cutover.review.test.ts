@@ -612,7 +612,7 @@ describe('terminal daemon Moor cutover adversarial review', () => {
     daemon.dispose();
   });
 
-  it('preserves the event store when terminal observer failure cannot confirm retirement', async () => {
+  it('stops failed observation without retiring the live holder generation', async () => {
     const diagnostics: string[] = [];
     const daemon = createTerminalDaemon({
       homeRoot: home,
@@ -650,16 +650,9 @@ describe('terminal daemon Moor cutover adversarial review', () => {
         };
       }
     );
-    const retire = vi
-      .spyOn(daemon.router.sessions, 'retireGenerationAwaited')
-      .mockResolvedValue({
-        ok: false,
-        reason: 'retire-failed',
-        expectedGeneration: 2,
-        error: 'retirement is indeterminate'
-      });
+    const retire = vi.spyOn(daemon.router.sessions, 'retireGenerationAwaited');
 
-    await daemon.provision('sess-1', {
+    const provisioned = await daemon.provision('sess-1', {
       command: ['bash'],
       geometry: { rows: 24, cols: 80 },
       subject: { kind: 'terminal' }
@@ -667,12 +660,11 @@ describe('terminal daemon Moor cutover adversarial review', () => {
 
     writeMoorStore(storeDir, observedGeneration, join(home, 'different-session'));
     await waitFor(() => diagnostics.length > 0, 'terminal observer diagnostic');
-    await waitFor(() => retire.mock.calls.length > 0, 'retirement attempt');
+    await new Promise((resolve) => setTimeout(resolve, 60));
 
-    expect(retire).toHaveBeenCalledWith('sess-1', 2, {
-      // An observer that died mid-life is not an operator retire either.
-      reason: 'observer-terminal'
-    });
+    expect(retire).not.toHaveBeenCalled();
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.generation).toBe(provisioned.generation);
+    expect(daemon.router.sessions.stateSnapshot('sess-1')?.lifecycle).not.toBe('exited');
     expect(existsSync(storeDir)).toBe(true);
     daemon.dispose();
   });
