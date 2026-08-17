@@ -242,7 +242,8 @@ export class DaemonCore {
         health = this.d.initialAgentHealth(subject);
       } catch (error) {
         // The probe is optional diagnostics and must not block admission.
-        // Authority or transition-journal failures below remain fatal.
+        // Authority mutation failures below remain fatal; transition-sink
+        // failures are reported after the committed state is retained.
         const detail = (
           error instanceof Error ? error.message : String(error)
         ).trim().slice(0, 2_000);
