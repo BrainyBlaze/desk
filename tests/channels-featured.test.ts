@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { addFeatured, listFeaturedItems, listFeaturedRefs, removeFeatured } from '../src/server/channelsFeatured.js';
-import { formatChannelPreamble, formatMessageBlock } from '../src/server/channelsProtocol.js';
+import { addFeatured, listFeaturedItems, listFeaturedRefs, removeFeatured } from '../src/server/channels/store/featured.js';
+import { formatChannelPreamble, formatMessageBlock } from '../src/server/channels/protocol/format.js';
 
 const timestamp = '2026-06-18 16:50:00';
 

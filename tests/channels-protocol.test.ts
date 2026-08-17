@@ -1,20 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  END_TURN,
-  extractMentions,
-  formatMemberManifest,
-  formatMessageBlock,
-  formatSharedMessage,
-  generateMessageId,
-  isValidChannelName,
-  memberHandleFromSession,
-  mentionsHuman,
-  parseConversation,
-  parseMemberManifest,
-  qualifiedMemberHandle,
-  resolveTargets,
-  type ChannelMember
-} from '../src/server/channelsProtocol.js';
+import { END_TURN, formatMemberManifest, formatMessageBlock, formatSharedMessage, generateMessageId, isValidChannelName, memberHandleFromSession, parseConversation, parseMemberManifest, qualifiedMemberHandle, type ChannelMember } from '../src/server/channels/protocol/format.js';
+import { extractMentions, mentionsHuman, resolveTargets } from '../src/server/channels/protocol/routing.js';
 
 const member = (name: string, type = 'claude-code', sessionId?: string): ChannelMember => ({
   name,

@@ -1,8 +1,8 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
-import { disposeChannelsRuntime, initChannelsRuntime } from './channelsApi.js';
-import type { ChannelsRuntimeOwner } from './channelsRuntimeOwner.js';
+import { disposeChannelsRuntime, initChannelsRuntime } from './channels/index.js';
+import type { ChannelsRuntimeOwner } from './channels/index.js';
 import type { DeskApiHost } from './deskApiTypes.js';
 import type { DeskServices } from './deskServices.js';
 import type { DisposerRegistry } from './disposerRegistry.js';
@@ -111,7 +111,9 @@ export function installDeskRuntime({ host, services, plugins, disposers, channel
   disposers.add(stopSystemSampling);
   initChannelsRuntime({
     agentSurfaceBroker: services.agentSurfaceBroker,
-    owner: channelsOwner
+    owner: channelsOwner,
+    // Plugin order is provider order: each wraps the previous result.
+    providers: plugins.map((plugin) => plugin.channels).filter((entry) => entry !== undefined)
   });
   disposers.add(disposeChannelsRuntime);
 }

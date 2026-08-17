@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   listPausedSessions,
   pauseSession
-} from '../src/server/channelsPaused.js';
+} from '../src/server/channels/delivery/paused.js';
 import { PreCutoverStoreError } from '../src/shared/supportFloor.js';
 
 describe('Channels paused store', () => {

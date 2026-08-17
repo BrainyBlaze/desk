@@ -10,20 +10,20 @@ import {
   clearReactionsForMessage,
   listReactions,
   removeReaction
-} from '../src/server/channelsReactions.js';
+} from '../src/server/channels/store/reactions.js';
 import {
   addView,
   getView,
   listViews,
   removeView
-} from '../src/server/channelsViews.js';
+} from '../src/server/channels/store/views.js';
 import {
   getPausedSession,
   isSessionPaused,
   listPausedSessions,
   pauseSession,
   resumeSession
-} from '../src/server/channelsPaused.js';
+} from '../src/server/channels/delivery/paused.js';
 
 describe('channelsReactions', () => {
   let home: string;

@@ -6,12 +6,12 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { appendMessage } from '../src/server/channelsStore.js';
-import { formatChannelPreamble, parseConversation } from '../src/server/channelsProtocol.js';
-import { ChannelsEngine } from '../src/server/channelsEngine.js';
+import { appendMessage } from '../src/server/channels/store/fileStore.js';
+import { formatChannelPreamble, parseConversation } from '../src/server/channels/protocol/format.js';
+import { ChannelsEngine } from '../src/server/channels/delivery/engine.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
-const STORE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/server/channelsStore.ts')).href;
+const STORE_SOURCE = pathToFileURL(resolve(process.cwd(), 'src/server/channels/store/fileStore.ts')).href;
 const TEST_PID_SCOPE = {
   bootId: '11111111-1111-4111-8111-111111111111',
   pidNamespaceDev: 4n,

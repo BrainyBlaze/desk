@@ -8,9 +8,9 @@ import {
   handleChannelsRequest,
   initChannelsRuntime,
   resetChannelsRuntime
-} from '../src/server/channelsApi.js';
-import { listPausedSessions } from '../src/server/channelsPaused.js';
-import { appendMessage, createChannel, editMessage } from '../src/server/channelsStore.js';
+} from '../src/server/channels/api.js';
+import { listPausedSessions } from '../src/server/channels/delivery/paused.js';
+import { appendMessage, createChannel, editMessage } from '../src/server/channels/store/fileStore.js';
 
 interface ApiResult {
   handled: boolean;

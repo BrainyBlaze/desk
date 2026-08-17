@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runChannelsCli } from '../src/cli/channelsCli.js';
-import { addMember, appendMessage, createChannel, readChannelDetail, resolveChannelsHome } from '../src/server/channelsStore.js';
+import { addMember, appendMessage, createChannel, readChannelDetail, resolveChannelsHome } from '../src/server/channels/store/fileStore.js';
 
 describe('desk channels CLI', () => {
   let homeRoot: string;

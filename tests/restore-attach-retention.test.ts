@@ -22,7 +22,7 @@ import {
 import { MoorMasterClient } from '../src/server/runtime/moorMasterClient.js';
 import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
 import { moorEventStoreRoot } from '../src/server/runtime/moorEventObserver.js';
-import { canonicalDeliveryDecision } from '../src/server/channelsDeliveryStrategy.js';
+import { canonicalDeliveryDecision } from '../src/server/channels/delivery/strategy.js';
 import { GenerationLedger } from '../src/shared/controlPlane/generationLedger.js';
 import {
   InMemoryGenerationLedger,

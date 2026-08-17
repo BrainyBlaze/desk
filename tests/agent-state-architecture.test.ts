@@ -22,7 +22,7 @@ describe('canonical agent-state architecture', () => {
 
   it('has no retired attention transport or compatibility bridge in server runtime', () => {
     const paths = [
-      'src/server/channelsApi.ts',
+      'src/server/channels/api.ts',
       'src/server/deskRuntime.ts',
       'src/server/routes/systemRoutes.ts',
       'src/server/runtime/nativeSessionControl.ts',
@@ -49,8 +49,8 @@ describe('canonical agent-state architecture', () => {
   });
 
   it('has no retired agent-signal vocabulary in channels delivery history', () => {
-    const engine = readFileSync(join(root, 'src/server/channelsEngine.ts'), 'utf8');
-    const events = readFileSync(join(root, 'src/server/channelsEvents.ts'), 'utf8');
+    const engine = readFileSync(join(root, 'src/server/channels/delivery/engine.ts'), 'utf8');
+    const events = readFileSync(join(root, 'src/server/channels/delivery/events.ts'), 'utf8');
 
     expect(engine).not.toContain('AgentSignalKind');
     expect(events).not.toContain("'approval-requested'");

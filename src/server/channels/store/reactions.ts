@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isValidChannelName, type ReactionKind } from './channelsProtocol.js';
-import { writeFileAtomic } from './fsOps.js';
+import { isValidChannelName, type ReactionKind } from '../protocol/format.js';
+import { writeFileAtomic } from '../../fsOps.js';
 
 /**
  * Channels reactions store — operator-authored lightweight reactions / ack
@@ -10,7 +10,7 @@ import { writeFileAtomic } from './fsOps.js';
  * (no flock needed beyond atomic-rename).
  *
  * kind is the frozen ReactionKind enum ('ack' | 'seen' | 'done' | 'thumbs-up');
- * adding a kind requires a channelsProtocol.ts change so the UI label map
+ * adding a kind requires a protocol/format.ts change so the UI label map
  * stays exhaustive (Theme C single-source).
  *
  * CONCURRENCY INVARIANT: the read-modify-write path (readStore → mutate →

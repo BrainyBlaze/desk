@@ -1,11 +1,15 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { createChannelDeliverySender } from '../src/server/channelsApi.js';
-import { claimDelivering, revertAllDeliveringToJson } from '../src/server/channelsDurability.js';
-import { ChannelsEngine } from '../src/server/channelsEngine.js';
-import type { ChannelMember, ChannelMessage } from '../src/server/channelsProtocol.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createChannelDeliverySender,
+  initChannelsRuntime,
+  resetChannelsRuntime
+} from '../src/server/channels/api.js';
+import { claimDelivering, revertAllDeliveringToJson } from '../src/server/channels/delivery/durability.js';
+import { ChannelsEngine } from '../src/server/channels/delivery/engine.js';
+import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const READY_PANE = 'ready prompt';
@@ -67,7 +71,7 @@ describe('native-mode channel delivery', () => {
     });
 
     engine.pauseSession('tmux-a', 'hold before delivery');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-native-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-native-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
     await flush();
     expect(terminalSent).toEqual([]);
     expect(nativeSent).toEqual([]);
@@ -111,7 +115,7 @@ describe('native-mode channel delivery', () => {
     });
 
     engine.pauseSession('tmux-a', 'hold before delivery');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-terminal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-terminal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
     await flush();
 
     uiMode = 'terminal';
@@ -178,7 +182,7 @@ describe('native-mode channel delivery', () => {
       capturePane: async () => READY_PANE
     });
 
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fatal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fatal-1', 'human', '@alpha hi') }, [member('alpha', 'tmux-a')]);
     await waitFor(async () => (await engine.lifecycleStates()).some((state) => state.sessionId === 'tmux-a' && state.pausedByOperator));
 
     expect(readdirSync(join(home, '_engine', 'queue', 'tmux-a'))).toEqual(['0000000001.json']);
@@ -188,5 +192,51 @@ describe('native-mode channel delivery', () => {
     });
     engine.dispose();
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it('keeps durable rollback when a plugin replaces the delivery port', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-native-provider-fatal-'));
+    const configDir = join(home, '.config', 'desk');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, 'desk.yml'),
+      `groups:\n  - id: group-1\n    sessions:\n      - name: alpha\n        sessionId: tmux-a\n        cwd: ${home}\n        agent: codex\n        uiMode: native\n`
+    );
+    vi.stubEnv('HOME', home);
+
+    try {
+      const runtime = initChannelsRuntime({
+        home,
+        providers: [
+          {
+            delivery: () => ({
+              send: async () => false,
+              states: async () => canonicalAgentStateBatch(['tmux-a']),
+              probe: async () => READY_PANE,
+              submit: async () => true
+            })
+          }
+        ]
+      });
+
+      await runtime.engine.handleMessage(
+        {
+          channel: 'ops',
+          file: 'root.md',
+          message: message('msg-provider-fatal-1', 'human', '@alpha hi')
+        },
+        [member('alpha', 'tmux-a')]
+      );
+
+      await vi.waitFor(() => {
+        expect(readdirSync(join(home, '_engine', 'queue', 'tmux-a'))).toEqual([
+          '0000000001.json'
+        ]);
+      });
+    } finally {
+      resetChannelsRuntime();
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

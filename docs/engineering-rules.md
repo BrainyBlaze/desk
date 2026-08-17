@@ -81,7 +81,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 ## R9 — Architecture hygiene (enforced)
 
 - **R9.1 MUST** — layering holds: `core` never imports `web`/`server`; `web` never imports `server`; `shared` is pure. Zero violations is the standing bar. *Why:* the God-file problem is intra-file complexity, not tangled cross-module deps — which is only true because layering is clean (§6.0). *Enforcement:* `[review]` (there is no layer-check lint/CI rule today — the architecture test covers cycles/binding-isolation/retired-terminal, not layering; a layer-check is a backlog item). **Guidance.**
-- **R9.2 MUST** `[server-lane]` — no source dependency cycles; even a type-only cycle encodes wrong ownership, so relocate the shared type (`QueuedPrompt` → `channelsProtocol`, `AgentHostEnv` → `agents/host/types`). *Why:* two server cycles were type-only (erased at runtime) but still misplaced ownership (§5.5). *Enforcement:* `[lint]` (cycle check, generated code excluded) + `[CI]`. **Gate.**
+- **R9.2 MUST** `[server-lane]` — no source dependency cycles; even a type-only cycle encodes wrong ownership, so relocate the shared type (`QueuedPrompt` → `channels/protocol/delivery`, `AgentHostEnv` → `agents/host/types`). *Why:* two server cycles were type-only (erased at runtime) but still misplaced ownership (§5.5). *Enforcement:* `[lint]` (cycle check, generated code excluded) + `[CI]`. **Gate.**
 - **R9.3 MUST** `[server-lane]` — generated code (`codexBindings/**`) is isolated behind a barrel/adapter, excluded from health/dead-code/file-count metrics, and regenerable via the checked-in `generate:codex-bindings` script. *Why:* 655 generated stubs distorted metrics and the depth-12 dependency chain, and `package.json` had no regeneration script (§4, §5.6). *Enforcement:* `[test]` (generator tests + isolation) + `[review]`. **Gate.** *Backlog:* a CI step that regenerates and diffs to catch drift is not yet automated — add it separately before treating drift as a gate.
 - **R9.4 MUST** `[server-lane]` — no dead legacy path running beside its replacement; remove it, or quarantine it with parity tests + a documented reason. *Why:* the legacy `/ws/terminal` bridge still ran beside `/ws/terminal-broker` though the client uses only the broker (§5.7). *Enforcement:* `[review]` + `[test]` (parity if quarantined). **Gate.**
 
@@ -106,7 +106,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 |---|---|---|
 | R1.1/R1.3 | §6.1 no central error helper | `src/web/asyncSafe.ts` (`fireAndForget`, `toErrorMessage`) |
 | R1.4 | §6.4.4 ItemDrawer | `ItemDrawer.tsx` onError gated on request seq |
-| R2.1 | §5.4 owner-lock fail-open | `channelsEngine` `lockError` + fail-closed |
+| R2.1 | §5.4 owner-lock fail-open | `channels/runtimeOwner` lease + fail-closed |
 | R2.3 | §6.4.1 settings deadlock | ref resolved in `.catch` |
 | R3.4 | channels×native E2E bugs | `channelsDeliveryStrategy.ts` broker-FSM readiness |
 | R4.1 | §6.4.4/§6.4.5 readJson | `src/web/httpJson.ts` |

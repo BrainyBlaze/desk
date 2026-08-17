@@ -11,24 +11,10 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 
-import {
-  isShellAgent,
-  mentionsHuman,
-  resolveTargets,
-  type ChannelMember,
-  type ChannelMessage,
-  type LifecycleState,
-  type DeliveryStatus,
-  type ChannelActivityEvent,
-  type SessionResumeInfo,
-  type SubmitState,
-  type DeliveryBlockReason,
-  type QueuedPrompt,
-  type QueuedItemMeta,
-  type BlockedItemMeta,
-  type SessionDiagnostic
-} from './channelsProtocol.js';
-import { listChannelMembers, readChannelMessage, type IncomingChannelMessage } from './channelsStore.js';
+import { type ChannelMember, type ChannelMessage } from '../protocol/format.js';
+import { isShellAgent, type LifecycleState, type DeliveryStatus, type ChannelActivityEvent, type SessionResumeInfo, type SubmitState, type DeliveryBlockReason, type QueuedPrompt, type QueuedItemMeta, type BlockedItemMeta, type SessionDiagnostic } from '../protocol/delivery.js';
+import type { IncomingChannelMessage } from '../store/fileStore.js';
+import { FileChannelStore, type ChannelStore } from '../store/channelStore.js';
 import {
   classifyQueueFile,
   dropStuckItem,
@@ -42,17 +28,21 @@ import {
   readQueueItem,
   retryStuckItem,
   sweepDeliveredTtl
-} from './channelsDurability.js';
-import { appendDeliveryEvent, type DeliveryEvent, type DeliveryEventInput } from './channelsEvents.js';
-import { listPausedSessions } from './channelsPaused.js';
-import { writeFileAtomic } from './fsOps.js';
+} from './durability.js';
+import { appendDeliveryEvent, type DeliveryEvent, type DeliveryEventInput } from './events.js';
+import { listPausedSessions } from './paused.js';
+import { writeFileAtomic } from '../../fsOps.js';
 import {
   canonicalAgentView,
   canonicalDeliveryDecision,
   type AgentStateBatch,
   type CanonicalAgentView
-} from './channelsDeliveryStrategy.js';
-import { readAgentStatePulse } from './agentStatePulse.js';
+} from './strategy.js';
+import { readAgentStatePulse } from '../../agentStatePulse.js';
+import { agentDelivery, type AgentDelivery } from './transport.js';
+import { MentionRouter, threadParentIdFromFile, type MessageRouter } from '../routing/router.js';
+import { ChannelSupervision } from '../routing/supervision.js';
+import { defaultPromptRenderer, type PromptRenderer } from '../render/prompts.js';
 
 /**
  * Channels engine — per-agent delivery queues with explicit delivery contracts.
@@ -67,11 +57,11 @@ import { readAgentStatePulse } from './agentStatePulse.js';
  * Queues survive server restarts via _engine/queue/<sessionId>/<seq>.json files.
  */
 
-// MemberDeliveryState / PaneState / SubmitState / DeliveryBlockReason /
-// QueuedItemMeta / SessionDiagnostic are DEFINED in channelsProtocol.ts now —
-// one source shared with the web client (channelsClient re-exports the same
-// definitions). Imported above for local use and re-exported here so existing
-// server-side importers keep resolving against the engine module.
+// SubmitState / DeliveryBlockReason / QueuedItemMeta / SessionDiagnostic and
+// friends are DEFINED in protocol/delivery.ts — one source shared with the web
+// client (channelsClient re-exports the same definitions). Imported above for
+// local use and re-exported here so existing server-side importers keep
+// resolving against the engine module.
 export type {
   LifecycleState,
   DeliveryStatus,
@@ -100,7 +90,12 @@ export interface ChannelsEngineOptions {
    * (human-authored included); `file` locates it (root.md / thread-…),
    * `pingsHuman` marks agent messages that mention @human explicitly.
    */
-  onChannelMessage?: (channel: string, file: string, message: ChannelMessage, pingsHuman: boolean) => void;
+  onChannelMessage?: (
+    channel: string,
+    file: string,
+    message: ChannelMessage,
+    pingsHuman: boolean
+  ) => void | Promise<void>;
   /** ms between the literal body push and the Enter key (TUIs drop same-burst CR) */
   enterDelayMs?: number;
   /** ms to let the terminal settle after a release signal before draining */
@@ -139,6 +134,18 @@ export interface ChannelsEngineOptions {
   staleAfterMs?: number;
   /** manifest/session read model used by the resume inspector (no shelling from the engine) */
   sessionInfo?: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
+  /**
+   * The composed transport. When absent it is built from the primitives above,
+   * which is how the runtime and every test supply one; an embedder that wraps
+   * delivery passes the wrapped port here and the primitives are unused.
+   */
+  delivery?: AgentDelivery;
+  /** Renders what an agent sees. Defaults to the stock prompts. */
+  renderer?: PromptRenderer;
+  /** Where conversations are read from. Defaults to the filesystem store. */
+  store?: ChannelStore;
+  /** Decides who a message is for. Defaults to the stock @mention router. */
+  router?: MessageRouter;
   /** One canonical authority batch per Channels decision. */
   readAgentStates?: () => Promise<AgentStateBatch>;
   /** Clock used for working-lease validation and deterministic tests. */
@@ -150,9 +157,6 @@ const MAX_DELIVERED_MEMORY = 2000;
 /** Runaway-conversation backstop: a session's queue never grows past this. */
 const MAX_QUEUE_PER_SESSION = 50;
 
-function threadParentIdFromFile(file: string): string | undefined {
-  return /^thread-(msg-[A-Za-z0-9-]+)\.md$/.exec(file)?.[1];
-}
 const DELIVERY_SEND_TIMEOUT_MS = 30_000;
 const DELIVERY_CAPTURE_TIMEOUT_MS = 4_000;
 
@@ -162,219 +166,6 @@ function delay(ms: number): Promise<void> {
 
 function captureFingerprint(capture: string): string {
   return createHash('sha256').update(capture.slice(-16_384)).digest('hex');
-}
-
-export function buildTurnPrompt(options: {
-  channel: string;
-  file: string;
-  member: string;
-  author: string;
-  message: ChannelMessage;
-  home: string;
-  role?: string;
-  functions?: string;
-  supervisor?: boolean;
-  supervisorMaxIdleMinutes?: number;
-}): string {
-  const threadArg = options.file.startsWith('thread-') ? ` --thread ${options.file.slice('thread-'.length, -3)}` : '';
-  const lines = [
-    `[#${options.channel}] New message from @${options.author} (${options.message.id}) — you are @${options.member}.`,
-    ''
-  ];
-  if (options.supervisor) {
-    const idle = options.supervisorMaxIdleMinutes && options.supervisorMaxIdleMinutes > 0 ? options.supervisorMaxIdleMinutes : 3;
-    lines.push(
-      `You are the SUPERVISOR of #${options.channel}. You receive every message in the channel (not only mentions).`,
-      `Your job: keep an up-to-date summary of the channel — where we started, current state, decisions, patterns, and what each agent is doing.`,
-      `Stuck detection: desk tracks each worker's busy state. If an agent WORKED, went IDLE, and then stayed silent past ${idle} minute(s) without posting an update, desk will ping you with the specific @name(s) — nudge those agents directly, not @channel.`,
-      ``,
-      `EVERY message you receive, do this in order:`,
-      `1. Update your running SUMMARY (a few paragraphs — where we started, current state, latest decisions, patterns, who is doing what). Keep it as ONE sentinel message that you EDIT in place, not a new post each time.`,
-      `2. If this message needs a supervisor reply (someone is stuck, a decision is missing, the group drifted), reply in the channel by @name.`,
-      `3. If nothing needs a supervisor reply, do NOT post — silent updates to the sentinel summary are fine.`,
-      ``,
-      `Sentinel summary command:`,
-      `  first time: desk channels post ${options.channel} --as ${options.member} "**Summary (sentinel):** ..." — remember the returned message id.`,
-      `  every time after: desk channels edit ${options.channel} --message <sentinel-id> --as ${options.member} "**Summary (sentinel):** ..." — same id, updated body.`,
-      ``,
-      `The ${idle}-minute stuck-detection window is controlled from the desk UI (member role modal → Supervisor → Max idle). If it needs adjusting, ask @human to change it there — you do not set it yourself.`
-    );
-    if (options.role) {
-      lines.push(`Additional role: ${options.role}`);
-    }
-    if (options.functions) {
-      lines.push(`Additional functions: ${options.functions}`);
-    }
-    lines.push('');
-  } else if (options.role || options.functions) {
-    if (options.role) {
-      lines.push(`Your role in this channel: ${options.role}`);
-    }
-    if (options.functions) {
-      lines.push(`Remember your functions: ${options.functions}`);
-    }
-    lines.push('');
-  }
-  lines.push(
-    `1 new message from @${options.author}.`,
-    `notificationId:${options.message.id}`,
-    `Read message: desk channels read ${options.channel} --message ${options.message.id}`,
-    `Read full conversation: desk channels read ${options.channel}`,
-    '',
-    `Full conversation: ${join(options.home, options.channel, options.file)}`,
-    `To reply, run: desk channels post ${options.channel}${threadArg} --as ${options.member} "<your message>" — mention members with @name (never @${options.member}). ` +
-      `Run \`desk channels read ${options.channel} --message ${options.message.id}\` for this message or \`desk channels read ${options.channel}\` for history.`,
-    `When you reference a file, write it as a markdown link with its ABSOLUTE path so the operator can open it in the editor with one click: ` +
-      `[src/foo.ts](/abs/path/to/src/foo.ts). Bare or relative paths are not clickable.`,
-    `Collaboration contract: when you finish the work this message calls for, post your outcome to the channel (what you did, evidence, who acts next). ` +
-      `If it requires nothing from you, post one brief line saying so and why — unless this message is itself a pure acknowledgment/status (then do not reply; never acknowledge acknowledgments). ` +
-      `Human guidelines posted in the channel override this cadence.`
-  );
-  return lines.join('\n');
-}
-
-/**
- * Idle-timer check-in prompt for a supervisor: fired by the engine when the
- * channel has been silent longer than the supervisor's max-idle window. Asks
- * the supervisor to ping the channel and find out what's stuck, then refresh
- * their running summary.
- */
-export function buildSupervisorCheckInPrompt(options: {
-  channel: string;
-  member: string;
-  /** Agents that were working, went idle, and stayed silent past the max-idle
-   *  window without posting anything. Names are prefixed with @ in the prompt. */
-  stuckAgents: Array<{ name: string; stoppedForMinutes: number }>;
-  role?: string;
-  functions?: string;
-}): string {
-  const stuckLines = options.stuckAgents.map(
-    (agent) => `  - @${agent.name} — stopped ${agent.stoppedForMinutes} minute(s) ago without posting an update`
-  );
-  const stuckHandles = options.stuckAgents.map((agent) => `@${agent.name}`).join(', ');
-  const lines = [
-    `[#${options.channel}] Supervisor check-in — you are @${options.member}.`,
-    '',
-    `The following agent(s) in #${options.channel} were working, went idle, and then stayed silent — they need a nudge:`,
-    ...stuckLines,
-    ``,
-    `Do this now:`,
-    `1. Ping ${stuckHandles} in #${options.channel} by @name and ask a specific question: "what did you finish, what's blocking you?" Do NOT spam @channel with a generic prompt — target the stuck agent(s).`,
-    `2. When their reply lands, EDIT your sentinel summary in place (same message id you have been maintaining) so it reflects the new state — do NOT post a fresh summary each time.`,
-    `3. If a stuck agent needs concrete next steps to unblock, propose them in that same reply.`,
-    ``,
-    `Reply with:    desk channels post ${options.channel} --as ${options.member} "@${options.stuckAgents[0]?.name ?? 'agent'} <your targeted question>"`,
-    `Edit sentinel: desk channels edit ${options.channel} --message <sentinel-id> --as ${options.member} "**Summary (sentinel):** ..."`,
-    `Read full conversation: desk channels read ${options.channel}`
-  ];
-  if (options.role) {
-    lines.push('', `Additional role: ${options.role}`);
-  }
-  if (options.functions) {
-    lines.push(`Additional functions: ${options.functions}`);
-  }
-  return lines.join('\n');
-}
-
-/**
- * Several messages queued up while the agent was busy: instead of feeding
- * them one per turn (each delivery blocks the agent for a full turn), one
- * short digest tells the agent what arrived and where to read it.
- */
-export function buildDigestPrompt(items: QueuedPrompt[], home: string, notificationId?: string): string {
-  const byChannel = new Map<string, QueuedPrompt[]>();
-  for (const item of items) {
-    const list = byChannel.get(item.channel) ?? [];
-    list.push(item);
-    byChannel.set(item.channel, list);
-  }
-  const lines: string[] = [];
-  for (const [channel, channelItems] of byChannel) {
-    const member = channelItems.find((item) => item.member)?.member;
-    const byAuthor = new Map<string, QueuedPrompt[]>();
-    for (const item of channelItems) {
-      const list = byAuthor.get(item.author) ?? [];
-      list.push(item);
-      byAuthor.set(item.author, list);
-    }
-    const parts = [...byAuthor.entries()].map(([author, authorItems]) => {
-      const threads = [
-        ...new Set(
-          authorItems
-            .map((item) => item.file)
-            .filter((file): file is string => Boolean(file?.startsWith('thread-')))
-            .map((file) => file.slice('thread-'.length, -3))
-        )
-      ];
-      const threadNote = threads.length > 0 ? ` (thread ${threads.join(', ')})` : '';
-      return `${authorItems.length} from @${author}${threadNote}`;
-    });
-    lines.push(
-      `#${channel}: ${parts.join(', ')} — read: desk channels read ${channel}` +
-        (member ? ` | reply: desk channels post ${channel} [--thread <id>] --as ${member} "<msg>"` : '')
-    );
-  }
-  return [
-    `[desk channels] ${items.length} messages arrived while you were working (queued, not delivered one-by-one to avoid blocking you turn after turn). Read them from the channel now:`,
-    '',
-    notificationId ? `notificationId:${notificationId}` : undefined,
-    notificationId ? '' : undefined,
-    ...lines,
-    '',
-    `Files live under ${home}. Collaboration contract applies to the batch: act on what these messages require of you, post your outcome; if nothing is required, post one brief line saying so. Never reply to pure acknowledgments.`
-  ].join('\n');
-}
-
-/**
- * One-time briefing pushed to an agent's terminal when it joins a channel —
- * the agent learns the room, the roster, the CLI, and the collaboration
- * contract before the first dispatch ever reaches it.
- */
-export function buildOnboardingPrompt(options: {
-  channel: string;
-  goal: string;
-  handle: string;
-  members: ChannelMember[];
-  messageCount: number;
-  home: string;
-  role?: string;
-  functions?: string;
-}): string {
-  const roster = options.members
-    .filter((member) => member.name !== options.handle)
-    .map((member) => `@${member.name} (${member.type === 'human' ? 'human operator' : member.type})`)
-    .join(', ');
-  const lines = [
-    `You have been added to the desk channel #${options.channel} as @${options.handle}. This is a multi-agent collaboration room — you are expected to participate actively, not observe.`,
-    '',
-    options.goal ? `Channel goal: ${options.goal}` : 'Channel goal: (not set — ask @human if direction is unclear)',
-    `Members: ${roster || '(just you and the operator so far)'}`,
-  ];
-  if (options.role) {
-    lines.push(`Your role: ${options.role}`);
-  }
-  if (options.functions) {
-    lines.push(`Your functions in this channel: ${options.functions}`);
-  }
-  lines.push(
-    '',
-    'How it works:',
-    `- New messages addressed to you arrive in this terminal automatically. If several pile up while you are working, you get ONE summary instead — read the channel yourself to catch up.`,
-    `- Read the room first: desk channels read ${options.channel}${options.messageCount > 0 ? ` (${options.messageCount} messages so far)` : ''}`,
-    `- Post: desk channels post ${options.channel} --as ${options.handle} "<message>" (always pass --as ${options.handle}; without it your post may be misattributed).`,
-    `- Thread replies: desk channels post ${options.channel} --thread <parent-msg-id> --as ${options.handle} "<message>".`,
-    `- Mentions: @name/@channel mark urgency and context; channel notifications go to active agents. @human notifies the operator. Never mention yourself.`,
-    `- File links: reference files as markdown links with their ABSOLUTE path — [src/foo.ts](/abs/path/to/src/foo.ts) — so the operator can click to open them in the editor. Bare or relative paths are not clickable.`,
-    '',
-    'Collaboration contract:',
-    `- Whenever you finish a turn of real work — whether triggered by a channel message or by your own task — post a brief status to #${options.channel}: what you did, the evidence, and who must act next.`,
-    `- Do not go silent. If a message needs nothing from you, say so in one line with the reason. The only exception: never reply to pure acknowledgments or status notes that name no action for you.`,
-    `- Coordinate before colliding: announce what you are about to work on if another member might be touching the same thing.`,
-    `- If @human posts guidelines in the channel, they override these defaults — re-read them when they appear.`,
-    '',
-    `Start by reading the channel now and introducing yourself in one short message (who you are, what you are working on, current state).`
-  );
-  return lines.join('\n');
 }
 
 interface MemberRuntime {
@@ -428,28 +219,14 @@ interface DeliveryEventContext {
 export class ChannelsEngine {
   private readonly members = new Map<string, MemberRuntime>();
   private readonly activity: ChannelActivityEvent[] = [];
-  /** Per-channel per-worker activity tracking for supervisor stuck-detection.
-   *  For each channel and each non-supervisor member we remember when they were
-   *  last handed a prompt from THIS channel (lastPromptAt) and when they last
-   *  posted to THIS channel (lastPostAt). A worker is "stuck" when
-   *  lastPromptAt > lastPostAt AND they've been silent past the threshold —
-   *  i.e. this channel gave them work and they haven't reported back. Work
-   *  they picked up outside the channel is intentionally invisible here: roles
-   *  live per-channel, so supervision does too. `lastCheckInAt` is the spam
-   *  guard — one check-in per open work window per channel. */
-  private readonly channelWorkerActivity = new Map<
-    string,
-    {
-      workers: Map<string, { lastPromptAt: number; lastPostAt: number }>;
-      lastCheckInAt: number;
-    }
-  >();
+  /** Per-channel record of work handed out and not yet reported back. */
+  private readonly supervision = new ChannelSupervision();
+  /** Serialises dispatch so messages are handled in the order they arrive. */
+  private dispatchChain: Promise<void> = Promise.resolve();
   private activitySeq = 0;
   private queueSeq = 0;
   private disposed = false;
-  private readonly sendText: (sessionId: string, text: string) => Promise<boolean>;
-  private readonly capturePane: (sessionId: string) => Promise<string | null>;
-  private readonly sendEnter: (sessionId: string) => Promise<boolean>;
+  private readonly delivery: AgentDelivery;
   private readonly releaseSettleMs: number;
   private readonly drainWatchdogMs: number;
   private readonly enterVerifyDelayMs: number;
@@ -458,17 +235,22 @@ export class ChannelsEngine {
   private readonly onSubmitStateChange?: (sessionId: string, state: SubmitState, context: { seq: number }) => void;
   private readonly staleAfterMs: number;
   private readonly sessionInfo: (sessionId: string) => (Omit<SessionResumeInfo, 'hasResume'> & { hasResume?: boolean }) | undefined;
-  private readonly readAgentStates: () => Promise<AgentStateBatch>;
   private readonly now: () => number;
+  private readonly router: MessageRouter;
+  private readonly store: ChannelStore;
+  private readonly renderer: PromptRenderer;
   private pumpTimer: NodeJS.Timeout | undefined;
   /** delivered (session:messageId) pairs — dispatch dedupe across all paths */
   private readonly delivered = new Set<string>();
   /** queue metadata retained after delivery shift so async submit-state events can be attributed */
   private readonly deliveryEventContext = new Map<string, DeliveryEventContext>();
   constructor(private readonly options: ChannelsEngineOptions) {
-    this.sendText = options.sendText;
-    this.capturePane = options.capturePane;
-    this.sendEnter = options.sendEnter;
+    this.delivery = options.delivery ?? agentDelivery({
+      sendText: options.sendText,
+      capturePane: options.capturePane,
+      sendEnter: options.sendEnter,
+      readAgentStates: options.readAgentStates ?? readAgentStatePulse
+    });
     this.releaseSettleMs = options.releaseSettleMs ?? 800;
     this.drainWatchdogMs = options.drainWatchdogMs ?? 30_000;
     this.enterVerifyDelayMs = options.enterVerifyDelayMs ?? 1200;
@@ -477,8 +259,10 @@ export class ChannelsEngine {
     this.onSubmitStateChange = options.onSubmitStateChange;
     this.staleAfterMs = options.staleAfterMs ?? 10 * 60 * 1000;
     this.sessionInfo = options.sessionInfo ?? (() => undefined);
-    this.readAgentStates = options.readAgentStates ?? readAgentStatePulse;
     this.now = options.now ?? Date.now;
+    this.router = options.router ?? new MentionRouter();
+    this.store = options.store ?? new FileChannelStore(options.home);
+    this.renderer = options.renderer ?? defaultPromptRenderer;
     this.restorePausedSessions();
     this.restoreQueues();
     this.startPump(options.pumpIntervalMs ?? 2500);
@@ -518,7 +302,7 @@ export class ChannelsEngine {
 
   private async readStateBatch(): Promise<AgentStateBatch> {
     try {
-      const batch = await this.readAgentStates();
+      const batch = await this.delivery.states();
       if (!batch.ok || batch.revision === null || !Array.isArray(batch.snapshots)) {
         return { ok: false, revision: null, snapshots: [] };
       }
@@ -532,7 +316,7 @@ export class ChannelsEngine {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const captured = await Promise.race([
-        this.capturePane(sessionId).catch(() => null),
+        this.delivery.probe(sessionId).catch(() => null),
         new Promise<null>((resolve) => {
           timeout = setTimeout(() => resolve(null), DELIVERY_CAPTURE_TIMEOUT_MS);
           timeout.unref?.();
@@ -561,7 +345,7 @@ export class ChannelsEngine {
         this.resetHold(runtime);
       }
     }
-    this.checkSupervisorIdle(batch);
+    await this.checkSupervisorIdle(batch);
   }
 
   /** Every pump tick: for each channel with a supervisor member, look for
@@ -571,15 +355,12 @@ export class ChannelsEngine {
    *  outside this channel is invisible here (roles live per-channel, so
    *  supervision does too). If there is at least one stuck worker, ping the
    *  supervisor with names so it can nudge by @name instead of @channel. */
-  private checkSupervisorIdle(batch: AgentStateBatch): void {
+  private async checkSupervisorIdle(batch: AgentStateBatch): Promise<void> {
     const now = this.now();
-    for (const [channel, entry] of this.channelWorkerActivity.entries()) {
-      if (entry.workers.size === 0) {
-        continue; // no channel prompts and no channel posts recorded yet
-      }
+    for (const channel of this.supervision.watched()) {
       let members: ChannelMember[];
       try {
-        members = listChannelMembers(this.options.home, channel);
+        members = await this.store.listMembers(channel);
       } catch (error) {
         // R1: never drop a failure blind. A channel disappearing mid-pump
         // (destroy race) is expected; a broken manifest is not. Log both
@@ -591,69 +372,40 @@ export class ChannelsEngine {
         );
         continue;
       }
-      const supervisors = members.filter(
-        (member) => member.supervisor === true && member.sessionId && member.type !== 'human'
-      );
+      const supervisors = this.supervision.supervisorsOf(members);
       if (supervisors.length === 0) {
         continue;
       }
-      // Threshold = shortest max-idle among the channel's supervisors.
-      const thresholdMinutes = Math.min(
-        ...supervisors.map((sup) => (sup.supervisorMaxIdleMinutes && sup.supervisorMaxIdleMinutes > 0 ? sup.supervisorMaxIdleMinutes : 3))
-      );
-      const thresholdMs = thresholdMinutes * 60_000;
-      const stuck: Array<{ name: string; stoppedForMinutes: number }> = [];
-      for (const member of members) {
-        if (member.type === 'human') continue;
-        if (member.supervisor === true) continue;
-        if (!member.sessionId) continue;
-        const workerState = entry.workers.get(member.name);
-        if (!workerState) continue;
-        // Task in play = last prompt from this channel is newer than the
-        // worker's last post to this channel. If they already reported, no task.
-        if (workerState.lastPromptAt <= workerState.lastPostAt) continue;
-        // Give them time before nudging: measure silence since the last prompt.
-        const silentForMs = now - workerState.lastPromptAt;
-        if (silentForMs < thresholdMs) continue;
+      const stuck = this.supervision.findStuck(channel, members, {
+        thresholdMs: this.supervision.thresholdMs(supervisors),
+        now,
         // A fresh canonical working lease means the worker is still responding.
-        // Expired leases project as unknown and therefore cannot suppress checks forever.
-        const view = canonicalAgentView(batch, member.sessionId, now);
-        if (view.activity === 'working') continue;
-        stuck.push({ name: member.name, stoppedForMinutes: Math.round(silentForMs / 60_000) });
-      }
-      if (stuck.length === 0) {
+        // Expired leases project as unknown and cannot suppress checks forever.
+        isWorking: (sessionId) => canonicalAgentView(batch, sessionId, now).activity === 'working'
+      });
+      if (stuck.length === 0 || this.supervision.checkedIn(channel)) {
         continue;
       }
-      // Spam guard: one check-in per open work window. Reset when a new prompt
-      // lands (recordWorkerPrompt zeros this) or a worker posts (recordWorkerPost).
-      if (entry.lastCheckInAt > 0) {
-        continue;
-      }
-      let anyFired = false;
       for (const supervisor of supervisors) {
-        const prompt = buildSupervisorCheckInPrompt({
-          channel,
-          member: supervisor.name,
-          stuckAgents: stuck,
-          role: supervisor.role,
-          functions: supervisor.functions
-        });
         this.enqueue(supervisor.sessionId!, {
           channel,
           messageId: `supervisor-check-in-${channel}-${now}`,
           author: 'system',
-          prompt,
+          prompt: this.renderer.supervisorCheckIn({
+            channel,
+            member: supervisor.name,
+            stuckAgents: stuck,
+            role: supervisor.role,
+            functions: supervisor.functions
+          }),
           target: supervisor.name,
-          preview: `stuck: ${stuck.map((s) => s.name).join(', ')}`,
+          preview: `stuck: ${stuck.map((worker) => worker.name).join(', ')}`,
           kind: 'prompt',
           file: `_supervisor/${channel}.md`,
           member: supervisor.name
         });
-        anyFired = true;
       }
-      if (anyFired) {
-        entry.lastCheckInAt = now;
-      }
+      this.supervision.markCheckedIn(channel, now);
     }
   }
 
@@ -933,8 +685,24 @@ export class ChannelsEngine {
     }
   }
 
-  /** Entry point for every finalised message (server appends + watcher finds). */
-  handleMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): void {
+  /**
+   * Entry point for every finalised message (server appends + change feed).
+   *
+   * Dispatch is SERIALISED. Reading the roster and a thread's parent author is
+   * I/O, so two messages handed over back to back would otherwise interleave
+   * and land in the activity ring — and in an agent's digest — in whatever
+   * order their reads happened to finish. The change feed delivers a file's
+   * messages in file order, and that is the order a reader expects to see.
+   * Callers still get their own promise, with their own result and their own
+   * error; the chain only fixes the order they run in.
+   */
+  handleMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): Promise<void> {
+    const next = this.dispatchChain.then(() => this.dispatchMessage(incoming, membersOverride));
+    this.dispatchChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async dispatchMessage(incoming: IncomingChannelMessage, membersOverride?: ChannelMember[]): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -942,37 +710,43 @@ export class ChannelsEngine {
     const preview = message.body.replace(/\s+/g, ' ').slice(0, 140);
     this.pushActivity({ kind: 'message', channel, file, messageId: message.id, author: message.author, preview });
 
-    const members = membersOverride ?? listChannelMembers(this.options.home, channel);
+    const members = membersOverride ?? (await this.store.listMembers(channel));
+    const parentId = threadParentIdFromFile(file);
+    const decision = this.router.route({
+      channel,
+      file,
+      message,
+      members,
+      threadAuthor: parentId === undefined ? undefined : await this.threadParentAuthor(channel, parentId)
+    });
+
     // The author just posted to this channel — record it so stuck-detection
     // knows they reported back on any in-flight prompt from this channel.
     const authorMember = members.find((member) => member.name === message.author);
-    const authorIsSupervisor = authorMember?.supervisor === true;
-    if (authorMember && !authorIsSupervisor && authorMember.type !== 'human') {
-      this.recordWorkerPost(channel, authorMember.name);
+    if (authorMember && !decision.authorIsSupervisor && authorMember.type !== 'human') {
+      this.supervision.recordPost(channel, authorMember.name, this.now());
     }
 
-    const pingsHuman = message.author !== 'human' && mentionsHuman(message.body);
-    if (pingsHuman) {
+    if (decision.pingsOperator) {
       this.pushActivity({ kind: 'human-mention', channel, file, messageId: message.id, author: message.author, preview });
     }
-    this.options.onChannelMessage?.(channel, file, message, pingsHuman);
+    const onChannelMessage = this.options.onChannelMessage;
+    if (onChannelMessage) {
+      this.background(`channel event ${channel}/${message.id}`, () =>
+        Promise.resolve(onChannelMessage(channel, file, message, decision.pingsOperator))
+      );
+    }
 
-    const threadParentId = threadParentIdFromFile(file);
-    const threadAuthor = threadParentId ? this.threadParentAuthor(channel, threadParentId) : undefined;
-    const authorSession = members.find((member) => member.name === message.author)?.sessionId;
-    for (const target of resolveTargets(message.author, message.body, members, { isThread: Boolean(threadParentId), threadAuthor })) {
-      if (!target.sessionId || target.sessionId === authorSession) {
-        continue;
-      }
+    for (const target of decision.recipients) {
       // Record that THIS channel handed target a prompt (only for non-supervisor
       // workers, and only when the AUTHOR is not a supervisor). Supervisor
       // messages don't count as "assigned work" — the supervisor decides on
       // its own when to re-nudge, so we don't want its own check-in question
       // to open a fresh check-in window for the same worker forever.
-      if (target.supervisor !== true && target.type !== 'human' && !authorIsSupervisor) {
-        this.recordWorkerPrompt(channel, target.name);
+      if (target.supervisor !== true && target.type !== 'human' && !decision.authorIsSupervisor) {
+        this.supervision.recordPrompt(channel, target.name, this.now());
       }
-      const prompt = buildTurnPrompt({
+      const prompt = this.renderer.turn({
         channel,
         file,
         member: target.name,
@@ -998,41 +772,9 @@ export class ChannelsEngine {
     }
   }
 
-  private ensureChannelActivity(channel: string): {
-    workers: Map<string, { lastPromptAt: number; lastPostAt: number }>;
-    lastCheckInAt: number;
-  } {
-    let entry = this.channelWorkerActivity.get(channel);
-    if (!entry) {
-      entry = { workers: new Map(), lastCheckInAt: 0 };
-      this.channelWorkerActivity.set(channel, entry);
-    }
-    return entry;
-  }
-
-  private recordWorkerPrompt(channel: string, member: string): void {
-    const entry = this.ensureChannelActivity(channel);
-    const now = this.now();
-    const prior = entry.workers.get(member) ?? { lastPromptAt: 0, lastPostAt: 0 };
-    entry.workers.set(member, { lastPromptAt: now, lastPostAt: prior.lastPostAt });
-    // A new task landed → the previous check-in window closes; the next window
-    // can fire fresh once the new prompt goes unanswered for `threshold` minutes.
-    entry.lastCheckInAt = 0;
-  }
-
-  private recordWorkerPost(channel: string, member: string): void {
-    const entry = this.ensureChannelActivity(channel);
-    const now = this.now();
-    const prior = entry.workers.get(member) ?? { lastPromptAt: 0, lastPostAt: 0 };
-    entry.workers.set(member, { lastPromptAt: prior.lastPromptAt, lastPostAt: now });
-    // Someone reported back → the check-in guard resets so the next open work
-    // window can fire its own check-in later if the worker stops again.
-    entry.lastCheckInAt = 0;
-  }
-
-  private threadParentAuthor(channel: string, parentId: string): string | undefined {
+  private async threadParentAuthor(channel: string, parentId: string): Promise<string | undefined> {
     try {
-      return readChannelMessage(this.options.home, channel, parentId).author;
+      return (await this.store.readMessage(channel, parentId)).author;
     } catch {
       return undefined;
     }
@@ -1247,7 +989,7 @@ export class ChannelsEngine {
     // a staleness note so the agent weighs them against newer context.
     const ageMs = this.now() - Date.parse(next.queuedAt);
     const payload = digest
-      ? buildDigestPrompt(digestItems, this.options.home, notificationId)
+      ? this.renderer.digest(digestItems, this.options.home, notificationId)
       : Number.isFinite(ageMs) && ageMs > this.staleAfterMs
         ? `(delayed delivery — this message was posted ${Math.round(ageMs / 60000)} minutes ago; read the channel for the current state before acting)\n${next.prompt}`
         : next.prompt;
@@ -1279,7 +1021,7 @@ export class ChannelsEngine {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         delivered = await Promise.race([
-          this.sendText(runtime.sessionId, payload),
+          this.delivery.send(runtime.sessionId, payload),
           new Promise<boolean>((resolve) => {
             timeout = setTimeout(() => {
               deliveryTimedOut = true;
@@ -1432,7 +1174,7 @@ export class ChannelsEngine {
         }
       }
       if (view.activity === 'idle') {
-        await this.sendEnter(runtime.sessionId);
+        await this.delivery.submit(runtime.sessionId);
       }
     }
     if (this.disposed) {

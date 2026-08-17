@@ -4,21 +4,9 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { watch } from 'chokidar';
 import type { FSWatcher } from 'chokidar';
-import {
-  formatChannelPreamble,
-  formatMemberManifest,
-  formatMessageBlock,
-  formatThreadPreamble,
-  generateMessageId,
-  isValidChannelName,
-  messageTimestamp,
-  parseConversation,
-  parseMemberManifest,
-  type ChannelMember,
-  type ChannelMessage
-} from './channelsProtocol.js';
-import { writeFileAtomic, writeFileAtomicCreate } from './fsOps.js';
-import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
+import { formatChannelPreamble, formatMemberManifest, formatMessageBlock, formatThreadPreamble, generateMessageId, isValidChannelName, messageTimestamp, parseConversation, parseMemberManifest, type ChannelMember, type ChannelMessage } from '../protocol/format.js';
+import { writeFileAtomic, writeFileAtomicCreate } from '../../fsOps.js';
+import { withFileLock, withFileLockSync } from '../../../shared/fileLock.js';
 
 /**
  * Channels store — the filesystem side of the messaging protocol.
@@ -1201,12 +1189,13 @@ export interface IncomingChannelMessage {
  */
 export class ChannelsWatcher {
   private readonly seen = new Set<string>();
+  private readonly inFlight = new Map<string, Promise<void>>();
   private watcher: FSWatcher | undefined;
   private readonly pendingScans = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly home: string,
-    private readonly onMessage: (incoming: IncomingChannelMessage) => void,
+    private readonly onMessage: (incoming: IncomingChannelMessage) => void | Promise<void>,
     private readonly sweepIntervalMs = 30_000,
     private readonly onWatcherError: (error: Error) => void = (error) => {
       console.error(`channels watcher degraded: ${error.message}`);
@@ -1269,12 +1258,16 @@ export class ChannelsWatcher {
     // Reconciliation sweep: filesystem events are best-effort (WSL2 and network
     // filesystems can drop them); a missed event would otherwise mean a message
     // that never dispatches. Cheap thanks to the per-file mtime guard.
-    this.sweepTimer = setInterval(() => this.sweepNow(), this.sweepIntervalMs);
+    this.sweepTimer = setInterval(() => {
+      void this.sweepNow().catch((error: unknown) => {
+        this.reportWatcherError(error);
+      });
+    }, this.sweepIntervalMs);
     this.sweepTimer.unref?.();
   }
 
   /** Rescans every conversation file whose mtime moved since the last sweep. */
-  sweepNow(): void {
+  async sweepNow(): Promise<void> {
     let channelNames: string[];
     try {
       channelNames = readdirSync(this.home, { withFileTypes: true })
@@ -1296,8 +1289,12 @@ export class ChannelsWatcher {
         if (this.sweepMtimes.get(key) === mtime) {
           continue;
         }
-        this.sweepMtimes.set(key, mtime);
-        this.scanFile(channel, file);
+        try {
+          await this.scanFile(channel, file);
+          this.sweepMtimes.set(key, mtime);
+        } catch (error) {
+          this.reportWatcherError(error);
+        }
       }
     }
   }
@@ -1313,12 +1310,14 @@ export class ChannelsWatcher {
       key,
       setTimeout(() => {
         this.pendingScans.delete(key);
-        this.scanFile(channel, fileName);
+        void this.scanFile(channel, fileName).catch((error: unknown) => {
+          this.reportWatcherError(error);
+        });
       }, 150)
     );
   }
 
-  scanFile(channel: string, fileName: string): void {
+  async scanFile(channel: string, fileName: string): Promise<void> {
     const filePath = join(this.home, channel, fileName);
     if (!existsSync(filePath)) {
       return;
@@ -1333,12 +1332,32 @@ export class ChannelsWatcher {
       invalidateChannelSummary(this.home, channel);
     }
     for (const message of messages) {
+      const key = `${channel}/${fileName}:${message.id}`;
       if (!message.hasEndTurn || this.hasSeen(channel, fileName, message.id)) {
         continue;
       }
-      this.onMessage({ channel, file: fileName, message });
-      this.markSeen(channel, fileName, message.id);
+      const pending = this.inFlight.get(key);
+      if (pending) {
+        await pending;
+        continue;
+      }
+      const dispatch = (async (): Promise<void> => {
+        await this.onMessage({ channel, file: fileName, message });
+        this.markSeen(channel, fileName, message.id);
+      })();
+      this.inFlight.set(key, dispatch);
+      try {
+        await dispatch;
+      } finally {
+        if (this.inFlight.get(key) === dispatch) {
+          this.inFlight.delete(key);
+        }
+      }
     }
+  }
+
+  private reportWatcherError(error: unknown): void {
+    this.onWatcherError(error instanceof Error ? error : new Error(String(error)));
   }
 
   stop(): void {

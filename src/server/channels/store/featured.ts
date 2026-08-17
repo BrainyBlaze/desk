@@ -10,8 +10,8 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isValidChannelName, parseConversation } from './channelsProtocol.js';
-import { writeFileAtomic } from './fsOps.js';
+import { isValidChannelName, parseConversation } from '../protocol/format.js';
+import { writeFileAtomic } from '../../fsOps.js';
 
 const FEATURED_FILE = 'featured.json';
 const FEATURED_VERSION = 1;

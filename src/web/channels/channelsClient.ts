@@ -1,24 +1,11 @@
 /** Client for /api/channels/* — the desk agent messaging subsystem. */
 
-import type {
-  ChannelMember,
-  ChannelMessage,
-  ChannelActivityEvent,
-  LifecycleState,
-  SubmitState,
-  HistoricalSubmitState,
-  DeliveryBlockReason,
-  QueuedItemMeta,
-  BlockedItemMeta,
-  SessionDiagnostic,
-  SessionResumeInfo,
-  ReactionKind,
-  ViewFilter
-} from '../../server/channelsProtocol.js';
-import type { ReactionRef } from '../../server/channelsReactions.js';
+import type { ChannelMember, ChannelMessage, ReactionKind, ViewFilter } from '../../server/channels/protocol/format.js';
+import type { ChannelActivityEvent, LifecycleState, SubmitState, HistoricalSubmitState, DeliveryBlockReason, QueuedItemMeta, BlockedItemMeta, SessionDiagnostic, SessionResumeInfo } from '../../server/channels/protocol/delivery.js';
+import type { ReactionRef } from '../../server/channels/store/reactions.js';
 import { readJson } from '../httpJson.js';
-import type { SavedView } from '../../server/channelsViews.js';
-import type { DeliveryEvent, DeliveryEventKind } from '../../server/channelsEvents.js';
+import type { SavedView } from '../../server/channels/store/views.js';
+import type { DeliveryEvent, DeliveryEventKind } from '../../server/channels/delivery/events.js';
 
 // Store-defined row types re-exported for the web subsystem (type-only — the
 // server store modules are erased from the web bundle).

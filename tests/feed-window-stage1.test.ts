@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { sliceMessages } from '../src/server/channelsStore.js';
-import type { ChannelMessage } from '../src/server/channelsProtocol.js';
+import { sliceMessages } from '../src/server/channels/store/fileStore.js';
+import type { ChannelMessage } from '../src/server/channels/protocol/format.js';
 import { WINDOW_CAP, applyWindow } from '../src/web/channels/channelsModel.js';
 import type { ChannelDetail } from '../src/web/channels/channelsClient.js';
 

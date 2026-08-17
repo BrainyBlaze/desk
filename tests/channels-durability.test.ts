@@ -22,8 +22,8 @@ import {
   EXT_STUCK_SUBMIT,
   EXT_STUCK_UNOBSERVABLE,
   EXT_CONSUMED
-} from '../src/server/channelsDurability.js';
-import type { QueuedPrompt } from '../src/server/channelsEngine.js';
+} from '../src/server/channels/delivery/durability.js';
+import type { QueuedPrompt } from '../src/server/channels/delivery/engine.js';
 
 const sample = (seq: number, messageId = `msg-${seq}`): QueuedPrompt => ({
   seq,
