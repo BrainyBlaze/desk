@@ -56,11 +56,12 @@ export const AGENTS = [
     id: 'qwen',
     label: 'qwen',
     kind: 'agent',
+    bypass: true,
     terminalProducer: 'qwen-hooks',
     sessionIdField: 'session_id',
     sessionIdShape: 'uuid',
     hooks: 'qwen',
-    launch: { resumeFlag: '--resume' }
+    launch: { resumeFlag: '--resume', bypassFlag: '--yolo' }
   },
   {
     id: 'kimi',

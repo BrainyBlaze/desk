@@ -142,9 +142,9 @@ skipped rather than overwritten. Qwen reads a command hook's `timeout` in
 **milliseconds** (unlike Claude/Codex, which use seconds), so Desk writes
 `10000` there.
 
-Qwen has **no permission-bypass flag** — the Add Session bypass checkbox is
-hidden for it, and a hand-edited `bypassPermissions: true` on a Qwen session is
-rejected at manifest load.
+Permission bypass maps to Qwen's `--yolo` (auto-approve all tools; needs Qwen
+Code ≥0.21.13 — older CLIs reject the flag, and Qwen's own auto-updater keeps
+the effective version current).
 
 Qwen mints a **new resume id on every launch** and only persists a resumable
 session after the first message is exchanged. A Qwen pane restarted before any
@@ -215,7 +215,7 @@ Bash does not have agent-specific permission bypass, resume capture, or LSP MCP 
 
 ## Permission bypass
 
-The Add Session modal shows a bypass-permissions option for Codex, Claude, OpenCode, and Kimi.
+The Add Session modal shows a bypass-permissions option for Codex, Claude, OpenCode, Qwen, and Kimi.
 
 The manifest field is:
 
@@ -223,11 +223,11 @@ The manifest field is:
 bypassPermissions: true
 ```
 
-For Codex and Claude, Desk maps that field to the agent CLI's dangerous bypass mode; for Kimi it maps to `--yolo`.
+For Codex and Claude, Desk maps that field to the agent CLI's dangerous bypass mode; for Qwen and Kimi it maps to `--yolo`.
 
 For OpenCode, Desk maps it to a per-session OpenCode permission config. Unchecking the box makes OpenCode ask for tool permissions.
 
-Qwen and Grok have no bypass flag: the checkbox is hidden for them, and `bypassPermissions: true` on such a session is a manifest error rather than a silent no-op. (A `bash` session still ignores the field silently, as before.)
+Grok has no bypass flag (it has no per-tool approvals at all): the checkbox is hidden for it, and `bypassPermissions: true` on a Grok session is a manifest error rather than a silent no-op. (A `bash` session still ignores the field silently, as before.)
 
 ## Resume capture
 

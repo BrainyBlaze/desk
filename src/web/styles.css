@@ -1339,6 +1339,12 @@ select:focus {
   display: none;
 }
 
+/* Agents whose TUI draws its own scrollbar (grok's OpenTUI): the host rail
+   would be a second competing bar, so the pane defers to the agent's. */
+.terminalSurfaceShell[data-terminal-scroll-owner='agent'] .terminalScrollRail {
+  display: none;
+}
+
 .terminalSurfaceShell[data-terminal-scrollback='true']::after {
   content: 'SCROLLBACK · wheel to bottom or ESC for live';
   position: absolute;

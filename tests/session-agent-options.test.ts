@@ -18,7 +18,7 @@ describe('session agent options', () => {
     expect(supportsBypassPermissions('codex')).toBe(true);
     expect(supportsBypassPermissions('claude')).toBe(true);
     expect(supportsBypassPermissions('opencode')).toBe(true);
-    expect(supportsBypassPermissions('qwen')).toBe(false);
+    expect(supportsBypassPermissions('qwen')).toBe(true);
     expect(supportsBypassPermissions('kimi')).toBe(true);
     expect(supportsBypassPermissions('grok')).toBe(false);
     expect(supportsBypassPermissions('bash')).toBe(false);
