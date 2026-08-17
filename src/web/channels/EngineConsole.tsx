@@ -9,7 +9,7 @@ import {
   type EngineActionName,
   type EngineDiagnostics,
   type SessionDiagnostic,
-  type SubmitState
+  type HistoricalSubmitState
 } from './channelsClient.js';
 
 /**
@@ -30,10 +30,13 @@ const BLOCK_REASON_LABEL: Record<DeliveryBlockReason, string> = {
   'submit-stuck-submit': 'submit stuck'
 };
 
-const SUBMIT_STATE_LABEL: Record<SubmitState, string> = {
+// Labels span the HISTORICAL vocabulary: the console renders persisted
+// history, and `delivery-ack-timeout` still exists in old rings/ack files.
+const SUBMIT_STATE_LABEL: Record<HistoricalSubmitState, string> = {
   delivering: 'delivering',
   submitted: 'submitted',
   'delivery-ack-timeout': 'ack timeout',
+  'submit-not-applicable': 'delivered (shell)',
   'submit-stuck-paste': 'paste stuck',
   'submit-stuck-submit': 'submit stuck',
   'submit-stuck-unobservable': 'unobservable'
@@ -161,7 +164,6 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
             <span className={`chanEnginePill ${!live ? 'muted' : live.pumpAlive ? 'ok' : 'warn'}`}>
               {!live ? 'pump —' : live.pumpAlive ? 'pump live' : 'pump down'}
             </span>
-            {live?.passive ? <span className="chanEnginePill warn">passive</span> : null}
             <span className="chanEnginePill muted">{live ? `${live.totalQueued} queued` : '— queued'}</span>
           </div>
         </div>
@@ -172,18 +174,6 @@ export function EngineConsole({ open, onClose }: { open: boolean; onClose: () =>
           </button>
           <button className="chanEngineBtn" onClick={() => void act('drain-ready-all')} disabled={busyAction}>
             Drain ready
-          </button>
-          <button
-            className="chanEngineBtn danger"
-            disabled={busyAction}
-            onClick={() =>
-              setConfirm({
-                label: 'Rebuild the engine in-process? Queues are preserved (re-read from disk) and the pump restarts. Use this to recover a wedged engine without restarting desk serve.',
-                run: () => act('rebuild-engine')
-              })
-            }
-          >
-            Rebuild engine
           </button>
         </div>
 

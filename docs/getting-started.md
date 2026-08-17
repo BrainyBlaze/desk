@@ -14,20 +14,23 @@ release targets are:
 - macOS x64 and arm64
 - glibc Linux x64 and arm64, including WSL
 
-Native Windows is unsupported. Alpine and other musl systems can provision host
-packages, but installation stops before activation because Desk does not yet
-publish a compatible Node toolchain.
+Alpine and other musl systems can provision host packages, but installation
+stops before activation because Desk does not yet publish a compatible Node
+toolchain.
 
 The installer detects, installs, and rechecks the required host layer: CA
-certificates, archive and checksum tools, Git 2.30+, Python 3.6+, make, and a
-working C++ compiler. It maintains its own checksum-verified Node 22.23.1,
+certificates, archive and checksum tools, Git 2.30+, Python 3.6+, make, a
+working C++ compiler, and ripgrep (the editor's only search engine — without
+`rg` the server refuses search by name rather than degrading). It maintains its own checksum-verified Node 22.23.1,
 npm 10.9.8, and Bun 1.3.14 under the Desk install root. It does not replace your
 global runtimes.
 
 <Note>
-The installer builds the pinned bundled atch 1.6-bb1 fork for the host and
-verifies it before activation. Desk resolves `DESK_ATCH_BIN`, same-release
-`libexec/atch`, then `PATH`, in that order.
+  The installer validates the extracted source's committed four-target Moor pin
+  against the install manifest, downloads and verifies the selected host asset,
+  places it at `libexec/moor`, then runs `npm ci` and `npm run build:application`.
+  Desk resolves explicit `DESK_MOOR_BIN`, then an attested same-release
+  `libexec/moor`, then an attested absolute `moor` on `PATH`.
 </Note>
 
 Agent CLIs (`codex`, `claude`, and `opencode`), `gh`, and GPU telemetry commands
@@ -68,7 +71,7 @@ are optional. Install only the integrations you intend to use.
   <Step title="Create your first session">
     In the UI, open **Add session** and choose a session name, agent or command,
     and repository directory. Desk writes the session to
-    `~/.config/desk/desk.yml` and owns its atch lifetime.
+    `~/.config/desk/desk.yml` and owns its Moor lifetime.
   </Step>
 </Steps>
 
@@ -109,7 +112,7 @@ desk capture <name|sessionId|resume> --lines 200
 desk hooks install
 ```
 
-`desk up` starts missing configured sessions without replacing running atch
+`desk up` starts missing configured sessions without replacing running Moor
 sessions.
 
 ## Upgrade, reinstall, or downgrade
@@ -131,6 +134,12 @@ A same-version run creates and verifies a new immutable instance instead of
 modifying the active one. After activation, Desk retains the current and previous
 instances for rollback.
 
+Stores written by Desk v0.3.1 or older are not migrated by the current release.
+Desk v0.3.2 is the last release that migrates them in place; a machine still on
+v0.3.1 or older must boot v0.3.2 once against its store before upgrading
+further. A newer Desk that meets an unmigrated store refuses it by name and
+says so — see [Troubleshooting](troubleshooting.md).
+
 ## Uninstall the managed application
 
 ```bash
@@ -139,7 +148,7 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
 ```
 
 Uninstall verifies Desk ownership before removing the launcher, releases,
-toolchains, and install metadata. It preserves `~/.config/desk`, projects, atch
+toolchains, and install metadata. It preserves `~/.config/desk`, projects, Moor
 sessions, credentials, and optional host tools. To remove configuration too,
 inspect it first and then delete it explicitly:
 

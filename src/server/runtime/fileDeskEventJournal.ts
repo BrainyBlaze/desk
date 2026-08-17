@@ -32,7 +32,8 @@ import {
   type SessionStateTransitionCause
 } from '../../shared/controlPlane/contract.js';
 
-const JOURNAL_RECORD_VERSION = 1 as const;
+const LEGACY_JOURNAL_RECORD_VERSION = 1 as const;
+const JOURNAL_RECORD_VERSION = 2 as const;
 const DEFAULT_EVENT_LIMIT = 200;
 const MAX_EVENT_LIMIT = 1_000;
 const DEFAULT_MAX_RETAINED_EVENTS = 1_000;
@@ -130,6 +131,11 @@ type AppendRecord =
   | ClearRecord;
 type JournalRecord = AppendRecord | CheckpointRecord;
 
+interface ParsedJournalRecord {
+  record: JournalRecord;
+  migrated: boolean;
+}
+
 interface ChannelReceipt {
   fingerprint: string;
   event: Extract<DeskEvent, { kind: 'channel-message' }>;
@@ -212,7 +218,7 @@ export class FileDeskEventJournal {
     );
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     try {
-      this.replay();
+      if (this.replay()) this.rewriteMigratedJournal();
     } catch (error) {
       if (!(error instanceof DeskEventJournalCorruptionError)) throw error;
       const quarantinePath = this.quarantineCorruptJournal();
@@ -289,10 +295,7 @@ export class FileDeskEventJournal {
         : [
             ...new Set(
               parsed.ids.filter((id) =>
-                this.events.some(
-                  (event) =>
-                    event.id === id && event.seq > this.clearedThrough
-                )
+                this.events.some((event) => event.id === id && event.seq > this.clearedThrough)
               )
             )
           ];
@@ -394,8 +397,8 @@ export class FileDeskEventJournal {
     return { ...structuredClone(event), read: this.isRead(event) } as DeskEvent;
   }
 
-  private replay(): void {
-    if (!existsSync(this.path)) return;
+  private replay(): boolean {
+    if (!existsSync(this.path)) return false;
     const contents = readFileSync(this.path, 'utf8');
     let durableContents = contents;
     if (contents.length > 0 && !contents.endsWith('\n')) {
@@ -406,11 +409,14 @@ export class FileDeskEventJournal {
     }
 
     let lineNumber = 0;
+    let migrated = false;
     for (const line of durableContents.split('\n')) {
       if (line.length === 0) continue;
       lineNumber += 1;
       try {
-        const record = parseJournalRecord(JSON.parse(line));
+        const parsed = parseJournalRecord(JSON.parse(line));
+        const { record } = parsed;
+        migrated ||= parsed.migrated;
         if (record.type === 'checkpoint') {
           if (lineNumber !== 1) {
             throw new Error('desk event journal checkpoint is not first');
@@ -430,6 +436,7 @@ export class FileDeskEventJournal {
         );
       }
     }
+    return migrated;
   }
 
   private commitRecord(record: AppendRecord, forceCompact = false): void {
@@ -641,6 +648,13 @@ export class FileDeskEventJournal {
     }
   }
 
+  private rewriteMigratedJournal(): void {
+    if (this.journalSeq === 0) return;
+    const bytes = Buffer.from(`${JSON.stringify(this.checkpoint())}\n`, 'utf8');
+    atomicReplace(this.path, bytes);
+    this.recordsSinceCompaction = 0;
+  }
+
   private quarantineCorruptJournal(): string {
     const quarantinePath = uniqueQuarantinePath(this.path, this.now());
     renameSync(this.path, quarantinePath);
@@ -744,11 +758,26 @@ function parseTransition(input: unknown): SessionStateTransition {
   };
 }
 
-function parseJournalRecord(input: unknown): JournalRecord {
+function parseJournalRecord(input: unknown): ParsedJournalRecord {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {
     throw new Error('invalid desk event journal record');
   }
-  const record = input as Record<string, unknown>;
+  const inputRecord = input as Record<string, unknown>;
+  if (!isPositiveSafeInteger(inputRecord.journalSeq)) {
+    throw new Error('invalid desk event journal record');
+  }
+  if (inputRecord.recordVersion === LEGACY_JOURNAL_RECORD_VERSION) {
+    return {
+      record: parseCurrentJournalRecord(migrateLegacyJournalRecord(inputRecord)),
+      migrated: true
+    };
+  }
+  return { record: parseCurrentJournalRecord(inputRecord), migrated: false };
+}
+
+function parseCurrentJournalRecord(
+  record: Record<string, unknown>
+): JournalRecord {
   if (
     record.recordVersion !== JOURNAL_RECORD_VERSION ||
     !isPositiveSafeInteger(record.journalSeq)
@@ -852,6 +881,109 @@ function parseJournalRecord(input: unknown): JournalRecord {
   }
 
   throw new Error('invalid desk event journal record type');
+}
+
+function migrateLegacyJournalRecord(
+  input: Record<string, unknown>
+): Record<string, unknown> {
+  const record = structuredClone(input);
+  record.recordVersion = JOURNAL_RECORD_VERSION;
+  if (record.type === 'transition') {
+    record.transition = migrateLegacyTransition(record.transition);
+    if (Array.isArray(record.events)) {
+      record.events = record.events.map(migrateLegacyDeskEvent);
+    }
+  } else if (record.type === 'checkpoint') {
+    if (Array.isArray(record.transitions)) {
+      record.transitions = record.transitions.map(migrateLegacyTransition);
+    }
+    if (Array.isArray(record.retainedEvents)) {
+      record.retainedEvents = record.retainedEvents.map(
+        migrateLegacyRetainedEvent
+      );
+    }
+  }
+  return record;
+}
+
+function migrateLegacyTransition(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return input;
+  }
+  const transition = structuredClone(input) as Record<string, unknown>;
+  transition.from = migrateLegacySnapshot(transition.from);
+  transition.to = migrateLegacySnapshot(transition.to);
+  return transition;
+}
+
+function migrateLegacySnapshot(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return input;
+  }
+  const snapshot = structuredClone(input) as Record<string, unknown>;
+  snapshot.exit = migrateLegacyExit(snapshot.exit);
+  return snapshot;
+}
+
+function migrateLegacyDeskEvent(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return input;
+  }
+  const event = structuredClone(input) as Record<string, unknown>;
+  if (event.kind === 'agent-exited') {
+    event.exit = migrateLegacyExit(event.exit);
+  }
+  return event;
+}
+
+function migrateLegacyRetainedEvent(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return input;
+  }
+  const retained = structuredClone(input) as Record<string, unknown>;
+  retained.event = migrateLegacyDeskEvent(retained.event);
+  if (
+    typeof retained.source === 'object' &&
+    retained.source !== null &&
+    !Array.isArray(retained.source)
+  ) {
+    const source = structuredClone(retained.source) as Record<string, unknown>;
+    if (source.type === 'transition') {
+      source.transition = migrateLegacyTransition(source.transition);
+    }
+    retained.source = source;
+  }
+  return retained;
+}
+
+function migrateLegacyExit(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return input;
+  }
+  const exit = structuredClone(input) as Record<string, unknown>;
+  if (
+    typeof exit.outcome !== 'object' ||
+    exit.outcome === null ||
+    Array.isArray(exit.outcome)
+  ) {
+    return exit;
+  }
+  const outcome = structuredClone(exit.outcome) as Record<string, unknown>;
+  if (outcome.kind === 'terminated') {
+    if (
+      !Number.isInteger(outcome.code) ||
+      (outcome.method !== 'graceful' && outcome.method !== 'forced')
+    ) {
+      throw new Error('legacy v1 exit outcome violates grammar');
+    }
+    exit.outcome = { ...outcome, kind: 'exited' };
+  } else if (outcome.kind === 'exited' || outcome.kind === 'signalled') {
+    if (Object.hasOwn(outcome, 'method')) {
+      throw new Error('legacy v1 exit outcome violates grammar');
+    }
+    exit.outcome = { ...outcome, method: 'none' };
+  }
+  return exit;
 }
 
 function parseCheckpointRecord(

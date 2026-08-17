@@ -107,6 +107,16 @@ describe('server architecture boundaries', () => {
     expect(importers).toEqual(['agents/codexProtocol.ts']);
   });
 
+  it('pins the reviewed Codex bindings projection', () => {
+    const bindingsRoot = join(SERVER_ROOT, 'agents/codexBindings');
+    const digest = readFileSync(
+      join(bindingsRoot, 'REVIEWED_PROJECTION.sha256'),
+      'utf8'
+    ).trim();
+
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
 
   it('keeps the server free of tmux option/bridge primitives (deleted at cutover)', () => {
     const offenders = sourceFiles(SERVER_ROOT)
@@ -127,7 +137,17 @@ describe('server architecture boundaries', () => {
 
     expect(ci).toContain('node-version: 22.23.1');
     expect(ci).toContain('bun-version: 1.3.14');
-    expect(ci).toContain('npm run build:distribution');
+    expect(ci).toContain('ubuntu-latest');
+    expect(ci).toContain('macos-15');
+    expect(ci).toContain('macos-15-intel');
+    expect(ci).toContain('dtolnay/rust-toolchain@stable');
+    expect(ci).toContain('npm run build:moor');
+    expect(ci).toContain('RUN_REAL_JOIN: 1');
+    expect(ci).toContain('npx vitest run tests/moor-distribution-contract.test.ts');
+    expect(ci).toContain('npx vitest run tests/moor-native-e2e.test.ts');
+    expect(ci).toContain('--exclude tests/moor-distribution-contract.test.ts');
+    expect(ci).toContain('--exclude tests/moor-native-e2e.test.ts');
+    expect(ci).toContain('npm run build:application');
     expect(ci).toContain('npm run smoke:serve-modes');
     expect(release).toContain('npm run release:assets');
     expect(release).toContain('desk-install-manifest.json');
@@ -136,5 +156,22 @@ describe('server architecture boundaries', () => {
     expect(installer).toMatch(/ubuntu|fedora|archlinux|opensuse|alpine/);
     expect(installer).toContain('macos-15');
     expect(installer).toContain('macos-15-intel');
+  });
+
+  it('removes static-export launch helpers with one portable pattern', () => {
+    const docs = readFileSync(join(ROOT, '.github/workflows/docs.yml'), 'utf8');
+
+    expect(docs).toContain('rm -f _site/Start\\ Docs.*');
+  });
+
+  it('keeps pre-promotion CI on local Moor fixtures and requires a committed pin for tags', () => {
+    const release = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
+    const installer = readFileSync(join(ROOT, '.github/workflows/installer.yml'), 'utf8');
+
+    expect(installer).not.toContain('npm run fetch:moor');
+    expect(installer).toContain('tests/install-script.test.ts tests/release-assets.test.ts');
+    expect(release).toContain('git cat-file -e HEAD:scripts/distribution/moor-pin.json');
+    expect(release).toContain('Refusing a release tag without a committed Moor pin');
+    expect(release).toContain("steps.moor_pin.outputs.present == 'true'");
   });
 });

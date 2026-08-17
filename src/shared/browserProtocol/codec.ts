@@ -1,9 +1,8 @@
 // Loss-aware browser protocol — reference codec (spec §7.4). Encodes/decodes the
-// 14 frame types byte-exactly. Reuses the tested LE primitives (ByteWriter /
-// ByteReader) from the atch-wire codec; protocol-level validation surfaces as
+// 14 frame types byte-exactly. Owns its LE byte primitives (ByteWriter /
+// ByteReader below); protocol-level validation surfaces as
 // BrowserProtocolError with a BpError code the server can echo in an ERROR frame.
-
-import { ByteReader, ByteWriter } from '../atchWire/codec.js';
+import type { MoorExitOutcome } from '../controlPlane/contract.js';
 import {
   BP_HEADER_LEN,
   BP_MAX_FRAME_BYTES,
@@ -11,8 +10,147 @@ import {
   BP_MAX_QUERY_BYTES,
   BP_VERSION,
   BpError,
+  BpExitKind,
+  BpExitMethod,
   BpFrameType
 } from './frames.js';
+
+/** Low-level byte codec failure; decodeBpFrame folds it into TRUNCATED. */
+class ByteCodecError extends Error {
+  constructor(readonly code: 'TRUNCATED' | 'INTERNAL' | 'PAYLOAD_TOO_LARGE', message: string) {
+    super(`${code}: ${message}`);
+    this.name = 'ByteCodecError';
+  }
+}
+
+const BYTE_MAX_STR16 = 0xffff;
+const BYTE_MAX_BLOB32 = 16 << 20; // 16 MiB blob cap
+
+// ---- LE byte writer ----------------------------------------------------------
+class ByteWriter {
+  private buf = new Uint8Array(64);
+  private len = 0;
+  private grow(n: number): void {
+    if (this.len + n <= this.buf.length) return;
+    let cap = this.buf.length * 2;
+    while (cap < this.len + n) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.buf.subarray(0, this.len));
+    this.buf = next;
+  }
+  u8(v: number): this {
+    this.grow(1);
+    this.buf[this.len++] = v & 0xff;
+    return this;
+  }
+  u16(v: number): this {
+    this.grow(2);
+    this.buf[this.len++] = v & 0xff;
+    this.buf[this.len++] = (v >>> 8) & 0xff;
+    return this;
+  }
+  u32(v: number): this {
+    this.grow(4);
+    this.buf[this.len++] = v & 0xff;
+    this.buf[this.len++] = (v >>> 8) & 0xff;
+    this.buf[this.len++] = (v >>> 16) & 0xff;
+    this.buf[this.len++] = (v >>> 24) & 0xff;
+    return this;
+  }
+  u64(v: bigint): this {
+    this.grow(8);
+    let x = BigInt.asUintN(64, v);
+    for (let i = 0; i < 8; i++) {
+      this.buf[this.len++] = Number(x & 0xffn);
+      x >>= 8n;
+    }
+    return this;
+  }
+  bytes(b: Uint8Array): this {
+    this.grow(b.length);
+    this.buf.set(b, this.len);
+    this.len += b.length;
+    return this;
+  }
+  /** fixed-width binary field (e.g. bytes[16], bytes[32]). */
+  fixed(b: Uint8Array, width: number): this {
+    if (b.length !== width) throw new ByteCodecError('INTERNAL', `fixed[${width}] got ${b.length}`);
+    return this.bytes(b);
+  }
+  str16(s: string): this {
+    const enc = new TextEncoder().encode(s);
+    if (enc.length > BYTE_MAX_STR16) throw new ByteCodecError('INTERNAL', `str16 len ${enc.length} > ${BYTE_MAX_STR16}`);
+    return this.u16(enc.length).bytes(enc);
+  }
+  blob32(b: Uint8Array): this {
+    return this.u32(b.length).bytes(b);
+  }
+  take(): Uint8Array {
+    return this.buf.slice(0, this.len);
+  }
+}
+
+// ---- LE byte reader ----------------------------------------------------------
+class ByteReader {
+  private pos = 0;
+  constructor(private readonly buf: Uint8Array) {}
+  get remaining(): number {
+    return this.buf.length - this.pos;
+  }
+  private need(n: number): void {
+    if (this.remaining < n) throw new ByteCodecError('TRUNCATED', `need ${n}, have ${this.remaining}`);
+  }
+  u8(): number {
+    this.need(1);
+    return this.buf[this.pos++];
+  }
+  u16(): number {
+    this.need(2);
+    return this.buf[this.pos++] | (this.buf[this.pos++] << 8);
+  }
+  u32(): number {
+    this.need(4);
+    const v = (this.buf[this.pos] | (this.buf[this.pos + 1] << 8) | (this.buf[this.pos + 2] << 16) | (this.buf[this.pos + 3] << 24)) >>> 0;
+    this.pos += 4;
+    return v;
+  }
+  u64(): bigint {
+    this.need(8);
+    let x = 0n;
+    for (let i = 7; i >= 0; i--) x = (x << 8n) | BigInt(this.buf[this.pos + i]);
+    this.pos += 8;
+    return x;
+  }
+  fixed(width: number): Uint8Array {
+    this.need(width);
+    const out = this.buf.slice(this.pos, this.pos + width);
+    this.pos += width;
+    return out;
+  }
+  str16(): string {
+    const n = this.u16();
+    this.need(n);
+    const s = new TextDecoder('utf-8', { fatal: false }).decode(this.buf.subarray(this.pos, this.pos + n));
+    this.pos += n;
+    return s;
+  }
+  blob32(): Uint8Array {
+    const n = this.u32();
+    if (n > BYTE_MAX_BLOB32) throw new ByteCodecError('PAYLOAD_TOO_LARGE', `blob32 len ${n} > cap`);
+    this.need(n);
+    const b = this.buf.slice(this.pos, this.pos + n);
+    this.pos += n;
+    return b;
+  }
+  rest(): Uint8Array {
+    const b = this.buf.slice(this.pos);
+    this.pos = this.buf.length;
+    return b;
+  }
+  end(): void {
+    if (this.remaining !== 0) throw new ByteCodecError('TRUNCATED', `${this.remaining} trailing bytes`);
+  }
+}
 
 export class BrowserProtocolError extends Error {
   constructor(readonly code: BpError, message: string) {
@@ -91,9 +229,14 @@ export interface Gap {
 export interface Exit {
   type: BpFrameType.EXIT;
   channelId: number;
-  /** i32 exit code (-1 when signal-terminated). */
-  code: number;
-  signal: number;
+  /**
+   * The holder's ending exactly as moor reported it — the durable record's own
+   * tagged type, carried whole: u8 BpExitKind, then exited -> u32 code + u8
+   * method; signalled -> u32 signal + u8 method; unknown -> nothing. An
+   * unprovable ending crosses this wire as `unknown`; the frame never folds it
+   * into a number.
+   */
+  outcome: MoorExitOutcome;
 }
 export interface Heartbeat {
   type: BpFrameType.HEARTBEAT;
@@ -176,7 +319,8 @@ export function encodeBpFrame(f: BpFrame): Uint8Array {
       w.u32(f.channelId).u64(f.from).u64(f.to);
       break;
     case BpFrameType.EXIT:
-      w.u32(f.channelId).u32(f.code >>> 0).u16(f.signal);
+      w.u32(f.channelId);
+      encodeExitOutcome(w, f.outcome);
       break;
     case BpFrameType.HEARTBEAT:
       break;
@@ -257,8 +401,10 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
     }
     case BpFrameType.GAP:
       return { type, channelId: r.u32(), from: r.u64(), to: r.u64() };
-    case BpFrameType.EXIT:
-      return { type, channelId: r.u32(), code: r.u32() | 0, signal: r.u16() };
+    case BpFrameType.EXIT: {
+      const channelId = r.u32();
+      return { type, channelId, outcome: decodeExitOutcome(r) };
+    }
     case BpFrameType.HEARTBEAT:
       return { type };
     case BpFrameType.ERROR:
@@ -273,5 +419,82 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
     }
     default:
       throw new BrowserProtocolError(BpError.UNKNOWN_TYPE, `type ${type}`);
+  }
+}
+
+// ---- EXIT outcome (tag + per-kind payload) -----------------------------------
+/**
+ * moor states `code` and `signal` as u32. A value outside that range is a
+ * caller bug and is refused — silently wrapping it would put a DIFFERENT
+ * number on the wire, which is the one thing this frame must never do. (POSIX
+ * exit codes are 0..255 and signals small positives; the u32 bound is the
+ * defensive outer edge, not an invitation to a wider value.)
+ */
+function checkU32(v: number, what: string): number {
+  if (!Number.isInteger(v) || v < 0 || v > 0xffff_ffff) {
+    throw new BrowserProtocolError(BpError.INTERNAL, `${what} ${v} is not a u32`);
+  }
+  return v;
+}
+
+function methodByte(method: 'none' | 'graceful' | 'forced'): number {
+  switch (method) {
+    case 'none':
+      return BpExitMethod.NONE;
+    case 'graceful':
+      return BpExitMethod.GRACEFUL;
+    case 'forced':
+      return BpExitMethod.FORCED;
+  }
+}
+
+function encodeExitOutcome(w: ByteWriter, outcome: MoorExitOutcome): void {
+  switch (outcome.kind) {
+    case 'exited':
+      w.u8(BpExitKind.EXITED).u32(checkU32(outcome.code, 'exit code')).u8(methodByte(outcome.method));
+      break;
+    case 'signalled':
+      w.u8(BpExitKind.SIGNALLED).u32(checkU32(outcome.signal, 'exit signal')).u8(methodByte(outcome.method));
+      break;
+    case 'unknown':
+      w.u8(BpExitKind.UNKNOWN);
+      break;
+    default: {
+      const _exhaustive: never = outcome;
+      throw new BrowserProtocolError(BpError.INTERNAL, `exit kind ${(_exhaustive as { kind: string }).kind}`);
+    }
+  }
+}
+
+/**
+ * A method byte the decoder does not know is refused, never defaulted onto
+ * `none` — mapping an unknown method onto "the child ended on its own" would
+ * fabricate the holder-intent axis the tag exists to preserve.
+ */
+function decodeMethod(byte: number): 'none' | 'graceful' | 'forced' {
+  switch (byte) {
+    case BpExitMethod.NONE:
+      return 'none';
+    case BpExitMethod.GRACEFUL:
+      return 'graceful';
+    case BpExitMethod.FORCED:
+      return 'forced';
+    default:
+      throw new BrowserProtocolError(BpError.UNKNOWN_TYPE, `exit method ${byte}`);
+  }
+}
+
+/** A tag the decoder does not know is refused, never mapped onto some ending. */
+function decodeExitOutcome(r: ByteReader): MoorExitOutcome {
+  const kind = r.u8();
+  switch (kind) {
+    case BpExitKind.EXITED:
+      return { kind: 'exited', code: r.u32(), method: decodeMethod(r.u8()) };
+    case BpExitKind.SIGNALLED:
+      return { kind: 'signalled', signal: r.u32(), method: decodeMethod(r.u8()) };
+    case BpExitKind.UNKNOWN:
+      return { kind: 'unknown' };
+    default:
+      throw new BrowserProtocolError(BpError.UNKNOWN_TYPE, `exit kind ${kind}`);
   }
 }

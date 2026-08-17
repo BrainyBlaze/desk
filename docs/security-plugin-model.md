@@ -62,7 +62,7 @@ Treat uploaded files as untrusted, especially when they were produced by an agen
 The kill switch retires configured sessions and performs a host-wide sweep for
 supported agent processes. It can terminate:
 
-- every atch session in the active manifest
+- every Moor session in the active manifest
 - remaining host `codex` or `claude` processes found by process scan
 
 The process sweep is intentionally broader than the active manifest. Use the
@@ -79,7 +79,48 @@ A plugin can provide:
 - `middleware`: Connect middleware mounted before the core `/api` router
 - `routes`: extra `/api` route handlers tried after core routes and before the 404
 - `upgradeGuard`: a central predicate for WebSocket upgrades
+- `channels`: providers that replace or wrap parts of the Channels subsystem
 - `setup`: lifecycle code that runs when Desk installs the plugin
+
+### Channels providers
+
+`channels` takes one provider per Channels port. Each receives a **factory** for
+the implementation Desk would otherwise use and returns the one to use instead,
+so a plugin can wrap rather than reimplement:
+
+```js
+export default {
+  name: "delivery-audit",
+  channels: {
+    delivery: (base) => ({
+      ...base(),
+      async send(sessionId, text) {
+        auditLog(sessionId, text.length);
+        return base().send(sessionId, text);
+      }
+    })
+  }
+};
+```
+
+The six ports are `store` (where conversations live, their reactions and stars,
+and how a finalised message is noticed), `files` (where attachments live),
+`views` (saved view filters), `router` (who a message is for), `delivery` (what
+reaches an agent), and `renderer` (what an agent sees). Providers apply in plugin order, each wrapping the previous result; the factory
+is memoised, so calling it twice yields the same instance.
+
+A provider that never calls the factory replaces the part outright, and Desk
+does not build the stock implementation at all — no watcher is started for a
+store that pushes its own changes. A provider that returns `base()` unchanged is
+a no-op, and declaring none leaves Channels exactly as it ships.
+
+Every store operation is asynchronous, so an implementation may be backed by
+anything reachable over a network, not only a local disk. The contracts are in
+`src/server/channels/ports.ts`.
+
+A Channels provider is the most intrusive thing a plugin can do: it sits on the
+path that types text into a live agent session. Treat it with the same care as
+`upgradeGuard`.
 
 Runtime plugin modules can export a plain plugin object:
 

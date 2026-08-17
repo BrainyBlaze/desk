@@ -3,7 +3,7 @@ import { fetchPulse } from './api.js';
 import { UNKNOWN_AGENT, sessionStatusView, type SessionStatusView } from './agentStatusModel.js';
 import { patchViewLiveness } from './pulse.js';
 import { emitBridgeRetry } from './terminalHeartbeat.js';
-import { pushSparkSample } from './systemFormat.js';
+import { pushSparkSample, type SparkSample } from './systemFormat.js';
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
 
 export type SessionStatusMap = Record<string, SessionStatusView>;
@@ -17,11 +17,11 @@ interface UsePulseResult {
   systemSnapshot: SystemSnapshot | null;
   systemError: string | null;
   telemetryHistoryRef: MutableRefObject<{
-    cpu: number[];
-    ram: number[];
-    gpu: number[];
-    net: number[];
-    disk: number[];
+    cpu: SparkSample[];
+    ram: SparkSample[];
+    gpu: SparkSample[];
+    net: SparkSample[];
+    disk: SparkSample[];
   }>;
   /** Forces the next pulse to reconcile against the server payload. */
   invalidateAttentionPulse: () => void;
@@ -42,11 +42,11 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
   // Telemetry sparkline rings (one sample per poll tick); the snapshot state
   // change is what re-renders the header, so a ref avoids double renders.
   const telemetryHistoryRef = useRef({
-    cpu: [] as number[],
-    ram: [] as number[],
-    gpu: [] as number[],
-    net: [] as number[],
-    disk: [] as number[]
+    cpu: [] as SparkSample[],
+    ram: [] as SparkSample[],
+    gpu: [] as SparkSample[],
+    net: [] as SparkSample[],
+    disk: [] as SparkSample[]
   });
   const [systemError, setSystemError] = useState<string | null>(null);
   // Last server payload (serialized) for the pulse diff-and-bail. Optimistic
@@ -71,11 +71,18 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
         }
         const system = pulse.system;
         const history = telemetryHistoryRef.current;
-        pushSparkSample(history.cpu, system.cpu.usagePercent ?? 0);
-        pushSparkSample(history.ram, system.memory.usedPercent);
-        pushSparkSample(history.gpu, system.gpu.nvidia.utilizationGpuPercent ?? 0);
-        pushSparkSample(history.net, system.network.rxBytesPerSecond ?? 0);
-        pushSparkSample(history.disk, (system.disk?.readBytesPerSecond ?? 0) + (system.disk?.writeBytesPerSecond ?? 0));
+        // Unmeasured ticks stay gaps in the history — a sparkline must not
+        // draw a confident zero next to a tile that honestly says 'init'.
+        pushSparkSample(history.cpu, system.cpu.usagePercent);
+        pushSparkSample(history.ram, system.memory?.usedPercent);
+        pushSparkSample(history.gpu, system.gpu.nvidia.utilizationGpuPercent);
+        pushSparkSample(history.net, system.network.rxBytesPerSecond);
+        pushSparkSample(
+          history.disk,
+          system.disk?.readBytesPerSecond !== undefined && system.disk.writeBytesPerSecond !== undefined
+            ? system.disk.readBytesPerSecond + system.disk.writeBytesPerSecond
+            : undefined
+        );
         setSystemSnapshot(system);
         setSystemError(null);
         // A pulse that succeeds after a run of failures proves the bridge is

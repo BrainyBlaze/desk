@@ -3,7 +3,7 @@ import {
   canonicalAgentView,
   canonicalDeliveryDecision,
   type AgentStateBatch
-} from '../src/server/channelsDeliveryStrategy.js';
+} from '../src/server/channels/delivery/strategy.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   type AgentActivity,

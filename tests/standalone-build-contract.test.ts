@@ -58,16 +58,19 @@ describe('standalone build dependency contract', () => {
 
     expect(text).toContain("resolve(root, 'libexec', 'desk-standalone')");
     expect(text).not.toContain(`resolve(root, 'desk-${'server'}')`);
+    expect(text).toContain("filter: /\\/(lspResolver|uiAsset|ptyBackend)\\.js$/");
+    expect(text).toContain("filter: /node-pty\\/lib\\/utils\\.js$/");
+    expect(text).not.toContain('[\\\\/]');
   });
 
-  it('uses bundled atch while isolating daemon state and never kills an unverified descendant pid', () => {
+  it('uses the bundled moor while isolating daemon state and never kills an unverified descendant pid', () => {
     const text = readFileSync(SMOKE_SERVE_MODES, 'utf8');
 
     expect(text).toContain('HOME: smokeHome');
-    expect(text).toContain("DESK_ATCH_SOCKET_ROOT: join(smokeHome, 'atch')");
+    expect(text).toContain("DESK_MOOR_SOCKET_ROOT: join(smokeHome, 'moor')");
     expect(text).toContain('DESK_DAEMON_URL: `ws://127.0.0.1:${daemonPort}`');
-    expect(text).toContain('delete childEnvironment.DESK_ATCH_BIN');
-    expect(text).not.toContain('atch-smoke-stub');
+    expect(text).toContain('delete childEnvironment.DESK_MOOR_BIN');
+    expect(text).not.toContain('moor-smoke-stub');
     expect(text).toContain('delete childEnvironment.DESK_DAEMON_CMD');
     expect(text).toContain('delete childEnvironment.DESK_DAEMON_EXTERNAL');
     expect(text).toContain('delete childEnvironment.DESK_PLUGINS');

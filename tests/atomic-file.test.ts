@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readJsonFileOr, writeTextFileAtomic } from '../src/shared/atomicFile';
+import { writeTextFileAtomic } from '../src/shared/atomicFile';
 
 const dirs: string[] = [];
 function tmpDir(): string {
@@ -32,32 +32,3 @@ describe('writeTextFileAtomic', () => {
   });
 });
 
-describe('readJsonFileOr', () => {
-  it('parses a valid JSON object', () => {
-    const dir = tmpDir();
-    const path = join(dir, 'v.json');
-    writeFileSync(path, '{"x":true}');
-    expect(readJsonFileOr(path, { x: false })).toEqual({ x: true });
-  });
-
-  it('returns the fallback for a missing file', () => {
-    expect(readJsonFileOr(join(tmpDir(), 'nope.json'), { d: 1 })).toEqual({ d: 1 });
-  });
-
-  it('returns the fallback for malformed JSON without throwing', () => {
-    const dir = tmpDir();
-    const path = join(dir, 'bad.json');
-    writeFileSync(path, '{ not json ');
-    expect(readJsonFileOr(path, {})).toEqual({});
-  });
-
-  it('returns the fallback for non-object JSON (array or scalar)', () => {
-    const dir = tmpDir();
-    const arrPath = join(dir, 'arr.json');
-    writeFileSync(arrPath, '[1,2,3]');
-    expect(readJsonFileOr(arrPath, { ok: true })).toEqual({ ok: true });
-    const numPath = join(dir, 'num.json');
-    writeFileSync(numPath, '42');
-    expect(readJsonFileOr(numPath, { ok: true })).toEqual({ ok: true });
-  });
-});

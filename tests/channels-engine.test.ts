@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  buildDigestPrompt,
-  buildOnboardingPrompt,
-  buildTurnPrompt,
   ChannelsEngine,
   type ChannelsEngineOptions
-} from '../src/server/channelsEngine.js';
+} from '../src/server/channels/delivery/engine.js';
+import {
+  buildDigestPrompt,
+  buildOnboardingPrompt,
+  buildTurnPrompt
+} from '../src/server/channels/render/prompts.js';
 import {
   claimDelivering,
   confirmDelivered,
@@ -16,11 +18,12 @@ import {
   listStuckItems,
   markStuck,
   EXT_STUCK_SUBMIT
-} from '../src/server/channelsDurability.js';
-import { readDeliveryEvents } from '../src/server/channelsEvents.js';
-import { pauseSession as persistPausedSession } from '../src/server/channelsPaused.js';
-import { DELIVERY_BLOCK_REASONS } from '../src/server/channelsProtocol.js';
-import type { ChannelMember, ChannelMessage, DeliveryBlockReason } from '../src/server/channelsProtocol.js';
+} from '../src/server/channels/delivery/durability.js';
+import { readDeliveryEvents } from '../src/server/channels/delivery/events.js';
+import { pauseSession as persistPausedSession } from '../src/server/channels/delivery/paused.js';
+import { DELIVERY_BLOCK_REASONS } from '../src/server/channels/protocol/delivery.js';
+import type { ChannelMember, ChannelMessage } from '../src/server/channels/protocol/format.js';
+import type { DeliveryBlockReason } from '../src/server/channels/protocol/delivery.js';
 import {
   appendMessage,
   ChannelsWatcher,
@@ -33,7 +36,7 @@ import {
   readChannelDetail,
   readThread,
   sliceMessages
-} from '../src/server/channelsStore.js';
+} from '../src/server/channels/store/fileStore.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 vi.mock('../src/server/agentStatePulse.js', async () => {
@@ -222,7 +225,7 @@ describe('ChannelsEngine delivery gating', () => {
   ];
 
   it('uses canonical idle even when raw terminal bytes look working', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', 'hi @alpha') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', 'hi @alpha') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0].session).toBe('tmux-a');
     expect(sent[0].text).toContain('msg-1-aaaa');
@@ -230,7 +233,7 @@ describe('ChannelsEngine delivery gating', () => {
     // Raw terminal text is delivery evidence only. It cannot override the
     // canonical idle snapshot supplied by the authority fixture.
     pane = WORKING_PANE;
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha again') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha again') }, members);
     await waitFor(() => sent.length === 2);
     expect(sent[1].text).toContain('msg-2-bbbb');
     expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({
@@ -240,12 +243,12 @@ describe('ChannelsEngine delivery gating', () => {
   });
 
   it('does not infer an approval wait from raw terminal menu text', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha one') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha one') }, members);
     await waitFor(() => sent.length === 1);
     // Without a typed blocked observation, menu-looking bytes are not semantic
     // evidence and cannot create a wait or hold.
     pane = APPROVAL_PANE;
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha two') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha two') }, members);
     await waitFor(() => sent.length === 2);
     expect(sent[1].text).toContain('msg-2-bbbb');
     expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({
@@ -255,22 +258,38 @@ describe('ChannelsEngine delivery gating', () => {
   });
 
   it('fans out to all agents except the author; author session never self-delivers', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-3-cccc', 'alpha', 'hello @channel') }, multiMembers);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-3-cccc', 'alpha', 'hello @channel') }, multiMembers);
     await flush();
     expect(sent.map((entry) => entry.session)).toEqual(['tmux-b']);
   });
 
   it('delivers explicit agent mentions only to the mentioned agent', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-mention-1', 'human', 'hello @beta') }, multiMembers);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-mention-1', 'human', 'hello @beta') }, multiMembers);
     await flush();
     expect(sent.map((entry) => entry.session)).toEqual(['tmux-b']);
     expect(sent[0].text).toContain('notificationId:msg-mention-1');
   });
 
   it('does not deliver human-only mentions to agents', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-human-mention-1', 'human', 'hello @human') }, multiMembers);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-human-mention-1', 'human', 'hello @human') }, multiMembers);
     await flush();
     expect(sent).toEqual([]);
+  });
+
+  it('delivers a message whose only mentions name nobody in the channel (desk#44)', async () => {
+    // The live defect: `@asher` is an external person, no channel member matches,
+    // and the message was dropped to zero recipients with no trace anywhere.
+    await engine.handleMessage(
+      {
+        channel: 'ops',
+        file: 'root.md',
+        message: message('msg-unknown-mention-1', 'human', 'proceed with 1-2-3, and ping @asher about the follow-up')
+      },
+      multiMembers
+    );
+    await waitFor(() => sent.length === 2);
+    expect(sent.map((entry) => entry.session).sort()).toEqual(['tmux-a', 'tmux-b']);
+    expect(sent[0].text).toContain('notificationId:msg-unknown-mention-1');
   });
 
   it('routes an unmentioned thread reply only to the thread parent author', async () => {
@@ -278,7 +297,7 @@ describe('ChannelsEngine delivery gating', () => {
     const parent = await appendMessage(home, 'ops', { author: 'alpha', body: 'root question' });
     const threeAgentMembers = [...multiMembers, member('gamma', 'tmux-c')];
 
-    engine.handleMessage(
+    await engine.handleMessage(
       {
         channel: 'ops',
         file: `thread-${parent.message.id}.md`,
@@ -296,7 +315,7 @@ describe('ChannelsEngine delivery gating', () => {
     const parent = await appendMessage(home, 'ops', { author: 'alpha', body: 'root question' });
     const threeAgentMembers = [...multiMembers, member('gamma', 'tmux-c')];
 
-    engine.handleMessage(
+    await engine.handleMessage(
       {
         channel: 'ops',
         file: `thread-${parent.message.id}.md`,
@@ -314,7 +333,7 @@ describe('ChannelsEngine delivery gating', () => {
     const parent = await appendMessage(home, 'ops', { author: 'alpha', body: 'root question' });
     const threeAgentMembers = [...multiMembers, member('gamma', 'tmux-c')];
 
-    engine.handleMessage(
+    await engine.handleMessage(
       {
         channel: 'ops',
         file: `thread-${parent.message.id}.md`,
@@ -329,7 +348,7 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('attempts notification injection even when diagnostics think the session is not running', async () => {
     running.delete('tmux-a');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha wake up') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha wake up') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0].text).toContain('msg-4-dddd');
   });
@@ -361,7 +380,7 @@ describe('ChannelsEngine delivery gating', () => {
         return '❯ ';
       }
     });
-    wedged.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-wedge-1', 'human', 'hi @alpha') }, members);
+    await wedged.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-wedge-1', 'human', 'hi @alpha') }, members);
     await waitFor(() => captureStarted, 1000);
     pane = 'ready';
     // The pump retries; once the watchdog window elapses it reclaims the lock
@@ -374,7 +393,7 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('persists explicitly paused queued prompts across an engine restart', async () => {
     engine.pauseSession('tmux-a', 'operator hold');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-6-ffff', 'human', '@alpha held') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-6-ffff', 'human', '@alpha held') }, members);
     await flush();
     expect(sent).toHaveLength(0);
     persistPausedSession(home, 'tmux-a', 'operator hold', new Date('2026-06-18T20:00:00.000Z'));
@@ -421,12 +440,23 @@ describe('ChannelsEngine delivery gating', () => {
     it('inspectSession reports queued item metadata', async () => {
       const eng = opsEngine({ capturePane: async () => 'working (esc to interrupt)' });
       eng.pauseSession('tmux-a', 'operator hold');
-      eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-q-1', 'human', '@alpha hello there') }, members);
+      await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-q-1', 'human', '@alpha hello there') }, members);
       await flush();
       const diag = await eng.inspectSession('tmux-a');
       expect(diag.queueDepth).toBe(1);
       expect(diag.items[0]).toMatchObject({ messageId: 'msg-q-1', author: 'human', channel: 'ops' });
       expect(diag.items[0].preview.length).toBeGreaterThan(0);
+    });
+
+    it('inspectSession reports a session with neither runtime nor durable items as unregistered, not ready', async () => {
+      // `ready` is a positive claim about a queue this engine owns; a session
+      // that was never registered as a member and has nothing on disk has no
+      // such queue. Shading it green in the ops console misdirects the
+      // diagnosis of "why is nothing delivered to this session".
+      const eng = opsEngine();
+      const diag = await eng.inspectSession('tmux-nobody');
+      expect(diag.deliveryStatus).toBe('unregistered');
+      expect(diag.blockedItems).toEqual([]);
     });
 
     it('inspectSession does not turn pane holds into delivery blocks', async () => {
@@ -436,7 +466,7 @@ describe('ChannelsEngine delivery gating', () => {
         pumpIntervalMs: 10,
         capturePane: async () => pane
       });
-      eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-block-1', 'human', '@alpha held') }, members);
+      await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-block-1', 'human', '@alpha held') }, members);
       await waitFor(() => sent.length === 1, 1000);
 
       const diag = await eng.inspectSession('tmux-a');
@@ -476,7 +506,7 @@ describe('ChannelsEngine delivery gating', () => {
           pumpIntervalMs: 10,
           capturePane: async () => entry.pane
         });
-        eng.handleMessage(
+        await eng.handleMessage(
           { channel: 'ops', file: 'root.md', message: message(`msg-menu-${index}`, 'human', '@alpha held') },
           members
         );
@@ -535,9 +565,14 @@ describe('ChannelsEngine delivery gating', () => {
         })
       );
       const diag = await eng.inspectSession('tmux-a');
+      // The engine holds no runtime for tmux-a, but a durable stuck item sits
+      // on disk: the status answers "is there work and why is it not moving"
+      // — `submit-stuck` — instead of `ready` (a green lie) or `unregistered`
+      // (true of the runtime, but it would hide the work the operator must
+      // unblock in the very field they look at first).
       expect(diag).toMatchObject({
         activity: 'idle',
-        deliveryStatus: 'ready',
+        deliveryStatus: 'submit-stuck',
         deliveryBlocked: false,
         queueDepth: 0
       });
@@ -559,7 +594,7 @@ describe('ChannelsEngine delivery gating', () => {
 
     it('regular delivery already bypasses the busy/ready gate', async () => {
       const eng = opsEngine({ capturePane: async () => 'thinking… (esc to interrupt)' });
-      eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-f-1', 'human', '@alpha urgent') }, members);
+      await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-f-1', 'human', '@alpha urgent') }, members);
       await waitFor(() => sent.length === 1);
       expect(sent[0].text).toContain('msg-f-1');
       expect(sent[0].text).toContain('notificationId:msg-f-1');
@@ -571,8 +606,8 @@ describe('ChannelsEngine delivery gating', () => {
     it('dropMessage removes a single queued item, dropQueue clears all', async () => {
       const eng = opsEngine({ capturePane: async () => 'busy (esc to interrupt)' });
       eng.pauseSession('tmux-a', 'operator hold');
-      eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d-1', 'human', '@alpha one') }, members);
-      eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d-2', 'human', '@alpha two') }, members);
+      await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d-1', 'human', '@alpha one') }, members);
+      await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d-2', 'human', '@alpha two') }, members);
       await flush();
       const items = (await eng.inspectSession('tmux-a')).items;
       expect(items).toHaveLength(2);
@@ -602,17 +637,17 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '❯ ',
       onChannelMessage: (channel, file, msg, pingsHuman) => notified.push({ channel, file, author: msg.author, pingsHuman })
     });
-    noticing.handleMessage(
+    await noticing.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-7-aaaa', 'alpha', '@human and @beta look') },
       multiMembers
     );
-    noticing.handleMessage(
+    await noticing.handleMessage(
       { channel: 'ops', file: 'thread-msg-7-aaaa.md', message: message('msg-7-bbbb', 'beta', 'plain agent reply') },
       multiMembers
     );
     // Human-authored messages notify too (events feed shows ALL traffic);
     // pingsHuman stays false — the operator does not ping themselves.
-    noticing.handleMessage(
+    await noticing.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-7-cccc', 'human', 'from the operator @human') },
       multiMembers
     );
@@ -638,7 +673,7 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
 
-    queued.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-queued-1', 'human', '@alpha queued') }, members);
+    await queued.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-queued-1', 'human', '@alpha queued') }, members);
     await flush();
 
     const event = queued.listActivity().find((entry) => entry.kind === 'queued');
@@ -670,7 +705,7 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => pane
     });
 
-    historical.handleMessage(
+    await historical.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-history-1', 'human', '@alpha history') },
       members
     );
@@ -709,7 +744,7 @@ describe('ChannelsEngine delivery gating', () => {
     });
 
     historical.pauseSession('tmux-a', 'operator review', '2026-06-18T20:00:00.000Z');
-    historical.handleMessage(
+    await historical.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-history-2', 'human', '@alpha later') },
       members
     );
@@ -759,7 +794,7 @@ describe('ChannelsEngine delivery gating', () => {
     });
 
     paused.pauseSession('tmux-a', 'operator review');
-    paused.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-paused-1', 'human', '@alpha wait') }, members);
+    await paused.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-paused-1', 'human', '@alpha wait') }, members);
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     const held = await paused.inspectSession('tmux-a');
@@ -796,7 +831,7 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '✻ Working… (esc to interrupt)'
     });
     seed.pauseSession('tmux-a', 'restart hold');
-    seed.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-paused-restore', 'human', '@alpha after restart') }, members);
+    await seed.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-paused-restore', 'human', '@alpha after restart') }, members);
     await flush();
     seed.dispose();
     expect(pushed).toEqual([]);
@@ -878,7 +913,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => pane
     });
-    gated.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-9-aaaa', 'human', '@alpha now') }, members);
+    await gated.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-9-aaaa', 'human', '@alpha now') }, members);
     await waitFor(() => pushed.length === 1);
     expect(pushed[0]).toContain('notificationId:msg-9-aaaa');
     expect(pushed[0]).not.toContain('@alpha now');
@@ -903,10 +938,10 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => pane
     });
-    recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-aaaa', 'human', '@alpha one') }, members);
+    await recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-aaaa', 'human', '@alpha one') }, members);
     await waitFor(() => pushed.length === 1, 1000);
     pane = WORKING_PANE; // agent picks up msg-1 and works
-    recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-bbbb', 'human', '@alpha two') }, members);
+    await recovering.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-10-bbbb', 'human', '@alpha two') }, members);
     await waitFor(() => pushed.length === 2, 1500);
     expect(pushed[1]).toContain('msg-10-bbbb');
     recovering.dispose();
@@ -940,7 +975,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => READY_PANE
     });
-    flaky.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fail-aaaa', 'human', '@alpha retry me') }, members);
+    await flaky.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-fail-aaaa', 'human', '@alpha retry me') }, members);
     await waitFor(async () => (await flaky.inspectSession('tmux-a')).blockedReason === 'send-failed');
     expect((await flaky.inspectSession('tmux-a')).blockedReason).toBe('send-failed');
     // The first paste fails; the pump must RETRY and the second paste succeeds.
@@ -1008,7 +1043,7 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '❯ ',
       onSubmitStateChange: (_session, state) => states.push(state)
     });
-    acked.handleMessage(
+    await acked.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-ack-aaaa', 'human', '@alpha ack me') },
       members
     );
@@ -1042,13 +1077,13 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => '❯ ',
       onSubmitStateChange: (_session, state, context) => events.push({ state, seq: context.seq })
     });
-    retrying.handleMessage(
+    await retrying.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-noack-aaaa', 'human', '@alpha no ack') },
       members
     );
     await waitFor(() => sent.length === 1, 1000);
     expect(sent[0]).toContain('notificationId:msg-noack-aaaa');
-    retrying.handleMessage(
+    await retrying.handleMessage(
       { channel: 'ops', file: 'root.md', message: message('msg-noack-bbbb', 'human', '@alpha no ack again') },
       members
     );
@@ -1133,6 +1168,106 @@ describe('ChannelsEngine delivery gating', () => {
     stuck.dispose();
   });
 
+  it('never classifies a shell (bash) member onboarding prompt as submit-stuck-submit', async () => {
+    // desk#48 — a bash session is not an agent: it never reports "working", has
+    // no input box and no structural approval menu, so the agent-shaped verify
+    // cycle can never observe positive evidence. Before the fix EVERY prompt to
+    // a shell member landed on submit-stuck-submit by construction (the shell
+    // echoes the paste, so the pane always changes), which blocks the queue and
+    // writes a false .stuck-submit ack-file next to genuine incidents.
+    let pane = '$ ';
+    const enters: string[] = [];
+    const shell = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      enterVerifyDelayMs: 1,
+      verifyCycles: 3,
+      sessionInfo: () => ({ sessionName: 'bash-1', agent: 'bash' }),
+      sendText: async () => {
+        // a shell echoes whatever is pasted onto its prompt line
+        pane = '$ You have been added to the desk channel #qa-room as @bash-1';
+        return true;
+      },
+      sendEnter: async (session) => {
+        enters.push(session);
+        return true;
+      },
+      sessionRunning: () => true,
+      capturePane: async () => pane,
+      // real ack-file lifecycle (mirrors channelsApi) so the durable outcome is
+      // the one the operator actually sees on disk
+      onSubmitStateChange: (session, state, ctx) => {
+        if (state === 'delivering') {
+          claimDelivering(home, session, ctx.seq);
+        } else if (state.startsWith('submit-stuck-')) {
+          markStuck(home, session, ctx.seq, state.slice('submit-stuck-'.length) as 'paste' | 'submit' | 'unobservable');
+        } else {
+          confirmDelivered(home, session, ctx.seq);
+        }
+      }
+    });
+    shell.enqueuePrompt(
+      'tmux-a',
+      'qa-room',
+      buildOnboardingPrompt({
+        channel: 'qa-room',
+        goal: 'manual QA',
+        handle: 'bash-1',
+        members: [member('bash-2', 'tmux-b', 'bash')],
+        messageCount: 0,
+        home
+      }),
+      'onboard-qa-room'
+    );
+    await waitFor(async () => {
+      const state = (await shell.inspectSession('tmux-a')).submitState;
+      return state !== undefined && state !== 'delivering';
+    });
+    const diagnostic = await shell.inspectSession('tmux-a');
+    expect(diagnostic.submitState).not.toBe('submit-stuck-submit');
+    expect(diagnostic.submitState?.startsWith('submit-stuck-')).toBe(false);
+    // and not an agent-shaped success verdict either — a shell has no submit
+    // to verify, so the outcome names exactly that
+    expect(diagnostic.submitState).toBe('submit-not-applicable');
+    expect(diagnostic.deliveryStatus).not.toBe('submit-stuck');
+    expect(diagnostic.deliveryBlocked).toBe(false);
+    expect(diagnostic.blockedReason).toBeUndefined();
+    // no false stuck record on disk (the issue's headline symptom)
+    expect(listStuckItems(home, 'tmux-a')).toEqual([]);
+    // and no agent-shaped Enter pumping into a shell that already ran the line
+    expect(enters).toEqual([]);
+    shell.dispose();
+  });
+
+  it('still verifies submit for an assistant-CLI session (the shell exemption is agent-specific)', async () => {
+    // Guard for desk#48's fix: skipping verification is keyed on the session's
+    // agent being a shell, NOT on sessionInfo merely being wired — a claude
+    // session with an eaten Enter must still be classified submit-stuck-submit.
+    let pane = '❯ ';
+    const agentSession = new ChannelsEngine({
+      home,
+      releaseSettleMs: 0,
+      enterVerifyDelayMs: 1,
+      verifyCycles: 3,
+      sessionInfo: () => ({ sessionName: 'claude-1', agent: 'claude' }),
+      sendText: async () => {
+        pane = '❯ wedged prompt';
+        return true;
+      },
+      sendEnter: async () => true,
+      sessionRunning: () => true,
+      capturePane: async () => pane
+    });
+    agentSession.enqueuePrompt('tmux-a', 'qa-room', '@alpha submit stuck', 'onboard-qa-room');
+    await waitFor(async () => (await agentSession.inspectSession('tmux-a')).submitState === 'submit-stuck-submit');
+    expect(await agentSession.inspectSession('tmux-a')).toMatchObject({
+      submitState: 'submit-stuck-submit',
+      deliveryBlocked: true,
+      blockedReason: 'submit-stuck-submit'
+    });
+    agentSession.dispose();
+  });
+
   it('marks submitState submitted as soon as the agent goes busy', async () => {
     let activity: 'idle' | 'working' = 'idle';
     const ok = new ChannelsEngine({
@@ -1199,10 +1334,10 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => 'raw terminal bytes',
       onSubmitStateChange: (_session, state, ctx) => events.push({ state, seq: ctx.seq })
     });
-    cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-aaaa', 'human', '@alpha one') }, members);
+    await cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-aaaa', 'human', '@alpha one') }, members);
     await waitFor(() => events.some((e) => e.state === 'submitted'));
-    cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-bbbb', 'human', '@alpha two') }, members);
-    cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-cccc', 'human', '@alpha three') }, members);
+    await cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-bbbb', 'human', '@alpha two') }, members);
+    await cb.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-16-cccc', 'human', '@alpha three') }, members);
     await flush();
     activity = 'idle';
     await cb.drainReady();
@@ -1227,7 +1362,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => null
     });
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d9-aaaa', 'human', 'hi @alpha') }, members);
+    await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d9-aaaa', 'human', 'hi @alpha') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0]).toContain('msg-d9-aaaa');
     expect(await eng.inspectSession('tmux-a')).toMatchObject({ activity: 'idle', deliveryStatus: 'ready' });
@@ -1252,7 +1387,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => 'Allow command rm -rf /tmp/x?\n› Yes\n  No'
     });
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d1-aaaa', 'human', 'run it @alpha') }, members);
+    await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-d1-aaaa', 'human', 'run it @alpha') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0]).toContain('notificationId:msg-d1-aaaa');
     expect(enters).toEqual([]);
@@ -1364,7 +1499,7 @@ describe('ChannelsEngine delivery gating', () => {
         else if (state === 'submit-stuck-unobservable') markStuck(home, session, ctx.seq, 'unobservable');
       }
     });
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-live-aaaa', 'human', 'hi @alpha') }, members);
+    await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-live-aaaa', 'human', 'hi @alpha') }, members);
     await waitFor(() => sent.length === 1, 3000);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(sent).toHaveLength(1);
@@ -1552,7 +1687,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => '' // empty-capture -> drain holds, never ready
     });
-    eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-grd-aaaa', 'human', 'hi @alpha') }, members);
+    await eng.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-grd-aaaa', 'human', 'hi @alpha') }, members);
     await waitFor(async () => (await eng.lifecycleStates()).find((s) => s.sessionId === 'tmux-a')?.queueDepth === 0);
     const early = (await eng.lifecycleStates()).find((s) => s.sessionId === 'tmux-a');
     expect(early?.deliveryBlocked).toBe(false);
@@ -1562,86 +1697,19 @@ describe('ChannelsEngine delivery gating', () => {
 
   it('dispatch dedupe: re-discovered messages never enqueue or deliver twice', async () => {
     const incoming = { channel: 'ops', file: 'root.md', message: message('msg-12-aaaa', 'human', '@alpha once') };
-    engine.handleMessage(incoming, members);
-    engine.handleMessage(incoming, members); // watcher rescan / second path
+    await engine.handleMessage(incoming, members);
+    await engine.handleMessage(incoming, members); // watcher rescan / second path
     await flush();
     await engine.drainReady();
     expect(sent).toHaveLength(1);
     expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')?.queueDepth).toBe(0);
   });
 
-  it('single-engine guard: a second engine for the same home goes passive', async () => {
-    const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-'));
-    const owner = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 100,
-      pidAlive: () => true,
-      sendText: async () => true,
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-    const intruderSent: string[] = [];
-    const intruder = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 200,
-      pidAlive: (pid) => pid === 100, // owner alive
-      sendText: async (_s, text) => {
-        intruderSent.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-    expect(owner.passive).toBe(false);
-    expect(intruder.passive).toBe(true);
-    intruder.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-13-aaaa', 'human', '@alpha hi') }, members);
-    await flush();
-    expect(intruderSent).toHaveLength(0);
-
-    // Dead owner: the next engine takes over.
-    const successor = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 300,
-      pidAlive: () => false,
-      sendText: async () => true,
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-    expect(successor.passive).toBe(false);
-    owner.dispose();
-    intruder.dispose();
-    successor.dispose();
-    rmSync(lockedHome, { recursive: true, force: true });
-  });
-
-  it('single-engine guard: corrupt engine.pid fails closed instead of dispatching as owner', async () => {
-    const lockedHome = mkdtempSync(join(tmpdir(), 'desk-chan-lock-corrupt-'));
-    mkdirSync(join(lockedHome, '_engine', 'engine.pid'), { recursive: true });
-    const pushed: string[] = [];
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home: lockedHome,
-      pid: 400,
-      sendText: async (_session, text) => {
-        pushed.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => '❯ '
-    });
-
-    expect(engine.passive).toBe(true);
-    expect(engine.lockError).toMatch(/engine\.pid/i);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-lock-corrupt', 'human', '@alpha hi') }, members);
-    await flush();
-    expect(pushed).toHaveLength(0);
-
-    engine.dispose();
-    rmSync(lockedHome, { recursive: true, force: true });
-  });
+  // The single-engine ownership guard moved OUT of the engine: a second live
+  // Desk runtime is refused fail-closed at the runtime boundary, an obsolete
+  // engine.pid artifact refuses startup by name, and a killed owner's lease is
+  // reclaimable — all pinned in tests/channels-runtime-ownership.test.ts. The
+  // engine itself no longer has a passive mode or reads any pidfile.
 
   it('annotates prompts that sat in the queue past the staleness window', async () => {
     const pushed: string[] = [];
@@ -1658,7 +1726,7 @@ describe('ChannelsEngine delivery gating', () => {
       sessionRunning: () => true,
       capturePane: async () => '❯ '
     });
-    stale.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-14-aaaa', 'human', '@alpha old news') }, members);
+    await stale.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-14-aaaa', 'human', '@alpha old news') }, members);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(pushed[0]).toMatch(/^\(delayed delivery — this message was posted \d+ minutes ago/);
     stale.dispose();
@@ -1827,7 +1895,7 @@ describe('channels store', () => {
     const watcher = new ChannelsWatcher(home, () => undefined);
     watcher.prewarm();
     writeFileSync(rootFile, readFileSync(rootFile, 'utf8').replace('first', 'other'));
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     const afterExternalEdit = listChannels(home)[0].contentRevision;
     expect(afterExternalEdit).not.toBe(afterAppend);
     expect(readChannelDetail(home, 'ops').contentRevision).toBe(afterExternalEdit);
@@ -1864,12 +1932,12 @@ describe('channels store', () => {
     const incoming: string[] = [];
     const watcher = new ChannelsWatcher(home, (event) => incoming.push(event.message.id));
     watcher.prewarm();
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([]); // history is pre-warmed, not re-dispatched
 
     const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'new arrival' });
-    watcher.scanFile('ops', 'root.md');
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([fresh.message.id]); // seen-set dedupes the second scan
   });
 
@@ -1886,12 +1954,12 @@ describe('channels store', () => {
     watcher.stop();
   });
 
-  it('watcher leaves a message retryable when dispatch throws', async () => {
+  it('watcher leaves a message retryable when async dispatch rejects', async () => {
     createChannel(home, 'ops', 'goal');
     await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
 
     const incoming: string[] = [];
-    const watcher = new ChannelsWatcher(home, (event) => {
+    const watcher = new ChannelsWatcher(home, async (event) => {
       incoming.push(event.message.id);
       if (incoming.length === 1) {
         throw new Error('transient dispatch failure');
@@ -1900,11 +1968,81 @@ describe('channels store', () => {
     watcher.prewarm();
     const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'retry me' });
 
-    expect(() => watcher.scanFile('ops', 'root.md')).toThrow('transient dispatch failure');
+    await expect(watcher.scanFile('ops', 'root.md')).rejects.toThrow('transient dispatch failure');
     expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(false);
 
-    watcher.scanFile('ops', 'root.md');
+    await watcher.scanFile('ops', 'root.md');
     expect(incoming).toEqual([fresh.message.id, fresh.message.id]);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(true);
+  });
+
+  it('watcher keeps an async dispatch unseen without duplicating a concurrent scan', async () => {
+    createChannel(home, 'ops', 'goal');
+    await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
+
+    let releaseDispatch!: () => void;
+    const dispatchPending = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const incoming: string[] = [];
+    const watcher = new ChannelsWatcher(home, async (event) => {
+      incoming.push(event.message.id);
+      await dispatchPending;
+    });
+    watcher.prewarm();
+    const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'dispatch once' });
+
+    const firstScan = watcher.scanFile('ops', 'root.md');
+    expect(incoming).toEqual([fresh.message.id]);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(false);
+
+    const secondScan = watcher.scanFile('ops', 'root.md');
+    expect(incoming).toEqual([fresh.message.id]);
+
+    releaseDispatch();
+    await Promise.all([firstScan, secondScan]);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(true);
+  });
+
+  it('sweep retries the same mtime when an event-driven async dispatch rejects', async () => {
+    createChannel(home, 'ops', 'goal');
+    await appendMessage(home, 'ops', { author: 'human', body: 'historic' });
+
+    let releaseFirstDispatch!: () => void;
+    const firstDispatchPending = new Promise<void>((resolve) => {
+      releaseFirstDispatch = resolve;
+    });
+    let attempts = 0;
+    const errors: Error[] = [];
+    const watcher = new ChannelsWatcher(
+      home,
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          await firstDispatchPending;
+          throw new Error('event dispatch failed');
+        }
+      },
+      30_000,
+      (error) => errors.push(error)
+    );
+    watcher.prewarm();
+    await watcher.sweepNow();
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'retry after event' });
+    const eventScan = watcher.scanFile('ops', 'root.md');
+    expect(attempts).toBe(1);
+
+    const overlappingSweep = watcher.sweepNow();
+    releaseFirstDispatch();
+    await expect(eventScan).rejects.toThrow('event dispatch failed');
+    await overlappingSweep;
+    expect(errors.map((error) => error.message)).toEqual(['event dispatch failed']);
+    expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(false);
+
+    await watcher.sweepNow();
+    expect(attempts).toBe(2);
     expect(watcher.hasSeen('ops', 'root.md', fresh.message.id)).toBe(true);
   });
 
@@ -1973,7 +2111,7 @@ describe('channels store', () => {
     const incoming: string[] = [];
     const watcher = new ChannelsWatcher(home, (event) => incoming.push(event.message.id));
     watcher.prewarm();
-    watcher.sweepNow(); // primes mtimes; history already seen
+    await watcher.sweepNow(); // primes mtimes; history already seen
     expect(incoming).toEqual([]);
 
     // Simulate a missed inotify event: the file changes, no watcher callback.
@@ -1981,9 +2119,9 @@ describe('channels store', () => {
     // so the append lands with a different timestamp than the primed one.)
     await new Promise((resolve) => setTimeout(resolve, 25));
     const fresh = await appendMessage(home, 'ops', { author: 'claude', body: 'event was dropped' });
-    watcher.sweepNow();
+    await watcher.sweepNow();
     expect(incoming).toEqual([fresh.message.id]);
-    watcher.sweepNow(); // unchanged mtime → no rescan, no duplicate
+    await watcher.sweepNow(); // unchanged mtime → no rescan, no duplicate
     expect(incoming).toEqual([fresh.message.id]);
     watcher.stop();
   });
@@ -1995,12 +2133,16 @@ describe('channels store', () => {
       home,
       releaseSettleMs: 0,
       sendText: async () => true,
-      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity: 'working' }),
-      sessionRunning: () => false, // nothing ever delivers — queue only grows
+      // Lifecycle is the only thing that holds a queue, so a session that is
+      // still starting is what "nothing ever delivers" actually means. (It used
+      // to say `sessionRunning: false`, which stopped gating anything when
+      // state authority replaced process inference; the queue only grew because
+      // a synchronous dispatch loop outran the async drain.)
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'starting' }),
       capturePane: async () => '❯ '
     });
     for (let index = 0; index < 60; index += 1) {
-      blocked.handleMessage(
+      await blocked.handleMessage(
         { channel: 'ops', file: 'root.md', message: message(`msg-cap-${String(index).padStart(4, '0')}`, 'human', '@alpha go') },
         capMembers
       );
@@ -2038,7 +2180,7 @@ describe('engine drain race safety', () => {
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha go') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha go') }, members);
     await flush();
     // Concurrent drain nudges while the push is still in flight must not re-enter.
     await engine.drainReady();
@@ -2073,7 +2215,7 @@ describe('engine drain race safety', () => {
       capturePane: async () => '❯ '
     });
     const members = [member('alpha', 'tmux-a')];
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-watchdog', 'human', '@alpha go') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-watchdog', 'human', '@alpha go') }, members);
     await flush();
     await new Promise((resolve) => setTimeout(resolve, 20));
     let observedBlockReason: string | undefined;
@@ -2115,7 +2257,7 @@ describe('engine drain race safety', () => {
     });
     const members = [member('alpha', 'tmux-a')];
     try {
-      engine.handleMessage(
+      await engine.handleMessage(
         { channel: 'ops', file: 'root.md', message: message('msg-force-watchdog', 'human', '@alpha go') },
         members
       );
@@ -2135,6 +2277,7 @@ describe('engine drain race safety', () => {
   it('invalidates a stale gated drain before force-delivering another queued item', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-generation-'));
     const sent: string[] = [];
+    let now = 1_000;
     let captureCalls = 0;
     let resolveFirstCapture: ((pane: string) => void) | undefined;
     let markFirstCaptureStarted: (() => void) | undefined;
@@ -2147,6 +2290,7 @@ describe('engine drain race safety', () => {
       releaseSettleMs: 0,
       pumpIntervalMs: 60_000,
       drainWatchdogMs: 10,
+      now: () => now,
       sendText: async (_session, text) => {
         sent.push(text);
         return true;
@@ -2169,7 +2313,9 @@ describe('engine drain race safety', () => {
       engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-force-second');
       const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
       expect(targetSeq).toBeDefined();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(false);
+      expect(sent).toEqual([]);
+      now += 11;
 
       expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(true);
       expect(sent).toEqual(['second prompt']);
@@ -2184,6 +2330,93 @@ describe('engine drain race safety', () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it('reclaims a wedged forced delivery only once the injected clock crosses the watchdog', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-wedged-'));
+    const sent: string[] = [];
+    let captureCalls = 0;
+    const releaseCapture: Array<(pane: string) => void> = [];
+    let markSecondCaptureStarted: (() => void) | undefined;
+    const secondCaptureStarted = new Promise<void>((resolve) => {
+      markSecondCaptureStarted = resolve;
+    });
+    let clock = 1_760_000_000_000;
+    const engine = new ChannelsEngine({
+      sendEnter: async () => true,
+      home,
+      releaseSettleMs: 0,
+      // Background pump parked: every drain below is an explicit tick, so the
+      // queue advances exactly as far as the test asks and no further.
+      pumpIntervalMs: 60_000,
+      blockedAfterCycles: 1,
+      drainWatchdogMs: 1_000,
+      now: () => clock,
+      sendText: async (_session, text) => {
+        sent.push(text);
+        return true;
+      },
+      sessionRunning: () => true,
+      capturePane: async () => {
+        captureCalls += 1;
+        // Captures 1 and 2 wedge their callers pre-paste: the gated drain first,
+        // then the forced delivery that reclaimed the lock from it.
+        if (captureCalls <= 2) {
+          if (captureCalls === 2) {
+            markSecondCaptureStarted?.();
+          }
+          return new Promise<string>((resolve) => {
+            releaseCapture.push(resolve);
+          });
+        }
+        return '❯ ';
+      }
+    });
+    // One deliberate pump tick: a held drain counts a hold cycle, which is what
+    // surfaces `blockedReason` (blockedAfterCycles: 1).
+    const tick = (): Promise<void> =>
+      (engine as unknown as { runPumpTick: () => Promise<void> }).runPumpTick();
+    try {
+      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-wedged-first');
+      await waitFor(() => captureCalls === 1);
+      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-wedged-second');
+      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
+      expect(targetSeq).toBeDefined();
+
+      // Past the first window: the forced delivery takes the lock and stamps it
+      // with the injected clock, then wedges in its own pre-paste capture.
+      clock += 1_001;
+      const forced = engine.forceDeliver('tmux-a', targetSeq);
+      await secondCaptureStarted;
+
+      // Inside the FORCED holder's window: ordinary drains must hold, not reclaim.
+      await tick();
+      let blockedReason: string | undefined;
+      await waitFor(async () => {
+        blockedReason = (await engine.inspectSession('tmux-a')).blockedReason;
+        return blockedReason !== undefined;
+      });
+      expect(blockedReason).toBe('draining');
+      expect(sent).toEqual([]);
+
+      // Past it: the drain reclaims the wedged lock and delivers the queue head.
+      clock += 1_001;
+      await tick();
+      await waitFor(() => sent.length === 1);
+      expect(sent).toEqual(['first prompt']);
+
+      // Both wedged coroutines settle after the reclaim — neither may paste.
+      releaseCapture.forEach((resolve) => resolve('❯ '));
+      expect(await forced).toBe(false);
+      await flush();
+      expect(sent).toEqual(['first prompt']);
+    } finally {
+      releaseCapture.forEach((resolve) => resolve('❯ '));
+      await flush();
+      engine.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
 
   it('keeps a newer forced paste single-flight when a stale gated drain settles', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-stale-finally-'));
@@ -2329,13 +2562,13 @@ describe('ChannelsEngine digest coalescing', () => {
   const members = [member('alpha', 'tmux-a'), { ...member('human', '', 'human'), sessionId: undefined }];
 
   it('coalesces a multi-message backlog into one digest delivery', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
     engine.pauseSession('tmux-a', 'accumulate digest backlog');
 
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'beta', '@alpha two') }, members);
-    engine.handleMessage({ channel: 'ops', file: 'thread-msg-1-aaaa.md', message: message('msg-3-cccc', 'beta', '@alpha three') }, members);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha four') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'beta', '@alpha two') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'thread-msg-1-aaaa.md', message: message('msg-3-cccc', 'beta', '@alpha three') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha four') }, members);
     await flush();
     expect(sent).toHaveLength(1);
     expect((await engine.lifecycleStates()).find((state) => state.sessionId === 'tmux-a')).toMatchObject({ queueDepth: 3 });
@@ -2358,10 +2591,10 @@ describe('ChannelsEngine digest coalescing', () => {
   });
 
   it('a single queued message drains as a notification-only turn prompt', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
     engine.pauseSession('tmux-a', 'accumulate single item');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha only one waiting') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'human', '@alpha only one waiting') }, members);
     await flush();
     expect(sent).toHaveLength(1);
     engine.resumeSession('tmux-a');
@@ -2374,12 +2607,12 @@ describe('ChannelsEngine digest coalescing', () => {
   });
 
   it('standalone prompts (onboarding) never coalesce into the digest', async () => {
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-1-aaaa', 'human', '@alpha start') }, members);
     await waitFor(() => sent.length === 1);
     engine.pauseSession('tmux-a', 'accumulate mixed backlog');
     engine.enqueuePrompt('tmux-a', 'ops', 'welcome aboard @alpha — full briefing text', 'onboard-ops');
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'beta', '@alpha two') }, members);
-    engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-3-cccc', 'beta', '@alpha three') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-2-bbbb', 'beta', '@alpha two') }, members);
+    await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-3-cccc', 'beta', '@alpha three') }, members);
     await flush();
     expect(sent).toHaveLength(1);
 

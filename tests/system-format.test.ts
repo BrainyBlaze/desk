@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatGpuMemory, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePoints } from '../src/web/systemFormat';
+import { type SparkSample, formatBytes, formatGpuMemory, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePath } from '../src/web/systemFormat';
 
 describe('system formatting', () => {
   it('formats bytes compactly', () => {
@@ -32,26 +32,42 @@ describe('system formatting', () => {
     expect(formatGpuMemory(1024, undefined)).toBe('mem n/a');
   });
 
-  it('pushes sparkline samples within a fixed window', () => {
-    const samples: number[] = [];
+  it('pushes sparkline samples within a fixed window and keeps an unmeasured tick as a GAP, not a zero', () => {
+    const samples: SparkSample[] = [];
     for (let i = 0; i < 70; i++) {
       pushSparkSample(samples, i);
     }
     expect(samples).toHaveLength(60);
     expect(samples[0]).toBe(10);
+    // Not measured (first tick, unreadable /proc) is not "measured as zero":
+    // the buffer carries the gap so the sparkline can leave it blank instead
+    // of drawing a confident trough next to a tile that honestly says 'init'.
+    pushSparkSample(samples, undefined);
+    expect(samples.at(-1)).toBeUndefined();
     pushSparkSample(samples, Number.NaN);
-    expect(samples.at(-1)).toBe(0);
+    expect(samples.at(-1)).toBeUndefined();
+    // A negative reading is a broken measurement, not a small one.
     pushSparkSample(samples, -5);
-    expect(samples.at(-1)).toBe(0);
+    expect(samples.at(-1)).toBeUndefined();
   });
 
-  it('maps samples to polyline points with floor-anchored scaling', () => {
-    expect(sparklinePoints([50], 100)).toBe('');
-    const points = sparklinePoints([0, 100], 100).split(' ');
-    expect(points[0]).toBe('0.0,23.0'); // zero hugs the baseline
-    expect(points[1]).toBe('100.0,1.0'); // full scale reaches the top
+  it('maps samples to a path with floor-anchored scaling', () => {
+    expect(sparklinePath([50], 100)).toBe('');
+    const points = sparklinePath([0, 100], 100).split(' ');
+    expect(points[0]).toBe('M0.0,23.0'); // zero hugs the baseline
+    expect(points[1]).toBe('L100.0,1.0'); // full scale reaches the top
     // rates autoscale: with floor 1, the window peak defines the top
-    const rate = sparklinePoints([0, 500], 1).split(' ');
-    expect(rate[1]).toBe('100.0,1.0');
+    const rate = sparklinePath([0, 500], 1).split(' ');
+    expect(rate[1]).toBe('L100.0,1.0');
+  });
+
+  it('draws gaps as breaks in the path instead of plotting them', () => {
+    // Index 1 is unmeasured: the line stops at 0 and a NEW subpath starts at
+    // 2 — the gap is blank, not a point at the floor and not a bridge.
+    expect(sparklinePath([100, undefined, 100], 100)).toBe('M0.0,1.0 M100.0,1.0');
+    // Gaps still take their x slot: three samples span the full width.
+    expect(sparklinePath([undefined, 50, 100], 100)).toBe('M50.0,12.0 L100.0,1.0');
+    // All-gap: nothing to draw.
+    expect(sparklinePath([undefined, undefined], 100)).toBe('');
   });
 });

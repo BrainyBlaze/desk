@@ -40,7 +40,7 @@ describe('ChannelsEngine atomic queue snapshots', () => {
 
   it('preserves an existing queued json file when persistQueue crashes while refreshing it', async () => {
     crashOnQueueSnapshot();
-    const { ChannelsEngine } = await import('../src/server/channelsEngine.js');
+    const { ChannelsEngine } = await import('../src/server/channels/delivery/engine.js');
     const engine = new ChannelsEngine({
       sendEnter: async () => true,
       home,

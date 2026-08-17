@@ -1,8 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { resolveManifestPath } from '../../core/config.js';
-import { loadDesk } from '../../core/runner.js';
 import {
   observationEnvelope,
   type AgentObservationScope
@@ -25,7 +21,9 @@ import {
   completeProviderSessionLaunch as completeProviderSessionLaunchDefault,
   daemonControl,
   daemonControlGet,
+  observeProviderSessionIdentity as observeProviderSessionIdentityDefault,
   type CompleteProviderSessionLaunchRequest,
+  type DaemonControlOptions,
   type DaemonControlResult
 } from '../../shared/daemonControlClient.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
@@ -82,13 +80,24 @@ export interface SystemRoutesOptions {
   confirmClaudeSessionStart?: (
     input: ClaudeSessionStartIdentity
   ) => ConfirmClaudeSessionStartResult;
+  /** OpenCode endpoint activation retains its staged binder path. */
   bindProviderSessionIdentity?: (
     input: BindProviderSessionIdentityInput
   ) => Promise<ProviderSessionBindingResult>;
+  /** OpenCode endpoint activation completes its launch after durable binding. */
   completeProviderSessionLaunch?: (
     input: CompleteProviderSessionLaunchRequest
   ) => Promise<DaemonControlResult>;
+  observeProviderSessionIdentity?: (
+    input: ProviderSessionObservationRequest,
+    options?: DaemonControlOptions
+  ) => Promise<DaemonControlResult>;
   now?: () => number;
+  providerSessionRetryNow?: () => number;
+  providerSessionRetrySleep?: (
+    milliseconds: number,
+    signal: AbortSignal
+  ) => Promise<void>;
 }
 
 export interface ClaudeSessionStartIdentity {
@@ -103,6 +112,16 @@ interface ProviderHookIdentity {
   providerSessionId: string;
   hook: string;
   isSessionStart: boolean;
+  launchProof: string;
+}
+
+interface ProviderSessionObservationRequest {
+  deskSessionId: string;
+  generation: number;
+  provider: Exclude<ProviderSessionProvider, 'opencode'>;
+  providerSessionId: string;
+  hook: string;
+  launchProof: string;
 }
 
 interface AgentStateView {
@@ -143,7 +162,10 @@ function providerHookIdentity(
   | { kind: 'none' }
   | {
       kind: 'invalid';
-      code: 'provider-session-id-missing' | 'provider-session-id-invalid';
+      code:
+        | 'provider-session-id-missing'
+        | 'provider-session-id-invalid'
+        | 'provider-session-proof-missing';
       error: string;
     }
   | { kind: 'identity'; value: ProviderHookIdentity } {
@@ -178,6 +200,16 @@ function providerHookIdentity(
       error: `Invalid ${provider} provider session id`
     };
   }
+  if (
+    typeof body.launchProof !== 'string' ||
+    body.launchProof.trim().length === 0
+  ) {
+    return {
+      kind: 'invalid',
+      code: 'provider-session-proof-missing',
+      error: `${provider} hook did not include a provider launch proof`
+    };
+  }
   return {
     kind: 'identity',
     value: {
@@ -186,7 +218,8 @@ function providerHookIdentity(
       provider,
       providerSessionId,
       hook: fields.hook as string,
-      isSessionStart: fields.hook === 'SessionStart'
+      isSessionStart: fields.hook === 'SessionStart',
+      launchProof: body.launchProof
     }
   };
 }
@@ -261,48 +294,162 @@ async function readAgentStateView(gateway: AgentStateGateway): Promise<AgentStat
   }
 }
 
-/**
- * The session-identity map for the pre-React localStorage migration (cutover
- * step 4): the committed legacy-name→sessionId mappings plus the CURRENT
- * strict-manifest sessionIds (so post-cutover additions are preserved rather
- * than dropped). Read-only. Before the migration marker exists the map is
- * simply not available (409); AFTER the gate a missing or malformed map file
- * is corruption and fails closed (500) — the browser must not half-migrate.
- */
-export function readSessionIdentityMap(
-  manifestPath: string = resolveManifestPath()
-):
-  | { ok: true; payload: { version: 1; mappings: [string, string][]; sessionIds: string[] } }
-  | { ok: false; status: 409 | 500; error: string; code: 'not-migrated' | 'identity-map-corrupt' } {
-  const migrationRoot = join(dirname(manifestPath), '_migration', 'session-id-v1');
-  if (!existsSync(join(migrationRoot, 'migration.done'))) {
-    return { ok: false, status: 409, error: 'session identity migration has not committed', code: 'not-migrated' };
-  }
-  const mapPath = join(migrationRoot, 'session-id-map.json');
-  let mappings: [string, string][];
-  try {
-    const parsed = JSON.parse(readFileSync(mapPath, 'utf8')) as { version?: unknown; entries?: unknown };
-    if (
-      parsed.version !== 1 ||
-      !Array.isArray(parsed.entries) ||
-      !parsed.entries.every(
-        (entry: unknown): entry is [string, string] =>
-          Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && typeof entry[1] === 'string'
-      )
-    ) {
-      return { ok: false, status: 500, error: `session identity map is malformed: ${mapPath}`, code: 'identity-map-corrupt' };
+const PROVIDER_EVIDENCE_RETRY_OFFSETS_MS = [0, 200, 400, 600, 800] as const;
+const PROVIDER_EVIDENCE_RETRY_DEADLINE_MS = 1_000;
+
+function sleepForProviderEvidence(
+  milliseconds: number,
+  signal: AbortSignal
+): Promise<void> {
+  if (milliseconds <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
     }
-    mappings = parsed.entries;
-  } catch (error) {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true }
+    );
+  });
+}
+
+function providerObservationCall(
+  gateway: NonNullable<SystemRoutesOptions['observeProviderSessionIdentity']>,
+  input: ProviderSessionObservationRequest,
+  options: DaemonControlOptions,
+  signal: AbortSignal
+): Promise<DaemonControlResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: DaemonControlResult): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      resolve(result);
+    };
+    const abort = (): void =>
+      finish({
+        ok: false,
+        error: 'provider session observation deadline exceeded'
+      });
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    void gateway(input, options).then(finish, (error: unknown) =>
+      finish({
+        ok: false,
+        error: `terminal daemon unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      })
+    );
+  });
+}
+
+async function observeProviderIdentityWithRetry(input: {
+  identity: ProviderHookIdentity;
+  gateway: NonNullable<SystemRoutesOptions['observeProviderSessionIdentity']>;
+  now: () => number;
+  sleep: NonNullable<SystemRoutesOptions['providerSessionRetrySleep']>;
+  callerSignal: AbortSignal;
+}): Promise<DaemonControlResult> {
+  const startedAt = input.now();
+  const deadlineController = new AbortController();
+  const timer = setTimeout(
+    () => deadlineController.abort('provider observation deadline'),
+    PROVIDER_EVIDENCE_RETRY_DEADLINE_MS
+  );
+  timer.unref?.();
+  const signal = AbortSignal.any([
+    input.callerSignal,
+    deadlineController.signal
+  ]);
+  let result: DaemonControlResult = {
+    ok: false,
+    error: 'provider session observation deadline exceeded'
+  };
+  try {
+    for (const offset of PROVIDER_EVIDENCE_RETRY_OFFSETS_MS) {
+      const delay = startedAt + offset - input.now();
+      if (delay > 0) await input.sleep(delay, signal);
+      const remaining = Math.ceil(
+        startedAt + PROVIDER_EVIDENCE_RETRY_DEADLINE_MS - input.now()
+      );
+      if (remaining <= 0 || signal.aborted) return result;
+      result = await providerObservationCall(
+        input.gateway,
+        {
+          deskSessionId: input.identity.deskSessionId,
+          provider: input.identity.provider,
+          providerSessionId: input.identity.providerSessionId,
+          generation: input.identity.generation,
+          launchProof: input.identity.launchProof,
+          hook: input.identity.hook
+        },
+        { timeoutMs: remaining, signal },
+        signal
+      );
+      if (
+        !input.identity.isSessionStart ||
+        result.body?.reason !== 'provider-session-evidence-missing'
+      ) {
+        return result;
+      }
+    }
+    return result;
+  } catch {
     return {
       ok: false,
-      status: 500,
-      error: `session identity map unreadable: ${error instanceof Error ? error.message : String(error)}`,
-      code: 'identity-map-corrupt'
+      error: signal.aborted
+        ? 'provider session observation deadline exceeded'
+        : 'provider session evidence retry failed'
     };
+  } finally {
+    clearTimeout(timer);
   }
-  const sessionIds = loadDesk({ manifestPath }).sessions.map((session) => session.sessionId);
-  return { ok: true, payload: { version: 1, mappings, sessionIds } };
+}
+
+function providerObservationFailure(
+  result: DaemonControlResult
+): { status: number; body: Record<string, unknown> } {
+  const response = result.body;
+  const scrub = (value: string): string =>
+    value.replace(
+      /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{43})(?=$|[^A-Za-z0-9_-])/g,
+      '$1[redacted]'
+    );
+  const reason =
+    typeof response?.reason === 'string'
+      ? response.reason
+      : 'provider-session-observation-failed';
+  const error = scrub(
+    typeof response?.error === 'string'
+      ? response.error
+      : result.error ?? 'terminal daemon unavailable'
+  );
+  const status =
+    result.status !== undefined && result.status >= 400 && result.status <= 599
+      ? result.status
+      : 503;
+  const safe: Record<string, unknown> = { ok: false, reason, error };
+  for (const key of [
+    'currentProviderSessionId',
+    'targetProviderSessionId',
+    'action'
+  ] as const) {
+    const value = response?.[key];
+    if (typeof value === 'string') safe[key] = scrub(value);
+  }
+  return { status, body: safe };
 }
 
 export function createSystemRoutes(
@@ -320,29 +467,22 @@ export function createSystemRoutes(
         homeDir: homedir(),
         ...input
       }));
+  const observeProviderSessionIdentity =
+    options.observeProviderSessionIdentity ??
+    observeProviderSessionIdentityDefault;
   const bindProviderSessionIdentity =
     options.bindProviderSessionIdentity ?? bindProviderSessionIdentityDefault;
   const completeProviderSessionLaunch =
     options.completeProviderSessionLaunch ??
     completeProviderSessionLaunchDefault;
-  const providerSessionBindings = new Map<
-    string,
-    { provider: ProviderSessionProvider; providerSessionId: string }
-  >();
+  const providerSessionRetryNow =
+    options.providerSessionRetryNow ?? (() => performance.now());
+  const providerSessionRetrySleep =
+    options.providerSessionRetrySleep ?? sleepForProviderEvidence;
   const now = options.now ?? Date.now;
   return async (req, res, url) => {
     if (req.method === 'GET' && url.pathname === '/api/desk') {
       sendJson(res, 200, buildDeskSnapshot());
-      return true;
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/session-identity-map') {
-      const result = readSessionIdentityMap();
-      if (!result.ok) {
-        sendJson(res, result.status, { error: result.error, code: result.code });
-        return true;
-      }
-      sendJson(res, 200, result.payload);
       return true;
     }
 
@@ -383,7 +523,8 @@ export function createSystemRoutes(
 
     if (req.method === 'POST' && url.pathname === '/api/agent-event') {
       const body = await readJsonBody(req);
-      const adapted = observationEnvelope(body, { observedAt: now() });
+      const { launchProof: _launchProof, ...boundedBody } = body;
+      const adapted = observationEnvelope(boundedBody, { observedAt: now() });
       if (adapted.kind === 'invalid') {
         sendJson(res, 400, {
           ok: false,
@@ -403,104 +544,58 @@ export function createSystemRoutes(
       }
       if (providerIdentity.kind === 'identity') {
         const identity = providerIdentity.value;
-        const bindingKey = JSON.stringify([
-          identity.deskSessionId,
-          identity.generation
-        ]);
-        const cached = providerSessionBindings.get(bindingKey);
-        if (
-          cached &&
-          (cached.provider !== identity.provider ||
-            cached.providerSessionId !== identity.providerSessionId)
-        ) {
-          sendJson(res, 409, {
-            ok: false,
-            code: 'provider-session-mismatch',
-            error: `Desk session ${identity.deskSessionId} generation ${identity.generation} is already bound to a different provider session id`
-          });
-          return true;
-        }
-        if (!cached) {
-          if (identity.provider === 'claude') {
-            let confirmation: ConfirmClaudeSessionStartResult;
-            try {
-              confirmation = confirmClaudeSessionStart({
-                deskSessionId: identity.deskSessionId,
-                providerSessionId: identity.providerSessionId
-              });
-            } catch (error) {
-              confirmation = {
-                ok: false,
-                code: 'continuity-store-corrupt',
-                error: error instanceof Error ? error.message : String(error)
-              };
-            }
-            if (!confirmation.ok) {
-              sendJson(res, 409, confirmation);
-              return true;
-            }
-          }
-
-          let binding: ProviderSessionBindingResult | undefined;
+        if (identity.provider === 'claude' && identity.isSessionStart) {
+          let confirmation: ConfirmClaudeSessionStartResult;
           try {
-            binding = await bindProviderSessionIdentity({
+            confirmation = confirmClaudeSessionStart({
               deskSessionId: identity.deskSessionId,
-              provider: identity.provider,
               providerSessionId: identity.providerSessionId
             });
           } catch (error) {
-            if (identity.isSessionStart) {
-              sendJson(res, 500, {
-                ok: false,
-                code: 'provider-session-store-failed',
-                error: `provider session identity storage failed: ${error instanceof Error ? error.message : String(error)}`
-              });
-              return true;
-            }
+            confirmation = {
+              ok: false,
+              code: 'continuity-store-corrupt',
+              error: error instanceof Error ? error.message : String(error)
+            };
           }
-          if (binding && !binding.ok) {
-            sendJson(res, 409, binding);
+          if (!confirmation.ok) {
+            sendJson(res, 409, confirmation);
             return true;
           }
-          if (binding?.ok) {
-            let completion: DaemonControlResult;
-            try {
-              completion = await completeProviderSessionLaunch({
-                deskSessionId: identity.deskSessionId,
-                provider: identity.provider,
-                providerSessionId: identity.providerSessionId,
-                generation: identity.generation
-              });
-            } catch (error) {
-              completion = {
-                ok: false,
-                error: `terminal daemon unavailable: ${
-                  error instanceof Error ? error.message : String(error)
-                }`
-              };
+        }
+
+        const callerController = new AbortController();
+        req.once('aborted', () => callerController.abort('request aborted'));
+        if (typeof res.once === 'function') {
+          res.once('close', () => {
+            if (!res.writableEnded) {
+              callerController.abort('response closed');
             }
-            if (!completion.ok) {
-              const failure = gatewayFailure(completion);
-              sendJson(res, failure.status, failure.body);
-              return true;
-            }
-            if (
-              completion.body?.ok !== true ||
-              (completion.body.kind !== 'completed' &&
-                completion.body.kind !== 'not-required')
-            ) {
-              sendJson(res, 502, {
-                ok: false,
-                error:
-                  'terminal daemon returned malformed provider launch completion receipt'
-              });
-              return true;
-            }
-            providerSessionBindings.set(bindingKey, {
-              provider: identity.provider,
-              providerSessionId: identity.providerSessionId
-            });
-          }
+          });
+        }
+        const observed = await observeProviderIdentityWithRetry({
+          identity,
+          gateway: observeProviderSessionIdentity,
+          now: providerSessionRetryNow,
+          sleep: providerSessionRetrySleep,
+          callerSignal: callerController.signal
+        });
+        if (!observed.ok) {
+          const failure = providerObservationFailure(observed);
+          sendJson(res, failure.status, failure.body);
+          return true;
+        }
+        if (
+          observed.body?.ok !== true ||
+          (observed.body.kind !== 'bound' &&
+            observed.body.kind !== 'matching')
+        ) {
+          sendJson(res, 502, {
+            ok: false,
+            error:
+              'terminal daemon returned malformed provider session observation receipt'
+          });
+          return true;
         }
       }
       if (adapted.kind === 'no-facts') {

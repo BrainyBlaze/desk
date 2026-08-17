@@ -14,7 +14,7 @@ export type {
 } from '../../shared/git.js';
 import type { GitRepoSummary, GitStatus } from '../../shared/git.js';
 
-export type GitRefKind = 'head' | 'branch' | 'remote' | 'tag';
+export type GitRefKind = 'head' | 'branch' | 'remote' | 'tag' | 'other';
 
 export interface GitRef {
   name: string;

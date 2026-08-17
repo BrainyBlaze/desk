@@ -3,11 +3,11 @@ title: "Agent integrations"
 description: "How Desk launches Codex, Claude, OpenCode, Qwen, Kimi, Grok, bash, and custom commands, including resume ids, permissions, attention, and LSP access."
 ---
 
-Desk runs every managed session under an atch master. The browser is a view
+Desk runs every managed session under a Moor holder. The browser is a view
 over that durable process.
 
 Built-in agents add launch flags, resume behavior, permission handling, and
-attention signals on top of that atch base.
+attention signals on top of that Moor-managed lifetime.
 
 ## Supported session kinds
 
@@ -34,8 +34,9 @@ Custom commands are terminal sessions. They do not get built-in agent resume or 
 ## Session identity
 
 Every session has a durable `sessionId`. Desk preserves it across edits and
-uses it for the atch socket, terminal state, channels delivery, attention, and
-agent events. The agent's resume id remains a separate provider-owned value.
+uses it for the Moor control socket, terminal state, channels delivery,
+attention, and agent events. The agent's resume id remains a separate
+provider-owned value.
 
 Desk sets these environment variables for managed launches:
 

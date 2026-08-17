@@ -7,7 +7,8 @@ import { buildSessionSpecs } from '../src/core/manifest.js';
 import {
   bindProviderSessionIdentity,
   clearProviderSessionIdentity,
-  readProviderSessionBinding
+  readProviderSessionBinding,
+  replaceProviderSessionIdentity
 } from '../src/server/providerSessionBinding.js';
 import {
   extractProviderSessionId,
@@ -322,6 +323,118 @@ describe('provider session reset manifest transaction', () => {
       ok: false,
       code: 'provider-session-agent-mismatch'
     });
+  });
+});
+
+describe('provider session rebind manifest transaction', () => {
+  it('atomically replaces only the exact old identity and is retry-safe once new is durable', async () => {
+    const { manifestPath, homeDir } = createManifest();
+    await bindProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-codex',
+      provider: 'codex',
+      providerSessionId: CODEX_ID
+    });
+
+    await expect(replaceProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-codex',
+      provider: 'codex',
+      expectedProviderSessionId: CODEX_ID,
+      providerSessionId: OTHER_CODEX_ID
+    })).resolves.toEqual({ ok: true, kind: 'replaced' });
+    expect(persistedResume(manifestPath, homeDir, 'desk-codex')).toBe(OTHER_CODEX_ID);
+
+    const beforeRetry = readFileSync(manifestPath, 'utf8');
+    await expect(replaceProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-codex',
+      provider: 'codex',
+      expectedProviderSessionId: CODEX_ID,
+      providerSessionId: OTHER_CODEX_ID
+    })).resolves.toEqual({ ok: true, kind: 'already-replaced' });
+    expect(readFileSync(manifestPath, 'utf8')).toBe(beforeRetry);
+  });
+
+  it('preserves the old identity on stale expected state, wrong provider, invalid target, and unknown session', async () => {
+    const { manifestPath, homeDir } = createManifest();
+    await bindProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-codex',
+      provider: 'codex',
+      providerSessionId: CODEX_ID
+    });
+    const before = readFileSync(manifestPath, 'utf8');
+
+    const attempts = [
+      replaceProviderSessionIdentity({ manifestPath, homeDir, deskSessionId: 'desk-codex', provider: 'codex', expectedProviderSessionId: OTHER_CODEX_ID, providerSessionId: '55555555-5555-4555-8555-555555555555' }),
+      replaceProviderSessionIdentity({ manifestPath, homeDir, deskSessionId: 'desk-codex', provider: 'claude', expectedProviderSessionId: CODEX_ID, providerSessionId: CLAUDE_ID }),
+      replaceProviderSessionIdentity({ manifestPath, homeDir, deskSessionId: 'desk-codex', provider: 'codex', expectedProviderSessionId: CODEX_ID, providerSessionId: 'invalid' }),
+      replaceProviderSessionIdentity({ manifestPath, homeDir, deskSessionId: 'missing', provider: 'codex', expectedProviderSessionId: CODEX_ID, providerSessionId: OTHER_CODEX_ID })
+    ];
+    const results = await Promise.all(attempts);
+    expect(results.map((result) => result.ok ? 'ok' : result.code)).toEqual([
+      'provider-session-mismatch',
+      'provider-session-agent-mismatch',
+      'provider-session-id-invalid',
+      'provider-session-not-found'
+    ]);
+    expect(readFileSync(manifestPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects a target owned by another Desk session and leaves the manifest unchanged', async () => {
+    const { manifestPath, homeDir } = createManifest();
+    await bindProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-claude',
+      provider: 'claude',
+      providerSessionId: CLAUDE_ID
+    });
+    const before = readFileSync(manifestPath, 'utf8');
+
+    await expect(replaceProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-claude',
+      provider: 'claude',
+      expectedProviderSessionId: CLAUDE_ID,
+      providerSessionId: OWNED_CLAUDE_ID
+    })).resolves.toMatchObject({
+      ok: false,
+      code: 'provider-session-id-conflict'
+    });
+    expect(readFileSync(manifestPath, 'utf8')).toBe(before);
+  });
+
+  it('propagates persistence failure without altering the original manifest bytes', async () => {
+    const { manifestPath, homeDir } = createManifest();
+    await bindProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-codex',
+      provider: 'codex',
+      providerSessionId: CODEX_ID
+    });
+    const before = readFileSync(manifestPath, 'utf8');
+
+    await expect(replaceProviderSessionIdentity({
+      manifestPath,
+      homeDir,
+      deskSessionId: 'desk-codex',
+      provider: 'codex',
+      expectedProviderSessionId: CODEX_ID,
+      providerSessionId: OTHER_CODEX_ID
+    }, {
+      updateManifest: async () => {
+        throw new Error('simulated manifest persistence failure');
+      }
+    })).rejects.toThrow('simulated manifest persistence failure');
+    expect(readFileSync(manifestPath, 'utf8')).toBe(before);
   });
 });
 

@@ -207,8 +207,14 @@ describe('serve launch planning', () => {
 
     const message = thrownMessage(() => createServeLaunch(root, viteOptions, '/runtime/node'));
 
-    expect(message).toMatch(/vite.*reinstall/i);
-    expect(message).not.toMatch(/standalone|bun/i);
+    // Assert the whole sentence, exactly, like the standalone sibling below.
+    // The earlier `not.toMatch(/standalone|bun/i)` ran against the full message
+    // — which embeds `viteEntry`, an absolute path under TMPDIR that the test
+    // does not control. CI builds TMPDIR as `mktemp -d /var/tmp/desk-vitest.XXXXXX`,
+    // so a run whose random suffix contained `bun` (or `standalone`) failed a
+    // green codebase. The exact message is what the assertion means anyway, and
+    // it names only the Vite artifact, so it is strictly stronger and path-proof.
+    expect(message).toBe(`Vite runtime is missing at ${viteEntry}; reinstall desk`);
     expectOnlyArtifactLookup(viteEntry);
   });
 

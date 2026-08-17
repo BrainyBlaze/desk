@@ -163,9 +163,10 @@ surface:
   re-creates the delivery engine in-process — re-reading persisted queues —
   without restarting the server.
 
-If a second Desk process serves the same channels home, it runs **passive**:
-it renders everything but does not deliver. A passive badge appears in the
-header and status bar with the owning process.
+Exactly one Desk server owns a channels home. A second server pointed at the
+same home is refused at startup — there is no passive mode that renders
+everything and delivers nothing — and a server that crashed without releasing
+its ownership lease is reclaimed automatically once the lease goes stale.
 
 ## Notifications
 

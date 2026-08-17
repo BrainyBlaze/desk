@@ -85,6 +85,7 @@ export type CompleteProviderSessionLaunchResult =
 
 interface ProviderSessionLaunchLedgerOptions {
   createAuthorizationId?: () => string;
+  readOnly?: boolean;
 }
 
 const PROVIDERS = new Set<ProviderSessionProvider>(PROVIDER_SESSION_PROVIDERS);
@@ -96,6 +97,10 @@ const PROVIDERS = new Set<ProviderSessionProvider>(PROVIDER_SESSION_PROVIDERS);
  */
 export class FileProviderSessionLaunchLedger {
   private readonly currentBySession = new Map<
+    string,
+    ProviderSessionLaunchAuthorization
+  >();
+  private readonly authorizationById = new Map<
     string,
     ProviderSessionLaunchAuthorization
   >();
@@ -111,8 +116,12 @@ export class FileProviderSessionLaunchLedger {
   ) {
     this.createAuthorizationId =
       options.createAuthorizationId ?? randomUUID;
+    if (options.readOnly === true) {
+      this.replay(true);
+      return;
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.replay();
+    this.replay(false);
     this.fd = this.openDurableAppend();
   }
 
@@ -122,6 +131,16 @@ export class FileProviderSessionLaunchLedger {
     this.assertHealthy();
     const current = this.currentBySession.get(deskSessionId);
     return current === undefined ? undefined : structuredClone(current);
+  }
+
+  authorization(
+    authorizationId: string
+  ): ProviderSessionLaunchAuthorization | undefined {
+    this.assertHealthy();
+    const authorization = this.authorizationById.get(authorizationId);
+    return authorization === undefined
+      ? undefined
+      : structuredClone(authorization);
   }
 
   resumeRecoveredPrepared(input: {
@@ -205,9 +224,11 @@ export class FileProviderSessionLaunchLedger {
     if (current.provider !== input.provider) {
       return { ok: false, reason: 'provider-mismatch' };
     }
+    const expectedNext = nextSupervisedGeneration(input.currentGeneration);
     if (
       current.generation !== input.currentGeneration ||
-      input.nextGeneration !== input.currentGeneration + 1 ||
+      expectedNext > 0xffff_ffff || // OB-18 exhaustion: refuse before any append
+      input.nextGeneration !== expectedNext ||
       !Number.isSafeInteger(input.nextGeneration)
     ) {
       return { ok: false, reason: 'generation-mismatch' };
@@ -298,7 +319,7 @@ export class FileProviderSessionLaunchLedger {
     }
   }
 
-  private replay(): void {
+  private replay(readOnly: boolean): void {
     this.recoveredPreparedAuthorizationIds.clear();
     if (!existsSync(this.path)) return;
     const bytes = readFileSync(this.path);
@@ -318,6 +339,10 @@ export class FileProviderSessionLaunchLedger {
         parsed = JSON.parse(line);
       } catch {
         if (newline === -1) {
+          if (readOnly) {
+            this.markRecoveredPrepared();
+            return;
+          }
           this.truncateTail(offset);
           this.markRecoveredPrepared();
           return;
@@ -336,7 +361,7 @@ export class FileProviderSessionLaunchLedger {
       }
       const record = parseRecord(parsed, offset);
       this.applyRecord(record, offset);
-      if (newline === -1) this.appendRecordSeparator();
+      if (newline === -1 && !readOnly) this.appendRecordSeparator();
       offset = next;
     }
     for (const provider of foreignProviders) {
@@ -412,6 +437,7 @@ export class FileProviderSessionLaunchLedger {
         );
       }
       this.currentBySession.set(record.deskSessionId, record);
+      this.authorizationById.set(record.authorizationId, record);
       this.sessionByAuthorization.set(
         record.authorizationId,
         record.deskSessionId
@@ -440,7 +466,7 @@ export class FileProviderSessionLaunchLedger {
         record.generation === current.generation) ||
       (current.state === 'authorized' &&
         record.state === 'claimed' &&
-        record.generation === current.generation + 1) ||
+        record.generation === nextSupervisedGeneration(current.generation)) ||
       ((current.state === 'prepared' || current.state === 'authorized') &&
         record.state === 'completed' &&
         current.expectedPriorBinding !== null &&
@@ -454,6 +480,7 @@ export class FileProviderSessionLaunchLedger {
       );
     }
     this.currentBySession.set(record.deskSessionId, record);
+    this.authorizationById.set(record.authorizationId, record);
   }
 
   private assertHealthy(): void {
@@ -506,6 +533,17 @@ export class FileProviderSessionLaunchLedger {
   }
 }
 
+/**
+ * The OB-18 supervised-generation transition: a fresh lineage's first
+ * supervised allocation is 2 (generation 1 is reserved for unsupervised
+ * holders), every later one advances by exactly one. This MUST match the
+ * durable GenerationLedger's allocator, or a claim would be consumed at a
+ * generation the spawn never owns.
+ */
+function nextSupervisedGeneration(current: number): number {
+  return current === 0 ? 2 : current + 1;
+}
+
 function validateIdentity(input: PrepareProviderSessionLaunchInput): void {
   if (
     input.deskSessionId.trim().length === 0 ||
@@ -524,7 +562,8 @@ function validateIdentity(input: PrepareProviderSessionLaunchInput): void {
   }
   if (
     !Number.isSafeInteger(input.generation) ||
-    input.generation < 0
+    input.generation < 0 ||
+    input.generation > 0xffff_ffff // OB-18: u32 generations never wrap
   ) {
     throw new Error('provider launch generation is invalid');
   }

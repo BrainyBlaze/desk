@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { memberTypeForAgent } from '../src/server/channelsApi.js';
+import { memberTypeForAgent } from '../src/server/channels/api.js';
 import { AGENT_IDS } from '../src/shared/agentRegistry.js';
 
 describe('channel member type for an agent', () => {

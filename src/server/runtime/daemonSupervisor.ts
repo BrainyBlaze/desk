@@ -1,4 +1,4 @@
-// Production lifecycle for the atch terminal daemon (cutover item 1).
+// Production lifecycle for the moor terminal daemon (cutover item 1).
 //
 // The web server owns the daemon PROCESS: it spawns
 // `desk terminal-daemon` (or the DESK_DAEMON_CMD override) as a child,
@@ -17,14 +17,14 @@ import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import {
   isExecutableFile,
-  resolveAtchBinPath,
+  resolveMoorBinPath,
   resolveReleaseRoot
-} from '../../shared/atchPaths.js';
+} from '../../shared/moorPaths.js';
 
 // Re-exported so existing consumers (deskRuntime, tests) keep their import
-// path; the single audited copies live in shared/atchPaths — the CLI attach
+// path; the single audited copies live in shared/moorPaths — the CLI attach
 // path and the supervisor must resolve the exact same release binary.
-export { resolveAtchBinPath, resolveReleaseRoot };
+export { resolveMoorBinPath, resolveReleaseRoot };
 
 /**
  * Env vars a launching agent session leaks into the server process. A daemon
@@ -92,8 +92,8 @@ const defaultBackoff = (attempt: number): number => Math.min(500 * 2 ** (attempt
 
 /** True when a path plausibly names a Node runtime (not the Bun-compiled standalone). */
 function looksLikeNodeRuntime(execPath: string): boolean {
-  const base = execPath.split(/[\\/]/).pop() ?? '';
-  return base === 'node' || base === 'node.exe';
+  const base = execPath.split('/').pop() ?? '';
+  return base === 'node';
 }
 
 
@@ -192,7 +192,7 @@ export function startDaemonSupervisor(options: DaemonSupervisorOptions): DaemonS
    * whose event loop is wedged has the SIGTERM handler installed but never
    * runs it — without escalation neither bounded restart nor disposal (HMR
    * replacement on the shared port) can proceed. The escalation targets the
-   * captured child only, never a replacement, and never touches detached atch
+   * captured child only, never a replacement, and never touches detached moor
    * masters (they are separate processes reached via their kill command).
    */
   const terminate = (target: ChildProcess): void => {

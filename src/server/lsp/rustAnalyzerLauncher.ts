@@ -4,7 +4,7 @@ import { chmod, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { gunzipSync, inflateRawSync } from 'node:zlib';
+import { gunzipSync } from 'node:zlib';
 import { spawn } from 'node:child_process';
 
 export const RUST_ANALYZER_RELEASE = {
@@ -27,7 +27,7 @@ export interface RustAnalyzerAsset {
   assetName: string;
   url: string;
   sha256: string;
-  archiveKind: 'gzip' | 'zip';
+  archiveKind: 'gzip';
   binaryName: string;
   maxDownloadBytes: number;
   maxDecompressedBytes: number;
@@ -101,20 +101,6 @@ const RUST_ANALYZER_ASSETS: RustAnalyzerAsset[] = [
     arch: 'arm64',
     assetName: 'rust-analyzer-aarch64-apple-darwin.gz',
     sha256: '626213c6c91ae76429942d713a53a95513e2fe9938110fecfcb50552f01d608a'
-  }),
-  zipAsset({
-    key: 'win32-x64-msvc',
-    platform: 'win32',
-    arch: 'x64',
-    assetName: 'rust-analyzer-x86_64-pc-windows-msvc.zip',
-    sha256: '0f82e470220986a6b71202f135fe80233fc3baaffb84900f2f19388ba85cbb41'
-  }),
-  zipAsset({
-    key: 'win32-arm64-msvc',
-    platform: 'win32',
-    arch: 'arm64',
-    assetName: 'rust-analyzer-aarch64-pc-windows-msvc.zip',
-    sha256: '71ca233a9994c4119d10fea2d9b4f891a938c9957e86568061a9d6993140fe87'
   })
 ];
 
@@ -131,23 +117,6 @@ function gzipAsset(input: {
     url: `${RELEASE_BASE_URL}/${input.assetName}`,
     archiveKind: 'gzip',
     binaryName: 'rust-analyzer',
-    maxDownloadBytes: DEFAULT_MAX_DOWNLOAD_BYTES,
-    maxDecompressedBytes: DEFAULT_MAX_DECOMPRESSED_BYTES
-  };
-}
-
-function zipAsset(input: {
-  key: string;
-  platform: NodeJS.Platform | string;
-  arch: NodeJS.Architecture | string;
-  assetName: string;
-  sha256: string;
-}): RustAnalyzerAsset {
-  return {
-    ...input,
-    url: `${RELEASE_BASE_URL}/${input.assetName}`,
-    archiveKind: 'zip',
-    binaryName: 'rust-analyzer.exe',
     maxDownloadBytes: DEFAULT_MAX_DOWNLOAD_BYTES,
     maxDecompressedBytes: DEFAULT_MAX_DECOMPRESSED_BYTES
   };
@@ -230,112 +199,11 @@ async function installRustAnalyzerBinary(input: {
 }
 
 function extractRustAnalyzerBinary(archive: Buffer, asset: RustAnalyzerAsset): Buffer {
-  if (asset.archiveKind === 'zip') {
-    return extractZipBinary(archive, asset);
-  }
   const binary = gunzipSync(archive);
   if (binary.length === 0 || binary.length > asset.maxDecompressedBytes) {
     throw resolverError();
   }
   return binary;
-}
-
-interface ZipEntry {
-  name: string;
-  compressionMethod: number;
-  compressedSize: number;
-  uncompressedSize: number;
-  localHeaderOffset: number;
-}
-
-function extractZipBinary(archive: Buffer, asset: RustAnalyzerAsset): Buffer {
-  const eocdOffset = findEndOfCentralDirectory(archive);
-  if (eocdOffset < 0) {
-    throw resolverError();
-  }
-  const entryCount = archive.readUInt16LE(eocdOffset + 10);
-  const centralDirectoryOffset = archive.readUInt32LE(eocdOffset + 16);
-  let offset = centralDirectoryOffset;
-  let selected: ZipEntry | undefined;
-  let fileEntries = 0;
-
-  for (let index = 0; index < entryCount; index += 1) {
-    if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== 0x02014b50) {
-      throw resolverError();
-    }
-    const compressionMethod = archive.readUInt16LE(offset + 10);
-    const compressedSize = archive.readUInt32LE(offset + 20);
-    const uncompressedSize = archive.readUInt32LE(offset + 24);
-    const nameLength = archive.readUInt16LE(offset + 28);
-    const extraLength = archive.readUInt16LE(offset + 30);
-    const commentLength = archive.readUInt16LE(offset + 32);
-    const externalAttributes = archive.readUInt32LE(offset + 38);
-    const localHeaderOffset = archive.readUInt32LE(offset + 42);
-    const nameStart = offset + 46;
-    const nameEnd = nameStart + nameLength;
-    if (nameEnd > archive.length) {
-      throw resolverError();
-    }
-    const name = archive.subarray(nameStart, nameEnd).toString('utf8');
-    offset = nameEnd + extraLength + commentLength;
-    if (name.endsWith('/')) {
-      continue;
-    }
-    fileEntries += 1;
-    if (name !== asset.binaryName || isUnsafeZipName(name) || isZipSymlink(externalAttributes)) {
-      throw resolverError();
-    }
-    selected = { name, compressionMethod, compressedSize, uncompressedSize, localHeaderOffset };
-  }
-
-  if (!selected || fileEntries !== 1 || selected.uncompressedSize > asset.maxDecompressedBytes) {
-    throw resolverError();
-  }
-  const binary = readZipEntryBytes(archive, selected);
-  if (binary.length === 0 || binary.length !== selected.uncompressedSize || binary.length > asset.maxDecompressedBytes) {
-    throw resolverError();
-  }
-  return binary;
-}
-
-function findEndOfCentralDirectory(archive: Buffer): number {
-  const minOffset = Math.max(0, archive.length - 65_557);
-  for (let offset = archive.length - 22; offset >= minOffset; offset -= 1) {
-    if (archive.readUInt32LE(offset) === 0x06054b50) {
-      return offset;
-    }
-  }
-  return -1;
-}
-
-function readZipEntryBytes(archive: Buffer, entry: ZipEntry): Buffer {
-  const offset = entry.localHeaderOffset;
-  if (offset + 30 > archive.length || archive.readUInt32LE(offset) !== 0x04034b50) {
-    throw resolverError();
-  }
-  const nameLength = archive.readUInt16LE(offset + 26);
-  const extraLength = archive.readUInt16LE(offset + 28);
-  const dataStart = offset + 30 + nameLength + extraLength;
-  const dataEnd = dataStart + entry.compressedSize;
-  if (dataEnd > archive.length) {
-    throw resolverError();
-  }
-  const compressed = archive.subarray(dataStart, dataEnd);
-  if (entry.compressionMethod === 0) {
-    return Buffer.from(compressed);
-  }
-  if (entry.compressionMethod === 8) {
-    return inflateRawSync(compressed);
-  }
-  throw resolverError();
-}
-
-function isUnsafeZipName(name: string): boolean {
-  return name === '' || name.includes('/') || name.includes('\\') || name === '..' || name.startsWith('..');
-}
-
-function isZipSymlink(externalAttributes: number): boolean {
-  return ((externalAttributes >>> 16) & 0o170000) === 0o120000;
 }
 
 async function withInstallLock(lockPath: string, now: () => number, action: () => Promise<void>): Promise<void> {
@@ -434,7 +302,7 @@ async function runLauncher(args: string[]): Promise<number> {
 function isUsableBinary(path: string): boolean {
   try {
     const stat = statSync(path);
-    return stat.isFile() && (process.platform === 'win32' || (stat.mode & 0o111) !== 0);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
   } catch {
     return false;
   }

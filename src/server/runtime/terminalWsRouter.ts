@@ -26,11 +26,14 @@ export interface TerminalWsRouterDeps {
   supervisor: WorkerSupervisor;
   emulatorFactory: EmulatorFactory;
   now: () => number;
+  sessionGeometry?: SessionManagerDeps['sessionGeometry'];
   workingLeaseMs?: SessionManagerDeps['workingLeaseMs'];
   openToolLeaseMs?: SessionManagerDeps['openToolLeaseMs'];
   initialAgentHealth?: SessionManagerDeps['initialAgentHealth'];
   createAgentStateIntakeStore?: SessionManagerDeps['createAgentStateIntakeStore'];
   onStateTransition?: SessionManagerDeps['onStateTransition'];
+  /** Production recovery cannot declare a late Moor adoption healthy before observation. */
+  onLateMoorAdoption: NonNullable<SessionManagerDeps['onLateMoorAdoption']>;
 }
 
 export class TerminalWsRouter {
@@ -46,7 +49,14 @@ export class TerminalWsRouter {
       supervisor: deps.supervisor,
       emulatorFactory: deps.emulatorFactory,
       now: deps.now,
+      onLateMoorAdoption: deps.onLateMoorAdoption,
       sendBrowser: (_sessionId, channelId, frame) => this.routeToWs(channelId, frame),
+      onSubscriberFailure: (channelId) => {
+        const ws = this.channelToWs.get(channelId);
+        this.channelToWs.delete(channelId);
+        if (ws !== undefined) this.wsChannels.get(ws)?.delete(channelId);
+      },
+      ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -106,7 +116,20 @@ export class TerminalWsRouter {
           ws.send(encodeBpFrame({ type: BpFrameType.ERROR, channelId: frame.channelId, code: BpError.BAD_CHANNEL }));
           return;
         }
-        this.manager.onBrowserInputByChannel(frame.channelId, frame.binary, frame.bytes);
+        const errorCode = this.manager.dispatchBrowserInputByChannel(
+          frame.channelId,
+          frame.binary,
+          frame.bytes
+        );
+        if (errorCode !== undefined) {
+          ws.send(
+            encodeBpFrame({
+              type: BpFrameType.ERROR,
+              channelId: frame.channelId,
+              code: errorCode
+            })
+          );
+        }
         return;
       }
       case BpFrameType.UNSUBSCRIBE: {
@@ -138,12 +161,17 @@ export class TerminalWsRouter {
     return false;
   }
 
-  /** Clean up all of a WS's channels when it closes (§7.4 lifecycle). */
+  /**
+   * Clean up all of a WS's channels when it closes (§7.4 lifecycle) — in BULK
+   * (desk#68): the whole connection's channel set leaves before any resize
+   * handoff election runs, so a dying sibling channel of this same connection
+   * can never be transiently promoted and command the child through a surface
+   * that is already gone.
+   */
   onWsClose(ws: WsConn): void {
-    for (const ch of [...this.channelsOf(ws)]) {
-      this.manager.unsubscribeChannel(ch);
-      this.channelToWs.delete(ch);
-    }
+    const channels = [...this.channelsOf(ws)];
+    this.manager.unsubscribeChannels(channels);
+    for (const ch of channels) this.channelToWs.delete(ch);
     this.wsChannels.delete(ws);
   }
 

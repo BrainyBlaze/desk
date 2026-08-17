@@ -31,6 +31,17 @@ describe('system sampler health', () => {
     vi.resetModules();
   });
 
+  it('refuses a snapshot before the sampler is started instead of running a hidden one-off collect', async () => {
+    vi.doMock('../src/server/systemMetrics', () => ({
+      collectSystemSnapshot: () => {
+        throw new Error('a hidden one-off collect ran');
+      },
+      collectSystemSnapshotAsync: () => Promise.reject(new Error('not started'))
+    }));
+    const sampler = await import('../src/server/systemSampler');
+    expect(() => sampler.getSystemSnapshot()).toThrow(/sampler has not been started/);
+  });
+
   it('keeps the last good snapshot and exposes safe failure diagnostics', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-10T00:00:00.100Z'));

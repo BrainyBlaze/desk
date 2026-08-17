@@ -29,7 +29,7 @@ persists layout changes to the manifest.
 
 ## Sessions
 
-A session describes one atch-backed process. It can be:
+A session describes one Moor-backed process. It can be:
 
 - a managed Codex session
 - a managed Claude session
@@ -47,14 +47,14 @@ Every session has a durable `sessionId`. Desk preserves an existing id or mints
 one from the session name when you add or migrate a session. The id is the
 shared key for:
 
-- the atch master socket
+- the Moor control socket
 - terminal generation and snapshot state
 - channels membership and delivery queues
 - attention, resume capture, and agent event routing
 
 ## Resume ids
 
-Resume ids belong to the agent CLI, not to atch. Desk stores known resume ids in
+Resume ids belong to the agent CLI, not to Moor. Desk stores known resume ids in
 the manifest and can also harvest them after a first turn for managed agents.
 
 Use resume ids when you want a restarted agent CLI to reconnect to the same
@@ -62,7 +62,7 @@ conversation. Bash and custom command sessions do not use agent resume ids.
 
 ## Startup behavior
 
-`desk up` reads the manifest, checks the configured atch master sockets, and
+`desk up` reads the manifest, checks the configured Moor control sockets, and
 starts only the missing sessions. It does not replace running sessions.
 
 Use `desk up --dry-run` before changing a large fleet.
@@ -70,7 +70,7 @@ Use `desk up --dry-run` before changing a large fleet.
 ## Browser state
 
 The browser stores selected views, open editor tabs, panel sizes, and UI
-preferences separately from atch process lifetime. If you reload the browser,
+preferences separately from Moor process lifetime. If you reload the browser,
 Desk reconnects to the running sessions through the binary terminal transport.
 
 ## Next steps

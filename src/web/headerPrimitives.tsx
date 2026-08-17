@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Animated, Animator } from '@arwes/react';
 import { CLIP_OCTAGON_PILL, Cmd, TextReveal } from './arwes/primitives.js';
-import { sparklinePoints } from './systemFormat.js';
+import { sparklinePath, type SparkSample } from './systemFormat.js';
 
 export function CommandButton({
   icon,
@@ -50,12 +50,12 @@ export function TelemetryCell({
   sub: string;
   tone?: 'ok' | 'warn' | 'muted';
   title?: string;
-  /** history ring rendered as a right-aligned sparkline (percent series by default) */
-  spark?: number[];
+  /** history ring rendered as a right-aligned sparkline (percent series by default); gaps are unmeasured ticks and stay blank */
+  spark?: SparkSample[];
   /** scale ceiling floor: 100 anchors percent series; 1 lets rates autoscale to their window peak */
   sparkFloor?: number;
 }): JSX.Element {
-  const points = spark ? sparklinePoints(spark, sparkFloor) : '';
+  const path = spark ? sparklinePath(spark, sparkFloor) : '';
   return (
     <Animator>
       <Animated
@@ -69,9 +69,9 @@ export function TelemetryCell({
         <TextReveal as="span" manager="decipher">{label}</TextReveal>
         <strong>{value}</strong>
         <small>{sub}</small>
-        {points ? (
+        {path ? (
           <svg className="telemetrySpark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-            <polyline points={points} />
+            <path d={path} />
           </svg>
         ) : null}
       </Animated>

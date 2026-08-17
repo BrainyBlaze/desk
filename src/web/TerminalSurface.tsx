@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { binaryTerminalBroker } from './binaryTerminalBrokerClient.js';
 import { ReplySuppressionAddon } from './replySuppressionAddon.js';
-import { BpError } from '../shared/browserProtocol/index.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
+import { describeBpError } from './terminalBpError.js';
+import { describeSessionExit } from './terminalExitLine.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -874,12 +875,16 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // Repair the PTY size once if the settled cell differs from the daemon.
         stabilize();
       },
-      onExit: (code, signal) => {
-        const how = signal ? `signal ${signal}` : `code ${code}`;
-        terminal.writeln(`\r\n\x1b[33m[session exited ${how}]\x1b[0m`);
+      onExit: (outcome) => {
+        // The tagged ending as moor reported it: exited N, signalled N, or
+        // unknown -- the word, never a fabricated code 0.
+        terminal.writeln(`\r\n\x1b[33m${describeSessionExit(outcome)}\x1b[0m`);
       },
       onError: (code) => {
         terminal.writeln(`\r\n\x1b[31m${describeBpError(code)}\x1b[0m`);
+      },
+      onClientError: (message) => {
+        terminal.writeln(`\r\n\x1b[31m${message}\x1b[0m`);
       },
       onConnectionChange: (up) => {
         if (disposed) {
@@ -1088,8 +1093,8 @@ function supportsWebgl2(): boolean {
 
 /**
  * True only for HARDWARE-accelerated WebGL2. Software GL (SwiftShader, llvmpipe,
- * Mesa software, Microsoft Basic Render) is common on WSL2, remote desktops and
- * GPU-less VMs, and there xterm's WebGL renderer is SLOWER to create and run
+ * Mesa software) is common on WSL2, remote desktops and GPU-less VMs, and there
+ * xterm's WebGL renderer is SLOWER to create and run
  * than its DOM renderer — WebGL context creation alone was measured at hundreds
  * of ms to seconds per group switch under SwiftShader, versus ~50-100ms for the
  * DOM renderer. On those machines we stay on the DOM renderer so switches paint
@@ -1105,7 +1110,7 @@ function detectAcceleratedWebgl2(): boolean {
   const renderer = debugInfo
     ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) ?? '')
     : '';
-  if (/swiftshader|llvmpipe|softpipe|software|basic render|microsoft basic/i.test(renderer)) {
+  if (/swiftshader|llvmpipe|softpipe|software/i.test(renderer)) {
     return false;
   }
   return true;
@@ -1126,20 +1131,4 @@ function latin1ToBytes(data: string): Uint8Array {
     bytes[i] = data.charCodeAt(i) & 0xff;
   }
   return bytes;
-}
-
-/** Human-readable text for a browser-protocol error code (§7.4 ERROR frame). */
-function describeBpError(code: number): string {
-  switch (code) {
-    case BpError.BAD_CHANNEL:
-      return 'terminal channel is no longer valid';
-    case BpError.STALE_GENERATION:
-      return 'session was recreated; reattaching';
-    case BpError.STALE_LEASE:
-      return 'another surface holds the input lease';
-    case BpError.PAYLOAD_TOO_LARGE:
-      return 'terminal frame too large';
-    default:
-      return `terminal error ${code}`;
-  }
 }

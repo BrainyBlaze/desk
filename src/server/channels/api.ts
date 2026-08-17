@@ -1,0 +1,1043 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { extname } from 'node:path';
+import { readJsonBody, sendJson } from '../httpUtil.js';
+import { loadDesk, loadDeskCached } from '../../core/runner.js';
+import {
+  daemonControl,
+  type DaemonControlResult
+} from '../../shared/daemonControlClient.js';
+import type { ChannelMessageDeskEventInput } from '../../shared/controlPlane/index.js';
+import { createNativeChannelsTransport } from '../runtime/nativeSessionControl.js';
+import { ChannelsEngine } from './delivery/engine.js';
+import { FileChannelStore, type ChannelStore, type Unsubscribe } from './store/channelStore.js';
+import { FileChannelFiles, type ChannelFiles } from './store/channelFiles.js';
+import { FileChannelViews, type ChannelViews } from './store/channelViews.js';
+import { MentionRouter, type MessageRouter } from './routing/router.js';
+import { defaultPromptRenderer, type PromptRenderer } from './render/prompts.js';
+import { agentDelivery, type AgentDelivery } from './delivery/transport.js';
+import type { ChannelsProviders } from '../plugin.js';
+import { buildOnboardingPrompt } from './render/prompts.js';
+import {
+  claimDelivering,
+  confirmDelivered,
+  markStuck,
+  revertAllDeliveringToJson
+} from './delivery/durability.js';
+// Construction only: where the default filesystem store lives and how it is
+// prepared. Everything the routes DO to a channel goes through ChannelStore.
+import { ensureChannelsHome, resolveChannelsHome } from './store/fileStore.js';
+import {
+  listPausedSessions,
+  pauseSession as persistPausedSession,
+  resumeSession as persistResumedSession
+} from './delivery/paused.js';
+import { readDeliveryEvents, latestEventSeq } from './delivery/events.js';
+import { exportChannelToMarkdown } from './render/transcript.js';
+import { formatSharedMessage, isValidChannelName, qualifiedMemberHandle, type ReactionKind, type ViewFilter } from './protocol/format.js';
+import type { AgentSurfaceBroker } from '../agentSurfaceBroker.js';
+import { readAgentStatePulse } from '../agentStatePulse.js';
+import {
+  acquireChannelsRuntimeOwner,
+  type ChannelsRuntimeOwner
+} from './runtimeOwner.js';
+
+/**
+ * /api/channels/* — slack-like messaging between desk agents over the
+ * filesystem channels protocol. The desk server is the engine: it appends
+ * messages, watches for external protocol writes, resolves mentions and
+ * drains per-agent prompt queues gated on agent turn signals.
+ */
+
+/** Lazy-load window sizes: messages rendered on open, per scroll page, and the
+ *  read-context kept above the first unread when anchoring the initial window. */
+const CHANNEL_PAGE_INITIAL = 50;
+const CHANNEL_PAGE_MORE = 40;
+const CHANNEL_UNREAD_CONTEXT = 5;
+const REACTION_KINDS = new Set<ReactionKind>(['ack', 'seen', 'done', 'thumbs-up']);
+const UPLOAD_ONLY_CHANNELS = new Set(['agent-files']);
+
+interface ChannelsRuntime {
+  home: string;
+  engine: ChannelsEngine;
+  store: ChannelStore;
+  files: ChannelFiles;
+  views: ChannelViews;
+  /** stops the store handing finalised messages to this engine */
+  unsubscribe: Unsubscribe;
+  owner: ChannelsRuntimeOwner;
+}
+
+let runtime: ChannelsRuntime | undefined;
+
+export interface ChannelsRuntimeOptions {
+  home?: string;
+  /**
+   * Channels providers contributed by plugins, in plugin order. Each wraps the
+   * result of the previous, so several embedders compose instead of the last
+   * one winning.
+   */
+  providers?: ChannelsProviders[];
+  agentSurfaceBroker?: ChannelDeliveryBroker;
+  channelEventPublisher?: ChannelEventPublisher;
+  owner?: ChannelsRuntimeOwner;
+}
+
+export type ChannelEventPublisher = (
+  input: ChannelMessageDeskEventInput
+) => Promise<DaemonControlResult>;
+
+const defaultChannelEventPublisher: ChannelEventPublisher = (input) =>
+  daemonControl('/control/events/channel', input);
+
+export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): ChannelsRuntime {
+  if (runtime) {
+    return runtime;
+  }
+  const home = ensureChannelsHome(options.home ?? resolveChannelsHome());
+  const owner = options.owner ?? acquireChannelsRuntimeOwner(home);
+  const publishChannelEvent =
+    options.channelEventPublisher ?? defaultChannelEventPublisher;
+  try {
+    let engine!: ChannelsEngine;
+  // Terminal-session delivery rides the daemon control plane — the ONLY
+  // transport (Track B: the legacy transport is gone). The uiMode=native broker path is
+  // unchanged.
+  const nativeTransport = createNativeChannelsTransport();
+  const providers = options.providers ?? [];
+  // The base is a FACTORY, built at most once and only if something asks for
+  // it. A provider that replaces a part outright never calls it, so Desk never
+  // constructs the stock implementation — which is the difference between an
+  // interface and a suggestion: a database-backed store must not have a
+  // filesystem one built underneath it first.
+  const compose = <T,>(
+    make: () => T,
+    pick: (p: ChannelsProviders) => ((base: () => T) => T) | undefined
+  ): T => {
+    let built: { value: T } | undefined;
+    const base = (): T => (built ??= { value: make() }).value;
+    let current: (() => T) = base;
+    for (const provider of providers) {
+      const wrap = pick(provider);
+      if (!wrap) continue;
+      const inner = current;
+      let made: { value: T } | undefined;
+      current = () => (made ??= { value: wrap(inner) }).value;
+    }
+    return current();
+  };
+
+  const store = compose<ChannelStore>(() => new FileChannelStore(home), (p) => p.store);
+  const files = compose<ChannelFiles>(() => new FileChannelFiles(home), (p) => p.files);
+  const views = compose<ChannelViews>(() => new FileChannelViews(home), (p) => p.views);
+  const router = compose<MessageRouter>(() => new MentionRouter(), (p) => p.router);
+  const renderer = compose<PromptRenderer>(() => defaultPromptRenderer, (p) => p.renderer);
+  const sendChannelDelivery = createChannelDeliverySender({
+    agentSurfaceBroker: options.agentSurfaceBroker,
+    terminalSender: nativeTransport.sendText,
+    onNonRetryableNativeFailure: (sessionId, error) => {
+      pauseEngineSession(home, engine, sessionId, `native channel delivery failed (${error.code}): ${error.message}`);
+    }
+  });
+  const durableSendChannelDelivery = async (sessionId: string, text: string): Promise<boolean> => {
+    const ok = await sendChannelDelivery(sessionId, text);
+    if (!ok) {
+      revertAllDeliveringToJson(home, sessionId);
+    }
+    return ok;
+  };
+  const selectedDelivery = compose<AgentDelivery>(
+    () => agentDelivery({
+      sendText: sendChannelDelivery,
+      capturePane: nativeTransport.capturePane,
+      sendEnter: nativeTransport.sendEnter,
+      readAgentStates: readAgentStatePulse
+    }),
+    (p) => p.delivery
+  );
+  const durableDelivery: AgentDelivery = {
+    send: async (sessionId, text) => {
+      const ok = await selectedDelivery.send(sessionId, text);
+      if (!ok) {
+        revertAllDeliveringToJson(home, sessionId);
+      }
+      return ok;
+    },
+    states: () => selectedDelivery.states(),
+    probe: (sessionId) => selectedDelivery.probe(sessionId),
+    submit: (sessionId) => selectedDelivery.submit(sessionId)
+  };
+  engine = new ChannelsEngine({
+    home,
+    // sendText wrapper: on a false return (daemon unreachable / session vanished),
+    // revert EVERY .delivering file for this session back to .json. The engine's
+    // draining lock guarantees no concurrent in-flight delivery per session, so
+    // the set of .delivering files at this point is exactly the digest fan-out
+    // for this single failed send. The pump then re-drains the reverted items
+    // when the session becomes reachable again.
+    sendText: durableSendChannelDelivery,
+    // onSubmitStateChange drives the per-item durability renames. Fires on
+    // every transition (synchronous 'delivering' claim + async terminal
+    // states from verifySubmitted). Each helper is idempotent — a re-fire
+    // after restart no-ops rather than throws, so crash-mid-transition leaves
+    // a clean durable state the restore pass classifies correctly.
+    onSubmitStateChange: (sessionId, state, context) => {
+      switch (state) {
+        case 'delivering':
+          claimDelivering(home, sessionId, context.seq);
+          break;
+        case 'submitted':
+          confirmDelivered(home, sessionId, context.seq);
+          break;
+        // Non-agent (shell) session: nothing to verify, and nothing failed —
+        // the item leaves the queue as .delivered, never as .stuck-*.
+        case 'submit-not-applicable':
+          confirmDelivered(home, sessionId, context.seq);
+          break;
+        case 'submit-stuck-paste':
+          markStuck(home, sessionId, context.seq, 'paste');
+          break;
+        case 'submit-stuck-submit':
+          markStuck(home, sessionId, context.seq, 'submit');
+          break;
+        case 'submit-stuck-unobservable':
+          markStuck(home, sessionId, context.seq, 'unobservable');
+          break;
+      }
+    },
+    onChannelMessage: async (channel, file, message, pingsHuman) => {
+      const authorSession = (await store.listMembers(channel)).find(
+        (member) => member.name === message.author
+      )?.sessionId;
+      const event: ChannelMessageDeskEventInput = {
+        ...(authorSession === undefined ? {} : { sessionId: authorSession }),
+        channel,
+        messageId: message.id,
+        ...(file.startsWith('thread-')
+          ? {
+              thread: file.slice(
+                'thread-'.length,
+                -'.md'.length
+              )
+            }
+          : {}),
+        author: message.author,
+        mentionsOperator: pingsHuman,
+        message: message.body.replace(/\s+/g, ' ').trim().slice(0, 10_000)
+      };
+      void publishChannelEvent(event).then(
+        (result) => {
+          if (!result.ok) {
+            console.error(
+              `channel event journal rejected ${channel}/${message.id}: ${
+                result.error ?? 'unknown error'
+              }`
+            );
+          }
+        },
+        (error) => {
+          console.error(
+            `channel event journal unavailable for ${channel}/${message.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      );
+    },
+    sessionInfo: (sessionId) => {
+      const spec = loadDeskCached({}).sessions.find((candidate) => candidate.sessionId === sessionId);
+      if (!spec) {
+        return undefined;
+      }
+      return {
+        sessionName: spec.name,
+        agent: spec.agent,
+        cwd: spec.cwd,
+        resume: spec.resume,
+        bypassPermissions: spec.bypassPermissions,
+        uiMode: spec.uiMode
+      };
+    },
+    readAgentStates: readAgentStatePulse,
+    capturePane: nativeTransport.capturePane,
+    sendEnter: nativeTransport.sendEnter,
+    store,
+    router,
+    renderer,
+    delivery: durableDelivery
+  });
+    // Return the dispatch promise so the watcher records the message as seen
+    // only after delivery succeeds. Log before rethrowing so event-triggered
+    // failures remain visible while the unchanged file stays retryable.
+    const unsubscribe = store.onFinalized(async (incoming) => {
+      try {
+        await engine.handleMessage(incoming);
+      } catch (error: unknown) {
+        console.error(
+          `[desk-channels] dispatch failed for ${incoming.channel}/${incoming.message.id}:`,
+          error
+        );
+        throw error;
+      }
+    });
+    runtime = { home, engine, store, files, views, unsubscribe, owner };
+    return runtime;
+  } catch (error) {
+    owner.release();
+    throw error;
+  }
+}
+
+function pauseEngineSession(home: string, engine: ChannelsEngine, sessionId: string, reason?: string): void {
+  const paused = persistPausedSession(home, sessionId, reason);
+  engine.pauseSession(sessionId, paused.reason, paused.pausedAt);
+}
+
+function resumeEngineSession(home: string, engine: ChannelsEngine, sessionId: string): void {
+  persistResumedSession(home, sessionId);
+  engine.resumeSession(sessionId);
+}
+
+/**
+ * Tears the runtime down completely. MUST be called when the vite dev server
+ * restarts (it re-imports this module in the same Node process): a leaked old
+ * engine + watcher would dispatch every message a second time — double
+ * prompts in the agent terminals.
+ */
+export function disposeChannelsRuntime(): void {
+  const current = runtime;
+  runtime = undefined;
+  if (!current) {
+    return;
+  }
+  try {
+    current.unsubscribe();
+  } finally {
+    try {
+      current.engine.dispose();
+    } finally {
+      current.owner.release();
+    }
+  }
+}
+
+/** test hook */
+export function resetChannelsRuntime(): void {
+  disposeChannelsRuntime();
+}
+
+/**
+ * Inline-safe content types for uploaded channel files. Deliberately excludes
+ * anything that can run script on the app origin (svg, html); everything else
+ * is forced to download as application/octet-stream.
+ */
+const FILE_CONTENT_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.json': 'application/json',
+  '.log': 'text/plain; charset=utf-8'
+};
+
+type ChannelDeliveryBroker = Pick<AgentSurfaceBroker, 'injectUserMessage'>;
+
+interface ChannelDeliverySession {
+  sessionId: string;
+  uiMode?: 'terminal' | 'native';
+}
+
+export interface ChannelDeliveryFailure {
+  code: string;
+  message: string;
+  retryable?: boolean;
+}
+
+export interface ChannelDeliverySenderOptions {
+  agentSurfaceBroker?: ChannelDeliveryBroker;
+  /** Terminal-mode delivery transport (the daemon control plane — required, the legacy default is gone). */
+  terminalSender: (sessionId: string, text: string) => Promise<boolean>;
+  lookupSession?: (sessionId: string) => ChannelDeliverySession | undefined;
+  onNonRetryableNativeFailure?: (sessionId: string, error: ChannelDeliveryFailure) => void;
+  log?: (message: string) => void;
+}
+
+export function createChannelDeliverySender(options: ChannelDeliverySenderOptions): (sessionId: string, text: string) => Promise<boolean> {
+  const terminalSender = options.terminalSender;
+  const lookupSession = options.lookupSession ?? lookupDeskSessionForDelivery;
+  const log = options.log ?? ((message: string) => console.warn(message));
+  return async (sessionId, text) => {
+    const session = lookupSession(sessionId);
+    if (session?.uiMode !== 'native') {
+      return terminalSender(sessionId, text);
+    }
+    if (!options.agentSurfaceBroker) {
+      log(`native channel delivery failed for ${sessionId}: no agent surface broker`);
+      return false;
+    }
+    try {
+      await options.agentSurfaceBroker.injectUserMessage(sessionId, text, 'channel');
+      return true;
+    } catch (error) {
+      const failure = channelDeliveryFailure(error);
+      log(`native channel delivery failed for ${sessionId}: ${failure.code}: ${failure.message}`);
+      if (failure.retryable === false) {
+        options.onNonRetryableNativeFailure?.(sessionId, failure);
+      }
+      return false;
+    }
+  };
+}
+
+function lookupDeskSessionForDelivery(sessionId: string): ChannelDeliverySession | undefined {
+  return loadDeskCached({}).sessions.find((candidate) => candidate.sessionId === sessionId);
+}
+
+function channelDeliveryFailure(error: unknown): ChannelDeliveryFailure {
+  if (error instanceof Error) {
+    const record = error as { code?: unknown; retryable?: unknown };
+    return {
+      code: typeof record.code === 'string' ? record.code : 'adapter-unavailable',
+      message: error.message,
+      ...(typeof record.retryable === 'boolean' ? { retryable: record.retryable } : {})
+    };
+  }
+  return { code: 'adapter-unavailable', message: String(error) };
+}
+
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
+
+function requireReactionKind(value: unknown): ReactionKind {
+  if (typeof value === 'string' && REACTION_KINDS.has(value as ReactionKind)) {
+    return value as ReactionKind;
+  }
+  throw new Error('kind must be one of ack, seen, done, thumbs-up');
+}
+
+function optionalViewFilter(value: unknown): ViewFilter {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+  const input = value as Record<string, unknown>;
+  return {
+    text: typeof input.text === 'string' ? input.text : undefined,
+    author: typeof input.author === 'string' ? input.author : undefined,
+    mentionsMe: input.mentionsMe === true ? true : undefined,
+    hasThread: input.hasThread === true ? true : undefined
+  };
+}
+
+function requireChannel(value: unknown): string {
+  const name = requireString(value, 'channel');
+  if (!isValidChannelName(name)) {
+    throw new Error(`invalid channel name: ${name}`);
+  }
+  return name;
+}
+
+/**
+ * Resolves the message author for a post:
+ *  - explicit member name (`as`), validated against the channel roster;
+ *  - the caller's session identity (sessionId) matched to the member it
+ *    backs — how `desk channels post` identifies the agent without trusting
+ *    free-text input;
+ *  - otherwise the human operator.
+ */
+async function resolveAuthor(store: ChannelStore, channel: string, body: Record<string, unknown>): Promise<string> {
+  const members = await store.listMembers(channel);
+  if (typeof body.as === 'string' && body.as.length > 0) {
+    if (body.as !== 'human' && !members.some((member) => member.name === body.as)) {
+      throw new Error(`@${String(body.as)} is not a member of #${channel}`);
+    }
+    return body.as;
+  }
+  if (typeof body.sessionId === 'string' && body.sessionId.length > 0) {
+    // The CLI sends its DESK_SESSION_ID; members key by the same durable id.
+    const sessionKey = body.sessionId;
+    const member = members.find((candidate) => candidate.sessionId === sessionKey);
+    if (member) {
+      return member.name;
+    }
+    throw new Error(`session ${String(body.sessionId)} is not a member of #${channel}`);
+  }
+  return 'human';
+}
+
+const MEMBER_TYPE_BY_AGENT: Record<string, string> = {
+  claude: 'claude-code',
+  codex: 'codex-cli',
+  qwen: 'qwen',
+  kimi: 'kimi',
+  grok: 'grok'
+};
+
+/**
+ * The channel member kind for a session's agent. Every managed agent gets its
+ * own first-class kind; sessions with no agent (custom commands) and `bash`
+ * fall back to `bash`. Nothing gates behavior on the kind — it is a label for
+ * the roster and join notice — but a Qwen/Kimi/Grok session showing as `bash`
+ * misreads it, so they are named here too.
+ */
+export function memberTypeForAgent(agent: string | undefined): string {
+  return MEMBER_TYPE_BY_AGENT[agent ?? ''] ?? 'bash';
+}
+
+/** Maps an optional thread parent id to the conversation file it lives in. */
+function resolveConversationFile(thread: unknown): string {
+  if (typeof thread !== 'string' || thread.length === 0) {
+    return 'root.md';
+  }
+  if (!/^msg-[A-Za-z0-9-]+$/.test(thread)) {
+    throw new Error(`invalid thread id: ${thread}`);
+  }
+  return `thread-${thread}.md`;
+}
+
+export async function handleChannelsRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  if (!url.pathname.startsWith('/api/channels/')) {
+    return false;
+  }
+  const { home, engine, store, files, views } = initChannelsRuntime();
+
+  try {
+    if (req.method === 'GET' && url.pathname === '/api/channels/state') {
+      const since = Number(url.searchParams.get('since') ?? '0') || 0;
+      let seen: Record<string, string> | null = null;
+      const seenRaw = url.searchParams.get('seen');
+      if (seenRaw !== null && seenRaw.length <= 16384) {
+        try {
+          const parsed = JSON.parse(seenRaw) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            seen = Object.fromEntries(
+              Object.entries(parsed as Record<string, unknown>).filter(
+                (entry): entry is [string, string] => typeof entry[1] === 'string'
+              )
+            );
+          }
+        } catch {
+          seen = null;
+        }
+      }
+      sendJson(res, 200, {
+        home,
+        channels: await store.listChannels({ seen: seen ?? undefined }),
+        delivery: await engine.lifecycleStates(),
+        activity: engine.listActivity(since).slice(-100),
+        activitySeq: engine.latestActivitySeq()
+      });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/engine') {
+      // Ops console: live per-session diagnostics (each runs a real pane probe,
+      // so this is NOT on the hot /state poll path) plus engine health.
+      const sessions = await engine.inspectAll();
+      sendJson(res, 200, {
+        home,
+        pumpAlive: engine.pumpAlive(),
+        totalQueued: sessions.reduce((sum, session) => sum + session.queueDepth, 0),
+        sessions,
+        activity: engine.listActivity(0).slice(-100)
+      });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/engine/action') {
+      const body = await readJsonBody(req);
+      const action = requireString(body.action, 'action');
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined;
+      switch (action) {
+        case 'pause-session':
+          pauseEngineSession(home, engine, requireString(sessionId, 'sessionId'), typeof body.reason === 'string' ? body.reason : undefined);
+          break;
+        case 'resume-session':
+          resumeEngineSession(home, engine, requireString(sessionId, 'sessionId'));
+          break;
+        case 'drop-queue':
+          engine.dropQueue(requireString(sessionId, 'sessionId'));
+          break;
+        case 'drop-message': {
+          const seq = Number(body.seq);
+          if (!Number.isInteger(seq)) {
+            throw new Error('seq is required');
+          }
+          engine.dropMessage(requireString(sessionId, 'sessionId'), seq);
+          break;
+        }
+        case 'force-deliver': {
+          const seq = Number.isInteger(Number(body.seq)) ? Number(body.seq) : undefined;
+          await engine.forceDeliver(requireString(sessionId, 'sessionId'), seq);
+          break;
+        }
+        case 'drain-ready-all':
+          await engine.drainReady();
+          break;
+        default:
+          throw new Error(`unknown engine action: ${action}`);
+      }
+      sendJson(res, 200, { ok: true, sessions: await engine.inspectAll() });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/channel') {
+      // Initial window: anchored on the reader's first unread (`since`), else newest.
+      const since = url.searchParams.get('since');
+      sendJson(
+        res,
+        200,
+        await store.readChannel(requireChannel(url.searchParams.get('name')), {
+          since,
+          limit: CHANNEL_PAGE_INITIAL,
+          contextAbove: CHANNEL_UNREAD_CONTEXT
+        })
+      );
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/messages') {
+      // Scroll paging: older before a cursor, newer after it, around a target
+      // message id for jump/navigation, or the whole
+      // channel (`all=1`, used when the operator activates the filter box).
+      const channel = requireChannel(url.searchParams.get('name'));
+      if (url.searchParams.get('all') === '1') {
+        sendJson(res, 200, await store.readMessages(channel, { limit: Number.MAX_SAFE_INTEGER }));
+        return true;
+      }
+      const before = url.searchParams.get('before') ?? undefined;
+      const after = url.searchParams.get('after') ?? undefined;
+      const around = url.searchParams.get('around') ?? undefined;
+      sendJson(res, 200, await store.readMessages(channel, { before, after, around, limit: CHANNEL_PAGE_MORE }));
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/reactions') {
+      sendJson(res, 200, { items: await store.listReactions() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/reactions') {
+      const body = await readJsonBody(req);
+      const action = typeof body.action === 'string' ? body.action : 'add';
+      const input = {
+        channel: requireChannel(body.channel),
+        file: requireString(body.file, 'file'),
+        id: requireString(body.id, 'id'),
+        kind: requireReactionKind(body.kind)
+      };
+      if (action === 'add') {
+        await store.addReaction({
+          ...input,
+          author: typeof body.author === 'string' ? body.author : undefined
+        });
+      } else if (action === 'remove') {
+        await store.removeReaction(input);
+      } else if (action === 'clear') {
+        await store.clearReactions(input.channel, input.file, input.id);
+      } else {
+        throw new Error(`unknown reactions action: ${action}`);
+      }
+      sendJson(res, 200, { ok: true, items: await store.listReactions() });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/views') {
+      sendJson(res, 200, { items: views.list() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/views') {
+      const body = await readJsonBody(req);
+      const action = typeof body.action === 'string' ? body.action : 'add';
+      if (action === 'add') {
+        views.add({
+          name: requireString(body.name, 'name'),
+          filter: optionalViewFilter(body.filter)
+        });
+      } else if (action === 'remove') {
+        views.remove(requireString(body.name, 'name'));
+      } else {
+        throw new Error(`unknown views action: ${action}`);
+      }
+      sendJson(res, 200, { ok: true, items: views.list() });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/paused') {
+      sendJson(res, 200, { items: listPausedSessions(home) });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/paused') {
+      const body = await readJsonBody(req);
+      const action = typeof body.action === 'string' ? body.action : 'pause';
+      const sessionId = requireString(body.sessionId, 'sessionId');
+      if (action === 'pause') {
+        pauseEngineSession(home, engine, sessionId, typeof body.reason === 'string' ? body.reason : undefined);
+      } else if (action === 'resume') {
+        resumeEngineSession(home, engine, sessionId);
+      } else {
+        throw new Error(`unknown paused action: ${action}`);
+      }
+      sendJson(res, 200, { ok: true, items: listPausedSessions(home), sessions: await engine.inspectAll() });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/search') {
+      const channel = url.searchParams.get('channel');
+      const limit = Number(url.searchParams.get('limit') ?? '50');
+      sendJson(res, 200, {
+        items: await store.search({
+          query: url.searchParams.get('q') ?? url.searchParams.get('query') ?? '',
+          channel: channel ? requireChannel(channel) : undefined,
+          author: url.searchParams.get('author') ?? undefined,
+          mentions:
+            url.searchParams.get('mentions') ??
+            (url.searchParams.get('mentionsMe') === '1' || url.searchParams.get('mentionsMe') === 'true' ? 'human' : undefined),
+          hasThread: url.searchParams.get('hasThread') === '1' || url.searchParams.get('hasThread') === 'true',
+          dateFrom: url.searchParams.get('dateFrom') ?? undefined,
+          dateTo: url.searchParams.get('dateTo') ?? undefined,
+          limit: Number.isFinite(limit) ? limit : undefined
+        })
+      });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/thread') {
+      const channel = requireChannel(url.searchParams.get('name'));
+      const parent = requireString(url.searchParams.get('parent'), 'parent');
+      sendJson(res, 200, { messages: await store.readThread(channel, parent) });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/featured') {
+      sendJson(res, 200, { items: await store.listFeatured() });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/file') {
+      const channel = requireChannel(url.searchParams.get('channel'));
+      const name = requireString(url.searchParams.get('name'), 'name');
+      const attachment = files.open(channel, name);
+      if (!attachment) {
+        sendJson(res, 404, { error: `file not found: ${name}` });
+        return true;
+      }
+      const inlineType = FILE_CONTENT_TYPES[extname(name).toLowerCase()];
+      res.statusCode = 200;
+      res.setHeader('content-type', inlineType ?? 'application/octet-stream');
+      res.setHeader('content-length', attachment.size);
+      // Uploads are untrusted: never let them run script on the app origin.
+      res.setHeader('content-security-policy', "default-src 'none'; sandbox");
+      res.setHeader('x-content-type-options', 'nosniff');
+      res.setHeader(
+        'content-disposition',
+        `${inlineType ? 'inline' : 'attachment'}; filename="${encodeURIComponent(name)}"`
+      );
+      attachment.open().pipe(res);
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/create') {
+      const body = await readJsonBody(req);
+      const name = requireChannel(body.name);
+      await store.createChannel(name, typeof body.goal === 'string' ? body.goal : '');
+      sendJson(res, 200, { ok: true, channels: await store.listChannels() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/edit') {
+      const body = await readJsonBody(req);
+      const name = requireChannel(body.name);
+      await store.setGoal(name, typeof body.goal === 'string' ? body.goal : '');
+      sendJson(res, 200, { ok: true, channels: await store.listChannels() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/message-edit') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const fileName = resolveConversationFile(body.thread);
+      const message = await store.editMessage(channel, fileName, requireString(body.id, 'id'), requireString(body.body, 'body'));
+      // The id is already in the watcher's seen-set, so the rewrite never
+      // re-dispatches; edits intentionally do not re-prompt agents.
+      sendJson(res, 200, { ok: true, message });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/message-delete') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const fileName = resolveConversationFile(body.thread);
+      await store.deleteMessage(channel, fileName, requireString(body.id, 'id'));
+      sendJson(res, 200, { ok: true });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/destroy') {
+      const body = await readJsonBody(req);
+      await store.destroyChannel(requireChannel(body.name));
+      sendJson(res, 200, { ok: true, channels: await store.listChannels() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/member-add') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const sessionId = requireString(body.sessionId, 'sessionId');
+      const allSessions = loadDesk({}).sessions;
+      const sessionKey = sessionId;
+      const spec = allSessions.find((candidate) => candidate.sessionId === sessionKey);
+      if (!spec) {
+        sendJson(res, 404, { error: `no desk session backs ${sessionId}` });
+        return true;
+      }
+      if ((await store.listMembers(channel)).some((member) => member.sessionId === sessionKey)) {
+        sendJson(res, 409, { error: `that agent is already a member of #${channel}` });
+        return true;
+      }
+      const handle = qualifiedMemberHandle({
+        sessionName: spec.name,
+        projectLabel: spec.projectLabel,
+        groupLabel: spec.groupLabel,
+        roster: allSessions.map((candidate) => ({
+          name: candidate.name,
+          projectLabel: candidate.projectLabel,
+          groupLabel: candidate.groupLabel
+        }))
+      });
+      const member = await store.addMember(channel, handle, {
+        type: memberTypeForAgent(spec.agent),
+        sessionId: sessionKey,
+        agentLabel: [spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')
+      });
+
+      // Join notice: visible in the feed and discoverable by later reads, but
+      // deliberately NOT dispatched (markSeen, no handleMessage) — adding N
+      // agents must not blast N×(N-1) join prompts into terminals.
+      const detail = await store.readChannel(channel);
+      const joinNotice = await store.append(channel, {
+        author: 'human',
+        body: `@${member.name} joined #${channel} — ${[spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')} (${member.type}).`
+      });
+      await store.markSeen(channel, joinNotice.file, joinNotice.message.id);
+
+      // Onboarding briefing rides the same gated queue as channel dispatches:
+      // it lands when the agent's TUI is actually ready for input.
+      engine.enqueuePrompt(
+        sessionKey,
+        channel,
+        buildOnboardingPrompt({
+          channel,
+          goal: detail.goal,
+          handle: member.name,
+          members: detail.members,
+          messageCount: detail.messages.length,
+          home,
+          role: member.role,
+          functions: member.functions
+        }),
+        `onboard-${channel}`
+      );
+      sendJson(res, 200, { ok: true, member, members: await store.listMembers(channel) });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/queue-clear') {
+      const body = await readJsonBody(req);
+      engine.dropQueue(requireString(body.sessionId, 'sessionId'));
+      sendJson(res, 200, { ok: true, delivery: await engine.lifecycleStates() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/member-remove') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const name = requireString(body.name, 'name');
+      const member = (await store.listMembers(channel)).find((candidate) => candidate.name === name);
+      await store.removeMember(channel, name);
+      if (member?.sessionId) {
+        engine.dropQueue(member.sessionId);
+      }
+      sendJson(res, 200, { ok: true, members: await store.listMembers(channel) });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/post') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const author = await resolveAuthor(store, channel, body);
+      const appended = await store.append(channel, {
+        author,
+        body: requireString(body.body, 'body'),
+        threadParentId: typeof body.thread === 'string' && body.thread.length > 0 ? body.thread : undefined
+      });
+      await engine.handleMessage({ channel, file: appended.file, message: appended.message });
+      // Mark seen only after dispatch succeeds. If the engine callback throws,
+      // the watcher/sweep path still sees this finalized message and retries it.
+      await store.markSeen(channel, appended.file, appended.message.id);
+      sendJson(res, 200, { ok: true, id: appended.message.id, file: appended.file });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/share') {
+      const body = await readJsonBody(req);
+      const fromChannel = requireChannel(body.fromChannel);
+      const toChannel = requireChannel(body.toChannel);
+      const messageId = requireString(body.messageId, 'messageId');
+      const parentId = typeof body.thread === 'string' && body.thread.length > 0 ? body.thread : '';
+      if (parentId && !/^msg-[A-Za-z0-9-]+$/.test(parentId)) {
+        sendJson(res, 400, { error: `invalid thread id: ${parentId}` });
+        return true;
+      }
+      // `thread` is validated above as input hygiene but no longer locates the
+      // message: ids are unique within a channel, and readMessage searches the
+      // root and every thread, so a client that names the wrong parent still
+      // shares the right message instead of getting a 404.
+      let message;
+      try {
+        message = await store.readMessage(fromChannel, messageId);
+      } catch {
+        sendJson(res, 404, { error: `message ${messageId} not found in #${fromChannel}` });
+        return true;
+      }
+      const author = await resolveAuthor(store, toChannel, body);
+      const shared = formatSharedMessage(message, fromChannel, typeof body.comment === 'string' ? body.comment : undefined);
+      const appended = await store.append(toChannel, { author, body: shared });
+      await engine.handleMessage({ channel: toChannel, file: appended.file, message: appended.message });
+      await store.markSeen(toChannel, appended.file, appended.message.id);
+      sendJson(res, 200, { ok: true, id: appended.message.id });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/featured') {
+      const body = await readJsonBody(req);
+      const action = typeof body.action === 'string' ? body.action : 'add';
+      const input = {
+        channel: requireChannel(body.channel),
+        file: requireString(body.file, 'file'),
+        id: requireString(body.id, 'id'),
+        note: typeof body.note === 'string' ? body.note : undefined,
+        tag: typeof body.tag === 'string' ? body.tag : undefined
+      };
+      if (action === 'remove') {
+        await store.removeFeatured(input);
+      } else if (action === 'add') {
+        await store.addFeatured(input);
+      } else {
+        throw new Error(`unknown featured action: ${action}`);
+      }
+      sendJson(res, 200, { ok: true, items: await store.listFeatured() });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/upload') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const name = requireString(body.name, 'name');
+      const data = requireString(body.dataBase64, 'dataBase64');
+      const bytes = Buffer.from(data, 'base64');
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_UPLOAD_BYTES) {
+        sendJson(res, 400, { error: `upload must be 1 byte – ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB` });
+        return true;
+      }
+      if (UPLOAD_ONLY_CHANNELS.has(channel)) {
+        files.ensureBucket(channel);
+      }
+      const saved = files.save(channel, name, bytes);
+      sendJson(res, 200, { ok: true, file: saved, markdown: `[${saved}](_files/${saved})` });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/events') {
+      const filter: Record<string, unknown> = {};
+      const sessionId = url.searchParams.get('sessionId');
+      if (sessionId) { filter.sessionId = sessionId; }
+      const eventChannel = url.searchParams.get('channel');
+      if (eventChannel) { filter.channel = eventChannel; }
+      const kind = url.searchParams.get('kind');
+      if (kind) { filter.kind = kind; }
+      const sinceSeq = url.searchParams.get('sinceSeq');
+      if (sinceSeq) { filter.sinceSeq = Number(sinceSeq); }
+      const limit = url.searchParams.get('limit');
+      if (limit) { filter.limit = Number(limit); }
+      sendJson(res, 200, {
+        items: readDeliveryEvents(home, filter),
+        latestSeq: latestEventSeq(home)
+      });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/export') {
+      const channel = requireChannel(url.searchParams.get('channel'));
+      const thread = url.searchParams.get('thread');
+      const markdown = await exportChannelToMarkdown(store, channel, thread ?? undefined);
+      res.statusCode = 200;
+      res.setHeader('content-type', 'text/markdown; charset=utf-8');
+      res.setHeader('content-disposition', `attachment; filename="${channel}${thread ? `-thread-${thread}` : ''}.md"`);
+      res.end(markdown);
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/member-role') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const member = requireString(body.member, 'member');
+      const role = typeof body.role === 'string' ? body.role : undefined;
+      const functions = typeof body.functions === 'string' ? body.functions : undefined;
+      const updated = await store.updateMemberRole(channel, member, role, functions);
+      if (!updated) {
+        sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, member: updated });
+      return true;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/channels/member-role') {
+      const channel = requireChannel(url.searchParams.get('channel'));
+      const member = requireString(url.searchParams.get('member'), 'member');
+      const found = (await store.listMembers(channel)).find((m) => m.name === member);
+      if (!found) {
+        sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, role: found.role, functions: found.functions });
+      return true;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/channels/member-supervisor') {
+      const body = await readJsonBody(req);
+      const channel = requireChannel(body.channel);
+      const member = requireString(body.member, 'member');
+      const supervisor = Boolean(body.supervisor);
+      const rawMinutes = Number(body.supervisorMaxIdleMinutes);
+      const supervisorMaxIdleMinutes = Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : undefined;
+      const updated = await store.updateMemberSupervisor(channel, member, supervisor, supervisorMaxIdleMinutes);
+      if (!updated) {
+        sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
+        return true;
+      }
+      sendJson(res, 200, { ok: true, member: updated });
+      return true;
+    }
+
+    sendJson(res, 404, { error: `unknown channels endpoint: ${url.pathname}` });
+    return true;
+  } catch (err) {
+    // Last-resort net for the channels router: log the real failure with the
+    // route and return the message — a generic 500 hides every failure class.
+    console.error(`[desk-channels] ${req.method ?? ''} ${url.pathname} failed:`, err);
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    return true;
+  }
+}

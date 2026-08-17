@@ -57,10 +57,27 @@ export type ClearProviderSessionIdentityResult =
   | { ok: true; kind: 'cleared' | 'already-cleared' }
   | { ok: false; code: ProviderSessionBindingFailureCode; error: string };
 
+export interface ReplaceProviderSessionIdentityInput {
+  deskSessionId: string;
+  provider: ProviderSessionProvider;
+  expectedProviderSessionId: string;
+  providerSessionId: string;
+  manifestPath?: string;
+  homeDir?: string;
+}
+
+export type ReplaceProviderSessionIdentityResult =
+  | { ok: true; kind: 'replaced' | 'already-replaced' }
+  | { ok: false; code: ProviderSessionBindingFailureCode; error: string };
+
+export interface ReplaceProviderSessionIdentityDependencies {
+  updateManifest?: typeof updateManifestFile;
+}
+
 function failure(
   code: ProviderSessionBindingFailureCode,
   error: string
-): ProviderSessionBindingResult {
+): Extract<ProviderSessionBindingResult, { ok: false }> {
   return { ok: false, code, error };
 }
 
@@ -275,6 +292,88 @@ export async function bindProviderSessionIdentity(
   if (!result) {
     throw new Error(
       `provider identity binding produced no result for Desk session ${input.deskSessionId}`
+    );
+  }
+  return result;
+}
+
+export async function replaceProviderSessionIdentity(
+  input: ReplaceProviderSessionIdentityInput,
+  dependencies: ReplaceProviderSessionIdentityDependencies = {}
+): Promise<ReplaceProviderSessionIdentityResult> {
+  const manifestPath = input.manifestPath ?? resolveManifestPath();
+  const homeDir = input.homeDir ?? homedir();
+  if (
+    !isValidProviderSessionId(input.provider, input.expectedProviderSessionId) ||
+    !isValidProviderSessionId(input.provider, input.providerSessionId)
+  ) {
+    return failure(
+      'provider-session-id-invalid',
+      `Invalid ${input.provider} provider session id`
+    );
+  }
+
+  let result: ReplaceProviderSessionIdentityResult | undefined;
+  await (dependencies.updateManifest ?? updateManifestFile)(manifestPath, (manifest) => {
+    const specs = buildSessionSpecs(manifest, { homeDir });
+    const target = specs.find(
+      (candidate) => candidate.sessionId === input.deskSessionId
+    );
+    if (!target) {
+      result = failure(
+        'provider-session-not-found',
+        `Desk session not found: ${input.deskSessionId}`
+      );
+      return null;
+    }
+    if (target.agent !== input.provider) {
+      result = failure(
+        'provider-session-agent-mismatch',
+        `Desk session ${input.deskSessionId} is configured for ${target.agent ?? 'no provider'}, not ${input.provider}`
+      );
+      return null;
+    }
+    const conflictingOwner = specs.find(
+      (candidate) =>
+        candidate.sessionId !== input.deskSessionId &&
+        candidate.resume === input.providerSessionId
+    );
+    if (conflictingOwner) {
+      result = failure(
+        'provider-session-id-conflict',
+        `Provider session id is already bound to Desk session ${conflictingOwner.sessionId}`
+      );
+      return null;
+    }
+    if (target.resume === input.providerSessionId) {
+      result = { ok: true, kind: 'already-replaced' };
+      return null;
+    }
+    if (target.resume !== input.expectedProviderSessionId) {
+      result = failure(
+        'provider-session-mismatch',
+        `Desk session ${input.deskSessionId} provider session binding changed during rebind`
+      );
+      return null;
+    }
+
+    const next = structuredClone(manifest);
+    const mutableTarget = manifestSessions(next).find(
+      (session) => session.sessionId === input.deskSessionId
+    );
+    if (!mutableTarget) {
+      throw new Error(
+        `manifest session disappeared during provider identity rebind: ${input.deskSessionId}`
+      );
+    }
+    mutableTarget.resume = input.providerSessionId;
+    result = { ok: true, kind: 'replaced' };
+    return next;
+  });
+
+  if (!result) {
+    throw new Error(
+      `provider identity rebind produced no result for Desk session ${input.deskSessionId}`
     );
   }
   return result;

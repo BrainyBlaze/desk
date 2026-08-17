@@ -11,12 +11,12 @@ export function deriveNoteName(content?: string): string {
       .find((line) => line !== '') ?? '';
   const cleaned = firstLine
     .replace(/^[#>*+`\s-]+/, '')
-    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replaceAll('/', ' ')
+    .replaceAll('\0', ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 20)
-    .trim()
-    .replace(/\.+$/, '');
+    .trim();
   return cleaned || 'untitled';
 }
 

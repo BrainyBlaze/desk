@@ -22,8 +22,8 @@ import {
   EXT_STUCK_SUBMIT,
   EXT_STUCK_UNOBSERVABLE,
   EXT_CONSUMED
-} from '../src/server/channelsDurability.js';
-import type { QueuedPrompt } from '../src/server/channelsEngine.js';
+} from '../src/server/channels/delivery/durability.js';
+import type { QueuedPrompt } from '../src/server/channels/delivery/engine.js';
 
 const sample = (seq: number, messageId = `msg-${seq}`): QueuedPrompt => ({
   seq,
@@ -71,8 +71,8 @@ describe('channelsDurability', () => {
       expect(classifyQueueFile('0000000001.stuck-unobservable.consumed')).toBe(EXT_CONSUMED);
     });
 
-    it('returns null for unknown / non-queue files (engine.pid, lockfile, README, etc.)', () => {
-      expect(classifyQueueFile('engine.pid')).toBeNull();
+    it('returns null for unknown / non-queue files (server lease, lockfile, README, etc.)', () => {
+      expect(classifyQueueFile('server-owner.lease')).toBeNull();
       expect(classifyQueueFile('.write.lock')).toBeNull();
       expect(classifyQueueFile('README.md')).toBeNull();
       expect(classifyQueueFile('0000000001.tmp')).toBeNull();

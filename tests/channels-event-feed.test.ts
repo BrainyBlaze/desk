@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   initChannelsRuntime,
   resetChannelsRuntime
-} from '../src/server/channelsApi.js';
+} from '../src/server/channels/api.js';
 
 describe('channels unified event feed bridge', () => {
   let home: string | undefined;

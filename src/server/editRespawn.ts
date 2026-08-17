@@ -16,6 +16,27 @@ export function shouldRespawnAfterEdit(
   newSpec: SessionSpec | undefined,
   isRunning: (sessionId: string) => boolean
 ): boolean {
+  if (!editIsLaunchRelevant(oldSpec, newSpec)) {
+    return false;
+  }
+  // A profile change IS launch-relevant: the running process still holds the
+  // OLD account's credentials, so leaving it alive would answer the operator
+  // under the account they just switched away from.
+  return isRunning(newSpec!.sessionId);
+}
+
+/**
+ * Whether the respawn decision depends on the session being alive at all.
+ *
+ * Split out so a caller can tell "no respawn, whatever the liveness" from "the
+ * answer hinges on liveness" WITHOUT first inventing a liveness verdict: an
+ * edit that needs no respawn (a pure rename, say) must still commit when the
+ * authority that owns liveness is unreachable.
+ */
+export function editIsLaunchRelevant(
+  oldSpec: SessionSpec | undefined,
+  newSpec: SessionSpec | undefined
+): boolean {
   if (!oldSpec || !newSpec) {
     return false;
   }
@@ -32,8 +53,5 @@ export function shouldRespawnAfterEdit(
   ) {
     return false; // nothing launch-relevant changed
   }
-  // A profile change IS launch-relevant: the running process still holds the
-  // OLD account's credentials, so leaving it alive would answer the operator
-  // under the account they just switched away from.
-  return isRunning(newSpec.sessionId);
+  return true;
 }

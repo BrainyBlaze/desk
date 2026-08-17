@@ -1,10 +1,15 @@
 import type { Server as NodeHttpServer } from 'node:http';
 import type { Plugin, PreviewServer, ViteDevServer } from 'vite';
 import { handleAgentSessionInjectRequest } from './agentSessionsApi.js';
-import { handleChannelsRequest } from './channelsApi.js';
+import {
+  acquireChannelsRuntimeOwner,
+  handleChannelsRequest,
+  resolveChannelsHome,
+  type ChannelsRuntimeOwner
+} from './channels/index.js';
+
 import { createDeskApiMiddleware } from './deskApiRouter.js';
 import type { DeskApiHost } from './deskApiTypes.js';
-import { ensureProductionCutoverMigration } from './cutoverStoreMigration.js';
 import { installDeskRuntime } from './deskRuntime.js';
 import { createDeskServices } from './deskServices.js';
 import { createDisposerRegistry } from './disposerRegistry.js';
@@ -33,8 +38,8 @@ export {
 
 export interface InstallDeskApiOptions {
   plugins?: DeskPlugin[];
-  /** Test seam for proving the first-start migration blocks all service setup. */
-  runCutoverMigration?: () => void;
+  /** Test seam for proving Channels ownership gates every startup side effect. */
+  acquireChannelsOwner?: (home: string) => ChannelsRuntimeOwner;
 }
 
 /**
@@ -43,37 +48,44 @@ export interface InstallDeskApiOptions {
  * owning modules; this function only wires those boundaries together.
  */
 export function installDeskApi(host: DeskApiHost, options: InstallDeskApiOptions = {}): void {
-  (options.runCutoverMigration ?? ensureProductionCutoverMigration)();
-  const plugins = options.plugins ?? [];
-  const services = createDeskServices(host.httpServer);
-  const disposers = createDisposerRegistry();
-  installDeskRuntime({ host, services, plugins, disposers });
+  const channelsOwner = (options.acquireChannelsOwner ?? acquireChannelsRuntimeOwner)(
+    resolveChannelsHome()
+  );
+  try {
+    const plugins = options.plugins ?? [];
+    const services = createDeskServices(host.httpServer);
+    const disposers = createDisposerRegistry();
+    installDeskRuntime({ host, services, plugins, disposers, channelsOwner });
 
-  for (const plugin of plugins) {
-    for (const middleware of plugin.middleware ?? []) {
-      host.middlewares.use(middleware);
+    for (const plugin of plugins) {
+      for (const middleware of plugin.middleware ?? []) {
+        host.middlewares.use(middleware);
+      }
     }
-  }
 
-  const routes: DeskRoute[] = [
-    (req, res, url) => handleFsRequest(req, res, url, { fileOperationCoordinator: services.lspFileOperationCoordinator }),
-    handleGitRequest,
-    handleProjectsRequest,
-    (req, res, url) => handleAgentSessionInjectRequest(req, res, url, { broker: services.agentSurfaceBroker }),
-    handleChannelsRequest,
-    createLspRoutes({ httpEndpoint: services.lspHttpEndpoint, languageDetector: services.lspLanguageDetector }),
-    createSettingsRoutes(),
-    createSystemRoutes(services.managedAgentLsp),
-    createSessionsRoutes({
-      managedAgentLsp: services.managedAgentLsp,
-      nativeAgentLaunch: services.nativeAgentLaunch,
-      agentSurfaceBroker: services.agentSurfaceBroker
-    }),
-    createTerminalRoutes(),
-    createProfileRoutes(),
-    ...plugins.flatMap((plugin) => plugin.routes ?? [])
-  ];
-  host.middlewares.use(createDeskApiMiddleware(routes));
+    const routes: DeskRoute[] = [
+      (req, res, url) => handleFsRequest(req, res, url, { fileOperationCoordinator: services.lspFileOperationCoordinator }),
+      handleGitRequest,
+      handleProjectsRequest,
+      (req, res, url) => handleAgentSessionInjectRequest(req, res, url, { broker: services.agentSurfaceBroker }),
+      handleChannelsRequest,
+      createLspRoutes({ httpEndpoint: services.lspHttpEndpoint, languageDetector: services.lspLanguageDetector }),
+      createSettingsRoutes(),
+      createSystemRoutes(services.managedAgentLsp),
+      createSessionsRoutes({
+        managedAgentLsp: services.managedAgentLsp,
+        nativeAgentLaunch: services.nativeAgentLaunch,
+        agentSurfaceBroker: services.agentSurfaceBroker
+      }),
+      createTerminalRoutes(),
+      createProfileRoutes(),
+      ...plugins.flatMap((plugin) => plugin.routes ?? [])
+    ];
+    host.middlewares.use(createDeskApiMiddleware(routes));
+  } catch (error) {
+    channelsOwner.release();
+    throw error;
+  }
 }
 
 export function deskApiPlugin(options: InstallDeskApiOptions = {}): Plugin {
@@ -87,11 +99,11 @@ export function deskApiPlugin(options: InstallDeskApiOptions = {}): Plugin {
     name: 'desk-api',
     configureServer: async (server) => installDeskApi(toHost(server), {
       plugins: await resolvePlugins(),
-      runCutoverMigration: options.runCutoverMigration
+      acquireChannelsOwner: options.acquireChannelsOwner
     }),
     configurePreviewServer: async (server) => installDeskApi(toHost(server), {
       plugins: await resolvePlugins(),
-      runCutoverMigration: options.runCutoverMigration
+      acquireChannelsOwner: options.acquireChannelsOwner
     })
   };
 }

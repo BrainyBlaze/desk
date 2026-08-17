@@ -1,4 +1,4 @@
-import type { AgentStateBatch } from '../../src/server/channelsDeliveryStrategy.js';
+import type { AgentStateBatch } from '../../src/server/channels/delivery/strategy.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   type AgentActivity,

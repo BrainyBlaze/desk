@@ -179,6 +179,7 @@ import { createMonacoDiagnostics } from './editor/lsp/monacoDiagnostics.js';
 import { GitSubsystem, type GitNavigateTarget } from './git/GitSubsystem.js';
 import { ProjectsSubsystem } from './projects/ProjectsSubsystem.js';
 import { ChannelsSubsystem } from './channels/ChannelsSubsystem.js';
+import { ProviderSessionContinuityBanners } from './ProviderSessionContinuityBanners.js';
 
 type Subsystem = 'agents' | 'editor' | 'git' | 'notes' | 'projects' | 'channels';
 const SUBSYSTEMS: readonly Subsystem[] = ['agents', 'editor', 'git', 'notes', 'projects', 'channels'];
@@ -359,13 +360,9 @@ export function App(): JSX.Element {
     const id = (toastSeqRef.current += 1);
     setToasts((current) => [...current.slice(-3), { id, message, tone }]);
   }, []);
-  // Back-compat shim: existing `setError(msg)` calls become error toasts;
-  // `setError(null)` (clear-before-action) is a no-op since toasts auto-dismiss.
-  const setError = useCallback(
-    (message: string | null) => {
-      if (message) {
-        pushToast(message, 'error');
-      }
+  const toastError = useCallback(
+    (error: unknown) => {
+      pushToast(error instanceof Error ? error.message : String(error), 'error');
     },
     [pushToast]
   );
@@ -874,6 +871,14 @@ export function App(): JSX.Element {
   // events/messages, muted sound, and snapshot sync state.
   const attentionCount = actionableSessions(statusViews).length;
   const continuityIssues = snapshot?.continuity.issues ?? [];
+  const copyContinuityAction = useCallback(
+    (action: string) => {
+      void copyTextWithFallback(action).then((copied) => {
+        pushToast(copied ? 'Recovery command copied' : 'Copy failed', copied ? 'ok' : 'error');
+      });
+    },
+    [pushToast]
+  );
   const statusGlobals = useMemo<StatusSegment[]>(() => {
     const segments: StatusSegment[] = [];
     if (continuityIssues.length > 0) {
@@ -1120,9 +1125,8 @@ export function App(): JSX.Element {
     try {
       const next = await fetchDeskSnapshot();
       setSnapshot(next);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1132,7 +1136,7 @@ export function App(): JSX.Element {
     try {
       setAgentProfiles(await fetchAgentProfiles());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     }
   }
 
@@ -1141,9 +1145,8 @@ export function App(): JSX.Element {
     try {
       await upDesk(false);
       await refresh();
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1158,9 +1161,8 @@ export function App(): JSX.Element {
       setActiveProjectId(projectForm.projectId);
       setProjectForm(emptyProjectForm);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1186,9 +1188,8 @@ export function App(): JSX.Element {
       setSelectedSessionId(undefined);
       setGroupForm(emptyGroupForm);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1216,9 +1217,8 @@ export function App(): JSX.Element {
       setActiveGroupId(sessionForm.projectId ? `${sessionForm.projectId}:${sessionForm.groupId}` : sessionForm.groupId);
       setSessionForm(emptySessionForm);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1240,9 +1240,8 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(modalProject.id);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1267,9 +1266,8 @@ export function App(): JSX.Element {
       setActiveProjectId(modalGroup.projectId);
       setActiveGroupId(`${modalGroup.projectId}:${groupForm.groupId}`);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1301,9 +1299,8 @@ export function App(): JSX.Element {
       setActiveProjectId(modalGroup.projectId);
       setActiveGroupId(modalGroup.id);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1321,9 +1318,8 @@ export function App(): JSX.Element {
       setActiveGroupId(undefined);
       setSelectedSessionId(undefined);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1344,9 +1340,8 @@ export function App(): JSX.Element {
       setActiveGroupId(undefined);
       setSelectedSessionId(undefined);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1368,9 +1363,8 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setSelectedSessionId(undefined);
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1407,7 +1401,6 @@ export function App(): JSX.Element {
       }));
       setUiModeSwitchDiscard(false);
       setModal(null);
-      setError(null);
     } catch (err) {
       if (err instanceof ApiCodeError && err.code === 'resume-not-captured' && !uiModeSwitchDiscard) {
         // Re-render the confirm as an explicit discard warning; the next
@@ -1416,9 +1409,8 @@ export function App(): JSX.Element {
           setSnapshot(editedSnapshot);
         }
         setUiModeSwitchDiscard(true);
-        setError(null);
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        toastError(err);
       }
     } finally {
       setBusy(false);
@@ -1441,9 +1433,8 @@ export function App(): JSX.Element {
         [session.spec.sessionId]: (current[session.spec.sessionId] ?? 0) + 1
       }));
       setModal(null);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1467,9 +1458,8 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1502,9 +1492,8 @@ export function App(): JSX.Element {
       setSnapshot(next);
       setActiveProjectId(group.projectId);
       setActiveGroupId(group.id);
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1549,9 +1538,8 @@ export function App(): JSX.Element {
       setActiveProjectId(targetGroup.projectId);
       setActiveGroupId(targetGroup.id);
       setSelectedSessionId(getMovedSessionId(next, targetGroup.id, draggedSession.session.spec.name));
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
       setDraggedSidebarSession(null);
@@ -1808,7 +1796,7 @@ export function App(): JSX.Element {
       setModal(null);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1904,7 +1892,7 @@ export function App(): JSX.Element {
       setSnapshot(next);
       pushToast(`Booted ${session.spec.name}`, 'ok');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1927,7 +1915,7 @@ export function App(): JSX.Element {
       }
       pushToast(`Booted ${missing.length} session${missing.length === 1 ? '' : 's'} in ${group.label}`, 'ok');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1948,7 +1936,7 @@ export function App(): JSX.Element {
       });
       setSnapshot(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     } finally {
       setBusy(false);
     }
@@ -1985,17 +1973,15 @@ export function App(): JSX.Element {
   async function reorderProjectsList(orderedProjectIds: string[]): Promise<void> {
     try {
       setSnapshot(await reorderProjects({ orderedProjectIds }));
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     }
   }
   async function reorderGroupsList(projectId: string, orderedGroupIds: string[]): Promise<void> {
     try {
       setSnapshot(await reorderGroups({ projectId, orderedGroupIds }));
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     }
   }
   async function reorderSessionsList(
@@ -2006,9 +1992,8 @@ export function App(): JSX.Element {
   ): Promise<void> {
     try {
       setSnapshot(await reorderSessions({ projectId, groupId, projectCwd, orderedSessionNames }));
-      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      toastError(err);
     }
   }
 
@@ -2041,7 +2026,7 @@ export function App(): JSX.Element {
     onDropSessionToProject: (project: DeskProjectView, sessionId?: string) => {
       const targetGroup = getProjectDropGroup(project);
       if (!targetGroup) {
-        setError(`project ${project.label} has no groups`);
+        pushToast(`project ${project.label} has no groups`, 'error');
         setDraggedSidebarSession(null);
         return;
       }
@@ -2139,7 +2124,7 @@ export function App(): JSX.Element {
         disabled={reduced}
         duration={{ enter: DESK_DURATIONS.enter, exit: DESK_DURATIONS.exit, stagger: DESK_DURATIONS.stagger }}
       >
-        <Animator active={booted} combine manager="stagger" duration={{ stagger: 0.12 }}>
+        <Animator active={booted && snapshot !== null} combine manager="stagger" duration={{ stagger: 0.12 }}>
           <main className="deskShell" style={themeVars}>
             <BackdropField />
             <AttentionAnnouncer statusViews={statusViews} />
@@ -2214,6 +2199,10 @@ export function App(): JSX.Element {
                         />
                       ) : null}
                       <main className="subsystemSurfaceInner">
+                        <ProviderSessionContinuityBanners
+                          issues={continuityIssues}
+                          onCopyAction={copyContinuityAction}
+                        />
                         {!activeGroup ? <EmptySubsystem /> : null}
                         {mountedMuxGroups.map((mountedGroup) => (
                           <MountedMux
@@ -2240,7 +2229,7 @@ export function App(): JSX.Element {
                     rootShortcuts={(snapshot?.view.projects ?? []).map((project) => project.cwd)}
                     autosave={{ mode: autosaveMode, delayMs: autosaveDelayMs }}
                     createLspBinding={createLspBinding}
-                    onError={setError}
+                    onError={toastError}
                     onSidebarCollapsedChange={editorSidebar.onCollapsedChange}
                     registerSidebarToggle={editorSidebar.registerToggle}
                     registerFileOpener={(open) => {
@@ -2273,7 +2262,7 @@ export function App(): JSX.Element {
                 <div className="editorMount" style={{ display: subsystem === 'git' ? 'flex' : 'none' }}>
                   <GitSubsystem
                     active={subsystem === 'git'}
-                    onError={setError}
+                    onError={toastError}
                     onOpenFile={(path) => {
                       setSubsystem('editor');
                       if (editorFileOpenerRef.current) {
@@ -2310,7 +2299,7 @@ export function App(): JSX.Element {
                     rootShortcuts={[]}
                     autosave={{ mode: autosaveMode, delayMs: autosaveDelayMs }}
                     createLspBinding={createLspBinding}
-                    onError={setError}
+                    onError={toastError}
                     onSidebarCollapsedChange={notesSidebar.onCollapsedChange}
                     registerSidebarToggle={notesSidebar.registerToggle}
                     registerNoteCreator={(create) => {
@@ -2322,7 +2311,7 @@ export function App(): JSX.Element {
                 <div className="editorMount" style={{ display: subsystem === 'projects' ? 'flex' : 'none' }}>
                   <ProjectsSubsystem
                     active={subsystem === 'projects'}
-                    onError={setError}
+                    onError={toastError}
                     onInfo={(message) => pushToast(message, 'ok')}
                     onSidebarCollapsedChange={projectsSidebar.onCollapsedChange}
                     registerSidebarToggle={projectsSidebar.registerToggle}
@@ -2331,13 +2320,18 @@ export function App(): JSX.Element {
                 </div>
                 <div
                   className={`editorMount channelsKeepAliveMount ${subsystem === 'channels' ? 'active' : ''}`}
+                  style={{
+                    visibility: subsystem === 'channels' ? 'visible' : 'hidden',
+                    opacity: subsystem === 'channels' ? 1 : 0,
+                    pointerEvents: subsystem === 'channels' ? 'auto' : 'none'
+                  }}
                   aria-hidden={subsystem !== 'channels'}
                 >
                   <ChannelsSubsystem
                     active={subsystem === 'channels'}
                     snapshot={snapshot}
                     statusViews={statusViews}
-                    onError={setError}
+                    onError={toastError}
                     onInfo={(message) => pushToast(message, 'ok')}
                     onRevealAgent={revealAgentSession}
                     onUnreadChange={setChannelsUnread}

@@ -30,13 +30,14 @@ import {
   killSession,
   loadDesk,
   planDeskUp,
-  runningSessionSet,
-  runPlan
+  runPlan,
+  sessionLivenessFor,
+  UNKNOWN_LIVENESS_REASON
 } from '../../core/runner.js';
 import {
   restartSessionNativeAware,
   retireNativeSession,
-  retireStaleIdentityForEdit,
+  editIdentityContradiction,
   startSessionNativeAware
 } from '../runtime/nativeSessionControl.js';
 import type {
@@ -63,7 +64,7 @@ import {
   isClaudeProfileChange,
   requiresClaudeProfileHandoff
 } from '../claudeProfileContinuity.js';
-import { shouldRespawnAfterEdit } from '../editRespawn.js';
+import { editIsLaunchRelevant, shouldRespawnAfterEdit } from '../editRespawn.js';
 import { readJsonBody, sendJson } from '../httpUtil.js';
 import type { DeskRoute } from '../plugin.js';
 import { buildDeskSnapshot } from '../snapshot.js';
@@ -350,12 +351,12 @@ function cwdMatchesResolved(left: string, right: string): boolean {
 }
 
 export async function killSessionTargets(targets: Array<SessionSpec | string>): Promise<{ ok: boolean; error?: string }> {
-  // A session's atch master is keyed by sessionId; retire via the daemon so a
+  // A session's moor holder is keyed by sessionId; retire via the daemon so a
   // delete leaves no orphan master. A bare-string target retires best-effort;
   // retire is idempotent, so an unknown session is a harmless no-op.
   const ids = [...new Set(targets.map((target) => (typeof target === 'string' ? target : target.sessionId)))];
   for (const sessionId of ids) {
-    const retired = await retireNativeSession(sessionId);
+    const retired = await retireNativeSession(sessionId, 'session-deleted');
     if (!retired.ok) {
       return retired;
     }
@@ -433,6 +434,12 @@ export async function runManagedPlan(
     if (action.type === 'preserve') {
       continue;
     }
+    if (action.type === 'skip') {
+      // Unknown liveness (moor#8 §1): starting could duplicate a live holder,
+      // so nothing is attempted and nothing is reported as done.
+      failures.push(`${action.session.sessionId}: ${UNKNOWN_LIVENESS_REASON}`);
+      continue;
+    }
     const launch = managedAgentLsp.prepare(action.session, settings);
     const started = await start(nativeAgentLaunch(launch?.session ?? action.session, launch?.envFilePath));
     if (!started.ok) {
@@ -456,7 +463,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       const body = await readJsonBody(req);
       const dryRun = Boolean(body.dryRun);
       const desk = loadDesk({});
-      const plan = planDeskUp(desk.sessions);
+      const plan = await planDeskUp(desk.sessions);
       const settings = readManifestFile(resolveManifestPath()).settings;
       const result = dryRun
         ? { exitCode: await runPlan(plan, true) }
@@ -714,16 +721,31 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
             handoff: { manifestSource, manifest, next, oldSpec, newSpec }
           };
         }
-        // Fail closed (R2.1): a native edit that changes the session's identity
-        // (possible for a legacy entry without a persisted sessionId) must retire
-        // the master under its OLD identity, BEFORE the manifest edit commits. If
-        // it can't be retired (e.g. daemon down), abort — neither orphan the old
-        // atch master nor desync the manifest against a still-running master.
-        const staleGuard = await retireStaleIdentityForEdit(oldSpec, newSpec);
-        if (!staleGuard.ok) {
-          return { updated: null, respawnError: `session edit aborted: ${staleGuard.error}` };
+        // Fail closed: the persisted sessionId is the durable identity and an
+        // edit never re-mints it, so a differing id is a contradiction in the
+        // edit itself — abort before the manifest commits and before anything
+        // native runs (no holder is retired or provisioned under a wrong id).
+        const contradiction = editIdentityContradiction(oldSpec, newSpec);
+        if (contradiction !== undefined) {
+          return { updated: null, respawnError: `session edit aborted: ${contradiction}` };
         }
-        const wasRunning = oldSpec ? runningSessionSet().has(oldSpec.sessionId) : false;
+        // Liveness is consulted only when the respawn decision actually hinges
+        // on it, and then it must be the authority's answer. Fail closed for
+        // the same reason as the guard above: an unreachable authority cannot
+        // be rounded down to "it wasn't running", which would silently leave a
+        // live holder running the pre-edit launch config.
+        const launchRelevant = editIsLaunchRelevant(oldSpec, newSpec);
+        let wasRunning = false;
+        if (launchRelevant && oldSpec) {
+          const oldLiveness = await sessionLivenessFor(oldSpec.sessionId);
+          if (oldLiveness === 'indeterminate') {
+            return {
+              updated: null,
+              respawnError: `session edit aborted: ${oldSpec.sessionId}: ${UNKNOWN_LIVENESS_REASON}`
+            };
+          }
+          wasRunning = oldLiveness === 'verified-live';
+        }
         writeManifestFile(manifestPath, next);
         if (
           shouldRespawnAfterEdit(oldSpec, newSpec, () => wasRunning) &&
@@ -742,7 +764,18 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
       let completed = result;
       if (result.handoff) {
         const { manifestSource, manifest, next, oldSpec, newSpec } = result.handoff;
-        const wasRunning = runningSessionSet().has(oldSpec.sessionId);
+        // A profile handoff retires the source and starts the target; doing
+        // that without knowing whether the source is alive is exactly the
+        // guess this path must not make, so an unanswerable authority aborts
+        // before anything is retired or committed.
+        const sourceLiveness = await sessionLivenessFor(oldSpec.sessionId);
+        if (sourceLiveness === 'indeterminate') {
+          sendJson(res, 500, {
+            error: `session edit aborted: ${oldSpec.sessionId}: ${UNKNOWN_LIVENESS_REASON}`
+          });
+          return true;
+        }
+        const wasRunning = sourceLiveness === 'verified-live';
         let targetLaunch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
         let sourceLaunch: ReturnType<typeof managedAgentLsp.prepare> | undefined;
         const handoff = await executeClaudeProfileHandoff({
@@ -750,7 +783,7 @@ export function createSessionsRoutes(options: SessionsRoutesOptions): DeskRoute 
           newSpec,
           homeDir: homedir(),
           wasRunning,
-          retire: () => retireNativeSession(oldSpec.sessionId),
+          retire: () => retireNativeSession(oldSpec.sessionId, 'stale-identity-after-edit'),
           commit: () =>
             commitManifestIfUnchanged(manifestPath, manifestSource, next),
           startTarget: async () => {

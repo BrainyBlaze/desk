@@ -105,7 +105,14 @@ export function parseProcStat(source: string): CpuTimes | undefined {
   return { idle, total };
 }
 
-export function parseMemInfo(source: string): MemoryMetrics {
+/**
+ * Memory from /proc/meminfo, or `undefined` when the two load-bearing fields
+ * are not both present: an unreadable or foreign meminfo is "not measured",
+ * not "zero bytes total, zero percent used" — the CPU sampler already leaves
+ * `usagePercent` undefined when it cannot measure, and memory follows the
+ * same rule.
+ */
+export function parseMemInfo(source: string): MemoryMetrics | undefined {
   const fields = new Map<string, number>();
   for (const line of source.split('\n')) {
     const match = /^([^:]+):\s+(\d+)\s+kB$/i.exec(line.trim());
@@ -113,14 +120,17 @@ export function parseMemInfo(source: string): MemoryMetrics {
       fields.set(match[1]!, Number(match[2]) * 1024);
     }
   }
-  const totalBytes = fields.get('MemTotal') ?? 0;
-  const availableBytes = fields.get('MemAvailable') ?? 0;
+  const totalBytes = fields.get('MemTotal');
+  const availableBytes = fields.get('MemAvailable');
+  if (totalBytes === undefined || availableBytes === undefined || totalBytes <= 0) {
+    return undefined;
+  }
   const usedBytes = Math.max(totalBytes - availableBytes, 0);
   return {
     totalBytes,
     usedBytes,
     availableBytes,
-    usedPercent: totalBytes > 0 ? clampPercent((usedBytes / totalBytes) * 100) : 0
+    usedPercent: clampPercent((usedBytes / totalBytes) * 100)
   };
 }
 
@@ -201,12 +211,12 @@ export function parseDiskStats(source: string): { readBytes: number; writeBytes:
   return { readBytes, writeBytes };
 }
 
-function sampleDisk(): DiskMetrics {
+function sampleDisk(): DiskMetrics | undefined {
   const usage = readRootUsage();
   const current: DiskIoSample = { ...parseDiskStats(readText('/proc/diskstats')), sampledAtMs: Date.now() };
   const previous = previousDiskIo;
   previousDiskIo = current;
-  if (!previous) {
+  if (!previous || usage === undefined) {
     return usage;
   }
   const seconds = Math.max((current.sampledAtMs - previous.sampledAtMs) / 1000, 0.001);
@@ -217,19 +227,23 @@ function sampleDisk(): DiskMetrics {
   };
 }
 
-function readRootUsage(): DiskMetrics {
+/** Root filesystem usage, or `undefined` when it cannot be measured — never a fabricated zero. */
+function readRootUsage(): DiskMetrics | undefined {
   try {
     const stats = statfsSync('/');
     const totalBytes = stats.blocks * stats.bsize;
+    if (!(totalBytes > 0)) {
+      return undefined;
+    }
     // total - bfree counts the root reserve as used, matching df's % output.
     const usedBytes = Math.max((stats.blocks - stats.bfree) * stats.bsize, 0);
     return {
       totalBytes,
       usedBytes,
-      usedPercent: totalBytes > 0 ? clampPercent((usedBytes / totalBytes) * 100) : 0
+      usedPercent: clampPercent((usedBytes / totalBytes) * 100)
     };
   } catch {
-    return { totalBytes: 0, usedBytes: 0, usedPercent: 0 };
+    return undefined;
   }
 }
 

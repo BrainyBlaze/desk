@@ -10,20 +10,20 @@ import {
   clearReactionsForMessage,
   listReactions,
   removeReaction
-} from '../src/server/channelsReactions.js';
+} from '../src/server/channels/store/reactions.js';
 import {
   addView,
   getView,
   listViews,
   removeView
-} from '../src/server/channelsViews.js';
+} from '../src/server/channels/store/views.js';
 import {
   getPausedSession,
   isSessionPaused,
   listPausedSessions,
   pauseSession,
   resumeSession
-} from '../src/server/channelsPaused.js';
+} from '../src/server/channels/delivery/paused.js';
 
 describe('channelsReactions', () => {
   let home: string;
@@ -217,10 +217,7 @@ describe('channelsPaused', () => {
     expect(() => pauseSession(home, 'has space', 'reason')).toThrow();
   });
 
-  it('falls back to empty list when the store file is corrupt', () => {
-    mkdirSync(join(home, '_engine'), { recursive: true });
-    writeFileSync(join(home, '_engine', 'paused.json'), 'garbage');
-    expect(listPausedSessions(home)).toEqual([]);
-    expect(isSessionPaused(home, 'tmux-a')).toBe(false);
-  });
+  // A corrupt paused store no longer falls back to "nothing is paused": that
+  // silently resumed sessions an operator had deliberately held. It now fails
+  // closed and preserves the evidence — pinned in tests/channels-paused.test.ts.
 });

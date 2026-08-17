@@ -13,9 +13,10 @@ import {
   destroyChannel,
   ensureChannelsHome,
   ensureUploadFileBucket,
+  listChannelMembers,
   listChannels,
   saveChannelFile
-} from '../src/server/channelsStore.js';
+} from '../src/server/channels/store/fileStore.js';
 
 describe('boot sweep: boot-time orphan-temp sweep', () => {
   let home: string;
@@ -163,5 +164,36 @@ describe('upload-only buckets', () => {
     expect(saved).toBe('note.txt');
     expect(existsSync(join(home, 'agent-files', '_files', 'note.txt'))).toBe(true);
     expect(listChannels(home)).toEqual([]);
+  });
+});
+
+describe('pre-cutover member manifests: the member is carried, not silently dropped', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'desk-precutover-members-'));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('listChannelMembers lists the member with its retired binding, and never as a live session', () => {
+    ensureChannelsHome(home);
+    createChannel(home, 'deep-kca', 'goal');
+    // The shape Desk v0.3.1 wrote for an agent member (real file, shortened):
+    // the identity rides the retired line, there is no `session:` line. The
+    // v0.3.2 migration left such a line in place when the session was gone, so
+    // the member survives — but with a binding this version cannot resolve.
+    // The store must neither drop the member (the old catch-all skip did) nor
+    // give it a live sessionId it does not have.
+    writeFileSync(
+      join(home, 'deep-kca', '_members', 'zohar-glm.md'),
+      ['---', 'name: zohar-glm', 'type: bash', 'status: active', 'joined: 2026-06-29 10:19:58', 'tmux: agentdesk-zohar-main-glm-798c36d0', '---', '', '# @zohar-glm', ''].join('\n')
+    );
+    const members = listChannelMembers(home, 'deep-kca');
+    const zohar = members.find((candidate) => candidate.name === 'zohar-glm');
+    expect(zohar).toMatchObject({ name: 'zohar-glm', preCutoverSession: 'agentdesk-zohar-main-glm-798c36d0' });
+    expect(zohar?.sessionId).toBeUndefined();
   });
 });

@@ -36,8 +36,8 @@ Everything lives under `~/.config/desk/channels/`, one directory per channel:
 
 `_engine/` holds the delivery queues (`queue/<sessionId>/<seq>.json`), the
 delivery-history event ring (`events.jsonl`), operator pause state
-(`paused.json`), and the single-engine pid lock (`engine.pid`). It is an
-implementation detail: external writers must never create, edit, or delete
+(`paused.json`), and the server ownership lease (`server-owner.lease`). It is
+an implementation detail: external writers must never create, edit, or delete
 anything inside it.
 
 Channel names are lowercase slugs: they start with a letter, contain only
@@ -109,6 +109,12 @@ Who receives a **root message** is decided by mentions in the body:
 | `@channel` | dispatched to every agent member |
 | *(no mention)* | same as `@channel` — everyone |
 | `@human` | notifies the operator's UI (events drawer); **not** dispatched to agents |
+| `@stranger` (names nobody in the channel) | treated as prose about an outsider, **not** as addressing: same as *(no mention)* — everyone |
+
+A mention only narrows dispatch when it names somebody who is actually in the
+channel. Writing `@asher` in a channel with no `asher` member is a reference to
+a person elsewhere, so it cannot quietly cancel delivery; mix it with `@name`
+and the real member still wins (`@alpha cc @asher` → alpha only).
 
 **Thread replies** follow different rules: a reply is dispatched to the parent
 message's author plus any explicitly mentioned agents, and `@channel` is
@@ -137,6 +143,34 @@ clickable** — always give the full path. As a safety net the renderer also
 auto-links bare absolute paths (and `path:line` refs) it finds in message
 bodies, but an explicit markdown link with a readable label is preferred. The
 turn prompt and onboarding briefing remind agents of this.
+
+## Subsystem shape
+
+Channels lives under `src/server/channels/` and is six replaceable parts:
+
+| Port | What it owns |
+|---|---|
+| `ChannelStore` | where the conversation lives, and how a finalised message is noticed |
+| `ChannelFiles` | where attachments live — bytes, a different medium from conversation |
+| `ChannelViews` | saved view filters — operator preference, not channel data |
+| `MessageRouter` | who a message is for — pure, no I/O, no queue |
+| `AgentDelivery` | what reaches an agent: send, states, probe, submit |
+| `PromptRenderer` | what an agent sees |
+
+The contracts are stated in `ports.ts` and the subsystem is entered through
+`index.ts`. Every store operation is asynchronous, so an implementation is not
+required to be a local disk; the delivery engine's own durable state — its
+queues, the ownership lease, the delivery-event ring and operator pauses — stays
+local under `_engine/` regardless, because it belongs to the engine rather than
+to the conversation. Each part is replaceable on its own: a plugin swaps one and the
+others do not notice (see [plugins](/security-plugin-model)), and a test
+supplies one without needing a filesystem for the rest.
+
+Two consequences are worth stating because they are easy to miss. Routing is a
+pure function of a message and a roster — it never learns whether delivery
+happened. And the renderer is the one place that knows a channel is a FILE: the
+turn prompt carries an absolute path and the `desk channels` commands an agent
+runs to read the room.
 
 ## The delivery engine
 
@@ -230,17 +264,40 @@ so the agent re-reads the channel before acting on stale context. Delivery is
 deduplicated per (session, message), and each queue is capped at 50 items
 (oldest dropped).
 
-### Pause, passive mode, and the event log
+### Pause, ownership, and the event log
 
 Operators can pause delivery per session from the engine console; pause state
 persists across restarts and is never confused with busy or stuck. Every queue
 transition — queued, delivered, released, held, dropped, stuck — is appended
 to a durable event ring that backs the delivery timeline view.
 
-Only one desk server process dispatches at a time: the engine takes a pid
-lock in `_engine/engine.pid`, and a second desk process pointed at the same
-channels home runs **passive** (it serves the UI but does not deliver) until
-the lock holder dies.
+Only one desk server process owns Channels for a home at a time, and that
+ownership is decided at the **runtime boundary**, not inside the engine. The
+server acquires a heartbeat lease at `_engine/server-owner.lease` before it
+creates the engine; the lease is refreshed every second and considered stale
+after three seconds without a refresh, so one missed heartbeat (a GC pause,
+an I/O stall) cannot hand the home to a contender. There is no passive mode: a second Desk
+server pointed at the same home is **refused at startup**, with a diagnostic
+naming the home, instead of serving a UI that silently delivers nothing. A
+server that dies without releasing — SIGKILL, OOM, a crash — simply stops
+refreshing, so the next server reclaims the home once the lease is stale;
+no process identity is parsed, no pid is probed, and PID reuse, zombies,
+and PID namespaces are not inputs to the decision. Orderly shutdown releases
+the lease immediately. If the lease is destroyed from under a live owner (an
+operator wiping `_engine`, a filesystem fault, a foreign tool), ownership
+cannot be honestly continued: the server logs a diagnostic naming the lease,
+the home, and the cause, and exits non-zero — a loud, named stop rather than
+an anonymous exception out of a refresh timer.
+
+The former `_engine/engine.pid` ownership record is retired. A home that
+still carries one is refused at startup by name, because a stale pid record
+is exactly the artifact that used to leave a crashed deployment permanently
+silent. The pre-lease engine removed that file only on its crash-reclaim
+path — an orderly stop left it behind — and no installer or script touches
+it, so the remedy is the file itself: stop every Desk server for this home,
+delete `_engine/engine.pid`, then restart. Under the lease scheme the file
+carries no authority; the runtime refuses rather than deleting it silently so
+the operator learns a pre-lease server ran here and confirms none still does.
 
 ## Ops console
 

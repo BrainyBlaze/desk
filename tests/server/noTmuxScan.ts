@@ -4,8 +4,8 @@
  * whole-file exemptions cannot establish the property, so every file is
  * scanned and every legacy-token line must match the exact allowlist for its
  * file, with the total per-file count pinned. A new tmux reference anywhere —
- * including inside a sanctioned mixed runtime+migration module — fails on
- * either the pattern check or the count.
+ * including inside a sanctioned file that refuses the retired shapes — fails
+ * on either the pattern check or the count.
  */
 
 export interface ScannedFile {
@@ -19,22 +19,16 @@ interface Sanction {
   count: number;
   /**
    * Every legacy-token line must include at least one of these substrings —
-   * the specific migration constructs that legitimately name the legacy
-   * transport (reading old stores is their whole job).
+   * the retired on-disk shapes a reader must still be able to NAME in order to
+   * refuse them (the cutover migration that read them is gone; recognising
+   * the shape and stating the support floor is all that is left).
    */
   allowed: string[];
 }
 
-const MIGRATION_CONSTRUCTS = [
-  'tmuxSession', // legacy record fields the transforms read
-  'tmuxToSessionId', // the canonical re-key map
-  'tmuxSeen', // the transform's duplicate-source guard
-  "tmux:", // the legacy member-manifest line the transform re-keys
-  'legacy tmuxSession', // fail-closed rejection message
-  'tmux-era', // transform doc referring to the source era
-  'tmux ', // transform doc prose ("the tmux name", "tmux store")
-  'tmux→', // the re-key direction in transform docs
-  'tmux-' // transform doc compounds
+const PRE_CUTOVER_SHAPES = [
+  'tmuxSession', // the retired session key: refused in the manifest and the delivery-events ring
+  "PRE_CUTOVER_MEMBER_FIELD = 'tmux'" // the retired member-manifest field: refused by the member parser
 ];
 
 /**
@@ -42,16 +36,9 @@ const MIGRATION_CONSTRUCTS = [
  * a violation even when it reuses an allowed construct.
  */
 export const SANCTIONS: Record<string, Sanction> = {
-  'server/cutoverStoreMigration.ts': { count: 36, allowed: MIGRATION_CONSTRUCTS },
-  'server/channelsEvents.ts': { count: 9, allowed: MIGRATION_CONSTRUCTS },
-  'server/channelsProtocol.ts': { count: 6, allowed: MIGRATION_CONSTRUCTS },
-  'core/manifest.ts': { count: 2, allowed: MIGRATION_CONSTRUCTS },
-  'core/sessionIdentity.ts': { count: 5, allowed: MIGRATION_CONSTRUCTS },
-  'shared/migration/channelsPausedTransform.ts': { count: 8, allowed: MIGRATION_CONSTRUCTS },
-  'shared/migration/durabilityTransform.ts': { count: 6, allowed: MIGRATION_CONSTRUCTS },
-  'shared/migration/index.ts': { count: 1, allowed: MIGRATION_CONSTRUCTS },
-  'shared/migration/manifestTransform.ts': { count: 25, allowed: MIGRATION_CONSTRUCTS },
-  'shared/migration/sessionId.ts': { count: 1, allowed: MIGRATION_CONSTRUCTS }
+  'server/channels/delivery/events.ts': { count: 1, allowed: PRE_CUTOVER_SHAPES },
+  'server/channels/protocol/format.ts': { count: 1, allowed: PRE_CUTOVER_SHAPES },
+  'core/manifest.ts': { count: 5, allowed: PRE_CUTOVER_SHAPES }
 };
 
 /** Legacy-token lines of one source, 1-indexed. */
@@ -81,12 +68,12 @@ export function scanLegacySurface(files: ScannedFile[]): string[] {
     }
     for (const hit of hits) {
       if (!sanction.allowed.some((token) => hit.text.includes(token))) {
-        violations.push(`${rel}:${hit.line} — legacy-token line outside the migration allowlist: ${hit.text.trim()}`);
+        violations.push(`${rel}:${hit.line} — legacy-token line outside the refusal allowlist: ${hit.text.trim()}`);
       }
     }
     if (hits.length !== sanction.count) {
       violations.push(
-        `${rel} — legacy-token line count drifted: expected ${sanction.count}, found ${hits.length} (update the sanction ONLY for migration-transform changes)`
+        `${rel} — legacy-token line count drifted: expected ${sanction.count}, found ${hits.length} (update the sanction ONLY when a refusal of a retired shape changes)`
       );
     }
   }
@@ -96,6 +83,6 @@ export function scanLegacySurface(files: ScannedFile[]): string[] {
 /** The flag scan: the cutover flag and its predicate must not exist at all. */
 export function scanFlagSurface(files: ScannedFile[]): string[] {
   return files
-    .filter(({ source }) => source.includes('DESK_ATCH_NATIVE') || source.includes('nativeSessionsEnabled'))
+    .filter(({ source }) => source.includes('nativeSessionsEnabled'))
     .map(({ rel }) => rel);
 }

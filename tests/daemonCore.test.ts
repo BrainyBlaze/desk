@@ -3,6 +3,7 @@
 // into a callable daemon — tested with a fake emulator.
 
 import { describe, expect, it } from 'vitest';
+import { BpFrameType } from '../src/shared/browserProtocol/index.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   GenerationLedger,
@@ -19,12 +20,10 @@ import {
   type EmulatorPort,
   type EmulatorEvent
 } from '../src/shared/runtime/index.js';
-import { ByteWriter, type RawFrame } from '../src/shared/atchWire/codec.js';
-import { EventType, RecordType } from '../src/shared/atchWire/frames.js';
-import { type RecordEnvelope } from '../src/shared/atchWire/messages.js';
 
 class FakeEmu implements EmulatorPort {
   written: number[] = [];
+  disposed = false;
   write(b: Uint8Array): void {
     this.written.push(...b);
   }
@@ -41,7 +40,56 @@ class FakeEmu implements EmulatorPort {
   onEvent(_cb: (e: EmulatorEvent) => void): () => void {
     return () => {};
   }
-  dispose(): void {}
+  dispose(): void {
+    this.disposed = true;
+  }
+}
+
+class BlockingFlushEmu extends FakeEmu {
+  private drainResolve!: () => void;
+  private readonly drain = new Promise<void>((resolve) => {
+    this.drainResolve = resolve;
+  });
+
+  flush(): Promise<void> {
+    return this.drain;
+  }
+
+  release(): void {
+    this.drainResolve();
+  }
+
+  override serialize(): string {
+    return new TextDecoder().decode(Uint8Array.from(this.written));
+  }
+}
+
+class BlockingPreambleEmu extends FakeEmu {
+  private rendered = 'old';
+  private pending = '';
+  private drainResolve!: () => void;
+  private readonly drain = new Promise<void>((resolve) => {
+    this.drainResolve = resolve;
+  });
+
+  override write(bytes: Uint8Array): void {
+    this.pending += new TextDecoder().decode(bytes);
+  }
+
+  flush(): Promise<void> {
+    return this.drain.then(() => {
+      this.rendered += this.pending;
+      this.pending = '';
+    });
+  }
+
+  release(): void {
+    this.drainResolve();
+  }
+
+  override serialize(): string {
+    return this.rendered;
+  }
 }
 
 function makeCore(
@@ -49,18 +97,23 @@ function makeCore(
     maxLiveWorkers: number;
     initialAgentHealth: NonNullable<DaemonCoreDeps['initialAgentHealth']>;
     onStateTransition: (transition: SessionStateTransition) => void;
+    createEmulator: () => EmulatorPort;
   }> = {}
 ) {
   const browserOut: { sessionId: string; channelId: number; frame: BpFrame }[] = [];
-  const masterOut: { sessionId: string; frame: RawFrame }[] = [];
+  const masterOut: { sessionId: string; bytes: Uint8Array; binary: boolean; surfaceId: number }[] = [];
+  const masterResizes: { sessionId: string; rows: number; cols: number; surfaceId: number }[] = [];
   const clock = { t: 1000 };
   const deps: DaemonCoreDeps = {
     ledger: new GenerationLedger(new InMemoryGenerationLedger()),
     supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: over.maxLiveWorkers ?? 256 }),
-    emulatorFactory: { create: () => new FakeEmu() },
+    emulatorFactory: { create: over.createEmulator ?? (() => new FakeEmu()) },
     now: () => clock.t,
     sendBrowser: (sessionId, channelId, frame) => browserOut.push({ sessionId, channelId, frame }),
-    sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame }),
+    sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
+      masterOut.push({ sessionId, bytes, binary, surfaceId }),
+    sendMasterResize: (sessionId, rows, cols, surfaceId) =>
+      masterResizes.push({ sessionId, rows, cols, surfaceId }),
     ...(over.initialAgentHealth === undefined
       ? {}
       : { initialAgentHealth: over.initialAgentHealth }),
@@ -68,16 +121,8 @@ function makeCore(
       ? {}
       : { onStateTransition: over.onStateTransition })
   };
-  return { core: new DaemonCore(deps), browserOut, masterOut, clock };
+  return { core: new DaemonCore(deps), browserOut, masterOut, masterResizes, clock };
 }
-
-const output = (offset: bigint, seq: bigint, text: string): RecordEnvelope => ({
-  record_type: RecordType.OUTPUT,
-  record_seq: seq,
-  generation: 1,
-  output_offset: offset,
-  body: new TextEncoder().encode(text)
-});
 
 const agentSubject = {
   kind: 'agent',
@@ -89,7 +134,7 @@ const agentSubject = {
 const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnvelope => ({
   schemaVersion: AGENT_STATE_SCHEMA_VERSION,
   sessionId: 's1',
-  generation: 1,
+  generation: 2,
   provider: 'codex',
   mode: 'terminal',
   producer: 'codex-hooks',
@@ -104,12 +149,12 @@ const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnve
 });
 
 describe('DaemonCore — ensure / registry (§3.2)', () => {
-  it('ensure creates a session at ledger-allocated generation 1, idempotently', () => {
+  it('ensure creates a session at ledger-allocated generation 2 (OB-18: 1 is reserved for unsupervised), idempotently', () => {
     const { core } = makeCore();
     const a = core.ensure('s1', { rows: 40, cols: 120 });
-    expect(a).toEqual({ ok: true, generation: 1, created: true });
+    expect(a).toEqual({ ok: true, generation: 2, created: true });
     const b = core.ensure('s1', { rows: 40, cols: 120 });
-    expect(b).toEqual({ ok: true, generation: 1, created: false }); // idempotent
+    expect(b).toEqual({ ok: true, generation: 2, created: false }); // idempotent
     expect(core.sessionCount).toBe(1);
   });
 
@@ -154,7 +199,7 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
 
     expect(core.ensure('s1', { rows: 1, cols: 1 }, agentSubject)).toEqual({
       ok: true,
-      generation: 1,
+      generation: 2,
       created: true
     });
     expect(core.stateSnapshot('s1')).toMatchObject({
@@ -177,10 +222,10 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
 
   it('THE fence property end-to-end: recreate after retire gets a higher generation', () => {
     const { core } = makeCore();
-    expect(core.ensure('s1', { rows: 1, cols: 1 }).generation).toBe(1);
+    expect(core.ensure('s1', { rows: 1, cols: 1 }).generation).toBe(2);
     core.retire('s1'); // session ends — registry gone, ledger tombstone kept
     const recreated = core.ensure('s1', { rows: 1, cols: 1 });
-    expect(recreated).toEqual({ ok: true, generation: 2, created: true }); // NOT reset to 1
+    expect(recreated).toEqual({ ok: true, generation: 3, created: true }); // NOT reset to the fresh-lineage 2
   });
 
   it('retire frees a slot so a capped-out session can be admitted', () => {
@@ -193,20 +238,196 @@ describe('DaemonCore — ensure / registry (§3.2)', () => {
 });
 
 describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
-  it('routes master output to the session and out to its subscribers', () => {
+  it('routes moor child output to the session and out to its subscribers', () => {
     const { core, browserOut } = makeCore();
     core.ensure('s1', { rows: 40, cols: 120 });
-    const ch = core.subscribe('s1', 'main', 40, 120);
+    const ch = core.subscribe('s1', 'main', 40, 120)!.channelId;
     browserOut.length = 0;
-    core.onMasterRecord('s1', output(0n, 1n, 'hi'));
+    core.onMoorOutput('s1', new TextEncoder().encode('hi'), 0n);
     expect(browserOut).toHaveLength(1);
     expect(browserOut[0]).toMatchObject({ sessionId: 's1', channelId: ch });
+  });
+
+  it('delays a subscription snapshot until terminal-state parser work drains', async () => {
+    const emulator = new BlockingPreambleEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+
+    const preamble = core.onMasterTerminalState('s1', new TextEncoder().encode('-new'));
+    const channelId = core.subscribe('s1', 'preamble-viewer', 40, 120)!.channelId;
+    expect(
+      browserOut
+        .filter((entry) => entry.channelId === channelId)
+        .map((entry) => entry.frame.type)
+    ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+
+    emulator.release();
+    await expect(preamble).resolves.toBe(true);
+    const frames = browserOut
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => entry.frame);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 0n,
+      text: 'old-new'
+    });
+  });
+
+  it('coalesces an identical replay retry while the first parser drain is pending', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+    const bytes = new TextEncoder().encode('x');
+
+    const first = core.onMoorOutput('s1', bytes, 0n);
+    const retry = core.onMoorOutput('s1', bytes, 0n);
+    expect(new TextDecoder().decode(Uint8Array.from(emulator.written))).toBe('x');
+
+    const channelId = core.subscribe('s1', 'retry-viewer', 40, 120)!.channelId;
+    expect(
+      browserOut
+        .filter((entry) => entry.channelId === channelId)
+        .map((entry) => entry.frame.type)
+    ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+
+    emulator.release();
+    await Promise.all([first, retry]);
+
+    const frames = browserOut
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => entry.frame);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 1n,
+      text: 'x'
+    });
+    expect(frames.some((frame) => frame.type === BpFrameType.OUTPUT)).toBe(false);
+  });
+
+  it('waits for the holder final-output boundary before emitting and fencing EXIT', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut, masterOut, masterResizes } = makeCore({
+      createEmulator: () => emulator
+    });
+    core.ensure('s1', { rows: 40, cols: 120 });
+    const channelId = core.subscribe('s1', 'main', 40, 120)!.channelId;
+    browserOut.length = 0;
+    masterResizes.length = 0;
+
+    const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    const exit = core.emitExit('s1', { kind: 'exited', code: 7, method: 'none' }, 2n);
+    expect(browserOut).toEqual([]);
+    expect(
+      core.onBrowserInputByChannel(channelId, false, new TextEncoder().encode('after-exit'))
+    ).toBe(false);
+    const resizeOutcome = core.onBrowserResizeByChannel(channelId, 50, 130);
+    expect(masterOut).toEqual([]);
+    expect(masterResizes).toEqual([]);
+    const finalOutput = core.onMoorOutput('s1', new TextEncoder().encode('y'), 1n);
+
+    emulator.release();
+    await Promise.all([output, finalOutput, exit]);
+    expect(resizeOutcome).toEqual({ routed: true, accepted: false });
+    expect(browserOut.map(({ frame }) => frame.type)).toEqual([
+      BpFrameType.OUTPUT,
+      BpFrameType.OUTPUT,
+      BpFrameType.EXIT
+    ]);
+    expect(new TextDecoder().decode(Uint8Array.from(emulator.written))).toBe('xy');
+    expect(() => core.onMoorOutput('s1', new TextEncoder().encode('z'), 2n)).toThrow(
+      /after session exit/
+    );
+  });
+
+  it('orders an already-admitted delayed snapshot before terminal EXIT', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+
+    const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    const channelId = core.subscribe('s1', 'late-before-exit', 40, 120)!.channelId;
+    expect(
+      browserOut
+        .filter((entry) => entry.channelId === channelId)
+        .map((entry) => entry.frame.type)
+    ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+    const exit = core.emitExit('s1', { kind: 'exited', code: 7, method: 'none' }, 1n);
+
+    emulator.release();
+    await Promise.all([output, exit]);
+
+    const frames = browserOut
+      .filter((entry) => entry.channelId === channelId)
+      .map((entry) => entry.frame);
+    expect(frames.map((frame) => frame.type)).toEqual([
+      BpFrameType.SUBSCRIBE_ACK,
+      BpFrameType.SNAPSHOT,
+      BpFrameType.EXIT
+    ]);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 1n,
+      text: 'x'
+    });
+  });
+
+  it('rejects subscriptions during final drain and after the exit fence', async () => {
+    const emulator = new BlockingFlushEmu();
+    const { core, browserOut } = makeCore({ createEmulator: () => emulator });
+    core.ensure('s1', { rows: 40, cols: 120 });
+
+    const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    const exit = core.emitExit('s1', { kind: 'exited', code: 7, method: 'none' }, 1n);
+    expect(core.subscribe('s1', 'during-final-drain', 40, 120)).toBeUndefined();
+
+    emulator.release();
+    await Promise.all([output, exit]);
+    expect(core.subscribe('s1', 'after-exit-fence', 40, 120)).toBeUndefined();
+    expect(browserOut).toEqual([]);
+  });
+
+  it('fences a late output drain after retirement from the successor generation', async () => {
+    const retiredEmulator = new BlockingFlushEmu();
+    const successorEmulator = new FakeEmu();
+    const emulators: EmulatorPort[] = [retiredEmulator, successorEmulator];
+    const { core, browserOut } = makeCore({
+      createEmulator: () => emulators.shift() ?? new FakeEmu()
+    });
+    core.ensure('s1', { rows: 40, cols: 120 });
+    core.subscribe('s1', 'retired-viewer', 40, 120);
+    browserOut.length = 0;
+
+    const late = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
+    core.retire('s1', 'control-retire');
+    expect(retiredEmulator.disposed).toBe(true);
+    expect(core.ensure('s1', { rows: 40, cols: 120 })).toMatchObject({
+      ok: true,
+      generation: 3,
+      created: true
+    });
+    const successorChannel = core.subscribe('s1', 'successor-viewer', 40, 120)!.channelId;
+    browserOut.length = 0;
+
+    retiredEmulator.release();
+    await late;
+    expect(browserOut).toEqual([]);
+
+    core.onMoorOutput('s1', new TextEncoder().encode('y'), 0n);
+    expect(browserOut).toHaveLength(1);
+    expect(browserOut[0]).toMatchObject({
+      sessionId: 's1',
+      channelId: successorChannel,
+      frame: { type: BpFrameType.OUTPUT, generation: 3, offset: 0n }
+    });
+    expect(new TextDecoder().decode(Uint8Array.from(successorEmulator.written))).toBe('y');
   });
 
   it('accepts one canonical agent event and never reapplies its duplicate', () => {
     const { core } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     expect(core.stateSnapshot('s1')?.subject).toMatchObject({
       kind: 'agent',
       activity: 'unknown'
@@ -237,7 +458,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       onStateTransition: (transition) => transitions.push(transition)
     });
     core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     core.ingestAgentState(agentEvent());
     const before = core.stateSnapshot('s1')!;
 
@@ -250,7 +471,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     expect(core.stateSnapshot('s1')).toEqual(before);
 
     expect(
-      core.assessAgentHealth('s1', 1, {
+      core.assessAgentHealth('s1', 2, {
         status: 'degraded',
         reason: 'hook-not-installed',
         detail: 'desk hook config is absent'
@@ -270,7 +491,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('routes browser input to the session master', () => {
     const { core, masterOut } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 });
-    const ch = core.subscribe('s1', 'main', 1, 1)!;
+    const ch = core.subscribe('s1', 'main', 1, 1)!.channelId;
     core.onBrowserInput('s1', ch, false, new TextEncoder().encode('x'));
     expect(masterOut).toHaveLength(1);
     expect(masterOut[0].sessionId).toBe('s1');
@@ -279,17 +500,10 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
   it('projects process EXIT immediately and clears agent activity evidence', () => {
     const { core } = makeCore();
     core.ensure('s1', { rows: 1, cols: 1 }, agentSubject);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     core.ingestAgentState(agentEvent());
 
-    const body = new ByteWriter().u8(EventType.EXIT).u32(23).u16(15).take();
-    core.onMasterRecord('s1', {
-      record_type: RecordType.EVENT,
-      record_seq: 1n,
-      generation: 1,
-      output_offset: 0n,
-      body
-    });
+    core.markExited('s1', 2, { code: 23, signal: '15' });
 
     expect(core.stateSnapshot('s1')).toMatchObject({
       lifecycle: 'exited',
@@ -340,11 +554,12 @@ describe('DaemonCore — terminal output is never agent-state evidence', () => {
       emulatorFactory: { create: () => emu },
       now: () => 1000,
       sendBrowser: () => {},
-      sendMaster: () => {},
+      sendMasterInput: () => {},
+      sendMasterResize: () => {},
       onSemanticEvent: (sessionId, event) => seen.push({ sessionId, event })
     } as DaemonCoreDeps);
     expect(core.ensure('s1', { rows: 24, cols: 80 }, agentSubject).ok).toBe(true);
-    core.markRunning('s1', 1);
+    core.markRunning('s1', 2);
     core.ingestAgentState(agentEvent({ facts: [{ kind: 'activity', activity: 'idle' }] }));
     const before = core.stateSnapshot('s1');
 
@@ -356,60 +571,65 @@ describe('DaemonCore — terminal output is never agent-state evidence', () => {
 
 describe('DaemonCore — restore (re-adopt a surviving master after daemon restart)', () => {
   function coreOverLedger(ledger: GenerationLedger) {
-    const masterOut: { sessionId: string; frame: RawFrame }[] = [];
+    const masterOut: { sessionId: string; bytes: Uint8Array; binary: boolean; surfaceId: number }[] = [];
     const core = new DaemonCore({
       ledger,
       supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
       emulatorFactory: { create: () => new FakeEmu() },
       now: () => 1000,
       sendBrowser: () => {},
-      sendMaster: (sessionId, frame) => masterOut.push({ sessionId, frame })
+      sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
+        masterOut.push({ sessionId, bytes, binary, surfaceId }),
+      sendMasterResize: () => {}
     });
     return { core, masterOut };
   }
 
   it('adopts the durable CURRENT generation without allocating (ensure would fence the master out)', () => {
     const store = new InMemoryGenerationLedger();
-    // The ORIGINAL daemon spawned the master at generation 1.
+    // The ORIGINAL daemon spawned the master at generation 2 (OB-18: 1 reserved for unsupervised).
     new GenerationLedger(store).allocate('s1');
 
     // A RESTARTED daemon over the same durable store re-adopts, never allocates.
     const ledger = new GenerationLedger(store);
     const { core, masterOut } = coreOverLedger(ledger);
-    const restored = core.restore('s1', { rows: 24, cols: 80 });
-    expect(restored).toEqual({ ok: true, generation: 1 });
-    expect(ledger.current('s1')).toBe(1); // NOT bumped — the surviving master owns 1
+    const restored = core.restore('s1');
+    expect(restored).toEqual({ ok: true, generation: 2 });
+    expect(ledger.current('s1')).toBe(2); // NOT bumped — the surviving master owns 2
 
-    // Frames the runtime sends to the master carry the ADOPTED generation, so
-    // the master's fence accepts them; an ensure() would have stamped 2.
+    // Master-bound sends route through the installed link, which the manager
+    // constructs at the ADOPTED generation — the wire fence lives there; the
+    // core's job is exact routing of the typed send.
     core.injectInput('s1', new TextEncoder().encode('hi'));
     expect(masterOut).toHaveLength(1);
-    expect(masterOut[0].frame.generation).toBe(1);
+    expect(masterOut[0].sessionId).toBe('s1');
+    expect(new TextDecoder().decode(masterOut[0].bytes)).toBe('hi');
+    expect(masterOut[0].surfaceId).toBe(0);
   });
 
   it('fails closed when the ledger has no durable generation for the socket', () => {
     const { core } = coreOverLedger(new GenerationLedger(new InMemoryGenerationLedger()));
-    expect(core.restore('ghost', { rows: 24, cols: 80 })).toEqual({ ok: false, reason: 'no-generation' });
+    expect(core.restore('ghost')).toEqual({ ok: false, reason: 'no-generation' });
   });
 
   it('refuses to restore over an already-live session', () => {
     const store = new InMemoryGenerationLedger();
     const { core } = coreOverLedger(new GenerationLedger(store));
     expect(core.ensure('s1', { rows: 24, cols: 80 }).ok).toBe(true);
-    expect(core.restore('s1', { rows: 24, cols: 80 })).toEqual({ ok: false, reason: 'already-live' });
+    expect(core.restore('s1')).toEqual({ ok: false, reason: 'already-live' });
   });
 
   it('ensure AFTER a retire still allocates a HIGHER generation than the restored one', () => {
     const store = new InMemoryGenerationLedger();
-    new GenerationLedger(store).allocate('s1'); // original spawn: 1
+    new GenerationLedger(store).allocate('s1'); // original spawn: 2 (OB-18)
     const ledger = new GenerationLedger(store);
     const { core } = coreOverLedger(ledger);
-    expect(core.restore('s1', { rows: 24, cols: 80 }).ok).toBe(true);
+    expect(core.restore('s1').ok).toBe(true);
     core.retire('s1');
     const recreated = core.ensure('s1', { rows: 24, cols: 80 });
     expect(recreated.ok).toBe(true);
     if (recreated.ok) {
-      expect(recreated.generation).toBe(2); // the tombstone still advances (§4.8.1)
+      expect(recreated.generation).toBe(3); // the tombstone still advances (§4.8.1)
     }
   });
 });

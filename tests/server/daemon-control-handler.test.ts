@@ -1,7 +1,9 @@
 import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createDaemonControlHandler, isSafeDaemonSessionId } from '../../src/server/runtime/terminalDaemon.js';
+import { createDaemonControlHandler, isSafeDaemonSessionId, PROVISION_GEOMETRY_ERROR } from '../../src/server/runtime/terminalDaemon.js';
+import { SESSION_CREATION_GEOMETRY } from '../../src/shared/runtime/sessionGeometryStore.js';
+import { MOOR_STATUS_NO_LIVE_LINK_ERROR } from '../../src/shared/daemonControlClient.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
   DESK_EVENT_SCHEMA_VERSION,
@@ -18,11 +20,14 @@ interface DaemonMock {
   provision: ReturnType<typeof vi.fn>;
   resetProviderSession: ReturnType<typeof vi.fn>;
   completeProviderSessionLaunch: ReturnType<typeof vi.fn>;
+  observeProviderSessionIdentity: ReturnType<typeof vi.fn>;
+  rebindProviderSession: ReturnType<typeof vi.fn>;
   retire: ReturnType<typeof vi.fn>;
   retireGeneration: ReturnType<typeof vi.fn>;
   input: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
   terminalObservation: ReturnType<typeof vi.fn>;
+  moorExitEvidence: ReturnType<typeof vi.fn>;
   agentEndpoint: ReturnType<typeof vi.fn>;
   agentEvent: ReturnType<typeof vi.fn>;
   agentStates: ReturnType<typeof vi.fn>;
@@ -56,6 +61,10 @@ function invoke(
       setHeader() {
         /* sendJson sets content-type; irrelevant to these assertions */
       },
+      once() {
+        /* mutation-barrier release listeners; the mock resolves on end() */
+        return res;
+      },
       end(payload?: string) {
         resolve({ status, body: payload ? (JSON.parse(payload) as Captured['body']) : undefined });
       }
@@ -81,6 +90,18 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
       ok: true,
       kind: 'completed'
     }),
+    observeProviderSessionIdentity: vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'matching',
+      provider: 'codex',
+      providerSessionId: '11111111-1111-4111-8111-111111111111'
+    }),
+    rebindProviderSession: vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'rebound',
+      provider: 'codex',
+      providerSessionId: '22222222-2222-4222-8222-222222222222'
+    }),
     retire: vi.fn().mockResolvedValue({ ok: true }),
     retireGeneration: vi.fn().mockResolvedValue({ ok: true }),
     input: vi.fn().mockReturnValue(true),
@@ -97,6 +118,7 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
       exit: null,
       updatedAt: 1100
     }),
+    moorExitEvidence: vi.fn().mockResolvedValue([]),
     agentEndpoint: vi.fn().mockReturnValue({
       kind: 'accepted',
       registration: agentEndpoint(),
@@ -149,6 +171,10 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     readEvents: vi.fn().mockReturnValue(0),
     clearEvents: vi.fn().mockReturnValue(0),
     isReady: vi.fn().mockReturnValue(true),
+    isDraining: vi.fn().mockReturnValue(false),
+    enterMutation: vi.fn((_abort: () => void) => () => undefined),
+    moorSessionStatus: vi.fn().mockReturnValue(undefined),
+    moorHolderPresence: vi.fn().mockResolvedValue('unknown'),
     health: vi.fn().mockReturnValue({ status: 'healthy' })
   };
 }
@@ -194,6 +220,45 @@ const agentEvent = (overrides: Partial<AgentStateEnvelope> = {}): AgentStateEnve
 });
 
 describe('daemon control handler', () => {
+  it('serves the adopted moor status as wire truth and 404s without a live link (#8)', async () => {
+    const daemon = daemonMock();
+    daemon.moorSessionStatus = vi.fn().mockReturnValue({
+      generation: 2,
+      wallStart: 1_755_000_000_000n,
+      pid: 4321,
+      running: true
+    });
+    const hit = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
+    expect(hit).toEqual({
+      status: 200,
+      body: { ok: true, generation: 2, wallStartMs: 1_755_000_000_000, pid: 4321, running: true }
+    });
+    expect(daemon.moorSessionStatus).toHaveBeenCalledWith('sess-a');
+
+    // desk#50b: with no adopted link the route must ALSO answer the separable
+    // holder question, because callers read this 404 as a licence to start and
+    // it is equally the answer for a live session mid-re-adoption. The verdict
+    // is the daemon's, passed through verbatim — the route never invents one.
+    daemon.moorSessionStatus = vi.fn().mockReturnValue(undefined);
+    daemon.moorHolderPresence = vi.fn().mockResolvedValue('present');
+    const miss = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
+    expect(miss).toEqual({
+      status: 404,
+      body: { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR, holder: 'present' }
+    });
+    expect(daemon.moorHolderPresence).toHaveBeenCalledWith('sess-a');
+
+    daemon.moorHolderPresence = vi.fn().mockResolvedValue('absent');
+    const dead = await invoke(daemon, 'GET', '/control/moor-status?sessionId=sess-a');
+    expect(dead).toEqual({
+      status: 404,
+      body: { ok: false, error: MOOR_STATUS_NO_LIVE_LINK_ERROR, holder: 'absent' }
+    });
+
+    const bad = await invoke(daemon, 'GET', '/control/moor-status?sessionId=../evil');
+    expect(bad).toMatchObject({ status: 400 });
+  });
+
   it('provisions a session and returns ok', async () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
@@ -216,6 +281,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'spawntest',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['codex'],
       subject: agentSubject,
       providerSessionId: 7
@@ -245,6 +311,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['sh', '-c', 'bash'],
         subject: agentSubject,
         continuity
@@ -274,6 +341,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['sh', '-c', 'bash'],
         subject: agentSubject,
         continuity: {
@@ -318,6 +386,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['claude'],
         subject: agentSubject,
         claudeMemory
@@ -345,6 +414,7 @@ describe('daemon control handler', () => {
       '/control/provision',
       {
         sessionId: 'spawntest',
+        geometry: SESSION_CREATION_GEOMETRY,
         command: ['claude'],
         subject: agentSubject,
         claudeMemory: {
@@ -362,11 +432,46 @@ describe('daemon control handler', () => {
     expect(daemon.provision).toHaveBeenCalledOnce();
   });
 
-  it('defaults geometry when absent', async () => {
+  it('refuses a provision without geometry instead of inventing one (400, nothing provisioned)', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'sess-a',
+      command: ['bash'],
+      subject: terminalSubject
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ ok: false, error: PROVISION_GEOMETRY_ERROR });
+    expect(daemon.provision).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['zero rows', { rows: 0, cols: 80 }],
+    ['negative cols', { rows: 24, cols: -1 }],
+    ['fractional rows', { rows: 24.5, cols: 80 }],
+    ['string dimensions', { rows: '24', cols: '80' }],
+    ['a dimension above 32767', { rows: 32_768, cols: 80 }],
+    ['an area above 2000000', { rows: 2000, cols: 1001 }],
+    ['an array', [24, 80]],
+    ['null', null]
+  ])('refuses %s geometry rather than clamping it (400, nothing provisioned)', async (_label, geometry) => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/provision', {
+      sessionId: 'sess-a',
+      command: ['bash'],
+      geometry,
+      subject: terminalSubject
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ ok: false, error: PROVISION_GEOMETRY_ERROR });
+    expect(daemon.provision).not.toHaveBeenCalled();
+  });
+
+  it('passes a valid geometry through exactly, including the creation size, without rewriting it', async () => {
     const daemon = daemonMock();
     await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
       command: ['bash'],
+      geometry: SESSION_CREATION_GEOMETRY,
       subject: terminalSubject
     });
     expect(daemon.provision).toHaveBeenCalledWith('sess-a', {
@@ -380,6 +485,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: '../escape',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['bash'],
       subject: terminalSubject
     });
@@ -392,6 +498,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: [],
       subject: terminalSubject
     });
@@ -403,6 +510,7 @@ describe('daemon control handler', () => {
     const daemon = daemonMock({ ok: false, reason: 'cap-exceeded' });
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['bash'],
       subject: terminalSubject
     });
@@ -419,6 +527,7 @@ describe('daemon control handler', () => {
     });
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['codex'],
       subject: agentSubject
     });
@@ -444,6 +553,7 @@ describe('daemon control handler', () => {
     });
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['codex'],
       subject: agentSubject
     });
@@ -465,6 +575,7 @@ describe('daemon control handler', () => {
     const daemon = { ...daemonMock(), provision: vi.fn().mockRejectedValue(new Error('spawn failed')) };
     const result = await invoke(daemon, 'POST', '/control/provision', {
       sessionId: 'sess-a',
+      geometry: SESSION_CREATION_GEOMETRY,
       command: ['bash'],
       subject: terminalSubject
     });
@@ -474,14 +585,21 @@ describe('daemon control handler', () => {
 
   it('retires a session (200 only after the awaited kill reports done)', async () => {
     const daemon = daemonMock();
-    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    const result = await invoke(daemon, 'POST', '/control/retire', {
+      sessionId: 'sess-a',
+      reason: 'control-retire'
+    });
     expect(result).toEqual({ status: 200, body: { ok: true } });
-    expect(daemon.retire).toHaveBeenCalledWith('sess-a');
+    // desk#59: the cause travels with the request and reaches the daemon.
+    expect(daemon.retire).toHaveBeenCalledWith('sess-a', 'control-retire');
   });
 
   it('surfaces a failed kill as non-2xx, never a silent success', async () => {
     const daemon = { ...daemonMock(), retire: vi.fn().mockResolvedValue({ ok: false, error: 'kill command exited 1' }) };
-    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    const result = await invoke(daemon, 'POST', '/control/retire', {
+      sessionId: 'sess-a',
+      reason: 'control-retire'
+    });
     expect(result.status).toBe(502);
     expect(result.body?.error).toContain('kill command exited 1');
   });
@@ -569,6 +687,82 @@ describe('daemon control handler', () => {
       body: { ok: true, kind: 'completed' }
     });
     expect(daemon.completeProviderSessionLaunch).toHaveBeenCalledWith(body);
+  });
+
+  it('forwards an exact provider observation without echoing its launch proof', async () => {
+    const daemon = daemonMock();
+    const body = {
+      deskSessionId: 'sess-a',
+      provider: 'codex',
+      providerSessionId: '11111111-1111-4111-8111-111111111111',
+      generation: 8,
+      launchProof: 'A'.repeat(43),
+      hook: 'SessionStart'
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/observe',
+      body
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.observeProviderSessionIdentity).toHaveBeenCalledWith(body);
+    expect(JSON.stringify(result.body)).not.toContain(body.launchProof);
+  });
+
+  it('preserves typed rebind-required observation details without echoing proof', async () => {
+    const daemon = daemonMock();
+    daemon.observeProviderSessionIdentity.mockResolvedValue({
+      ok: false,
+      reason: 'provider-session-rebind-required',
+      error: 'manual resume detected',
+      currentProviderSessionId: '11111111-1111-4111-8111-111111111111',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222',
+      action:
+        'desk rebind-provider-session sess-a --to 22222222-2222-4222-8222-222222222222 --force'
+    });
+    const launchProof = 'B'.repeat(43);
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/observe',
+      {
+        deskSessionId: 'sess-a',
+        provider: 'codex',
+        providerSessionId: '22222222-2222-4222-8222-222222222222',
+        generation: 8,
+        launchProof,
+        hook: 'SessionStart'
+      }
+    );
+
+    expect(result.status).toBe(409);
+    expect(result.body?.reason).toBe('provider-session-rebind-required');
+    expect(JSON.stringify(result.body)).not.toContain(launchProof);
+  });
+
+  it('forwards only session id and exact target for provider rebind', async () => {
+    const daemon = daemonMock();
+    const body = {
+      sessionId: 'sess-a',
+      targetProviderSessionId: '22222222-2222-4222-8222-222222222222'
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/rebind',
+      body
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.rebindProviderSession).toHaveBeenCalledWith({
+      deskSessionId: body.sessionId,
+      targetProviderSessionId: body.targetProviderSessionId
+    });
   });
 
   it.each([
@@ -760,7 +954,69 @@ describe('daemon control handler', () => {
       activity: 'working',
       title: 'Building'
     });
+    expect(result.body?.exitEvidence).toEqual([]);
     expect(daemon.terminalObservation).toHaveBeenCalledWith('sess-a');
+    expect(daemon.moorExitEvidence).toHaveBeenCalledWith('sess-a');
+  });
+
+  it('surfaces archived exits without overwriting the live remote observation', async () => {
+    const daemon = daemonMock();
+    const liveObservation = {
+      sessionId: 'sess-a',
+      generation: 7,
+      ready: false,
+      readyAt: 1200,
+      activity: 'idle',
+      activityAt: 1300,
+      title: 'Successor',
+      link: null,
+      exit: { code: 143, at: 1400 },
+      updatedAt: 1400
+    };
+    const exitEvidence = [
+      {
+        generation: 6,
+        startWallMs: '1',
+        endWallMs: '2',
+        outputEnd: '0',
+        outcome: { ended: 'signalled', signal: 15 }
+      }
+    ];
+    daemon.terminalObservation.mockReturnValue(liveObservation);
+    daemon.moorExitEvidence.mockResolvedValue(exitEvidence);
+
+    const result = await invoke(
+      daemon,
+      'GET',
+      '/control/terminal-observation?sessionId=sess-a'
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: true, observation: liveObservation, exitEvidence });
+  });
+
+  it('surfaces archived exits after the in-memory observation is gone', async () => {
+    const daemon = daemonMock();
+    const exitEvidence = [
+      {
+        generation: 6,
+        startWallMs: '1',
+        endWallMs: '2',
+        outputEnd: '0',
+        outcome: { ended: 'exited', code: 137 }
+      }
+    ];
+    daemon.terminalObservation.mockReturnValue(undefined);
+    daemon.moorExitEvidence.mockResolvedValue(exitEvidence);
+
+    const result = await invoke(
+      daemon,
+      'GET',
+      '/control/terminal-observation?sessionId=sess-a'
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: true, observation: null, exitEvidence });
   });
 
   it('rejects invalid observation ids and 404s unknown sessions', async () => {
@@ -1065,5 +1321,28 @@ describe('isSafeDaemonSessionId', () => {
     for (const id of ['../escape', 'has/slash', 'has space', '', 'a', 42, null, undefined]) {
       expect(isSafeDaemonSessionId(id)).toBe(false);
     }
+  });
+});
+
+describe('the retire cause is part of the request (desk#59)', () => {
+  it('refuses a retire that names no cause instead of inventing one', async () => {
+    // The route is transport: only the caller knows whether this is an
+    // operator reboot, a deletion, or a generic control retire. Accepting a
+    // causeless request would relabel all of them as one, which is exactly the
+    // confident-but-wrong record this issue exists to remove.
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/retire', { sessionId: 'sess-a' });
+    expect(result.status).toBe(400);
+    expect(daemon.retire).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cause outside the closed vocabulary', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/retire', {
+      sessionId: 'sess-a',
+      reason: 'because-i-said-so'
+    });
+    expect(result.status).toBe(400);
+    expect(daemon.retire).not.toHaveBeenCalled();
   });
 });

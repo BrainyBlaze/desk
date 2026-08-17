@@ -54,6 +54,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 - **R5.1 MUST** — a write to a user/config file is atomic (temp + `renameSync`), reusing the shared helpers (`fsOps.ts::writeFileAtomic`/`writeFileAtomicCreate` server-side; the `config.ts` temp+rename pattern for the manifest; `agentHooks` now uses `writeJsonIfChanged`). AVOID a bare `writeFileSync` a crash can truncate. *Why:* `agentHooks` wrote the user's `~/.claude/settings.json` / `~/.codex/hooks.json` non-atomically (§6.4.3). *Enforcement:* `[review]` + `[test]`. **Gate.**
 - **R5.2 MUST** — a `JSON.parse` of on-disk/user content is parse-or-default, never an unguarded parse that one hand-edited typo aborts a whole flow. *Why:* `readJsonObject` did `JSON.parse(readFileSync(...))` with no try/catch, so a typo aborted all of `installAgentHooks` (§6.4.3). *Enforcement:* `[review]`. **Guidance.**
 - **R5.3 MUST** `[server-lane]` — concurrent read-modify-write uses a per-path lock AND a collision-proof temp name (random suffix, e.g. `${path}.tmp-${pid}-${randomUUID()}`, NOT `${pid}-${Date.now()}` which collides for two same-ms writes). Judge lock correctness on the SHARED MEDIUM, not an in-memory object. *Why:* the manifest read-modify-write was last-writer-wins with a same-ms-colliding temp name (§6.4.3); the fix is `withFileLock` + `randomUUID` temp in `config.ts` over `src/shared/fileLock.ts`. *Enforcement:* `[test]` (the `config-concurrency` suite: concurrent writers, collision-proof temp) `[CI]`. **Gate.**
+- **R5.4 MUST** `[server-lane]` — a durable state change is accepted only after both its content and the directory entry that names it are durable. Atomic rename alone is not durable acceptance. *Why:* the provider-session transition ledger could durably authorize a rebind while the corresponding manifest replacement had only been renamed, allowing power loss to restore the old binding beside a resolved transition. *Enforcement:* `[test]` (`config-manifest-durability`: temp inode sync precedes rename; parent-directory sync follows it) + `[review]`. **Gate.**
 
 ## R6 — Shell + untrusted rendering are audited once
 
@@ -80,7 +81,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 ## R9 — Architecture hygiene (enforced)
 
 - **R9.1 MUST** — layering holds: `core` never imports `web`/`server`; `web` never imports `server`; `shared` is pure. Zero violations is the standing bar. *Why:* the God-file problem is intra-file complexity, not tangled cross-module deps — which is only true because layering is clean (§6.0). *Enforcement:* `[review]` (there is no layer-check lint/CI rule today — the architecture test covers cycles/binding-isolation/retired-terminal, not layering; a layer-check is a backlog item). **Guidance.**
-- **R9.2 MUST** `[server-lane]` — no source dependency cycles; even a type-only cycle encodes wrong ownership, so relocate the shared type (`QueuedPrompt` → `channelsProtocol`, `AgentHostEnv` → `agents/host/types`). *Why:* two server cycles were type-only (erased at runtime) but still misplaced ownership (§5.5). *Enforcement:* `[lint]` (cycle check, generated code excluded) + `[CI]`. **Gate.**
+- **R9.2 MUST** `[server-lane]` — no source dependency cycles; even a type-only cycle encodes wrong ownership, so relocate the shared type (`QueuedPrompt` → `channels/protocol/delivery`, `AgentHostEnv` → `agents/host/types`). *Why:* two server cycles were type-only (erased at runtime) but still misplaced ownership (§5.5). *Enforcement:* `[lint]` (cycle check, generated code excluded) + `[CI]`. **Gate.**
 - **R9.3 MUST** `[server-lane]` — generated code (`codexBindings/**`) is isolated behind a barrel/adapter, excluded from health/dead-code/file-count metrics, and regenerable via the checked-in `generate:codex-bindings` script. *Why:* 655 generated stubs distorted metrics and the depth-12 dependency chain, and `package.json` had no regeneration script (§4, §5.6). *Enforcement:* `[test]` (generator tests + isolation) + `[review]`. **Gate.** *Backlog:* a CI step that regenerates and diffs to catch drift is not yet automated — add it separately before treating drift as a gate.
 - **R9.4 MUST** `[server-lane]` — no dead legacy path running beside its replacement; remove it, or quarantine it with parity tests + a documented reason. *Why:* the legacy `/ws/terminal` bridge still ran beside `/ws/terminal-broker` though the client uses only the broker (§5.7). *Enforcement:* `[review]` + `[test]` (parity if quarantined). **Gate.**
 
@@ -105,7 +106,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 |---|---|---|
 | R1.1/R1.3 | §6.1 no central error helper | `src/web/asyncSafe.ts` (`fireAndForget`, `toErrorMessage`) |
 | R1.4 | §6.4.4 ItemDrawer | `ItemDrawer.tsx` onError gated on request seq |
-| R2.1 | §5.4 owner-lock fail-open | `channelsEngine` `lockError` + fail-closed |
+| R2.1 | §5.4 owner-lock fail-open | `channels/runtimeOwner` lease + fail-closed |
 | R2.3 | §6.4.1 settings deadlock | ref resolved in `.catch` |
 | R3.4 | channels×native E2E bugs | `channelsDeliveryStrategy.ts` broker-FSM readiness |
 | R4.1 | §6.4.4/§6.4.5 readJson | `src/web/httpJson.ts` |
@@ -113,6 +114,7 @@ The single biggest correctness theme in the review: failures dropped with zero t
 | R4.5 | §5.8 collapsed LSP errors | typed error codes in `deskLspMcp` |
 | R5.1/R5.2 | §6.4.3 agentHooks | `writeJsonIfChanged` + guarded parse |
 | R5.3 | §6.4.3 manifest lock | `config.ts` `withFileLock` + `randomUUID` temp; `config-concurrency` suite |
+| R5.4 | provider-session rebind durability gap | `config.ts` durable manifest replacement; `config-manifest-durability` suite |
 | R6.1/R6.2 | §3.2/§6.4.3 shell | `src/shared/shell.ts::shellQuote` |
 | R7.2 | §6.4.2 disk-watch | `active` added to subscribe deps |
 | R8.1 | §2/§8.3 God-file | `usePulse`, `ModalRouter`, `*Impl` extraction |

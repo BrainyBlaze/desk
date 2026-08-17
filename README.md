@@ -3,7 +3,7 @@
 <p align="center"><strong>Native chat UI for coding-agent fleets, with terminal multiplexing, an IDE/CDE, and Slack-style agent channels.</strong></p>
 
 <p align="center">
-  Keep Claude Code, OpenAI Codex, OpenCode, Qwen Code, Kimi Code, Grok, and custom agents alive in durable atch sessions.
+  Keep Claude Code, OpenAI Codex, OpenCode, Qwen Code, Kimi Code, Grok, and custom agents alive in durable Moor sessions.
   SDK-backed agents open in Desk's native chat surface by default, with the
   terminal multiplexer available when you need the raw TUI. Run the whole
   fleet from one cockpit: native agent transcripts, terminals, a full IDE with
@@ -16,12 +16,12 @@
   <a href="https://docs.desk.cloud"><img src="https://img.shields.io/badge/docs-docs.desk.cloud-0E7490" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/license-BSL%201.1-orange" alt="Business Source License 1.1">
   <img src="https://img.shields.io/badge/node-20%2B-brightgreen" alt="node 20+">
-  <img src="https://img.shields.io/badge/runtime-atch-0E7490" alt="atch runtime">
+  <img src="https://img.shields.io/badge/runtime-moor-0E7490" alt="Moor runtime">
 </p>
 
 <p align="center">
   <a href="https://docs.desk.cloud">
-    <img src="docs/images/agents-multiplexer.png" alt="Desk product showcase: app rail, agent tree, host telemetry, fleet controls, and a 2x2 grid of live atch-backed agent terminals">
+    <img src="docs/images/agents-multiplexer.png" alt="Desk product showcase: app rail, agent tree, host telemetry, fleet controls, and a 2x2 grid of live Moor-backed agent terminals">
   </a>
 </p>
 
@@ -36,9 +36,9 @@ coordinate except you, copy-pasting between them.
 
 Desk's answer is a strict separation of lifetime and view:
 
-- **atch owns the processes.** Every agent in your manifest gets a durable
+- **Moor holders own the processes.** Every agent in your manifest gets a durable
   session keyed by `sessionId`. Close the browser or restart Desk and the
-  supervised terminal daemon reattaches to the surviving atch master.
+  supervised terminal daemon reconnects to the surviving Moor holder.
 - **The browser owns the agent surface.** A single web UI (bound to
   `127.0.0.1`) renders the default native chat view, terminal grid, Monaco
   editor, git client, GitHub Projects boards, markdown notes, and Slack-like
@@ -58,12 +58,12 @@ once, and let them coordinate — without becoming the message bus yourself.
   theme-aware transcripts. Terminal UI is available per session for raw TUI
   commands and custom shell agents.
 - 🖥️ **A real terminal multiplexer when you need it** — per-group grids of 1–16
-  live xterm.js terminals over Desk's binary terminal transport and atch. Drag
+  live xterm.js terminals over Desk's binary terminal transport and Moor. Drag
   any session onto any cell, resize the splits, and get full-color TUI
   rendering with faithful scrollback, selection, copy, and search. Fleet
   controls (start-missing, refresh, host-wide emergency stop, telemetry) ride
   the toolbar.
-- 🔄 **Nothing dies when you look away** — the browser is a view while atch owns
+- 🔄 **Nothing dies when you look away** — the browser is a view while Moor owns
   the processes. Close the tab, drop your SSH session, or restart Desk and
   every agent keeps running — Desk reattaches the native chat or terminal view
   and **resumes the same agent conversation** instead of starting over.
@@ -100,16 +100,16 @@ curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | 
 desk serve            # private Bun server on http://127.0.0.1:5173
 ```
 
-Desk bundles the audited atch 1.6-bb1 fork as the release's `libexec/atch`.
-Runtime resolution remains `DESK_ATCH_BIN`, same-release `libexec/atch`, then
-`PATH`, in that order, so explicit development and operator overrides still
-work.
+Desk installs the host entry from its committed four-target Moor release-asset
+pin as the release's `libexec/moor`. Runtime resolution is explicit
+`DESK_MOOR_BIN`, then an attested same-release `libexec/moor`, then an attested
+absolute `moor` found on `PATH`.
 
 The installer provisions missing host requirements, downloads checksum-verified
 Desk source plus pinned Node 22.23.1 and Bun 1.3.14 toolchains, builds an immutable
 release, and installs the complete `desk` CLI in the first safe directory already
-on `PATH`. It supports macOS and glibc Linux; WSL follows the Linux path. Native
-Windows and musl Linux are not currently supported release targets.
+on `PATH`. It supports macOS and glibc Linux on x64 and arm64. Musl Linux is not
+currently a supported release target.
 
 `desk serve` always launches the private Bun runtime. Use `desk serve --dev` when
 you explicitly want Vite. A missing or broken runtime fails; Desk never falls back
@@ -118,9 +118,10 @@ to the other mode.
 <details>
 <summary>Build from source (for development)</summary>
 
-Match CI with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**, `make`, and a
-C/C++ toolchain. The distribution build compiles the pinned vendored atch
-snapshot for the host:
+Build the application with **Node 22.23.1**, **npm 10.9.8**, **Bun 1.3.14**,
+`make`, and a C/C++ toolchain. `npm run build:distribution` calls `fetch:moor`,
+which consumes the committed four-target release-asset pin and verifies the
+selected host binary; this prebuilt-holder path does not require Rust or Cargo:
 
 ```bash
 git clone https://github.com/BrainyBlaze/desk.git
@@ -128,11 +129,16 @@ cd desk
 npm ci && npm run build:distribution && npm link
 desk serve --dev      # Vite development server on http://127.0.0.1:5173
 ```
+
+The separate `npm run build:moor` path requires a Rust toolchain with Cargo. It
+validates the provenance and snapshot digest under `vendor/moor` before
+compiling `libexec/moor`; the current core/native CI workflow invokes that
+source-build path.
 </details>
 
 Open the printed URL and add your first agent from the sidebar — pick a
 directory, choose an agent (or any command), and Desk
-launches it under atch. SDK-backed agents open in the native chat surface by
+launches it under Moor. SDK-backed agents open in the native chat surface by
 default; use the session editor to switch the session to terminal UI when you
 need a raw terminal, custom command, or interactive TUI-only command. Or declare
 sessions in the manifest and run:
@@ -169,7 +175,7 @@ cards near the composer, and slash commands come from the agent driver. Attach
 files, paste files, stop a running turn, and send the next instruction from the
 same composer.
 
-Native mode is backed by atch and the agent's own resume identity, so the
+Native mode is backed by Moor and the agent's own resume identity, so the
 session survives reloads and server restarts. Terminal UI is available:
 switch the session to terminal UI for raw TUI commands, login flows, or custom
 commands that do not expose a native driver.
@@ -196,7 +202,9 @@ A file explorer over any root (hidden files, create/rename/delete,
 drag-and-drop moves) feeding Monaco editor tabs: every language, IntelliSense
 for TS/JS/JSON/CSS/HTML, minimap, multi-cursor. Files are watched live,
 saves are mtime-guarded against external edits, tabs restore after reload,
-and filename/content search is ripgrep-powered.
+and filename/content search runs on ripgrep — a host requirement the installer
+provisions; without `rg` the server refuses search by name instead of
+degrading to a weaker engine.
 
 A shared language-server layer backs the editor with real diagnostics,
 go-to-definition, and hover — and the same servers are surfaced to your agents
@@ -333,9 +341,9 @@ isolated instance (a temporary `HOME` directory running `vite --port 5190`).
 
 `desk serve --dev` runs the UI through Vite with the Desk API mounted as server
 middleware. Plain `desk serve` launches `libexec/desk-standalone`, whose embedded
-UI and API do not load Vite. `npm run build:distribution` verifies and builds
-the pinned atch snapshot, builds the private Bun runtime, and builds the Node CLI
-last because Vite clears `dist/` during its build.
+UI and API do not load Vite. `npm run build:distribution` fetches and verifies
+the pinned Moor release asset, builds the private Bun runtime, and builds the
+Node CLI last because Vite clears `dist/` during its build.
 
 The sci-fi/HUD design system lives in `src/web/arwes/`:
 

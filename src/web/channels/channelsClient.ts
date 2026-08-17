@@ -1,23 +1,11 @@
 /** Client for /api/channels/* — the desk agent messaging subsystem. */
 
-import type {
-  ChannelMember,
-  ChannelMessage,
-  ChannelActivityEvent,
-  LifecycleState,
-  SubmitState,
-  DeliveryBlockReason,
-  QueuedItemMeta,
-  BlockedItemMeta,
-  SessionDiagnostic,
-  SessionResumeInfo,
-  ReactionKind,
-  ViewFilter
-} from '../../server/channelsProtocol.js';
-import type { ReactionRef } from '../../server/channelsReactions.js';
+import type { ChannelMember, ChannelMessage, ReactionKind, ViewFilter } from '../../server/channels/protocol/format.js';
+import type { ChannelActivityEvent, LifecycleState, SubmitState, HistoricalSubmitState, DeliveryBlockReason, QueuedItemMeta, BlockedItemMeta, SessionDiagnostic, SessionResumeInfo } from '../../server/channels/protocol/delivery.js';
+import type { ReactionRef } from '../../server/channels/store/reactions.js';
 import { readJson } from '../httpJson.js';
-import type { SavedView } from '../../server/channelsViews.js';
-import type { DeliveryEvent, DeliveryEventKind } from '../../server/channelsEvents.js';
+import type { SavedView } from '../../server/channels/store/views.js';
+import type { DeliveryEvent, DeliveryEventKind } from '../../server/channels/delivery/events.js';
 
 // Store-defined row types re-exported for the web subsystem (type-only — the
 // server store modules are erased from the web bundle).
@@ -34,6 +22,7 @@ export type {
   ChannelActivityEvent,
   LifecycleState,
   SubmitState,
+  HistoricalSubmitState,
   DeliveryBlockReason,
   QueuedItemMeta,
   BlockedItemMeta,
@@ -50,6 +39,10 @@ export interface ChannelSummary {
   messageCount: number;
   threadReplyCount: number;
   lastMessage?: { id: string; author: string; timestamp: string; preview: string };
+  /** server-resolved unread against the reader's seen id (present when the
+   *  state poll carried a seen map) */
+  unreadCount?: number;
+  firstUnreadId?: string | null;
   /** Opaque content-addressed revision of the channel's root conversation.
    *  Changes on ANY mutation the count/last-id/preview signature can miss —
    *  a mid-history delete, or an in-place edit of an existing message. Compare
@@ -81,6 +74,10 @@ export interface ChannelDetail {
   firstMessageAt?: string;
   /** protocol timestamp of the channel's most recent message (last activity) */
   lastMessageAt?: string;
+  /** first message after the reader's `since` pointer (since windows only) */
+  firstUnreadId?: string | null;
+  /** messages after the `since` pointer (since windows only) */
+  unreadCount?: number;
   /** Matches ChannelSummary.contentRevision for the same root conversation, so
    *  the poll can reconcile a loaded detail against the freshly polled summary
    *  by equality even when the tail signature is unchanged. */
@@ -141,14 +138,11 @@ export interface ChannelsState {
   delivery: LifecycleState[];
   activity: ChannelActivityEvent[];
   activitySeq: number;
-  /** another live desk process owns dispatch for this channels home */
-  passive?: boolean;
-  /** pid of the owning desk process (when passive) — for the recovery hint */
-  passiveOwner?: number;
 }
 
-export async function channelsState(since = 0): Promise<ChannelsState> {
-  return readJson(fetch(`/api/channels/state?since=${since}`));
+export async function channelsState(since = 0, seen?: Record<string, string>): Promise<ChannelsState> {
+  const seenArg = seen ? `&seen=${encodeURIComponent(JSON.stringify(seen))}` : '';
+  return readJson(fetch(`/api/channels/state?since=${since}${seenArg}`));
 }
 
 export async function channelsDetail(name: string, since?: string | null): Promise<ChannelDetail> {
@@ -368,7 +362,6 @@ export async function channelsShare(payload: {
 
 export interface EngineDiagnostics {
   home: string;
-  passive: boolean;
   pumpAlive: boolean;
   totalQueued: number;
   sessions: SessionDiagnostic[];
@@ -384,8 +377,7 @@ export type EngineActionName =
   | 'drop-queue'
   | 'drop-message'
   | 'force-deliver'
-  | 'drain-ready-all'
-  | 'rebuild-engine';
+  | 'drain-ready-all';
 
 export async function channelsEngineDiagnostics(): Promise<EngineDiagnostics> {
   return readJson(fetch('/api/channels/engine'));

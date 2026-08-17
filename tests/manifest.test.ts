@@ -5,40 +5,125 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildSessionSpecs,
+  collectSessions,
   ManifestValidationError,
-  parseDeskManifest,
-  parseLegacyDeskManifest
+  parseDeskManifest
 } from '../src/core/manifest';
 
+// A session exactly as Desk v0.3.1 wrote it once it had started (the shape a
+// never-upgraded install still carries): the retired `tmuxSession` key, no
+// `sessionId`. Taken from a real pre-cutover backup, values shortened.
+const PRE_CUTOVER_STARTED_SESSION = `
+projects:
+  - id: brainyblaze
+    label: brainyblaze
+    cwd: ~/projects/brainyblaze
+    groups:
+      - id: site
+        label: site
+        sessions:
+          - name: codex
+            cwd: /home/dev/projects/brainyblaze
+            agent: codex
+            resume: 019f4b95-d315-7092-8603-7a8781aa653b
+            bypassPermissions: true
+            uiMode: terminal
+            tmuxSession: agentdesk-brainyblaze-site-codex-019f4b95
+`;
+
+// The same era, a session that never started: v0.3.1 wrote no identity at all.
+const PRE_CUTOVER_UNSTARTED_SESSION = `
+groups:
+  - id: main
+    sessions:
+      - name: legacy
+        cwd: /workspace
+        command: bash
+`;
+
 describe('desk manifest native identity boundary', () => {
-  it('rejects a legacy session at the runtime parser boundary', () => {
-    expect(() =>
+  // The cutover migration that used to rewrite these manifests is gone (PR 78
+  // deleted it with the engine lock it was welded to). The refusal therefore
+  // has to name the one remedy that still exists — boot Desk v0.3.2, the last
+  // release that migrates — instead of "run the sessionId migration".
+  it('refuses a v0.3.1 started session by naming the retired key and the support floor', () => {
+    let caught: unknown;
+    try {
+      parseDeskManifest(PRE_CUTOVER_STARTED_SESSION);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ManifestValidationError);
+    const message = (caught as Error).message;
+    expect(message).toContain('session codex');
+    expect(message).toContain('tmuxSession');
+    expect(message).toContain('Desk v0.3.1 or older');
+    expect(message).toContain('boot Desk v0.3.2 once');
+    expect(message).toContain('does not migrate');
+    expect(message).not.toMatch(/run the .*migration/);
+  });
+
+  it('refuses a v0.3.1 session that never started (no identity at all) with the same floor, and says what a hand-written session needs', () => {
+    let caught: unknown;
+    try {
+      parseDeskManifest(PRE_CUTOVER_UNSTARTED_SESSION);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ManifestValidationError);
+    const message = (caught as Error).message;
+    expect(message).toContain('session legacy has no sessionId');
+    expect(message).toContain('boot Desk v0.3.2 once');
+    expect(message).toContain('does not migrate');
+    // A hand-written session is the other way to arrive here; the operator
+    // must be told the grammar, not sent to a release they may not need.
+    expect(message).toContain('^[a-z][a-z0-9-]{2,63}$');
+  });
+
+  it('a present but malformed sessionId is a bad id, not a pre-cutover store — no floor is named', () => {
+    let caught: unknown;
+    try {
       parseDeskManifest(`
 groups:
   - id: main
     sessions:
-      - name: legacy
+      - name: shouty
+        sessionId: Not-Valid
         cwd: /workspace
         command: bash
-        tmuxSession: agentdesk-main-legacy
-`)
-    ).toThrow(/sessionId/);
+`);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ManifestValidationError);
+    expect((caught as Error).message).toContain('session shouty has "Not-Valid" sessionId');
+    expect((caught as Error).message).not.toContain('v0.3.2');
   });
 
-  it('accepts legacy identity only through the migration parser', () => {
-    const legacy = parseLegacyDeskManifest(`
+  it('collectSessions walks top-level groups then projects, in order', () => {
+    const manifest = parseDeskManifest(`
 groups:
   - id: main
     sessions:
-      - name: legacy
+      - name: one
+        sessionId: one
         cwd: /workspace
         command: bash
-        tmuxSession: agentdesk-main-legacy
+projects:
+  - id: proj
+    label: proj
+    cwd: /workspace
+    groups:
+      - id: g
+        sessions:
+          - name: two
+            sessionId: two
+            command: bash
+          - name: three
+            sessionId: three
+            command: bash
 `);
-    expect(legacy.groups[0].sessions[0]).toMatchObject({
-      name: 'legacy',
-      tmuxSession: 'agentdesk-main-legacy'
-    });
+    expect(collectSessions(manifest).map((session) => session.sessionId)).toEqual(['one', 'two', 'three']);
   });
 
   it('rejects duplicate runtime sessionIds before building specs', () => {
@@ -530,7 +615,12 @@ projects:
     expect(commands[1]).toContain("DESK_SESSION_ID='claude'");
     expect(commands[1]).not.toContain('DESK_TMUX_SESSION');
     expect(commands[1]).not.toContain('tmux display-message');
-    expect(commands[1]).toContain("DESK_AGENT='claude' claude");
+    // Claude's terminal defaults to the classic renderer with mouse capture
+    // off so desk's xterm owns scroll/selection/right-click; the env sits
+    // between the Desk identity and the binary.
+    expect(commands[1]).toContain(
+      "DESK_AGENT='claude' CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 CLAUDE_CODE_DISABLE_MOUSE=1 claude"
+    );
     // `--settings` points at DESK'S OWN file, never at the operator's. The
     // retired form inlined a JSON blob carrying terminal-bell settings and
     // hooks of a schema the route now rejects; this one names a file Desk

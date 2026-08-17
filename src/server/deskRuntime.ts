@@ -1,7 +1,8 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
-import { disposeChannelsRuntime, initChannelsRuntime } from './channelsApi.js';
+import { disposeChannelsRuntime, initChannelsRuntime } from './channels/index.js';
+import type { ChannelsRuntimeOwner } from './channels/index.js';
 import type { DeskApiHost } from './deskApiTypes.js';
 import type { DeskServices } from './deskServices.js';
 import type { DisposerRegistry } from './disposerRegistry.js';
@@ -13,7 +14,7 @@ import { startSystemSampling, stopSystemSampling } from './systemSampler.js';
 import { installTerminalDaemonProxy } from './terminalDaemonProxy.js';
 import {
   daemonChildEnv,
-  resolveAtchBinPath,
+  resolveMoorBinPath,
   resolveDaemonCommand,
   startDaemonSupervisor
 } from './runtime/daemonSupervisor.js';
@@ -23,10 +24,11 @@ interface InstallDeskRuntimeOptions {
   services: DeskServices;
   plugins: DeskPlugin[];
   disposers: DisposerRegistry;
+  channelsOwner: ChannelsRuntimeOwner;
 }
 
 
-export function installDeskRuntime({ host, services, plugins, disposers }: InstallDeskRuntimeOptions): void {
+export function installDeskRuntime({ host, services, plugins, disposers, channelsOwner }: InstallDeskRuntimeOptions): void {
   const { httpServer } = host;
   if (httpServer) {
     disposers.bind(httpServer);
@@ -62,7 +64,7 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
           command: resolveDaemonCommand(import.meta.url),
           env: {
             ...childEnv,
-            DESK_ATCH_BIN: resolveAtchBinPath(import.meta.url)
+            DESK_MOOR_BIN: resolveMoorBinPath(import.meta.url)
           },
           healthUrl: `http://${childEnv.DESK_DAEMON_HOST}:${childEnv.DESK_DAEMON_PORT}/control/health`
         });
@@ -107,6 +109,11 @@ export function installDeskRuntime({ host, services, plugins, disposers }: Insta
 
   startSystemSampling();
   disposers.add(stopSystemSampling);
-  initChannelsRuntime({ agentSurfaceBroker: services.agentSurfaceBroker });
+  initChannelsRuntime({
+    agentSurfaceBroker: services.agentSurfaceBroker,
+    owner: channelsOwner,
+    // Plugin order is provider order: each wraps the previous result.
+    providers: plugins.map((plugin) => plugin.channels).filter((entry) => entry !== undefined)
+  });
   disposers.add(disposeChannelsRuntime);
 }

@@ -42,8 +42,12 @@ describe('source-backed installer contract', () => {
       'ensure_macos_tooling',
       'resolve_release_version',
       'download_release_metadata',
+      'require_matching_release_generation',
       'validate_install_manifest',
+      'validate_staged_moor_pin',
       'download_and_verify_asset',
+      'download_and_verify_moor',
+      'probe_moor_binary',
       'ensure_node_toolchain',
       'ensure_bun_toolchain',
       'acquire_install_lock',
@@ -58,6 +62,11 @@ describe('source-backed installer contract', () => {
     expect(source).not.toMatch(/tmux/i);
     expect(source).not.toMatch(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/u);
     expect(source).toContain('PATH="$root/bin:$PATH" "$root/bin/npm" --version');
+    expect(source).toContain('"$NODE_ROOT/bin/npm" run build:application');
+    expect(source).not.toContain('"$NODE_ROOT/bin/npm" run build:distribution');
+    expect(source).not.toMatch(/cargo\s+(?:build|install)/);
+    expect(source).not.toContain('vendor/moor');
+    expect(source).toContain('curl -fsSL --retry 3 --connect-timeout 30 --max-time 60');
   });
 
   it('has valid Bash syntax', () => {
@@ -74,16 +83,16 @@ describe('source-backed installer contract', () => {
     expect(existsSync(value.launcher())).toBe(false);
   });
 
-  it('rejects native Windows explicitly', () => {
+  it('rejects any operating system outside the Linux/macOS support policy', () => {
     const value = fixture();
     const uname = join(value.binDir, 'uname');
-    writeFileSync(uname, '#!/usr/bin/env bash\nprintf "MINGW64_NT-10.0\\n"\n');
+    writeFileSync(uname, '#!/usr/bin/env bash\nprintf "Plan9\\n"\n');
     chmodSync(uname, 0o755);
 
     const result = value.run();
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/native Windows.*unsupported/i);
+    expect(result.stderr).toMatch(/unsupported operating system.*macOS and Linux/i);
   });
 
   it('rejects noncanonical install paths before network or activation', () => {
@@ -165,6 +174,50 @@ describe('source-backed installer contract', () => {
     expect(readFileSync(log, 'utf8')).toMatch(/update|install/);
     expect(existsSync(`${value.deskHome}.install-lock`)).toBe(false);
   });
+
+  it('provisions ripgrep with the other host capabilities and probes for it (desk#70 item 6)', () => {
+    // Search has exactly one engine, ripgrep. The installer used to provision
+    // git/python/make/compiler and not rg, so an rg-less host was a real,
+    // supported population on which search silently ran a weaker walker. The
+    // walker is gone; the installer now owns rg like every other host
+    // requirement. Witnessed on the actual command line handed to the package
+    // manager, not on the script text.
+    const value = fixture();
+    const log = join(value.root, 'package-manager.log');
+    const git = join(value.binDir, 'git');
+    const packageManager = join(value.binDir, process.platform === 'darwin' ? 'brew' : 'apt-get');
+    const sudo = join(value.binDir, 'sudo');
+    writeFileSync(git, '#!/usr/bin/env bash\nprintf "git version 2.20.0\\n"\n');
+    writeFileSync(
+      packageManager,
+      '#!/usr/bin/env bash\n[ "${1:-}" = "shellenv" ] && exit 0\nprintf "%s\\n" "$*" >> "$PACKAGE_LOG"\n[ "${1:-}" = "update" ] && exit 0\nexit 73\n'
+    );
+    writeFileSync(sudo, '#!/usr/bin/env bash\nexec "$@"\n');
+    chmodSync(git, 0o755);
+    chmodSync(packageManager, 0o755);
+    chmodSync(sudo, 0o755);
+
+    const result = value.run({ env: { PACKAGE_LOG: log } });
+
+    expect(result.status).toBe(73);
+    const installLine = readFileSync(log, 'utf8')
+      .split('\n')
+      .find((line) => /install/.test(line));
+    expect(installLine).toMatch(/\bripgrep\b/);
+
+    const source = readFileSync(INSTALLER, 'utf8');
+    expect(source).toContain('have rg || MISSING_CAPABILITIES+=("ripgrep")');
+    // Every package manager the installer speaks provisions rg by its distro
+    // name; a manager that omitted it would leave that host without search
+    // and with no installer step to blame.
+    const start = source.indexOf('install_missing_packages() {');
+    const body = source.slice(start, source.indexOf('\n}\n', start));
+    const packageLists = body.split('\n').filter((line) => /^\s*packages=\(/.test(line));
+    expect(packageLists).toHaveLength(6); // brew, apt-get, dnf|yum, pacman, zypper, apk
+    for (const line of packageLists) {
+      expect(line).toMatch(/\bripgrep\b/);
+    }
+  });
 });
 
 describe('installer lifecycle', () => {
@@ -179,9 +232,20 @@ describe('installer lifecycle', () => {
     expect(readlinkSync(join(value.deskHome, 'current'))).toMatch(/^releases\/v0\.3\.0\//);
     expect(value.releaseInstances()).toHaveLength(1);
     const release = realpathSync(join(value.deskHome, 'current'));
-    const atch = spawnSync(join(release, 'libexec', 'atch'), ['--version'], { encoding: 'utf8' });
-    expect(atch.status, atch.stderr).toBe(0);
-    expect(atch.stdout).toMatch(/^atch - version 1\.6-bb1,/);
+    expect(readFileSync(join(release, 'libexec', 'moor'))).toEqual(readFileSync(value.moorAssetPath()));
+    const moor = spawnSync(join(release, 'libexec', 'moor'), ['--version'], { encoding: 'utf8' });
+    expect(moor.status, moor.stderr).toBe(0);
+    expect(moor.stdout.trim()).toBe('moor 0.1.0');
+    expect(JSON.parse(readFileSync(join(release, '.desk-release'), 'utf8'))).toMatchObject({
+      schemaVersion: 2,
+      moor: {
+        repository: value.moorPin.repository,
+        version: value.moorPin.version,
+        commit: value.moorPin.commit,
+        target: value.target.moorTarget,
+        ...value.moorPin.targets[value.target.moorTarget]
+      }
+    });
 
     const help = spawnSync(value.launcher(), ['help'], {
       env: { ...process.env, DESK_HOME: value.deskHome },
@@ -191,15 +255,188 @@ describe('installer lifecycle', () => {
     expect(help.stdout).toContain('Desk fixture help');
   }, 20_000);
 
-  it('rejects a non-runnable bundled atch before activating the release', () => {
+  it('uses chmod arguments accepted by BSD hosts', () => {
     const value = fixture();
-    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_ATCH_MODE: 'broken' } });
+    const chmod = join(value.binDir, 'chmod');
+    writeFileSync(
+      chmod,
+      `#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  if [ "$argument" = "--" ]; then
+    printf 'BSD chmod does not accept -- here\\n' >&2
+    exit 64
+  fi
+done
+exec /bin/chmod "$@"
+`
+    );
+    chmodSync(chmod, 0o755);
+
+    const result = value.run();
+
+    expect(result.status, result.stderr).toBe(0);
+  }, 20_000);
+
+  it('probes target-qualified Moor bytes under the canonical executable basename', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'argv0-sensitive' } });
+
+    expect(result.status, result.stderr).toBe(0);
+    const release = realpathSync(join(value.deskHome, 'current'));
+    expect(readFileSync(join(release, 'libexec', 'moor'))).toEqual(readFileSync(value.moorAssetPath()));
+  }, 20_000);
+
+  it('rejects a non-runnable bundled moor before activating the release', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'broken' } });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/bundled atch.*version probe/i);
+    expect(result.stderr).toMatch(/Moor.*exact version probe/i);
     expect(existsSync(value.launcher())).toBe(false);
     expect(value.releaseInstances()).toHaveLength(0);
   }, 20_000);
+
+  it('rejects a Moor asset that reports the wrong version before activation', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'wrong-version' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*exact version probe/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('bounds the Moor identity probe and leaves no activated release when it hangs', () => {
+    const value = fixture();
+    const started = Date.now();
+    const result = value.run({ env: { DESK_INSTALLER_FIXTURE_MOOR_MODE: 'hanging' } });
+
+    expect(result.status).not.toBe(0);
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(result.stderr).toMatch(/Moor.*exact version probe/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 12_000);
+
+  it('checks the Moor byte length before SHA-256 and activation', () => {
+    const value = fixture();
+    appendFileSync(value.moorAssetPath(), 'tampered');
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*size mismatch/i);
+    expect(result.stderr).not.toMatch(/Moor.*checksum mismatch/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('rejects same-length Moor bytes whose SHA-256 differs', () => {
+    const value = fixture();
+    const path = value.moorAssetPath();
+    const bytes = readFileSync(path);
+    bytes[bytes.length - 2] ^= 1;
+    writeFileSync(path, bytes);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*checksum mismatch/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('rejects a Desk manifest that disagrees with the committed Moor pin', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: { targets: Record<string, { sha256: string }> };
+    };
+    manifest.moor.targets[value.target.moorTarget].sha256 = '0'.repeat(64);
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*committed pin/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('refuses any release closure other than full-matrix', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: { coverage: Record<string, unknown> };
+    };
+    manifest.moor.coverage = {
+      requiredClosure: 'partial',
+      unverified: []
+    };
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/full-matrix/i);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('refuses a true legacy v1 Moor pin that cannot state its coverage (desk#60)', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: Record<string, unknown>;
+    };
+    manifest.moor.schemaVersion = 1;
+    delete manifest.moor.coverage;
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(existsSync(value.launcher())).toBe(false);
+    expect(value.releaseInstances()).toHaveLength(0);
+  }, 20_000);
+
+  it('rejects a missing Moor target even when the Desk checksums are updated', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as {
+      moor: { targets: Record<string, unknown> };
+    };
+    delete manifest.moor.targets['aarch64-apple-darwin'];
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/invalid Moor target set/i);
+    expect(existsSync(value.launcher())).toBe(false);
+  });
+
+  it('rejects a caller-controlled network origin for Moor candidate bytes', () => {
+    const value = fixture();
+    const result = value.run({ env: { DESK_MOOR_RELEASE_BASE_URL: 'https://invalid.example/moor' } });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor.*only.*absolute local file/i);
+    expect(existsSync(value.launcher())).toBe(false);
+  });
+
+  it('rejects build-time Moor tampering and preserves the active release', () => {
+    const value = fixture();
+    const installed = value.run();
+    expect(installed.status, installed.stderr).toBe(0);
+    const activeTarget = readlinkSync(join(value.deskHome, 'current'));
+
+    const result = value.run({
+      env: { DESK_INSTALLER_FIXTURE_BUILD_MOOR_MODE: 'tamper' }
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Moor checksum mismatch.*staged/i);
+    expect(readlinkSync(join(value.deskHome, 'current'))).toBe(activeTarget);
+    expect(value.releaseInstances()).toHaveLength(1);
+  }, 30_000);
 
   it('reinstalls the same version into a new immutable instance and retains the previous one', () => {
     const value = fixture();
@@ -310,6 +547,27 @@ describe('installer lifecycle', () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/manifest is invalid/i);
+    expect(existsSync(value.launcher())).toBe(false);
+  });
+
+  // Every Desk release published so far carries the pre-Moor manifest: schemaVersion 1
+  // and no `moor` key. The installer served from `main` speaks schemaVersion 2 only, so
+  // it meets that shape on every real host. Reported as issue #37. A generation gap is
+  // not corruption, and telling the operator the manifest is "invalid" sends them
+  // hunting a tampered release instead of the installer that ships with their release.
+  it('names the installer/release generation gap instead of calling a pre-Moor manifest invalid', () => {
+    const value = fixture();
+    const manifest = value.readManifest() as Record<string, unknown>;
+    delete manifest.moor;
+    manifest.schemaVersion = 1;
+    value.writeManifest(manifest);
+
+    const result = value.run();
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/schemaVersion 1/);
+    expect(result.stderr).toMatch(/requires 2/);
+    expect(result.stderr).toContain('raw.githubusercontent.com/BrainyBlaze/desk/v0.3.0/install.sh');
     expect(existsSync(value.launcher())).toBe(false);
   });
 

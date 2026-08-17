@@ -90,7 +90,7 @@ WS /ws/terminal
 browser tab carries multiple visible terminal surfaces. Hidden surfaces
 unsubscribe; reveal resubscribes and receives a fresh snapshot before live
 output. Frames are channel- and generation-fenced through the supervised
-terminal daemon to the session's atch master.
+terminal daemon to the session's Moor holder.
 
 ## Filesystem routes
 

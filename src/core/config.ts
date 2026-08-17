@@ -1,17 +1,26 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { withFileLock, withFileLockSync } from '../shared/fileLock.js';
-import { mintSessionId } from '../shared/migration/index.js';
+import { mintSessionId } from '../shared/sessionId.js';
 import {
   isProviderSessionProvider,
   isValidProviderSessionId,
   type ProviderSessionProvider
 } from '../shared/providerSessionIdentity.js';
-import { buildSessionSpecs, parseDeskManifest } from './manifest.js';
-import { collectSessions } from './sessionIdentity.js';
+import { buildSessionSpecs, collectSessions, parseDeskManifest } from './manifest.js';
 import type { DeskGroup, DeskGroupLayout, DeskLayoutSizes, DeskManifest, DeskSession, DeskSessionDraft, SessionSpec } from './types.js';
 
 export class ManifestMutationError extends Error {
@@ -136,15 +145,32 @@ function writeManifestSource(path: string, source: string): void {
   if (source.trim() === '') {
     throw new Error('refusing to write an empty desk manifest');
   }
-  mkdirSync(dirname(path), { recursive: true });
-  // Atomic write: a crash mid-write leaves the temp file, never a truncated
-  // or 0-byte manifest. rename(2) is atomic on the same filesystem.
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
+  // A replacement is accepted only after both its content and directory entry
+  // are durable. rename(2) alone provides atomicity, not power-loss durability.
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  let fd: number | undefined;
   try {
-    writeFileSync(tmp, source, { flag: 'wx' });
+    fd = openSync(tmp, 'wx');
+    writeFileSync(fd, source);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
     renameSync(tmp, path);
+    fsyncDirectory(directory);
   } finally {
+    if (fd !== undefined) closeSync(fd);
     rmSync(tmp, { force: true });
+  }
+}
+
+function fsyncDirectory(path: string): void {
+  const fd = openSync(path, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -677,9 +703,12 @@ function materializeAddedSession(manifest: DeskManifest, draft: DeskSessionDraft
 function managedProviderFor(
   session: Pick<DeskSessionDraft, 'agent' | 'command'>
 ): ProviderSessionProvider | undefined {
-  if (session.command !== undefined) return undefined;
-  const provider = session.agent ?? 'codex';
-  return isProviderSessionProvider(provider) ? provider : undefined;
+  // A session with a command, or with no agent at all, launches as a plain
+  // shell (see manifest.ts): it is managed by no provider and can resume
+  // nothing. Presuming codex here was a fossil of codex-as-the-default-agent
+  // acted on as fact.
+  if (session.command !== undefined || session.agent === undefined) return undefined;
+  return isProviderSessionProvider(session.agent) ? session.agent : undefined;
 }
 
 function cwdMatches(candidate: string, target: string): boolean {

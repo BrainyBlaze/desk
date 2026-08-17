@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildDeskSnapshotFromManifest } from '../src/server/snapshot';
+import { FileProviderSessionContinuityLedger } from '../src/server/runtime/providerSessionContinuityLedger.js';
 
 function writeJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -146,7 +147,10 @@ groups:
         'running-native',
         'running-custom'
       ]),
-      { homeDir: '/workspace' }
+      {
+        homeDir: '/workspace',
+        manifestPath: '/workspace/.config/desk/desk.yml'
+      }
     );
 
     expect(snapshot.continuity.issues).toEqual([
@@ -231,7 +235,10 @@ groups:
         sessionId: sample-agent
 `,
         new Set(['sample-agent']),
-        { homeDir }
+        {
+          homeDir,
+          manifestPath: join(homeDir, '.config', 'desk', 'desk.yml')
+        }
       );
 
       expect(snapshot.view.groups[0]?.sessions[0]?.state).toBe('running');
@@ -248,6 +255,73 @@ groups:
       ]);
     } finally {
       rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('includes durable provider rebind blockers for Codex and Claude', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-snapshot-provider-rebind-'));
+    const manifestPath = join(root, 'desk.yml');
+    const ledger = new FileProviderSessionContinuityLedger(
+      join(root, '_engine', 'provider-session-continuity.ndjson')
+    );
+    try {
+      ledger.stageTransition({
+        deskSessionId: 'codex-agent',
+        provider: 'codex',
+        generation: 2,
+        expectedProviderSessionId: '11111111-1111-4111-8111-111111111111',
+        observedProviderSessionId: '22222222-2222-4222-8222-222222222222',
+        evidencePath: '/workspace/codex/session.jsonl'
+      });
+      ledger.stageTransition({
+        deskSessionId: 'claude-agent',
+        provider: 'claude',
+        generation: 2,
+        expectedProviderSessionId: '33333333-3333-4333-8333-333333333333',
+        observedProviderSessionId: '44444444-4444-4444-8444-444444444444',
+        evidencePath: '/workspace/claude/session.jsonl'
+      });
+      ledger.close();
+
+      const snapshot = buildDeskSnapshotFromManifest(
+        `
+groups:
+  - id: main
+    sessions:
+      - name: codex-agent
+        cwd: /workspace/codex
+        agent: codex
+        resume: 11111111-1111-4111-8111-111111111111
+        sessionId: codex-agent
+      - name: claude-agent
+        cwd: /workspace/claude
+        agent: claude
+        resume: 33333333-3333-4333-8333-333333333333
+        sessionId: claude-agent
+`,
+        new Set(),
+        { homeDir: root, manifestPath, daemonHomeRoot: root }
+      );
+
+      expect(snapshot.continuity.issues).toEqual([
+        expect.objectContaining({
+          sessionId: 'codex-agent',
+          provider: 'codex',
+          code: 'provider-session-rebind-required',
+          action:
+            'desk rebind-provider-session codex-agent --to 22222222-2222-4222-8222-222222222222 --force'
+        }),
+        expect.objectContaining({
+          sessionId: 'claude-agent',
+          provider: 'claude',
+          code: 'provider-session-rebind-required',
+          action:
+            'desk rebind-provider-session claude-agent --to 44444444-4444-4444-8444-444444444444 --force'
+        })
+      ]);
+    } finally {
+      ledger.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

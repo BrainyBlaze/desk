@@ -55,7 +55,43 @@ const degradedSchema = z.strictObject({
 const exitSchema = z.strictObject({
   at: nonNegativeSequenceSchema,
   code: z.number().int().nullable(),
-  signal: nonBlank(64).nullable()
+  signal: nonBlank(64).nullable(),
+  // desk#59: the feed carries the exit's provenance, so a durable event says
+  // whether the child's death was observed or the session was torn down — and
+  // by which call site. Optional only for events journalled before this field
+  // existed: their provenance is genuinely unknown and is not invented here.
+  origin: z.enum(['observed', 'retired']).optional(),
+  reason: nonBlank(120).nullable().optional(),
+  /** desk#59 — the raw ending, carried so a durable feed event can name it. */
+  outcome: z
+    .discriminatedUnion('kind', [
+      z.strictObject({
+        kind: z.literal('exited'),
+        code: z.number().int(),
+        method: z.enum(['none', 'graceful', 'forced'])
+      }),
+      z.strictObject({
+        kind: z.literal('signalled'),
+        signal: z.number().int(),
+        method: z.enum(['none', 'graceful', 'forced'])
+      }),
+      z.strictObject({ kind: z.literal('unknown') })
+    ])
+    .optional(),
+  /** desk#59 — observation failure, independent of the retire reason. */
+  diagnostic: z
+    .union([
+      z.null(),
+      z.strictObject({
+        code: z.enum([
+          'moor-event-drain-unobservable',
+          'moor-event-observer-terminal',
+          'moor-final-output-truncated'
+        ]),
+        detail: nonBlank(200).optional()
+      })
+    ])
+    .optional()
 });
 
 const agentBlockedEventSchema = z.strictObject({
@@ -310,16 +346,24 @@ export function projectTransitionToDeskEvents(
     });
   }
 
+  // desk#59: an exited→exited transition is the CORRECTION of a teardown
+  // placeholder by the holder's real exit. Filtering it out is how the cause of
+  // death stayed invisible; the operator must see the corrected record, so the
+  // event is emitted whenever the exit details actually changed.
+  const exitChanged =
+    transition.to.exit !== null &&
+    (transition.from === null ||
+      transition.from.exit === null ||
+      JSON.stringify(transition.from.exit) !== JSON.stringify(transition.to.exit));
   if (
     transition.from !== null &&
-    transition.from.lifecycle !== 'exited' &&
     transition.to.lifecycle === 'exited' &&
-    transition.to.exit !== null
+    exitChanged
   ) {
     events.push({
       ...common,
       kind: 'agent-exited',
-      exit: transition.to.exit
+      exit: transition.to.exit!
     });
   }
 

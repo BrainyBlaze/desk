@@ -8,6 +8,7 @@ import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/contro
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type EmulatorEvent } from '../src/shared/runtime/index.js';
 import { TerminalWsRouter, type WsConn } from '../src/server/runtime/terminalWsRouter.js';
 import { BpError, BpFrameType, decodeBpFrame, encodeBpFrame, type BpFrame } from '../src/shared/browserProtocol/index.js';
+import { describeBpError } from '../src/web/terminalBpError.js';
 
 const createdEmus: FakeEmu[] = [];
 class FakeEmu implements EmulatorPort {
@@ -61,7 +62,10 @@ describe('terminal WS router (§7.4)', () => {
       ledger: new GenerationLedger(new InMemoryGenerationLedger()),
       supervisor: new WorkerSupervisor(DEFAULT_SUPERVISOR_CONFIG),
       emulatorFactory: { create: () => new FakeEmu() },
-      now: () => 1000
+      now: () => 1000,
+      // This router-only suite has no durable Moor store; acknowledge the
+      // production-required recovery gate explicitly.
+      onLateMoorAdoption: async () => true
     });
     router.sessions.ensure('s1', { rows: 40, cols: 120 });
     router.sessions.ensure('s2', { rows: 40, cols: 120 });
@@ -88,12 +92,13 @@ describe('terminal WS router (§7.4)', () => {
     router.onWsFrame(b, subscribe('s1'));
     expect(a.acks()).toEqual([1]);
     expect(b.acks()).toEqual([2]);
-    // B may not drive A's channel 1 → rejected; A may drive its own → accepted.
+    // B may not drive A's channel 1 → BAD_CHANNEL. A owns it, but this unit
+    // has no attached controller link, so the honest result is INPUT_UNAVAILABLE.
     router.onWsFrame(b, input(1, 'x'));
     expect(b.errors()).toContain(BpError.BAD_CHANNEL);
     a.frames.length = 0;
     router.onWsFrame(a, input(1, 'x'));
-    expect(a.errors()).toHaveLength(0); // owner accepted
+    expect(a.errors()).toEqual([BpError.INPUT_UNAVAILABLE]);
   });
 
   it('INPUT on an unknown/stale channel is rejected', () => {
@@ -101,6 +106,17 @@ describe('terminal WS router (§7.4)', () => {
     router.onWsFrame(ws, subscribe('s1')); // owns channel 1
     router.onWsFrame(ws, input(999, 'x')); // never allocated
     expect(ws.errors()).toContain(BpError.BAD_CHANNEL);
+  });
+
+  it('reports truthful browser text when a valid channel has no controller link', () => {
+    const ws = new FakeWs();
+    router.onWsFrame(ws, subscribe('s1'));
+    router.onWsFrame(ws, input(1, 'not-silently-dropped'));
+    expect(ws.errors()).toContain(BpError.INPUT_UNAVAILABLE);
+    expect(ws.errors()).not.toContain(BpError.BAD_CHANNEL);
+    expect(describeBpError(ws.errors().at(-1)!)).toBe(
+      'terminal input is unavailable while the session reconnects or exits'
+    );
   });
 
   it('WS close unsubscribes its channels; later INPUT on them is rejected', () => {
@@ -148,6 +164,63 @@ describe('terminal WS router (§7.4)', () => {
     expect(a.errors()).toHaveLength(0); // owner → accepted
     router.onWsFrame(b, visibility(1, false)); // non-owner
     expect(b.errors()).toContain(BpError.BAD_CHANNEL);
+  });
+
+  // ---- desk#68: a closing connection removes its channels in BULK -----------
+  // The three tests below assert on the emulator's resize sequence, which is
+  // written by the same single writer as the master resize (commandOwnerSize):
+  // this unit has no attached master link, so the emulator is the observable.
+  const sized = (sessionId: string, surfaceId: string, rows: number, cols: number) =>
+    encodeBpFrame({ type: BpFrameType.SUBSCRIBE, sessionId, surfaceId, rows, cols });
+
+  it('desk#68: closing a WS with two channels elects at most once, never through the dying sibling', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, sized('s1', 'cell-one', 48, 95)); // channel 1 — owner
+    router.onWsFrame(a, sized('s1', 'cell-two', 41, 137)); // channel 2 — observer, same conn
+    router.onWsFrame(b, sized('s1', 'cell-other', 30, 90)); // channel 3 — the true survivor
+    const emu = createdEmus[0]!;
+    const before = emu.resizes.length;
+
+    router.onWsClose(a);
+
+    // Exactly one command: the survivor's. Sequential removal would first
+    // promote dying channel 2 and command 41x137 through it.
+    expect(emu.resizes.slice(before)).toEqual([{ rows: 30, cols: 90 }]);
+    expect(emu.resizes).toEqual([
+      { rows: 48, cols: 95 },
+      { rows: 30, cols: 90 }
+    ]);
+  });
+
+  it('desk#68: a WS holding ALL channels closes — zero commands, size left alone', () => {
+    const a = new FakeWs();
+    router.onWsFrame(a, sized('s1', 'cell-one', 48, 95)); // owner
+    router.onWsFrame(a, sized('s1', 'cell-two', 41, 137)); // observer, same conn
+    const emu = createdEmus[0]!;
+    const before = emu.resizes.length;
+
+    router.onWsClose(a);
+
+    expect(emu.resizes.slice(before)).toEqual([]);
+    expect(emu.resizes).toEqual([{ rows: 48, cols: 95 }]);
+  });
+
+  it('desk#68: a close spanning two sessions elects independently per session', () => {
+    const a = new FakeWs();
+    const b = new FakeWs();
+    router.onWsFrame(a, sized('s1', 'one', 48, 95)); // s1 owner
+    router.onWsFrame(a, sized('s2', 'two', 41, 137)); // s2 owner
+    router.onWsFrame(b, sized('s1', 'other', 30, 90)); // s1 survivor
+
+    router.onWsClose(a);
+
+    expect(createdEmus[0]!.resizes).toEqual([
+      { rows: 48, cols: 95 },
+      { rows: 30, cols: 90 }
+    ]);
+    // s2 loses its only surface: no election, size left alone.
+    expect(createdEmus[1]!.resizes).toEqual([{ rows: 41, cols: 137 }]);
   });
 
   it('QUERY_REPLY from the owner is dropped fail-closed (no error, no crash); a non-owner is rejected', () => {

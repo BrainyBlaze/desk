@@ -446,22 +446,7 @@ function TerminalCellImpl({
         onDrop={() => onDropSession(group, cell)}
       >
         <CellChrome focused={Boolean(cell.activeSession && cell.activeSession.spec.sessionId === selectedSessionId)}>
-          <div
-            className="cellTabs"
-            draggable={Boolean(cell.activeSession)}
-            onDragStart={(event: DragEvent<HTMLDivElement>) => {
-              if (!cell.activeSession) return;
-              event.dataTransfer.effectAllowed = 'move';
-              // Drag image = just the active tab pill (name + status), not the whole header.
-              const activeTab = event.currentTarget.querySelector('.cellTab.selected') as HTMLElement | null;
-              if (activeTab) {
-                const rect = activeTab.getBoundingClientRect();
-                event.dataTransfer.setDragImage(activeTab, event.clientX - rect.left, event.clientY - rect.top);
-              }
-              onDragSession(cell.activeSession.spec.sessionId);
-            }}
-            onDragEnd={() => onDragSession(null)}
-          >
+          <div className="cellTabs">
             {cell.sessions.map((session) => (
               <button
                 key={session.spec.sessionId}

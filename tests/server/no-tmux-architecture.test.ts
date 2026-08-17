@@ -6,7 +6,7 @@ import { SANCTIONS, scanFlagSurface, scanLegacySurface, type ScannedFile } from 
 const ROOT = join(__dirname, '..', '..');
 const SRC = join(ROOT, 'src');
 const DOCS = join(ROOT, 'docs');
-const VENDORED_ATCH = join(ROOT, 'vendor', 'atch');
+const VENDORED_MOOR = join(ROOT, 'vendor', 'moor');
 const SHIPPED_RUNTIME_FILES = [
   'Dockerfile',
   'install.sh',
@@ -17,11 +17,14 @@ const SHIPPED_RUNTIME_FILES = [
     .map((name) => `.github/workflows/${name}`)
 ].sort();
 const HISTORICAL_DOC_PAGES = new Set(['release-notes']);
+const HISTORICAL_DOC_FILES = new Set(['release-notes.md']);
 const RETIRED_DOC_RUNTIME = /\btmux\b|terminal[ -]broker|terminalBroker|capture-pane|send-keys|warm[- ]PTY/i;
+const RETIRED_ATCH_DOC_RUNTIME =
+  /(?:^|[^A-Za-z0-9_])atch(?:$|[^A-Za-z0-9_])|DESK_ATCH_BIN|libexec\/atch|vendor\/atch|atch-wire-v3/i;
 
 /**
  * The Track B terminal gate: tmux is gone. EVERY source is scanned — the
- * sanctioned migration modules included — and every legacy-token line must
+ * sanctioned refusal sites included — and every legacy-token line must
  * match its file's exact allowlist with a pinned per-file count. See
  * noTmuxScan.ts for the scanner; the mutant suite below proves the gate
  * rejects one extra legacy reference even inside a sanctioned mixed file.
@@ -74,6 +77,20 @@ function currentRuntimeDocs(): ScannedFile[] {
   }));
 }
 
+function currentMoorDocs(): ScannedFile[] {
+  const rels = [
+    'README.md',
+    ...readdirSync(DOCS)
+      .filter((name) => name.endsWith('.md') && !HISTORICAL_DOC_FILES.has(name))
+      .map((name) => `docs/${name}`),
+    'docs/images/architecture-runtime.svg'
+  ];
+  return rels.sort().map((rel) => ({
+    rel,
+    source: readFileSync(join(ROOT, rel), 'utf8')
+  }));
+}
+
 function scanRetiredDocRuntime(files: ScannedFile[]): string[] {
   return files.flatMap(({ rel, source }) =>
     source
@@ -82,6 +99,19 @@ function scanRetiredDocRuntime(files: ScannedFile[]): string[] {
       .filter(({ text }) => RETIRED_DOC_RUNTIME.test(text))
       .map(({ line }) => `${rel}:${line}`)
   );
+}
+
+function scanRetiredAtchDocs(files: ScannedFile[]): string[] {
+  return files.flatMap(({ rel, source }) => {
+    const violations = RETIRED_ATCH_DOC_RUNTIME.test(rel) ? [`${rel}:path`] : [];
+    return violations.concat(
+      source
+        .split('\n')
+        .map((text, index) => ({ text, line: index + 1 }))
+        .filter(({ text }) => RETIRED_ATCH_DOC_RUNTIME.test(text))
+        .map(({ line }) => `${rel}:${line}`)
+    );
+  });
 }
 
 describe('no-tmux architecture gate (Track B terminal state)', () => {
@@ -97,14 +127,18 @@ describe('no-tmux architecture gate (Track B terminal state)', () => {
     expect(scanLegacySurface(scannedShippedRuntime())).toEqual([]);
   });
 
-  it('keeps active public docs on the atch-native runtime', () => {
+  it('keeps active public docs on the moor-native runtime', () => {
     expect(scanRetiredDocRuntime(currentRuntimeDocs())).toEqual([]);
   });
 
-  it('deliberately keeps the pinned fork source outside the Desk vocabulary gate', () => {
-    expect(relative(ROOT, VENDORED_ATCH).split(sep).join('/')).toBe('vendor/atch');
-    expect(statSync(VENDORED_ATCH).isDirectory()).toBe(true);
-    expect(scannedTree().every(({ rel }) => !rel.startsWith('vendor/atch/'))).toBe(true);
+  it('keeps every current product document on Moor terminology and authority', () => {
+    expect(scanRetiredAtchDocs(currentMoorDocs())).toEqual([]);
+  });
+
+  it('deliberately keeps the pinned holder source outside the Desk vocabulary gate', () => {
+    expect(relative(ROOT, VENDORED_MOOR).split(sep).join('/')).toBe('vendor/moor');
+    expect(statSync(VENDORED_MOOR).isDirectory()).toBe(true);
+    expect(scannedTree().every(({ rel }) => !rel.startsWith('vendor/moor/'))).toBe(true);
   });
 });
 
@@ -118,10 +152,10 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
       source: `${realSource}\nconst leaked = spawnSync('tmux', ['kill-server']);\n`
     };
     const violations = scanLegacySurface([mutant]);
-    expect(violations.some((v) => v.includes('outside the migration allowlist'))).toBe(true);
+    expect(violations.some((v) => v.includes('outside the refusal allowlist'))).toBe(true);
   });
 
-  it('rejects an extra reference even when it reuses an allowed migration construct', () => {
+  it('rejects an extra reference even when it reuses an allowed refusal construct', () => {
     const mutant: ScannedFile = {
       rel: sanctionedRel,
       source: `${realSource}\n// one more tmuxSession mention than the sanction pins\n`
@@ -143,19 +177,45 @@ describe('no-tmux gate oracle (mutant rejection)', () => {
     ).toEqual(['docs/concepts-architecture.md:1']);
   });
 
-  it('pins the sanction table itself to the migration surface (no runtime file may be added silently)', () => {
+  it('rejects retired atch authority without matching attach or ATCH_GENERATION', () => {
+    expect(
+      scanRetiredAtchDocs([
+        {
+          rel: 'docs/concepts-architecture.md',
+          source: 'Attach uses ATCH_GENERATION only as a compatibility-negative carrier.'
+        }
+      ])
+    ).toEqual([]);
+    expect(
+      scanRetiredAtchDocs([
+        { rel: 'docs/concepts-architecture.md', source: 'Desk resolves DESK_ATCH_BIN.' }
+      ])
+    ).toEqual(['docs/concepts-architecture.md:1']);
+  });
+
+  it('rejects standalone retired atch authority in prose', () => {
+    expect(
+      scanRetiredAtchDocs([
+        { rel: 'docs/concepts-architecture.md', source: 'atch owns process lifetime.' }
+      ])
+    ).toEqual(['docs/concepts-architecture.md:1']);
+  });
+
+  it('rejects an empty orphan document whose path restores the retired wire contract', () => {
+    expect(scanRetiredAtchDocs([{ rel: 'docs/atch-wire-v3.md', source: '' }])).toEqual([
+      'docs/atch-wire-v3.md:path'
+    ]);
+  });
+
+  it('pins the sanction table itself to the three refusal sites (no runtime file may be added silently)', () => {
+    // The cutover migration and its transforms are gone (PR 78 deleted the
+    // trunk, this change the organs); what may still spell the retired shape
+    // is exactly the reader that refuses it.
     expect(Object.keys(SANCTIONS).sort()).toEqual(
       [
         'core/manifest.ts',
-        'core/sessionIdentity.ts',
-        'server/channelsEvents.ts',
-        'server/channelsProtocol.ts',
-        'server/cutoverStoreMigration.ts',
-        'shared/migration/channelsPausedTransform.ts',
-        'shared/migration/durabilityTransform.ts',
-        'shared/migration/index.ts',
-        'shared/migration/manifestTransform.ts',
-        'shared/migration/sessionId.ts'
+        'server/channels/delivery/events.ts',
+        'server/channels/protocol/format.ts'
       ].sort()
     );
   });

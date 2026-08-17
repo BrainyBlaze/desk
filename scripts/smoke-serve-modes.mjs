@@ -33,7 +33,7 @@ async function createIsolatedRuntimeEnvironment() {
   const daemonPort = await unusedPort();
   childEnvironment = {
     ...process.env,
-    DESK_ATCH_SOCKET_ROOT: join(smokeHome, 'atch'),
+    DESK_MOOR_SOCKET_ROOT: join(smokeHome, 'moor'),
     DESK_DAEMON_HOME: join(smokeHome, '.config', 'desk'),
     DESK_DAEMON_HOST: '127.0.0.1',
     DESK_DAEMON_PORT: String(daemonPort),
@@ -46,7 +46,7 @@ async function createIsolatedRuntimeEnvironment() {
     XDG_CONFIG_HOME: join(smokeHome, '.config'),
     XDG_DATA_HOME: join(smokeHome, '.local', 'share')
   };
-  delete childEnvironment.DESK_ATCH_BIN;
+  delete childEnvironment.DESK_MOOR_BIN;
   delete childEnvironment.DESK_CHANNELS_DEBUG;
   delete childEnvironment.DESK_CODEX_HOME;
   delete childEnvironment.DESK_DAEMON_CMD;
@@ -780,10 +780,6 @@ async function runSmoke(command, cwd) {
 
   await runStatusPropagationProbe(command, cwd, realpathSync(privateRuntime));
   console.log('smoke: private runtime status 37 propagated and the original artifact was restored');
-}
-
-if (process.platform === 'win32') {
-  throw new Error('smoke:serve-modes supports the macOS/Linux distribution targets only');
 }
 
 const options = parseOptions(process.argv.slice(2));

@@ -10,6 +10,8 @@ import {
 
 export const PROVIDER_SESSION_PROVIDERS = AGENT_PROVIDER_IDS;
 
+export const DESK_PROVIDER_LAUNCH_PROOF = 'DESK_PROVIDER_LAUNCH_PROOF';
+
 export type ProviderSessionProvider = AgentProviderId;
 
 type HookIdentityEntry = Extract<

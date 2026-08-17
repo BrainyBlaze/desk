@@ -3,14 +3,23 @@
 // browser tab. Pure module (src/shared): no server/web imports.
 //
 // Each WS binary message IS exactly one frame (WS preserves message boundaries),
-// so there is no magic/reassembly like the atch wire needs — just a 2-byte
+// so there is no magic/reassembly like the legacy wire needed — just a 2-byte
 // header (version, type) + a typed payload. A SUBSCRIBE assigns a compact u32
 // `channelId` (returned in SUBSCRIBE_ACK); every subsequent frame routes by
 // channelId instead of repeating the session/surface strings on the hot path.
 // Every DATA frame (SNAPSHOT/OUTPUT) carries generation+revision so a stale
 // producer's bytes are discardable at the browser.
 
-export const BP_VERSION = 1;
+/**
+ * v2: EXIT carries the holder's tagged ending (BpExitKind + per-kind payload)
+ * instead of one i32 code + u16 signal, so an unprovable ending travels as
+ * `unknown` rather than a fabricated code 0. Both ends ship in this repo and
+ * the browser is the only consumer, so the layout was replaced, not extended;
+ * a tab still running the v1 bundle rejects every v2 frame as BAD_VERSION (and
+ * the server its v1 frames) until it reloads — silence, never a mis-decoded
+ * ending shown as a code.
+ */
+export const BP_VERSION = 2;
 export const BP_HEADER_LEN = 2; // u8 version + u8 type
 
 /** Hard per-frame payload cap (bytes). The server chunks output/snapshots below this. */
@@ -19,7 +28,7 @@ export const BP_MAX_FRAME_BYTES = 1 << 20; // 1 MiB
 export const BP_SNAP_CHUNK = 256 * 1024;
 /** Input payload cap per frame. */
 export const BP_MAX_INPUT_BYTES = 1 << 16; // 64 KiB
-/** Query request/reply byte cap (parity with the atch wire MAX_TERMINAL_REPLY). */
+/** Query request/reply byte cap (parity with the legacy wire MAX_TERMINAL_REPLY). */
 export const BP_MAX_QUERY_BYTES = 256;
 /** channelId 0 is reserved for connection-level frames (HEARTBEAT, conn ERROR). */
 export const BP_CONN_CHANNEL = 0;
@@ -61,6 +70,31 @@ export const BpInputFlag = {
   BINARY: 1 << 0
 } as const;
 
+/**
+ * EXIT ending kinds (u8) — the tag of the holder's outcome exactly as moor
+ * reported it (the durable record's MoorExitOutcome). Each kind is followed by
+ * its own payload: EXITED -> u32 code + u8 method; SIGNALLED -> u32 signal +
+ * u8 method; UNKNOWN -> nothing. `code`/`signal` are moor's own u32 grammar
+ * fields. There is deliberately no numeric fallback: an ending the grammar
+ * could not prove is UNKNOWN on the wire, never a zero.
+ */
+export enum BpExitKind {
+  EXITED = 1,
+  SIGNALLED = 2,
+  UNKNOWN = 3
+}
+
+/**
+ * Whether the holder ASKED the child to end (u8), moor's `method` field. It
+ * rides both EXITED and SIGNALLED — "how it ended" and "did the holder ask" are
+ * two independent facts, and `none` is the child ending on its own.
+ */
+export enum BpExitMethod {
+  NONE = 0,
+  GRACEFUL = 1,
+  FORCED = 2
+}
+
 /** Browser-protocol error codes (u16), carried in ERROR frames. */
 export enum BpError {
   BAD_VERSION = 1,
@@ -70,5 +104,6 @@ export enum BpError {
   BAD_CHANNEL = 5,
   STALE_GENERATION = 6,
   STALE_LEASE = 7,
-  INTERNAL = 8
+  INTERNAL = 8,
+  INPUT_UNAVAILABLE = 9
 }

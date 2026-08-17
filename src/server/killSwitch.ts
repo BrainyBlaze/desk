@@ -5,7 +5,7 @@ import { retireNativeSession } from './runtime/nativeSessionControl.js';
 /**
  * Emergency kill switch.
  *
- * Retires EVERY manifest session's atch master via the daemon control plane
+ * Retires EVERY manifest session's moor holder via the daemon control plane
  * (bounded kill + socket-gone before each 200), then sweeps surviving agent
  * CLI processes by pid — detached hosts, orphans, or agents started outside
  * desk entirely. Deliberately broad: this is the "stop everything now"
@@ -52,7 +52,7 @@ export async function executeKillSwitch(): Promise<KillResult> {
     result.errors.push(`manifest unreadable: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const sessionId of sessionIds) {
-    const retired = await retireNativeSession(sessionId);
+    const retired = await retireNativeSession(sessionId, 'kill-switch');
     if (retired.ok) {
       result.killedSessions.push(sessionId);
     } else if (retired.error) {

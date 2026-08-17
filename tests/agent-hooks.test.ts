@@ -99,6 +99,8 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('producerInstanceId');
     expect(shim).toContain('producerSeq');
     expect(shim).toContain('providerSessionId');
+    expect(shim).toContain('launchProof: process.env.DESK_PROVIDER_LAUNCH_PROOF');
+    expect(shim).not.toContain('observation.launchProof');
     expect(shim).toContain('const DESK_PROVIDER_SESSION_ID_FIELDS = {');
     expect(shim).toContain('"claude":"session_id"');
     expect(shim).toContain('"codex":"session_id"');
@@ -343,6 +345,55 @@ describe('agent hook shim runtime (child process)', () => {
     expect(occurrences).toBe(1);
   });
 
+  it('copies launch proof only into the top-level request through the real shim', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desk-shim-proof-'));
+    try {
+      const shimPath = join(dir, 'shim.mjs');
+      const preloadPath = join(dir, 'capture.mjs');
+      const capturePath = join(dir, 'request.json');
+      writeFileSync(shimPath, buildDeskAgentEventShim());
+      writeFileSync(
+        preloadPath,
+        `import { writeFileSync } from 'node:fs';\n` +
+          `globalThis.fetch = async (_url, init) => {\n` +
+          `  writeFileSync(process.env.DESK_CAPTURE_PATH, String(init.body));\n` +
+          `  return new Response('{"ok":true}', { status: 200 });\n` +
+          `};\n`
+      );
+      const proof = 'A'.repeat(43);
+      const result = spawnSync(
+        process.execPath,
+        [shimPath, '--event', 'SessionStart', '--agent', 'codex'],
+        {
+          input: JSON.stringify({
+            session_id: '11111111-1111-4111-8111-111111111111'
+          }),
+          env: {
+            ...process.env,
+            NODE_OPTIONS: `--import=${preloadPath}`,
+            DESK_SESSION_ID: 'runtime-test',
+            DESK_SESSION_GENERATION: '7',
+            DESK_PROVIDER_LAUNCH_PROOF: proof,
+            DESK_PRODUCER_STATE_DIR: join(dir, 'producer-state'),
+            DESK_CAPTURE_PATH: capturePath
+          },
+          encoding: 'utf8',
+          timeout: 10_000
+        }
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      const request = JSON.parse(readFileSync(capturePath, 'utf8')) as {
+        launchProof?: string;
+        observation: Record<string, unknown>;
+      };
+      expect(request.launchProof).toBe(proof);
+      expect(request.observation.launchProof).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('sends NOTHING when the generation is missing — an unfenceable event is worse than silence', () => {
     const env = { ...process.env, DESK_DEBUG: '1' };
     delete env.DESK_SESSION_GENERATION;
@@ -391,6 +442,23 @@ describe('agent hook shim runtime (child process)', () => {
     expect(status).toBe(0);
     // If the env won, the shim would resolve `claude`, bind a producer, and
     // attempt a POST — which is exactly what this must not do.
+    expect(stderr).not.toContain('agent-event POST failed');
+  });
+
+  // A hand-written hook that names NO agent must read as unattributed. The
+  // ambient DESK_AGENT describes whichever session surrounds the process, not
+  // the producer of this hook: resolving it here would attribute a nested
+  // shell's or a helper's event to the surrounding session's agent — the exact
+  // mislabelling the argument-wins rule above exists to prevent, arriving
+  // through the back door the fallback left open.
+  it('does not attribute an agent-less hook to the ambient DESK_AGENT', () => {
+    const { status, stderr } = runShim(
+      { ...process.env, DESK_DEBUG: '1', DESK_AGENT: 'claude' },
+      ['--event', 'Stop']
+    );
+    expect(status).toBe(0);
+    // Resolving `claude` from the environment would bind a producer and try a
+    // POST; an unattributed hook must stay silent instead.
     expect(stderr).not.toContain('agent-event POST failed');
   });
 });

@@ -1,0 +1,268 @@
+// #9 integration seam: supervised moor holder launch. Desk must deliver ONE
+// 32-byte private launch record over an inherited fd named by the
+// invocation-derived <BASENAME>_LAUNCH_CHANNEL selector (decimal fd number,
+// spec §10.1.1), close it (EOF), and set the moor generation carriers —
+// <BASENAME>_GENERATION and the fixed MOOR_SESSION_GENERATION — plus Desk's
+// own opaque DESK_SESSION_GENERATION, all to the record's canonical decimal
+// generation. Verified against a real child process standing in for the moor
+// launcher.
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  DESK_SESSION_GENERATION,
+  MOOR_SESSION_GENERATION,
+  decodeMoorLaunchRecord,
+  moorGenerationEnvKey,
+  moorLaunchChannelEnvKey
+} from '../src/server/runtime/moorLaunchChannel.js';
+import { spawnMoorMaster } from '../src/server/runtime/moorSpawnMaster.js';
+import { DESK_PROVIDER_LAUNCH_PROOF } from '../src/shared/providerSessionIdentity.js';
+
+/**
+ * Fake moor launcher: finds the single *_LAUNCH_CHANNEL selector in its
+ * environment (deriving nothing — so the test can assert the exact key Desk
+ * produced), reads that fd to EOF, records what it saw (selector key + bytes +
+ * env carriers) as JSON, exits 0. Exits 1 if the selector is missing,
+ * ambiguous, or unreadable — so a stale second selector surviving the strip
+ * fails the spawn itself.
+ */
+const PROBE_SOURCE = `
+const { readFileSync, writeFileSync } = require('node:fs');
+const out = process.argv[2];
+try {
+  const launchKeys = Object.keys(process.env).filter((key) => key.endsWith('_LAUNCH_CHANNEL'));
+  if (launchKeys.length !== 1) {
+    throw new Error('expected exactly one *_LAUNCH_CHANNEL selector, got ' + JSON.stringify(launchKeys));
+  }
+  const selectorKey = launchKeys[0];
+  const selector = process.env[selectorKey];
+  const fd = Number(selector);
+  const record = readFileSync(fd); // reads to EOF — hangs unless Desk closed the write side
+  const generationKeys = Object.keys(process.env).filter((key) => key.endsWith('_GENERATION'));
+  const environment = {};
+  for (const key of generationKeys) environment[key] = process.env[key];
+  // The terminal identity/locale Desk composes for the child (desk#45/#51):
+  // captured from the SAME spawned process, so a refactor of the env spread
+  // cannot silently stop delivering it.
+  const terminalEnv = {};
+  for (const key of ['TERM', 'COLORTERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'LC_TERMINAL', 'LANG']) {
+    if (process.env[key] !== undefined) terminalEnv[key] = process.env[key];
+  }
+  const providerLaunchProof = process.env['${DESK_PROVIDER_LAUNCH_PROOF}'];
+  writeFileSync(out, JSON.stringify({
+    selectorKey,
+    selector,
+    recordHex: Buffer.from(record).toString('hex'),
+    recordLength: record.length,
+    environment,
+    terminalEnv,
+    providerLaunchProof
+  }));
+  process.exit(0);
+} catch (error) {
+  try { writeFileSync(out, JSON.stringify({ failed: String(error) })); } catch {}
+  process.exit(1);
+}
+`;
+
+interface ProbeReport {
+  terminalEnv?: Record<string, string>;
+  providerLaunchProof?: string;
+  selectorKey?: string;
+  selector?: string;
+  recordHex?: string;
+  recordLength?: number;
+  environment?: Record<string, string>;
+  failed?: string;
+}
+
+async function runProbe(
+  binPath: string,
+  generation: number,
+  extraEnv: NodeJS.ProcessEnv = {},
+  providerLaunchProof?: string
+): Promise<ProbeReport> {
+  const root = mkdtempSync(join(tmpdir(), 'moor-spawn-'));
+  try {
+    const reportPath = join(root, 'report.json');
+    writeFileSync(join(root, 'probe.cjs'), PROBE_SOURCE);
+    const { child } = spawnMoorMaster({
+      binPath: process.execPath,
+      argv0: binPath,
+      args: [join(root, 'probe.cjs'), reportPath],
+      generation,
+      env: { PATH: process.env.PATH ?? '', ...extraEnv },
+      ...(providerLaunchProof === undefined ? {} : { providerLaunchProof })
+    });
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code) => resolve(code ?? -1));
+    });
+    expect(exitCode).toBe(0);
+    return JSON.parse(readFileSync(reportPath, 'utf8')) as ProbeReport;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+describe('spawnMoorMaster', () => {
+  it('refuses an unsupervised generation before spawning', () => {
+    for (const generation of [0, 1, 1.5, -3]) {
+      expect(() =>
+        spawnMoorMaster({ binPath: '/usr/bin/true', args: [], generation })
+      ).toThrowError(/generation/i);
+    }
+  });
+
+  it('delivers exactly one 32-byte record over the derived selector fd and closes it', async () => {
+    const report = await runProbe('/opt/desk/libexec/moor', 7);
+    expect(report.failed).toBeUndefined();
+    expect(report.selectorKey).toBe('MOOR_LAUNCH_CHANNEL');
+    expect(report.recordLength).toBe(32);
+    const record = decodeMoorLaunchRecord(Buffer.from(report.recordHex!, 'hex'));
+    expect(record.generation).toBe(7);
+  });
+
+  it('sets every generation carrier to the canonical decimal record generation', async () => {
+    const report = await runProbe('/opt/desk/libexec/moor', 42);
+    expect(report.environment).toMatchObject({
+      [moorGenerationEnvKey('/opt/desk/libexec/moor')]: '42', // MOOR_GENERATION
+      [MOOR_SESSION_GENERATION]: '42',
+      [DESK_SESSION_GENERATION]: '42'
+    });
+    expect(report.environment!['MOOR_GENERATION']).toBe('42');
+  });
+
+  it('derives the invocation keys from the spawned basename, not a fixed name', async () => {
+    const report = await runProbe('/usr/local/bin/holderx', 9);
+    expect(report.selectorKey).toBe(moorLaunchChannelEnvKey('/usr/local/bin/holderx'));
+    expect(report.selectorKey).toBe('HOLDERX_LAUNCH_CHANNEL');
+    expect(report.environment!['HOLDERX_GENERATION']).toBe('9');
+    expect(report.environment!['MOOR_GENERATION']).toBeUndefined();
+    // The fixed child-visible carrier does NOT follow the invoked name.
+    expect(report.environment![MOOR_SESSION_GENERATION]).toBe('9');
+    expect(report.environment![DESK_SESSION_GENERATION]).toBe('9');
+  });
+
+  it('spawns through a real renamed symlink with matching argv0 identity', async () => {
+    // The env key must match what the HOLDER derives from its own argv[0]; spawn
+    // node through a differently-named symlink so basename-driven identity is real.
+    const root = mkdtempSync(join(tmpdir(), 'moor-symlink-'));
+    try {
+      const probePath = join(root, 'probe.cjs');
+      const reportPath = join(root, 'report.json');
+      writeFileSync(probePath, PROBE_SOURCE);
+      const linkPath = join(root, 'holderx');
+      symlinkSync(process.execPath, linkPath);
+      chmodSync(probePath, 0o644);
+      const { child, nonce } = spawnMoorMaster({
+        binPath: linkPath,
+        args: [probePath, reportPath],
+        generation: 11,
+        env: { PATH: process.env.PATH ?? '' }
+      });
+      expect(nonce).toHaveLength(16);
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', (code) => resolve(code ?? -1));
+      });
+      expect(exitCode).toBe(0);
+      const report = JSON.parse(readFileSync(reportPath, 'utf8')) as ProbeReport;
+      expect(report.environment!['HOLDERX_GENERATION']).toBe('11');
+      const record = decodeMoorLaunchRecord(Buffer.from(report.recordHex!, 'hex'));
+      expect(record.generation).toBe(11);
+      expect(Buffer.from(record.nonce).equals(Buffer.from(nonce))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps POSIX basename semantics: a literal backslash is a filename byte, not a separator', async () => {
+    const report = await runProbe('/opt/desk/moor\\alias', 17);
+    expect(report.environment!['MOOR_ALIAS_GENERATION']).toBe('17');
+    expect(report.environment!['ALIAS_GENERATION']).toBeUndefined();
+  });
+
+  it('strips exactly the known supervision carriers and preserves application env', async () => {
+    // Stale carriers from every era Desk has ever set — including the
+    // pre-decoupling DESK_MOOR_LAUNCH_CHANNEL: had it survived, the probe
+    // would see TWO *_LAUNCH_CHANNEL keys and fail the launch itself.
+    const report = await runProbe('/usr/local/bin/moor', 23, {
+      ATCH_GENERATION: '99',
+      MY_TOOL_GENERATION: '77',
+      MOOR_SESSION_GENERATION: '99',
+      DESK_SESSION_GENERATION: '99',
+      DESK_MOOR_LAUNCH_CHANNEL: '9'
+    });
+    expect(report.failed).toBeUndefined();
+    expect(report.selectorKey).toBe('MOOR_LAUNCH_CHANNEL');
+    expect(report.environment).toEqual({
+      MOOR_GENERATION: '23',
+      MY_TOOL_GENERATION: '77',
+      MOOR_SESSION_GENERATION: '23',
+      DESK_SESSION_GENERATION: '23'
+    });
+    expect(Number.parseInt(report.selector!, 10)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('scrubs ambient provider launch proof and injects only the explicit proof', async () => {
+    const inherited = await runProbe('/usr/local/bin/moor', 24, {
+      [DESK_PROVIDER_LAUNCH_PROOF]: 'ambient-forgery'
+    });
+    expect(inherited.providerLaunchProof).toBeUndefined();
+
+    const authorized = await runProbe(
+      '/usr/local/bin/moor',
+      25,
+      { [DESK_PROVIDER_LAUNCH_PROOF]: 'ambient-forgery' },
+      'daemon-issued-proof'
+    );
+    expect(authorized.providerLaunchProof).toBe('daemon-issued-proof');
+  });
+
+  it('delivers the composed terminal identity and locale to the child (desk#45, desk#51)', async () => {
+    // The verifier found the gap this closes: the old harness captured only
+    // *_GENERATION keys, so nothing asserted that the env Desk composes at the
+    // spawn seam actually REACHES the spawned process. This drives the real
+    // spawnMoorMaster with a daemonized-style environment (no TERM, no locale
+    // — exactly what systemd/docker/the installer hand a daemon).
+    const report = await runProbe('/opt/desk/libexec/moor', 31, {
+      TERM: undefined,
+      LANG: undefined,
+      LC_ALL: undefined,
+      LC_CTYPE: undefined
+    } as NodeJS.ProcessEnv);
+    expect(report.terminalEnv).toMatchObject({
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      TERM_PROGRAM: 'desk',
+      TERM_PROGRAM_VERSION: '0',
+      LC_TERMINAL: 'desk',
+      LANG: 'C.UTF-8'
+    });
+  });
+
+  it('never overrides a terminal identity or locale the operator already set', async () => {
+    const report = await runProbe('/opt/desk/libexec/moor', 33, {
+      TERM: 'screen-256color',
+      TERM_PROGRAM: 'iTerm.app',
+      TERM_PROGRAM_VERSION: '3.5.0',
+      LANG: 'de_DE.UTF-8'
+    });
+    expect(report.terminalEnv).toMatchObject({
+      TERM: 'screen-256color',
+      TERM_PROGRAM: 'iTerm.app',
+      TERM_PROGRAM_VERSION: '3.5.0',
+      LANG: 'de_DE.UTF-8'
+    });
+  });
+
+  it('names the selector fd it actually wired', async () => {
+    const report = await runProbe('/opt/desk/libexec/moor', 7);
+    expect(report.selector).toBeDefined();
+    expect(Number.parseInt(report.selector!, 10)).toBeGreaterThanOrEqual(3);
+    expect(String(Number.parseInt(report.selector!, 10))).toBe(report.selector);
+  });
+});
