@@ -24,6 +24,31 @@ import type { WindowReason } from './feedPosition.js';
  * agent can finish a turn with a queue still full — so a signature covering
  * only one of them would silently hide the other's transitions.
  */
+export type MemberDotState = 'running' | 'missing' | 'unbound';
+
+/**
+ * The presence dot for one channel-member row. Three states, because two were
+ * a lie: a member the desk cannot bind to any configured session — no
+ * `session:` in the manifest (hand-made, or a pre-cutover binding this version
+ * cannot resolve), or a session id no configured session carries — is not a
+ * session that FAILED. Painting it `missing` asserted a dead session that
+ * never existed. `missing` now means exactly one thing: this desk knows the
+ * session and it is not running. Anything unresolvable is `unbound` — an
+ * empty ring, the same "no evidence" language the agent status dot uses.
+ */
+export function memberDotState(
+  member: { type: string; sessionId?: string },
+  resolved: { state: string } | undefined
+): MemberDotState {
+  if (member.type === 'human') {
+    return 'running';
+  }
+  if (!member.sessionId || !resolved) {
+    return 'unbound';
+  }
+  return resolved.state === 'running' ? 'running' : 'missing';
+}
+
 export function lifecycleStateSignature(entry: LifecycleState): string {
   return [
     entry.sessionId,
