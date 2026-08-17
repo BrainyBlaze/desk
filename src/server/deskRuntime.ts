@@ -4,6 +4,7 @@ import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
 import { disposeChannelsRuntime, initChannelsRuntime } from './channels/index.js';
 import type { ChannelsRuntimeOwner } from './channels/index.js';
 import type { DeskApiHost } from './deskApiTypes.js';
+import { createPluginSettingsStore } from './pluginSettings.js';
 import type { DeskServices } from './deskServices.js';
 import type { DisposerRegistry } from './disposerRegistry.js';
 import { installFsWatchBridge } from './fsWatchBridge.js';
@@ -98,9 +99,14 @@ export function installDeskRuntime({ host, services, plugins, disposers, channel
   }
 
   for (const plugin of plugins) {
+    // One namespaced section of the manifest per plugin name; the store's
+    // file watch dies with the server.
+    const settings = createPluginSettingsStore(plugin.name);
+    disposers.add(() => settings.dispose());
     const dispose = plugin.setup?.({
       httpServer,
-      onClose: (fn) => disposers.add(fn)
+      onClose: (fn) => disposers.add(fn),
+      settings
     });
     if (dispose) {
       disposers.add(dispose);
