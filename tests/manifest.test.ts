@@ -525,7 +525,8 @@ projects:
     for (const i of [0, 1, 2]) {
       expect(commands[i]).toContain('desk_resume_status=$?');
       expect(commands[i]).toContain('exec "${SHELL:-/bin/sh}"');
-      expect(commands[i]).toContain('to start a fresh session');
+      expect(commands[i]).toContain('desk reset-provider-session');
+      expect(commands[i]).toContain('restart the pane to start fresh');
     }
   });
 

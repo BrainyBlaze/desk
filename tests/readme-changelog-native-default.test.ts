@@ -5,14 +5,17 @@ const readme = () => readFileSync('README.md', 'utf8');
 const changelog = () => readFileSync('CHANGELOG.md', 'utf8');
 
 describe('native UI product documentation', () => {
-  it('positions native chat as the default agent surface in the README', () => {
+  it('positions terminal cells as the default and native chat as the opt-in surface', () => {
     const source = readme();
 
     expect(source).toContain('Native chat UI for coding-agent fleets');
-    expect(source).toContain('SDK-backed agents open in the native chat surface by default');
-    expect(source).toContain('Terminal UI is available');
+    expect(source).toContain('Sessions open in durable terminal cells by default');
     expect(source).toContain('### Native agent UI');
     expect(source).toContain('switch the session to terminal UI');
+    // The code resolves an omitted uiMode to terminal for every agent
+    // (resolveSessionUiMode); the README must not drift back to claiming a
+    // native default.
+    expect(source).not.toContain('native chat surface by default');
     expect(source).not.toContain('New SDK-backed agents');
     expect(source).not.toContain('Terminal UI remains');
   });

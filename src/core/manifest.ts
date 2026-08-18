@@ -517,9 +517,13 @@ export function buildAgentCommand(
     // keep it open with the id and a way to start fresh (mirrors claude).
     const resumeArg = shellQuote(session.resume);
     args.push(launch.resumeFlag, resumeArg);
+    // The remedy must go through Desk, not a bare CLI relaunch: DESK_SESSION_ID
+    // and DESK_AGENT are prefix assignments on the failed launch only, so an
+    // agent started by hand from the fallback shell posts nothing — no state,
+    // no resume capture — and looks permanently silent to Desk.
     const diagnostics =
-      `printf 'desk: %s resume failed with exit %s; leaving pane open — run \`%s\` to start a fresh session\\n' ` +
-      `${shellQuote(session.agent)} "$desk_resume_status" ${shellQuote(session.agent)} >&2; ` +
+      `printf 'desk: %s resume failed with exit %s; leaving pane open — run \`desk reset-provider-session %s --force\` and restart the pane to start fresh\\n' ` +
+      `${shellQuote(session.agent)} "$desk_resume_status" ${shellQuote(sessionId)} >&2; ` +
       `printf 'desk: resume id: %s\\n' ${resumeArg} >&2;`;
     return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}; ${resumeFailureGuard('desk_resume_status', diagnostics)}`;
   }
