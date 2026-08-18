@@ -164,7 +164,7 @@ describe('provider session continuity coordinator', () => {
         kind: 'agent',
         provider,
         mode: 'terminal',
-        producer: provider === 'codex' ? 'codex-hooks' : 'claude-hooks'
+        producer: `${provider}-hooks`
       },
       ...(providerSessionId === undefined ? {} : { providerSessionId })
     });
@@ -440,6 +440,44 @@ describe('provider session continuity coordinator', () => {
     expect(manifestResume(manifestPath)).toBe(NEW_ID);
   });
 
+  it('authenticates a qwen identity by launch proof alone and stages the sentinel on mismatch', async () => {
+    const verifier = vi.fn();
+    const { root, manifestPath, daemon } = fixture('qwen', undefined, verifier);
+    const { generation, launchProof } = await launch(daemon, 'qwen');
+    const first = '33333333-3333-4333-8333-333333333333';
+    const second = '44444444-4444-4444-8444-444444444444';
+
+    const bound = await daemon.observeProviderSessionIdentity({
+      deskSessionId: 'alpha',
+      provider: 'qwen',
+      providerSessionId: first,
+      generation,
+      launchProof,
+      hook: 'SessionStart'
+    });
+    expect(bound).toMatchObject({ ok: true });
+    expect(readFileSync(manifestPath, 'utf8')).toContain(first);
+
+    const mismatch = await daemon.observeProviderSessionIdentity({
+      deskSessionId: 'alpha',
+      provider: 'qwen',
+      providerSessionId: second,
+      generation,
+      launchProof,
+      hook: 'SessionStart'
+    });
+    expect(mismatch).toMatchObject({ ok: false });
+    const ledger = readFileSync(
+      join(root, '_engine', 'provider-session-continuity.ndjson'),
+      'utf8'
+    );
+    // No transcript evidence exists for qwen; the staged transition must
+    // carry the launch-proof sentinel, and the injected evidence verifier
+    // must never have been consulted.
+    expect(ledger).toContain('"evidencePath":"launch-proof"');
+    expect(verifier).not.toHaveBeenCalled();
+  });
+
   it('rejects generation-only authority before evidence lookup or manifest mutation', async () => {
     const { root, manifestPath, daemon } = fixture('codex');
     const launched = await launch(daemon, 'codex');
@@ -508,7 +546,7 @@ describe('provider session continuity coordinator', () => {
           kind: 'agent',
           provider,
           mode: 'terminal',
-          producer: provider === 'codex' ? 'codex-hooks' : 'claude-hooks'
+          producer: `${provider}-hooks`
         },
         providerSessionId: OLD_ID
       })

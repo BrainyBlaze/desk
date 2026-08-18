@@ -712,6 +712,76 @@ describe('daemon control handler', () => {
     expect(JSON.stringify(result.body)).not.toContain(body.launchProof);
   });
 
+  // The observe gate is registry-derived; a merge that resolves back to
+  // main's inline claude|codex allowlist would 400 these at the daemon
+  // socket while every stubbed route test stays green.
+  it.each([
+    ['qwen', '33333333-3333-4333-8333-333333333333'],
+    ['kimi', 'session_abc123'],
+    ['grok', 'a1b2c3d4e5f6']
+  ] as const)('forwards a %s observation through the daemon gate', async (provider, providerSessionId) => {
+    const daemon = daemonMock();
+    const body = {
+      deskSessionId: 'sess-a',
+      provider,
+      providerSessionId,
+      generation: 8,
+      launchProof: 'A'.repeat(43),
+      hook: 'SessionStart'
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/observe',
+      body
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.observeProviderSessionIdentity).toHaveBeenCalledWith(body);
+  });
+
+  it('rejects an opencode observation: its plugin cannot present a launch proof', async () => {
+    const daemon = daemonMock();
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/observe',
+      {
+        deskSessionId: 'sess-a',
+        provider: 'opencode',
+        providerSessionId: `ses_${'a'.repeat(24)}`,
+        generation: 8,
+        launchProof: 'A'.repeat(43),
+        hook: 'SessionStart'
+      }
+    );
+
+    expect(result.status).toBe(400);
+    expect(daemon.observeProviderSessionIdentity).not.toHaveBeenCalled();
+  });
+
+  it('completes a kimi launch authorization through the daemon gate', async () => {
+    const daemon = daemonMock();
+    const body = {
+      deskSessionId: 'sess-a',
+      provider: 'kimi',
+      providerSessionId: 'session_abc123',
+      generation: 8
+    };
+
+    const result = await invoke(
+      daemon,
+      'POST',
+      '/control/provider-session/complete',
+      body
+    );
+
+    expect(result.status).toBe(200);
+    expect(daemon.completeProviderSessionLaunch).toHaveBeenCalledWith(body);
+  });
+
   it('preserves typed rebind-required observation details without echoing proof', async () => {
     const daemon = daemonMock();
     daemon.observeProviderSessionIdentity.mockResolvedValue({

@@ -685,6 +685,60 @@ esac
     }
   });
 
+  it('keeps a qwen pane alive through the registry resume guard when the CLI rejects the id', () => {
+    const root = mkdtempSync(join(tmpdir(), 'desk-qwen-launch-'));
+    const home = join(root, 'home');
+    const workspace = join(root, 'workspace');
+    const bin = join(root, 'bin');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    const qwenBin = join(bin, 'qwen');
+    const shell = join(bin, 'pane-shell');
+    writeFileSync(
+      qwenBin,
+      `#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/qwen-args.log"
+printf '%s\n' 'No conversation found' >&2
+exit 31
+`
+    );
+    writeFileSync(
+      shell,
+      `#!/bin/sh
+printf '%s\n' 'shell kept alive' >> "$HOME/shell.log"
+exit 0
+`
+    );
+    chmodSync(qwenBin, 0o755);
+    chmodSync(shell, 0o755);
+    try {
+      const command = buildSessionSpecs(
+        parseDeskManifest(`
+groups:
+  - id: group-1
+    sessions:
+      - name: qwen
+        sessionId: qwen
+        cwd: ${workspace}
+        agent: qwen
+        resume: 11111111-1111-4111-8111-111111111111
+        uiMode: terminal
+`),
+        { homeDir: workspace }
+      )[0].command;
+      const result = runGeneratedCommand(command, { home, bin, shell });
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('qwen resume failed with exit 31');
+      expect(result.stderr).toContain('desk reset-provider-session qwen --force');
+      expect(readText(join(home, 'qwen-args.log'))).toContain('--resume 11111111-1111-4111-8111-111111111111');
+      expect(readText(join(home, 'shell.log'))).toEqual('shell kept alive\n');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('maps the opencode bypass-permissions checkbox to the per-session permission ruleset', () => {
     const yolo = buildSessionSpecs(
       parseDeskManifest(`
@@ -815,6 +869,52 @@ projects:
     expect(launch[0].command).toContain("DESK_LSP_ENV_FILE='/tmp/app-lsp-managed-agents/123/session/env.json'");
     expect(launch[1].command).not.toContain('DESK_LSP_ENV_FILE');
     expect(launch[2].command).not.toContain('DESK_LSP_ENV_FILE');
+  });
+
+  it('keeps the desk_lsp env file on the qwen resume branch too', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: qwen
+            sessionId: qwen
+            agent: qwen
+            resume: 11111111-1111-4111-8111-111111111111
+`);
+    const [qwen] = buildSessionSpecs(manifest, {
+      homeDir: '/workspace',
+      agentMcp: () => ({
+        envFilePath: '/tmp/app-lsp-managed-agents/123/session/env.json'
+      })
+    });
+    expect(qwen!.command).toContain("DESK_LSP_ENV_FILE='/tmp/app-lsp-managed-agents/123/session/env.json'");
+    expect(qwen!.command).toContain('--resume');
+  });
+});
+
+describe('registry resume command shell safety', () => {
+  it('passes a hostile qwen resume id shell-quoted through the registry guard', () => {
+    const manifest = parseDeskManifest(`
+projects:
+  - id: sample
+    cwd: ~/projects/sample
+    groups:
+      - id: main
+        sessions:
+          - name: qwen
+            sessionId: qwen
+            agent: qwen
+            resume: 'a$(id)b'
+            uiMode: terminal
+`);
+    const [qwen] = buildSessionSpecs(manifest, { homeDir: '/workspace' });
+    const command = qwen!.command;
+    expect(command).toContain("printf 'desk: resume id: %s\\n' 'a$(id)b'");
+    expect(command).not.toContain('resume id: a$(id)b');
+    expect(command).toContain("--resume 'a$(id)b'");
   });
 });
 
