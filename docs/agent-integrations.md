@@ -128,6 +128,7 @@ OpenCode resume uses `ses_...` ids. Desk can discover recent OpenCode sessions f
 Qwen sessions launch as `qwen` (Qwen Code, a Gemini-CLI fork). Desk supports:
 
 - resume ids (`--resume <id>`, a UUID)
+- permission bypass (`--yolo`)
 - hook settings for state reporting and resume capture
 
 Desk wires `desk_lsp` for Qwen in two parts. `desk hooks install` registers
@@ -161,9 +162,10 @@ Permission bypass maps to Qwen's `--yolo` (auto-approve all tools; needs Qwen
 Code ≥0.21.13 — older CLIs reject the flag, and Qwen's own auto-updater keeps
 the effective version current).
 
-Qwen mints a **new resume id on every launch** and only persists a resumable
-session after the first message is exchanged. A Qwen pane restarted before any
-input therefore carries an id the CLI rejects; Desk keeps the pane alive (see
+A successful `--resume` keeps the conversation id. What Qwen does **not** do
+is persist a resumable session before the first message is exchanged, and a
+fresh launch mints a new id — so a Qwen pane restarted before any input
+carries an id the CLI rejects. Desk keeps the pane alive (see
 [Resume capture](#resume-capture)) rather than letting it exit.
 
 Qwen needs a provider credential. Point it at Alibaba ModelStudio, a third-party
@@ -211,8 +213,9 @@ Grok has **no per-tool approval system**, so there is no permission-bypass flag
 and the bypass checkbox is hidden for it. Grok also fires `SessionStart` lazily
 on the first prompt (not at launch), so a freshly launched Grok pane reads
 `unknown` until the first message, and its tool hooks fire only for the bash
-tool — long non-bash tool runs rest on the heartbeat rather than a tool
-interval. Grok cannot join `desk_lsp` yet: it reads MCP servers only from its
+tool. There is no periodic heartbeat to fill that gap: a long non-bash tool
+run (e.g. an MCP tool from Grok's own settings) outlives the working lease
+and the session reads `unknown` until the next hook fires. Grok cannot join `desk_lsp` yet: it reads MCP servers only from its
 global settings and spawns them with a sanitized environment, so the
 per-session token cannot reach the server.
 

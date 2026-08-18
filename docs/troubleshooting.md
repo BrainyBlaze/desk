@@ -180,6 +180,9 @@ Check the session's `bypassPermissions` value in `desk.yml`.
 - Claude uses its skip-permissions flag.
 - OpenCode receives per-session permission configuration through
   `OPENCODE_CONFIG_CONTENT`.
+- Qwen and Kimi map the field to their `--yolo` flag.
+- Grok has no per-tool approvals at all: the checkbox is hidden, and
+  `bypassPermissions: true` on a Grok session is a manifest error.
 
 Restart an already-running session after changing permission behavior.
 

@@ -32,10 +32,11 @@ provider *account* a session runs under — see
 Each integration prepares that CLI's launch command, environment, resume
 metadata, and state-reporting hooks. Sessions for agents that support it can be
 launched with permission bypass enabled from a checkbox in the session form.
-Resume behavior is agent-specific: Claude Code conversation ids are harvested
-from the session and validated before reuse, OpenCode sessions are recaptured
-from the CLI's own session list with a picker on restart, and Codex sessions
-accept an explicit resume id.
+Resume behavior is agent-specific: Claude, Qwen, Kimi, and Grok session ids
+arrive through their hooks, Codex ids are read from its own session records,
+and OpenCode sessions are recaptured from the CLI's session list with a picker
+on restart. Every captured id is validated before reuse; an explicit `resume`
+in the manifest works for all of them.
 
 Claude Code, Codex, and OpenCode sessions can render as a native chat surface
 (`uiMode: native`); Qwen, Kimi, and Grok are terminal-only;
@@ -142,11 +143,12 @@ contexts — cells beyond the budget (and machines with software-only GL) fall
 back to the DOM renderer. Hidden cells release their context to visible ones,
 and only the focused cell blinks its cursor.
 
-Scrollback: append-style agent output opens a frozen scrollback viewer fed by
-the daemon's xterm emulator snapshot (colors and layout preserved, native
-scrolling and selection); full-screen TUI programs get application-owned
-scrolling with agent-aware key encoding. A custom scroll rail on the cell edge
-tracks position.
+Scrollback: append-style agent output scrolls natively in the live buffer,
+which already carries the daemon's retained history (colors and layout
+preserved, native scrolling and selection); full-screen TUI programs get
+application-owned scrolling with agent-aware key encoding. A custom scroll
+rail on the cell edge tracks position — except on Grok panes, whose TUI draws
+its own scrollbar, so Desk's rail steps aside instead of competing with it.
 
 Terminals self-heal: if the connection drops, cells show a reconnect overlay
 and automatically re-arm on tab return, network recovery, or the first
