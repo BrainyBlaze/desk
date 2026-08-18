@@ -94,7 +94,10 @@ export function generateMessageId(now = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, '0');
   const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
   const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  return `msg-${date}-${time}-${randomBytes(2).toString('hex')}`;
+  // 4 random bytes, not 2: ids are the dedupe key everywhere (watcher seen-set,
+  // per-session delivery dedupe), and two messages minted in the same second
+  // used to collide at 1/65536 — a silent merge, one of them never dispatched.
+  return `msg-${date}-${time}-${randomBytes(4).toString('hex')}`;
 }
 
 export function messageTimestamp(now = new Date()): string {
