@@ -86,6 +86,21 @@ describe('mentions', () => {
     expect(mentionsHuman('@human look at this')).toBe(true);
     expect(mentionsHuman('plain message')).toBe(false);
   });
+
+  it('mentionsHuman is case-insensitive, like every other mention comparison', () => {
+    // `@Human` used to slip through: resolveTargets read it as addressing (no
+    // agents notified) while the ping predicate missed it — nobody was told.
+    expect(mentionsHuman('@Human please take a look')).toBe(true);
+    expect(mentionsHuman('@HUMAN decision needed')).toBe(true);
+    expect(mentionsHuman('mail me@humanreadable.org')).toBe(false);
+  });
+
+  it('resolveTargets excludes the author case-insensitively', () => {
+    // Manifest says Alpha, the author line says alpha: still the same member,
+    // and their own broadcast must not come back to them as a prompt.
+    const members = [member('Alpha'), member('agent-b', 'agent-cli'), member('human', 'human')];
+    expect(resolveTargets('alpha', 'status update', members).map((m) => m.name)).toEqual(['agent-b']);
+  });
 });
 
 describe('resolveTargets: mentions that name nobody in the channel (desk#44)', () => {
@@ -333,6 +348,8 @@ describe('sharing and naming', () => {
   });
 
   it('generates protocol-shaped message ids', () => {
-    expect(generateMessageId(new Date(2026, 5, 11, 15, 30, 12))).toMatch(/^msg-20260611-153012-[0-9a-f]{4}$/);
+    // 8 hex chars = 4 random bytes: the same-second collision space that makes
+    // dedupe-by-id trustworthy on a busy channel.
+    expect(generateMessageId(new Date(2026, 5, 11, 15, 30, 12))).toMatch(/^msg-20260611-153012-[0-9a-f]{8}$/);
   });
 });

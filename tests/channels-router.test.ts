@@ -64,6 +64,28 @@ describe('MentionRouter', () => {
     expect(decision.threadParentId).toBe('msg-20260816-110000-0001');
   });
 
+  it('finds the author member case-insensitively, so a casing mismatch never yields self-delivery', () => {
+    const cased: ChannelMember[] = [member('Alpha', 'alpha-1'), member('beta', 'beta-1')];
+    const decision = router.route({
+      channel: 'ops',
+      file: 'root.md',
+      message: message('alpha', 'status update, no mentions'),
+      members: cased
+    });
+    expect(decision.recipients.map((r) => r.name)).toEqual(['beta']);
+  });
+
+  it('recognises a supervisor author case-insensitively', () => {
+    const cased: ChannelMember[] = [...roster, { ...member('Watch', 'watch-1'), supervisor: true }];
+    const decision = router.route({
+      channel: 'ops',
+      file: 'root.md',
+      message: message('watch', '@alpha what is blocking you?'),
+      members: cased
+    });
+    expect(decision.authorIsSupervisor).toBe(true);
+  });
+
   it('marks a supervisor author so supervision can skip its own nudges', () => {
     const supervised = [...roster, { ...member('watch', 'watch-1'), supervisor: true }];
     const decision = router.route({

@@ -18,8 +18,8 @@
 // Everything here is a re-export: the ports live next to their stock
 // implementations, because a port with no implementation beside it drifts.
 
-export type { ChannelStore, Unsubscribe, SeenCursors, NewMemberSpec } from './store/channelStore.js';
-export { FileChannelStore } from './store/channelStore.js';
+export type { ChannelStore, Unsubscribe, SeenCursors, NewMemberSpec, IngestMessageInput, IngestResult } from './store/channelStore.js';
+export { FileChannelStore, IngestParentNotFoundError } from './store/channelStore.js';
 
 export type { ChannelFiles, ChannelAttachment } from './store/channelFiles.js';
 export { FileChannelFiles } from './store/channelFiles.js';
