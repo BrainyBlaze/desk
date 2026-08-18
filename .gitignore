@@ -29,6 +29,10 @@ npm-debug.log*
 src/server/assets/*.tar.gz
 /libexec/desk-standalone
 /libexec/moor
+# Retired runtime symlink; stale copies linger in old worktrees and must
+# never be swept into a merge resolution again (that is how b87aba0 shipped
+# a machine-local absolute symlink).
+/libexec/atch
 /probe-server
 /probe-*.mjs
 
