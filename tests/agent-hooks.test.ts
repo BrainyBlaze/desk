@@ -222,6 +222,67 @@ describe('agent hook configuration generation', () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it('replaces desk hooks whose timeout drifted instead of accumulating duplicates', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-drift-'));
+    try {
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+      const grokPath = join(home, '.grok', 'user-settings.json');
+      mkdirSync(dirname(grokPath), { recursive: true });
+      writeFileSync(grokPath, JSON.stringify({}));
+
+      const installed = installAgentHooks({ homeDir: home });
+      const drift = (path: string, timeout: number): void => {
+        const parsed = JSON.parse(readFileSync(path, 'utf8'));
+        for (const groups of Object.values(parsed.hooks as Record<string, { hooks: { timeout?: number }[] }[]>)) {
+          for (const group of groups) {
+            for (const hook of group.hooks) {
+              hook.timeout = timeout;
+            }
+          }
+        }
+        writeFileSync(path, JSON.stringify(parsed));
+      };
+      drift(installed.qwenSettingsPath, 10);
+      drift(grokPath, 5);
+
+      installAgentHooks({ homeDir: home });
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
+      const qwenTimeouts = Object.values(qwen.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout));
+      expect(qwenTimeouts).toHaveLength(10);
+      expect(new Set(qwenTimeouts)).toEqual(new Set([10_000]));
+
+      const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
+      expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(7);
+      const grokTimeouts = Object.values(grok.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout))
+        .filter((timeout) => timeout !== undefined);
+      expect(new Set(grokTimeouts)).toEqual(new Set([10]));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves operator-authored non-array hook entries in place', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-nonarray-'));
+    try {
+      const qwenPath = join(home, '.qwen', 'settings.json');
+      mkdirSync(dirname(qwenPath), { recursive: true });
+      writeFileSync(qwenPath, JSON.stringify({ hooks: { MyCustomEvent: { command: 'notify' } } }));
+
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
+      expect(qwen.hooks.MyCustomEvent).toEqual({ command: 'notify' });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('optional agent hook installs', () => {

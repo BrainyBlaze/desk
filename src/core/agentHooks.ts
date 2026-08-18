@@ -776,11 +776,13 @@ function mergeHookConfigLocked(
 /**
  * Strip Desk-owned hooks from an event's groups, keeping operator hooks. Returns
  * undefined when nothing operator-authored remains, so the caller drops the now
- * Desk-only event key entirely instead of leaving an empty array behind.
+ * Desk-only event key entirely instead of leaving an empty array behind. A
+ * non-array value is an operator-authored shape Desk never writes — hand it
+ * back untouched rather than judging it prunable.
  */
-function pruneDeskHooks(existing: unknown, currentShimPath: string): unknown[] | undefined {
+function pruneDeskHooks(existing: unknown, currentShimPath: string): unknown | undefined {
   if (!Array.isArray(existing)) {
-    return undefined;
+    return existing;
   }
   const groups: unknown[] = [];
   for (const group of existing) {
@@ -816,7 +818,14 @@ function isStaleDeskHook(hook: unknown, currentShimPath: string, desiredGroups?:
   if (!hook.command.includes(currentShimPath)) {
     return true;
   }
-  return false;
+  if (desiredGroups === undefined) {
+    return false;
+  }
+  // Same shim but a drifted shape (a timeout-unit fix, a changed arg): without
+  // this, isSameHook rejects the old copy as "different" and mergeHookGroups
+  // appends the corrected one beside it — the shim then fires twice per event,
+  // forever, because nothing else ever removes a current-shim hook.
+  return !desiredGroups.some((group) => group.hooks.some((desired) => isSameHook(hook, desired)));
 }
 
 function mergeHookGroups(
