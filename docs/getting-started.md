@@ -33,7 +33,7 @@ global runtimes.
   `libexec/moor`, then an attested absolute `moor` on `PATH`.
 </Note>
 
-Agent CLIs (`codex`, `claude`, and `opencode`), `gh`, and GPU telemetry commands
+Agent CLIs (`codex`, `claude`, `opencode`, and optionally `qwen`, `kimi`, `grok`), `gh`, and GPU telemetry commands
 are optional. Install only the integrations you intend to use.
 
 ## Install and start Desk

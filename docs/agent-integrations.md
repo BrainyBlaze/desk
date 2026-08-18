@@ -165,7 +165,8 @@ flow.
 
 Kimi sessions launch as `kimi` (Kimi Code). Desk supports:
 
-- resume ids (`--session <id>`, an opaque `session_...` value)
+- resume ids (`--session <id>`; Kimi mints `session_...` values, which Desk
+  validates as opaque tokens)
 - permission bypass (`--yolo`)
 - hook settings for state reporting and resume capture
 
@@ -187,7 +188,8 @@ a provider key added through `kimi provider`.
 Grok sessions launch as `grok` (superagent-ai's grok-cli, published to npm as
 `grok-dev`; it runs under Bun). Desk supports:
 
-- resume ids (`--session <id>`, a 12-hex value)
+- resume ids (`--session <id>`; Grok mints 12-hex values, which Desk validates
+  as opaque tokens)
 - hook settings for state reporting and resume capture
 
 Grok's hooks are Claude-compatible and live in:

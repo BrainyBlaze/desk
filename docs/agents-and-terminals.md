@@ -18,6 +18,9 @@ Desk has a built-in integration for each of:
 - Claude Code
 - OpenAI Codex
 - OpenCode
+- Qwen Code
+- Kimi Code
+- Grok
 - bash (or any custom command)
 
 <Note>
@@ -34,7 +37,8 @@ from the session and validated before reuse, OpenCode sessions are recaptured
 from the CLI's own session list with a picker on restart, and Codex sessions
 accept an explicit resume id.
 
-Claude Code, Codex, and OpenCode sessions render as a native chat surface;
+Claude Code, Codex, and OpenCode sessions can render as a native chat surface
+(`uiMode: native`); Qwen, Kimi, and Grok are terminal-only;
 bash and custom-command sessions render as terminals. Each SDK-backed session
 can instead run in terminal mode — the raw CLI TUI in a terminal cell — by
 setting `uiMode: terminal` on the session, and the edit modal switches a

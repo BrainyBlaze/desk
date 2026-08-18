@@ -236,11 +236,11 @@ conversation, or move the transcript, when you change a live session's profile.
 ### UI mode
 
 `uiMode` selects how a session renders: `native` (the agent chat surface) or
-`terminal` (the CLI's own TUI in a terminal cell). Codex, Claude, and OpenCode
-sessions resolve to `native` when the field is omitted; write
-`uiMode: terminal` to keep a session on the raw TUI. Bash and custom-command
-sessions are always terminal — declaring `uiMode: native` on them is a
-manifest error.
+`terminal` (the CLI's own TUI in a terminal cell). An omitted field resolves
+to `terminal` for every agent; write `uiMode: native` on a Codex, Claude, or
+OpenCode session to open the chat surface. Qwen, Kimi, Grok, bash, and
+custom-command sessions are terminal-only — declaring `uiMode: native` on
+them is a manifest error.
 
 ```yaml
 - name: api-codex
@@ -272,14 +272,15 @@ id asks for confirmation first, because switching starts it fresh.
   resume: 00000000-0000-0000-0000-000000000000
 ```
 
-Desk validates known resume id formats before persisting them. Codex and Claude use UUID-like ids. OpenCode uses `ses_...` ids.
+Desk validates known resume id formats before persisting them. Codex, Claude, and Qwen use UUID-like ids; OpenCode uses `ses_...` ids; Kimi and Grok ids are opaque tokens (letters, digits, `._-`).
 
 Capturing a fresh resume id never changes `sessionId`; terminal, channels, and
 attention state remain keyed to the same Desk session.
 
-Desk captures the initial Codex or Claude provider session automatically only
-from the managed child launch. The terminal daemon requires both its private
-per-launch proof and current provider transcript evidence before it persists
+Desk captures every provider's initial session automatically, only from the
+managed child launch. The terminal daemon always requires its private
+per-launch proof; for Codex and Claude it additionally verifies the provider
+transcript on disk before it persists
 the ID; a generation number by itself is not authorization.
 
 Resuming a different conversation manually inside the provider TUI creates a
