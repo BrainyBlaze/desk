@@ -372,7 +372,13 @@ describe('MoorMasterClient', () => {
     await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
   });
 
-  it('keeps the fresh-lease attach deadline running through replay delivery', async () => {
+  it('resolves a fresh-lease attach at LEASE_RESULT, without waiting for the replay to be delivered', async () => {
+    // Spec §10.2: the identity/adoption gate closes at the preamble (plus the
+    // lease result when one was requested, §6.1); the display baseline
+    // "completes separately … identity success must not be confused with
+    // screen exactness". A consumer whose emulator is slow to drain the replay
+    // must therefore still see the attach resolve inside the 2 s deadline —
+    // otherwise a holder that retained a heavy TUI tail could never be adopted.
     let closed = false;
     const { holder, client, identity } = await start(
       {
@@ -395,8 +401,12 @@ describe('MoorMasterClient', () => {
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('x')));
 
-    await expect(attached).rejects.toThrow(/DEADLINE_EXCEEDED/);
-    await waitFor(() => closed, 'fresh-lease replay deadline close');
+    await expect(attached).resolves.toMatchObject({ generation: GENERATION });
+    // The replay stays undelivered (the emulator never drains) — that is the
+    // viewer's baseline problem, not an adoption failure: the link stays open.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(closed).toBe(false);
+    expect(client.attached).toBe(true);
   });
 
   it('refuses a LEASE_RESULT that contradicts the attach status', async () => {
@@ -527,6 +537,10 @@ describe('MoorMasterClient', () => {
     holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
 
+    // Adoption closed at preamble + LEASE_RESULT (§10.2/§6.1); the replay that
+    // follows is the display baseline and its byte boundaries are still
+    // enforced fail-closed — as a producer fault on the adopted link.
+    await expect(attached).resolves.toBeDefined();
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(100n, 8), text('0123456789')));
     // The boundary record ends at 120, but the ACK promised replay.end 121.
@@ -534,7 +548,8 @@ describe('MoorMasterClient', () => {
     await waitFor(() => protocolErrors.length === 1, 'short replay boundary refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(outputs).toEqual([3n]);
-    await expect(attached).rejects.toThrow();
+    // The link is torn down: nothing more may ride it.
+    expect(client.attached).toBe(false);
   });
 
   it('bounds OUTPUT_ACK to records actually delivered', async () => {
@@ -914,11 +929,14 @@ describe('MoorMasterClient', () => {
     );
     holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
     holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+    // Adoption is complete here (§10.2); the unsafe recovery gap that follows
+    // is refused fail-closed as a producer fault, tearing the adopted link down.
+    await expect(attached).resolves.toBeDefined();
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(4n, 8)));
     await waitFor(() => protocolErrors.length === 1, 'unsafe recovery gap refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(() => client.sendInput(text('never-on-stale-screen'))).toThrow(/attached|closed/i);
-    await expect(attached).rejects.toThrow();
+    expect(client.attached).toBe(false);
   });
 
   it('sends one coalesced auto-ack per delivered batch when the policy is enabled', async () => {
