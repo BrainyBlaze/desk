@@ -141,16 +141,14 @@ async function spawnSurvivingHolder(input: {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Wait until the holder has retained the whole heavy tail (child finished printing). */
-async function waitForTail(sessionPath: string, timeoutMs = 20_000): Promise<void> {
-  const startedAt = Date.now();
-  // The fake holder mirrors retained output count in its witness file only on
-  // attach; instead give the child time to finish printing — a bounded settle
-  // that a slow CI box still satisfies, verified below by the byte count the
-  // emulator eventually receives.
-  while (Date.now() - startedAt < 1_500) await sleep(100);
-  void sessionPath;
-  void timeoutMs;
+/**
+ * Give the child a moment to print most of its tail before adoption so the
+ * replay is genuinely heavy. Not load-bearing for correctness: on a slow host
+ * whatever is still printing arrives as live output on the same ordered path,
+ * and the assertions below wait for the last line either way.
+ */
+async function waitForTail(): Promise<void> {
+  await sleep(1_500);
 }
 
 describe('adoption is independent of the retained replay size', () => {
@@ -180,7 +178,7 @@ describe('adoption is independent of the retained replay size', () => {
       expect(processAlive(pid)).toBe(true);
       sessions.push({ sessionId, sessionPath, pid });
     }
-    await waitForTail(sessions[0]!.sessionPath);
+    await waitForTail();
     const emulators = new Map<string, GatedEmu>();
     let nextEmulatorFor = 0;
     const state = { gateClosed: false };
@@ -246,14 +244,28 @@ describe('adoption is independent of the retained replay size', () => {
       // ordinary output path, complete and in order, having never gated the
       // adoption above.
       emulator!.open();
-      const expectedBytes = HEAVY_TAIL_LINES * ('redraw line 0 '.length + 150);
+      // The child may still be printing on a slow host; whatever it printed
+      // before adoption arrives as replay and the rest as live output — both on
+      // the same ordered path. Wait, bounded, for the LAST line to land.
+      const lastLine = `redraw line ${HEAVY_TAIL_LINES - 1} `;
       const startedAt = Date.now();
-      while (emulator!.bytesWritten() < expectedBytes * 0.9 && Date.now() - startedAt < 15_000) {
+      let text = '';
+      while (Date.now() - startedAt < 30_000) {
+        text = Buffer.concat(emulator!.written.map((chunk) => Buffer.from(chunk))).toString('utf8');
+        if (text.includes(lastLine)) break;
         await sleep(50);
       }
-      const text = Buffer.concat(emulator!.written.map((chunk) => Buffer.from(chunk))).toString('utf8');
+      // The preamble (an empty §6 TERMINAL_STATE) precedes the tail; the first
+      // retained line is the first thing after it, and every line arrives in
+      // order.
       expect(text.startsWith('redraw line 0 ')).toBe(true);
-      expect(text).toContain(`redraw line ${HEAVY_TAIL_LINES - 1} `);
+      expect(text).toContain(lastLine);
+      let cursor = 0;
+      for (const line of [0, 1, 2, HEAVY_TAIL_LINES - 2, HEAVY_TAIL_LINES - 1]) {
+        const at = text.indexOf(`redraw line ${line} `, cursor);
+        expect(at).toBeGreaterThanOrEqual(cursor);
+        cursor = at;
+      }
       expect(processAlive(session!.pid)).toBe(true);
     },
     60_000
