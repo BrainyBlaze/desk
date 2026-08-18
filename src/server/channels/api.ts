@@ -201,8 +201,11 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       }
     },
     onChannelMessage: async (channel, file, message, pingsHuman) => {
+      // Case-insensitive, like the router's author lookup: a casing mismatch
+      // must not strip the session off the journalled event.
+      const authorLower = message.author.toLowerCase();
       const authorSession = (await store.listMembers(channel)).find(
-        (member) => member.name === message.author
+        (member) => member.name.toLowerCase() === authorLower
       )?.sessionId;
       const event: ChannelMessageDeskEventInput = {
         ...(authorSession === undefined ? {} : { sessionId: authorSession }),
@@ -451,10 +454,18 @@ function requireChannel(value: unknown): string {
 async function resolveAuthor(store: ChannelStore, channel: string, body: Record<string, unknown>): Promise<string> {
   const members = await store.listMembers(channel);
   if (typeof body.as === 'string' && body.as.length > 0) {
-    if (body.as !== 'human' && !members.some((member) => member.name === body.as)) {
+    // Case-insensitive, like mention resolution — and the MANIFEST's casing is
+    // what gets written as the author line, so a `--as Scout` post cannot mint
+    // a second casing of the same member.
+    const asLower = body.as.toLowerCase();
+    if (asLower === 'human') {
+      return 'human';
+    }
+    const matched = members.find((member) => member.name.toLowerCase() === asLower);
+    if (!matched) {
       throw new Error(`@${String(body.as)} is not a member of #${channel}`);
     }
-    return body.as;
+    return matched.name;
   }
   if (typeof body.sessionId === 'string' && body.sessionId.length > 0) {
     // The CLI sends its DESK_SESSION_ID; members key by the same durable id.
@@ -844,7 +855,9 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
       const body = await readJsonBody(req);
       const channel = requireChannel(body.channel);
       const name = requireString(body.name, 'name');
-      const member = (await store.listMembers(channel)).find((candidate) => candidate.name === name);
+      // Case-insensitive: a casing mismatch must not leave the removed
+      // member's queue behind.
+      const member = (await store.listMembers(channel)).find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
       await store.removeMember(channel, name);
       if (member?.sessionId) {
         engine.dropQueue(member.sessionId);
@@ -987,7 +1000,8 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'GET' && url.pathname === '/api/channels/member-role') {
       const channel = requireChannel(url.searchParams.get('channel'));
       const member = requireString(url.searchParams.get('member'), 'member');
-      const found = (await store.listMembers(channel)).find((m) => m.name === member);
+      // Case-insensitive, like every other member lookup.
+      const found = (await store.listMembers(channel)).find((m) => m.name.toLowerCase() === member.toLowerCase());
       if (!found) {
         sendJson(res, 404, { error: `member @${member} not found in #${channel}` });
         return true;
