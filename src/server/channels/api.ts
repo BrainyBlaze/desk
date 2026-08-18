@@ -148,8 +148,6 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
   const selectedDelivery = compose<AgentDelivery>(
     () => agentDelivery({
       sendText: sendChannelDelivery,
-      capturePane: nativeTransport.capturePane,
-      sendEnter: nativeTransport.sendEnter,
       readAgentStates: readAgentStatePulse
     }),
     (p) => p.delivery
@@ -162,9 +160,7 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
       }
       return ok;
     },
-    states: () => selectedDelivery.states(),
-    probe: (sessionId) => selectedDelivery.probe(sessionId),
-    submit: (sessionId) => selectedDelivery.submit(sessionId)
+    states: () => selectedDelivery.states()
   };
   engine = new ChannelsEngine({
     home,
@@ -176,8 +172,8 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     // when the session becomes reachable again.
     sendText: durableSendChannelDelivery,
     // onSubmitStateChange drives the per-item durability renames. Fires on
-    // every transition (synchronous 'delivering' claim + async terminal
-    // states from verifySubmitted). Each helper is idempotent — a re-fire
+    // every transition (synchronous 'delivering' claim + atomic transport
+    // acknowledgement). Each helper is idempotent — a re-fire
     // after restart no-ops rather than throws, so crash-mid-transition leaves
     // a clean durable state the restore pass classifies correctly.
     onSubmitStateChange: (sessionId, state, context) => {
@@ -259,7 +255,6 @@ export function initChannelsRuntime(options: ChannelsRuntimeOptions = {}): Chann
     },
     readAgentStates: readAgentStatePulse,
     capturePane: nativeTransport.capturePane,
-    sendEnter: nativeTransport.sendEnter,
     store,
     router,
     renderer,

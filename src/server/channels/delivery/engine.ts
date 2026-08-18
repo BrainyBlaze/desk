@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
@@ -81,10 +80,10 @@ export interface ChannelsEngineOptions {
   sendText: (sessionId: string, text: string) => Promise<boolean>;
   /** @deprecated State authority replaces process/pane inference. */
   sessionRunning?: (sessionId: string) => boolean;
-  /** capture the tail of a session's pane (injectable for tests); null = capture failed */
+  /** @deprecated Ignored. Atomic prompt delivery does not inspect pane output. */
   capturePane: (sessionId: string) => Promise<string | null>;
-  /** bare Enter keypress for the submit-verification retry (injectable for tests) */
-  sendEnter: (sessionId: string) => Promise<boolean>;
+  /** @deprecated Ignored. Submission is part of the atomic prompt packet. */
+  sendEnter?: (sessionId: string) => Promise<boolean>;
   /**
    * Notify the desk UI (events drawer) about every finalised channel message
    * (human-authored included); `file` locates it (root.md / thread-…),
@@ -96,7 +95,7 @@ export interface ChannelsEngineOptions {
     message: ChannelMessage,
     pingsHuman: boolean
   ) => void | Promise<void>;
-  /** ms between the literal body push and the Enter key (TUIs drop same-burst CR) */
+  /** @deprecated Ignored. Body and submit CR share one atomic prompt packet. */
   enterDelayMs?: number;
   /** ms to let the terminal settle after a release signal before draining */
   releaseSettleMs?: number;
@@ -108,9 +107,9 @@ export interface ChannelsEngineOptions {
    * unforeseen never-settling await can never strand a session's queue.
    */
   drainWatchdogMs?: number;
-  /** ms to wait after Enter before verifying the prompt actually submitted */
+  /** @deprecated Ignored. Atomic prompt transport has no pane verification phase. */
   enterVerifyDelayMs?: number;
-  /** number of verify cycles before a delivery is classified submit-stuck (default 3) */
+  /** @deprecated Ignored. Atomic prompt transport has no pane verification phase. */
   verifyCycles?: number;
   /** number of consecutive queue-head hold cycles before diagnostics flag blocked (default 3) */
   blockedAfterCycles?: number;
@@ -120,12 +119,12 @@ export interface ChannelsEngineOptions {
   probeTimeoutMs?: number;
   /**
    * Fired on every submit-state transition of a delivery, for the on-disk
-   * ack-file durability layer to drive its `.json/.delivering/.delivered/
-   * .stuck-*` renames with no pump-poll lag. `context.seq` identifies the exact
+   * ack-file durability layer to drive its `.json/.delivering/.delivered`
+   * renames with no pump-poll lag. `context.seq` identifies the exact
    * queue item that transitioned; a digest delivery fires once per coalesced
    * seq. The `'delivering'` transition fires synchronously inside deliverNext
-   * (under the draining lock, before the paste); the terminal states fire from
-   * the async verify cycle. NOTE: a `sendText` failure leaves the state at
+   * (under the draining lock, before the send); the terminal state fires when
+   * the atomic transport call resolves. NOTE: a `sendText` failure leaves the state at
    * `'delivering'` (no further fire) — the consumer reverts that from its own
    * sendText wrapper, correlating on the seq from the `'delivering'` fire.
    */
@@ -158,15 +157,6 @@ const MAX_DELIVERED_MEMORY = 2000;
 const MAX_QUEUE_PER_SESSION = 50;
 
 const DELIVERY_SEND_TIMEOUT_MS = 30_000;
-const DELIVERY_CAPTURE_TIMEOUT_MS = 4_000;
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function captureFingerprint(capture: string): string {
-  return createHash('sha256').update(capture.slice(-16_384)).digest('hex');
-}
 
 interface MemberRuntime {
   sessionId: string;
@@ -229,8 +219,6 @@ export class ChannelsEngine {
   private readonly delivery: AgentDelivery;
   private readonly releaseSettleMs: number;
   private readonly drainWatchdogMs: number;
-  private readonly enterVerifyDelayMs: number;
-  private readonly verifyCycles: number;
   private readonly blockedAfterCycles: number;
   private readonly onSubmitStateChange?: (sessionId: string, state: SubmitState, context: { seq: number }) => void;
   private readonly staleAfterMs: number;
@@ -247,14 +235,10 @@ export class ChannelsEngine {
   constructor(private readonly options: ChannelsEngineOptions) {
     this.delivery = options.delivery ?? agentDelivery({
       sendText: options.sendText,
-      capturePane: options.capturePane,
-      sendEnter: options.sendEnter,
       readAgentStates: options.readAgentStates ?? readAgentStatePulse
     });
     this.releaseSettleMs = options.releaseSettleMs ?? 800;
     this.drainWatchdogMs = options.drainWatchdogMs ?? 30_000;
-    this.enterVerifyDelayMs = options.enterVerifyDelayMs ?? 1200;
-    this.verifyCycles = options.verifyCycles ?? 3;
     this.blockedAfterCycles = options.blockedAfterCycles ?? 3;
     this.onSubmitStateChange = options.onSubmitStateChange;
     this.staleAfterMs = options.staleAfterMs ?? 10 * 60 * 1000;
@@ -309,24 +293,6 @@ export class ChannelsEngine {
       return batch;
     } catch {
       return { ok: false, revision: null, snapshots: [] };
-    }
-  }
-
-  private async captureDeliveryFingerprint(sessionId: string): Promise<string | null> {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const captured = await Promise.race([
-        this.delivery.probe(sessionId).catch(() => null),
-        new Promise<null>((resolve) => {
-          timeout = setTimeout(() => resolve(null), DELIVERY_CAPTURE_TIMEOUT_MS);
-          timeout.unref?.();
-        })
-      ]);
-      return captured === null ? null : captureFingerprint(captured);
-    } finally {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
     }
   }
 
@@ -457,15 +423,6 @@ export class ChannelsEngine {
   > {
     if (!runtime) {
       return { deliveryBlocked: false };
-    }
-    if (runtime.submitState === 'submit-stuck-paste' || runtime.submitState === 'submit-stuck-submit') {
-      return {
-        deliveryBlocked: true,
-        blockedReason: runtime.submitState,
-        blockedSince: runtime.lastDeliveryAt,
-        blockedCycles: this.blockedAfterCycles,
-        blockedHeadSeq: runtime.submitStateSeqs?.[0]
-      };
     }
     const block = runtime.deliveryBlock;
     if (!block || block.cycles < this.blockedAfterCycles) {
@@ -942,7 +899,8 @@ export class ChannelsEngine {
   /**
    * Delivers the head item — or a digest of the queued channel messages — to the
    * agent, removes it from the queue, persists, records activity, and kicks off
-   * submit verification. The caller MUST hold the draining lock and have already
+   * records the atomic transport acknowledgement. The caller MUST hold the
+   * draining lock and have already
    * decided the agent is eligible (drain's gates, or a forced operator override
    * from the ops console). Returns whether the push reached the session's terminal.
    */
@@ -974,7 +932,6 @@ export class ChannelsEngine {
     const deliveredSeqs = digest ? digestItems.map((item) => item.seq) : [next.seq];
     const notificationId = digest ? `digest-${deliveredSeqs.join('-')}-${next.messageId}` : next.messageId;
     const info = this.sessionInfo(runtime.sessionId);
-    const native = info?.uiMode === 'native';
     // A shell member is not an agent. It never reports `working`, has no input
     // box an Enter could be eaten by and no structural approval menu, so the
     // verify cycle can never find the positive evidence it looks for — while
@@ -984,7 +941,6 @@ export class ChannelsEngine {
     // incidents (desk#48). There is no submit to verify here, so we do not
     // pretend either way; the outcome is recorded as submit-not-applicable.
     const shell = isShellAgent(info?.agent);
-    const needsTerminalVerify = next.kind === 'prompt' && !native && !shell;
     // Prompts held a long time (busy agent, dead session, restarts) carry
     // a staleness note so the agent weighs them against newer context.
     const ageMs = this.now() - Date.parse(next.queuedAt);
@@ -993,11 +949,6 @@ export class ChannelsEngine {
       : Number.isFinite(ageMs) && ageMs > this.staleAfterMs
         ? `(delayed delivery — this message was posted ${Math.round(ageMs / 60000)} minutes ago; read the channel for the current state before acting)\n${next.prompt}`
         : next.prompt;
-    // Standalone terminal prompts retain delivery-only verification. Raw capture
-    // bytes classify paste/submit failure; they never contribute agent activity.
-    const preFingerprint = needsTerminalVerify
-      ? await this.captureDeliveryFingerprint(runtime.sessionId)
-      : null;
     const current = forceSeq === undefined
       ? runtime.queue[0]
       : runtime.queue.find((item) => item.seq === forceSeq);
@@ -1075,13 +1026,11 @@ export class ChannelsEngine {
       target: runtime.sessionId,
       preview: payload.split('\n')[0]?.slice(0, 140) ?? ''
     });
-    if (needsTerminalVerify) {
-      // Fire-and-forget: verification sleeps between checks and must not
-      // hold the drain lock.
-      this.background('submit verification', () => this.verifySubmitted(runtime, preFingerprint, deliveredSeqs));
-    } else {
-      this.setSubmitState(runtime, shell ? 'submit-not-applicable' : 'submitted', deliveredSeqs);
-    }
+    // `/control/prompt` resolves only after the daemon has handed one complete
+    // prompt packet to Moor. Pane deltas and later activity are not transport
+    // acknowledgements; treating them as one created false `submit-stuck`
+    // records after Codex had already consumed the prompt.
+    this.setSubmitState(runtime, shell ? 'submit-not-applicable' : 'submitted', deliveredSeqs);
     return true;
   }
 
@@ -1146,56 +1095,6 @@ export class ChannelsEngine {
       this.persistQueue(runtime);
     }
     return revived;
-  }
-
-  private async verifySubmitted(
-    runtime: MemberRuntime,
-    preFingerprint: string | null,
-    seqs: number[]
-  ): Promise<void> {
-    let everObservable = false;
-    let captureChanged = false;
-    for (let attempt = 0; attempt < this.verifyCycles; attempt += 1) {
-      await delay(this.enterVerifyDelayMs);
-      if (this.disposed) {
-        return;
-      }
-      const batch = await this.readStateBatch();
-      const view = canonicalAgentView(batch, runtime.sessionId, this.now());
-      if (view.activity === 'working' || view.activity === 'blocked') {
-        this.setSubmitState(runtime, 'submitted', seqs);
-        return;
-      }
-      const fingerprint = await this.captureDeliveryFingerprint(runtime.sessionId);
-      if (fingerprint !== null) {
-        everObservable = true;
-        if (preFingerprint !== null && fingerprint !== preFingerprint) {
-          captureChanged = true;
-        }
-      }
-      if (view.activity === 'idle') {
-        await this.delivery.submit(runtime.sessionId);
-      }
-    }
-    if (this.disposed) {
-      return;
-    }
-    if (everObservable && preFingerprint !== null) {
-      this.setSubmitState(runtime, captureChanged ? 'submit-stuck-submit' : 'submit-stuck-paste', seqs);
-    } else {
-      // We never read the pane during the whole verify window, so we have NO
-      // evidence either way: the paste may have landed and been invisible, or
-      // never landed at all. Re-pasting on that is a coin flip that duplicates
-      // the prompt into the agent's context when it lands on the wrong side.
-      //
-      // This used to be safe because the drain held an unobservable session,
-      // so a re-enqueued item waited until the pane could be read again. That
-      // hold is gone — activity and observability no longer gate delivery —
-      // so a re-enqueue here delivers immediately and blind, up to the retry
-      // cap. Leave the durable .stuck-unobservable for the operator instead:
-      // force-deliver is a deliberate act with a human deciding the risk.
-      this.setSubmitState(runtime, 'submit-stuck-unobservable', seqs);
-    }
   }
 
   /**

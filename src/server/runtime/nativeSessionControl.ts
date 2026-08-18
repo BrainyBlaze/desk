@@ -105,7 +105,7 @@ export async function restartSessionNativeAware(spec: SessionSpec): Promise<{ ok
  * through untouched. The uiMode=native broker path is unaffected.
  */
 export interface NativeChannelsTransport {
-  /** Paste text then a delayed Enter (bracketed-paste staging + separate submit). */
+  /** Submit one complete prompt through one daemon-to-Moor input packet. */
   sendText: (sessionId: string, text: string) => Promise<boolean>;
   /**
    * The daemon's authoritative three-state liveness (#8 criterion 1). Never a
@@ -114,8 +114,6 @@ export interface NativeChannelsTransport {
   sessionLiveness: (sessionId: string) => Promise<SessionLiveness>;
   /** The emulator's on-screen tail (plain text), null when unobservable. */
   capturePane: (sessionId: string) => Promise<string | null>;
-  /** Bare Enter (the submit-verification retry). */
-  sendEnter: (sessionId: string) => Promise<boolean>;
   /**
    * Session start time in epoch SECONDS (legacy session_created parity),
    * from the adopted holder's own wallStart clock (#8: wire truth, never a
@@ -124,21 +122,7 @@ export interface NativeChannelsTransport {
   sessionCreatedAt: (sessionId: string) => Promise<number | null>;
 }
 
-export function createNativeChannelsTransport(
-  options: {
-    enterDelayMs?: number;
-    wait?: (ms: number) => Promise<void>;
-    confirmDelayMs?: number;
-    enterAttempts?: number;
-    pasteObserveAttempts?: number;
-  } = {}
-): NativeChannelsTransport {
-  const enterDelayMs = options.enterDelayMs ?? 1200;
-  const confirmDelayMs = options.confirmDelayMs ?? 400;
-  // Total Enter presses, including the first. 1 restores the open-loop send.
-  const enterAttempts = Math.max(1, options.enterAttempts ?? 3);
-  const pasteObserveAttempts = Math.max(1, options.pasteObserveAttempts ?? 3);
-  const wait = options.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+export function createNativeChannelsTransport(): NativeChannelsTransport {
   const capturePane = async (sessionId: string): Promise<string | null> => {
     const result = await daemonControl('/control/tail', { sessionId, rows: 200 });
     const lines = result.ok ? result.body?.lines : undefined;
@@ -146,71 +130,13 @@ export function createNativeChannelsTransport(
   };
   return {
     async sendText(sessionId, text) {
-      const prePaste = await capturePane(sessionId);
-      // paste:true mirrors legacy paste semantics — the daemon wraps in
-      // bracketed-paste codes only when the app enabled the mode.
-      const delivered = await daemonControl('/control/input', { sessionId, text, paste: true });
-      if (!delivered.ok) {
-        return false;
-      }
-      await wait(enterDelayMs);
-
-      // The control endpoint acknowledges the socket write, not TUI ingestion.
-      // Under load the first post-paste capture can still equal the pre-paste
-      // screen. Wait boundedly for the composer to move before using a later
-      // screen change as evidence that Enter submitted the prompt.
-      let before = await capturePane(sessionId);
-      if (prePaste !== null && before !== null) {
-        for (let attempt = 1; attempt < pasteObserveAttempts && before === prePaste; attempt += 1) {
-          await wait(confirmDelayMs);
-          before = await capturePane(sessionId);
-          if (before === null) break;
-        }
-        if (before === prePaste) {
-          before = null; // paste staging stayed unobservable: one open-loop Enter only
-        }
-      }
-
-      // The submit is CONFIRMED, not assumed. A fixed delay is an open-loop
-      // guess: a TUI still digesting the paste (or busy rendering) swallows
-      // the Enter, and the message then sits in the composer until a human
-      // presses Enter — the operator-reported symptom. Submitting always
-      // repaints (composer clears, the message renders), so an unchanged
-      // screen across the Enter means the keystroke did nothing and is worth
-      // repeating. Bounded, and a screen we cannot observe falls back to the
-      // single open-loop press rather than hammering Enter blindly.
-      let sent = false;
-      for (let attempt = 0; attempt < enterAttempts; attempt += 1) {
-        const pressed = await daemonControl('/control/input', { sessionId, text: '\r' });
-        if (!pressed.ok) {
-          return false;
-        }
-        sent = true;
-        // Unobservable screen: no oracle, so keep the single open-loop press
-        // instead of spending a confirm round-trip on a guess.
-        if (before === null || attempt + 1 >= enterAttempts) {
-          break;
-        }
-        await wait(confirmDelayMs);
-        const after = await capturePane(sessionId);
-        if (after === null) {
-          break;
-        }
-        if (after !== before) {
-          break; // the screen moved — the submit landed
-        }
-        before = after; // identical across the press: swallowed, try once more
-      }
-      return sent;
+      return (await daemonControl('/control/prompt', { sessionId, text })).ok;
     },
     sessionLiveness(sessionId) {
       // #8: the daemon's own adopted-link status, not a socket probe.
       return sessionLivenessFor(sessionId);
     },
     capturePane,
-    async sendEnter(sessionId) {
-      return (await daemonControl('/control/input', { sessionId: sessionId, text: '\r' })).ok;
-    },
     async sessionCreatedAt(sessionId) {
       // #8: WIRE truth, not a filesystem timestamp — the adopted ATTACH_ACK's
       // wallStart is the holder's own start clock, immune to fs birthtime

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ChannelsEngine } from '../src/server/channels/delivery/engine.js';
-import { claimDelivering, confirmDelivered, markStuck } from '../src/server/channels/delivery/durability.js';
+import { claimDelivering, confirmDelivered } from '../src/server/channels/delivery/durability.js';
 import { canonicalAgentStateBatch } from './helpers/canonicalAgentState.js';
 
 const READY_PANE = 'agent ready\n> ';
@@ -135,7 +135,7 @@ describe('an unverifiable delivery is never blind-repasted', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('sends a standalone prompt once when the pane can never be observed', async () => {
+  it('submits a standalone prompt once when the pane can never be observed', async () => {
     const sent: string[] = [];
     const stateChanges: string[] = [];
     engine = new ChannelsEngine({
@@ -145,25 +145,19 @@ describe('an unverifiable delivery is never blind-repasted', () => {
         sent.push(text);
         return true;
       },
-      // The pane is unreadable for the whole verify window: we cannot tell
-      // whether the paste landed, so a retry would duplicate it into the agent.
+      // Pane capture is deliberately unavailable. Delivery acknowledgement now
+      // comes from the atomic prompt transport instead of terminal heuristics.
       capturePane: async () => null,
       releaseSettleMs: 0,
       pumpIntervalMs: 5,
       enterVerifyDelayMs: 1,
       verifyCycles: 1,
       readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { lifecycle: 'running' }),
-      // Production wires this to the durability layer; without it no .stuck-*
-      // file exists and the retry has nothing to revive, which is what made an
-      // earlier version of this test pass against the unfixed engine.
-      // Wire the SAME durability renames production wires (channelsApi), so a
-      // .stuck-unobservable file really exists for a retry to revive. Without
-      // this the retry has nothing to find and the test proves nothing.
+      // Wire the same durability transitions as production.
       onSubmitStateChange: (sessionId, state, detail) => {
         stateChanges.push(`${sessionId}:${state}:${detail.seq}`);
         if (state === 'delivering') claimDelivering(home, sessionId, detail.seq);
         else if (state === 'submitted') confirmDelivered(home, sessionId, detail.seq);
-        else if (state === 'submit-stuck-unobservable') markStuck(home, sessionId, detail.seq, 'unobservable');
       }
     });
 
@@ -173,8 +167,8 @@ describe('an unverifiable delivery is never blind-repasted', () => {
     }
 
     const diagnostic = await engine.inspectSession('tmux-a');
-    expect(stateChanges, 'the delivery must reach the unobservable stuck state').toContain('tmux-a:submit-stuck-unobservable:1');
-    expect(sent.length, 'an unverifiable paste must not be repeated blind').toBe(1);
-    expect(diagnostic.submitState, 'and it must be surfaced for the operator').toBe('submit-stuck-unobservable');
+    expect(stateChanges).toEqual(['tmux-a:delivering:1', 'tmux-a:submitted:1']);
+    expect(sent.length, 'an acknowledged packet must not be repeated blind').toBe(1);
+    expect(diagnostic.submitState).toBe('submitted');
   });
 });

@@ -1,8 +1,7 @@
 // What actually reaches an agent.
 //
-// Everything the engine can do TO a session, as one contract: put text in
-// front of it, read what the authority says it is doing, and — for terminal
-// sessions only — look at the screen and press Enter. Nothing here knows about
+// Everything the engine can do TO a session, as one contract: submit one
+// complete prompt and read what the authority says it is doing. Nothing here knows about
 // queues, channels, mentions or prompts; it is the boundary between "we decided
 // to deliver" and "the session received something".
 //
@@ -19,18 +18,6 @@ export interface AgentDelivery {
   /** The canonical authority's current view of every session, one batch per decision. */
   states(): Promise<AgentStateBatch>;
 
-  /**
-   * A stable fingerprint of what the session is showing, or `null` when it
-   * cannot be observed. Used only to CLASSIFY a stalled submit — never to
-   * decide whether to deliver.
-   */
-  probe(sessionId: string): Promise<string | null>;
-
-  /**
-   * Press Enter. The one safe recovery action for a prompt whose submit was
-   * eaten: a no-op on an idle composer, a submit on a filled one.
-   */
-  submit(sessionId: string): Promise<boolean>;
 }
 
 /**
@@ -41,16 +28,12 @@ export interface AgentDelivery {
  */
 export interface TransportPrimitives {
   sendText: (sessionId: string, text: string) => Promise<boolean>;
-  capturePane: (sessionId: string) => Promise<string | null>;
-  sendEnter: (sessionId: string) => Promise<boolean>;
   readAgentStates: () => Promise<AgentStateBatch>;
 }
 
 export function agentDelivery(parts: TransportPrimitives): AgentDelivery {
   return {
     send: (sessionId, text) => parts.sendText(sessionId, text),
-    states: () => parts.readAgentStates(),
-    probe: (sessionId) => parts.capturePane(sessionId),
-    submit: (sessionId) => parts.sendEnter(sessionId)
+    states: () => parts.readAgentStates()
   };
 }

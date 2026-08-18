@@ -321,6 +321,8 @@ export interface TerminalDaemon {
   ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
+  /** Atomic prompt submission over one Moor INPUT request. False if unknown. */
+  prompt(sessionId: string, bytes: Uint8Array): boolean;
   /**
    * Ranged plain-text window into the session's screen + scrollback. `offset`
    * counts lines back from the live edge (0/absent = the live tail); reads at
@@ -1796,6 +1798,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
+    prompt(sessionId, bytes) {
+      return router.sessions.injectPrompt(sessionId, bytes);
+    },
     tail(sessionId, rows, offset = 0) {
       return router.sessions.historyText(sessionId, rows, offset);
     },
@@ -2106,6 +2111,7 @@ export function createDaemonControlHandler(
     | 'observeProviderSessionIdentity'
     | 'rebindProviderSession'
     | 'input'
+    | 'prompt'
     | 'tail'
     | 'clearSessionLog'
     | 'moorSessionStatus'
@@ -2626,6 +2632,24 @@ export function createDaemonControlHandler(
           if (!accepted) {
             // An unknown session is a concrete failure the channels engine must
             // see (it reverts the delivery), never a silent ok.
+            sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/prompt') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          if (typeof body.text !== 'string' || body.text.length === 0) {
+            sendJson(res, 400, { ok: false, error: 'text must be a non-empty string' });
+            return;
+          }
+          const accepted = daemon.prompt(body.sessionId, new TextEncoder().encode(body.text));
+          if (!accepted) {
             sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
             return;
           }
