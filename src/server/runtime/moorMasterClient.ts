@@ -1218,7 +1218,7 @@ export class MoorMasterClient {
           this.continuity = 'observer';
         }
         this.h.onLeaseResult?.(decoded);
-        this.completeAttachIfReplayDelivered();
+        this.completeAttachAtAdoptionGate();
         return;
       }
       case 'status-reply':
@@ -1284,12 +1284,12 @@ export class MoorMasterClient {
         if (decoded.sequence > this.effectiveResume) {
           const delivered = this.h.onOutput?.(decoded);
           if (delivered instanceof Promise) {
-            return delivered.then(() => this.completeAttachIfReplayDelivered());
+            return delivered.then(() => this.completeAttachAtAdoptionGate());
           }
         } else {
           this.highestSuppressed = decoded.sequence;
         }
-        this.completeAttachIfReplayDelivered();
+        this.completeAttachAtAdoptionGate();
         return;
       }
       case 'gap': {
@@ -1489,7 +1489,7 @@ export class MoorMasterClient {
     this.phase = 'attached';
     this.live = true;
     this.armLiveness();
-    this.completeAttachIfReplayDelivered();
+    this.completeAttachAtAdoptionGate();
   }
 
   private sendAttach(mode: 'fresh' | 'resumed' | 'none'): void {
@@ -1520,7 +1520,7 @@ export class MoorMasterClient {
    * while the holder was alive and answering. Replay delivery is still
    * observable per record through `onOutput` and `highestReceived`.
    */
-  private completeAttachIfReplayDelivered(): void {
+  private completeAttachAtAdoptionGate(): void {
     const pending = this.pendingAttach;
     const status = this.status;
     if (pending === undefined || status === undefined || this.phase !== 'attached') return;
