@@ -10,6 +10,7 @@ import {
   buildInboxItems,
   buildMessageListRows,
   buildMessageLink,
+  memberDotState,
   buildQuoteReply,
   channelSidebarCollapsedSectionsToPreserve,
   channelSidebarExpandedSize,
@@ -809,5 +810,34 @@ describe('applyWindow poll reconcile', () => {
     const merged = applyWindow(window([]), window(['m1'], { contentRevision: 'rev-b' }), 'poll');
     expect(merged.messages.map((m) => m.id)).toEqual(['m1']);
     expect(merged.contentRevision).toBe('rev-b');
+  });
+});
+
+describe('memberDotState', () => {
+  const agent = (sessionId?: string) => ({ name: 'worker', type: 'codex-cli', ...(sessionId === undefined ? {} : { sessionId }) });
+
+  it('is green for the operator and for a member whose session is running', () => {
+    expect(memberDotState({ name: 'human', type: 'human' }, undefined)).toBe('running');
+    expect(memberDotState(agent('sess-a'), { state: 'running' })).toBe('running');
+  });
+
+  it('does not paint OTHER human-typed members green — nothing tracks their presence', () => {
+    // The literal operator's green is true by observation (it is their desk,
+    // their screen). A second hand-written human member has no such tautology.
+    expect(memberDotState({ name: 'guest', type: 'human' }, undefined)).toBe('unbound');
+    expect(memberDotState({ name: 'Human', type: 'human' }, undefined)).toBe('running');
+  });
+
+  it('is red ONLY when this desk knows the session and it is not running', () => {
+    expect(memberDotState(agent('sess-a'), { state: 'stopped' })).toBe('missing');
+  });
+
+  it('is a hollow ring when no session on this desk backs the member', () => {
+    // No session in the manifest at all — hand-made, or a pre-cutover binding
+    // this version cannot resolve. Nothing failed; there is nothing to assert.
+    expect(memberDotState(agent(), undefined)).toBe('unbound');
+    // A session id no configured session carries is the same absence of
+    // evidence, not a death certificate.
+    expect(memberDotState(agent('sess-gone'), undefined)).toBe('unbound');
   });
 });
