@@ -72,6 +72,23 @@ describe('ChannelStore.ingest', () => {
     expect(readChannelMessage(home, 'ops', 'msg-20260801-091500-aaaa0003').body).toBe('first body');
   });
 
+  it('does not cry collision over whitespace the round trip preserves', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // Leading indentation and a trailing space on a content line — typical for
+    // code — survive the format→parse round trip. A bare trim() comparison
+    // used to strip them from the INCOMING side only, flag an honest repeat as
+    // an id collision, and thereby devalue the one signal that means one.
+    const codeShaped = '  const x = 1;\nreturn x;  ';
+    await store.ingest('ops', foreign('msg-20260801-091500-aaaa0021', codeShaped));
+    const repeat = await store.ingest('ops', foreign('msg-20260801-091500-aaaa0021', codeShaped));
+    expect(repeat.applied).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+    // Whitespace the round trip DOES normalise is not a difference either.
+    const padded = await store.ingest('ops', foreign('msg-20260801-091500-aaaa0021', `\n${codeShaped}\n\n`));
+    expect(padded.applied).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('finds the dedupe hit inside a thread too, not only in root', async () => {
     const parent = await appendMessage(home, 'ops', { author: 'human', body: 'parent' });
     await store.ingest('ops', { ...foreign('msg-20260801-091500-aaaa0004', 'reply'), threadParentId: parent.message.id });

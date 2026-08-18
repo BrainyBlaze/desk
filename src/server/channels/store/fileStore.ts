@@ -1104,6 +1104,26 @@ export class IngestParentNotFoundError extends Error {
 const PROTOCOL_MESSAGE_ID = /^msg-[A-Za-z0-9-]+$/;
 const PROTOCOL_MEMBER_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
+/**
+ * A body exactly as the format→parse round trip returns it: CRLF folded, the
+ * renderer's trailing-newline cut, then the parser's edge trim — WHOLE blank
+ * lines (and trailing block separators) only. Inner indentation and trailing
+ * spaces on content lines survive the round trip, so the collision tripwire
+ * must compare against this, not a bare trim(): trim() would strip a leading
+ * indent or a trailing space and report an honest idempotent re-ingest of
+ * code-shaped bodies as an id collision.
+ */
+function roundTrippedBody(body: string): string {
+  const lines = body.replace(/\r\n/g, '\n').replace(/\n*$/, '').split('\n');
+  while (lines.length > 0 && (lines[lines.length - 1].trim() === '' || lines[lines.length - 1].trim() === '---')) {
+    lines.pop();
+  }
+  while (lines.length > 0 && lines[0].trim() === '') {
+    lines.shift();
+  }
+  return lines.join('\n');
+}
+
 /** One message by id with the conversation file it lives in, or undefined. */
 function findChannelMessage(home: string, channel: string, messageId: string): { message: ChannelMessage; file: string } | undefined {
   const dir = channelDir(home, channel);
@@ -1166,7 +1186,7 @@ export async function ingestMessage(home: string, channel: string, input: Ingest
 
       const existing = findChannelMessage(home, channel, input.id);
       if (existing) {
-        const incomingBody = input.body.replace(/\r\n/g, '\n').trim();
+        const incomingBody = roundTrippedBody(input.body);
         if (existing.message.author !== input.author || existing.message.body !== incomingBody) {
           console.warn(
             `[desk-channels] ingest of '${input.id}' into #${channel} matched an existing message with different content — id collision or out-of-band edit; the existing message wins`
