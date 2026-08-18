@@ -53,6 +53,43 @@ export interface MoorStoreSnapshot {
   readonly bytes: Uint8Array;
 }
 
+/**
+ * Per-slot memory of the last VALIDATED read, so an idle poll costs two
+ * 92-byte commit reads instead of the whole store (spec §7.3): the selected
+ * prefix is never mutated in place, and every writer transition — growth or
+ * replacement — lands as a NEW commit record. A commit record byte-identical
+ * to the one last validated therefore means the validated state is unchanged
+ * and its body is not read at all. Any change to either commit record (a new
+ * record, or a torn/short one mid-write) is a transition: the changed slot is
+ * re-read and re-validated whole, and the OTHER slot's memory is dropped too,
+ * because a second replacement can rewrite the very body an older commit
+ * still points at. The cache never decides validity: whatever is read is
+ * hashed and validated against its commit. Event bodies are rewritten whole
+ * on every commit (the header's `next_seq` moves), so there is no byte-level
+ * "growth" to exploit; correctness comes from reading nothing when nothing
+ * changed. Create one per store directory with `createMoorStoreReadCache()`
+ * and pass it to every read.
+ */
+export interface MoorStoreReadCache {
+  /** @internal */
+  readonly slots: [MoorStoreSlotMemory | undefined, MoorStoreSlotMemory | undefined];
+  /** @internal The raw commit files as last seen (92 bytes, or the short size), to detect any transition. */
+  lastSeen: [Uint8Array | number | undefined, Uint8Array | number | undefined];
+}
+
+/** @internal */
+export interface MoorStoreSlotMemory {
+  /** The exact 92-byte commit record that was validated. */
+  readonly record: Uint8Array;
+  readonly commit: MoorCommit;
+  /** The validated body bytes (exactly `commit.length` of them). */
+  readonly bytes: Uint8Array;
+}
+
+export function createMoorStoreReadCache(): MoorStoreReadCache {
+  return { slots: [undefined, undefined], lastSeen: [undefined, undefined] };
+}
+
 export interface MoorEventRecord {
   readonly type: string;
   readonly epoch: number;
@@ -147,7 +184,8 @@ const LIFECYCLE_END =
 export async function readMoorStoreSnapshot(
   directory: string,
   kind: MoorStoreKind,
-  expectedGeneration?: number
+  expectedGeneration?: number,
+  cache?: MoorStoreReadCache
 ): Promise<MoorStoreSnapshot> {
   assertKind(kind);
   if (
@@ -190,9 +228,49 @@ export async function readMoorStoreSnapshot(
       requireSameFile(pathMetadata, handleMetadata);
     }
 
+    let preRead: [Uint8Array | undefined, Uint8Array | undefined] = [undefined, undefined];
+    if (cache !== undefined) {
+      // A writer transaction always touches a commit slot (growth rewrites the
+      // active slot's record; replacement writes the inactive body then the
+      // other commit slot). If EITHER commit record differs from what was last
+      // validated — including a torn/partial record mid-write — the store is
+      // in transition and the body an OLD commit points at may already have
+      // been rewritten (a second replacement returns to the same body slot).
+      // Forget both slots then, so nothing is served from memory across a
+      // transition; only a fully unchanged pair of records is served cached.
+      const seen = await Promise.all(
+        ([0, 1] as const).map(async (slot): Promise<Uint8Array | number> => {
+          const size = (await slots[2 + slot]!.stat()).size;
+          return size === 92 ? await readExact(slots[2 + slot]!, 92) : size;
+        })
+      );
+      const changed = ([0, 1] as const).map((slot) => {
+        const before = cache.lastSeen[slot];
+        const now = seen[slot]!;
+        if (before === undefined) return true;
+        if (typeof before === 'number' || typeof now === 'number') return before !== now;
+        return !equal(before, now);
+      });
+      // A change in slot X's commit record is X's own transition: X takes the
+      // growth-or-full path against its new record. But it also means a writer
+      // transaction is (or was) in flight, and a replacement may have rewritten
+      // the body the OTHER slot's older commit points at (a second replacement
+      // returns to the same body slot) — so the other slot's memory is dropped
+      // and it is re-read whole before it can be selected again.
+      if (changed[0]) cache.slots[1] = undefined;
+      if (changed[1]) cache.slots[0] = undefined;
+      cache.lastSeen = [
+        typeof seen[0] === 'number' ? seen[0] : seen[0]!.slice(),
+        typeof seen[1] === 'number' ? seen[1] : seen[1]!.slice()
+      ];
+      preRead = [
+        typeof seen[0] === 'number' ? undefined : seen[0],
+        typeof seen[1] === 'number' ? undefined : seen[1]
+      ];
+    }
     const reads = await Promise.all([
-      readCandidate(slots, 0, kind, expectedGeneration),
-      readCandidate(slots, 1, kind, expectedGeneration)
+      readCandidate(slots, 0, kind, expectedGeneration, cache, preRead[0]),
+      readCandidate(slots, 1, kind, expectedGeneration, cache, preRead[1])
     ]);
     const candidates = reads.flatMap((read) => (read.candidate === undefined ? [] : [read.candidate]));
     if (candidates.length === 0) {
@@ -438,21 +516,41 @@ async function readCandidate(
   slots: readonly FileHandle[],
   slot: 0 | 1,
   kind: MoorStoreKind,
-  expectedGeneration?: number
+  expectedGeneration?: number,
+  cache?: MoorStoreReadCache,
+  /** The slot's 92-byte commit record if the caller already read it this poll. */
+  preRead?: Uint8Array
 ): Promise<CandidateRead> {
   try {
     const commitFile = slots[2 + slot]!;
-    const commitSize = (await commitFile.stat()).size;
-    if (commitSize !== 92) {
+    let record: Uint8Array;
+    if (preRead !== undefined) {
+      record = preRead;
+    } else {
+      const commitSize = (await commitFile.stat()).size;
+      if (commitSize !== 92) {
+        return {
+          generationMismatch: false,
+          // A non-empty short commit is an in-progress rewrite, not a completed
+          // store decision. Empty slots remain neutral so an actually malformed
+          // store with one bad committed record still fails as corruption.
+          unavailable: commitSize > 0 && commitSize < 92
+        };
+      }
+      record = await readExact(commitFile, 92);
+    }
+    const remembered = cache?.slots[slot];
+    // Unchanged commit record ⇒ the validated state is unchanged (spec §7.3:
+    // the selected prefix is never mutated in place). Nothing to read.
+    if (remembered !== undefined && equal(remembered.record, record)) {
+      if (expectedGeneration !== undefined && remembered.commit.generation !== expectedGeneration) {
+        return { generationMismatch: true };
+      }
       return {
-        generationMismatch: false,
-        // A non-empty short commit is an in-progress rewrite, not a completed
-        // store decision. Empty slots remain neutral so an actually malformed
-        // store with one bad committed record still fails as corruption.
-        unavailable: commitSize > 0 && commitSize < 92
+        candidate: { commit: copyCommit(remembered.commit), bytes: remembered.bytes.slice() },
+        generationMismatch: false
       };
     }
-    const record = await readExact(commitFile, 92);
     const commit = decodeCommit(record, slot, kind);
     if (commit === undefined) return { generationMismatch: false };
     const length = exactAllocationLength(commit.length);
@@ -469,6 +567,9 @@ async function readCandidate(
     }
     if (!bodyValid(commit, bytes)) {
       return { generationMismatch: false };
+    }
+    if (cache !== undefined) {
+      cache.slots[slot] = { record: record.slice(), commit: copyCommit(commit), bytes: bytes.slice() };
     }
     if (expectedGeneration !== undefined && commit.generation !== expectedGeneration) {
       return { generationMismatch: true };
