@@ -355,7 +355,7 @@ export class FileProviderSessionLaunchLedger {
       if (foreignProvider !== undefined) {
         foreignProviders.add(foreignProvider);
         this.applyForeignRecord(parsed as Record<string, unknown>);
-        if (newline === -1) this.appendRecordSeparator();
+        if (newline === -1 && !readOnly) this.appendRecordSeparator();
         offset = next;
         continue;
       }

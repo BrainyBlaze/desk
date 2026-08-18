@@ -168,6 +168,42 @@ describe('FileProviderSessionLaunchLedger', () => {
     expect(readFileSync(path)).toEqual(before);
   });
 
+  it('replays a torn foreign-provider tail read-only without writing the separator', () => {
+    const path = ledgerPath();
+    const writer = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    writer.prepare({
+      deskSessionId: 'desk-alpha',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 7
+    });
+    writer.close();
+    appendFileSync(
+      path,
+      JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-foreign',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation: 1,
+        state: 'prepared'
+      })
+    );
+    const before = readFileSync(path);
+
+    const reader = new FileProviderSessionLaunchLedger(path, {
+      readOnly: true
+    });
+    expect(reader.current('desk-alpha')).toMatchObject({
+      authorizationId: 'authorization-1',
+      state: 'prepared'
+    });
+    reader.close();
+    expect(readFileSync(path)).toEqual(before);
+  });
+
   it('durably replays prepared and authorized reset states', () => {
     const path = ledgerPath();
     const first = new FileProviderSessionLaunchLedger(path, {
