@@ -546,7 +546,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     if (currentAuthorization === undefined) {
       return { ok: true };
     }
-    if (context.currentGeneration === 0 && currentAuthorization.state === 'completed') {
+    if (currentAuthorization.state === 'completed') {
       return { ok: true };
     }
     const claim = providerLaunchLedger.claim({

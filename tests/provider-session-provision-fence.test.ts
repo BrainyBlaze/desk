@@ -452,6 +452,47 @@ function daemonFor(
     replayed.close();
   });
 
+  it('lets a resume-less launch proceed over a completed authorization at any generation', async () => {
+    const { root, manifestPath, ledgerPath } = fixture();
+    const seed = new FileProviderSessionLaunchLedger(ledgerPath, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    const prepared = seed.prepare({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    seed.authorize(prepared.authorizationId);
+    seed.claim({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      currentGeneration: 3,
+      nextGeneration: 4
+    });
+    seed.complete({
+      deskSessionId: 'alpha',
+      provider: 'codex',
+      providerSessionId: NEXT_ID,
+      generation: 4
+    });
+    seed.close();
+
+    const daemon = daemonFor(root, manifestPath);
+    await expect(provisionAtGeneration(daemon, 4)).resolves.toMatchObject({
+      ok: true,
+      generation: 5
+    });
+    daemon.dispose();
+
+    const replayed = new FileProviderSessionLaunchLedger(ledgerPath);
+    expect(replayed.current('alpha')).toMatchObject({
+      state: 'completed',
+      generation: 4
+    });
+    replayed.close();
+  });
+
   it('requires the request identity to match the authoritative manifest binding', async () => {
     const { root, manifestPath } = fixture(PRIOR_ID);
     const daemon = daemonFor(root, manifestPath);
