@@ -128,10 +128,13 @@ state.
 
 Terminal cells — bash sessions, custom commands, and SDK agents running with
 `uiMode: terminal` — use xterm.js in the browser and a server-side terminal
-daemon for transport. One binary WebSocket per browser tab carries all visible
-terminal surfaces. The daemon owns the Moor holder connections, fans each
-session to every viewer (a desktop tab and a phone see the same process),
-restores snapshots on reveal, and streams output only to visible cells.
+daemon for transport. One binary WebSocket per browser tab carries the tab's
+terminal surfaces. A hidden surface keeps its channel but relinquishes input,
+resize, and output-delivery authority until reveal. The daemon owns the Moor
+holder connections, fans each session to every viewer (a desktop tab and a
+phone see the same process), restores a fresh snapshot on same-channel reveal,
+and streams output only to visible cells. Unsubscribe is reserved for actual
+surface removal or transport loss.
 
 Rendering uses hardware WebGL where available, under a shared budget of 8
 contexts — cells beyond the budget (and machines with software-only GL) fall

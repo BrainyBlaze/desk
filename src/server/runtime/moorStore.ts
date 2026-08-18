@@ -17,14 +17,21 @@ export type MoorStoreErrorCode =
   | 'COMPACTION_GAP'
   | 'CURSOR_AHEAD';
 
+interface MoorStoreErrorOptions extends ErrorOptions {
+  readonly mismatchFingerprint?: string;
+}
+
 export class MoorStoreError extends Error {
+  readonly mismatchFingerprint: string | undefined;
+
   constructor(
     readonly code: MoorStoreErrorCode,
     message: string,
-    options?: ErrorOptions
+    options?: MoorStoreErrorOptions
   ) {
     super(message, options);
     this.name = 'MoorStoreError';
+    this.mismatchFingerprint = options?.mismatchFingerprint;
   }
 }
 
@@ -107,6 +114,7 @@ interface CandidateRead {
   readonly candidate?: MoorStoreSnapshot;
   readonly generationMismatch: boolean;
   readonly unavailable?: boolean;
+  readonly mismatchFingerprint?: string;
 }
 
 const EVENT_SCHEMAS: Readonly<Record<string, string>> = {
@@ -190,6 +198,18 @@ export async function readMoorStoreSnapshot(
     if (candidates.length === 0) {
       if (reads.some((read) => read.unavailable)) {
         throw new MoorStoreError('UNAVAILABLE', 'Moor store is temporarily unreadable');
+      }
+      const mismatchFingerprint = reads
+        .flatMap((read) =>
+          read.mismatchFingerprint === undefined ? [] : [read.mismatchFingerprint]
+        )
+        .join(':');
+      if (mismatchFingerprint !== '') {
+        throw new MoorStoreError(
+          'UNAVAILABLE',
+          'Moor store commit/body mismatch is awaiting a stability witness',
+          { mismatchFingerprint }
+        );
       }
       if (reads.some((read) => read.generationMismatch)) {
         throw new MoorStoreError(
@@ -437,10 +457,15 @@ async function readCandidate(
     if (commit === undefined) return { generationMismatch: false };
     const length = exactAllocationLength(commit.length);
     const bytes = await readExact(slots[commit.bodySlot]!, length);
-    if (!equal(sha256(bytes), commit.hash)) {
-      // Bodies are rewritten before their replacement commit. A reader can
-      // therefore observe the old commit against the new body during rotation.
-      return { generationMismatch: false, unavailable: true };
+    const bodyHash = sha256(bytes);
+    if (!equal(bodyHash, commit.hash)) {
+      return {
+        generationMismatch: false,
+        mismatchFingerprint: createHash('sha256')
+          .update(record)
+          .update(bodyHash)
+          .digest('hex')
+      };
     }
     if (!bodyValid(commit, bytes)) {
       return { generationMismatch: false };

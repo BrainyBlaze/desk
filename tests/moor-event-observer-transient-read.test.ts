@@ -27,7 +27,8 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { performance } from 'node:perf_hooks';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { MoorStoreKind } from '../src/server/runtime/moorStore.js';
 import {
@@ -41,6 +42,7 @@ const encoder = new TextEncoder();
 const observers: MoorEventObserver[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (observers.length > 0) observers.pop()!.stop();
   // Permissions are restored before removal: a test that leaves a store
   // unreadable would otherwise defeat its own cleanup.
@@ -343,6 +345,161 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(seen.some((value) => value.type === 'link')).toBe(true);
     expect(seen.at(-1)).toMatchObject({ type: 'link', uri: 'https://example.test/rotation' });
     expect(terminalCount()).toBe(0);
+  });
+
+  it('treats a stable committed body hash mismatch as terminal corruption', async () => {
+    const root = await readyStore();
+    const { diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 3,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const corrupted = eventBody([event('ready', 1, 1n)]);
+    corrupted[0] = corrupted[0]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), corrupted, { mode: 0o600 });
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    await poll();
+
+    expect(terminalCount()).toBe(0);
+    expect(availability).toEqual([]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
+
+    now.mockReturnValue(5_000);
+    await poll();
+
+    expect(terminalCount()).toBe(1);
+    expect(availability).toEqual([]);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[1]).toMatch(/CORRUPT/);
+  });
+
+  it('restarts mismatch stability after a valid commit', async () => {
+    const root = await readyStore();
+    const { seen, diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 5,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const validBody = eventBody([event('ready', 1, 1n)]);
+    const transientBody = validBody.slice();
+    transientBody[0] = transientBody[0]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), transientBody, { mode: 0o600 });
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    await poll();
+    now.mockReturnValue(200);
+    await poll();
+
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics.every((diagnostic) => diagnostic.includes('UNAVAILABLE'))).toBe(true);
+
+    await writeFile(join(root, 'body.0'), validBody, { mode: 0o600 });
+    await poll();
+
+    expect(seen.map((value) => value.type)).toEqual(['ready']);
+    expect(terminalCount()).toBe(0);
+    expect(availability).toEqual([]);
+
+    await writeFile(join(root, 'body.0'), transientBody, { mode: 0o600 });
+    now.mockReturnValue(6_000);
+    await poll();
+
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(3);
+    now.mockReturnValue(11_000);
+    await poll();
+    expect(terminalCount()).toBe(1);
+    expect(diagnostics[3]).toMatch(/CORRUPT/);
+  });
+
+  it('keeps changing two-slot hash mismatch fingerprints retryable', async () => {
+    const root = await readyStore();
+    const { seen, diagnostics, availability, terminalCount, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 5,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+
+    const rotatedBody = eventBody([
+      event('ready', 1, 1n),
+      event('link', 1, 2n, ',\"uri\":\"https://example.test/two-rotation\",\"truncated\":false')
+    ]);
+    const rotatedCommit = commitRecord({
+      slot: 1,
+      bytes: rotatedBody,
+      index: 2n,
+      start: 1n,
+      end: 3n
+    });
+    await writeSlot(root, 1, rotatedBody, rotatedCommit);
+
+    const oldBodyMismatch = eventBody([event('ready', 1, 1n)]);
+    oldBodyMismatch[0] = oldBodyMismatch[0]! ^ 0x01;
+    const rotatedBodyMismatch = rotatedBody.slice();
+    rotatedBodyMismatch[0] = rotatedBodyMismatch[0]! ^ 0x01;
+    await Promise.all([
+      writeFile(join(root, 'body.0'), oldBodyMismatch, { mode: 0o600 }),
+      writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 })
+    ]);
+
+    const poll = () =>
+      (observer as unknown as { poll: () => Promise<void> }).poll();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    await poll();
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
+
+    rotatedBodyMismatch[1] = rotatedBodyMismatch[1]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 });
+    now.mockReturnValue(3_000);
+    await poll();
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[1]).toMatch(/UNAVAILABLE/);
+
+    rotatedBodyMismatch[1] = rotatedBodyMismatch[1]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), rotatedBodyMismatch, { mode: 0o600 });
+    now.mockReturnValue(6_000);
+    await poll();
+    now.mockReturnValue(6_001);
+    await poll();
+    expect(terminalCount()).toBe(0);
+    expect(diagnostics).toHaveLength(4);
+
+    await writeFile(join(root, 'body.1'), rotatedBody, { mode: 0o600 });
+    await poll();
+
+    expect(seen.at(-1)).toMatchObject({
+      type: 'link',
+      uri: 'https://example.test/two-rotation'
+    });
+    expect(terminalCount()).toBe(0);
+    expect(availability).toEqual([]);
   });
 
   it('treats a compaction gap as terminal on the FIRST read, with no retry', async () => {

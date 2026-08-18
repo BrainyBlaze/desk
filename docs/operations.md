@@ -73,15 +73,20 @@ Touching a terminal acknowledges that session's unread events. The events drawer
 
 ## Terminal health
 
-Desk keeps one binary terminal WebSocket per browser tab and subscribes it only
-to visible terminal surfaces. The supervised terminal daemon owns Moor holder
-connections, emulator snapshots, and generation state.
+Desk keeps one binary terminal WebSocket per browser tab. Hidden terminal
+surfaces retain their channel with `VISIBILITY false`, but cannot send input or
+resize the child and receive no output deltas. Reveal reuses that channel and
+starts from a fresh daemon snapshot; actual removal or transport loss
+unsubscribes. The supervised terminal daemon owns Moor holder connections,
+emulator snapshots, and generation state.
 
 Operational guards include:
 
 - visible-only output delivery so hidden cells do not parse terminal streams
+- server-enforced input suppression and queued-input revocation for hidden retained channels
 - snapshot-on-reveal from the daemon's xterm emulator
 - per-session generation fencing so stale output cannot corrupt a new process
+- retryable Moor store rotations; only a hash mismatch unchanged for the five-second stability window is corruption
 - bounded frame sizes, heartbeat detection, and resubscription after gaps
 - private, per-user Moor socket roots
 

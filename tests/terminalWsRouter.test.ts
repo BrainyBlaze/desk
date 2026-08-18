@@ -7,6 +7,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
 import { WorkerSupervisor, DEFAULT_SUPERVISOR_CONFIG, type EmulatorPort, type EmulatorEvent } from '../src/shared/runtime/index.js';
 import { TerminalWsRouter, type WsConn } from '../src/server/runtime/terminalWsRouter.js';
+import type { SessionMasterLink } from '../src/server/runtime/sessionManager.js';
 import { BpError, BpFrameType, decodeBpFrame, encodeBpFrame, type BpFrame } from '../src/shared/browserProtocol/index.js';
 import { describeBpError } from '../src/web/terminalBpError.js';
 
@@ -117,6 +118,34 @@ describe('terminal WS router (§7.4)', () => {
     expect(describeBpError(ws.errors().at(-1)!)).toBe(
       'terminal input is unavailable while the session reconnects or exits'
     );
+  });
+
+  it('rejects INPUT from a retained hidden channel without forwarding master bytes', () => {
+    const ws = new FakeWs();
+    router.onWsFrame(ws, subscribe('s1'));
+    const channelId = ws.acks()[0]!;
+    const forwarded: Uint8Array[] = [];
+    const link: SessionMasterLink = {
+      sendInput: (bytes) => {
+        forwarded.push(bytes.slice());
+        return true;
+      },
+      cancelQueuedInput: () => {},
+      sealInput: () => {},
+      sendResize: () => {},
+      close: () => {}
+    };
+    (router.sessions as unknown as { masters: Map<string, SessionMasterLink> }).masters.set(
+      's1',
+      link
+    );
+    ws.frames.length = 0;
+
+    router.onWsFrame(ws, visibility(channelId, false));
+    router.onWsFrame(ws, input(channelId, 'must-not-reach-master'));
+
+    expect(forwarded).toEqual([]);
+    expect(ws.errors()).toEqual([BpError.INPUT_UNAVAILABLE]);
   });
 
   it('WS close unsubscribes its channels; later INPUT on them is rejected', () => {

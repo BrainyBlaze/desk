@@ -87,10 +87,12 @@ WS /ws/terminal
 ```
 
 `/ws/terminal` is the only browser terminal path. One binary connection per
-browser tab carries multiple visible terminal surfaces. Hidden surfaces
-unsubscribe; reveal resubscribes and receives a fresh snapshot before live
-output. Frames are channel- and generation-fenced through the supervised
-terminal daemon to the session's Moor holder.
+browser tab carries multiple terminal surfaces. Hidden surfaces retain their
+channel under `VISIBILITY false`; the daemon rejects their input, ignores their
+resize authority, and sends no output deltas. Same-channel reveal receives a
+fresh snapshot before live output. Only actual surface removal or transport
+loss unsubscribes. Frames are channel- and generation-fenced through the
+supervised terminal daemon to the session's Moor holder.
 
 ## Filesystem routes
 
