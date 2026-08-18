@@ -167,22 +167,6 @@ describe('ChannelsEngine delivery gating', () => {
         sendText: async () => false
       });
 
-      await exercise('submit-stuck-paste', {
-        enterVerifyDelayMs: 1,
-        verifyCycles: 1
-      });
-
-      let submitPane = READY_PANE;
-      await exercise('submit-stuck-submit', {
-        enterVerifyDelayMs: 1,
-        verifyCycles: 1,
-        sendText: async () => {
-          submitPane = '❯ wedged prompt';
-          return true;
-        },
-        capturePane: async () => submitPane
-      });
-
       let pasteStarted = false;
       await exercise(
         'draining',
@@ -351,44 +335,6 @@ describe('ChannelsEngine delivery gating', () => {
     await engine.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-4-dddd', 'human', '@alpha wake up') }, members);
     await waitFor(() => sent.length === 1);
     expect(sent[0].text).toContain('msg-4-dddd');
-  });
-
-  it('reclaims a wedged draining lock so a hung capture never strands the queue forever', async () => {
-    const recovered: string[] = [];
-    let pane: 'wedged' | 'ready' = 'wedged';
-    let captureStarted = false;
-    const wedged = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 15,
-      // tiny watchdog so the test does not wait the production 30s
-      drainWatchdogMs: 60,
-      sendText: async (_session, text) => {
-        recovered.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => {
-        captureStarted = true;
-        // The pane stays wedged until the test flips explicit state. Any
-        // incidental probe before recovery sees the same state instead of
-        // consuming a fragile "first call" mock.
-        if (pane === 'wedged') {
-          return new Promise<string>(() => {});
-        }
-        return '❯ ';
-      }
-    });
-    await wedged.handleMessage({ channel: 'ops', file: 'root.md', message: message('msg-wedge-1', 'human', 'hi @alpha') }, members);
-    await waitFor(() => captureStarted, 1000);
-    pane = 'ready';
-    // The pump retries; once the watchdog window elapses it reclaims the lock
-    // and the next ready-state capture delivers.
-    await waitFor(() => recovered.length === 1, 3000);
-    expect(recovered).toHaveLength(1);
-    expect(recovered[0]).toContain('msg-wedge-1');
-    wedged.dispose();
   });
 
   it('persists explicitly paused queued prompts across an engine restart', async () => {
@@ -986,38 +932,36 @@ describe('ChannelsEngine delivery gating', () => {
     flaky.dispose();
   });
 
-  it('re-sends Enter when the prompt is in the box but the agent stays idle (eaten submit)', async () => {
-    // Real shape of an eaten submit: the paste lands (the box now shows text, so
-    // the footer changes), but the submit Enter was swallowed, so the agent
-    // stays idle. The verify cycle must press Enter — NOT re-paste — until it runs.
+  it('accepts an atomic prompt packet without a second Enter or pane oracle', async () => {
     let pane = '❯ ';
-    let activity: 'idle' | 'working' = 'idle';
     const enters: string[] = [];
     let pastes = 0;
+    let captures = 0;
     const verifying = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
       enterVerifyDelayMs: 5,
       sendText: async () => {
         pastes += 1;
-        pane = '❯ stuck test'; // the paste reaches the input box
+        pane = '❯ stuck test';
         return true;
       },
       sendEnter: async (session) => {
         enters.push(session);
-        if (enters.length === 2) {
-          activity = 'working';
-        }
         return true;
       },
-      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity }),
+      readAgentStates: async () => canonicalAgentStateBatch(['tmux-a'], { activity: 'idle' }),
       sessionRunning: () => true,
-      capturePane: async () => pane
+      capturePane: async () => {
+        captures += 1;
+        return pane;
+      }
     });
     verifying.enqueuePrompt('tmux-a', 'ops', '@alpha stuck test', 'prompt-11-aaaa');
     await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(enters).toEqual(['tmux-a', 'tmux-a']); // box changed -> Enter retried until busy
-    expect(pastes).toBe(1); // delivered once; never re-pasted (the box showed text)
+    expect(enters).toEqual([]);
+    expect(pastes).toBe(1);
+    expect(captures).toBe(0);
     expect((await verifying.inspectSession('tmux-a')).submitState).toBe('submitted');
     verifying.dispose();
   });
@@ -1097,13 +1041,10 @@ describe('ChannelsEngine delivery gating', () => {
     retrying.dispose();
   });
 
-  it('classifies submit-stuck-paste when nothing ever lands in the box (Enter-only recovery, never re-pastes)', async () => {
-    // The paste never reaches the input box (pane never changes from the
-    // pre-paste capture) and the agent never goes busy. Recovery stays the safe
-    // Enter (a no-op on the empty box) — it must NOT auto re-paste (that would
-    // double-deliver) — and the stall is classified stuck-paste for the operator.
+  it('does not infer paste failure from an unchanged pane after atomic transport acceptance', async () => {
     const enters: string[] = [];
     let pastes = 0;
+    let captures = 0;
     const stuck = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
@@ -1118,27 +1059,30 @@ describe('ChannelsEngine delivery gating', () => {
         return true;
       },
       sessionRunning: () => true,
-      capturePane: async () => '❯ ' // idle, unchanged, forever
+      capturePane: async () => {
+        captures += 1;
+        return '❯ ';
+      }
     });
     stuck.enqueuePrompt('tmux-a', 'ops', '@alpha paste stuck', 'prompt-12-aaaa');
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pastes).toBe(1); // delivered once; NEVER re-pasted (no double delivery)
-    expect(enters).toEqual(['tmux-a', 'tmux-a', 'tmux-a']); // safe Enter each cycle
-    expect(await stuck.inspectSession('tmux-a')).toMatchObject({
-      submitState: 'submit-stuck-paste',
-      deliveryBlocked: true,
-      blockedReason: 'submit-stuck-paste'
+    expect(enters).toEqual([]);
+    expect(captures).toBe(0);
+    const unchangedDiagnostic = await stuck.inspectSession('tmux-a');
+    expect(unchangedDiagnostic).toMatchObject({
+      submitState: 'submitted',
+      deliveryBlocked: false
     });
+    expect(unchangedDiagnostic.blockedReason).toBeUndefined();
     stuck.dispose();
   });
 
-  it('classifies submit-stuck-submit when the box shows text but it never runs', async () => {
-    // The paste lands (footer changes) but every submit Enter is eaten and the
-    // agent never goes busy: after the cycle it must be classified stuck-submit,
-    // and it must never have been re-pasted.
+  it('does not infer submit failure from pane changes after atomic transport acceptance', async () => {
     let pane = '❯ ';
     const enters: string[] = [];
     let pastes = 0;
+    let captures = 0;
     const stuck = new ChannelsEngine({
       home,
       releaseSettleMs: 0,
@@ -1146,25 +1090,30 @@ describe('ChannelsEngine delivery gating', () => {
       verifyCycles: 3,
       sendText: async () => {
         pastes += 1;
-        pane = '❯ wedged prompt'; // lands in the box, but never submits
+        pane = '❯ wedged prompt';
         return true;
       },
       sendEnter: async (session) => {
         enters.push(session);
-        return true; // Enter eaten every time
+        return true;
       },
       sessionRunning: () => true,
-      capturePane: async () => pane
+      capturePane: async () => {
+        captures += 1;
+        return pane;
+      }
     });
     stuck.enqueuePrompt('tmux-a', 'ops', '@alpha submit stuck', 'prompt-13-aaaa');
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pastes).toBe(1); // delivered once; never re-pasted (the box did change)
-    expect(enters).toEqual(['tmux-a', 'tmux-a', 'tmux-a']); // Enter retried each cycle
-    expect(await stuck.inspectSession('tmux-a')).toMatchObject({
-      submitState: 'submit-stuck-submit',
-      deliveryBlocked: true,
-      blockedReason: 'submit-stuck-submit'
+    expect(enters).toEqual([]);
+    expect(captures).toBe(0);
+    const changedDiagnostic = await stuck.inspectSession('tmux-a');
+    expect(changedDiagnostic).toMatchObject({
+      submitState: 'submitted',
+      deliveryBlocked: false
     });
+    expect(changedDiagnostic.blockedReason).toBeUndefined();
     stuck.dispose();
   });
 
@@ -1239,10 +1188,7 @@ describe('ChannelsEngine delivery gating', () => {
     shell.dispose();
   });
 
-  it('still verifies submit for an assistant-CLI session (the shell exemption is agent-specific)', async () => {
-    // Guard for desk#48's fix: skipping verification is keyed on the session's
-    // agent being a shell, NOT on sessionInfo merely being wired — a claude
-    // session with an eaten Enter must still be classified submit-stuck-submit.
+  it('does not pane-verify an assistant CLI after atomic transport acceptance', async () => {
     let pane = '❯ ';
     const agentSession = new ChannelsEngine({
       home,
@@ -1259,12 +1205,13 @@ describe('ChannelsEngine delivery gating', () => {
       capturePane: async () => pane
     });
     agentSession.enqueuePrompt('tmux-a', 'qa-room', '@alpha submit stuck', 'onboard-qa-room');
-    await waitFor(async () => (await agentSession.inspectSession('tmux-a')).submitState === 'submit-stuck-submit');
-    expect(await agentSession.inspectSession('tmux-a')).toMatchObject({
-      submitState: 'submit-stuck-submit',
-      deliveryBlocked: true,
-      blockedReason: 'submit-stuck-submit'
+    await waitFor(async () => (await agentSession.inspectSession('tmux-a')).submitState === 'submitted');
+    const agentDiagnostic = await agentSession.inspectSession('tmux-a');
+    expect(agentDiagnostic).toMatchObject({
+      submitState: 'submitted',
+      deliveryBlocked: false
     });
+    expect(agentDiagnostic.blockedReason).toBeUndefined();
     agentSession.dispose();
   });
 
@@ -1395,10 +1342,7 @@ describe('ChannelsEngine delivery gating', () => {
     eng.dispose();
   });
 
-  it('verify: classifies submit-stuck-unobservable when the pane is unobservable for all verify cycles', async () => {
-    // Drain + pre-paste see a ready pane (delivery happens); then capture fails
-    // for every verify cycle. No positive observation -> retryable unobservable,
-    // NOT a false 'submitted' for retryable unobservable panes.
+  it('does not classify an accepted atomic prompt as stuck when the pane is unobservable', async () => {
     let pane: string | null = '❯ ';
     const states: string[] = [];
     const eng = new ChannelsEngine({
@@ -1416,9 +1360,9 @@ describe('ChannelsEngine delivery gating', () => {
       onSubmitStateChange: (_session, state) => states.push(state)
     });
     eng.enqueuePrompt('tmux-a', 'ops', 'hi @alpha', 'prompt-un-aaaa');
-    await waitFor(() => states.includes('submit-stuck-unobservable'));
-    expect(states).toContain('submit-stuck-unobservable');
-    expect(states).not.toContain('submitted'); // never falsely marked delivered
+    await waitFor(() => states.includes('submitted'));
+    expect(states).toEqual(['delivering', 'submitted']);
+    expect(states).not.toContain('submit-stuck-unobservable');
     eng.dispose();
   });
 
@@ -2193,7 +2137,7 @@ describe('engine drain race safety', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('does not reclaim a watchdog drain while the physical paste is in flight', async () => {
+  it('does not reclaim a watchdog drain while the atomic prompt send is in flight', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-watchdog-'));
     const sent: string[] = [];
     let resolvePush: (() => void) | null = null;
@@ -2234,7 +2178,7 @@ describe('engine drain race safety', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('does not force-deliver while the physical paste is in flight past the watchdog', async () => {
+  it('does not force-deliver while the atomic prompt send is in flight past the watchdog', async () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-watchdog-'));
     const sent: string[] = [];
     let resolvePush: (() => void) | undefined;
@@ -2274,259 +2218,6 @@ describe('engine drain race safety', () => {
     }
   });
 
-  it('invalidates a stale gated drain before force-delivering another queued item', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-generation-'));
-    const sent: string[] = [];
-    let now = 1_000;
-    let captureCalls = 0;
-    let resolveFirstCapture: ((pane: string) => void) | undefined;
-    let markFirstCaptureStarted: (() => void) | undefined;
-    const firstCaptureStarted = new Promise<void>((resolve) => {
-      markFirstCaptureStarted = resolve;
-    });
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 60_000,
-      drainWatchdogMs: 10,
-      now: () => now,
-      sendText: async (_session, text) => {
-        sent.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => {
-        captureCalls += 1;
-        if (captureCalls === 1) {
-          markFirstCaptureStarted?.();
-          return new Promise<string>((resolve) => {
-            resolveFirstCapture = resolve;
-          });
-        }
-        return '❯ ';
-      }
-    });
-    try {
-      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-force-first');
-      await firstCaptureStarted;
-      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-force-second');
-      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
-      expect(targetSeq).toBeDefined();
-      expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(false);
-      expect(sent).toEqual([]);
-      now += 11;
-
-      expect(await engine.forceDeliver('tmux-a', targetSeq)).toBe(true);
-      expect(sent).toEqual(['second prompt']);
-
-      resolveFirstCapture?.('❯ ');
-      await flush();
-      expect(sent).toEqual(['second prompt']);
-    } finally {
-      resolveFirstCapture?.('❯ ');
-      await flush();
-      engine.dispose();
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it('reclaims a wedged forced delivery only once the injected clock crosses the watchdog', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-wedged-'));
-    const sent: string[] = [];
-    let captureCalls = 0;
-    const releaseCapture: Array<(pane: string) => void> = [];
-    let markSecondCaptureStarted: (() => void) | undefined;
-    const secondCaptureStarted = new Promise<void>((resolve) => {
-      markSecondCaptureStarted = resolve;
-    });
-    let clock = 1_760_000_000_000;
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      releaseSettleMs: 0,
-      // Background pump parked: every drain below is an explicit tick, so the
-      // queue advances exactly as far as the test asks and no further.
-      pumpIntervalMs: 60_000,
-      blockedAfterCycles: 1,
-      drainWatchdogMs: 1_000,
-      now: () => clock,
-      sendText: async (_session, text) => {
-        sent.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => {
-        captureCalls += 1;
-        // Captures 1 and 2 wedge their callers pre-paste: the gated drain first,
-        // then the forced delivery that reclaimed the lock from it.
-        if (captureCalls <= 2) {
-          if (captureCalls === 2) {
-            markSecondCaptureStarted?.();
-          }
-          return new Promise<string>((resolve) => {
-            releaseCapture.push(resolve);
-          });
-        }
-        return '❯ ';
-      }
-    });
-    // One deliberate pump tick: a held drain counts a hold cycle, which is what
-    // surfaces `blockedReason` (blockedAfterCycles: 1).
-    const tick = (): Promise<void> =>
-      (engine as unknown as { runPumpTick: () => Promise<void> }).runPumpTick();
-    try {
-      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-wedged-first');
-      await waitFor(() => captureCalls === 1);
-      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-wedged-second');
-      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
-      expect(targetSeq).toBeDefined();
-
-      // Past the first window: the forced delivery takes the lock and stamps it
-      // with the injected clock, then wedges in its own pre-paste capture.
-      clock += 1_001;
-      const forced = engine.forceDeliver('tmux-a', targetSeq);
-      await secondCaptureStarted;
-
-      // Inside the FORCED holder's window: ordinary drains must hold, not reclaim.
-      await tick();
-      let blockedReason: string | undefined;
-      await waitFor(async () => {
-        blockedReason = (await engine.inspectSession('tmux-a')).blockedReason;
-        return blockedReason !== undefined;
-      });
-      expect(blockedReason).toBe('draining');
-      expect(sent).toEqual([]);
-
-      // Past it: the drain reclaims the wedged lock and delivers the queue head.
-      clock += 1_001;
-      await tick();
-      await waitFor(() => sent.length === 1);
-      expect(sent).toEqual(['first prompt']);
-
-      // Both wedged coroutines settle after the reclaim — neither may paste.
-      releaseCapture.forEach((resolve) => resolve('❯ '));
-      expect(await forced).toBe(false);
-      await flush();
-      expect(sent).toEqual(['first prompt']);
-    } finally {
-      releaseCapture.forEach((resolve) => resolve('❯ '));
-      await flush();
-      engine.dispose();
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-
-  it('keeps a newer forced paste single-flight when a stale gated drain settles', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'desk-chan-force-stale-finally-'));
-    const sent: string[] = [];
-    let captureCalls = 0;
-    let resolveFirstCapture: ((pane: string) => void) | undefined;
-    let markFirstCaptureStarted: (() => void) | undefined;
-    let resolveForcedPaste: (() => void) | undefined;
-    const firstCaptureStarted = new Promise<void>((resolve) => {
-      markFirstCaptureStarted = resolve;
-    });
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 60_000,
-      drainWatchdogMs: 10,
-      sendText: async (_session, text) => {
-        sent.push(text);
-        if (sent.length === 1) {
-          await new Promise<void>((resolve) => {
-            resolveForcedPaste = resolve;
-          });
-        }
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => {
-        captureCalls += 1;
-        if (captureCalls === 1) {
-          markFirstCaptureStarted?.();
-          return new Promise<string>((resolve) => {
-            resolveFirstCapture = resolve;
-          });
-        }
-        return '❯ ';
-      }
-    });
-    try {
-      engine.enqueuePrompt('tmux-a', 'ops', 'first prompt', 'prompt-stale-first');
-      await firstCaptureStarted;
-      engine.enqueuePrompt('tmux-a', 'ops', 'second prompt', 'prompt-stale-second');
-      const targetSeq = engine.queuedItems('tmux-a').at(-1)?.seq;
-      expect(targetSeq).toBeDefined();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-
-      const forced = engine.forceDeliver('tmux-a', targetSeq);
-      await waitFor(() => sent.length === 1);
-      resolveFirstCapture?.('❯ ');
-      await flush();
-
-      expect(await engine.forceDeliver('tmux-a')).toBe(false);
-      expect(sent).toEqual(['second prompt']);
-      resolveForcedPaste?.();
-      expect(await forced).toBe(true);
-    } finally {
-      resolveFirstCapture?.('❯ ');
-      resolveForcedPaste?.();
-      await flush();
-      engine.dispose();
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it('does not apply a stale prompt-gate decision after the queue head changes', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'desk-chan-gate-race-'));
-    const sent: string[] = [];
-    let releaseFirstCapture: ((pane: string) => void) | undefined;
-    let markFirstCaptureStarted: (() => void) | undefined;
-    const firstCaptureStarted = new Promise<void>((resolve) => {
-      markFirstCaptureStarted = resolve;
-    });
-    let firstCapture = true;
-    const engine = new ChannelsEngine({
-      sendEnter: async () => true,
-      home,
-      releaseSettleMs: 0,
-      pumpIntervalMs: 60_000,
-      sendText: async (_session, text) => {
-        sent.push(text);
-        return true;
-      },
-      sessionRunning: () => true,
-      capturePane: async () => {
-        if (!firstCapture) {
-          return '❯ ';
-        }
-        firstCapture = false;
-        markFirstCaptureStarted?.();
-        return await new Promise<string>((resolve) => {
-          releaseFirstCapture = resolve;
-        });
-      }
-    });
-
-    engine.enqueuePrompt('tmux-a', 'ops', 'stale head', 'stale-head');
-    await firstCaptureStarted;
-    const staleSeq = engine.queuedItems('tmux-a')[0]!.seq;
-    expect(engine.dropMessage('tmux-a', staleSeq)).toBe(true);
-    engine.enqueuePrompt('tmux-a', 'ops', 'replacement head', 'replacement-head');
-    releaseFirstCapture?.('❯ ');
-    await flush();
-
-    expect(sent).toEqual([]);
-    await engine.drainReady();
-    await waitFor(() => sent.length === 1);
-    expect(sent).toEqual(['replacement head']);
-    engine.dispose();
-    rmSync(home, { recursive: true, force: true });
-  });
 });
 
 describe('ChannelsEngine digest coalescing', () => {

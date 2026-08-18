@@ -531,6 +531,24 @@ export class SessionRuntime {
   }
 
   /**
+   * Submit one complete prompt as one Moor INPUT request. The carriage return
+   * is outside the bracketed-paste boundary, but in the same byte buffer, so
+   * the holder cannot observe a staged composer between separate requests.
+   */
+  injectPrompt(bytes: Uint8Array): boolean {
+    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
+    const bracketed = this.d.emulator.bracketedPaste?.() === true;
+    const open = bracketed ? new TextEncoder().encode('\x1b[200~') : new Uint8Array();
+    const close = bracketed ? new TextEncoder().encode('\x1b[201~') : new Uint8Array();
+    const data = new Uint8Array(open.length + bytes.length + close.length + 1);
+    data.set(open, 0);
+    data.set(bytes, open.length);
+    data.set(close, open.length + bytes.length);
+    data[data.length - 1] = 0x0d;
+    return this.d.sendMasterInput(data, false, 0) !== false;
+  }
+
+  /**
    * The last `rows` on-screen lines as plain text (the pane-capture equivalent
    * for channels submit-verify): the authoritative emulator's tail, never
    * escape sequences.

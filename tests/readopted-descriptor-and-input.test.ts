@@ -149,13 +149,13 @@ describe('a re-adopted session is still addressable (desk#63 follow-up)', () => 
       expect(two.moorStatus('survivor')).toBeDefined();
 
       // And the half the live machine actually failed: input must REACH the
-      // child. The control endpoint answers with `accepted`, which on the live
+      // child. The prompt endpoint answers with `accepted`, which on the live
       // machine was true for bytes that never arrived — so acceptance is not
       // the assertion here; the child's own file is.
-      expect(two.injectInput('survivor', new TextEncoder().encode('READOPTED-INPUT\n'))).toBe(
+      expect(two.injectPrompt('survivor', new TextEncoder().encode('ATOMIC-PROMPT'))).toBe(
         true
       );
-      await waitFor(() => existsSync(received) && readFileSync(received, 'utf8').includes('READOPTED-INPUT'));
+      await waitFor(() => existsSync(received) && readFileSync(received, 'utf8').includes('ATOMIC-PROMPT\r'));
     } finally {
       await killFakeMoorHolder(sock);
       rmSync(dir, { recursive: true, force: true });

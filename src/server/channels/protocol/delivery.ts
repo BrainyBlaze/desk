@@ -81,11 +81,11 @@ export interface ChannelActivityEvent {
 }
 
 /**
- * Lifecycle of a single delivery's submit, as the verify cycle observes it.
- * `delivering` is set the instant the paste is pushed; the verify cycle resolves
- * it to `submitted` (positive evidence the prompt was accepted — the agent went
- * working, OR after a ready-gated delivery a structural approval/input menu
- * appeared) or to one of three stuck classifications after N cycles:
+ * Lifecycle vocabulary for a delivery transaction. The live engine emits
+ * `delivering` before `/control/prompt`, then `submitted` when that atomic
+ * daemon/Moor transport call acknowledges the complete prompt packet.
+ * Pane-derived stuck values remain readable for queues and event rings written
+ * by older Desk builds:
  *  - `submit-stuck-paste`        — pane never changed from pre-paste; the paste
  *    never landed in the input box.
  *  - `submit-stuck-submit`       — the prompt is in the box (pane changed) but
@@ -114,20 +114,16 @@ export type SubmitState =
   | 'submit-stuck-unobservable';
 
 /**
- * The HISTORICAL submit vocabulary: everything the live engine emits today plus
- * `delivery-ack-timeout`, a state no live path has emitted since delivery ACK
- * outcomes were retired. It survives only in already-persisted event rings and
- * ack-file names, so readers of durable history (the timeline, the console
- * label table) speak this wider vocabulary — while the engine's own state and
- * every write path speak `SubmitState`, and a write arm for the retired state
- * cannot exist because the type refuses it.
+ * Historical readers additionally accept `delivery-ack-timeout`, which no live
+ * path emits. Pane-derived stuck values in SubmitState are likewise legacy
+ * compatibility vocabulary and are not live transport outcomes.
  */
 export type HistoricalSubmitState = SubmitState | 'delivery-ack-timeout';
 
 /**
  * Agents whose sessions are a bare shell rather than an assistant CLI. They
- * produce no canonical activity, so agent-shaped submit verification (see
- * SubmitState) has no evidence to read and must not be run against them.
+ * produce no canonical activity and use the explicit submit-not-applicable
+ * terminal state.
  */
 const SHELL_AGENTS = new Set(['bash']);
 
@@ -138,16 +134,14 @@ export function isShellAgent(agent: string | undefined): boolean {
 
 /** Why a session's queue is currently held (ops-console diagnostic). */
 // This runtime list is deliberately exhaustive: lifecycle refusal, drain
-// single-flight ownership, transport failure, and the two observable terminal
-// submit failures are the only production paths that can populate
-// SessionDiagnostic.blockedReason.
+// Single-flight ownership and transport failure are the production paths that
+// can populate SessionDiagnostic.blockedReason. Pane-derived submit failures
+// are retained only as historical durability vocabulary.
 export const DELIVERY_BLOCK_REASONS = [
   'offline',
   'booting',
   'draining',
-  'send-failed',
-  'submit-stuck-paste',
-  'submit-stuck-submit'
+  'send-failed'
 ] as const;
 
 export type DeliveryBlockReason = (typeof DELIVERY_BLOCK_REASONS)[number];

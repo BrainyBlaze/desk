@@ -239,29 +239,20 @@ describe('createNativeChannelsTransport', () => {
     } as never);
   }
 
-  it('sendText pastes via the daemon (paste flag on) then sends a delayed CR', async () => {
+  it('sends one atomic prompt command instead of staging paste and Enter separately', async () => {
     stubDesk();
-    const bodies: Array<Record<string, unknown>> = [];
-    const fetchMock = vi.fn().mockImplementation((_url: string, init: { body: string }) => {
-      bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn().mockImplementation((url: string, init: { body: string }) => {
+      requests.push({ url, body: JSON.parse(init.body) as Record<string, unknown> });
       return Promise.resolve({ ok: true, status: 200, text: async () => '{"ok":true}' });
     });
     vi.stubGlobal('fetch', fetchMock);
-    const waits: number[] = [];
-    const transport = createNativeChannelsTransport({ enterDelayMs: 700, wait: async (ms) => void waits.push(ms) });
+    const transport = createNativeChannelsTransport();
 
-    const sent = await transport.sendText('shell', 'msg body');
-
-    expect(sent).toBe(true);
-    // An unobservable screen (the stub returns no lines) has no submit oracle,
-    // so delivery stays the single open-loop press it always was.
-    expect(bodies).toEqual([
-      { sessionId: 'shell', rows: 200 },
-      { sessionId: 'shell', text: 'msg body', paste: true },
-      { sessionId: 'shell', rows: 200 },
-      { sessionId: 'shell', text: '\r' }
-    ]);
-    expect(waits).toEqual([700]);
+    expect(await transport.sendText('shell', 'msg body')).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toContain('/control/prompt');
+    expect(requests[0].body).toEqual({ sessionId: 'shell', text: 'msg body' });
   });
 
   it('sendText works when passed as the detached terminal sender used by Channels', async () => {
@@ -272,101 +263,20 @@ describe('createNativeChannelsTransport', () => {
       return Promise.resolve({ ok: true, status: 200, text: async () => '{"ok":true}' });
     });
     vi.stubGlobal('fetch', fetchMock);
-    const { sendText } = createNativeChannelsTransport({ wait: async () => {} });
+    const { sendText } = createNativeChannelsTransport();
 
     expect(await sendText('shell', 'msg body')).toBe(true);
-    expect(bodies).toEqual([
-      { sessionId: 'shell', rows: 200 },
-      { sessionId: 'shell', text: 'msg body', paste: true },
-      { sessionId: 'shell', rows: 200 },
-      { sessionId: 'shell', text: '\r' }
-    ]);
+    expect(bodies).toEqual([{ sessionId: 'shell', text: 'msg body' }]);
   });
 
-  /**
-   * The operator-reported bug: the message lands in the composer but codex
-   * never starts processing it until a human presses Enter. A fixed delay
-   * cannot tell a swallowed keystroke from an accepted one — the screen can.
-   */
-  it('sendText repeats Enter while the screen does not move across the press', async () => {
-    stubDesk();
-    const bodies: Array<Record<string, unknown>> = [];
-    const captures = ['ready', '> msg body', '> msg body', '> msg body', '> msg body'];
-    const fetchMock = vi.fn().mockImplementation((_url: string, init: { body: string }) => {
-      const body = JSON.parse(init.body) as Record<string, unknown>;
-      bodies.push(body);
-      const lines = body.rows === 200 ? [captures.shift() ?? '> msg body'] : undefined;
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify(lines ? { ok: true, lines } : { ok: true })
-      });
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const transport = createNativeChannelsTransport({ enterAttempts: 3, wait: async () => {} });
-
-    expect(await transport.sendText('shell', 'msg body')).toBe(true);
-
-    const enters = bodies.filter((body) => body.text === '\r');
-    expect(enters).toHaveLength(3);
-  });
-
-  it('waits for an asynchronously staged paste before using screen movement as submit proof', async () => {
-    stubDesk();
-    const bodies: Array<Record<string, unknown>> = [];
-    const captures = ['ready', 'ready', '> msg body', '> msg body', 'working'];
-    const fetchMock = vi.fn().mockImplementation((_url: string, init: { body: string }) => {
-      const body = JSON.parse(init.body) as Record<string, unknown>;
-      bodies.push(body);
-      const lines = body.rows === 200 ? [captures.shift() ?? 'working'] : undefined;
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify(lines ? { ok: true, lines } : { ok: true })
-      });
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const transport = createNativeChannelsTransport({ enterAttempts: 3, wait: async () => {} });
-
-    expect(await transport.sendText('shell', 'msg body')).toBe(true);
-
-    const firstEnter = bodies.findIndex((body) => body.text === '\r');
-    expect(bodies.slice(0, firstEnter).filter((body) => body.rows === 200)).toHaveLength(3);
-    expect(bodies.filter((body) => body.text === '\r')).toHaveLength(2);
-  });
-
-  it('sendText stops pressing Enter as soon as the screen moves', async () => {
-    stubDesk();
-    const bodies: Array<Record<string, unknown>> = [];
-    const captures = ['ready', '> msg body', 'thinking…'];
-    const fetchMock = vi.fn().mockImplementation((_url: string, init: { body: string }) => {
-      const body = JSON.parse(init.body) as Record<string, unknown>;
-      bodies.push(body);
-      // The submit lands: the composer clears on the capture after the press.
-      const lines = body.rows === 200 ? [captures.shift() ?? 'thinking…'] : undefined;
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify(lines ? { ok: true, lines } : { ok: true })
-      });
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const transport = createNativeChannelsTransport({ enterAttempts: 3, wait: async () => {} });
-
-    expect(await transport.sendText('shell', 'msg body')).toBe(true);
-
-    expect(bodies.filter((body) => body.text === '\r')).toHaveLength(1);
-  });
-
-  it('sendText reports false (no Enter) when the paste fails', async () => {
+  it('sendText reports false when the atomic prompt request fails', async () => {
     stubDesk();
     const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     vi.stubGlobal('fetch', fetchMock);
-    const transport = createNativeChannelsTransport({ wait: async () => {} });
+    const transport = createNativeChannelsTransport();
     expect(await transport.sendText('shell', 'msg')).toBe(false);
     expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body))).toEqual([
-      { sessionId: 'shell', rows: 200 },
-      { sessionId: 'shell', text: 'msg', paste: true }
+      { sessionId: 'shell', text: 'msg' }
     ]);
   });
 
@@ -380,15 +290,6 @@ describe('createNativeChannelsTransport', () => {
     const transport = createNativeChannelsTransport();
     expect(await transport.capturePane('shell')).toBe('a\nb');
     expect(await transport.capturePane('shell')).toBeNull();
-  });
-
-  it('sendEnter sends a bare CR keyed by sessionId', async () => {
-    stubDesk();
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
-    vi.stubGlobal('fetch', fetchMock);
-    const transport = createNativeChannelsTransport();
-    expect(await transport.sendEnter('shell')).toBe(true);
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ sessionId: 'shell', text: '\r' });
   });
 
   it('sessionLiveness is the daemon authority, and unreachable stays indeterminate', async () => {
@@ -434,8 +335,11 @@ describe('createNativeChannelsTransport', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '{"ok":true}' });
     vi.stubGlobal('fetch', fetchMock);
     const transport = createNativeChannelsTransport();
-    await transport.sendEnter('agentdesk-g-orphan-xyz');
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).sessionId).toBe('agentdesk-g-orphan-xyz');
+    await transport.sendText('agentdesk-g-orphan-xyz', 'message');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      sessionId: 'agentdesk-g-orphan-xyz',
+      text: 'message'
+    });
   });
 
   it('sessionCreatedAt is the adopted holder wallStart in epoch seconds and null without a live link', async () => {

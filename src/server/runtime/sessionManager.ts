@@ -2145,6 +2145,11 @@ export class SessionManager {
     return this.core.injectInput(sessionId, bytes, paste);
   }
 
+  /** Submit one complete prompt through one Moor INPUT request. */
+  injectPrompt(sessionId: string, bytes: Uint8Array): boolean {
+    return this.core.injectPrompt(sessionId, bytes);
+  }
+
   /** The session's on-screen tail as plain text (capture-pane equivalent), or undefined. */
   tailText(sessionId: string, rows: number): string[] | undefined {
     return this.core.tailText(sessionId, rows);
