@@ -130,11 +130,16 @@ Qwen sessions launch as `qwen` (Qwen Code, a Gemini-CLI fork). Desk supports:
 - resume ids (`--resume <id>`, a UUID)
 - hook settings for state reporting and resume capture
 
-When LSP agent access is enabled, Desk wires `desk_lsp` for Qwen too: the
-server is registered once in `~/.qwen/settings.json` (Qwen has no per-session
-MCP flag), and each Desk launch carries the session's `DESK_LSP_ENV_FILE` in
-the environment. Outside Desk the entry is inert — the tools resolve their
-token from that variable and report an error without it.
+Desk wires `desk_lsp` for Qwen in two parts. `desk hooks install` registers
+the server once in `~/.qwen/settings.json` (Qwen has no per-session MCP flag),
+unconditionally — the install command has no view of LSP settings. The
+per-session part is gated: only when LSP agent access is enabled does a Desk
+launch carry the session's `DESK_LSP_ENV_FILE` in the environment. Without
+that variable the registered tools stay visible to Qwen but every call
+returns a missing-environment error — including in Qwen sessions run outside
+Desk. Note that the variable lives in the Qwen process environment, so child
+processes Qwen spawns inherit it; the token it points to stays bound to the
+launching session's workspace.
 
 Qwen's hooks are Claude-compatible and live in:
 
@@ -142,11 +147,15 @@ Qwen's hooks are Claude-compatible and live in:
 ~/.qwen/settings.json
 ```
 
-`desk hooks install` merges Desk's hooks into that file without touching the
-operator's other settings; if the file is malformed JSON it is backed up and
-skipped rather than overwritten. Qwen reads a command hook's `timeout` in
-**milliseconds** (unlike Claude/Codex, which use seconds), so Desk writes
-`10000` there.
+`desk hooks install` merges Desk's hooks into that file and also fills two
+terminal-context keys Qwen exposes only through settings —
+`ui.mouseTracking: false` and `ui.useTerminalBuffer: false`, so a click does
+not paste mouse-report bytes and the pane has one scrollback instead of two.
+It fills only keys the operator has not set: an explicit operator value is
+never overridden, and other settings are untouched. If the file is malformed
+JSON it is backed up and skipped rather than overwritten. Qwen reads a
+command hook's `timeout` in **milliseconds** (unlike Claude/Codex, which use
+seconds), so Desk writes `10000` there.
 
 Permission bypass maps to Qwen's `--yolo` (auto-approve all tools; needs Qwen
 Code ≥0.21.13 — older CLIs reject the flag, and Qwen's own auto-updater keeps

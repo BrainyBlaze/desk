@@ -661,7 +661,7 @@ describe('probe and merge maintenance for the new terminal agents', () => {
     }
   });
 
-  it('writes qwen terminal-context settings alongside hooks and preserves operator ui keys', () => {
+  it('fills missing qwen terminal-context settings without flipping explicit operator choices', () => {
     const home = mkdtempSync(join(tmpdir(), 'desk-qwen-ui-'));
     try {
       const qwenPath = join(home, '.qwen', 'settings.json');
@@ -674,11 +674,26 @@ describe('probe and merge maintenance for the new terminal agents', () => {
       installAgentHooks({ homeDir: home });
 
       const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
-      expect(qwen.ui.mouseTracking).toBe(false);
+      expect(qwen.ui.mouseTracking).toBe(true);
       expect(qwen.ui.useTerminalBuffer).toBe(false);
       expect(qwen.ui.theme).toBe('dark');
       expect(qwen.security.auth.selectedType).toBe('openai');
       expect(Object.keys(qwen.hooks)).toContain('SessionStart');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('writes the full qwen terminal-context settings when the operator set none', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-qwen-ui-fresh-'));
+    try {
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+
+      const installed = installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
+      expect(qwen.ui.mouseTracking).toBe(false);
+      expect(qwen.ui.useTerminalBuffer).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

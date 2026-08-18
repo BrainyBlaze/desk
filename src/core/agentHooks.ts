@@ -761,12 +761,15 @@ function mergeHookConfigLocked(
   // Desk terminal-context settings the agent CLI has no env lever for. Claude
   // and OpenCode get the same treatment through launch env
   // (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN / OPENCODE_DISABLE_MOUSE); qwen exposes
-  // them only through settings.json, so Desk merges them here — shallow per key,
-  // preserving every other operator setting in the same block.
+  // them only through settings.json, so Desk fills them here — but only the
+  // keys the operator has not set. This is the operator's global file (every
+  // qwen session reads it, Desk-launched or not), and the ~/.claude rule
+  // applies: an explicit operator value is theirs, not Desk's to flip back on
+  // every install.
   const mergedSettings: Record<string, unknown> = {};
   for (const [block, values] of Object.entries(deskSettings ?? {})) {
     const currentBlock = isRecord(current[block]) ? (current[block] as Record<string, unknown>) : {};
-    mergedSettings[block] = { ...currentBlock, ...values };
+    mergedSettings[block] = { ...values, ...currentBlock };
   }
 
   writeJsonIfChanged(path, { ...current, ...mergedSettings, hooks: mergedHooks });
