@@ -881,24 +881,14 @@ export class SessionManager {
       return false;
     }
     // The §6 status ACK precedes terminal state on the wire. The client chains
-    // terminal-state handling before every later prefix/replay frame; adoption
-    // completes only after that work drains clean, then buffered replay/live
-    // output reaches the emulator in arrival order. A failed drain discards it.
+    // terminal-state handling before every later prefix/replay frame, and the
+    // adoption gate (spec §10.2) closes when that mandatory preamble has
+    // drained clean — NOT when the retained replay has reached the screen.
+    // "Identity success must not be confused with screen exactness": the
+    // display baseline completes separately, on the ordinary output path.
     if (!(await terminalStateReady)) {
       client.close();
       return false;
-    }
-    let deliveredWatermark = 0n;
-    for (const pending of bufferedOutput.splice(0)) {
-      await this.core.onMoorOutput(sessionId, pending.bytes, pending.offset);
-      deliveredWatermark = pending.sequence;
-    }
-    if (deliveredWatermark > 0n) {
-      try {
-        client.ackOutput(deliveredWatermark); // one coalesced ack per released buffer
-      } catch {
-        /* link closed: nothing to acknowledge */
-      }
     }
     // Re-check AFTER the await: a concurrent retire may have torn the session
     // down while the attach prefix was in flight.
@@ -911,6 +901,33 @@ export class SessionManager {
       return false;
     }
     attached = true;
+    // Release the replay that was held behind the preamble barrier onto the
+    // same backpressured, acknowledged path live output takes. The runtime
+    // serializes deliveries per session (SessionRuntime.onMoorOutput chains on
+    // its own outputDelivery), so arrival order is preserved: every buffered
+    // record is enqueued here before any later live record can be enqueued
+    // by onOutput. Nothing awaits the screen — a holder that retained 4 MiB of
+    // TUI redraws adopts as fast as one that retained 4 KiB, and sibling
+    // adoptions on this daemon are never starved by this session's tail.
+    for (const pending of bufferedOutput.splice(0)) {
+      const acknowledge = (): void => {
+        try {
+          client.ackOutput(pending.sequence);
+        } catch {
+          /* link closed mid-replay: nothing to acknowledge */
+        }
+      };
+      let delivered: void | Promise<void>;
+      try {
+        delivered = this.core.onMoorOutput(sessionId, pending.bytes, pending.offset);
+      } catch {
+        // Output past an exit boundary or a disposed runtime: the session is
+        // going away; the remaining tail has no screen to reach.
+        break;
+      }
+      if (delivered instanceof Promise) void delivered.then(acknowledge, () => undefined);
+      else acknowledge();
+    }
     const retainedPendingInput =
       client.leaseContinuity === 'resumed'
         ? resumedPendingInput

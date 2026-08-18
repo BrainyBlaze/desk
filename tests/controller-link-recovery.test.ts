@@ -180,33 +180,6 @@ class BlockingRecoveryReplayEmulator extends EmptyEmulator {
   }
 }
 
-class LateCompletingReplayEmulator extends EmptyEmulator {
-  private flushCount = 0;
-  private replayFlushStartedResolve!: () => void;
-  readonly replayFlushStarted = new Promise<void>((resolve) => {
-    this.replayFlushStartedResolve = resolve;
-  });
-  private replayDrainResolve!: () => void;
-  private readonly replayDrain = new Promise<void>((resolve) => {
-    this.replayDrainResolve = resolve;
-  });
-
-  flush(): Promise<void> {
-    this.flushCount += 1;
-    if (this.flushCount === 3) this.replayFlushStartedResolve();
-    if (this.flushCount === 3 || this.flushCount === 5) return this.replayDrain;
-    return Promise.resolve();
-  }
-
-  releaseReplayFlush(): void {
-    this.replayDrainResolve();
-  }
-
-  override serialize(): string {
-    return new TextDecoder().decode(joined(...this.writes));
-  }
-}
-
 class BlockingOutputEmulator extends EmptyEmulator {
   flushCount = 0;
   failNextSerialize = false;
@@ -1091,7 +1064,15 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('bounds recovery through post-ack replay before publishing the recovered master', async () => {
+  it('recovers the master at adoption; a slow replay drain never times the attempt out, and the replay is applied exactly once', async () => {
+    // Spec §10.2: the identity/adoption gate closes at ATTACH_ACK + preamble
+    // (+ LEASE_RESULT); the display baseline "completes separately". A screen
+    // that drains the retained replay slowly is a viewer concern — it must not
+    // expire the 2 s adoption deadline, close the recovery attempt, and start a
+    // retry storm that re-streams the same replay (the live failure of
+    // 2026-08-18: 4 MiB codex tails never adopted). Recovery therefore
+    // publishes the recovered master at adoption; the replay lands afterwards,
+    // exactly once, with one ack; input queued during recovery flows after it.
     const emulator = new BlockingRecoveryReplayEmulator();
     const harness = await startRecoveryHarness(
       () => emulator,
@@ -1121,96 +1102,49 @@ describe('SessionManager controller-link recovery', () => {
       await emulator.replayFlushStarted;
       await settleSocketIo();
 
-      expect(harness.holder.inputs).toEqual([]);
+      // Adopted: the recovered link is published while the replay is still
+      // draining, and the keystroke queued during recovery reaches the holder
+      // NOW — lease-owned traffic is legal the moment the lease is granted
+      // (§6.1); holding it behind the display baseline would let a heavy
+      // replay stall the agent's input all over again.
+      expect(harness.holder.inputs).toEqual(['must-stay-queued']);
       expect(harness.manager.stateSnapshot('session')).toMatchObject({
         generation: GENERATION,
-        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+        health: { status: 'healthy' }
       });
 
+      // The 2 s adoption deadline (which the old contract let the replay run
+      // out) passes with the screen still shut: nothing closes, nothing
+      // reconnects — 1 primary + 1 probe + 1 recovery attach, and it stays 3.
       await vi.advanceTimersByTimeAsync(2_001);
-      await harness.holder.recoveryAttemptClosed;
-      await settleSocketIo();
-
-      expect(harness.holder.inputs).toEqual([]);
+      await settleSocketIo(4);
+      expect(harness.holder.connections).toBe(3);
       expect(harness.browserErrors).toEqual([]);
       expect(harness.manager.stateSnapshot('session')).toMatchObject({
         generation: GENERATION,
-        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+        health: { status: 'healthy' }
       });
 
-      await vi.advanceTimersByTimeAsync(20_000);
-      await settleSocketIo(8);
-      expect(harness.holder.connections).toBe(3);
-      expect(harness.browserErrors).toHaveLength(1);
-
+      // The screen finally drains: the replay is applied once and acked once,
+      // on the same, still-open recovered link.
       emulator.releaseReplayFlush();
-      await harness.holder.postFailureRetryConnected;
-      await harness.holder.secondRecoveryAttemptConnected;
-      await harness.holder.postFailureRetryAttached;
       await settleSocketIo(12);
       expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
       expect(harness.holder.outputAcks).toEqual([1n]);
-    } finally {
-      await harness.close();
-    }
-  });
-
-  it('applies a late replay completion only once across the timed-out attempt and retry', async () => {
-    const emulator = new LateCompletingReplayEmulator();
-    const harness = await startRecoveryHarness(
-      () => emulator,
-      (sessionPath) =>
-        new ExpiringLeaseHolder(
-          sessionPath,
-          false,
-          INCARNATION,
-          false,
-          false,
-          false,
-          true
-        )
-    );
-    try {
-      await harness.enterRecovery();
-      expect(
-        harness.manager.onBrowserInputByChannel(
-          harness.channelId,
-          false,
-          new TextEncoder().encode('after-timeout')
-        )
-      ).toBe(true);
-      harness.holder.allowRecovery();
-      await harness.holder.recoveryAttemptConnected;
-      await emulator.replayFlushStarted;
-
-      await vi.advanceTimersByTimeAsync(2_001);
-      await harness.holder.recoveryAttemptClosed;
-      await vi.advanceTimersByTimeAsync(20_000);
-      await settleSocketIo(8);
+      expect(harness.holder.inputs).toEqual(['must-stay-queued']);
       expect(harness.holder.connections).toBe(3);
+      expect(harness.browserErrors).toEqual([]);
 
-      emulator.releaseReplayFlush();
-      await harness.holder.postFailureRetryConnected;
-      await harness.holder.secondRecoveryAttemptConnected;
-      await harness.holder.postFailureRetryAttached;
-      await settleSocketIo(12);
-
-      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
-      expect(harness.holder.outputAcks).toEqual([1n]);
-      expect(harness.holder.inputs).toEqual([]);
-      expect(harness.browserErrors).toHaveLength(1);
-
+      // A surface subscribing after the drain is baselined at the replay's
+      // end offset — the whole retained run was applied exactly once.
       const lateChannel = harness.manager.subscribe('session', 'late', 24, 80)!;
       const snapshot = harness.browserFrames
         .filter(({ channelId }) => channelId === lateChannel)
         .map(({ frame }) => frame)
         .find((frame) => frame.type === BpFrameType.SNAPSHOT);
-      expect(snapshot).toMatchObject({
-        type: BpFrameType.SNAPSHOT,
-        offset: 1n,
-        text: 'r'
-      });
+      expect(snapshot).toMatchObject({ type: BpFrameType.SNAPSHOT, offset: 1n });
     } finally {
+      emulator.releaseReplayFlush();
       await harness.close();
     }
   });

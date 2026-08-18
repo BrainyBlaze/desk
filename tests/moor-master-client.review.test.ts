@@ -499,13 +499,16 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       })
     );
     holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
+    // Observer attach: adoption closes at the preamble (§10.2). The replay
+    // boundary fault that follows is enforced on the adopted link.
+    await expect(attached).resolves.toBeDefined();
     holder.send(MoorKind.GAP, joined(integer(1n, 8), integer(2n, 8)));
     holder.send(MoorKind.OUTPUT, joined(integer(3n, 8), integer(999n, 8), text('x')));
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(outputs).toEqual([]);
-    await expect(attached).rejects.toThrow();
+    expect(client.attached).toBe(false);
   });
 
   it('enforces the ACK retained byte end on the final replay record', async () => {
@@ -529,12 +532,13 @@ describe('MoorMasterClient adversarial lifecycle replay', () => {
       })
     );
     holder.send(MoorKind.TERMINAL_STATE, integer(0, 2));
+    await expect(attached).resolves.toBeDefined();
     holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('xx')));
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
     expect(outputs).toEqual([]);
-    await expect(attached).rejects.toThrow();
+    expect(client.attached).toBe(false);
   });
 
   it('does not emit OUTPUT_ACK above the highest record delivered', async () => {

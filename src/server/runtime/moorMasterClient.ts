@@ -1509,11 +1509,21 @@ export class MoorMasterClient {
     });
   }
 
+  /**
+   * Resolve the pending ATTACH once the identity/adoption gate has closed
+   * (spec §10.2): HELLO → ATTACH_ACK → mandatory TERMINAL_STATE preamble →
+   * lease settlement. The retained-output replay that follows is the viewer's
+   * DISPLAY BASELINE, which "completes separately … identity success must not
+   * be confused with screen exactness". Gating adoption on the replay tied a
+   * 2 s protocol deadline to the size of a holder's scrollback (§6.7 allows
+   * 4 MiB) — a heavy TUI tail then failed adoption for the whole session
+   * while the holder was alive and answering. Replay delivery is still
+   * observable per record through `onOutput` and `highestReceived`.
+   */
   private completeAttachIfReplayDelivered(): void {
     const pending = this.pendingAttach;
     const status = this.status;
     if (pending === undefined || status === undefined || this.phase !== 'attached') return;
-    if (this.highestReceived < status.replay.last) return;
     if (this.deadline !== undefined) {
       clearTimeout(this.deadline);
       this.deadline = undefined;
