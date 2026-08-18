@@ -306,6 +306,6 @@ The MCP surface is token-bound to the session workspace. Agents receive the toke
 
 ## Channels membership
 
-Channels give Claude, Codex, Qwen, Kimi, and Grok sessions their own first-class member type. OpenCode still enters channels through the generic bash-typed member path.
+Channels give every managed agent session — Claude, Codex, OpenCode, Qwen, Kimi, and Grok — its own first-class member type. Custom-command and bash sessions enter through the generic bash-typed member path.
 
-The member type is a roster/notice label only — no delivery or supervisor behavior gates on it — so a bash-typed member still participates fully. Do not assume an OpenCode-specific channel member type exists until the source adds one.
+The member type is a roster/notice label only — no delivery or supervisor behavior gates on it — so a bash-typed member still participates fully.

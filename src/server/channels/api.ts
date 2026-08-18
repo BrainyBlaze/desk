@@ -476,6 +476,7 @@ async function resolveAuthor(store: ChannelStore, channel: string, body: Record<
 const MEMBER_TYPE_BY_AGENT: Record<string, string> = {
   claude: 'claude-code',
   codex: 'codex-cli',
+  opencode: 'opencode',
   qwen: 'qwen',
   kimi: 'kimi',
   grok: 'grok'
@@ -485,8 +486,8 @@ const MEMBER_TYPE_BY_AGENT: Record<string, string> = {
  * The channel member kind for a session's agent. Every managed agent gets its
  * own first-class kind; sessions with no agent (custom commands) and `bash`
  * fall back to `bash`. Nothing gates behavior on the kind — it is a label for
- * the roster and join notice — but a Qwen/Kimi/Grok session showing as `bash`
- * misreads it, so they are named here too.
+ * the roster and join notice — but an agent session showing as `bash`
+ * misreads it, so every registry agent is named here.
  */
 export function memberTypeForAgent(agent: string | undefined): string {
   return MEMBER_TYPE_BY_AGENT[agent ?? ''] ?? 'bash';

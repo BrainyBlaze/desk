@@ -346,6 +346,7 @@ export class FileProviderSessionContinuityLedger {
 
   private replay(fd: number, readOnly: boolean): void {
     const bytes = readFileSync(fd);
+    const foreignProviders = new Set<string>();
     let offset = 0;
     while (offset < bytes.length) {
       const newline = bytes.indexOf(0x0a, offset);
@@ -370,6 +371,17 @@ export class FileProviderSessionContinuityLedger {
           `corrupt provider continuity ledger at byte ${offset}: malformed interior record`
         );
       }
+      // A record from a provider this build does not know (version skew: a
+      // newer desk wrote it, then rolled back) must not poison startup — the
+      // launch ledger already tolerates exactly this (3959047). Skipping means
+      // that session's continuity state is simply absent here, which degrades
+      // to a failed proof check instead of a daemon that refuses to boot.
+      const foreignProvider = foreignProviderOf(parsed);
+      if (foreignProvider !== undefined) {
+        foreignProviders.add(foreignProvider);
+        offset = next;
+        continue;
+      }
       this.applyRecord(parseRecord(parsed, offset), offset);
       if (newline === -1 && !readOnly) {
         if (writeSync(fd, '\n') !== 1) {
@@ -380,6 +392,11 @@ export class FileProviderSessionContinuityLedger {
         fsyncSync(fd);
       }
       offset = next;
+    }
+    for (const provider of foreignProviders) {
+      process.stderr.write(
+        `provider continuity ledger: skipped records for unknown provider "${provider}"\n`
+      );
     }
   }
 
@@ -685,6 +702,28 @@ function isSafeSessionId(value: string): boolean {
     value.length <= 512 &&
     !value.includes('\0')
   );
+}
+
+function foreignProviderOf(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  if (
+    typeof record.provider !== 'string' ||
+    record.provider.trim().length === 0 ||
+    isProviderSessionProvider(record.provider)
+  ) {
+    return undefined;
+  }
+  if (
+    record.version !== 1 ||
+    (record.type !== 'proof-issued' && record.type !== 'transition') ||
+    typeof record.deskSessionId !== 'string'
+  ) {
+    return undefined;
+  }
+  return record.provider;
 }
 
 function parseRecord(input: unknown, offset: number): ContinuityRecord {

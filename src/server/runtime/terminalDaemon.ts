@@ -103,6 +103,7 @@ import type {
 } from './sessionManager.js';
 import type { AgentObservationScope } from '../../core/agentState/providerAdapter.js';
 import {
+  isHookIdentityProvider,
   isProviderSessionProvider,
   isValidProviderSessionId,
   type ProviderSessionProvider
@@ -561,9 +562,13 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     context: SessionSpawnPreallocationContext,
     spec: TerminalDaemonSessionSpec
   ): Promise<SessionSpawnPreallocationResult> | SessionSpawnPreallocationResult => {
+    // Continuity (proofs + observation) is for providers whose HOOKS can carry
+    // an identity back; a plugin-reporting provider (opencode) still gets its
+    // launch-ledger authorization above but must not receive proofs nothing
+    // can present, nor have its launches coupled to continuity-store health.
     if (
       context.subject.kind !== 'agent' ||
-      !isProviderSessionProvider(context.subject.provider)
+      !isHookIdentityProvider(context.subject.provider)
     ) {
       return authorizeProviderSessionLaunch(context, spec);
     }
@@ -1355,7 +1360,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         if (
           !input ||
           !isSafeDaemonSessionId(input.deskSessionId) ||
-          !isProviderSessionProvider(input.provider) ||
+          !isHookIdentityProvider(input.provider) ||
           !isValidProviderSessionId(input.provider, input.providerSessionId) ||
           !Number.isSafeInteger(input.generation) ||
           input.generation < 2 ||
@@ -2521,7 +2526,7 @@ export function createDaemonControlHandler(
             Object.keys(body).sort().join(',') !==
               'deskSessionId,generation,hook,launchProof,provider,providerSessionId' ||
             !isSafeDaemonSessionId(body.deskSessionId) ||
-            !isProviderSessionProvider(body.provider) ||
+            !isHookIdentityProvider(body.provider) ||
             typeof body.providerSessionId !== 'string' ||
             !isValidProviderSessionId(
               body.provider,

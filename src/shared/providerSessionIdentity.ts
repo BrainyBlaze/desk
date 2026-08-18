@@ -56,6 +56,20 @@ export function isProviderSessionProvider(
   return isAgentProviderId(value);
 }
 
+/**
+ * Providers whose hooks can actually carry a provider session id back to the
+ * daemon. The launch-proof flow is only meaningful for these: a provider
+ * without a hook identity path (opencode reports through its plugin) can
+ * receive a proof but nothing can ever present it, so gating on the broader
+ * registry predicate would issue dead-weight proofs and couple that
+ * provider's launches to continuity-store health for no benefit.
+ */
+export function isHookIdentityProvider(
+  value: unknown
+): value is HookIdentityProvider {
+  return typeof value === 'string' && value in HOOK_IDENTITY_PRODUCERS;
+}
+
 export function extractProviderSessionId(
   provider: ProviderSessionProvider,
   payload: unknown

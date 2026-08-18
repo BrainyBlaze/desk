@@ -6,6 +6,7 @@ describe('channel member type for an agent', () => {
   it('gives every managed agent its own first-class kind', () => {
     expect(memberTypeForAgent('claude')).toBe('claude-code');
     expect(memberTypeForAgent('codex')).toBe('codex-cli');
+    expect(memberTypeForAgent('opencode')).toBe('opencode');
     expect(memberTypeForAgent('qwen')).toBe('qwen');
     expect(memberTypeForAgent('kimi')).toBe('kimi');
     expect(memberTypeForAgent('grok')).toBe('grok');
@@ -18,7 +19,7 @@ describe('channel member type for an agent', () => {
   });
 
   it('never labels one of the new terminal agents as bash', () => {
-    for (const agent of ['qwen', 'kimi', 'grok'] as const) {
+    for (const agent of ['opencode', 'qwen', 'kimi', 'grok'] as const) {
       expect(AGENT_IDS).toContain(agent);
       expect(memberTypeForAgent(agent), `${agent} member type`).not.toBe('bash');
     }
