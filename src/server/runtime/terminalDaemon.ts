@@ -2312,10 +2312,13 @@ export function createDaemonControlHandler(
                   : 'action' in ens && typeof ens.action === 'string'
                     ? ens.action
                     : undefined;
+            const cause =
+              detail ??
+              ('error' in ens && typeof ens.error === 'string' ? ens.error : undefined);
             sendJson(res, 503, {
               ok: false,
               error: `${ens.reason}${
-                detail === undefined ? '' : `: ${detail}`
+                cause === undefined ? '' : `: ${cause}`
               }${recovery === undefined ? '' : `; ${recovery}`}`,
               ...(detail === undefined ? {} : { detail }),
               ...(recovery === undefined ? {} : { recovery })

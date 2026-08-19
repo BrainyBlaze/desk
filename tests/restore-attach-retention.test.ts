@@ -1216,7 +1216,11 @@ describe('desk#64 — restart attach failure retains the session', () => {
           args: [...NODE_IMPORT_ARGS, 'kill', world.sessionPath]
         }
       });
-      expect(reprovision).toEqual({ ok: false, reason: 'spawn-failed' });
+      expect(reprovision).toEqual({
+        ok: false,
+        reason: 'spawn-failed',
+        error: 'a live terminal holder already occupies this session name; use another name or stop that holder first'
+      });
       expect(processAlive(world.pid)).toBe(true);
       expect(existsSync(world.sessionPath)).toBe(true);
     },
