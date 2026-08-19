@@ -36,7 +36,7 @@ jobs:
         run: |
           test_tmp=$(mktemp -d /var/tmp/desk-vitest.XXXXXX)
           trap 'rm -rf "$test_tmp"' EXIT
-          TMPDIR="$test_tmp" npx vitest run --exclude tests/moor-distribution-contract.test.ts --exclude tests/moor-native-e2e.test.ts
+          TMPDIR="$test_tmp" npm run test:ci
       - name: Build application
         run: npm run build:application
       - run: npm run smoke:serve-modes
