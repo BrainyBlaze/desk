@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { DeskAgent } from '../core/types.js';
+import { isAgentProviderId, nativeProducerOf } from '../shared/agentRegistry.js';
 import {
   AGENT_SURFACE_RING_SIZE,
   parseAgentHostClientFrame,
@@ -1048,20 +1049,18 @@ function sessionOfFrame(frame: AgentUiClientFrame): string | undefined {
 }
 
 function nativeProviderFor(agent: DeskAgent): AgentProvider | undefined {
-  return agent === 'claude' || agent === 'codex' || agent === 'opencode'
-    ? agent
-    : undefined;
+  if (!isAgentProviderId(agent)) {
+    return undefined;
+  }
+  return nativeProducerOf(agent) !== undefined ? agent : undefined;
 }
 
 function nativeProducerFor(provider: AgentProvider): AgentProducer {
-  switch (provider) {
-    case 'claude':
-      return 'claude-native';
-    case 'codex':
-      return 'codex-native';
-    case 'opencode':
-      return 'opencode-native';
+  const producer = nativeProducerOf(provider);
+  if (producer === undefined) {
+    throw new Error(`native producer is not defined for provider: ${provider}`);
   }
+  return producer;
 }
 
 function eventOccurredAt(event: AgentSurfaceEvent, fallback: number): number {

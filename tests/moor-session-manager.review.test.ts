@@ -571,6 +571,46 @@ describe('SessionManager Moor production-slice adversarial review', () => {
     expect(new DataView(acknowledgement!.payload.buffer, acknowledgement!.payload.byteOffset).getBigUint64(0, true)).toBe(1n);
   });
 
+  it('receipts one complete control prompt packet before reporting delivery', async () => {
+    const manager = makeManager();
+    expect(manager.ensure('s1', { rows: 24, cols: 80 })).toMatchObject({
+      ok: true,
+      generation: GENERATION
+    });
+    const holder = new ProtocolHolder();
+    await holder.listen();
+    cleanups.push(() => holder.close());
+    cleanups.push(() => manager.retire('s1'));
+
+    const attaching = manager.moorAttachMaster('s1', holder.sockPath, { rows: 24, cols: 80 }, {
+      generation: GENERATION
+    });
+    expect(await driveAttach(holder, attaching)).toBe(true);
+
+    const submitted = manager.injectPrompt('s1', text('prompt'));
+    const input = await holder.next();
+    expect(input?.kind).toBe(MoorKind.INPUT);
+    expect(new TextDecoder().decode(input!.payload.subarray(13))).toBe('prompt\r');
+    const settled = vi.fn();
+    void submitted.then(settled);
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    holder.send(
+      MoorKind.INPUT_RECEIPT,
+      joined(
+        integer(1, 4),
+        integer(1n, 8),
+        integer(GENERATION, 4),
+        INCARNATION,
+        integer(7n, 8),
+        Uint8Array.of(0),
+        integer(0, 2)
+      )
+    );
+    await expect(submitted).resolves.toBe(true);
+  });
+
   it('clears an adopted Moor status when restart adoption rolls back', async () => {
     const ledger = new GenerationLedger(new InMemoryGenerationLedger());
     expect(ledger.allocate('s1')).toBe(GENERATION);

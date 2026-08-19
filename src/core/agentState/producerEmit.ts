@@ -12,14 +12,17 @@
 // The runtime carries NO judgement about what an observation means. It reports
 // what was seen and stamps who saw it.
 
+import {
+  AGENT_PROVIDER_ENTRIES,
+  terminalProducerOf,
+  type AgentProviderId
+} from '../../shared/agentRegistry.js';
 import { DESK_PROVIDER_LAUNCH_PROOF } from '../../shared/providerSessionIdentity.js';
 
 /** Producers registered in the control-plane contract, by provider. */
-export const TERMINAL_PRODUCERS = {
-  claude: 'claude-hooks',
-  codex: 'codex-hooks',
-  opencode: 'opencode-terminal'
-} as const;
+export const TERMINAL_PRODUCERS = Object.fromEntries(
+  AGENT_PROVIDER_ENTRIES.map((agent) => [agent.id, terminalProducerOf(agent.id)])
+) as Record<AgentProviderId, string>;
 
 /**
  * Env var carrying the session's daemon generation into the agent process.

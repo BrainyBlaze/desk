@@ -481,8 +481,23 @@ async function resolveAuthor(store: ChannelStore, channel: string, body: Record<
 
 const MEMBER_TYPE_BY_AGENT: Record<string, string> = {
   claude: 'claude-code',
-  codex: 'codex-cli'
+  codex: 'codex-cli',
+  opencode: 'opencode',
+  qwen: 'qwen',
+  kimi: 'kimi',
+  grok: 'grok'
 };
+
+/**
+ * The channel member kind for a session's agent. Every managed agent gets its
+ * own first-class kind; sessions with no agent (custom commands) and `bash`
+ * fall back to `bash`. Nothing gates behavior on the kind — it is a label for
+ * the roster and join notice — but an agent session showing as `bash`
+ * misreads it, so every registry agent is named here.
+ */
+export function memberTypeForAgent(agent: string | undefined): string {
+  return MEMBER_TYPE_BY_AGENT[agent ?? ''] ?? 'bash';
+}
 
 /** Maps an optional thread parent id to the conversation file it lives in. */
 function resolveConversationFile(thread: unknown): string {
@@ -808,7 +823,7 @@ export async function handleChannelsRequest(req: IncomingMessage, res: ServerRes
         }))
       });
       const member = await store.addMember(channel, handle, {
-        type: MEMBER_TYPE_BY_AGENT[spec.agent ?? ''] ?? 'bash',
+        type: memberTypeForAgent(spec.agent),
         sessionId: sessionKey,
         agentLabel: [spec.projectLabel, spec.groupLabel, spec.name].filter(Boolean).join(' / ')
       });

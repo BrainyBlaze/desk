@@ -20,7 +20,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve as resolvePath } from 'node:path';
-import { findPackageRoot } from './packageRoot.js';
+import { resolvePackageRoot } from './packageRoot.js';
 
 export function resolveMoorSocketRoot(
   env: NodeJS.ProcessEnv = process.env,
@@ -131,24 +131,6 @@ export function ensurePrivateSocketRoot(root: string): void {
     throw new Error(`moor socket root ${root} is owned by uid ${stat.uid}, not this user — refusing to use it`);
   }
   chmodSync(root, 0o700);
-}
-
-/**
- * The release root: the module's package root when the module lives on a real
- * release filesystem, else the process cwd when IT is a release root. The
- * second branch exists for the Bun-compiled standalone, whose import.meta.url
- * is a bundle-internal path — `desk serve` launches it with cwd = the release
- * root (serveCommand), so cwd is the authoritative fallback there.
- */
-export function resolveReleaseRoot(fromUrl: string, cwd: string = process.cwd()): string {
-  try {
-    return findPackageRoot(fromUrl);
-  } catch {
-    if (existsSync(join(cwd, 'package.json')) && existsSync(join(cwd, 'dist', 'cli', 'main.js'))) {
-      return cwd;
-    }
-    throw new Error('cannot locate the desk release root for the terminal daemon — set DESK_DAEMON_CMD');
-  }
 }
 
 export function isExecutableFile(path: string): boolean {
@@ -277,7 +259,7 @@ export function resolveMoorBinPath(
     return explicit;
   }
   try {
-    const bundled = join(resolveReleaseRoot(fromUrl, cwd), 'libexec', 'moor');
+    const bundled = join(resolvePackageRoot(fromUrl, cwd), 'libexec', 'moor');
     if (isExecutableFile(bundled) && attest(bundled).ok) {
       return bundled;
     }

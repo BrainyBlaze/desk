@@ -17,14 +17,14 @@ import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import {
   isExecutableFile,
-  resolveMoorBinPath,
-  resolveReleaseRoot
+  resolveMoorBinPath
 } from '../../shared/moorPaths.js';
+import { resolvePackageRoot } from '../../shared/packageRoot.js';
 
 // Re-exported so existing consumers (deskRuntime, tests) keep their import
 // path; the single audited copies live in shared/moorPaths — the CLI attach
 // path and the supervisor must resolve the exact same release binary.
-export { resolveMoorBinPath, resolveReleaseRoot };
+export { resolveMoorBinPath };
 
 /**
  * Env vars a launching agent session leaks into the server process. A daemon
@@ -117,7 +117,7 @@ export function resolveDaemonCommand(
   if (override !== undefined && override.length > 0) {
     return override.split(/\s+/);
   }
-  const root = resolveReleaseRoot(fromUrl, cwd);
+  const root = resolvePackageRoot(fromUrl, cwd);
   const cliEntry = join(root, 'dist', 'cli', 'main.js');
   if (!existsSync(cliEntry)) {
     throw new Error(`desk CLI entry missing at ${cliEntry} — run npm run build, or set DESK_DAEMON_CMD`);

@@ -1,9 +1,10 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { CLAUDE_NOTIFICATION_MATCHERS } from './agentState/claudeFacts.js';
 import { buildOpencodeAttentionPlugin } from './agentState/opencodeProducer.js';
 import { defaultOpencodeConfigDir } from './opencodeConfig.js';
 import { buildProducerRuntime } from './agentState/producerEmit.js';
 import { shellQuote } from '../shared/shell.js';
+import type { AgentProviderId } from '../shared/agentRegistry.js';
 import { writeTextFileAtomic } from '../shared/atomicFile.js';
 import { withFileLockSync } from '../shared/fileLock.js';
 import { PROVIDER_SESSION_ID_PAYLOAD_FIELD } from '../shared/providerSessionIdentity.js';
@@ -63,8 +64,15 @@ export interface InstalledAgentHooks {
   codexHooksPath: string;
   claudeSettingsPath: string;
   opencodePluginPath: string;
-  /** Config paths that were NOT written because their existing content was
-   *  malformed JSON (a .bak was made). The caller must report these honestly. */
+  qwenSettingsPath: string;
+  kimiConfigPath: string;
+  grokSettingsPath: string;
+  /** Optional agent configs left untouched because their CLI's config
+   *  directory does not exist on this machine. */
+  notInstalled: string[];
+  /** Config paths that were NOT written: malformed JSON (a .bak was made) or a
+   *  kimi hooks entry that cannot hold [[hooks]] blocks (left untouched). The
+   *  caller must report these honestly. */
   skipped: string[];
 }
 
@@ -173,6 +181,91 @@ export function buildClaudeHooksSettings(shimPath: string): ClaudeHooksSettings 
   };
 }
 
+/**
+ * Terminal-context settings Desk needs for the qwen pane, which qwen exposes
+ * only through settings.json (it has no env equivalent):
+ *  - mouseTracking:false — the host xterm owns click/selection, so a click no
+ *    longer injects raw SGR mouse-report bytes into the prompt.
+ *  - useTerminalBuffer:false — qwen renders in the main screen instead of an
+ *    alternate-screen viewport, so there is one scrollback (the host's) instead
+ *    of two competing scrollbars.
+ * This mirrors CLAUDE_TERMINAL_ENV / OPENCODE_DISABLE_MOUSE for the CLIs that
+ * take the same directives through launch env.
+ */
+const QWEN_DESK_TERMINAL_SETTINGS = {
+  ui: { mouseTracking: false, useTerminalBuffer: false },
+  // desk_lsp is registered globally because qwen has no per-session MCP config
+  // flag. The server starts as a no-op outside Desk: its tools resolve the
+  // per-session token from DESK_LSP_ENV_FILE, which only Desk launches carry.
+  mcpServers: {
+    desk_lsp: { command: 'desk-lsp-mcp', args: [] }
+  }
+} as const;
+
+const QWEN_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PermissionRequest',
+  'Notification',
+  'Stop',
+  'StopFailure',
+  'SessionEnd'
+] as const;
+
+const GROK_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'Stop',
+  'StopFailure'
+] as const;
+
+function buildClaudeStyleHooksSettings(
+  shimPath: string,
+  agent: string,
+  events: readonly string[],
+  timeout: number
+): { hooks: Record<string, HookGroup[]> } {
+  return {
+    hooks: Object.fromEntries(
+      events.map((event) => [event, [{ hooks: [commandHook(shimPath, agent, event, timeout)] }]])
+    )
+  };
+}
+
+export function buildQwenHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
+  return buildClaudeStyleHooksSettings(shimPath, 'qwen', QWEN_HOOK_EVENTS, 10_000);
+}
+
+export function buildGrokHooksSettings(shimPath: string): { hooks: Record<string, HookGroup[]> } {
+  return buildClaudeStyleHooksSettings(shimPath, 'grok', GROK_HOOK_EVENTS, 10);
+}
+
+const KIMI_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PermissionRequest',
+  'Notification',
+  'Stop',
+  'StopFailure',
+  'SessionEnd'
+] as const;
+
+export function buildKimiHooksToml(shimPath: string): string {
+  return KIMI_HOOK_EVENTS.map(
+    (event) =>
+      `[[hooks]]\nevent = "${event}"\ncommand = ${JSON.stringify(command(shimPath, 'kimi', event))}\ntimeout = 10\n`
+  ).join('\n');
+}
+
 export function codexHookPreflightStatus(input: {
   installed: boolean;
   trusted: boolean;
@@ -191,7 +284,7 @@ export function codexHookPreflightStatus(input: {
   return { active: true };
 }
 
-export type HookProbeProvider = 'claude' | 'codex' | 'opencode';
+export type HookProbeProvider = AgentProviderId;
 
 /**
  * What the filesystem can honestly say about a provider's trust records.
@@ -245,6 +338,33 @@ export function probeHookInstallation(
       ...(installed ? {} : { detail: 'desk-owned claude settings do not invoke the current shim' })
     };
   }
+  if (provider === 'qwen') {
+    const installed = hookConfigInvokes(join(homeDir, '.qwen', 'settings.json'), shimPath);
+    return {
+      provider,
+      installed,
+      trust: 'not-applicable',
+      ...(installed ? {} : { detail: 'qwen settings.json does not invoke the current shim' })
+    };
+  }
+  if (provider === 'grok') {
+    const installed = hookConfigInvokes(join(homeDir, '.grok', 'user-settings.json'), shimPath);
+    return {
+      provider,
+      installed,
+      trust: 'not-applicable',
+      ...(installed ? {} : { detail: 'grok user-settings.json does not invoke the current shim' })
+    };
+  }
+  if (provider === 'kimi') {
+    const installed = kimiConfigInvokes(join(homeDir, '.kimi-code', 'config.toml'), shimPath);
+    return {
+      provider,
+      installed,
+      trust: 'not-applicable',
+      ...(installed ? {} : { detail: 'kimi config.toml does not invoke the current shim' })
+    };
+  }
   const codexHooksPath = join(homeDir, '.codex', 'hooks.json');
   const installed = hookConfigInvokes(codexHooksPath, shimPath);
   return {
@@ -253,6 +373,14 @@ export function probeHookInstallation(
     trust: codexTrustSignal(homeDir, codexHooksPath),
     ...(installed ? {} : { detail: 'codex hooks.json does not invoke the current shim' })
   };
+}
+
+function kimiConfigInvokes(path: string, shimPath: string): boolean {
+  try {
+    return readFileSync(path, 'utf8').includes(shimPath);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -373,8 +501,91 @@ export function installAgentHooks(options: InstallAgentHooksOptions = {}): Insta
   // has no business editing it to install its own reporting.
   writeTextIfChanged(claudeSettingsPath, `${JSON.stringify(buildClaudeHooksSettings(shimPath), null, 2)}\n`);
   writeTextIfChanged(opencodePluginPath, buildOpencodeAttentionPlugin());
+  const notInstalled: string[] = [];
+  const qwenSettingsPath = join(homeDir, '.qwen', 'settings.json');
+  installOptionalAgentHooks(qwenSettingsPath, notInstalled, skipped, () =>
+    mergeHookConfig(qwenSettingsPath, buildQwenHooksSettings(shimPath), shimPath, QWEN_DESK_TERMINAL_SETTINGS)
+  );
+  const kimiConfigPath = join(homeDir, '.kimi-code', 'config.toml');
+  installOptionalAgentHooks(kimiConfigPath, notInstalled, skipped, () =>
+    appendKimiHooks(kimiConfigPath, shimPath)
+  );
+  const grokSettingsPath = join(homeDir, '.grok', 'user-settings.json');
+  installOptionalAgentHooks(grokSettingsPath, notInstalled, skipped, () =>
+    mergeHookConfig(grokSettingsPath, buildGrokHooksSettings(shimPath), shimPath)
+  );
 
-  return { shimPath, codexHooksPath, claudeSettingsPath, opencodePluginPath, skipped };
+  return {
+    shimPath,
+    codexHooksPath,
+    claudeSettingsPath,
+    opencodePluginPath,
+    qwenSettingsPath,
+    kimiConfigPath,
+    grokSettingsPath,
+    notInstalled,
+    skipped
+  };
+}
+
+function installOptionalAgentHooks(
+  configPath: string,
+  notInstalled: string[],
+  skipped: string[],
+  install: () => 'merged' | 'skipped-malformed' | 'skipped-incompatible'
+): void {
+  let stats;
+  try {
+    stats = statSync(dirname(configPath));
+  } catch {
+    notInstalled.push(configPath);
+    return;
+  }
+  if (!stats.isDirectory()) {
+    skipped.push(configPath);
+    return;
+  }
+  try {
+    if (install() !== 'merged') {
+      skipped.push(configPath);
+    }
+  } catch {
+    skipped.push(configPath);
+  }
+}
+
+function appendKimiHooks(path: string, shimPath: string): 'merged' | 'skipped-incompatible' {
+  return withFileLockSync(`${path}.lock`, () => appendKimiHooksLocked(path, shimPath));
+}
+
+function appendKimiHooksLocked(path: string, shimPath: string): 'merged' | 'skipped-incompatible' {
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  if (/^\s*hooks\s*=|^\s*\[hooks[\].]/m.test(existing)) {
+    return 'skipped-incompatible';
+  }
+  const kept: string[] = [];
+  const lines = existing.split('\n');
+  let index = 0;
+  while (index < lines.length) {
+    if (lines[index].trim() === '[[hooks]]') {
+      const start = index;
+      index += 1;
+      while (index < lines.length && !lines[index].trimStart().startsWith('[')) {
+        index += 1;
+      }
+      const block = lines.slice(start, index).join('\n');
+      if (!/desk-agent-event(\.mjs)?' --agent/.test(block)) {
+        kept.push(block);
+      }
+      continue;
+    }
+    kept.push(lines[index]);
+    index += 1;
+  }
+  const base = kept.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n*$/, '');
+  const block = buildKimiHooksToml(shimPath);
+  writeTextIfChanged(path, base === '' ? block : `${base}\n\n${block}`);
+  return 'merged';
 }
 
 /**
@@ -424,7 +635,7 @@ process.stdin.on('end', async () => {
     matcher: deskBounded(discriminantOf(hook, input)),
     message: deskBounded(input.message),
     tool: deskBounded(input.tool_name),
-    toolUseId: deskBounded(input.tool_use_id),
+    toolUseId: deskBounded(input.tool_use_id || input.tool_call_id),
     turnId: deskBounded(input.turn_id || input.turnId),
     providerSessionId: deskBounded(
       input[DESK_PROVIDER_SESSION_ID_FIELDS[DESK_PROVIDER]]
@@ -487,20 +698,24 @@ function writeTextIfChanged(path: string, content: string): void {
 function mergeHookConfig(
   path: string,
   desired: { hooks: Record<string, HookGroup[]> },
-  currentShimPath: string
+  currentShimPath: string,
+  deskSettings?: Record<string, Record<string, unknown>>
 ): 'merged' | 'skipped-malformed' {
   // Lock the read-modify-write on this shared user config: `desk hooks install`
   // can race Claude Code (or a second install) writing ~/.claude/settings.json.
   // The atomic write prevents a torn file, not a lost update. Lock a separate
   // `.lock` path, matching the manifest update convention.
   mkdirSync(dirname(path), { recursive: true });
-  return withFileLockSync(`${path}.lock`, () => mergeHookConfigLocked(path, desired, currentShimPath));
+  return withFileLockSync(`${path}.lock`, () =>
+    mergeHookConfigLocked(path, desired, currentShimPath, deskSettings)
+  );
 }
 
 function mergeHookConfigLocked(
   path: string,
   desired: { hooks: Record<string, HookGroup[]> },
-  currentShimPath: string
+  currentShimPath: string,
+  deskSettings?: Record<string, Record<string, unknown>>
 ): 'merged' | 'skipped-malformed' {
   const read = readJsonObjectClassified(path);
   if (read.kind === 'malformed') {
@@ -527,9 +742,65 @@ function mergeHookConfigLocked(
   for (const [event, desiredGroups] of Object.entries(desired.hooks)) {
     mergedHooks[event] = mergeHookGroups(mergedHooks[event], desiredGroups, currentShimPath);
   }
+  // Prune Desk's own hooks for events we no longer install. Without this, an
+  // event dropped from an agent's set (e.g. grok's Notification) leaves an
+  // orphaned desk hook firing a retired schema forever, because the loop above
+  // only ever visits DESIRED events. Operator-authored hooks are untouched.
+  for (const event of Object.keys(mergedHooks)) {
+    if (event in desired.hooks) {
+      continue;
+    }
+    const pruned = pruneDeskHooks(mergedHooks[event], currentShimPath);
+    if (pruned === undefined) {
+      delete mergedHooks[event];
+    } else {
+      mergedHooks[event] = pruned;
+    }
+  }
 
-  writeJsonIfChanged(path, { ...current, hooks: mergedHooks });
+  // Desk terminal-context settings the agent CLI has no env lever for. Claude
+  // and OpenCode get the same treatment through launch env
+  // (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN / OPENCODE_DISABLE_MOUSE); qwen exposes
+  // them only through settings.json, so Desk fills them here — but only the
+  // keys the operator has not set. This is the operator's global file (every
+  // qwen session reads it, Desk-launched or not), and the ~/.claude rule
+  // applies: an explicit operator value is theirs, not Desk's to flip back on
+  // every install.
+  const mergedSettings: Record<string, unknown> = {};
+  for (const [block, values] of Object.entries(deskSettings ?? {})) {
+    const currentBlock = isRecord(current[block]) ? (current[block] as Record<string, unknown>) : {};
+    mergedSettings[block] = { ...values, ...currentBlock };
+  }
+
+  writeJsonIfChanged(path, { ...current, ...mergedSettings, hooks: mergedHooks });
   return 'merged';
+}
+
+/**
+ * Strip Desk-owned hooks from an event's groups, keeping operator hooks. Returns
+ * undefined when nothing operator-authored remains, so the caller drops the now
+ * Desk-only event key entirely instead of leaving an empty array behind. A
+ * non-array value is an operator-authored shape Desk never writes — hand it
+ * back untouched rather than judging it prunable.
+ */
+function pruneDeskHooks(existing: unknown, currentShimPath: string): unknown | undefined {
+  if (!Array.isArray(existing)) {
+    return existing;
+  }
+  const groups: unknown[] = [];
+  for (const group of existing) {
+    if (!isRecord(group) || !Array.isArray(group.hooks)) {
+      groups.push(group);
+      continue;
+    }
+    const hooks = group.hooks.filter(
+      (hook) => !(isRecord(hook) && typeof hook.command === 'string' && hook.command.includes(DESK_SHIM_BASENAME))
+    );
+    if (hooks.length > 0) {
+      groups.push({ ...group, hooks });
+    }
+  }
+  return groups.length > 0 ? groups : undefined;
 }
 
 /**
@@ -540,11 +811,24 @@ function mergeHookConfigLocked(
  * longer exists or speaks a retired schema. Both failures are silent: a hook
  * that errors never breaks the agent, so nobody would notice the duplicate.
  */
-function isStaleDeskHook(hook: unknown, currentShimPath: string): boolean {
+function isStaleDeskHook(hook: unknown, currentShimPath: string, desiredGroups?: HookGroup[]): boolean {
   if (!isRecord(hook) || typeof hook.command !== 'string') {
     return false;
   }
-  return hook.command.includes(DESK_SHIM_BASENAME) && !hook.command.includes(currentShimPath);
+  if (!hook.command.includes(DESK_SHIM_BASENAME)) {
+    return false;
+  }
+  if (!hook.command.includes(currentShimPath)) {
+    return true;
+  }
+  if (desiredGroups === undefined) {
+    return false;
+  }
+  // Same shim but a drifted shape (a timeout-unit fix, a changed arg): without
+  // this, isSameHook rejects the old copy as "different" and mergeHookGroups
+  // appends the corrected one beside it — the shim then fires twice per event,
+  // forever, because nothing else ever removes a current-shim hook.
+  return !desiredGroups.some((group) => group.hooks.some((desired) => isSameHook(hook, desired)));
 }
 
 function mergeHookGroups(
@@ -556,7 +840,7 @@ function mergeHookGroups(
     Array.isArray(existing) ? existing.map((group) => normalizeHookGroup(group)) : []
   ).map((group) => ({
     ...group,
-    hooks: (Array.isArray(group.hooks) ? group.hooks : []).filter((hook) => !isStaleDeskHook(hook, currentShimPath))
+    hooks: (Array.isArray(group.hooks) ? group.hooks : []).filter((hook) => !isStaleDeskHook(hook, currentShimPath, desiredGroups))
   }));
   for (const desired of desiredGroups) {
     const matcher = desired.matcher ?? '';
@@ -584,7 +868,12 @@ function normalizeHookGroup(group: unknown): Record<string, unknown> {
 }
 
 function isSameHook(existing: unknown, desired: HookHandler): boolean {
-  return isRecord(existing) && existing.type === desired.type && existing.command === desired.command;
+  return (
+    isRecord(existing) &&
+    existing.type === desired.type &&
+    existing.command === desired.command &&
+    existing.timeout === desired.timeout
+  );
 }
 
 type JsonObjectRead =

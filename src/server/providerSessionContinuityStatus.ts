@@ -37,7 +37,7 @@ export function readProviderSessionContinuityStatus(
         const session = sessionsById.get(transition.deskSessionId);
         if (session === undefined) return [];
         const providerLabel =
-          transition.provider === 'codex' ? 'Codex' : 'Claude';
+          transition.provider.charAt(0).toUpperCase() + transition.provider.slice(1);
         if (transition.state === 'cancelled-by-reset') {
           const authorization = loadedLaunchLedger.authorization(
             transition.resetAuthorizationId ?? ''

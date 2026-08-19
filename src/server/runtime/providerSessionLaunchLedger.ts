@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import {
   isValidProviderSessionId,
+  PROVIDER_SESSION_PROVIDERS,
   type ProviderSessionProvider
 } from '../../shared/providerSessionIdentity.js';
 
@@ -87,11 +88,7 @@ interface ProviderSessionLaunchLedgerOptions {
   readOnly?: boolean;
 }
 
-const PROVIDERS = new Set<ProviderSessionProvider>([
-  'claude',
-  'codex',
-  'opencode'
-]);
+const PROVIDERS = new Set<ProviderSessionProvider>(PROVIDER_SESSION_PROVIDERS);
 
 /**
  * Daemon-owned, append-only authorization ledger. Every mutation is fsync'd
@@ -326,6 +323,7 @@ export class FileProviderSessionLaunchLedger {
     this.recoveredPreparedAuthorizationIds.clear();
     if (!existsSync(this.path)) return;
     const bytes = readFileSync(this.path);
+    const foreignProviders = new Set<string>();
     let offset = 0;
     while (offset < bytes.length) {
       const newline = bytes.indexOf(0x0a, offset);
@@ -353,12 +351,36 @@ export class FileProviderSessionLaunchLedger {
           `corrupt provider launch ledger at byte ${offset}: malformed interior record`
         );
       }
+      const foreignProvider = foreignProviderOf(parsed);
+      if (foreignProvider !== undefined) {
+        foreignProviders.add(foreignProvider);
+        this.applyForeignRecord(parsed as Record<string, unknown>);
+        if (newline === -1 && !readOnly) this.appendRecordSeparator();
+        offset = next;
+        continue;
+      }
       const record = parseRecord(parsed, offset);
       this.applyRecord(record, offset);
       if (newline === -1 && !readOnly) this.appendRecordSeparator();
       offset = next;
     }
+    for (const provider of foreignProviders) {
+      process.stderr.write(
+        `provider launch ledger: skipped records for unknown provider "${provider}"\n`
+      );
+    }
     this.markRecoveredPrepared();
+  }
+
+  private applyForeignRecord(record: Record<string, unknown>): void {
+    if (record.state !== 'prepared' || typeof record.deskSessionId !== 'string') {
+      return;
+    }
+    const displaced = this.currentBySession.get(record.deskSessionId);
+    if (displaced !== undefined) {
+      this.currentBySession.delete(record.deskSessionId);
+      this.sessionByAuthorization.delete(displaced.authorizationId);
+    }
   }
 
   private markRecoveredPrepared(): void {
@@ -545,6 +567,28 @@ function validateIdentity(input: PrepareProviderSessionLaunchInput): void {
   ) {
     throw new Error('provider launch generation is invalid');
   }
+}
+
+function foreignProviderOf(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  if (
+    typeof record.provider !== 'string' ||
+    record.provider.trim().length === 0 ||
+    PROVIDERS.has(record.provider as ProviderSessionProvider)
+  ) {
+    return undefined;
+  }
+  if (
+    typeof record.authorizationId !== 'string' ||
+    record.authorizationId.trim().length === 0 ||
+    typeof record.deskSessionId !== 'string'
+  ) {
+    return undefined;
+  }
+  return record.provider;
 }
 
 function parseRecord(

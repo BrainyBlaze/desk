@@ -3,6 +3,11 @@ import { checkGlobalUniqueness, isValidSessionId, SESSION_ID_GRAMMAR } from '../
 import { shellQuote } from '../shared/shell.js';
 import { STORE_SUPPORT_FLOOR_NOTE } from '../shared/supportFloor.js';
 import { isSupportedAgent } from './types.js';
+import {
+  agentProvider,
+  nativeProducerOf,
+  providerSupportsBypass
+} from '../shared/agentRegistry.js';
 import type {
   AgentMcpLaunchConfig,
   AgentProfile,
@@ -93,13 +98,20 @@ function parseManifestStructure(source: string): ParsedManifest {
     }
   }
 
+  if (parsed.settings !== undefined && !isRecord(parsed.settings)) {
+    throw new ManifestValidationError('desk manifest settings must be an object');
+  }
+  if (parsed.plugins !== undefined && !isRecord(parsed.plugins)) {
+    throw new ManifestValidationError('desk manifest plugins must be an object');
+  }
+
   const manifest = {
     // UI settings live in the manifest so they survive reboots and browsers;
     // every write path spreads the manifest, so parse must carry them through.
-    settings: isRecord(parsed.settings) ? (parsed.settings as ParsedManifest['settings']) : undefined,
+    settings: parsed.settings as ParsedManifest['settings'],
     // Plugin sections are opaque to desk: carried through verbatim so every
     // write path (which spreads the manifest) preserves what a plugin stored.
-    plugins: isRecord(parsed.plugins) ? (parsed.plugins as Record<string, unknown>) : undefined,
+    plugins: parsed.plugins as Record<string, unknown> | undefined,
     // Present-but-not-a-list is a mistake (e.g. an indentation slip turning
     // `groups:` into a scalar), NOT an empty config. Silently coercing it to []
     // dropped every project/session with zero diagnostics, and the next write
@@ -302,6 +314,7 @@ function validateSession(groupId: string, session: ParsedSession, inheritedCwd?:
     throw new ManifestValidationError(`group ${groupId} has a session without a name`);
   }
   validateSessionUiMode(session);
+  validateSessionBypass(session);
   if (typeof session.command === 'string' && session.command.trim() !== '') {
     return;
   }
@@ -328,10 +341,28 @@ function validateSessionUiMode(session: Pick<DeskSession, 'name' | 'agent' | 'co
   }
 }
 
+function validateSessionBypass(
+  session: Pick<DeskSession, 'name' | 'agent' | 'command' | 'bypassPermissions'>
+): void {
+  if (session.bypassPermissions !== true) {
+    return;
+  }
+  if (typeof session.command === 'string' && session.command.trim() !== '') {
+    return;
+  }
+  const provider = agentProvider(session.agent);
+  if (provider === undefined || providerSupportsBypass(provider.id)) {
+    return;
+  }
+  throw new ManifestValidationError(
+    `session ${session.name} cannot use bypassPermissions; agent ${session.agent} does not support it`
+  );
+}
+
 /** Native UI mode is limited to SDK-backed agents launched without a custom command. */
 export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' | 'command'>): boolean {
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  return !hasCustomCommand && (session.agent === 'codex' || session.agent === 'claude' || session.agent === 'opencode');
+  return !hasCustomCommand && nativeProducerOf(session.agent) !== undefined;
 }
 
 /**
@@ -479,6 +510,44 @@ export function buildAgentCommand(
   if (session.agent === 'opencode') {
     return buildOpencodeCommand(session, cwd, homeDir, sessionId);
   }
+  const provider = agentProvider(session.agent);
+  if (provider?.launcher.kind === 'cli') {
+    const launch = provider.launcher;
+    // Agents that read MCP servers only from their global settings file get the
+    // per-session desk_lsp environment through the launch env instead of a
+    // per-session config flag; desk-lsp-mcp resolves the file from its own env.
+    const lspEnv =
+      launch.lsp.kind === 'settings-env' && agentMcp
+        ? ` DESK_LSP_ENV_FILE=${shellQuote(agentMcp.envFilePath)}`
+        : '';
+    const args: string[] = [launch.executable];
+    if (
+      session.bypassPermissions &&
+      provider.permissions.kind === 'bypass' &&
+      provider.permissions.mechanism.kind === 'flag'
+    ) {
+      args.push(provider.permissions.mechanism.flag);
+    }
+    if (!session.resume) {
+      return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}`;
+    }
+    // A resume id is a HINT, not a guarantee: qwen mints a fresh session id on
+    // every launch and only persists a resumable session after the first
+    // message, so a pane restarted before any input carries an id the CLI
+    // rejects. Without this the CLI exits and the pane dies silently; instead
+    // keep it open with the id and a way to start fresh (mirrors claude).
+    const resumeArg = shellQuote(session.resume);
+    args.push(launch.resumeFlag, resumeArg);
+    // The remedy must go through Desk, not a bare CLI relaunch: DESK_SESSION_ID
+    // and DESK_AGENT are prefix assignments on the failed launch only, so an
+    // agent started by hand from the fallback shell posts nothing — no state,
+    // no resume capture — and looks permanently silent to Desk.
+    const diagnostics =
+      `printf 'desk: %s resume failed with exit %s; leaving pane open — run \`desk reset-provider-session %s --force\` and restart the pane to start fresh\\n' ` +
+      `${shellQuote(provider.id)} "$desk_resume_status" ${shellQuote(sessionId)} >&2; ` +
+      `printf 'desk: resume id: %s\\n' ${resumeArg} >&2;`;
+    return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}; ${resumeFailureGuard('desk_resume_status', diagnostics)}`;
+  }
   throw new ManifestValidationError(`session ${session.name} requires an explicit command`);
 }
 
@@ -530,15 +599,23 @@ function profileCommandPrefix(session: DeskSession, homeDir: string): string {
 
 function buildClaudeResumeCommand(env: string, baseCommand: string, resume: string): string {
   const resumeArg = shellQuote(resume);
-  return [
-    `${env} ${baseCommand} --resume ${resumeArg}`,
-    'desk_claude_resume_status=$?',
-    `if [ "$desk_claude_resume_status" -ne 0 ]; then printf '%s\\n' "desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics" >&2; printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2; exec "\${SHELL:-/bin/sh}"; fi`
-  ].join('; ');
+  const diagnostics =
+    `printf '%s\\n' "desk: exact claude --resume failed with exit $desk_claude_resume_status; leaving pane open for diagnostics" >&2; ` +
+    `printf 'desk: claude resume id: %s\\n' ${resumeArg} >&2;`;
+  return `${env} ${baseCommand} --resume ${resumeArg}; ${resumeFailureGuard('desk_claude_resume_status', diagnostics)}`;
+}
+
+/**
+ * The shared resume-failure guard: capture the launch's exit status, and on any
+ * non-zero exit print the caller's diagnostics and drop to an interactive shell
+ * so the pane stays alive instead of vanishing. One skeleton, per-agent message.
+ */
+function resumeFailureGuard(statusVar: string, diagnostics: string): string {
+  return `${statusVar}=$?; if [ "$${statusVar}" -ne 0 ]; then ${diagnostics} exec "\${SHELL:-/bin/sh}"; fi`;
 }
 
 // shellQuote now lives in ../shared/shell.ts (single audited copy).
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

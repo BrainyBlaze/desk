@@ -186,13 +186,25 @@ fi
 if [ "\${1:-}" = "--version" ]; then printf '10.9.8\\n'; exit 0; fi
 if [ "\${1:-}" = "ci" ]; then exit 0; fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build:application" ]; then
-  mkdir -p dist/cli libexec
+  mkdir -p bin dist/cli dist/shared libexec
+  printf '%s\\n' '#!/usr/bin/env node' > bin/desk.js
   printf '%s\\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'case "\${1:-help}" in' '  help) printf "Desk fixture help\\n" ;;' '  *) printf "Desk fixture command: %s\\n" "\${1:-}" ;;' 'esac' > dist/cli/main.js
+  printf '%s\\n' 'export function assertCurrentStandaloneBuild() {}' > dist/shared/runtimeProvenance.js
   printf '%s\\n' '#!/usr/bin/env bash' 'exit 0' > libexec/desk-standalone
-  chmod +x dist/cli/main.js libexec/desk-standalone
+  printf '%s\\n' '{"schemaVersion":1,"sourceFingerprint":"fixture"}' > libexec/desk-standalone.provenance.json
+  chmod +x bin/desk.js dist/cli/main.js libexec/desk-standalone
   if [ "\${DESK_INSTALLER_FIXTURE_BUILD_MOOR_MODE:-}" = "tamper" ]; then
     printf X | dd of=libexec/moor bs=1 seek=10 count=1 conv=notrunc 2>/dev/null
   fi
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "verify:application-build" ]; then
+  [ "\${3:-}" = "--" ] && [ "\${4:-}" = "--require-moor" ] && [ "$#" -eq 4 ] || exit 93
+  for artifact in bin/desk.js dist/cli/main.js libexec/desk-standalone libexec/moor; do
+    [ -x "$artifact" ] || { printf 'missing executable application artifact: %s\\n' "$artifact" >&2; exit 94; }
+  done
+  [ -f dist/shared/runtimeProvenance.js ] || exit 95
+  [ -f libexec/desk-standalone.provenance.json ] || exit 96
   exit 0
 fi
 printf 'unexpected fake npm invocation: %s\\n' "$*" >&2

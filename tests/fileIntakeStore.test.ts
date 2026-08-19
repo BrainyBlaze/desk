@@ -206,6 +206,50 @@ describe('FileIntakeStore canonical acceptance receipts', () => {
     restarted.close();
   });
 
+  it('replays sequence claims for registry-new producers across restart', () => {
+    const kimiDependencies = () => ({
+      currentGeneration: (_sessionId: string) => generation,
+      expectedProducer: (_sessionId: string, _generation: number) => ({
+        provider: 'kimi' as const,
+        mode: 'terminal' as const,
+        producer: 'kimi-hooks' as const,
+        producerInstanceId: expectedInstance
+      }),
+      now: () => now
+    });
+    const kimiEnvelope = (overrides: Partial<AgentStateEnvelope> = {}) =>
+      envelope({ provider: 'kimi', producer: 'kimi-hooks', ...overrides });
+
+    const store = new FileIntakeStore(path, kimiDependencies());
+    expect(
+      acceptAgentStateEvent(kimiEnvelope({ producerSeq: 3, eventId: 'instance-a:push:3' }), store)
+    ).toMatchObject({ kind: 'accepted' });
+    expect(
+      store.claimProducerSequence({
+        sessionId: 's1',
+        generation: 1,
+        producer: 'kimi-hooks',
+        producerInstanceId: 'instance-a',
+        transport: 'push',
+        producerSeq: 4
+      })
+    ).toEqual({ kind: 'claimed' });
+    store.close();
+
+    const restarted = new FileIntakeStore(path, kimiDependencies());
+    expect(
+      restarted.claimProducerSequence({
+        sessionId: 's1',
+        generation: 1,
+        producer: 'kimi-hooks',
+        producerInstanceId: 'instance-a',
+        transport: 'push',
+        producerSeq: 4
+      })
+    ).toMatchObject({ kind: 'rejected', reason: 'producer-order' });
+    restarted.close();
+  });
+
   it('refuses sequence claims from an unbound or different producer instance', () => {
     const store = new FileIntakeStore(path, dependencies());
     const claim = {

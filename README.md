@@ -3,8 +3,8 @@
 <p align="center"><strong>Native chat UI for coding-agent fleets, with terminal multiplexing, an IDE/CDE, and Slack-style agent channels.</strong></p>
 
 <p align="center">
-  Keep Claude Code, OpenAI Codex, OpenCode, and custom agents alive in durable Moor sessions.
-  SDK-backed agents open in Desk's native chat surface by default, with the
+  Keep Claude Code, OpenAI Codex, OpenCode, Qwen Code, Kimi Code, Grok, and custom agents alive in durable Moor sessions.
+  Sessions open in durable terminal cells by default; SDK-backed agents can switch to Desk's native chat surface, with the
   terminal multiplexer available when you need the raw TUI. Run the whole
   fleet from one cockpit: native agent transcripts, terminals, a full IDE with
   language servers your agents can query, git, GitHub, project boards, notes,
@@ -52,8 +52,8 @@ Desk's answer is a strict separation of lifetime and view:
 The whole point: keep a fleet of coding agents alive, watch all of them at
 once, and let them coordinate — without becoming the message bus yourself.
 
-- 💬 **Native agent UI by default** — SDK-backed agents open in the native
-  chat surface by default: streaming assistant output, tool-call rows,
+- 💬 **Native agent chat UI** — switch an SDK-backed agent to the native
+  chat surface: streaming assistant output, tool-call rows,
   permission cards, slash commands, uploads, stop/send controls, markdown, and
   theme-aware transcripts. Terminal UI is available per session for raw TUI
   commands and custom shell agents.
@@ -137,9 +137,9 @@ source-build path.
 </details>
 
 Open the printed URL and add your first agent from the sidebar — pick a
-directory, choose `codex`, `claude`, `opencode`, or any command, and Desk
-launches it under Moor. SDK-backed agents open in the native chat surface by
-default; use the session editor to switch the session to terminal UI when you
+directory, choose an agent (or any command), and Desk
+launches it under Moor in a terminal cell. Use the session editor to switch an
+SDK-backed session to the native chat surface when you
 need a raw terminal, custom command, or interactive TUI-only command. Or declare
 sessions in the manifest and run:
 
@@ -154,6 +154,10 @@ Optional, per subsystem:
 - **Claude Code** — install per Anthropic's docs, log in once.
 - **OpenCode** — install per the OpenCode docs, sign in once; Desk launches it
   with its own config dir and resumes sessions like the others.
+- **Qwen Code / Kimi Code / Grok** — optional terminal agents. Install each
+  CLI and add a provider credential (Grok runs under Bun). Run
+  `desk hooks install` so Desk can report their state. See
+  [Agent integrations](docs/agent-integrations.md) for per-agent details.
 - **GitHub CLI** — `gh auth login` powers the GitHub card, PR info, and
   open-on-GitHub actions (everything degrades gracefully without it).
 - **Projects subsystem** — the gh token additionally needs the `project`
@@ -163,7 +167,7 @@ Optional, per subsystem:
 
 ### Native agent UI
 
-SDK-backed agents open in the native chat surface by default. The transcript
+SDK-backed agents can open in the native chat surface (`uiMode: native`). The transcript
 is built for agent work rather than terminal scraping: user and assistant
 messages render as markdown, tool calls collapse into inspectable rows, running
 tools show status and elapsed time, permissions and questions appear as action

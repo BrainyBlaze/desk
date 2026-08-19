@@ -42,8 +42,8 @@ import {
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VENDOR = join(ROOT, 'vendor', 'moor');
 const BUNDLED = join(ROOT, 'libexec', 'moor');
-const REQUIRED_VENDOR_COMMIT = 'aa26a26f5308aa31091d143c6600d5f5dd1c1bf1';
-const REQUIRED_SNAPSHOT_DIGEST = 'e9625ae976e0dbcfd9f00f37c605546d40e49ecbdb3d343b2e9ff29e81e2a948';
+const REQUIRED_VENDOR_COMMIT = '88d631bdc84c12cb6c949657d7c98a7e5dc4dc87';
+const REQUIRED_SNAPSHOT_DIGEST = 'e9c8703ab67fd077d2b168b39e0b176c12575d448d82310fcb3462922541b08b';
 const BUILD_MOOR_URL = new URL('../scripts/build-moor.mjs', import.meta.url).href;
 const execFileAsync = promisify(execFile);
 

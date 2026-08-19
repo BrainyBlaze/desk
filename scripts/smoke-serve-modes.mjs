@@ -598,6 +598,7 @@ async function runStandaloneSignalProbe(command, cwd, signal, checkRouteIdentity
   const port = await unusedPort();
   const tracked = startDesk(command, cwd, [
     'serve',
+    '--standalone',
     '--host',
     '127.0.0.1',
     '--port',
@@ -610,6 +611,16 @@ async function runStandaloneSignalProbe(command, cwd, signal, checkRouteIdentity
     `standalone root on ${port}`
   );
   assert.equal(rootResponse.status, 200);
+  const provenanceResponse = await readHttpResponse(port, '/api/runtime');
+  assert.equal(
+    provenanceResponse.status,
+    200,
+    `standalone runtime provenance failed: ${provenanceResponse.body}`
+  );
+  const provenance = JSON.parse(provenanceResponse.body);
+  assert.equal(provenance.schemaVersion, 1);
+  assert.equal(provenance.runtimeKind, 'standalone');
+  assert.match(provenance.packageKind, /^(?:source|distribution)$/);
   const runtime = await waitForPrivateRuntime(tracked);
 
   if (checkRouteIdentity) {
@@ -617,7 +628,7 @@ async function runStandaloneSignalProbe(command, cwd, signal, checkRouteIdentity
     assert.equal(
       isViteClientResponse(viteRoute),
       false,
-      `plain serve exposed Vite's client route (${viteRoute.contentType})`
+      `serve --standalone exposed Vite's client route (${viteRoute.contentType})`
     );
   }
 
@@ -659,6 +670,7 @@ async function runOccupiedPortProbe(command, cwd) {
   try {
     tracked = startDesk(command, cwd, [
       'serve',
+      '--standalone',
       '--host',
       '127.0.0.1',
       '--port',
@@ -706,6 +718,7 @@ async function runStatusPropagationProbe(command, cwd, runtimePath) {
     const port = await unusedPort();
     tracked = startDesk(command, cwd, [
       'serve',
+      '--standalone',
       '--host',
       '127.0.0.1',
       '--port',
@@ -762,7 +775,7 @@ async function cleanupAllProcesses() {
 
 async function runSmoke(command, cwd) {
   const privateRuntime = await runStandaloneSignalProbe(command, cwd, 'SIGINT', true);
-  console.log('smoke: plain serve returned 200 without a Vite client route and stopped on SIGINT');
+  console.log('smoke: serve --standalone returned 200 without a Vite client route and stopped on SIGINT');
 
   const termRuntime = await runStandaloneSignalProbe(command, cwd, 'SIGTERM', false);
   assert.equal(
@@ -770,7 +783,7 @@ async function runSmoke(command, cwd) {
     realpathSync(privateRuntime),
     'separate standalone runs selected different private runtimes'
   );
-  console.log('smoke: plain serve stopped its private runtime and process group on SIGTERM');
+  console.log('smoke: serve --standalone stopped its private runtime and process group on SIGTERM');
 
   await runViteProbe(command, cwd);
   console.log('smoke: serve --dev exposed the Vite client route and stopped cleanly');

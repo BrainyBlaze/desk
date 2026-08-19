@@ -27,6 +27,114 @@ describe('FileProviderSessionLaunchLedger', () => {
     return join(root, '_engine', 'provider-session-launch.ndjson');
   }
 
+  it('skips whole chains from unknown providers and keeps known chains intact', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-known'
+    });
+    const prepared = first.prepare({
+      deskSessionId: 'desk-known',
+      provider: 'claude',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    first.close();
+
+    const foreign = (state: string, generation: number) =>
+      JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-foreign',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation,
+        state
+      });
+    appendFileSync(
+      path,
+      `${foreign('prepared', 1)}\n${foreign('authorized', 1)}\n${foreign('claimed', 2)}\n${foreign('completed', 2)}\n`
+    );
+
+    const second = new FileProviderSessionLaunchLedger(path);
+    expect(second.current('desk-known')).toEqual(prepared);
+    expect(second.current('desk-foreign')).toBeUndefined();
+    second.close();
+  });
+
+  it('skips foreign records that carry unknown extra fields', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-known'
+    });
+    const prepared = first.prepare({
+      deskSessionId: 'desk-known',
+      provider: 'claude',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    first.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-foreign',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation: 1,
+        state: 'prepared',
+        futureField: 'ignored'
+      })}\n`
+    );
+
+    const second = new FileProviderSessionLaunchLedger(path);
+    expect(second.current('desk-known')).toEqual(prepared);
+    expect(second.current('desk-foreign')).toBeUndefined();
+    second.close();
+  });
+
+  it('lets a skipped foreign prepared record supersede the chain it displaced', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-known'
+    });
+    first.prepare({
+      deskSessionId: 'desk-known',
+      provider: 'claude',
+      expectedPriorBinding: null,
+      generation: 3
+    });
+    first.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-known',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation: 4,
+        state: 'prepared'
+      })}\n`
+    );
+
+    const second = new FileProviderSessionLaunchLedger(path);
+    expect(second.current('desk-known')).toBeUndefined();
+    second.close();
+  });
+
+  it('still fails loud on malformed records for known providers', () => {
+    const path = ledgerPath();
+    const first = new FileProviderSessionLaunchLedger(path);
+    first.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({ provider: 'claude', deskSessionId: 'desk-known', state: 'prepared' })}\n`
+    );
+
+    expect(() => new FileProviderSessionLaunchLedger(path)).toThrow(/invalid authorization record/);
+  });
+
   it('replays read-only without creating or repairing the durable ledger', () => {
     const path = ledgerPath();
     const absent = new FileProviderSessionLaunchLedger(path, {
@@ -47,6 +155,42 @@ describe('FileProviderSessionLaunchLedger', () => {
     });
     writer.close();
     appendFileSync(path, '{"version":1');
+    const before = readFileSync(path);
+
+    const reader = new FileProviderSessionLaunchLedger(path, {
+      readOnly: true
+    });
+    expect(reader.current('desk-alpha')).toMatchObject({
+      authorizationId: 'authorization-1',
+      state: 'prepared'
+    });
+    reader.close();
+    expect(readFileSync(path)).toEqual(before);
+  });
+
+  it('replays a torn foreign-provider tail read-only without writing the separator', () => {
+    const path = ledgerPath();
+    const writer = new FileProviderSessionLaunchLedger(path, {
+      createAuthorizationId: () => 'authorization-1'
+    });
+    writer.prepare({
+      deskSessionId: 'desk-alpha',
+      provider: 'codex',
+      expectedPriorBinding: null,
+      generation: 7
+    });
+    writer.close();
+    appendFileSync(
+      path,
+      JSON.stringify({
+        authorizationId: 'authorization-foreign',
+        deskSessionId: 'desk-foreign',
+        provider: 'someday-provider',
+        expectedPriorBinding: null,
+        generation: 1,
+        state: 'prepared'
+      })
+    );
     const before = readFileSync(path);
 
     const reader = new FileProviderSessionLaunchLedger(path, {

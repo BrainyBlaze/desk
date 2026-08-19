@@ -35,6 +35,80 @@ describe('FileProviderSessionContinuityLedger', () => {
     return join(root, '_engine', 'provider-session-continuity.ndjson');
   }
 
+  it('issues and replays launch proofs for every registry provider, not only claude/codex', () => {
+    const path = ledgerPath();
+    const ledger = new FileProviderSessionContinuityLedger(path);
+
+    for (const [provider, sessionId] of [
+      ['qwen', 'desk-qwen'],
+      ['kimi', 'desk-kimi'],
+      ['grok', 'desk-grok']
+    ] as const) {
+      const issued = ledger.issueLaunchProof({
+        deskSessionId: sessionId,
+        provider,
+        generation: 3,
+        issuedAt: 1_000
+      });
+      expect(
+        ledger.verifyLaunchProof({
+          deskSessionId: sessionId,
+          provider,
+          generation: 3,
+          launchProof: issued.launchProof
+        })
+      ).toMatchObject({ ok: true });
+    }
+    ledger.close();
+
+    const replayed = new FileProviderSessionContinuityLedger(path);
+    expect(
+      replayed.verifyLaunchProof({
+        deskSessionId: 'desk-grok',
+        provider: 'grok',
+        generation: 3,
+        launchProof: 'A'.repeat(43)
+      })
+    ).toMatchObject({ ok: false });
+    replayed.close();
+  });
+
+  it('skips records from providers this build does not know instead of refusing to start', () => {
+    const path = ledgerPath();
+    const ledger = new FileProviderSessionContinuityLedger(path);
+    const issued = ledger.issueLaunchProof({
+      deskSessionId: 'desk-known',
+      provider: 'qwen',
+      generation: 2,
+      issuedAt: 1_000
+    });
+    ledger.close();
+
+    appendFileSync(
+      path,
+      `${JSON.stringify({
+        version: 1,
+        type: 'proof-issued',
+        deskSessionId: 'desk-future',
+        provider: 'someday-provider',
+        generation: 3,
+        issuedAt: 2_000,
+        launchProof: 'A'.repeat(43)
+      })}\n`
+    );
+
+    const replayed = new FileProviderSessionContinuityLedger(path);
+    expect(
+      replayed.verifyLaunchProof({
+        deskSessionId: 'desk-known',
+        provider: 'qwen',
+        generation: 2,
+        launchProof: issued.launchProof
+      })
+    ).toMatchObject({ ok: true });
+    replayed.close();
+  });
+
   it('durably issues one private exact launch proof and supersedes an older same-generation proof', () => {
     const path = ledgerPath();
     const proofs = [Buffer.alloc(32, 1), Buffer.alloc(32, 2)];

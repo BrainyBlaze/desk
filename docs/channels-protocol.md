@@ -84,10 +84,10 @@ The message body — regular markdown.
 CLI launch environment and which terminal or native agent surface receives an
 incoming dispatch.
 
-Member `type` values are `claude-code`, `codex-cli`, `bash`, and `human`.
-Sessions running other agents — including OpenCode — are currently recorded
-with the `bash` type; the type is informational and does not affect dispatch
-or delivery.
+Member `type` values are `claude-code`, `codex-cli`, `opencode`, `qwen`,
+`kimi`, `grok`, `bash`, and `human`. Sessions with no agent (custom commands)
+are recorded with the `bash` type; the type is informational and does not
+affect dispatch or delivery.
 
 Member handles derive from the desk session name and are qualified when names
 collide across projects: `name`, then `project-name`, then

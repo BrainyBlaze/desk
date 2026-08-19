@@ -957,6 +957,7 @@ build_release() {
     cd "$STAGED_RELEASE"
     PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" ci
     PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" run build:application
+    PATH="$NODE_ROOT/bin:$BUN_ROOT:$PATH" "$NODE_ROOT/bin/npm" run verify:application-build -- --require-moor
   )
   [ -x "$STAGED_RELEASE/dist/cli/main.js" ] || die "distribution build did not produce dist/cli/main.js."
   [ -x "$STAGED_RELEASE/libexec/desk-standalone" ] || die "distribution build did not produce libexec/desk-standalone."

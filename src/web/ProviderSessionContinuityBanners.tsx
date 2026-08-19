@@ -1,5 +1,9 @@
 import { Copy, TriangleAlert } from 'lucide-react';
 import type { ClaudeContinuityAttention } from '../server/claudeContinuityStatus.js';
+import {
+  isProviderSessionProvider,
+  type ProviderSessionProvider
+} from '../shared/providerSessionIdentity.js';
 
 interface ProviderSessionContinuityBannersProps {
   issues: readonly ClaudeContinuityAttention[];
@@ -10,7 +14,7 @@ interface ProviderContinuityActionIssue extends ClaudeContinuityAttention {
   code:
     | 'provider-session-rebind-required'
     | 'provider-session-reset-incomplete';
-  provider: 'claude' | 'codex';
+  provider: ProviderSessionProvider;
   durableProviderSessionId: string;
   observedProviderSessionId: string;
   action: string;
@@ -22,7 +26,8 @@ function isProviderContinuityActionIssue(
   return (
     (issue.code === 'provider-session-rebind-required' ||
       issue.code === 'provider-session-reset-incomplete') &&
-    (issue.provider === 'claude' || issue.provider === 'codex') &&
+    issue.provider !== undefined &&
+    isProviderSessionProvider(issue.provider) &&
     typeof issue.durableProviderSessionId === 'string' &&
     typeof issue.observedProviderSessionId === 'string' &&
     typeof issue.action === 'string'
@@ -42,7 +47,8 @@ export function ProviderSessionContinuityBanners({
       aria-label="Provider session continuity blockers"
     >
       {actionableIssues.map((issue) => {
-        const providerLabel = issue.provider === 'codex' ? 'Codex' : 'Claude';
+        const providerLabel =
+          issue.provider.charAt(0).toUpperCase() + issue.provider.slice(1);
         const actionLabel =
           issue.code === 'provider-session-reset-incomplete'
             ? 'reset'

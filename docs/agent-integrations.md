@@ -1,6 +1,6 @@
 ---
 title: "Agent integrations"
-description: "How Desk launches Codex, Claude, OpenCode, bash, and custom commands, including resume ids, permissions, attention, and LSP access."
+description: "How Desk launches Codex, Claude, OpenCode, Qwen, Kimi, Grok, bash, and custom commands, including resume ids, permissions, attention, and LSP access."
 ---
 
 Desk runs every managed session under a Moor holder. The browser is a view
@@ -16,6 +16,9 @@ Built-in `agent` values:
 - `codex`
 - `claude`
 - `opencode`
+- `qwen`
+- `kimi`
+- `grok`
 - `bash`
 
 Any session can also use a custom `command`.
@@ -120,6 +123,108 @@ This preserves Desk/xterm selection and copy behavior.
 
 OpenCode resume uses `ses_...` ids. Desk can discover recent OpenCode sessions from `opencode session list --format json` and persist a matching id.
 
+## Qwen
+
+Qwen sessions launch as `qwen` (Qwen Code, a Gemini-CLI fork). Desk supports:
+
+- resume ids (`--resume <id>`, a UUID)
+- permission bypass (`--yolo`)
+- hook settings for state reporting and resume capture
+
+Desk wires `desk_lsp` for Qwen in two parts. `desk hooks install` registers
+the server once in `~/.qwen/settings.json` (Qwen has no per-session MCP flag),
+unconditionally — the install command has no view of LSP settings. The
+per-session part is gated: only when LSP agent access is enabled does a Desk
+launch carry the session's `DESK_LSP_ENV_FILE` in the environment. Without
+that variable the registered tools stay visible to Qwen but every call
+returns a missing-environment error — including in Qwen sessions run outside
+Desk. Note that the variable lives in the Qwen process environment, so child
+processes Qwen spawns inherit it; the token it points to stays bound to the
+launching session's workspace.
+
+Qwen's hooks are Claude-compatible and live in:
+
+```text
+~/.qwen/settings.json
+```
+
+`desk hooks install` merges Desk's hooks into that file and also fills two
+terminal-context keys Qwen exposes only through settings —
+`ui.mouseTracking: false` and `ui.useTerminalBuffer: false`, so a click does
+not paste mouse-report bytes and the pane has one scrollback instead of two.
+It fills only keys the operator has not set: an explicit operator value is
+never overridden, and other settings are untouched. If the file is malformed
+JSON it is backed up and skipped rather than overwritten. Qwen reads a
+command hook's `timeout` in **milliseconds** (unlike Claude/Codex, which use
+seconds), so Desk writes `10000` there.
+
+Permission bypass maps to Qwen's `--yolo` (auto-approve all tools; needs Qwen
+Code ≥0.21.13 — older CLIs reject the flag, and Qwen's own auto-updater keeps
+the effective version current).
+
+A successful `--resume` keeps the conversation id. What Qwen does **not** do
+is persist a resumable session before the first message is exchanged, and a
+fresh launch mints a new id — so a Qwen pane restarted before any input
+carries an id the CLI rejects. Desk keeps the pane alive (see
+[Resume capture](#resume-capture)) rather than letting it exit.
+
+Qwen needs a provider credential. Point it at Alibaba ModelStudio, a third-party
+key, or any OpenAI-compatible endpoint through Qwen's own `Connect a Provider`
+flow.
+
+## Kimi
+
+Kimi sessions launch as `kimi` (Kimi Code). Desk supports:
+
+- resume ids (`--session <id>`; Kimi mints `session_...` values, which Desk
+  validates as opaque tokens)
+- permission bypass (`--yolo`)
+- hook settings for state reporting and resume capture
+
+Kimi's hooks are TOML `[[hooks]]` blocks appended to:
+
+```text
+~/.kimi-code/config.toml
+```
+
+`desk hooks install` rewrites only Desk's own blocks and leaves operator-authored
+hooks in place; a config whose `hooks` key is not an array of tables is skipped
+rather than corrupted. Validate with `kimi doctor`.
+
+Kimi's coding endpoint needs an active Kimi (Moonshot) membership for OAuth, or
+a provider key added through `kimi provider`.
+
+## Grok
+
+Grok sessions launch as `grok` (superagent-ai's grok-cli, published to npm as
+`grok-dev`; it runs under Bun). Desk supports:
+
+- resume ids (`--session <id>`; Grok mints 12-hex values, which Desk validates
+  as opaque tokens)
+- hook settings for state reporting and resume capture
+
+Grok's hooks are Claude-compatible and live in:
+
+```text
+~/.grok/user-settings.json
+```
+
+Grok has **no per-tool approval system**, so there is no permission-bypass flag
+and the bypass checkbox is hidden for it. Grok also fires `SessionStart` lazily
+on the first prompt (not at launch), so a freshly launched Grok pane reads
+`unknown` until the first message, and its tool hooks fire only for the bash
+tool. There is no periodic heartbeat to fill that gap: a long non-bash tool
+run (e.g. an MCP tool from Grok's own settings) outlives the working lease
+and the session reads `unknown` until the next hook fires. Grok cannot join `desk_lsp` yet: it reads MCP servers only from its
+global settings and spawns them with a sanitized environment, so the
+per-session token cannot reach the server.
+
+<Note>
+`desk hooks install` only writes a new agent's hook config when that CLI's
+config directory already exists, so a machine that never installed Qwen, Kimi,
+or Grok is left untouched.
+</Note>
+
 ## Bash
 
 Bash sessions run:
@@ -132,7 +237,7 @@ Bash does not have agent-specific permission bypass, resume capture, or LSP MCP 
 
 ## Permission bypass
 
-The Add Session modal shows a bypass-permissions option for Codex, Claude, and OpenCode.
+The Add Session modal shows a bypass-permissions option for Codex, Claude, OpenCode, Qwen, and Kimi.
 
 The manifest field is:
 
@@ -140,19 +245,27 @@ The manifest field is:
 bypassPermissions: true
 ```
 
-For Codex and Claude, Desk maps that field to the agent CLI's dangerous bypass mode.
+For Codex and Claude, Desk maps that field to the agent CLI's dangerous bypass mode; for Qwen and Kimi it maps to `--yolo`.
 
 For OpenCode, Desk maps it to a per-session OpenCode permission config. Unchecking the box makes OpenCode ask for tool permissions.
+
+Grok has no bypass flag (it has no per-tool approvals at all): the checkbox is hidden for it, and `bypassPermissions: true` on a Grok session is a manifest error rather than a silent no-op. (A `bash` session still ignores the field silently, as before.)
 
 ## Resume capture
 
 Desk can start a session without `resume` and later capture the conversation id:
 
 - Codex: reads Codex session records and startup shell snapshots
-- Claude: receives hook events with `session_id`
+- Claude, Qwen, Kimi, Grok: receive hook events carrying the provider session id
 - OpenCode: queries OpenCode's session list
 
 Captured ids are validated before writing the manifest.
+
+A resume id is a hint, not a guarantee. If the CLI rejects it — most often a Qwen
+session restarted before its first message, or any conversation the provider no
+longer has — Desk keeps the pane alive with a diagnostic and a shell instead of
+letting it exit. Start fresh by running the agent without a resume id, or clear
+the binding with `desk reset-provider-session <sessionId> --force`.
 
 ## State reporting
 
@@ -188,7 +301,7 @@ Hook configuration is read when a session launches. A session started before
 
 ## Agent LSP access
 
-When LSP is enabled and agent LSP access is enabled, Desk wires the `desk_lsp` MCP server into supported managed agents.
+When LSP is enabled and agent LSP access is enabled, Desk wires the `desk_lsp` MCP server into supported managed agents (Codex, Claude, and Qwen).
 
 The server exposes language-server tools such as hover, definitions, references, diagnostics, symbols, completions, rename preparation, rename edits, formatting, and code actions.
 
@@ -196,6 +309,6 @@ The MCP surface is token-bound to the session workspace. Agents receive the toke
 
 ## Channels membership
 
-Channels map Claude and Codex sessions to first-class member types. Other agents, including OpenCode, currently enter channels through the generic bash-typed member path.
+Channels give every managed agent session — Claude, Codex, OpenCode, Qwen, Kimi, and Grok — its own first-class member type. Custom-command and bash sessions enter through the generic bash-typed member path.
 
-Do not assume an OpenCode-specific channel member type exists until the source adds one.
+The member type is a roster/notice label only — no delivery or supervisor behavior gates on it — so a bash-typed member still participates fully.

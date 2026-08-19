@@ -31,6 +31,16 @@ export function applicationScrollProfileForAgent(agent?: string): ApplicationScr
   return agent === 'opencode' ? 'opencode' : 'page-keys';
 }
 
+/**
+ * Who renders the scroll position indicator for this agent's pane. Grok's
+ * OpenTUI draws its own scrollbar and owns wheel/click scrolling entirely, so
+ * showing Desk's rail beside it produces two competing bars; every other CLI
+ * leaves position indication to the host.
+ */
+export function terminalScrollOwnerForAgent(agent?: string): 'host' | 'agent' {
+  return agent === 'grok' ? 'agent' : 'host';
+}
+
 export function encodeApplicationScrollInput(
   requestedLines: number,
   profile: ApplicationScrollProfile

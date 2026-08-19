@@ -21,7 +21,7 @@ import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { probeRendezvous } from '../src/server/runtime/sessionManager.js';
+import { MoorPresenceAuthority } from '../src/server/runtime/moorPresenceAuthority.js';
 import { moorSocketRootUsable } from '../src/shared/moorPaths.js';
 
 /** Root bypasses the DAC checks that produce EACCES, so it cannot see that case. */
@@ -50,6 +50,7 @@ async function abandonedRendezvous(path: string): Promise<void> {
 }
 
 describe('probeRendezvous holds three outcomes, and claims the dangerous one only on proof', () => {
+  const authority = new MoorPresenceAuthority();
   let dir: string;
   const servers: Server[] = [];
 
@@ -88,7 +89,7 @@ describe('probeRendezvous holds three outcomes, and claims the dangerous one onl
   it('answers live for a socket with a listener behind it', async () => {
     const sock = join(dir, 'held');
     await listening(sock);
-    await expect(probeRendezvous(sock)).resolves.toBe('live');
+    await expect(authority.probeRendezvous(sock)).resolves.toBe('live');
   });
 
   it('answers stale only on positive absence: a refused connect or no node at all', async () => {
@@ -96,10 +97,10 @@ describe('probeRendezvous holds three outcomes, and claims the dangerous one onl
     const abandoned = join(dir, 'abandoned');
     await abandonedRendezvous(abandoned);
     expect(existsSync(abandoned)).toBe(true);
-    await expect(probeRendezvous(abandoned)).resolves.toBe('stale');
+    await expect(authority.probeRendezvous(abandoned)).resolves.toBe('stale');
 
     // ENOENT — connect(2) found no rendezvous object to reach.
-    await expect(probeRendezvous(join(dir, 'never-existed'))).resolves.toBe('stale');
+    await expect(authority.probeRendezvous(join(dir, 'never-existed'))).resolves.toBe('stale');
   });
 
   it('answers indeterminate for a LIVE holder it cannot reach, never stale', async () => {
@@ -117,7 +118,7 @@ describe('probeRendezvous holds three outcomes, and claims the dangerous one onl
     await listening(sock);
     chmodSync(sock, 0o000);
     try {
-      await expect(probeRendezvous(sock)).resolves.toBe('indeterminate');
+      await expect(authority.probeRendezvous(sock)).resolves.toBe('indeterminate');
     } finally {
       chmodSync(sock, 0o700); // so afterEach can close/unlink it
     }
@@ -130,7 +131,7 @@ describe('probeRendezvous holds three outcomes, and claims the dangerous one onl
     const looping = join(dir, 'looping');
     symlinkSync(join(dir, 'looping-other'), looping);
     symlinkSync(looping, join(dir, 'looping-other'));
-    await expect(probeRendezvous(looping)).resolves.toBe('indeterminate');
+    await expect(authority.probeRendezvous(looping)).resolves.toBe('indeterminate');
   });
 
   it('does not unlink anything it probed, whatever the verdict (desk#42)', async () => {
@@ -143,7 +144,9 @@ describe('probeRendezvous holds three outcomes, and claims the dangerous one onl
     const held = join(dir, 'still-held');
     await listening(held);
 
-    await Promise.all([abandoned, notASocket, held].map((path) => probeRendezvous(path)));
+    await Promise.all(
+      [abandoned, notASocket, held].map((path) => authority.probeRendezvous(path))
+    );
 
     expect(existsSync(abandoned)).toBe(true);
     expect(existsSync(notASocket)).toBe(true);

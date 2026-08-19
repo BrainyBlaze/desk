@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { AgentProfile, ProfileProvider } from '../core/types.js';
+import { AGENT_PROFILE_PROVIDER_IDS } from '../shared/agentRegistry.js';
+import { isProfileProvider } from '../shared/agentProfiles.js';
 import {
   createAgentProfile,
   deleteAgentProfile,
@@ -10,10 +12,10 @@ import { toErrorMessage } from './asyncSafe.js';
 import { CommandButton } from './headerPrimitives.js';
 import { DeskSelect, IconButton } from './arwes/primitives.js';
 
-const PROVIDER_OPTIONS = [
-  { value: 'codex', label: 'Codex' },
-  { value: 'claude', label: 'Claude' }
-];
+const PROVIDER_OPTIONS = AGENT_PROFILE_PROVIDER_IDS.map((id) => ({
+  value: id,
+  label: id.charAt(0).toUpperCase() + id.slice(1)
+}));
 
 export function AgentProfilesSettings({
   profiles,
@@ -98,7 +100,11 @@ export function AgentProfilesSettings({
           <DeskSelect
             value={provider}
             options={PROVIDER_OPTIONS}
-            onChange={(value) => setProvider(value === 'claude' ? 'claude' : 'codex')}
+            onChange={(value) => {
+              if (isProfileProvider(value)) {
+                setProvider(value);
+              }
+            }}
           />
         </label>
         <label>

@@ -20,8 +20,7 @@ import { readManifestFile, resolveManifestPath } from '../../core/config.js';
 import { buildSessionSpecs } from '../../core/manifest.js';
 import {
   ensurePrivateSocketRoot,
-  moorRendezvousPath,
-  moorSocketRootUsable
+  moorRendezvousPath
 } from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -91,7 +90,6 @@ import {
   MOOR_STATUS_NO_LIVE_LINK_ERROR,
   type MoorHolderPresence
 } from '../../shared/daemonControlClient.js';
-import { probeRendezvous } from './sessionManager.js';
 import type {
   HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
@@ -103,6 +101,7 @@ import type {
 } from './sessionManager.js';
 import type { AgentObservationScope } from '../../core/agentState/providerAdapter.js';
 import {
+  isHookIdentityProvider,
   isProviderSessionProvider,
   isValidProviderSessionId,
   type ProviderSessionProvider
@@ -129,6 +128,7 @@ import {
   type MoorGenerationExitEvidence
 } from './moorGenerationStores.js';
 import {
+  isEvidenceCapableProvider,
   verifyProviderSessionEvidence,
   type ProviderSessionEvidenceResult
 } from '../providerSessionEvidence.js';
@@ -321,8 +321,8 @@ export interface TerminalDaemon {
   ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
-  /** Atomic prompt submission over one Moor INPUT request. False if unknown. */
-  prompt(sessionId: string, bytes: Uint8Array): boolean;
+  /** Atomic prompt submission resolved only by a complete Moor INPUT receipt. */
+  prompt(sessionId: string, bytes: Uint8Array): Promise<boolean>;
   /**
    * Ranged plain-text window into the session's screen + scrollback. `offset`
    * counts lines back from the live edge (0/absent = the live tail); reads at
@@ -562,10 +562,13 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     context: SessionSpawnPreallocationContext,
     spec: TerminalDaemonSessionSpec
   ): Promise<SessionSpawnPreallocationResult> | SessionSpawnPreallocationResult => {
+    // Continuity (proofs + observation) is for providers whose HOOKS can carry
+    // an identity back; a plugin-reporting provider (opencode) still gets its
+    // launch-ledger authorization above but must not receive proofs nothing
+    // can present, nor have its launches coupled to continuity-store health.
     if (
       context.subject.kind !== 'agent' ||
-      (context.subject.provider !== 'claude' &&
-        context.subject.provider !== 'codex')
+      !isHookIdentityProvider(context.subject.provider)
     ) {
       return authorizeProviderSessionLaunch(context, spec);
     }
@@ -1300,6 +1303,18 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         `Desk session ${input.deskSessionId} is not configured for ${input.provider}`
       );
     }
+    // Providers without an on-disk session store reader are authenticated by
+    // the launch proof alone: it is per-generation, random, and already
+    // verified before this point, while their stores (sqlite, per-cwd chats)
+    // have no bounded evidence file to read.
+    if (!isEvidenceCapableProvider(input.provider)) {
+      return {
+        ok: true,
+        provider: input.provider,
+        providerSessionId: input.providerSessionId,
+        evidencePath: 'launch-proof'
+      };
+    }
     return evidenceVerifier({
       provider: input.provider,
       providerSessionId: input.providerSessionId,
@@ -1331,7 +1346,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         if (
           !input ||
           !isSafeDaemonSessionId(input.deskSessionId) ||
-          (input.provider !== 'claude' && input.provider !== 'codex') ||
+          !isHookIdentityProvider(input.provider) ||
           !isValidProviderSessionId(input.provider, input.providerSessionId) ||
           !Number.isSafeInteger(input.generation) ||
           input.generation < 2 ||
@@ -1817,31 +1832,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     moorSessionStatus(sessionId) {
       return router.sessions.moorStatus(sessionId);
     },
-    async moorHolderPresence(sessionId) {
-      // The rendezvous NAMESPACE first. A connect failure inside a live socket
-      // root is evidence about this session; the identical failure with the
-      // root swept, misconfigured, or foreign-owned is evidence about the
-      // root, and reporting it as `absent` would let a misconfiguration
-      // authorise starting a second holder over every live one at once.
-      if (!moorSocketRootUsable(options.moorSocketRoot)) {
-        return 'unknown';
-      }
-      // The daemon's own probe, the same one the spawn path's staleness fence
-      // uses — not a second definition of "alive". It connects and destroys:
-      // no protocol bytes (so a live holder's supervised link is never fenced
-      // or stolen by a status query) and no unlink (desk#42).
-      //
-      // `stale` is POSITIVE absence and nothing else: the kernel refused the
-      // connect (ECONNREFUSED — the node is there and no process is listening
-      // on it) or there was no rendezvous object to connect to (ENOENT). It is
-      // never inferred from a stat; every answer here costs a real connect(2)
-      // against the exact path a holder for this session would have bound.
-      // EACCES, timeouts, and resource errors are `unknown` — a live holder
-      // this daemon merely cannot reach must never read as a dead one.
-      const outcome = await probeRendezvous(
-        moorRendezvousPath(options.moorSocketRoot, sessionId)
-      );
-      return outcome === 'live' ? 'present' : outcome === 'stale' ? 'absent' : 'unknown';
+    moorHolderPresence(sessionId) {
+      return router.sessions.moorHolderPresence(sessionId, options.moorSocketRoot);
     },
     agentEndpoint(input) {
       return endpointStore.register(input);
@@ -2501,7 +2493,7 @@ export function createDaemonControlHandler(
             Object.keys(body).sort().join(',') !==
               'deskSessionId,generation,hook,launchProof,provider,providerSessionId' ||
             !isSafeDaemonSessionId(body.deskSessionId) ||
-            (body.provider !== 'claude' && body.provider !== 'codex') ||
+            !isHookIdentityProvider(body.provider) ||
             typeof body.providerSessionId !== 'string' ||
             !isValidProviderSessionId(
               body.provider,
@@ -2648,7 +2640,7 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'text must be a non-empty string' });
             return;
           }
-          const accepted = daemon.prompt(body.sessionId, new TextEncoder().encode(body.text));
+          const accepted = await daemon.prompt(body.sessionId, new TextEncoder().encode(body.text));
           if (!accepted) {
             sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
             return;
