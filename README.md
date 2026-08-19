@@ -96,7 +96,7 @@ once, and let them coordinate — without becoming the message bus yourself.
 On macOS or Linux x64/arm64, start with a working `curl` and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh | bash
 desk serve            # private Bun server on http://127.0.0.1:5173
 ```
 

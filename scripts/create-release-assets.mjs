@@ -288,7 +288,10 @@ export function writeReleaseAssets({ root, version, outDir, ref = 'HEAD' }) {
     const manifestPath = join(stagedOutput, 'desk-install-manifest.json');
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 
-    const checksumEntries = [sourceAsset, 'desk-install-manifest.json']
+    const installerPath = join(stagedOutput, 'install.sh');
+    writeFileSync(installerPath, readGitFile(canonicalRoot, commit, 'install.sh'), { mode: 0o755 });
+
+    const checksumEntries = readdirSync(stagedOutput)
       .sort()
       .map((name) => `${sha256(join(stagedOutput, name))}  ${name}`);
     writeFileSync(join(stagedOutput, 'SHA256SUMS'), `${checksumEntries.join('\n')}\n`, { mode: 0o644 });
@@ -300,7 +303,8 @@ export function writeReleaseAssets({ root, version, outDir, ref = 'HEAD' }) {
     return {
       manifest: join(canonicalOut, 'desk-install-manifest.json'),
       checksums: join(canonicalOut, 'SHA256SUMS'),
-      source: join(canonicalOut, sourceAsset)
+      source: join(canonicalOut, sourceAsset),
+      installer: join(canonicalOut, 'install.sh')
     };
   } finally {
     rmSync(staging, { recursive: true, force: true });

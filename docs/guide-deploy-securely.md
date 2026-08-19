@@ -22,7 +22,7 @@ control, and keep it bound to localhost.
     Install the complete CLI and run its private compiled runtime:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+    curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh | bash
     desk serve --host 127.0.0.1 --port 5173
     ```
 
