@@ -24,7 +24,7 @@ runtime resolves explicit `DESK_MOOR_BIN`, then an attested same-release
 ## Source-backed installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh | bash
 desk serve
 ```
 
@@ -83,7 +83,7 @@ Rerun the installer to upgrade or repair. Use the same installer for ownership-
 safe uninstall:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
+curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh \
   | bash -s -- --uninstall
 ```
 
@@ -96,7 +96,12 @@ Tagged releases publish only:
 
 - `desk-vX.Y.Z-source.tar.gz`
 - `desk-install-manifest.json`
+- `install.sh`
 - `SHA256SUMS`
+
+`install.sh` is the exact installer committed at the release tag, so
+`releases/latest/download/install.sh` always serves an installer of the same
+generation as the release it installs.
 
 The install manifest declares the source digest and exact target-qualified Node
 and Bun assets. It contains no caller-controlled URLs. The installer constructs

@@ -35,7 +35,7 @@ Plain `desk serve` requires `libexec/desk-standalone` in the active immutable
 release. Rerun the installer to create and activate a fresh instance:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh | bash
 ```
 
 Desk does not switch to Vite when this artifact is absent.

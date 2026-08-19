@@ -106,6 +106,7 @@ jobs:
           path: |
             ${{ runner.temp }}/release-assets/desk-${{ steps.version.outputs.value }}-source.tar.gz
             ${{ runner.temp }}/release-assets/desk-install-manifest.json
+            ${{ runner.temp }}/release-assets/install.sh
             ${{ runner.temp }}/release-assets/SHA256SUMS
           if-no-files-found: error
 
@@ -129,4 +130,5 @@ jobs:
           files: |
             release-assets/desk-${{ needs.assets-and-install.outputs.version }}-source.tar.gz
             release-assets/desk-install-manifest.json
+            release-assets/install.sh
             release-assets/SHA256SUMS

@@ -41,7 +41,7 @@ are optional. Install only the integrations you intend to use.
 <Steps>
   <Step title="Install the CLI">
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+    curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh | bash
     command -v desk
     desk help
     ```
@@ -120,13 +120,13 @@ sessions.
 Rerun the installer to resolve and install the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh | bash
+curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh | bash
 ```
 
 Pin a version for an explicit install or downgrade:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/v0.3.0/install.sh \
   | DESK_VERSION=v0.3.0 bash
 ```
 
@@ -143,7 +143,7 @@ says so — see [Troubleshooting](troubleshooting.md).
 ## Uninstall the managed application
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BrainyBlaze/desk/main/install.sh \
+curl -fsSL https://github.com/BrainyBlaze/desk/releases/latest/download/install.sh \
   | bash -s -- --uninstall
 ```
 
