@@ -315,6 +315,44 @@ describe('desk#68 — one owner of the session size', () => {
     expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, [24, 80]]);
   });
 
+  it('hide-all and reveal at the unchanged size does not send a redundant resize', () => {
+    const { runtime, sizes } = makeRuntime();
+    const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
+
+    runtime.onBrowserVisibility(only, false);
+    runtime.onBrowserVisibility(only, true);
+
+    expect(runtime.resizeOwnerChannel).toBe(only);
+    expect(sizes()).toEqual([OWNER_SIZE]);
+  });
+
+  it('keeps a hidden channel attached, suppresses deltas, and snapshots it on reveal', () => {
+    const { runtime, browser } = makeRuntime();
+    const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
+    browser.length = 0;
+
+    runtime.onBrowserVisibility(only, false);
+    runtime.onMoorOutput(new TextEncoder().encode('hidden'), 0n);
+    expect(browser).toEqual([]);
+    expect(runtime.subscriberCount).toBe(1);
+
+    runtime.onBrowserVisibility(only, true);
+    expect(browser).toEqual([
+      {
+        channelId: only,
+        frame: {
+          type: BpFrameType.SNAPSHOT,
+          channelId: only,
+          generation: 1,
+          revision: 1,
+          offset: 6n,
+          text: 'SCREEN 48x95'
+        }
+      }
+    ]);
+    expect(runtime.subscriberCount).toBe(1);
+  });
+
   it('an observer leaving changes nothing: no re-election, no re-command', () => {
     const { runtime, sizes } = makeRuntime();
     const owner = runtime.subscribe('surf-owner', ...OWNER_SIZE).channelId;
@@ -474,15 +512,12 @@ describe('desk#68 — DaemonCore records geometry only for a COMMANDED resize', 
 });
 
 // ---- ownership acquisition commands (desk#68 review blocker 1) --------------
-// The client implements hide/reveal as UNSUBSCRIBE + fresh SUBSCRIBE
-// (binaryTerminalBrokerClient.setVisibility), and the reveal path suppresses a
-// RESIZE whose size is unchanged (TerminalSurface's lastResizeRef dedupe, twice
-// over). So after "A hides, B hides, A reveals", the ONLY carrier of A's
-// geometry the runtime will ever see is the SUBSCRIBE frame itself. Acquiring
-// ownership must therefore command the acquirer's geometry transactionally —
-// otherwise the owner renders 48x95 while the child stays at 41x137 forever.
+// Visibility changes now preserve their channel, but a real disconnect/remount
+// still creates a fresh subscription. SUBSCRIBE is the only geometry carrier
+// guaranteed on that path, so acquiring ownership must command the acquirer's
+// geometry transactionally.
 describe('desk#68 — acquiring ownership on subscribe commands the acquirer geometry', () => {
-  it('reveal after hide-all: the re-subscriber owns and its geometry is commanded with NO resize frame', () => {
+  it('subscribe after all channels detach owns and commands geometry with NO resize frame', () => {
     const { runtime, emu, sent, sizes } = makeRuntime();
     const a = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId;
     const b = runtime.subscribe('surf-b', ...OBSERVER_SIZE).channelId;
@@ -504,7 +539,7 @@ describe('desk#68 — acquiring ownership on subscribe commands the acquirer geo
   // PREVIOUS owner's geometry — the browser renders a stale-geometry snapshot
   // and then reflows when the resize lands, on exactly the reveal path this
   // acquisition exists to fix.
-  it('reveal after hide-all: the ACK carries the post-command revision and the snapshot is serialized at the commanded geometry', () => {
+  it('subscribe after all channels detach ACKs and snapshots at the commanded geometry', () => {
     const { runtime, browser } = makeRuntime();
     const a = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId; // revision 0 → 1
     const b = runtime.subscribe('surf-b', ...OBSERVER_SIZE).channelId;
@@ -538,7 +573,7 @@ describe('desk#68 — acquiring ownership on subscribe commands the acquirer geo
     ]);
   });
 
-  it('reveal after hide-all: the journal and the master both record the re-acquirer geometry', () => {
+  it('subscribe after all channels detach records the re-acquirer geometry', () => {
     const { core, recorded, masterOut } = makeCore();
     const a = core.subscribe('s1', 'surf-a', ...OWNER_SIZE)!.channelId;
     const b = core.subscribe('s1', 'surf-b', ...OBSERVER_SIZE)!.channelId;

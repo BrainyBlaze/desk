@@ -3658,6 +3658,13 @@ select {
 .chanMemberDot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .chanMemberDot.running { background: var(--desk-ok); box-shadow: 0 0 6px var(--desk-ok); }
 .chanMemberDot.missing { background: var(--desk-error); box-shadow: 0 0 6px var(--desk-error); }
+/* Same "no evidence" language as .statusDot.unknown: a hollow ring, because a
+   member with no resolvable session on this desk is not a session that died —
+   any fill would assert a state we do not have. */
+.chanMemberDot.unbound {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px rgba(190, 205, 215, 0.55);
+}
 .chanFileRow {
   display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 11px;
   color: var(--desk-text); text-decoration: none; min-width: 0;

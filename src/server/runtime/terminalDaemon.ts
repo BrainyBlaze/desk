@@ -323,6 +323,8 @@ export interface TerminalDaemon {
   ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
+  /** Atomic prompt submission over one Moor INPUT request. False if unknown. */
+  prompt(sessionId: string, bytes: Uint8Array): boolean;
   /**
    * Ranged plain-text window into the session's screen + scrollback. `offset`
    * counts lines back from the live edge (0/absent = the live tail); reads at
@@ -1120,12 +1122,11 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         });
       },
       onTerminal: () => {
-        // This callback carries an authoritative cursor/identity/content
-        // contradiction, never mere store unreadability. A STALE observer's
-        // late terminal callback must never touch a successor: everything is
-        // guarded by the current registration, the retirement is
-        // exact-generation, and the store is left in place (§11.6: cleanup
-        // of a published store belongs to the holder).
+        // Observation is not holder lifetime authority. A structural event-
+        // store contradiction stops this observer and leaves the store in place
+        // for diagnosis, but it must never retire/SIGTERM an authenticated live
+        // holder. Session exit still comes only from holder lifecycle evidence
+        // or an explicit control-plane retirement.
         const registered = eventObservers.get(sessionId);
         if (registered === undefined || registered.observer !== storeObserver) {
           return;
@@ -1137,19 +1138,6 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
         ) {
           eventObservers.delete(sessionId);
         }
-        // desk#59: this retirement is caused by the observer failing, not by an
-        // operator. Letting it fall through to the default control-retire
-        // reason writes a lie into the record.
-        void router.sessions
-          .retireGenerationAwaited(sessionId, generation, { reason: 'observer-terminal' })
-          .then(() => {
-            // The reason says WHO ended it; the diagnostic says what
-            // observation lost. Both are recorded, neither overwrites the
-            // other.
-            router.sessions.refineExitDiagnostic(sessionId, generation, {
-              code: 'moor-event-observer-terminal'
-            });
-          });
       }
     });
     let resolveReady!: () => void;
@@ -1827,6 +1815,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     input(sessionId, bytes, paste = false) {
       return router.sessions.injectInput(sessionId, bytes, paste);
     },
+    prompt(sessionId, bytes) {
+      return router.sessions.injectPrompt(sessionId, bytes);
+    },
     tail(sessionId, rows, offset = 0) {
       return router.sessions.historyText(sessionId, rows, offset);
     },
@@ -2137,6 +2128,7 @@ export function createDaemonControlHandler(
     | 'observeProviderSessionIdentity'
     | 'rebindProviderSession'
     | 'input'
+    | 'prompt'
     | 'tail'
     | 'clearSessionLog'
     | 'moorSessionStatus'
@@ -2657,6 +2649,24 @@ export function createDaemonControlHandler(
           if (!accepted) {
             // An unknown session is a concrete failure the channels engine must
             // see (it reverts the delivery), never a silent ok.
+            sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/control/prompt') {
+          const body = await readJsonBody(req, { maxBytes: CONTROL_BODY_MAX_BYTES });
+          if (!isSafeDaemonSessionId(body.sessionId)) {
+            sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
+            return;
+          }
+          if (typeof body.text !== 'string' || body.text.length === 0) {
+            sendJson(res, 400, { ok: false, error: 'text must be a non-empty string' });
+            return;
+          }
+          const accepted = daemon.prompt(body.sessionId, new TextEncoder().encode(body.text));
+          if (!accepted) {
             sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
             return;
           }

@@ -72,11 +72,17 @@ theme state. Closing the browser does not stop Moor sessions.
 
 ### Terminal transport
 
-The browser uses one binary WebSocket at `/ws/terminal` for every visible
-terminal surface in the tab. Hidden surfaces unsubscribe, and reveal requests a
-fresh emulator snapshot before live output resumes. The WebSocket bridge routes
-frames to the terminal daemon; the daemon owns the Moor holder connections and
-per-session generation state.
+The browser uses one binary WebSocket at `/ws/terminal` for the tab's terminal
+surfaces. Hiding sends `VISIBILITY false` while retaining the channel; the
+daemon revokes its input and resize authority, cancels its queued input, and
+suppresses output deltas. Reveal uses the same channel and requests a fresh
+emulator snapshot before live output resumes. If revocation races a recovered
+Moor client that already copied an ambiguous input tuple, the daemon replaces
+that viewer lease before accepting later input; an indeterminate replacement
+recovers output continuity without carrying the revoked lease. Only actual
+surface removal or transport loss unsubscribes. The
+WebSocket bridge routes frames to the terminal daemon; the daemon owns the Moor
+holder connections and per-session generation state.
 
 ### Agent event hooks
 

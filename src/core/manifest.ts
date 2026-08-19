@@ -25,7 +25,7 @@ import {
 } from '../shared/agentProfiles.js';
 import { OPENCODE_PROVIDER_SESSION_ENV_VAR } from './agentState/producerEmit.js';
 
-const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'profiles', 'groups', 'projects']);
+const MANIFEST_TOP_LEVEL_KEYS = new Set(['settings', 'profiles', 'groups', 'projects', 'plugins']);
 
 /** Env that makes claude's terminal behave like a plain scrollback terminal
     inside desk's xterm: classic main-screen renderer + no mouse capture, so the
@@ -98,6 +98,9 @@ function parseManifestStructure(source: string): ParsedManifest {
     // UI settings live in the manifest so they survive reboots and browsers;
     // every write path spreads the manifest, so parse must carry them through.
     settings: isRecord(parsed.settings) ? (parsed.settings as ParsedManifest['settings']) : undefined,
+    // Plugin sections are opaque to desk: carried through verbatim so every
+    // write path (which spreads the manifest) preserves what a plugin stored.
+    plugins: isRecord(parsed.plugins) ? (parsed.plugins as Record<string, unknown>) : undefined,
     // Present-but-not-a-list is a mistake (e.g. an indentation slip turning
     // `groups:` into a scalar), NOT an empty config. Silently coercing it to []
     // dropped every project/session with zero diagnostics, and the next write

@@ -35,6 +35,7 @@ import {
   destroyChannel,
   editChannelGoal,
   editMessage,
+  ingestMessage,
   listChannelMembers,
   listChannels,
   readChannelDetail,
@@ -53,9 +54,14 @@ import {
   type ChannelSearchResult,
   type ChannelSummary,
   type IncomingChannelMessage,
+  type IngestMessageInput,
+  type IngestResult,
   type MessageSliceOpts,
   type MessageWindow
 } from './fileStore.js';
+
+export type { IngestMessageInput, IngestResult } from './fileStore.js';
+export { IngestParentNotFoundError } from './fileStore.js';
 import {
   addReaction,
   clearReactionsForMessage,
@@ -106,6 +112,23 @@ export interface ChannelStore {
   search(opts: ChannelSearchOptions): Promise<ChannelSearchResult[]>;
 
   append(channel: string, options: AppendMessageOptions): Promise<AppendedMessage>;
+
+  /**
+   * Apply a message that already has an identity, preserving id, author and
+   * timestamp verbatim. The inverse of the markdown export, and the only door
+   * for material that re-enters the store: a restore, a transfer between
+   * homes, a replay of externally produced blocks. Idempotent by id across
+   * the whole channel; a thread reply without its parent throws
+   * IngestParentNotFoundError so the caller can park and retry.
+   *
+   * `quiet: true` applies WITHOUT dispatching: the message is marked seen
+   * before it becomes visible, so agents get no prompts — restoring a month
+   * of history must not bombard terminals with a month of turn prompts (the
+   * same behaviour join notices already have). Without it, the applied block
+   * reaches subscribers through onFinalized like any externally written one.
+   */
+  ingest(channel: string, input: IngestMessageInput, opts?: { quiet?: boolean }): Promise<IngestResult>;
+
   editMessage(channel: string, file: string, id: string, body: string): Promise<ChannelMessage>;
   deleteMessage(channel: string, file: string, id: string): Promise<void>;
 
@@ -204,6 +227,16 @@ export class FileChannelStore implements ChannelStore {
 
   append(channel: string, options: AppendMessageOptions): Promise<AppendedMessage> {
     return appendMessage(this.home, channel, options);
+  }
+
+  ingest(channel: string, input: IngestMessageInput, opts: { quiet?: boolean } = {}): Promise<IngestResult> {
+    return ingestMessage(this.home, channel, input, {
+      // Marked seen BEFORE the block is written: even an instant watcher scan
+      // then skips it, so quiet is quiet without racing the change feed. A
+      // phantom mark for a write that subsequently fails is harmless — the id
+      // never exists. With no watcher yet, prewarm() covers it at start.
+      onBeforeWrite: opts.quiet ? (file) => this.watcher?.markSeen(channel, file, input.id) : undefined
+    });
   }
 
   editMessage(channel: string, file: string, id: string, body: string): Promise<ChannelMessage> {

@@ -116,6 +116,7 @@ import {
   lifecycleStateSignature,
   applyWindow,
   messageMatchesFilter,
+  memberDotState,
   nextMentionId,
   parseMessageLink,
   reactionsForMessage,
@@ -2419,7 +2420,7 @@ export function ChannelsSubsystem({
                         {detail.members.map((member) => {
                           const live = member.sessionId ? sessionIndex.get(member.sessionId) : undefined;
                           const queue = member.sessionId ? deliveryIndex.get(member.sessionId) : undefined;
-                          const running = member.type === 'human' ? true : live?.view.state === 'running';
+                          const dot = memberDotState(member, live?.view);
                           // Activity comes from the authority; the queue below
                           // stays strictly about DELIVERY. They were one enum,
                           // which is why "message delivered" and "agent busy"
@@ -2435,7 +2436,16 @@ export function ChannelsSubsystem({
                                 setSidebarMenu({ kind: 'member', member, x: event.clientX, y: event.clientY });
                               }}
                             >
-                              <span className={`chanMemberDot ${running ? 'running' : 'missing'}`} />
+                              <span
+                                className={`chanMemberDot ${dot}`}
+                                title={
+                                  dot === 'unbound'
+                                    ? 'not bound to a session on this desk'
+                                    : dot === 'missing'
+                                      ? 'session is not running'
+                                      : undefined
+                                }
+                              />
                               <span className="chanMemberName">@{member.name}</span>
                               {member.role ? <Pill tone="ok" title={member.functions}>{member.role}</Pill> : null}
                               <Pill tone="muted">

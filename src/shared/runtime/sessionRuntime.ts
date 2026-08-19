@@ -197,7 +197,7 @@ export class SessionRuntime {
 
   /**
    * Moor-native child output (§6.1 OUTPUT): absolute byte offset + raw bytes.
-   * Feeds the authoritative emulator and fans out to every subscribed surface.
+   * Feeds the authoritative emulator and fans out to visible subscribed surfaces.
    */
   onMoorOutput(bytes: Uint8Array, offset: bigint): void | Promise<void> {
     if (this.disposed) return;
@@ -226,7 +226,7 @@ export class SessionRuntime {
       if (this.disposed) return;
       this.outputOffset = end;
       for (const [channelId, subscriber] of this.subscribers) {
-        if (!subscriber.ready) continue;
+        if (!subscriber.visible || !subscriber.ready) continue;
         this.sendSubscriber(channelId, {
           type: BpFrameType.OUTPUT,
           channelId,
@@ -237,7 +237,9 @@ export class SessionRuntime {
         });
       }
       for (const [channelId, subscriber] of this.subscribers) {
-        if (!subscriber.ready) this.scheduleSubscriberActivation(channelId, subscriber);
+        if (subscriber.visible && !subscriber.ready) {
+          this.scheduleSubscriberActivation(channelId, subscriber);
+        }
       }
       this.completeExitIfReady();
     };
@@ -277,11 +279,10 @@ export class SessionRuntime {
     let commanded: CommandedGeometry | undefined;
     if (this.resizeOwner === undefined) {
       // First surface in takes resize ownership, and acquisition COMMANDS the
-      // acquirer's geometry (desk#68). It must: the reveal path suppresses a
-      // RESIZE whose size is unchanged (TerminalSurface's lastResizeRef dedupe),
-      // so after hide-all this SUBSCRIBE is the only carrier of the new owner's
-      // geometry the runtime will ever see — without commanding here the owner
-      // renders one size while the child stays at the previous owner's forever.
+      // acquirer's geometry (desk#68). It must: after a real disconnect/remount,
+      // SUBSCRIBE is the only geometry carrier guaranteed before the baseline
+      // snapshot. Without commanding here, the owner can render one size while
+      // the child stays at the previous owner's forever.
       // The value is not invented: SUBSCRIBE carries the surface's current xterm
       // rows×cols (TerminalSurface.tsx subscribes with terminal.rows/cols) — the
       // fitted measurement on reveal; on a very first mount it is the terminal's
@@ -310,6 +311,7 @@ export class SessionRuntime {
   private scheduleSubscriberActivation(channelId: number, subscriber: Subscriber): void {
     if (
       this.subscribers.get(channelId) !== subscriber ||
+      !subscriber.visible ||
       subscriber.ready ||
       subscriber.activation !== undefined
     ) {
@@ -336,7 +338,7 @@ export class SessionRuntime {
   }
 
   private activateSubscriber(channelId: number, subscriber: Subscriber): void {
-    if (this.subscribers.get(channelId) !== subscriber) return;
+    if (this.subscribers.get(channelId) !== subscriber || !subscriber.visible) return;
     let text: string;
     try {
       text = this.d.emulator.serialize();
@@ -488,16 +490,18 @@ export class SessionRuntime {
   /**
    * Forward browser input to the master (§7.6, two channels).
    *
-   * NOT gated on the resize owner (desk#68 seam): §7.5 puts INPUT and RESIZE
-   * under one owner, but this change enforces the RESIZE half only. Any
-   * subscriber may still type.
+   * Input is not gated on resize ownership: any VISIBLE subscriber may type.
+   * Hidden subscribers retain their channel only for continuity and have no
+   * input authority until a VISIBILITY reveal reactivates them.
    */
   onBrowserInput(channelId: number, binary: boolean, bytes: Uint8Array): boolean {
+    const subscriber = this.subscribers.get(channelId);
     if (
       this.disposed ||
       this.pendingExit !== undefined ||
       this.exitFenced ||
-      !this.subscribers.has(channelId)
+      subscriber === undefined ||
+      !subscriber.visible
     ) {
       return false;
     }
@@ -523,6 +527,24 @@ export class SessionRuntime {
       data.set(bytes, open.length);
       data.set(close, open.length + bytes.length);
     }
+    return this.d.sendMasterInput(data, false, 0) !== false;
+  }
+
+  /**
+   * Submit one complete prompt as one Moor INPUT request. The carriage return
+   * is outside the bracketed-paste boundary, but in the same byte buffer, so
+   * the holder cannot observe a staged composer between separate requests.
+   */
+  injectPrompt(bytes: Uint8Array): boolean {
+    if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
+    const bracketed = this.d.emulator.bracketedPaste?.() === true;
+    const open = bracketed ? new TextEncoder().encode('\x1b[200~') : new Uint8Array();
+    const close = bracketed ? new TextEncoder().encode('\x1b[201~') : new Uint8Array();
+    const data = new Uint8Array(open.length + bytes.length + close.length + 1);
+    data.set(open, 0);
+    data.set(bytes, open.length);
+    data.set(close, open.length + bytes.length);
+    data[data.length - 1] = 0x0d;
     return this.d.sendMasterInput(data, false, 0) !== false;
   }
 
@@ -589,11 +611,22 @@ export class SessionRuntime {
    */
   onBrowserVisibility(channelId: number, visible: boolean): CommandedGeometry | undefined {
     const sub = this.subscribers.get(channelId);
-    if (sub === undefined) return undefined;
+    if (sub === undefined || sub.visible === visible) return undefined;
     sub.visible = visible;
-    // A hidden owner is no longer driving anything a human can see: hand off to
-    // a visible surface, or hold the size if there is none (desk#68).
-    return this.handoffIfOwnerGone(channelId);
+    if (!visible) {
+      // A hidden subscriber remains attached but receives no deltas. Its next
+      // reveal re-baselines from the authoritative emulator on this same channel.
+      sub.ready = false;
+      return this.handoffIfOwnerGone(channelId);
+    }
+
+    // Ownership/geometry must settle before serializing the reveal snapshot.
+    // When hide-all returns to the already-commanded size, reacquire ownership
+    // without emitting a redundant master resize or revision bump.
+    const commanded = this.handoffIfOwnerGone(channelId, true);
+    sub.ready = false;
+    this.scheduleSubscriberActivation(channelId, sub);
+    return commanded;
   }
 
   /** The channel that currently owns this session's size, if any (§7.5, desk#68). */
@@ -638,12 +671,15 @@ export class SessionRuntime {
    * size is left ALONE — a child whose surfaces are all hidden is not resized
    * to nothing, and the first surface to come back takes ownership then.
    */
-  private handoffIfOwnerGone(channelId: number): CommandedGeometry | undefined {
+  private handoffIfOwnerGone(
+    channelId: number,
+    skipUnchangedCommand = false
+  ): CommandedGeometry | undefined {
     if (this.resizeOwner !== undefined) {
       if (this.resizeOwner !== channelId) return undefined;
       if (this.subscribers.get(channelId)?.visible === true) return undefined;
     }
-    return this.electOwner();
+    return this.electOwner(skipUnchangedCommand);
   }
 
   /**
@@ -653,7 +689,7 @@ export class SessionRuntime {
    * is commanded exactly once. With no visible candidate the session is
    * owner-less and the size is left alone.
    */
-  private electOwner(): CommandedGeometry | undefined {
+  private electOwner(skipUnchangedCommand = false): CommandedGeometry | undefined {
     this.resizeOwner = undefined;
     let successor: number | undefined;
     for (const [candidate, sub] of this.subscribers) {
@@ -663,6 +699,13 @@ export class SessionRuntime {
     if (successor === undefined) return undefined;
     this.resizeOwner = successor;
     const sub = this.subscribers.get(successor)!;
+    if (
+      skipUnchangedCommand &&
+      this.commanded?.rows === sub.rows &&
+      this.commanded.cols === sub.cols
+    ) {
+      return undefined;
+    }
     return this.commandOwnerSize(successor, sub.rows, sub.cols);
   }
 

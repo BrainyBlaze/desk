@@ -591,6 +591,13 @@ export class DaemonCore {
     return e.runtime.injectInput(bytes, paste);
   }
 
+  /** Atomic control-plane prompt submission. False if the session is unknown. */
+  injectPrompt(sessionId: string, bytes: Uint8Array): boolean {
+    const e = this.sessions.get(sessionId);
+    if (e === undefined) return false;
+    return e.runtime.injectPrompt(bytes);
+  }
+
   /** The session's on-screen tail as plain text, or undefined if unknown. */
   tailText(sessionId: string, rows: number): string[] | undefined {
     return this.sessions.get(sessionId)?.runtime.tailText(rows);

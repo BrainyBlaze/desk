@@ -22,6 +22,9 @@
 // who its embedders are or what they gate on.
 import type { IncomingMessage, ServerResponse, Server as NodeHttpServer } from 'node:http';
 import type { Connect } from 'vite';
+import type { PluginSettingsStore } from './pluginSettings.js';
+
+export type { PluginSettingsStore } from './pluginSettings.js';
 import type {
   AgentDelivery,
   ChannelFiles,
@@ -48,6 +51,15 @@ export interface DeskPluginContext {
   httpServer: NodeHttpServer | null;
   /** Register a callback to run when the server closes. */
   onClose(fn: () => void): void;
+  /**
+   * Durable, operator-editable configuration for THIS plugin: a namespaced
+   * section of the desk manifest (`plugins.<name>` in desk.yml), read with
+   * `get`, replaced atomically with `set`, and observed with `subscribe` —
+   * which also fires when the operator edits the file by hand while the
+   * server runs, so a plugin can follow config changes without a restart.
+   * Desk never interprets the stored value.
+   */
+  settings: PluginSettingsStore;
 }
 
 /**

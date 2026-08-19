@@ -96,8 +96,8 @@ function statusPayload(
   );
 }
 
-function leaseGrantPayload(): Uint8Array {
-  return joined(Uint8Array.of(0, 0, 0, 0), integer(1, 4), new Uint8Array(16).fill(0xd4));
+function leaseGrantPayload(epoch = 1): Uint8Array {
+  return joined(Uint8Array.of(0, 0, 0, 0), integer(epoch, 4), new Uint8Array(16).fill(0xd4));
 }
 
 function leaseResumedPayload(): Uint8Array {
@@ -106,6 +106,10 @@ function leaseResumedPayload(): Uint8Array {
 
 function leaseRefusedPayload(): Uint8Array {
   return joined(Uint8Array.of(3, 1, 0, 0), integer(1, 4), new Uint8Array(16));
+}
+
+function leaseReleasedPayload(epoch: number): Uint8Array {
+  return joined(Uint8Array.of(2, 0, 0, 0), integer(epoch, 4), new Uint8Array(16));
 }
 
 class EmptyEmulator implements EmulatorPort {
@@ -173,33 +177,6 @@ class BlockingRecoveryReplayEmulator extends EmptyEmulator {
 
   releaseReplayFlush(): void {
     this.replayDrainResolve();
-  }
-}
-
-class LateCompletingReplayEmulator extends EmptyEmulator {
-  private flushCount = 0;
-  private replayFlushStartedResolve!: () => void;
-  readonly replayFlushStarted = new Promise<void>((resolve) => {
-    this.replayFlushStartedResolve = resolve;
-  });
-  private replayDrainResolve!: () => void;
-  private readonly replayDrain = new Promise<void>((resolve) => {
-    this.replayDrainResolve = resolve;
-  });
-
-  flush(): Promise<void> {
-    this.flushCount += 1;
-    if (this.flushCount === 3) this.replayFlushStartedResolve();
-    if (this.flushCount === 3 || this.flushCount === 5) return this.replayDrain;
-    return Promise.resolve();
-  }
-
-  releaseReplayFlush(): void {
-    this.replayDrainResolve();
-  }
-
-  override serialize(): string {
-    return new TextDecoder().decode(joined(...this.writes));
   }
 }
 
@@ -293,6 +270,7 @@ class ExpiringLeaseHolder {
     this.secondResumeRefusedResolve = resolve;
   });
   private resumeRefusals = 0;
+  private nextFreshLeaseEpoch = 2;
   private recoveryHello: (() => void) | undefined;
   private recoveryHelloSeenResolve!: () => void;
   readonly recoveryHelloSeen = new Promise<void>((resolve) => {
@@ -301,6 +279,12 @@ class ExpiringLeaseHolder {
   private recoveryAttachedResolve!: () => void;
   readonly recoveryAttached = new Promise<void>((resolve) => {
     this.recoveryAttachedResolve = resolve;
+  });
+  private holdRecoveryAttach = false;
+  private releaseRecoveryAttach: (() => void) | undefined;
+  private recoveryAttachSeenResolve!: () => void;
+  readonly recoveryAttachSeen = new Promise<void>((resolve) => {
+    this.recoveryAttachSeenResolve = resolve;
   });
   private disappearedResolve!: () => void;
   readonly disappeared = new Promise<void>((resolve) => { this.disappearedResolve = resolve; });
@@ -314,7 +298,8 @@ class ExpiringLeaseHolder {
     private readonly unsafeRecoveryGap = false,
     private readonly refuseLeaseResume = false,
     private readonly attachReplayBurst = false,
-    private readonly recoveryReplayBurst = false
+    private readonly recoveryReplayBurst = false,
+    private readonly refuseLeaseRelease = false
   ) {
     this.identity = identityFor(sessionPath);
   }
@@ -381,6 +366,12 @@ class ExpiringLeaseHolder {
         }
         return;
       case MoorKind.ATTACH:
+        if (connection >= 3 && this.holdRecoveryAttach) {
+          this.holdRecoveryAttach = false;
+          this.releaseRecoveryAttach = () => this.route(socket, codec, connection, message);
+          this.recoveryAttachSeenResolve();
+          return;
+        }
         if (
           (connection === 1 && this.attachReplayBurst) ||
           (connection >= 3 && this.recoveryReplayBurst)
@@ -475,8 +466,29 @@ class ExpiringLeaseHolder {
             this.refuseLeaseResume ? leaseRefusedPayload() : leaseResumedPayload()
           );
           if (this.resumeRefusals === 2) this.secondResumeRefusedResolve();
+        } else {
+          this.send(
+            socket,
+            codec,
+            MoorKind.LEASE_RESULT,
+            leaseGrantPayload(this.nextFreshLeaseEpoch++)
+          );
         }
         return;
+      case MoorKind.LEASE_RELEASE: {
+        const epoch = new DataView(
+          message.payload.buffer,
+          message.payload.byteOffset,
+          message.payload.byteLength
+        ).getUint32(0, true);
+        this.send(
+          socket,
+          codec,
+          MoorKind.LEASE_RESULT,
+          this.refuseLeaseRelease ? leaseRefusedPayload() : leaseReleasedPayload(epoch)
+        );
+        return;
+      }
       case MoorKind.LEASE_KEEPALIVE:
         if (connection === 1 && Date.now() > this.leaseDeadline) {
           this.send(
@@ -583,6 +595,17 @@ class ExpiringLeaseHolder {
 
   allowRecovery(): void {
     this.recoveryHello?.();
+  }
+
+  holdNextRecoveryAttach(): void {
+    this.holdRecoveryAttach = true;
+  }
+
+  allowRecoveryAttach(): void {
+    const release = this.releaseRecoveryAttach;
+    if (release === undefined) throw new Error('no recovery attach is pending');
+    this.releaseRecoveryAttach = undefined;
+    release();
   }
 
   async close(): Promise<void> {
@@ -695,6 +718,55 @@ async function startRecoveryHarness(
 describe('SessionManager controller-link recovery', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('does not strand future input when hide revokes a retained request before recovery attach completes', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      harness.holder.holdNextRecoveryAttach();
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttachSeen;
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+      harness.holder.allowRecoveryAttach();
+
+      await waitForSocketCondition(
+        () => harness.manager.stateSnapshot('session')?.health.status === 'healthy',
+        'recovery health after pre-attach retained input revocation'
+      );
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, true)).toBe(true);
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('after-pre-attach-revoke')
+        )
+      ).toBe(true);
+
+      await waitForSocketCondition(
+        () => harness.holder.inputs.includes('after-pre-attach-revoke'),
+        'post-reveal input after pre-attach retained request revocation'
+      );
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'after-pre-attach-revoke']);
+      expect(harness.holder.inputRequests.at(-1)).toMatchObject({
+        connection: 3,
+        epoch: 2,
+        requestId: 1n
+      });
+      expect(harness.browserErrors).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('desk#66 gates ambiguous input retransmission on late observer acceptance', async () => {
     const acceptance = deferred<boolean>();
     const callbackStarted = deferred<void>();
@@ -757,6 +829,186 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
+  it('does not strand future input when hide revokes a retained request during late acceptance', async () => {
+    const acceptance = deferred<boolean>();
+    const callbackStarted = deferred<void>();
+    const onLateMoorAdoption = vi.fn(() => {
+      callbackStarted.resolve(undefined);
+      return acceptance.promise;
+    });
+    const harness = await startRecoveryHarness(
+      undefined,
+      undefined,
+      undefined,
+      { onLateMoorAdoption }
+    );
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await callbackStarted.promise;
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+
+      acceptance.resolve(true);
+      await waitForSocketCondition(
+        () => harness.manager.stateSnapshot('session')?.health.status === 'healthy',
+        'observer-accepted recovery health'
+      );
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, true)).toBe(true);
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('after-reveal')
+        )
+      ).toBe(true);
+
+      await waitForSocketCondition(
+        () => harness.holder.inputs.includes('after-reveal'),
+        'post-reveal input after retained request revocation'
+      );
+      expect(harness.holder.inputs).toEqual(['ambiguous', 'after-reveal']);
+      expect(harness.holder.inputRequests.at(-1)).toMatchObject({
+        connection: 3,
+        epoch: 2,
+        requestId: 1n
+      });
+      expect(harness.browserErrors).toEqual([]);
+    } finally {
+      acceptance.resolve(true);
+      await harness.close();
+    }
+  });
+
+  it('recovers without revoked lease continuity when release is refused after unsubscribe', async () => {
+    const acceptance = deferred<boolean>();
+    const callbackStarted = deferred<void>();
+    const onLateMoorAdoption = vi.fn(() => {
+      callbackStarted.resolve(undefined);
+      return acceptance.promise;
+    });
+    const harness = await startRecoveryHarness(
+      undefined,
+      (sessionPath) =>
+        new ExpiringLeaseHolder(
+          sessionPath,
+          false,
+          INCARNATION,
+          false,
+          false,
+          false,
+          false,
+          true
+        ),
+      undefined,
+      { onLateMoorAdoption }
+    );
+    let replacement: number | undefined;
+    let transferInputAccepted: boolean | undefined;
+    let transferResizeAccepted: boolean | undefined;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation((message) => {
+      const replacementChannel = replacement;
+      if (
+        replacementChannel === undefined ||
+        !String(message).includes('revoked retained input lease reset failed')
+      ) {
+        return;
+      }
+      queueMicrotask(() => {
+        transferInputAccepted = harness.manager.onBrowserInputByChannel(
+          replacementChannel,
+          false,
+          new TextEncoder().encode('during-transfer')
+        );
+        transferResizeAccepted = harness.manager.onBrowserResizeByChannel(
+          replacementChannel,
+          44,
+          132
+        );
+      });
+    });
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await callbackStarted.promise;
+      harness.manager.unsubscribeChannel(harness.channelId);
+      replacement = harness.manager.subscribe('session', 'replacement', 31, 101)!;
+
+      acceptance.resolve(true);
+      await waitForSocketCondition(
+        () => transferInputAccepted !== undefined && transferResizeAccepted !== undefined,
+        'authorized work during failed-reset ownership transfer'
+      );
+      await harness.holder.secondRecoveryAttemptConnected;
+      await settleSocketIo();
+      await waitForSocketCondition(
+        () => harness.manager.stateSnapshot('session')?.health.status === 'healthy',
+        'fresh recovery after refused revoked-lease release'
+      );
+      await waitForSocketCondition(
+        () => harness.holder.inputs.includes('during-transfer'),
+        'authorized input transferred through refused revoked-lease release'
+      );
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          replacement,
+          false,
+          new TextEncoder().encode('after-unsubscribe')
+        )
+      ).toBe(true);
+      harness.holder.acknowledgeLatestInput(5);
+      await waitForSocketCondition(
+        () => harness.holder.inputs.includes('after-unsubscribe'),
+        'replacement-channel input after output-only recovery'
+      );
+
+      expect(transferInputAccepted).toBe(true);
+      expect(transferResizeAccepted).toBe(true);
+      expect(harness.holder.inputs).toEqual([
+        'ambiguous',
+        'during-transfer',
+        'after-unsubscribe'
+      ]);
+      expect(
+        harness.holder.inputRequests
+          .filter((request) => request.connection === 5)
+          .map((request) => request.requestId)
+      ).toEqual([1n, 2n]);
+      expect(harness.holder.resizes.at(-1)).toMatchObject({
+        connection: 5,
+        columns: 132,
+        rows: 44
+      });
+      expect(harness.browserErrors).toEqual([]);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('revoked retained input lease reset failed')
+      );
+    } finally {
+      acceptance.resolve(true);
+      errorLog.mockRestore();
+      await harness.close();
+    }
+  });
+
   it('bounds recovery while the authoritative emulator is not draining', async () => {
     const emulator = new BlockingRecoveryEmulator();
     const harness = await startRecoveryHarness(() => emulator);
@@ -812,7 +1064,15 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('bounds recovery through post-ack replay before publishing the recovered master', async () => {
+  it('recovers the master at adoption; a slow replay drain never times the attempt out, and the replay is applied exactly once', async () => {
+    // Spec §10.2: the identity/adoption gate closes at ATTACH_ACK + preamble
+    // (+ LEASE_RESULT); the display baseline "completes separately". A screen
+    // that drains the retained replay slowly is a viewer concern — it must not
+    // expire the 2 s adoption deadline, close the recovery attempt, and start a
+    // retry storm that re-streams the same replay (the live failure of
+    // 2026-08-18: 4 MiB codex tails never adopted). Recovery therefore
+    // publishes the recovered master at adoption; the replay lands afterwards,
+    // exactly once, with one ack; input queued during recovery flows after it.
     const emulator = new BlockingRecoveryReplayEmulator();
     const harness = await startRecoveryHarness(
       () => emulator,
@@ -842,96 +1102,49 @@ describe('SessionManager controller-link recovery', () => {
       await emulator.replayFlushStarted;
       await settleSocketIo();
 
-      expect(harness.holder.inputs).toEqual([]);
+      // Adopted: the recovered link is published while the replay is still
+      // draining, and the keystroke queued during recovery reaches the holder
+      // NOW — lease-owned traffic is legal the moment the lease is granted
+      // (§6.1); holding it behind the display baseline would let a heavy
+      // replay stall the agent's input all over again.
+      expect(harness.holder.inputs).toEqual(['must-stay-queued']);
       expect(harness.manager.stateSnapshot('session')).toMatchObject({
         generation: GENERATION,
-        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+        health: { status: 'healthy' }
       });
 
+      // The 2 s adoption deadline (which the old contract let the replay run
+      // out) passes with the screen still shut: nothing closes, nothing
+      // reconnects — 1 primary + 1 probe + 1 recovery attach, and it stays 3.
       await vi.advanceTimersByTimeAsync(2_001);
-      await harness.holder.recoveryAttemptClosed;
-      await settleSocketIo();
-
-      expect(harness.holder.inputs).toEqual([]);
+      await settleSocketIo(4);
+      expect(harness.holder.connections).toBe(3);
       expect(harness.browserErrors).toEqual([]);
       expect(harness.manager.stateSnapshot('session')).toMatchObject({
         generation: GENERATION,
-        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+        health: { status: 'healthy' }
       });
 
-      await vi.advanceTimersByTimeAsync(20_000);
-      await settleSocketIo(8);
-      expect(harness.holder.connections).toBe(3);
-      expect(harness.browserErrors).toHaveLength(1);
-
+      // The screen finally drains: the replay is applied once and acked once,
+      // on the same, still-open recovered link.
       emulator.releaseReplayFlush();
-      await harness.holder.postFailureRetryConnected;
-      await harness.holder.secondRecoveryAttemptConnected;
-      await harness.holder.postFailureRetryAttached;
       await settleSocketIo(12);
       expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
       expect(harness.holder.outputAcks).toEqual([1n]);
-    } finally {
-      await harness.close();
-    }
-  });
-
-  it('applies a late replay completion only once across the timed-out attempt and retry', async () => {
-    const emulator = new LateCompletingReplayEmulator();
-    const harness = await startRecoveryHarness(
-      () => emulator,
-      (sessionPath) =>
-        new ExpiringLeaseHolder(
-          sessionPath,
-          false,
-          INCARNATION,
-          false,
-          false,
-          false,
-          true
-        )
-    );
-    try {
-      await harness.enterRecovery();
-      expect(
-        harness.manager.onBrowserInputByChannel(
-          harness.channelId,
-          false,
-          new TextEncoder().encode('after-timeout')
-        )
-      ).toBe(true);
-      harness.holder.allowRecovery();
-      await harness.holder.recoveryAttemptConnected;
-      await emulator.replayFlushStarted;
-
-      await vi.advanceTimersByTimeAsync(2_001);
-      await harness.holder.recoveryAttemptClosed;
-      await vi.advanceTimersByTimeAsync(20_000);
-      await settleSocketIo(8);
+      expect(harness.holder.inputs).toEqual(['must-stay-queued']);
       expect(harness.holder.connections).toBe(3);
+      expect(harness.browserErrors).toEqual([]);
 
-      emulator.releaseReplayFlush();
-      await harness.holder.postFailureRetryConnected;
-      await harness.holder.secondRecoveryAttemptConnected;
-      await harness.holder.postFailureRetryAttached;
-      await settleSocketIo(12);
-
-      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
-      expect(harness.holder.outputAcks).toEqual([1n]);
-      expect(harness.holder.inputs).toEqual([]);
-      expect(harness.browserErrors).toHaveLength(1);
-
+      // A surface subscribing after the drain is baselined at the replay's
+      // end offset — the whole retained run was applied exactly once.
       const lateChannel = harness.manager.subscribe('session', 'late', 24, 80)!;
       const snapshot = harness.browserFrames
         .filter(({ channelId }) => channelId === lateChannel)
         .map(({ frame }) => frame)
         .find((frame) => frame.type === BpFrameType.SNAPSHOT);
-      expect(snapshot).toMatchObject({
-        type: BpFrameType.SNAPSHOT,
-        offset: 1n,
-        text: 'r'
-      });
+      expect(snapshot).toMatchObject({ type: BpFrameType.SNAPSHOT, offset: 1n });
     } finally {
+      emulator.releaseReplayFlush();
       await harness.close();
     }
   });
@@ -1297,6 +1510,85 @@ describe('SessionManager controller-link recovery', () => {
 
       expect(harness.holder.inputs).toEqual(['ambiguous', 'ambiguous']);
       expect(harness.browserErrors).toEqual([BpError.INPUT_UNAVAILABLE]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('hide removes input already transferred to the live client queue', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('in-flight')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['in-flight']);
+
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('cancel-after-hide')
+        )
+      ).toBe(true);
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+
+      harness.holder.acknowledgeLatestInput(1);
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual(['in-flight']);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('hide removes input waiting in the recovery queue', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      await harness.enterRecovery();
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('cancel-during-recovery')
+        )
+      ).toBe(true);
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('hide cancels a retained lease tuple before recovery can replay it', async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('ambiguous')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
+
+      await harness.enterRecovery();
+      expect(harness.manager.onBrowserVisibilityByChannel(harness.channelId, false)).toBe(true);
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual(['ambiguous']);
     } finally {
       await harness.close();
     }

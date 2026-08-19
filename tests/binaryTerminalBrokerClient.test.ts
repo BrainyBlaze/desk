@@ -86,12 +86,7 @@ describe('binary terminal broker client (§7.4)', () => {
   const output = (channelId: number, offset: bigint, bytes: Uint8Array, generation = 1, revision = 0) =>
     ({ type: BpFrameType.OUTPUT as const, channelId, generation, revision, offset, bytes });
 
-  it('re-subscribes after being hidden while its SUBSCRIBE ACK was in flight', () => {
-    // The ACK arrives for a surface the operator already hid (layout change,
-    // tab switch). The channel is released server-side, but the surface must
-    // not stay marked as awaiting an ACK: the reveal path refuses to
-    // re-subscribe while that flag is set, leaving a dead cell that swallows
-    // every keystroke with no Reconnect affordance.
+  it('keeps the ACKed channel when hidden while SUBSCRIBE was in flight', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
@@ -99,14 +94,18 @@ describe('binary terminal broker client (§7.4)', () => {
 
     client.setVisibility('s1', false);
     socket.deliver(ack(7)); // ACK lands for the now-hidden surface
-    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(1); // channel released
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0);
+    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
+      expect.objectContaining({ channelId: 7, visible: false })
+    ]);
 
     client.setVisibility('s1', true);
 
-    expect(
-      socket.ofType(BpFrameType.SUBSCRIBE),
-      'a revealed surface must subscribe again instead of staying dead'
-    ).toHaveLength(2);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
+    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
+      expect.objectContaining({ channelId: 7, visible: false }),
+      expect.objectContaining({ channelId: 7, visible: true })
+    ]);
   });
 
   it('subscribes on open, then applies its ACK snapshot and live output', () => {
@@ -448,19 +447,39 @@ describe('binary terminal broker client (§7.4)', () => {
     expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0); // not dirtied
   });
 
-  it('hides via UNSUBSCRIBE and reveals via a fresh SUBSCRIBE', () => {
+  it('keeps one channel across hide and reveal and gates hidden output', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     socket.deliver(ack(1));
+    const visibilityStart = socket.sent.length;
     client.setVisibility('s1', false);
-    expect(socket.ofType(BpFrameType.UNSUBSCRIBE).map((f) => f.channelId)).toEqual([1]);
-    // Output to the dropped channel is ignored.
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0);
+    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
+      expect.objectContaining({ channelId: 1, visible: false })
+    ]);
+    // An in-flight output that crossed the hide boundary is ignored locally.
     socket.deliver(output(1, 0n, Uint8Array.of(7)));
     expect(cap.output).toHaveLength(0);
-    // Reveal → a new SUBSCRIBE (2nd overall).
+    client.sendResize('s1', 101, 31);
     client.setVisibility('s1', true);
-    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(2);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
+    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
+      expect.objectContaining({ channelId: 1, visible: false }),
+      expect.objectContaining({ channelId: 1, visible: true })
+    ]);
+    expect(
+      socket.sent
+        .slice(visibilityStart)
+        .filter((frame) =>
+          frame.type === BpFrameType.VISIBILITY || frame.type === BpFrameType.RESIZE
+        )
+        .map((frame) => frame.type)
+    ).toEqual([
+      BpFrameType.VISIBILITY,
+      BpFrameType.RESIZE,
+      BpFrameType.VISIBILITY
+    ]);
   });
 
   it('unsubscribing while an ACK is in flight releases the orphan channel', () => {
@@ -483,18 +502,22 @@ describe('binary terminal broker client (§7.4)', () => {
     expect([...keep.output[0]]).toEqual([75]);
   });
 
-  it('does not replay pre-ACK input after a hide and reveal opens a new channel', () => {
+  it('does not replay pre-ACK input when hide and reveal keep the same channel', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     client.sendInput('s1', 'stale');
     client.setVisibility('s1', false);
-    socket.deliver(ack(8)); // release the hidden subscription
+    socket.deliver(ack(8));
 
     client.setVisibility('s1', true);
-    socket.deliver(ack(9));
 
-    expect(socket.ofType(BpFrameType.UNSUBSCRIBE).map((frame) => frame.channelId)).toEqual([8]);
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
+    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
+      expect.objectContaining({ channelId: 8, visible: false }),
+      expect.objectContaining({ channelId: 8, visible: true })
+    ]);
     expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0);
   });
 

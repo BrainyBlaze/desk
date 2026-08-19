@@ -16,18 +16,14 @@ import {
  * Channels engine ops console — a drawer toggled from the channels header that
  * surfaces live per-session delivery diagnostics (why each queue is held) and
  * the recovery levers: drop, force-deliver (gate-bypassing), drain
- * all ready sessions, and an in-process engine rebuild. The pane probe is the
- * point: it turns "queued: 20" into "held because the agent is mid-turn" vs
- * "held because capture came back empty".
+ * all ready sessions, and an in-process engine rebuild.
  */
 
 const BLOCK_REASON_LABEL: Record<DeliveryBlockReason, string> = {
   offline: 'offline',
   booting: 'booting',
   draining: 'engine drain in progress',
-  'send-failed': 'send failed',
-  'submit-stuck-paste': 'paste stuck',
-  'submit-stuck-submit': 'submit stuck'
+  'send-failed': 'send failed'
 };
 
 // Labels span the HISTORICAL vocabulary: the console renders persisted

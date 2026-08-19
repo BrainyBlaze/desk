@@ -84,7 +84,6 @@ describe('Channels plugin providers', () => {
         return true;
       },
       capturePane: async () => 'ready',
-      sendEnter: async () => true,
       readAgentStates: async () => canonicalAgentStateBatch(['alpha-1', 'beta-1'])
     });
 

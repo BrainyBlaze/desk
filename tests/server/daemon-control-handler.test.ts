@@ -25,6 +25,7 @@ interface DaemonMock {
   retire: ReturnType<typeof vi.fn>;
   retireGeneration: ReturnType<typeof vi.fn>;
   input: ReturnType<typeof vi.fn>;
+  prompt: ReturnType<typeof vi.fn>;
   tail: ReturnType<typeof vi.fn>;
   terminalObservation: ReturnType<typeof vi.fn>;
   moorExitEvidence: ReturnType<typeof vi.fn>;
@@ -105,6 +106,7 @@ function daemonMock(provisionResult: unknown = { ok: true, generation: 1, create
     retire: vi.fn().mockResolvedValue({ ok: true }),
     retireGeneration: vi.fn().mockResolvedValue({ ok: true }),
     input: vi.fn().mockReturnValue(true),
+    prompt: vi.fn().mockReturnValue(true),
     tail: vi.fn().mockReturnValue({ lines: ['line-a', 'line-b'], totalAvailable: 42 }),
     terminalObservation: vi.fn().mockReturnValue({
       sessionId: 'sess-a',
@@ -964,6 +966,30 @@ describe('daemon control handler', () => {
     expect(sessionId).toBe('sess-a');
     expect(new TextDecoder().decode(bytes)).toBe('hi\n');
     expect(paste).toBe(true);
+  });
+
+  it('forwards one typed prompt command to the daemon', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/prompt', { sessionId: 'sess-a', text: 'msg body' });
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    const [sessionId, bytes] = daemon.prompt.mock.calls[0];
+    expect(sessionId).toBe('sess-a');
+    expect(new TextDecoder().decode(bytes)).toBe('msg body');
+    expect(daemon.input).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty atomic prompt before touching the daemon', async () => {
+    const daemon = daemonMock();
+    const result = await invoke(daemon, 'POST', '/control/prompt', { sessionId: 'sess-a', text: '' });
+    expect(result).toEqual({ status: 400, body: { ok: false, error: 'text must be a non-empty string' } });
+    expect(daemon.prompt).not.toHaveBeenCalled();
+  });
+
+  it('404s an atomic prompt for an unknown session', async () => {
+    const daemon = { ...daemonMock(), prompt: vi.fn().mockReturnValue(false) };
+    const result = await invoke(daemon, 'POST', '/control/prompt', { sessionId: 'ghost', text: 'msg body' });
+    expect(result).toEqual({ status: 404, body: { ok: false, error: 'no such session: ghost' } });
+    expect(daemon.prompt).toHaveBeenCalledOnce();
   });
 
   it('404s input for an unknown session (a concrete failure, not a silent ok)', async () => {

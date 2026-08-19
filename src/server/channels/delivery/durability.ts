@@ -4,15 +4,14 @@ import type { QueuedPrompt } from '../protocol/delivery.js';
 
 /**
  * Channels delivery durability — the on-disk lifecycle for a single queued
- * prompt across the delivering → submitted / submit-stuck transitions.
+ * prompt across the delivering → submitted transition. Stuck extensions are
+ * retained for backward-compatible recovery of files written by older builds.
  *
  * File extensions under `_engine/queue/<sessionId>/`:
  *   <seq>.json            — queued, drain candidate
- *   <seq>.delivering      — paste cycle in flight (claimed before sendText)
- *   <seq>.delivered       — submit confirmed (paste landed AND pane went working)
- *   <seq>.stuck-paste     — paste never landed (composer unchanged after N retries)
- *   <seq>.stuck-submit    — paste landed but submit failed (composer changed, pane never went working)
- *   <seq>.stuck-unobservable — submission unconfirmed (capture failed for all verify cycles); retryable
+ *   <seq>.delivering      — atomic prompt transport call in flight
+ *   <seq>.delivered       — daemon/Moor accepted the complete prompt packet
+ *   <seq>.stuck-*         — legacy pane-verifier outcomes; readable/recoverable only
  *
  * All transitions are idempotent: re-firing a callback for a seq that is
  * already in the target state (or has already moved past it) is a no-op,
