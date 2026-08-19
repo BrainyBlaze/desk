@@ -67,6 +67,10 @@ describe('application build contract', () => {
     expect(installer).toContain('verify:application-build -- --require-moor');
 
     const workflow = readFileSync(join(projectRoot, '.github/workflows/release.yml'), 'utf8');
-    expect(workflow).toContain('run: npm run build:application');
+    const bunSetup = workflow.indexOf('oven-sh/setup-bun@v2');
+    const applicationBuild = workflow.indexOf('run: npm run build:application');
+    expect(bunSetup).toBeGreaterThanOrEqual(0);
+    expect(bunSetup).toBeLessThan(applicationBuild);
+    expect(workflow).toContain('bun-version: 1.3.14');
   });
 });
