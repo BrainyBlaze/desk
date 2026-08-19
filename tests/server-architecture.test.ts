@@ -188,14 +188,14 @@ describe('server architecture boundaries', () => {
     expect(docs).toContain('rm -f _site/Start\\ Docs.*');
   });
 
-  it('keeps pre-promotion CI on local Moor fixtures and requires a committed pin for tags', () => {
+  it('keeps pre-promotion CI on local Moor fixtures and requires a committed pin for formal candidates', () => {
     const release = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
     const installer = readFileSync(join(ROOT, '.github/workflows/installer.yml'), 'utf8');
 
     expect(installer).not.toContain('npm run fetch:moor');
     expect(installer).toContain('tests/install-script.test.ts tests/release-assets.test.ts');
     expect(release).toContain('git cat-file -e HEAD:scripts/distribution/moor-pin.json');
-    expect(release).toContain('Refusing a release tag without a committed Moor pin');
+    expect(release).toContain('Refusing a formal release candidate without a committed Moor pin');
     expect(release).toContain("steps.moor_pin.outputs.present == 'true'");
   });
 });

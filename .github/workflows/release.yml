@@ -1,9 +1,32 @@
 name: release
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Build a candidate or promote an already-QAed candidate
+        required: true
+        default: candidate
+        type: choice
+        options:
+          - candidate
+          - promote
+      candidate_run_id:
+        description: Exact successful candidate workflow run ID
+        required: false
+        type: string
+      candidate_run_attempt:
+        description: Exact candidate run attempt; formal candidates require attempt 1
+        required: false
+        type: string
+      candidate_artifact_id:
+        description: Exact candidate artifact ID
+        required: false
+        type: string
+      candidate_sha:
+        description: Exact protected-main candidate commit SHA
+        required: false
+        type: string
   pull_request:
     paths:
       - 'install.sh'
@@ -11,12 +34,14 @@ on:
       - 'scripts/create-release-assets.mjs'
       - 'scripts/verify-application-build.mjs'
       - 'scripts/distribution/**'
+      - 'scripts/release/**'
       - 'scripts/build-standalone.ts'
       - 'scripts/smoke-serve-modes.mjs'
       - 'tests/moor-distribution-contract.test.ts'
       - 'tests/install-script.test.ts'
       - 'tests/release-assets.test.ts'
       - 'tests/application-build-contract.test.ts'
+      - 'tests/release-promotion.test.ts'
       - 'tests/server-architecture.test.ts'
       - 'tests/helpers/installerFixture.ts'
       - 'src/**'
@@ -29,9 +54,12 @@ permissions:
 
 jobs:
   assets-and-install:
+    if: ${{ github.event_name == 'pull_request' || (inputs.operation == 'candidate' && github.run_attempt == 1) }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.value }}
+      artifact-id: ${{ steps.candidate_artifact.outputs.artifact-id }}
+      artifact-name: ${{ steps.version.outputs.artifact-name }}
     env:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
@@ -47,7 +75,17 @@ jobs:
       - name: Build and verify the application contract
         run: npm run build:application
       - name: Verify release behavior with local Moor fixtures
-        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts tests/fetch-moor.test.ts
+        run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts tests/fetch-moor.test.ts tests/release-promotion.test.ts
+      - name: Require protected main for a formal candidate
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != 'refs/heads/main' ]] || [[ "$REF_PROTECTED" != 'true' ]]; then
+            echo '::error::Formal release candidates must be built from protected main'
+            exit 1
+          fi
       - name: Detect committed Moor pin
         id: moor_pin
         shell: bash
@@ -57,29 +95,26 @@ jobs:
           else
             echo 'present=false' >> "$GITHUB_OUTPUT"
           fi
-      - name: Refuse a release tag without a committed Moor pin
-        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.moor_pin.outputs.present != 'true' }}
+      - name: Refuse a formal candidate without a committed Moor pin
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.moor_pin.outputs.present != 'true' }}
         run: |
-          echo '::error::Refusing a release tag without a committed Moor pin'
+          echo '::error::Refusing a formal release candidate without a committed Moor pin'
           exit 1
-      - name: Resolve and verify release version
+      - name: Resolve release version and artifact identity
         id: version
         shell: bash
         run: |
           package_version="v$(node -p "require('./package.json').version")"
-          if [[ "$GITHUB_REF" == refs/tags/* ]] && [[ "$GITHUB_REF_NAME" != "$package_version" ]]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match package.json $package_version"
-            exit 1
-          fi
           echo "value=$package_version" >> "$GITHUB_OUTPUT"
+          echo "artifact-name=desk-release-candidate-$package_version-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - name: Generate source-backed release assets
         if: ${{ steps.moor_pin.outputs.present == 'true' }}
         run: npm run release:assets -- --version "${{ steps.version.outputs.value }}" --out-dir "$RUNNER_TEMP/release-assets"
       - name: Verify release checksums
         if: ${{ steps.moor_pin.outputs.present == 'true' }}
         run: (cd "$RUNNER_TEMP/release-assets" && sha256sum -c SHA256SUMS)
-      - name: Install and smoke the published contract
-        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.moor_pin.outputs.present == 'true' }}
+      - name: Install and smoke the candidate contract
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.moor_pin.outputs.present == 'true' }}
         shell: bash
         run: |
           root=$(mktemp -d "$RUNNER_TEMP/desk-release-install.XXXXXX")
@@ -91,44 +126,378 @@ jobs:
           export DESK_BIN_DIR="$root/bin"
           export DESK_VERSION="${{ steps.version.outputs.value }}"
           export DESK_RELEASE_BASE_URL="file://$RUNNER_TEMP/release-assets"
-          bash install.sh
+          bash "$RUNNER_TEMP/release-assets/install.sh"
           release=$(cd -P "$DESK_HOME/current" && pwd)
           test "$("$release/libexec/moor" --version)" = 'moor 0.1.0'
           (cd "$root/outside" && "$root/bin/desk" help)
           node scripts/smoke-serve-modes.mjs --desk "$root/bin/desk" --cwd "$root/outside"
-          bash install.sh --uninstall
+          bash "$RUNNER_TEMP/release-assets/install.sh" --uninstall
           test ! -e "$root/bin/desk"
           test ! -e "$root/home"
-      - uses: actions/upload-artifact@v4
-        if: ${{ steps.moor_pin.outputs.present == 'true' }}
+      - name: Upload immutable candidate bytes
+        id: candidate_artifact
+        uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.moor_pin.outputs.present == 'true' }}
         with:
-          name: desk-release-assets
+          name: ${{ steps.version.outputs.artifact-name }}
           path: |
             ${{ runner.temp }}/release-assets/desk-${{ steps.version.outputs.value }}-source.tar.gz
             ${{ runner.temp }}/release-assets/desk-install-manifest.json
             ${{ runner.temp }}/release-assets/install.sh
             ${{ runner.temp }}/release-assets/SHA256SUMS
           if-no-files-found: error
+          retention-days: 30
+      - name: Record exact candidate binding
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.moor_pin.outputs.present == 'true' }}
+        env:
+          ARTIFACT_ID: ${{ steps.candidate_artifact.outputs.artifact-id }}
+          ARTIFACT_NAME: ${{ steps.version.outputs.artifact-name }}
+        shell: bash
+        run: |
+          {
+            echo '### Immutable release candidate'
+            echo
+            echo "- candidate_sha=$GITHUB_SHA"
+            echo "- candidate_run_id=$GITHUB_RUN_ID"
+            echo "- candidate_run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "- candidate_artifact_id=$ARTIFACT_ID"
+            echo "- candidate_artifact_name=$ARTIFACT_NAME"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  publish:
-    needs: assets-and-install
-    if: startsWith(github.ref, 'refs/tags/')
+  promote:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'promote' }}
     runs-on: ubuntu-latest
+    environment: release
+    concurrency:
+      group: desk-release-promotion
+      cancel-in-progress: false
     permissions:
+      actions: read
       contents: write
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+      CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Require an exact protected-main promotion binding
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != 'refs/heads/main' ]] || [[ "$REF_PROTECTED" != 'true' ]]; then
+            echo '::error::Release promotion must run from protected main'
+            exit 1
+          fi
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$CANDIDATE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          if [[ "$CANDIDATE_SHA" != "$GITHUB_SHA" ]]; then
+            echo '::error::Protected main moved after the candidate was built; build and QA a new candidate'
+            exit 1
+          fi
+      - uses: actions/checkout@v5
         with:
-          name: desk-release-assets
-          path: release-assets
-      - uses: softprops/action-gh-release@v2
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Desk ${{ github.ref_name }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            release-assets/desk-${{ needs.assets-and-install.outputs.version }}-source.tar.gz
-            release-assets/desk-install-manifest.json
-            release-assets/install.sh
-            release-assets/SHA256SUMS
+          node-version: 22.23.1
+      - name: Resolve and validate candidate identity
+        id: promotion
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          state="$RUNNER_TEMP/release-promotion"
+          mkdir -p "$state"
+          version="v$(node -p "require('./package.json').version")"
+          artifact_name="desk-release-candidate-$version-$CANDIDATE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$state/run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > "$state/artifact.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" > "$state/run-artifacts.json"
+          node scripts/release/promotion.js validate-binding \
+            "$state/run.json" \
+            "$state/artifact.json" \
+            "$state/run-artifacts.json" \
+            "$CANDIDATE_RUN_ID" \
+            "$CANDIDATE_RUN_ATTEMPT" \
+            "$CANDIDATE_ARTIFACT_ID" \
+            "$artifact_name" \
+            "$CANDIDATE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/immutable-releases" > "$state/immutable-releases.json"
+          node scripts/release/promotion.js verify-immutable-settings \
+            "$state/immutable-releases.json"
+          {
+            echo "state=$state"
+            echo "version=$version"
+            echo "artifact-name=$artifact_name"
+          } >> "$GITHUB_OUTPUT"
+      - name: Download the exact candidate artifact ID
+        shell: bash
+        run: |
+          state="${{ steps.promotion.outputs.state }}"
+          candidate="$RUNNER_TEMP/release-candidate"
+          mkdir -p "$candidate"
+          gh api \
+            -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > "$state/candidate.zip"
+          python3 -m zipfile -e "$state/candidate.zip" "$candidate"
+      - name: Verify every candidate byte and embedded distribution pin
+        shell: bash
+        run: |
+          node scripts/release/promotion.js verify-candidate \
+            "$RUNNER_TEMP/release-candidate" \
+            "${{ steps.promotion.outputs.version }}" \
+            "$CANDIDATE_SHA" \
+            "$CANDIDATE_RUN_ID" \
+            "$CANDIDATE_RUN_ATTEMPT" \
+            "$CANDIDATE_ARTIFACT_ID" \
+            "${{ steps.promotion.outputs.state }}/expected.json"
+      - name: Create or verify the immutable lightweight tag
+        shell: bash
+        run: |
+          state="${{ steps.promotion.outputs.state }}"
+          version="${{ steps.promotion.outputs.version }}"
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" > "$state/tag.json" 2>/dev/null; then
+            if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$version" \
+              -f sha="$CANDIDATE_SHA" > "$state/tag-created.json"; then
+              echo 'Tag creation raced; verifying the winning ref'
+            fi
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" > "$state/tag.json"
+          node scripts/release/promotion.js verify-tag \
+            "$state/tag.json" "$version" "$CANDIDATE_SHA"
+      - name: Promote only the verified candidate bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="${{ steps.promotion.outputs.state }}"
+          version="${{ steps.promotion.outputs.version }}"
+          candidate="$RUNNER_TEMP/release-candidate"
+          counts="$state/starter-delete-counts.json"
+          printf '{}\n' > "$counts"
+          complete=false
+
+          for iteration in $(seq 1 16); do
+            echo "Release transaction iteration $iteration"
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$version" > "$state/release.json" 2>/dev/null; then
+              release_id=$(node -p 'require(process.argv[1]).id' "$state/release.json")
+              [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+              gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+                | jq '[.[][]]' > "$state/assets.json"
+            else
+              printf 'null\n' > "$state/release.json"
+              printf '[]\n' > "$state/assets.json"
+            fi
+
+            observed="$state/observed"
+            rm -rf "$observed"
+            mkdir -p "$observed"
+            node -e '
+              const fs = require("node:fs");
+              const assets = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              for (const asset of assets) {
+                if (asset.state !== "uploaded") continue;
+                if (!Number.isSafeInteger(asset.id) || asset.id <= 0) throw new Error("invalid asset id");
+                console.log(asset.id);
+              }
+            ' "$state/assets.json" > "$state/uploaded-asset-ids"
+            while IFS= read -r asset_id; do
+              [[ -z "$asset_id" ]] && continue
+              gh api \
+                -H 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$observed/$asset_id"
+            done < "$state/uploaded-asset-ids"
+            node scripts/release/promotion.js observe-assets \
+              "$state/assets.json" "$observed" "$state/observed.json"
+            node scripts/release/promotion.js plan-release \
+              "$state/expected.json" \
+              "$state/release.json" \
+              "$state/assets.json" \
+              "$state/observed.json" \
+              "$counts" \
+              "$state/plan.json"
+            action=$(node -p 'require(process.argv[1]).type' "$state/plan.json")
+
+            case "$action" in
+              create-release)
+                # JavaScript template literal; shell expansion is intentionally disabled.
+                # shellcheck disable=SC2016
+                node -e '
+                  const fs = require("node:fs");
+                  const expected = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                  const payload = {
+                    tag_name: expected.version,
+                    target_commitish: expected.candidateSha,
+                    name: `Desk ${expected.version}`,
+                    body: expected.releaseBody,
+                    draft: true,
+                    prerelease: false,
+                    generate_release_notes: false
+                  };
+                  fs.writeFileSync(process.argv[2], JSON.stringify(payload));
+                ' "$state/expected.json" "$state/create-release.json"
+                gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+                  --input "$state/create-release.json" > "$state/release-created.json"
+                ;;
+              upload)
+                release_id=$(node -p 'require(process.argv[1]).id' "$state/release.json")
+                asset_name=$(node -p 'require(process.argv[1]).name' "$state/plan.json")
+                gh api --method POST --hostname uploads.github.com \
+                  -H 'Content-Type: application/octet-stream' \
+                  "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$asset_name" \
+                  --input "$candidate/$asset_name" > "$state/asset-uploaded.json"
+                ;;
+              delete-starter)
+                asset_id=$(node -p 'require(process.argv[1]).id' "$state/plan.json")
+                asset_name=$(node -p 'require(process.argv[1]).name' "$state/plan.json")
+                gh api "repos/$GITHUB_REPOSITORY/releases/tags/$version" \
+                  > "$state/release-before-delete.json"
+                release_id=$(node -p 'require(process.argv[1]).id' "$state/release-before-delete.json")
+                [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+                gh api --paginate --slurp \
+                  "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+                  | jq '[.[][]]' > "$state/assets-before-delete.json"
+                gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+                  > "$state/asset-before-delete.json"
+                node scripts/release/promotion.js verify-starter-deletion \
+                  "$state/expected.json" \
+                  "$state/release-before-delete.json" \
+                  "$state/assets-before-delete.json" \
+                  "$state/asset-before-delete.json" \
+                  "$state/plan.json" \
+                  "$counts"
+                # JavaScript template literal; shell expansion is intentionally disabled.
+                # shellcheck disable=SC2016
+                node -e '
+                  const fs = require("node:fs");
+                  const [path, name] = process.argv.slice(1);
+                  const counts = JSON.parse(fs.readFileSync(path, "utf8"));
+                  counts[name] = (counts[name] ?? 0) + 1;
+                  fs.writeFileSync(path, `${JSON.stringify(counts, null, 2)}\n`);
+                ' "$counts" "$asset_name"
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+                ;;
+              publish)
+                gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+                  > "$state/immutable-before-publish.json"
+                node scripts/release/promotion.js verify-immutable-settings \
+                  "$state/immutable-before-publish.json"
+                gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" \
+                  > "$state/tag-before-publish.json"
+                node scripts/release/promotion.js verify-tag \
+                  "$state/tag-before-publish.json" "$version" "$CANDIDATE_SHA"
+                gh api "repos/$GITHUB_REPOSITORY/releases/tags/$version" \
+                  > "$state/release-before-publish.json"
+                release_id=$(node -p 'require(process.argv[1]).id' "$state/release-before-publish.json")
+                [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+                gh api --paginate --slurp \
+                  "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+                  | jq '[.[][]]' > "$state/assets-before-publish.json"
+                before_publish="$state/observed-before-publish"
+                rm -rf "$before_publish"
+                mkdir -p "$before_publish"
+                node -e '
+                  const fs = require("node:fs");
+                  const assets = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                  for (const asset of assets) {
+                    if (asset.state !== "uploaded") continue;
+                    if (!Number.isSafeInteger(asset.id) || asset.id <= 0) throw new Error("invalid asset id");
+                    console.log(asset.id);
+                  }
+                ' "$state/assets-before-publish.json" > "$state/before-publish-asset-ids"
+                while IFS= read -r asset_id; do
+                  [[ -z "$asset_id" ]] && continue
+                  gh api \
+                    -H 'Accept: application/octet-stream' \
+                    "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$before_publish/$asset_id"
+                done < "$state/before-publish-asset-ids"
+                node scripts/release/promotion.js observe-assets \
+                  "$state/assets-before-publish.json" \
+                  "$before_publish" \
+                  "$state/observed-before-publish.json"
+                node scripts/release/promotion.js verify-publication \
+                  "$state/expected.json" \
+                  "$state/tag-before-publish.json" \
+                  "$state/release-before-publish.json" \
+                  "$state/assets-before-publish.json" \
+                  "$state/observed-before-publish.json" \
+                  "$state/plan.json"
+                printf '{"draft":false}\n' > "$state/publish-release.json"
+                gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+                  --input "$state/publish-release.json" > "$state/release-published.json"
+                ;;
+              complete)
+                complete=true
+                break
+                ;;
+              *)
+                echo "::error::Unknown release transaction action: $action"
+                exit 1
+                ;;
+            esac
+          done
+
+          if [[ "$complete" != 'true' ]]; then
+            echo '::error::Release transaction did not converge'
+            exit 1
+          fi
+      - name: Re-download and verify the public release
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="${{ steps.promotion.outputs.state }}"
+          version="${{ steps.promotion.outputs.version }}"
+          release_id=$(node -p 'require(process.argv[1]).id' "$state/release.json")
+          gh api "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            > "$state/immutable-after-publish.json"
+          node scripts/release/promotion.js verify-immutable-settings \
+            "$state/immutable-after-publish.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$version" \
+            > "$state/tag-after-publish.json"
+          node scripts/release/promotion.js verify-tag \
+            "$state/tag-after-publish.json" "$version" "$CANDIDATE_SHA"
+          live="$state/live"
+          rm -rf "$live"
+          mkdir -p "$live"
+          # JavaScript template literal; shell expansion is intentionally disabled.
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("node:fs");
+            const assets = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            for (const asset of assets) {
+              if (!Number.isSafeInteger(asset.id) || asset.id <= 0) throw new Error("invalid asset id");
+              if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(asset.name)) throw new Error("invalid asset name");
+              console.log(`${asset.id}\t${asset.name}`);
+            }
+          ' "$state/assets.json" > "$state/live-assets"
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$live/$asset_name"
+          done < "$state/live-assets"
+          node scripts/release/promotion.js verify-live-release "$live" "$state/expected.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$state/latest.json"
+          node -e '
+            const fs = require("node:fs");
+            const [latestPath, releasePath, version, sha] = process.argv.slice(1);
+            const latest = JSON.parse(fs.readFileSync(latestPath, "utf8"));
+            const release = JSON.parse(fs.readFileSync(releasePath, "utf8"));
+            if (latest.id !== release.id || latest.tag_name !== version || latest.target_commitish !== sha) {
+              throw new Error("the verified release is not the public latest release");
+            }
+          ' "$state/latest.json" "$state/release.json" "$version" "$CANDIDATE_SHA"
+          {
+            echo '### Published immutable release'
+            echo
+            echo "- tag=$version"
+            echo "- candidate_sha=$CANDIDATE_SHA"
+            echo "- candidate_run_id=$CANDIDATE_RUN_ID"
+            echo "- candidate_run_attempt=$CANDIDATE_RUN_ATTEMPT"
+            echo "- candidate_artifact_id=$CANDIDATE_ARTIFACT_ID"
+            echo "- release_id=$release_id"
+          } >> "$GITHUB_STEP_SUMMARY"
