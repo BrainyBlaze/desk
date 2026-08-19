@@ -17,6 +17,7 @@ import { MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from '../core/terminalSizing.js'
 import { captureTerminal } from './api.js';
 import {
   applicationScrollProfileForAgent,
+  terminalScrollOwnerForAgent,
   chooseScrollStrategy,
   encodeApplicationScrollInput
 } from './terminalScroll.js';
@@ -1023,7 +1024,11 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
   }, [scrollbackLines]);
 
   return (
-    <div className="terminalSurfaceShell" ref={shellRef}>
+    <div
+      className="terminalSurfaceShell"
+      ref={shellRef}
+      data-terminal-scroll-owner={terminalScrollOwnerForAgent(session?.spec.agent)}
+    >
       <div className="terminalSurface" ref={hostRef} />
       {scrollbackLines ? (
         <div

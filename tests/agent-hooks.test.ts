@@ -99,13 +99,15 @@ describe('agent hook configuration generation', () => {
     expect(shim).toContain('producerInstanceId');
     expect(shim).toContain('producerSeq');
     expect(shim).toContain('providerSessionId');
-    expect(shim).toContain(
-      'launchProof: process.env.DESK_PROVIDER_LAUNCH_PROOF'
-    );
+    expect(shim).toContain('launchProof: process.env.DESK_PROVIDER_LAUNCH_PROOF');
     expect(shim).not.toContain('observation.launchProof');
-    expect(shim).toContain(
-      'const DESK_PROVIDER_SESSION_ID_FIELDS = {"claude":"session_id","codex":"session_id","opencode":"sessionID"}'
-    );
+    expect(shim).toContain('const DESK_PROVIDER_SESSION_ID_FIELDS = {');
+    expect(shim).toContain('"claude":"session_id"');
+    expect(shim).toContain('"codex":"session_id"');
+    expect(shim).toContain('"opencode":"sessionID"');
+    expect(shim).toContain('"qwen":"session_id"');
+    expect(shim).toContain('"kimi":"session_id"');
+    expect(shim).toContain('"grok":"session_id"');
     expect(shim).toContain(
       'input[DESK_PROVIDER_SESSION_ID_FIELDS[DESK_PROVIDER]]'
     );
@@ -143,6 +145,19 @@ describe('agent hook configuration generation', () => {
         hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep-claude' }] }] }
       });
       writeFileSync(claudePath, operatorClaudeSettings);
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+      const kimiPath = join(home, '.kimi-code', 'config.toml');
+      mkdirSync(dirname(kimiPath), { recursive: true });
+      writeFileSync(kimiPath, '[[hooks]]\nevent = "Stop"\ncommand = "echo keep-kimi"\ntimeout = 5\n');
+      const grokPath = join(home, '.grok', 'user-settings.json');
+      mkdirSync(dirname(grokPath), { recursive: true });
+      writeFileSync(
+        grokPath,
+        JSON.stringify({
+          apiKey: 'keep-key',
+          hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep-grok' }] }] }
+        })
+      );
 
       const installed = installAgentHooks({ homeDir: home });
       installAgentHooks({ homeDir: home });
@@ -169,6 +184,177 @@ describe('agent hook configuration generation', () => {
       expect(JSON.stringify(claude).match(/desk-agent-event/g)?.length).toBe(15);
 
       expect(readFileSync(installed.opencodePluginPath, 'utf8')).toContain('/api/agent-event');
+
+      const kimi = readFileSync(kimiPath, 'utf8');
+      expect(kimi).toContain('echo keep-kimi');
+      expect(kimi.match(/desk-agent-event/g)?.length).toBe(10);
+      expect(kimi.match(/timeout = 10/g)?.length).toBe(10);
+      for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'Stop', 'StopFailure', 'SessionEnd']) {
+        expect(kimi).toContain(`event = "${event}"`);
+      }
+
+      const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
+      const qwenTimeouts = Object.values(qwen.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout));
+      expect(qwenTimeouts).toHaveLength(10);
+      expect(new Set(qwenTimeouts)).toEqual(new Set([10_000]));
+      expect(Object.keys(qwen.hooks)).toEqual(
+        expect.arrayContaining(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'Stop', 'StopFailure', 'SessionEnd'])
+      );
+
+      const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
+      expect(grok.apiKey).toBe('keep-key');
+      expect(JSON.stringify(grok)).toContain('echo keep-grok');
+      expect(JSON.stringify(grok)).toContain('desk-agent-event');
+      expect(JSON.stringify(grok)).toContain('UserPromptSubmit');
+      expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(7);
+      const grokEvents = Object.keys(grok.hooks);
+      expect(grokEvents).toEqual(
+        expect.arrayContaining(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure'])
+      );
+      const grokTimeouts = Object.values(grok.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout))
+        .filter((timeout) => timeout !== undefined);
+      expect(new Set(grokTimeouts)).toEqual(new Set([10]));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces desk hooks whose timeout drifted instead of accumulating duplicates', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-drift-'));
+    try {
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+      const grokPath = join(home, '.grok', 'user-settings.json');
+      mkdirSync(dirname(grokPath), { recursive: true });
+      writeFileSync(grokPath, JSON.stringify({}));
+
+      const installed = installAgentHooks({ homeDir: home });
+      const drift = (path: string, timeout: number): void => {
+        const parsed = JSON.parse(readFileSync(path, 'utf8'));
+        for (const groups of Object.values(parsed.hooks as Record<string, { hooks: { timeout?: number }[] }[]>)) {
+          for (const group of groups) {
+            for (const hook of group.hooks) {
+              hook.timeout = timeout;
+            }
+          }
+        }
+        writeFileSync(path, JSON.stringify(parsed));
+      };
+      drift(installed.qwenSettingsPath, 10);
+      drift(grokPath, 5);
+
+      installAgentHooks({ homeDir: home });
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
+      const qwenTimeouts = Object.values(qwen.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout));
+      expect(qwenTimeouts).toHaveLength(10);
+      expect(new Set(qwenTimeouts)).toEqual(new Set([10_000]));
+
+      const grok = JSON.parse(readFileSync(grokPath, 'utf8'));
+      expect(JSON.stringify(grok).match(/desk-agent-event/g)?.length).toBe(7);
+      const grokTimeouts = Object.values(grok.hooks as Record<string, { hooks: { timeout: number }[] }[]>)
+        .flat()
+        .flatMap((group) => group.hooks.map((hook) => hook.timeout))
+        .filter((timeout) => timeout !== undefined);
+      expect(new Set(grokTimeouts)).toEqual(new Set([10]));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves operator-authored non-array hook entries in place', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-nonarray-'));
+    try {
+      const qwenPath = join(home, '.qwen', 'settings.json');
+      mkdirSync(dirname(qwenPath), { recursive: true });
+      writeFileSync(qwenPath, JSON.stringify({ hooks: { MyCustomEvent: { command: 'notify' } } }));
+
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
+      expect(qwen.hooks.MyCustomEvent).toEqual({ command: 'notify' });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('optional agent hook installs', () => {
+  it('leaves machines without the new agent CLIs byte-untouched and reports them', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-absent-'));
+    try {
+      const installed = installAgentHooks({ homeDir: home });
+      expect(installed.skipped).toEqual([]);
+      expect(installed.notInstalled).toEqual([
+        installed.qwenSettingsPath,
+        installed.kimiConfigPath,
+        installed.grokSettingsPath
+      ]);
+      expect(existsSync(installed.qwenSettingsPath)).toBe(false);
+      expect(existsSync(installed.kimiConfigPath)).toBe(false);
+      expect(existsSync(installed.grokSettingsPath)).toBe(false);
+      expect(existsSync(join(home, '.qwen'))).toBe(false);
+      expect(existsSync(installed.claudeSettingsPath)).toBe(true);
+      expect(existsSync(installed.codexHooksPath)).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('survives a hostile optional config path without aborting the shared install', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-hostile-'));
+    try {
+      writeFileSync(join(home, '.qwen'), 'not a directory');
+      const installed = installAgentHooks({ homeDir: home });
+      expect(installed.skipped).toEqual([installed.qwenSettingsPath]);
+      expect(readFileSync(join(home, '.qwen'), 'utf8')).toBe('not a directory');
+      expect(existsSync(installed.claudeSettingsPath)).toBe(true);
+      expect(existsSync(installed.codexHooksPath)).toBe(true);
+      expect(existsSync(installed.opencodePluginPath)).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('kimi hook config maintenance', () => {
+  it('rewrites stale desk blocks to the current shim and keeps operator blocks', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-kimi-'));
+    try {
+      const kimiPath = join(home, '.kimi-code', 'config.toml');
+      mkdirSync(dirname(kimiPath), { recursive: true });
+      writeFileSync(
+        kimiPath,
+        '[[hooks]]\nevent = "Stop"\ncommand = "echo keep-kimi"\ntimeout = 5\n\n' +
+          '[[hooks]]\nevent = "Stop"\ncommand = "\'/old/desk-agent-event.mjs\' --agent \'kimi\' --event \'Stop\'"\ntimeout = 10\n'
+      );
+      const installed = installAgentHooks({ homeDir: home });
+      const kimi = readFileSync(kimiPath, 'utf8');
+      expect(kimi).toContain('echo keep-kimi');
+      expect(kimi).not.toContain('/old/desk-agent-event.mjs');
+      expect(kimi).toContain(installed.shimPath);
+      expect(kimi.match(/desk-agent-event/g)?.length).toBe(10);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a config whose hooks entry cannot hold [[hooks]] blocks and reports it', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-hooks-kimi-'));
+    try {
+      const kimiPath = join(home, '.kimi-code', 'config.toml');
+      mkdirSync(dirname(kimiPath), { recursive: true });
+      const incompatible = '[hooks]\nfoo = 1\n';
+      writeFileSync(kimiPath, incompatible);
+      const installed = installAgentHooks({ homeDir: home });
+      expect(installed.skipped).toContain(kimiPath);
+      expect(readFileSync(kimiPath, 'utf8')).toBe(incompatible);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -427,6 +613,113 @@ describe('read-only hook probe', () => {
       // `recorded`, never `trusted`: only evidence the authority accepted may
       // raise confidence that far.
       expect(probeHookInstallation('codex', home)).toMatchObject({ trust: 'recorded' });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('probe and merge maintenance for the new terminal agents', () => {
+  it('reports qwen/grok/kimi hooks installed after install and uninstalled before', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-probe-newagents-'));
+    try {
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+      mkdirSync(join(home, '.grok'), { recursive: true });
+      mkdirSync(join(home, '.kimi-code'), { recursive: true });
+
+      expect(probeHookInstallation('qwen', home)).toMatchObject({ installed: false });
+      expect(probeHookInstallation('grok', home)).toMatchObject({ installed: false });
+      expect(probeHookInstallation('kimi', home)).toMatchObject({ installed: false });
+
+      installAgentHooks({ homeDir: home });
+
+      expect(probeHookInstallation('qwen', home)).toMatchObject({ installed: true });
+      expect(probeHookInstallation('grok', home)).toMatchObject({ installed: true });
+      expect(probeHookInstallation('kimi', home)).toMatchObject({ installed: true });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('registers desk_lsp in qwen mcpServers without displacing operator servers', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-qwen-mcp-'));
+    try {
+      const qwenPath = join(home, '.qwen', 'settings.json');
+      mkdirSync(dirname(qwenPath), { recursive: true });
+      writeFileSync(
+        qwenPath,
+        JSON.stringify({ mcpServers: { operator_tool: { command: 'my-tool', args: ['--x'] } } })
+      );
+
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
+      expect(qwen.mcpServers.desk_lsp).toEqual({ command: 'desk-lsp-mcp', args: [] });
+      expect(qwen.mcpServers.operator_tool).toEqual({ command: 'my-tool', args: ['--x'] });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('fills missing qwen terminal-context settings without flipping explicit operator choices', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-qwen-ui-'));
+    try {
+      const qwenPath = join(home, '.qwen', 'settings.json');
+      mkdirSync(dirname(qwenPath), { recursive: true });
+      writeFileSync(
+        qwenPath,
+        JSON.stringify({ ui: { theme: 'dark', mouseTracking: true }, security: { auth: { selectedType: 'openai' } } })
+      );
+
+      installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(qwenPath, 'utf8'));
+      expect(qwen.ui.mouseTracking).toBe(true);
+      expect(qwen.ui.useTerminalBuffer).toBe(false);
+      expect(qwen.ui.theme).toBe('dark');
+      expect(qwen.security.auth.selectedType).toBe('openai');
+      expect(Object.keys(qwen.hooks)).toContain('SessionStart');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('writes the full qwen terminal-context settings when the operator set none', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-qwen-ui-fresh-'));
+    try {
+      mkdirSync(join(home, '.qwen'), { recursive: true });
+
+      const installed = installAgentHooks({ homeDir: home });
+
+      const qwen = JSON.parse(readFileSync(installed.qwenSettingsPath, 'utf8'));
+      expect(qwen.ui.mouseTracking).toBe(false);
+      expect(qwen.ui.useTerminalBuffer).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('prunes a desk hook for an event that is no longer installed', () => {
+    const home = mkdtempSync(join(tmpdir(), 'desk-prune-'));
+    try {
+      mkdirSync(join(home, '.grok'), { recursive: true });
+      const installed = installAgentHooks({ homeDir: home });
+      const grokPath = installed.grokSettingsPath;
+      // Simulate a hook desk installed for a since-retired event, pointing at
+      // the CURRENT shim, plus an operator hook that must survive.
+      const config = JSON.parse(readFileSync(grokPath, 'utf8'));
+      config.hooks.Notification = [
+        { hooks: [{ type: 'command', command: `'${installed.shimPath}' --agent 'grok' --event 'Notification'`, timeout: 10 }] }
+      ];
+      config.hooks.SessionEnd = [{ hooks: [{ type: 'command', command: 'echo operator-owns-this' }] }];
+      writeFileSync(grokPath, JSON.stringify(config, null, 2));
+
+      installAgentHooks({ homeDir: home });
+
+      const after = JSON.parse(readFileSync(grokPath, 'utf8'));
+      expect(after.hooks.Notification).toBeUndefined();
+      expect(JSON.stringify(after.hooks.SessionEnd)).toContain('echo operator-owns-this');
+      expect(JSON.stringify(after).match(/desk-agent-event/g)?.length).toBe(7);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

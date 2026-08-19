@@ -10,17 +10,20 @@
 // spawn rewrite in server/agentHostLaunch.ts. Shared stays a leaf: structural
 // params only, no core type imports.
 
-import { join } from 'node:path';
 import { shellQuote } from './shell.js';
+import {
+  AGENT_PROFILE_PROVIDER_IDS,
+  profileEnvVarOf,
+  type AgentProfileProviderId
+} from './agentRegistry.js';
 
 /** Providers with a documented credential-directory override. */
-export type ProfileProviderId = 'claude' | 'codex';
+export type ProfileProviderId = AgentProfileProviderId;
 
 /** The credential-directory variable each provider CLI reads. */
-export const PROFILE_ENV_VAR: Record<ProfileProviderId, string> = {
-  claude: 'CLAUDE_CONFIG_DIR',
-  codex: 'CODEX_HOME'
-};
+export const PROFILE_ENV_VAR: Record<ProfileProviderId, string> = Object.fromEntries(
+  AGENT_PROFILE_PROVIDER_IDS.map((provider) => [provider, profileEnvVarOf(provider)])
+) as Record<ProfileProviderId, string>;
 
 /**
  * Inherited provider credential variables removed from a PROFILED child.
@@ -46,12 +49,13 @@ export function isValidProfileId(id: unknown): id is string {
 }
 
 export function isProfileProvider(value: unknown): value is ProfileProviderId {
-  return value === 'claude' || value === 'codex';
+  return typeof value === 'string' && profileEnvVarOf(value) !== undefined;
 }
 
 /** The Desk-owned credential directory for a profile. */
 export function profileRoot(profileId: string, homeDir: string): string {
-  return join(homeDir, '.config', 'desk', 'profiles', profileId);
+  const root = homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir;
+  return `${root}/.config/desk/profiles/${profileId}`;
 }
 
 /**

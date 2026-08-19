@@ -45,6 +45,7 @@ import {
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, unlinkSync } from 'node:fs';
 import { type MoorSessionEvent } from './moorEventObserver.js';
+import { MoorPresenceAuthority } from './moorPresenceAuthority.js';
 
 interface KillCommandSpec {
   binPath: string;
@@ -274,6 +275,7 @@ export interface SessionManagerDeps {
  */
 export interface SessionMasterLink {
   sendInput(bytes: Uint8Array, binary: boolean, surfaceId: number, queuedAt: number): boolean;
+  sendPrompt(bytes: Uint8Array): Promise<boolean>;
   /** Re-send only the exact pending tuple whose lease this recovered link resumed. */
   retryPendingInput?(): void;
   cancelQueuedInput(surfaceId: number): void;
@@ -344,6 +346,7 @@ export class SessionManager {
   private readonly ledger: GenerationLedger;
   private readonly now: () => number;
   private readonly onLateMoorAdoption: SessionManagerDeps['onLateMoorAdoption'];
+  private readonly moorPresence = new MoorPresenceAuthority();
   private readonly masters = new Map<string, SessionMasterLink>();
   /** OB-39: the last adopted ATTACH_ACK descriptor per session (holder truth). */
   private readonly moorStatuses = new Map<string, MoorStatus>();
@@ -391,6 +394,7 @@ export class SessionManager {
       // Typed master-bound sends route to the session's attached holder link.
       sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
+      sendMasterPrompt: (sessionId, bytes) => this.dispatchMasterPrompt(sessionId, bytes),
       sendMasterResize: (sessionId, rows, cols, surfaceId) => {
         const recovery = this.recoveries.get(sessionId);
         if (
@@ -655,7 +659,13 @@ export class SessionManager {
      *  never mutate a restored or replaced episode. */
     let livenessEpisode = 0;
     let livenessEpisodeResolved = true;
+    let livenessProbeEpisode: number | undefined;
     let armLivenessProbe: (episode: number) => void = () => undefined;
+    const retryLivenessProbe = (): void => {
+      if (!attached || link === undefined || this.masters.get(sessionId) !== link) return;
+      if (livenessEpisodeResolved) return;
+      armLivenessProbe(livenessEpisode);
+    };
     /** Bytes queued behind the outstanding §7.3 input request. */
     let inputQueue: Array<{ bytes: Uint8Array; surfaceId: number; queuedAt: number }> = [];
     let inputSealed = false;
@@ -813,11 +823,8 @@ export class SessionManager {
           this.core.observeHolderLiveness(sessionId, opts.generation, false, 'probe-pending');
           armLivenessProbe(livenessEpisode);
         },
-        onLivenessRestored: () => {
-          if (!attached || link === undefined || this.masters.get(sessionId) !== link) return;
-          if (livenessEpisodeResolved) return;
-          armLivenessProbe(livenessEpisode);
-        }
+        onLivenessRestored: retryLivenessProbe,
+        onHeartbeat: retryLivenessProbe
       },
       // NOTE deliberately NO autoAckOutput: with the preamble barrier
       // buffering records, a receipt-time ack would confirm consumption
@@ -846,7 +853,10 @@ export class SessionManager {
       opts.recoverySlot.candidate = client;
     }
     armLivenessProbe = (episode: number): void => {
+      if (livenessEpisodeResolved || livenessProbeEpisode === episode) return;
+      livenessProbeEpisode = episode;
       void probeMoorHolder(sessionPath, opts.generation).then((outcome) => {
+        if (livenessProbeEpisode === episode) livenessProbeEpisode = undefined;
         // Fenced twice: only the CURRENT link's CURRENT unresolved episode may
         // consume a probe result.
         if (this.masters.get(sessionId) !== link) return;
@@ -1008,6 +1018,14 @@ export class SessionManager {
           if (error instanceof Error && /in flight/.test(error.message)) {
             return queueInput(bytes, surfaceId, queuedAt);
           }
+          return false;
+        }
+      },
+      sendPrompt: async (bytes) => {
+        if (inputSealed || leaseReset !== undefined || discardLeaseOnClose) return false;
+        try {
+          return await client.submitInput(bytes, 0);
+        } catch {
           return false;
         }
       },
@@ -1543,6 +1561,14 @@ export class SessionManager {
     return link?.sendInput(bytes, binary, surfaceId, this.now()) ?? false;
   }
 
+  private dispatchMasterPrompt(sessionId: string, bytes: Uint8Array): Promise<boolean> {
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
+      return Promise.resolve(false);
+    }
+    return this.masters.get(sessionId)?.sendPrompt(bytes) ?? Promise.resolve(false);
+  }
+
   private armRecoveryInputExpiry(slot: MoorRecoverySlot): void {
     const oldest = slot.inputQueue[0];
     const oldestQueuedAt =
@@ -1720,7 +1746,7 @@ export class SessionManager {
       // Staleness must be POSITIVE: only a refused connect proves the owner is
       // gone. A live listener or ANY indeterminate outcome (permissions,
       // timeout) preserves the node and refuses the spawn.
-      if ((await probeRendezvous(opts.sessionPath)) !== 'stale') {
+      if ((await this.moorPresence.probeRendezvous(opts.sessionPath)) !== 'stale') {
         return { ok: false, reason: 'spawn-failed' };
       }
       // TOCTOU identity fence: re-lstat immediately before unlink and require
@@ -1872,6 +1898,11 @@ export class SessionManager {
   /** OB-39: the last adopted ATTACH_ACK descriptor, if this session joined moor. */
   moorStatus(sessionId: string): MoorStatus | undefined {
     return this.moorStatuses.get(sessionId);
+  }
+
+  /** The one non-adopting holder-presence authority shared by status and spawn fencing. */
+  moorHolderPresence(sessionId: string, socketRoot: string) {
+    return this.moorPresence.holderPresence(socketRoot, sessionId);
   }
 
   /**
@@ -2146,7 +2177,7 @@ export class SessionManager {
   }
 
   /** Submit one complete prompt through one Moor INPUT request. */
-  injectPrompt(sessionId: string, bytes: Uint8Array): boolean {
+  injectPrompt(sessionId: string, bytes: Uint8Array): Promise<boolean> {
     return this.core.injectPrompt(sessionId, bytes);
   }
 
@@ -2753,30 +2784,6 @@ async function probeMoorHolder(
  * nothing (desk#42 — the caller that DOES unlink adds its own TOCTOU identity
  * fence on top of a `stale` verdict; the presence probe never unlinks at all).
  */
-export async function probeRendezvous(
-  path: string,
-  timeoutMs = 250
-): Promise<'live' | 'stale' | 'indeterminate'> {
-  // An over-capacity absolute path is truncated by libuv before connect, so its
-  // ENOENT would be a FALSE positive-absence. It is unaddressable, never proven
-  // stale: classify indeterminate before any Node connect (moor spec 2.2 lets a
-  // holder bind such a path relative to its parent).
-  if (!rendezvousPathWithinCapacity(path)) return 'indeterminate';
-  return new Promise((resolve) => {
-    const socket = createConnection({ path });
-    const settle = (result: 'live' | 'stale' | 'indeterminate'): void => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(result);
-    };
-    socket.setTimeout(timeoutMs, () => settle('indeterminate'));
-    socket.once('connect', () => settle('live'));
-    socket.once('error', (error: NodeJS.ErrnoException) => {
-      settle(error.code === 'ECONNREFUSED' || error.code === 'ENOENT' ? 'stale' : 'indeterminate');
-    });
-  });
-}
-
 async function socketHasListener(path: string, timeoutMs = 250): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const socket = createConnection({ path });

@@ -41,9 +41,16 @@ import type { DeskRoute } from '../plugin.js';
 import { buildDeskSnapshot } from '../snapshot.js';
 import { getSystemSnapshot } from '../systemSampler.js';
 import {
+  hookIdentityProvider,
   isValidProviderSessionId,
+  type HookIdentityProvider,
   type ProviderSessionProvider
 } from '../../shared/providerSessionIdentity.js';
+import { resolvePackageRoot } from '../../shared/packageRoot.js';
+import {
+  resolveRuntimeProvenance,
+  type RuntimeProvenance
+} from '../../shared/runtimeProvenance.js';
 
 interface ManagedAgentLifecycle {
   reconcile(runningSessions: Set<string>): void;
@@ -96,6 +103,7 @@ export interface SystemRoutesOptions {
     milliseconds: number,
     signal: AbortSignal
   ) => Promise<void>;
+  runtimeProvenance?: () => RuntimeProvenance;
 }
 
 export interface ClaudeSessionStartIdentity {
@@ -106,7 +114,7 @@ export interface ClaudeSessionStartIdentity {
 interface ProviderHookIdentity {
   deskSessionId: string;
   generation: number;
-  provider: Exclude<ProviderSessionProvider, 'opencode'>;
+  provider: HookIdentityProvider;
   providerSessionId: string;
   hook: string;
   isSessionStart: boolean;
@@ -171,12 +179,8 @@ function providerHookIdentity(
     return { kind: 'none' };
   }
   const body = input as Record<string, unknown>;
-  let provider: ProviderHookIdentity['provider'];
-  if (body.provider === 'claude' && body.producer === 'claude-hooks') {
-    provider = 'claude';
-  } else if (body.provider === 'codex' && body.producer === 'codex-hooks') {
-    provider = 'codex';
-  } else {
+  const provider = hookIdentityProvider(body.provider, body.producer);
+  if (provider === undefined) {
     return { kind: 'none' };
   }
   const observation = body.observation;
@@ -481,8 +485,16 @@ export function createSystemRoutes(
     options.providerSessionRetryNow ?? (() => performance.now());
   const providerSessionRetrySleep =
     options.providerSessionRetrySleep ?? sleepForProviderEvidence;
+  const runtimeProvenance =
+    options.runtimeProvenance ??
+    (() => resolveRuntimeProvenance(resolvePackageRoot(import.meta.url)));
   const now = options.now ?? Date.now;
   return async (req, res, url) => {
+    if (req.method === 'GET' && url.pathname === '/api/runtime') {
+      sendJson(res, 200, runtimeProvenance());
+      return true;
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/desk') {
       sendJson(res, 200, buildDeskSnapshot());
       return true;

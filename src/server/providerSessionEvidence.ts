@@ -3,7 +3,10 @@ import { lstat, open, opendir, realpath, type FileHandle } from 'node:fs/promise
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { TextDecoder, types as utilTypes } from 'node:util';
 import { isValidProfileId, profileRoot } from '../shared/agentProfiles.js';
-import { isValidProviderSessionId } from '../shared/providerSessionIdentity.js';
+import {
+  isValidProviderSessionId,
+  type ProviderSessionProvider
+} from '../shared/providerSessionIdentity.js';
 import { claudeProjectDirName } from './claudeProfileContinuity.js';
 
 // Provider transcripts are untrusted evidence, not binding authority. Keep all
@@ -67,10 +70,16 @@ export type ProviderSessionEvidenceFailure = {
   error: string;
 };
 
+export function isEvidenceCapableProvider(
+  provider: string
+): provider is ProviderSessionEvidenceProvider {
+  return provider === 'codex' || provider === 'claude';
+}
+
 export type ProviderSessionEvidenceResult =
   | {
       ok: true;
-      provider: ProviderSessionEvidenceProvider;
+      provider: ProviderSessionProvider;
       providerSessionId: string;
       evidencePath: string;
     }

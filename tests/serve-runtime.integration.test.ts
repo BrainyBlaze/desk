@@ -268,10 +268,6 @@ describe('public CLI serve dispatch', () => {
       expectedError: '--port requires a value'
     },
     {
-      argv: ['serve', '--standalone'],
-      expectedError: 'unknown option --standalone'
-    },
-    {
       argv: ['status', '--dev'],
       expectedError: 'unknown option --dev'
     },
@@ -315,27 +311,32 @@ describe('public CLI serve dispatch', () => {
     }
   });
 
-  it('documents both serve forms, precedence, and no second public server command', { timeout: 30_000 }, async () => {
+  it('documents automatic selection, both overrides, precedence, and no second public server command', { timeout: 30_000 }, async () => {
     const cli = startNpxCli(['help'], await randomUnusedPort());
     const outcome = await within(cli.closed, cliExitTimeoutMs);
     const helpLines = cli.stdout.split('\n').map((line) => line.trim());
 
     expect(outcome).toEqual({ code: 0, signal: null });
     expect(cli.stdout).toContain(
-      'desk serve [--host HOST] [--port PORT]\n      Start the private standalone runtime.'
+      'desk serve [--host HOST] [--port PORT]\n      Use Vite in a source checkout or the bundled runtime in an installed release.'
     );
     expect(cli.stdout).toContain(
-      'desk serve --dev [--host HOST] [--port PORT]\n      Start the Vite dev server + UI.'
+      'desk serve --dev [--host HOST] [--port PORT]\n      Force the Vite dev server + UI.'
+    );
+    expect(cli.stdout).toContain(
+      'desk serve --standalone [--host HOST] [--port PORT]\n      Force the bundled runtime; source checkouts require a matching build.'
     );
     expect(helpLines).toContain('desk serve [--host HOST] [--port PORT]');
-    expect(helpLines).toContain('Start the private standalone runtime.');
+    expect(helpLines).toContain('Use Vite in a source checkout or the bundled runtime in an installed release.');
     expect(helpLines).toContain('desk serve --dev [--host HOST] [--port PORT]');
-    expect(helpLines).toContain('Start the Vite dev server + UI.');
+    expect(helpLines).toContain('Force the Vite dev server + UI.');
+    expect(helpLines).toContain('desk serve --standalone [--host HOST] [--port PORT]');
+    expect(helpLines).toContain('Force the bundled runtime; source checkouts require a matching build.');
     expect(helpLines.filter((line) => /^desk (?:serve|server|standalone)\b/.test(line))).toEqual([
       'desk serve [--host HOST] [--port PORT]',
-      'desk serve --dev [--host HOST] [--port PORT]'
+      'desk serve --dev [--host HOST] [--port PORT]',
+      'desk serve --standalone [--host HOST] [--port PORT]'
     ]);
-    expect(cli.stdout).not.toContain('--standalone');
     expect(cli.stdout).toContain('flags > DESK_HOST/DESK_PORT > 127.0.0.1/5173');
   });
 });

@@ -32,6 +32,7 @@ export interface SessionRuntimeDeps {
    * (moor supervised frames), so no wire type leaks into the runtime.
    */
   sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
+  sendMasterPrompt: (bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
 }
 
@@ -535,7 +536,7 @@ export class SessionRuntime {
    * is outside the bracketed-paste boundary, but in the same byte buffer, so
    * the holder cannot observe a staged composer between separate requests.
    */
-  injectPrompt(bytes: Uint8Array): boolean {
+  async injectPrompt(bytes: Uint8Array): Promise<boolean> {
     if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return false;
     const bracketed = this.d.emulator.bracketedPaste?.() === true;
     const open = bracketed ? new TextEncoder().encode('\x1b[200~') : new Uint8Array();
@@ -545,7 +546,7 @@ export class SessionRuntime {
     data.set(bytes, open.length);
     data.set(close, open.length + bytes.length);
     data[data.length - 1] = 0x0d;
-    return this.d.sendMasterInput(data, false, 0) !== false;
+    return this.d.sendMasterPrompt(data);
   }
 
   /**

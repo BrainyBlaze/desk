@@ -42,7 +42,7 @@ across projects, branches, terminals, files, and team-like conversations.
 
 Desk is built for:
 
-- **Agent operators** who need to keep Codex, Claude, OpenCode, shell, and
+- **Agent operators** who need to keep Codex, Claude, OpenCode, Qwen, Kimi, Grok, shell, and
   custom-command sessions alive while switching between groups quickly.
 - **Repository maintainers** who want terminals, editor tabs, Git operations,
   GitHub context, project boards, and notes in one browser workspace.
@@ -65,7 +65,7 @@ Desk separates process ownership from view ownership:
 - **The terminal daemon owns terminal transport.** One binary browser
   WebSocket multiplexes visible surfaces while the supervised daemon manages
   Moor holders, generation fencing, snapshots, input, and resize.
-- **Hooks own agent events.** Codex, Claude, and OpenCode report lifecycle,
+- **Hooks own agent events.** Codex, Claude, OpenCode, Qwen, Kimi, and Grok report lifecycle,
   attention, prompt, stop, and permission events back to Desk.
 
 Read [Architecture](/concepts-architecture) and [Workspace model](/concepts-workspace-model)

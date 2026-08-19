@@ -2,8 +2,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { classifyPackageRoot } from '../shared/packageRoot.js';
+import { assertCurrentStandaloneBuild } from '../shared/runtimeProvenance.js';
 
-export type ServeMode = 'vite' | 'standalone';
+export type ServeMode = 'auto' | 'vite' | 'standalone';
 
 export interface ServeOptions {
   mode: ServeMode;
@@ -28,7 +30,7 @@ export function parseServeOptions(
   argv: readonly string[],
   env: ServeEnvironment = process.env
 ): ServeOptions {
-  let mode: ServeMode = 'standalone';
+  let mode: ServeMode = 'auto';
   let hostFlag: string | undefined;
   let portFlag: string | undefined;
   const seen = new Set<string>();
@@ -37,12 +39,16 @@ export function parseServeOptions(
   while (cursor < argv.length) {
     const argument = argv[cursor];
 
-    if (argument === '--dev') {
+    if (argument === '--dev' || argument === '--standalone') {
       if (seen.has(argument)) {
         throw new Error(`${argument} may be specified only once`);
       }
+      const conflictingFlag = argument === '--dev' ? '--standalone' : '--dev';
+      if (seen.has(conflictingFlag)) {
+        throw new Error('--dev and --standalone are mutually exclusive');
+      }
       seen.add(argument);
-      mode = 'vite';
+      mode = argument === '--dev' ? 'vite' : 'standalone';
       cursor += 1;
       continue;
     }
@@ -92,7 +98,11 @@ export function parseServeOptions(
 
 // Root resolution lives in shared (the daemon supervisor spawns the
 // same-release CLI entry from it too); re-exported here for CLI callers.
-export { findPackageRoot } from '../shared/packageRoot.js';
+export {
+  classifyPackageRoot,
+  findPackageRoot,
+  resolvePackageRoot
+} from '../shared/packageRoot.js';
 
 export function createServeLaunch(
   root: string,
@@ -100,7 +110,12 @@ export function createServeLaunch(
   nodeExecutable: string = process.execPath,
   parentEnv: NodeJS.ProcessEnv = process.env
 ): ServeLaunch {
-  if (options.mode === 'vite') {
+  const packageKind = options.mode === 'vite' ? undefined : classifyPackageRoot(root);
+  const mode = options.mode === 'auto'
+    ? packageKind === 'source' ? 'vite' : 'standalone'
+    : options.mode;
+
+  if (mode === 'vite') {
     const viteEntry = join(root, 'node_modules', 'vite', 'bin', 'vite.js');
     if (!existsSync(viteEntry)) {
       throw new Error(`Vite runtime is missing at ${viteEntry}; reinstall desk`);
@@ -109,7 +124,7 @@ export function createServeLaunch(
       command: nodeExecutable,
       args: [viteEntry, '--host', options.host, '--port', String(options.port), '--strictPort'],
       cwd: root,
-      env: parentEnv,
+      env: { ...parentEnv, DESK_RUNTIME_MODE: 'vite' },
       label: `desk starting (dev) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
     };
   }
@@ -117,6 +132,9 @@ export function createServeLaunch(
   const standaloneEntry = join(root, 'libexec', 'desk-standalone');
   if (!existsSync(standaloneEntry)) {
     throw new Error(`Standalone runtime is missing at ${standaloneEntry}; reinstall desk`);
+  }
+  if (packageKind === 'source') {
+    assertCurrentStandaloneBuild(root);
   }
   return {
     command: standaloneEntry,
@@ -126,7 +144,8 @@ export function createServeLaunch(
       ...parentEnv,
       DESK_HOST: options.host,
       DESK_PORT: String(options.port),
-      DESK_DAEMON_NODE: nodeExecutable
+      DESK_DAEMON_NODE: nodeExecutable,
+      DESK_RUNTIME_MODE: 'standalone'
     },
     label: `desk starting (standalone) on http://${options.host}:${options.port}  (Ctrl-C to stop)`
   };

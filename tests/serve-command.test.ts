@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  computeRuntimeSourceFingerprint,
+  writeStandaloneBuildProvenance
+} from '../src/shared/runtimeProvenance.js';
+import {
+  classifyPackageRoot,
   createServeLaunch,
   findPackageRoot,
   parseServeOptions,
@@ -30,6 +35,23 @@ function addArtifact(root: string, relativePath: string): string {
   mkdirSync(dirname(artifact), { recursive: true });
   writeFileSync(artifact, '');
   return artifact;
+}
+
+function makeSourceRoot(): string {
+  const root = makePackageRoot();
+  for (const [path, content] of [
+    ['package-lock.json', '{}'],
+    ['tsconfig.json', '{}'],
+    ['vite.config.ts', 'export default {}'],
+    ['index.html', '<main></main>'],
+    ['src/cli/main.ts', 'export {}'],
+    ['scripts/build-standalone.ts', 'export {}'],
+    ['scripts/make-assets.mjs', 'export {}']
+  ] as const) {
+    const artifact = addArtifact(root, path);
+    writeFileSync(artifact, content);
+  }
+  return root;
 }
 
 function thrownMessage(fn: () => unknown): string {
@@ -59,9 +81,9 @@ afterEach(() => {
 });
 
 describe('parseServeOptions', () => {
-  it('defaults to standalone on the loopback host and port 5173', () => {
+  it('defaults to automatic runtime selection on the loopback host and port 5173', () => {
     expect(parseServeOptions([], {})).toEqual({
-      mode: 'standalone',
+      mode: 'auto',
       host: '127.0.0.1',
       port: 5173
     });
@@ -85,7 +107,7 @@ describe('parseServeOptions', () => {
 
   it('uses environment defaults when flags are absent', () => {
     expect(parseServeOptions([], { DESK_HOST: '0.0.0.0', DESK_PORT: '7000' })).toEqual({
-      mode: 'standalone',
+      mode: 'auto',
       host: '0.0.0.0',
       port: 7000
     });
@@ -97,7 +119,7 @@ describe('parseServeOptions', () => {
         DESK_HOST: '0.0.0.0',
         DESK_PORT: '7000'
       })
-    ).toEqual({ mode: 'standalone', host: 'localhost', port: 6000 });
+    ).toEqual({ mode: 'auto', host: 'localhost', port: 6000 });
   });
 
   it.each([
@@ -118,6 +140,7 @@ describe('parseServeOptions', () => {
 
   it.each([
     [['--dev', '--dev'], '--dev may be specified only once'],
+    [['--standalone', '--standalone'], '--standalone may be specified only once'],
     [['--host', 'one', '--host', 'two'], '--host may be specified only once'],
     [['--port', '5173', '--port', '5174'], '--port may be specified only once']
   ] as const)('rejects duplicate flags in %j', (argv, message) => {
@@ -132,8 +155,18 @@ describe('parseServeOptions', () => {
     expect(() => parseServeOptions(['--unknown'], {})).toThrow('unknown option --unknown');
   });
 
-  it('rejects the retired --standalone flag', () => {
-    expect(() => parseServeOptions(['--standalone'], {})).toThrow('unknown option --standalone');
+  it('accepts --standalone as an explicit immutable-runtime override', () => {
+    expect(parseServeOptions(['--standalone'], {})).toEqual({
+      mode: 'standalone',
+      host: '127.0.0.1',
+      port: 5173
+    });
+  });
+
+  it('rejects conflicting runtime overrides', () => {
+    expect(() => parseServeOptions(['--dev', '--standalone'], {})).toThrow(
+      '--dev and --standalone are mutually exclusive'
+    );
   });
 
   it('rejects unexpected positional arguments', () => {
@@ -142,12 +175,14 @@ describe('parseServeOptions', () => {
 });
 
 describe('serve launch planning', () => {
+  const autoOptions: ServeOptions = { mode: 'auto', host: '127.0.0.1', port: 5173 };
   const viteOptions: ServeOptions = { mode: 'vite', host: '127.0.0.1', port: 5173 };
   const standaloneOptions: ServeOptions = { mode: 'standalone', host: '0.0.0.0', port: 6000 };
 
-  it('finds a source package root with only vite.config.ts as its marker', () => {
+  it('finds a complete source package root', () => {
     const root = makePackageRoot();
     writeFileSync(join(root, 'vite.config.ts'), '');
+    addArtifact(root, 'src/cli/main.ts');
     const nestedModule = addArtifact(root, 'src/cli/serveCommand.ts');
 
     expect(findPackageRoot(pathToFileURL(nestedModule).href)).toBe(root);
@@ -169,6 +204,46 @@ describe('serve launch planning', () => {
     );
   });
 
+  it('classifies a complete source checkout ahead of stale built artifacts', () => {
+    const root = makePackageRoot();
+    addArtifact(root, 'vite.config.ts');
+    addArtifact(root, 'src/cli/main.ts');
+    addArtifact(root, 'dist/cli/main.js');
+
+    expect(classifyPackageRoot(root)).toBe('source');
+  });
+
+  it('classifies a built-only package as a distribution', () => {
+    const root = makePackageRoot();
+    addArtifact(root, 'dist/cli/main.js');
+
+    expect(classifyPackageRoot(root)).toBe('distribution');
+  });
+
+  it('automatically launches Vite from a source checkout even when stale standalone exists', () => {
+    const root = makePackageRoot();
+    addArtifact(root, 'vite.config.ts');
+    addArtifact(root, 'src/cli/main.ts');
+    const viteEntry = addArtifact(root, 'node_modules/vite/bin/vite.js');
+    addArtifact(root, 'libexec/desk-standalone');
+
+    expect(createServeLaunch(root, autoOptions, '/runtime/node')).toMatchObject({
+      command: '/runtime/node',
+      args: [viteEntry, '--host', '127.0.0.1', '--port', '5173', '--strictPort']
+    });
+  });
+
+  it('automatically launches standalone from a distribution package', () => {
+    const root = makePackageRoot();
+    addArtifact(root, 'dist/cli/main.js');
+    const standaloneEntry = addArtifact(root, 'libexec/desk-standalone');
+
+    expect(createServeLaunch(root, autoOptions, '/runtime/node')).toMatchObject({
+      command: standaloneEntry,
+      args: []
+    });
+  });
+
   it('selects the Vite JavaScript entry with strict port handling and probes only that artifact', () => {
     const root = makePackageRoot();
     const viteEntry = addArtifact(root, 'node_modules/vite/bin/vite.js');
@@ -181,8 +256,9 @@ describe('serve launch planning', () => {
     expectOnlyArtifactLookup(viteEntry);
   });
 
-  it('selects the private standalone executable, probes only it, and passes the resolved environment', () => {
+  it('selects the private standalone executable from a distribution and passes the resolved environment', () => {
     const root = makePackageRoot();
+    addArtifact(root, 'dist/cli/main.js');
     const standaloneEntry = addArtifact(root, 'libexec/desk-standalone');
     const parentEnv = { KEEP_ME: 'yes' };
 
@@ -197,7 +273,33 @@ describe('serve launch planning', () => {
         DESK_DAEMON_NODE: '/runtime/node'
       }
     });
-    expectOnlyArtifactLookup(standaloneEntry);
+    expect(vi.mocked(existsSync).mock.calls).toContainEqual([standaloneEntry]);
+    expect(vi.mocked(existsSync).mock.calls).not.toContainEqual([
+      join(root, 'node_modules', 'vite', 'bin', 'vite.js')
+    ]);
+  });
+
+  it('rejects an unstamped standalone runtime from a source checkout', () => {
+    const root = makeSourceRoot();
+    addArtifact(root, 'libexec/desk-standalone');
+
+    expect(() => createServeLaunch(root, standaloneOptions, '/runtime/node')).toThrow(
+      'Standalone runtime provenance is missing; run npm run build:standalone'
+    );
+  });
+
+  it('launches an explicitly selected source standalone only when its provenance is current', () => {
+    const root = makeSourceRoot();
+    const standaloneEntry = addArtifact(root, 'libexec/desk-standalone');
+    writeStandaloneBuildProvenance(
+      standaloneEntry,
+      computeRuntimeSourceFingerprint(root)
+    );
+
+    expect(createServeLaunch(root, standaloneOptions, '/runtime/node')).toMatchObject({
+      command: standaloneEntry,
+      args: []
+    });
   });
 
   it('reports only the missing Vite artifact and asks for reinstall', () => {
@@ -220,13 +322,14 @@ describe('serve launch planning', () => {
 
   it('reports only the missing standalone artifact and asks for reinstall', () => {
     const root = makePackageRoot();
+    addArtifact(root, 'dist/cli/main.js');
     addArtifact(root, 'node_modules/vite/bin/vite.js');
     const standaloneEntry = join(root, 'libexec', 'desk-standalone');
 
     const message = thrownMessage(() => createServeLaunch(root, standaloneOptions, '/runtime/node'));
 
     expect(message).toBe(`Standalone runtime is missing at ${standaloneEntry}; reinstall desk`);
-    expectOnlyArtifactLookup(standaloneEntry);
+    expect(vi.mocked(existsSync).mock.calls).toContainEqual([standaloneEntry]);
   });
 });
 

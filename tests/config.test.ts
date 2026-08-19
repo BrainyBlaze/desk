@@ -24,6 +24,20 @@ const CLAUDE_RESUME_ID = '11111111-1111-4111-8111-111111111111';
 const OTHER_CLAUDE_RESUME_ID = '22222222-2222-4222-8222-222222222222';
 
 describe('desk config', () => {
+  it.each(['plugins: []\ngroups: []\n', 'plugins: disabled\ngroups: []\n'])(
+    'rejects a present non-object plugins section instead of dropping it: %s',
+    (source) => {
+      expect(() => parseDeskManifest(source)).toThrow('desk manifest plugins must be an object');
+    }
+  );
+
+  it.each(['settings: []\ngroups: []\n', 'settings: disabled\ngroups: []\n'])(
+    'rejects a present non-object settings section instead of dropping it: %s',
+    (source) => {
+      expect(() => parseDeskManifest(source)).toThrow('desk manifest settings must be an object');
+    }
+  );
+
   it('resolves the default manifest path under user config', () => {
     expect(resolveDefaultManifestPath({ homeDir: `${HOME}` })).toBe(`${HOME}/.config/desk/desk.yml`);
   });

@@ -28,6 +28,7 @@ import {
   type AgentStateEnvelope,
   parseAgentStateEnvelope
 } from '../../shared/controlPlane/contract.js';
+import { AGENT_PRODUCER_IDS } from '../../shared/agentRegistry.js';
 
 export interface FileIntakeStoreDependencies {
   currentGeneration: (sessionId: string) => number;
@@ -285,15 +286,10 @@ function parseProducerSequenceClaim(
   return record as unknown as ProducerSequenceClaimRecord;
 }
 
+const AGENT_PRODUCER_SET: ReadonlySet<string> = new Set(AGENT_PRODUCER_IDS);
+
 function isAgentProducer(value: unknown): value is AgentProducer {
-  return (
-    value === 'codex-hooks' ||
-    value === 'codex-native' ||
-    value === 'claude-hooks' ||
-    value === 'claude-native' ||
-    value === 'opencode-terminal' ||
-    value === 'opencode-native'
-  );
+  return typeof value === 'string' && AGENT_PRODUCER_SET.has(value);
 }
 
 function parseAcceptedEvent(line: string): AcceptedAgentStateEvent | undefined {

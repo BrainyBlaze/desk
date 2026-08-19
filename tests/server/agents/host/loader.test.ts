@@ -32,6 +32,12 @@ vi.mock('../../../../src/server/agents/drivers/opencodeDriver.js', () => ({
 }));
 
 import { loadDriver } from '../../../../src/server/agents/host/loader.js';
+import {
+  AGENT_NATIVE_PROVIDER_IDS,
+  AGENT_PROVIDER_IDS
+} from '../../../../src/shared/agentRegistry.js';
+
+const NATIVE_PROVIDERS = new Set<string>(AGENT_NATIVE_PROVIDER_IDS);
 
 function env(overrides: Partial<AgentHostEnv> = {}): AgentHostEnv {
   return {
@@ -71,4 +77,17 @@ describe('loadDriver', () => {
       lspEnvFilePath: '/tmp/desk-lsp/env.json'
     });
   });
+
+  it.each(AGENT_NATIVE_PROVIDER_IDS)('has a native driver factory for %s', (provider) => {
+    expect(loadDriver(env({ DESK_AGENT: provider }), {} as never)).toBe(mocks.fakeDriver);
+  });
+
+  it.each(AGENT_PROVIDER_IDS.filter((provider) => !NATIVE_PROVIDERS.has(provider)))(
+    'rejects terminal-only provider %s at the native host boundary',
+    (provider) => {
+      expect(() => loadDriver(env({ DESK_AGENT: provider }), {} as never)).toThrow(
+        `unsupported DESK_AGENT value: ${provider}`
+      );
+    }
+  );
 });

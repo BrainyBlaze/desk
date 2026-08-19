@@ -164,6 +164,9 @@ function factsFor(body: ProducerBody): AgentSemanticFact[] {
   switch (body.producer) {
     case 'claude-hooks':
     case 'codex-hooks':
+    case 'qwen-hooks':
+    case 'kimi-hooks':
+    case 'grok-hooks':
       return claudeFacts(body.observation as unknown as ClaudeObservation);
     case 'opencode-terminal':
       return opencodeFacts(body.observation as unknown as OpencodeObservation);

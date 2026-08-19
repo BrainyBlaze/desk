@@ -4,6 +4,8 @@ import type { SessionSpec } from '../core/types.js';
 import { sessionStateSubjectFor } from '../shared/controlPlane/sessionSubject.js';
 import { claudeMemoryProjectSlug } from './claudeProfileMemory.js';
 
+import type { ProviderSessionProvider } from '../shared/providerSessionIdentity.js';
+
 export type ClaudeContinuityAttentionCode =
   | 'continuity-resume-unconfirmed'
   | 'continuity-store-corrupt'
@@ -20,7 +22,7 @@ export interface ClaudeContinuityAttention {
   code: ClaudeContinuityAttentionCode;
   message: string;
   count?: number;
-  provider?: 'claude' | 'codex';
+  provider?: ProviderSessionProvider;
   durableProviderSessionId?: string;
   observedProviderSessionId?: string;
   action?: string;

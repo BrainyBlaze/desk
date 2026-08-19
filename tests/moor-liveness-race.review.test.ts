@@ -12,6 +12,7 @@ import {
 } from '../src/shared/runtime/workerSupervisor.js';
 
 type LivenessHandlers = {
+  onHeartbeat?: (monotonicMs: bigint, flags: number) => void;
   onLivenessLost?: () => void;
   onLivenessRestored?: () => void;
 };
@@ -77,7 +78,7 @@ describe('SessionManager Moor liveness adversarial review', () => {
     harness.probes = [];
   });
 
-  it('requires authenticated recovery and fences an older probe result', async () => {
+  it('single-flights authenticated recovery and fences an older liveness episode', async () => {
     const manager = new SessionManager({
       ledger: new GenerationLedger(new InMemoryGenerationLedger()),
       supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 2 }),
@@ -101,6 +102,11 @@ describe('SessionManager Moor liveness adversarial review', () => {
     });
 
     harness.handlers!.onLivenessRestored!();
+    harness.handlers!.onHeartbeat!(1n, 0);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(harness.probes).toHaveLength(1);
+
+    harness.handlers!.onLivenessLost!();
     await vi.waitFor(() => expect(harness.probes).toHaveLength(2));
     expect(manager.stateSnapshot('s1')?.health).toMatchObject({
       status: 'degraded',
@@ -113,6 +119,46 @@ describe('SessionManager Moor liveness adversarial review', () => {
     harness.probes[0]!.reject(new Error('older probe became indeterminate'));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(manager.stateSnapshot('s1')?.health.status).toBe('healthy');
+
+    manager.retire('s1');
+  });
+
+  it('retries an indeterminate identity probe on later heartbeats', async () => {
+    const manager = new SessionManager({
+      ledger: new GenerationLedger(new InMemoryGenerationLedger()),
+      supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 2 }),
+      emulatorFactory: { create: emulator },
+      now: () => Date.now(),
+      sendBrowser: () => {}
+    });
+    expect(manager.ensure('s1', { rows: 24, cols: 80 })).toMatchObject({
+      ok: true,
+      generation: 2
+    });
+    await expect(
+      manager.moorAttachMaster('s1', '/tmp/s1', { rows: 24, cols: 80 }, { generation: 2 })
+    ).resolves.toBe(true);
+
+    harness.handlers!.onLivenessLost!();
+    await vi.waitFor(() => expect(harness.probes).toHaveLength(1));
+    harness.probes[0]!.reject(new Error('first probe became indeterminate'));
+    await vi.waitFor(() =>
+      expect(manager.stateSnapshot('s1')?.health).toMatchObject({
+        status: 'degraded',
+        detail: 'probe-indeterminate'
+      })
+    );
+
+    harness.handlers!.onLivenessRestored!();
+    await vi.waitFor(() => expect(harness.probes).toHaveLength(2));
+    harness.probes[1]!.reject(new Error('restoration probe became indeterminate'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(harness.handlers!.onHeartbeat).toBeTypeOf('function');
+    harness.handlers!.onHeartbeat!(1n, 0);
+    await vi.waitFor(() => expect(harness.probes).toHaveLength(3));
+    harness.probes[2]!.resolve();
+    await vi.waitFor(() => expect(manager.stateSnapshot('s1')?.health.status).toBe('healthy'));
 
     manager.retire('s1');
   });

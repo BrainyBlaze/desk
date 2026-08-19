@@ -292,6 +292,30 @@ async function invokeRoute(
 }
 
 describe('canonical system agent-state routes', () => {
+  it('returns the canonical runtime provenance projection', async () => {
+    const provenance = {
+      schemaVersion: 1 as const,
+      packageKind: 'distribution' as const,
+      runtimeKind: 'standalone' as const,
+      version: '0.4.0',
+      release: { state: 'unmanaged' as const }
+    };
+    const runtimeProvenance = vi.fn(() => provenance);
+
+    const result = await invoke(
+      gateway(),
+      'GET',
+      '/api/runtime',
+      undefined,
+      eventGateway(),
+      endpointGateway(),
+      { runtimeProvenance }
+    );
+
+    expect(runtimeProvenance).toHaveBeenCalledOnce();
+    expect(result).toEqual({ handled: true, status: 200, body: provenance });
+  });
+
   it('maps producer bytes to a canonical envelope and returns the daemon receipt', async () => {
     const agentStateGateway = gateway();
     const envelope = event();
@@ -461,6 +485,129 @@ describe('canonical system agent-state routes', () => {
     expect(observeProviderSessionIdentity.mock.invocationCallOrder[0]).toBeLessThan(
       agentStateGateway.submitEvent.mock.invocationCallOrder[0]!
     );
+    expect(result.status).toBe(200);
+  });
+
+  it('binds a Qwen provider session id without Claude confirmation', async () => {
+    const agentStateGateway = gateway();
+    const observeProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { ok: true, kind: 'matching', provider: 'qwen', providerSessionId: '33333333-3333-4333-8333-333333333333' }
+    });
+    const bindProviderSessionIdentity = vi.fn();
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'qwen',
+        producer: 'qwen-hooks',
+        launchProof: 'A'.repeat(43),
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: '33333333-3333-4333-8333-333333333333'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { observeProviderSessionIdentity, bindProviderSessionIdentity } as unknown as Partial<SystemRoutesOptions>
+    );
+
+    expect(observeProviderSessionIdentity).toHaveBeenCalledWith(
+      {
+        deskSessionId: 'agent-a',
+        provider: 'qwen',
+        providerSessionId: '33333333-3333-4333-8333-333333333333',
+        generation: 2,
+        launchProof: 'A'.repeat(43),
+        hook: 'SessionStart'
+      },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+    expect(result.status).toBe(200);
+  });
+
+  it('binds an opaque Kimi provider session id without Claude confirmation', async () => {
+    const agentStateGateway = gateway();
+    const observeProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { ok: true, kind: 'matching', provider: 'kimi', providerSessionId: 'kimi-session_01HZX4T9QK' }
+    });
+    const bindProviderSessionIdentity = vi.fn();
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'kimi',
+        producer: 'kimi-hooks',
+        launchProof: 'A'.repeat(43),
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: 'kimi-session_01HZX4T9QK'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { observeProviderSessionIdentity, bindProviderSessionIdentity } as unknown as Partial<SystemRoutesOptions>
+    );
+
+    expect(observeProviderSessionIdentity).toHaveBeenCalledWith(
+      {
+        deskSessionId: 'agent-a',
+        provider: 'kimi',
+        providerSessionId: 'kimi-session_01HZX4T9QK',
+        generation: 2,
+        launchProof: 'A'.repeat(43),
+        hook: 'SessionStart'
+      },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+    expect(result.status).toBe(200);
+  });
+
+  it('binds a Grok 12-hex opaque provider session id without Claude confirmation', async () => {
+    const agentStateGateway = gateway();
+    const observeProviderSessionIdentity = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { ok: true, kind: 'matching', provider: 'grok', providerSessionId: '69057f6fab27' }
+    });
+    const bindProviderSessionIdentity = vi.fn();
+    const result = await invoke(
+      agentStateGateway,
+      'POST',
+      '/api/agent-event',
+      producerBody({
+        provider: 'grok',
+        producer: 'grok-hooks',
+        launchProof: 'A'.repeat(43),
+        observation: {
+          hook: 'SessionStart',
+          providerSessionId: '69057f6fab27'
+        }
+      }),
+      eventGateway(),
+      endpointGateway(),
+      { observeProviderSessionIdentity, bindProviderSessionIdentity } as unknown as Partial<SystemRoutesOptions>
+    );
+
+    expect(observeProviderSessionIdentity).toHaveBeenCalledWith(
+      {
+        deskSessionId: 'agent-a',
+        provider: 'grok',
+        providerSessionId: '69057f6fab27',
+        generation: 2,
+        launchProof: 'A'.repeat(43),
+        hook: 'SessionStart'
+      },
+      expect.objectContaining({ timeoutMs: expect.any(Number) })
+    );
+    expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
     expect(result.status).toBe(200);
   });
 
@@ -685,6 +832,30 @@ describe('canonical system agent-state routes', () => {
     expect(confirmClaudeSessionStart).not.toHaveBeenCalled();
     expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
     expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+  });
+
+  it('rejects opaque provider session ids that break the id grammar', async () => {
+    for (const providerSessionId of ['', '   ', 'has space', 'x'.repeat(129), 'семь-и-юникод']) {
+      const agentStateGateway = gateway();
+      const bindProviderSessionIdentity = vi.fn();
+      const result = await invoke(
+        agentStateGateway,
+        'POST',
+        '/api/agent-event',
+        producerBody({
+          provider: 'kimi',
+          producer: 'kimi-hooks',
+          observation: { hook: 'SessionStart', providerSessionId }
+        }),
+        eventGateway(),
+        endpointGateway(),
+        { bindProviderSessionIdentity }
+      );
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({ ok: false });
+      expect(bindProviderSessionIdentity).not.toHaveBeenCalled();
+      expect(agentStateGateway.submitEvent).not.toHaveBeenCalled();
+    }
   });
 
   it('rejects a mismatched Claude provider SessionStart before forwarding facts', async () => {

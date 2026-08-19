@@ -102,7 +102,7 @@ scheduled adaptively so a slow server never floods.
 
 ## MCP surface for agents
 
-Managed Claude Code and Codex sessions can receive the same language
+Managed Claude Code, Codex, and Qwen sessions can receive the same language
 intelligence through `desk-lsp-mcp`, Desk's MCP server (enabled by
 `settings.lsp.agents.enabled`). It exposes 18 read-only tools:
 

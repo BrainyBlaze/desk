@@ -78,17 +78,18 @@ export class MoorCodec {
       this.expireOpen(nowMs);
       this.appendInbound(bytes);
       const messages: MoorMessage[] = [];
+      let inputOffset = 0;
 
-      while (this.inboundBuffer.length >= MOOR_HEADER_SIZE) {
-        const header = this.decodeHeader(this.inboundBuffer.subarray(0, MOOR_HEADER_SIZE));
+      while (this.inboundBuffer.length - inputOffset >= MOOR_HEADER_SIZE) {
+        const header = this.decodeHeader(
+          this.inboundBuffer.subarray(inputOffset, inputOffset + MOOR_HEADER_SIZE)
+        );
         const frameLength = MOOR_HEADER_SIZE + header.length;
-        if (this.inboundBuffer.length < frameLength) break;
+        if (this.inboundBuffer.length - inputOffset < frameLength) break;
 
-        const payload = this.inboundBuffer.slice(MOOR_HEADER_SIZE, frameLength);
-        this.inboundBuffer =
-          frameLength === this.inboundBuffer.length
-            ? new Uint8Array()
-            : this.inboundBuffer.slice(frameLength);
+        const frameEnd = inputOffset + frameLength;
+        const payload = this.inboundBuffer.slice(inputOffset + MOOR_HEADER_SIZE, frameEnd);
+        inputOffset = frameEnd;
         this.nextInboundSequence += 1;
 
         const run = this.appendFragment(header.scope, header.kind, payload);
@@ -106,6 +107,12 @@ export class MoorCodec {
         });
       }
 
+      if (inputOffset !== 0) {
+        this.inboundBuffer =
+          inputOffset === this.inboundBuffer.length
+            ? new Uint8Array()
+            : this.inboundBuffer.slice(inputOffset);
+      }
       if (this.inboundBuffer.length !== 0 || this.reassembly !== undefined) {
         this.inboundDeadline ??= nowMs + 5_000;
       }

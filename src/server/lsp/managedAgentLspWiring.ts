@@ -110,7 +110,7 @@ function shouldWire(session: SessionSpec, settings: DeskSettings | undefined): b
     Array.isArray(lsp.languages) &&
     lsp.languages.some((language) => typeof language === 'string' && language.trim() !== '') &&
     lsp.agents?.enabled === true &&
-    (session.agent === 'claude' || session.agent === 'codex') &&
+    (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'qwen') &&
     session.customCommand !== true
   );
 }

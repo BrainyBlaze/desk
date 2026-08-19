@@ -8,9 +8,9 @@ import {
   daemonChildEnv,
   resolveMoorBinPath,
   resolveDaemonCommand,
-  resolveReleaseRoot,
   startDaemonSupervisor
 } from '../../src/server/runtime/daemonSupervisor.js';
+import { resolvePackageRoot } from '../../src/shared/packageRoot.js';
 import { attestMoorBinary } from '../../src/shared/moorPaths.js';
 
 class FakeChild extends EventEmitter {
@@ -244,17 +244,38 @@ describe('startDaemonSupervisor', () => {
   });
 });
 
-describe('resolveReleaseRoot + production shape', () => {
+describe('resolvePackageRoot + production shape', () => {
   it('falls back to a release-shaped cwd when the module URL is not on a release filesystem (compiled standalone)', () => {
     const root = mkdtempSync(join(tmpdir(), 'desk-release-'));
     try {
       writeFileSync(join(root, 'package.json'), '{}');
       mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
       writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
-      expect(resolveReleaseRoot('file:///$bunfs/root/desk-standalone', root)).toBe(root);
-      expect(() => resolveReleaseRoot('file:///$bunfs/root/desk-standalone', '/nonexistent-cwd')).toThrow(/DESK_DAEMON_CMD/);
+      expect(resolvePackageRoot('file:///$bunfs/root/desk-standalone', root)).toBe(root);
+      expect(() =>
+        resolvePackageRoot('file:///$bunfs/root/desk-standalone', '/nonexistent-cwd')
+      ).toThrow(/cannot locate the desk package root/);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not borrow the release cwd for an ordinary incomplete module URL', () => {
+    const releaseRoot = mkdtempSync(join(tmpdir(), 'desk-release-'));
+    const moduleRoot = mkdtempSync(join(tmpdir(), 'desk-module-'));
+    try {
+      writeFileSync(join(releaseRoot, 'package.json'), '{}');
+      mkdirSync(join(releaseRoot, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(releaseRoot, 'dist', 'cli', 'main.js'), '');
+      mkdirSync(join(moduleRoot, 'src'), { recursive: true });
+      const fromUrl = pathToFileURL(join(moduleRoot, 'src', 'module.js')).href;
+
+      expect(() => resolvePackageRoot(fromUrl, releaseRoot)).toThrow(
+        /cannot locate the desk package root/
+      );
+    } finally {
+      rmSync(releaseRoot, { recursive: true, force: true });
+      rmSync(moduleRoot, { recursive: true, force: true });
     }
   });
 
@@ -349,7 +370,8 @@ describe('resolveDaemonCommand', () => {
     try {
       writeFileSync(join(root, 'package.json'), '{}');
       writeFileSync(join(root, 'vite.config.ts'), '');
-      mkdirSync(join(root, 'src'), { recursive: true });
+      mkdirSync(join(root, 'src', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'src', 'cli', 'main.ts'), '');
       const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
       expect(() => resolveDaemonCommand(fromUrl)).toThrow(/dist\/cli\/main\.js|DESK_DAEMON_CMD/);
     } finally {
@@ -364,7 +386,8 @@ describe('resolveMoorBinPath', () => {
     const pathDir = mkdtempSync(join(tmpdir(), 'desk-path-'));
     try {
       writeFileSync(join(root, 'package.json'), '{}');
-      writeFileSync(join(root, 'vite.config.ts'), '');
+      mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+      writeFileSync(join(root, 'dist', 'cli', 'main.js'), '');
       mkdirSync(join(root, 'src'), { recursive: true });
       const fromUrl = pathToFileURL(join(root, 'src', 'module.js')).href;
 

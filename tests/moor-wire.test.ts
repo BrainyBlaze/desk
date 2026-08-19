@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { crc32c } from '../src/shared/moorWire/crc32c.js';
 import { MoorCodec } from '../src/shared/moorWire/codec.js';
 import {
@@ -213,6 +213,24 @@ function joined(...parts: Uint8Array[]): Uint8Array {
 }
 
 describe('Moor controller streaming decoder', () => {
+  it('does not recopy the unread suffix for every frame in one feed', () => {
+    const frameCount = 128;
+    const sender = new MoorCodec();
+    const wire = joined(
+      ...Array.from({ length: frameCount }, (_, index) =>
+        sender.encode(7, 1, Uint8Array.of(index & 0xff))
+      )
+    );
+    const slice = vi.spyOn(Uint8Array.prototype, 'slice');
+
+    const messages = new MoorCodec().feed(10, wire);
+    const sliceCalls = slice.mock.calls.length;
+    slice.mockRestore();
+
+    expect(messages).toHaveLength(frameCount);
+    expect(sliceCalls).toBe(frameCount);
+  });
+
   it('decodes arbitrary chunk boundaries and multiple messages per feed', () => {
     const sender = new MoorCodec();
     const wire = joined(

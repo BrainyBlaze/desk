@@ -78,4 +78,19 @@ describe('standalone build dependency contract', () => {
     expect(text).not.toMatch(/tmux/i);
     expect(text).not.toContain("process.kill(pid, 'SIGKILL')");
   });
+
+  it('opts standalone-only smoke probes out of source auto mode', () => {
+    const text = readFileSync(SMOKE_SERVE_MODES, 'utf8');
+    const probeBody = (name: string, nextName: string): string => {
+      const start = text.indexOf(`function ${name}`);
+      const end = text.indexOf(`function ${nextName}`, start + 1);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(start);
+      return text.slice(start, end);
+    };
+
+    expect(probeBody('runStandaloneSignalProbe', 'runViteProbe')).toContain("'--standalone'");
+    expect(probeBody('runOccupiedPortProbe', 'runtimeIdentity')).toContain("'--standalone'");
+    expect(probeBody('runStatusPropagationProbe', 'cleanupAllProcesses')).toContain("'--standalone'");
+  });
 });

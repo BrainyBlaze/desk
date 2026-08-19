@@ -9,14 +9,18 @@ const CODEX_OLD = '11111111-1111-4111-8111-111111111111';
 const CODEX_NEW = '22222222-2222-4222-8222-222222222222';
 const CLAUDE_OLD = '33333333-3333-4333-8333-333333333333';
 const CLAUDE_NEW = '44444444-4444-4444-8444-444444444444';
+const QWEN_OLD = '55555555-5555-4555-8555-555555555555';
+const QWEN_NEW = '66666666-6666-4666-8666-666666666666';
+const GROK_OLD = 'aaaaaaaaaaaa';
+const GROK_NEW = 'bbbbbbbbbbbb';
 
 function issue(
-  provider: 'claude' | 'codex',
+  provider: 'claude' | 'codex' | 'qwen' | 'kimi' | 'grok',
   sessionId: string,
   durableProviderSessionId: string,
   observedProviderSessionId: string
 ): ClaudeContinuityAttention {
-  const label = provider === 'codex' ? 'Codex' : 'Claude';
+  const label = provider.charAt(0).toUpperCase() + provider.slice(1);
   return {
     sessionId,
     cwd: `/workspace/${sessionId}`,
@@ -30,12 +34,12 @@ function issue(
 }
 
 function resetIssue(
-  provider: 'claude' | 'codex',
+  provider: 'claude' | 'codex' | 'qwen' | 'kimi' | 'grok',
   sessionId: string,
   durableProviderSessionId: string,
   observedProviderSessionId: string
 ): ClaudeContinuityAttention {
-  const label = provider === 'codex' ? 'Codex' : 'Claude';
+  const label = provider.charAt(0).toUpperCase() + provider.slice(1);
   return {
     sessionId,
     cwd: `/workspace/${sessionId}`,
@@ -55,7 +59,9 @@ describe('provider session continuity App banners', () => {
         issues: [
           issue('codex', 'codex-agent', CODEX_OLD, CODEX_NEW),
           issue('claude', 'claude-agent', CLAUDE_OLD, CLAUDE_NEW),
+          issue('qwen', 'qwen-agent', QWEN_OLD, QWEN_NEW),
           resetIssue('codex', 'codex-reset', CODEX_OLD, CODEX_NEW),
+          resetIssue('grok', 'grok-reset', GROK_OLD, GROK_NEW),
           {
             sessionId: 'claude-memory',
             cwd: '/workspace/memory',
@@ -69,9 +75,18 @@ describe('provider session continuity App banners', () => {
 
     expect(html).toContain('data-provider="codex"');
     expect(html).toContain('data-provider="claude"');
+    expect(html).toContain('data-provider="qwen"');
+    expect(html).toContain('data-provider="grok"');
     expect(html).toContain('Codex relaunch blocked');
     expect(html).toContain('Claude relaunch blocked');
+    expect(html).toContain('Qwen relaunch blocked');
+    expect(html).toContain('Grok reset interrupted');
     expect(html).toContain('Codex reset interrupted');
+    expect(html).toContain(
+      `desk rebind-provider-session qwen-agent --to ${QWEN_NEW} --force`
+    );
+    expect(html).toContain('aria-label="Copy Qwen rebind command"');
+    expect(html).toContain('aria-label="Copy Grok reset command"');
     expect(html).toContain(CODEX_OLD);
     expect(html).toContain(CLAUDE_OLD);
     expect(html).toContain(

@@ -22,7 +22,7 @@
   },
   "type": "module",
   "bin": {
-    "desk": "./dist/cli/main.js",
+    "desk": "./bin/desk.js",
     "desk-lsp-mcp": "./dist/server/lsp/deskLspMcpCli.js"
   },
   "scripts": {
@@ -33,8 +33,9 @@
     "build:ui": "vite build",
     "build:standalone:assets": "vite build && node scripts/make-assets.mjs",
     "build:standalone": "npm run build:standalone:assets && bun run scripts/build-standalone.ts",
-    "build:application": "npm run build:standalone && npm run build",
-    "build:distribution": "npm run fetch:moor && npm run build:application",
+    "verify:application-build": "node scripts/verify-application-build.mjs",
+    "build:application": "npm run build:standalone && npm run build && npm run verify:application-build",
+    "build:distribution": "npm run fetch:moor && npm run build:application && npm run verify:application-build -- --require-moor",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dev": "tsx src/cli/main.ts",

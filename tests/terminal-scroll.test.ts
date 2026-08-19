@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chooseScrollStrategy, encodeApplicationScrollInput } from '../src/web/terminalScroll';
+import { chooseScrollStrategy, encodeApplicationScrollInput, terminalScrollOwnerForAgent } from '../src/web/terminalScroll';
 
 describe('terminal scroll strategy', () => {
   it('uses local xterm scrollback before shared terminal history', () => {
@@ -78,5 +78,14 @@ describe('terminal scroll strategy', () => {
   it('encodes generic application scroll as page keys', () => {
     expect(encodeApplicationScrollInput(-1, 'page-keys')).toBe('\x1b[5~');
     expect(encodeApplicationScrollInput(1, 'page-keys')).toBe('\x1b[6~');
+  });
+});
+
+describe('terminal scroll owner', () => {
+  it('defers the scroll indicator to grok and keeps the host rail elsewhere', () => {
+    expect(terminalScrollOwnerForAgent('grok')).toBe('agent');
+    for (const agent of ['claude', 'codex', 'opencode', 'qwen', 'kimi', 'bash', undefined]) {
+      expect(terminalScrollOwnerForAgent(agent)).toBe('host');
+    }
   });
 });

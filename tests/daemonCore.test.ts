@@ -629,7 +629,7 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
     expect(masterOut[0].surfaceId).toBe(0);
   });
 
-  it('encodes a bracketed paste and submit as one Moor-bound input packet', () => {
+  it('encodes a bracketed paste and waits for one receipted Moor-bound input packet', async () => {
     class BracketedPasteEmu extends FakeEmu {
       bracketedPaste(): boolean {
         return true;
@@ -638,20 +638,35 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
     const store = new InMemoryGenerationLedger();
     new GenerationLedger(store).allocate('s1');
     const masterOut: Uint8Array[] = [];
+    let resolvePrompt!: (accepted: boolean) => void;
     const core = new DaemonCore({
       ledger: new GenerationLedger(store),
       supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
       emulatorFactory: { create: () => new BracketedPasteEmu() },
       now: () => 1000,
       sendBrowser: () => {},
-      sendMasterInput: (_sessionId, bytes) => masterOut.push(bytes.slice()),
+      sendMasterInput: () => {
+        throw new Error('atomic prompts must not use ordinary terminal input');
+      },
+      sendMasterPrompt: (_sessionId, bytes) => {
+        masterOut.push(bytes.slice());
+        return new Promise<boolean>((resolve) => {
+          resolvePrompt = resolve;
+        });
+      },
       sendMasterResize: () => {}
     });
     expect(core.restore('s1').ok).toBe(true);
 
-    expect(core.injectPrompt('s1', new TextEncoder().encode('msg body'))).toBe(true);
+    const submitted = core.injectPrompt('s1', new TextEncoder().encode('msg body'));
+    const settled = vi.fn();
+    void submitted.then(settled);
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
     expect(masterOut).toHaveLength(1);
     expect(new TextDecoder().decode(masterOut[0])).toBe('\x1b[200~msg body\x1b[201~\r');
+    resolvePrompt(true);
+    await expect(submitted).resolves.toBe(true);
   });
 
   it('fails closed when the ledger has no durable generation for the socket', () => {

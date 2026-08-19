@@ -11,11 +11,18 @@
 //                   kept as a guard in case anything else pulls node-pty in.
 //
 // Run after `vite build` + `node scripts/make-assets.mjs`.
-import { existsSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { BunPlugin } from 'bun';
+import {
+  computeRuntimeSourceFingerprint,
+  standaloneProvenancePath,
+  writeStandaloneBuildProvenance
+} from '../src/shared/runtimeProvenance.js';
 
-const root = resolve(import.meta.dir, '..');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const swap: BunPlugin = {
   name: 'desk-standalone-swap',
@@ -62,21 +69,47 @@ const embedNodePty: BunPlugin = {
 // repository cloud-free.
 export async function buildStandalone({
   outfile,
+  sourceRoot = root,
   extraPlugins = []
 }: {
   outfile: string;
+  sourceRoot?: string;
   extraPlugins?: BunPlugin[];
 }): Promise<void> {
-  const result = await Bun.build({
-    entrypoints: [resolve(root, 'src/server/standalone-entry.ts')],
-    compile: { outfile },
-    plugins: [swap, embedNodePty, ...extraPlugins]
-  });
-  if (!result.success) {
-    for (const log of result.logs) {
-      console.error(log);
+  const sourceFingerprint = computeRuntimeSourceFingerprint(sourceRoot);
+  const temporaryOutfile = `${outfile}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  mkdirSync(dirname(outfile), { recursive: true });
+  rmSync(temporaryOutfile, { force: true });
+
+  try {
+    const result = await Bun.build({
+      entrypoints: [resolve(sourceRoot, 'src/server/standalone-entry.ts')],
+      compile: { outfile: temporaryOutfile },
+      plugins: [swap, embedNodePty, ...extraPlugins]
+    });
+    if (!result.success) {
+      for (const log of result.logs) {
+        console.error(log);
+      }
+      throw new Error('build-standalone: bun build failed');
     }
-    throw new Error('build-standalone: bun build failed');
+
+    if (computeRuntimeSourceFingerprint(sourceRoot) !== sourceFingerprint) {
+      throw new Error('build-standalone: runtime source changed during standalone compilation');
+    }
+
+    renameSync(temporaryOutfile, outfile);
+    writeStandaloneBuildProvenance(outfile, sourceFingerprint);
+  } catch (error) {
+    rmSync(temporaryOutfile, { force: true });
+    if (
+      error instanceof Error &&
+      error.message.includes('runtime source changed during standalone compilation')
+    ) {
+      rmSync(outfile, { force: true });
+      rmSync(standaloneProvenancePath(outfile), { force: true });
+    }
+    throw error;
   }
 }
 
