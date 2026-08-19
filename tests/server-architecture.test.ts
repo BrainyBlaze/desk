@@ -148,8 +148,22 @@ describe('server architecture boundaries', () => {
     expect(ci).toContain('RUN_REAL_JOIN: 1');
     expect(ci).toContain('npx vitest run tests/moor-distribution-contract.test.ts');
     expect(ci).toContain('npx vitest run tests/moor-native-e2e.test.ts');
-    expect(ci).toContain('--exclude tests/moor-distribution-contract.test.ts');
-    expect(ci).toContain('--exclude tests/moor-native-e2e.test.ts');
+    expect(ci).toContain('npm run test:ci');
+    expect(packageJson.scripts.test).toBe(
+      'npm run test:suite && npm run test:heavy-replay'
+    );
+    expect(packageJson.scripts['test:suite']).toContain(
+      '--exclude tests/real-moor-heavy-replay-stability.test.ts'
+    );
+    expect(packageJson.scripts['test:ci']).toContain(
+      '--exclude tests/moor-distribution-contract.test.ts'
+    );
+    expect(packageJson.scripts['test:ci']).toContain(
+      '--exclude tests/moor-native-e2e.test.ts'
+    );
+    expect(packageJson.scripts['test:heavy-replay']).toBe(
+      'vitest run tests/real-moor-heavy-replay-stability.test.ts --maxWorkers=1 --minWorkers=1'
+    );
     expect(ci).toContain('npm run build:application');
     expect(ci).toContain('npm run smoke:serve-modes');
     expect(packageJson.devDependencies['@vscode/ripgrep']).toBe('1.18.0');
