@@ -1908,7 +1908,7 @@ export class SessionManager {
         error:
           ready === 'timeout'
             ? 'the moor launcher did not become ready before the timeout'
-            : 'the moor launcher exited before the holder came up'
+            : 'the moor launcher failed to start or exited before the holder came up'
       };
     }
     if (opts.killSpec !== undefined) {
