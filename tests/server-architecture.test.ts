@@ -149,6 +149,13 @@ describe('server architecture boundaries', () => {
     expect(ci).toContain('--exclude tests/moor-native-e2e.test.ts');
     expect(ci).toContain('npm run build:application');
     expect(ci).toContain('npm run smoke:serve-modes');
+    expect(ci).toContain('command -v rg');
+    expect(release).toContain('command -v rg');
+    expect(installer).toContain('command -v rg');
+    expect(ci).not.toContain('run: sudo apt-get update');
+    expect(release).not.toContain('run: sudo apt-get update');
+    expect(installer).not.toContain('run: sudo apt-get update');
+    expect(installer).not.toContain('- run: brew install ripgrep');
     expect(release).toContain('npm run release:assets');
     expect(release).toContain('desk-install-manifest.json');
     expect(release).toContain('-source.tar.gz');
