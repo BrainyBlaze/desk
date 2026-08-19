@@ -152,7 +152,7 @@ describe('a re-adopted session is still addressable (desk#63 follow-up)', () => 
       // child. The prompt endpoint answers with `accepted`, which on the live
       // machine was true for bytes that never arrived — so acceptance is not
       // the assertion here; the child's own file is.
-      expect(two.injectPrompt('survivor', new TextEncoder().encode('ATOMIC-PROMPT'))).toBe(
+      expect(await two.injectPrompt('survivor', new TextEncoder().encode('ATOMIC-PROMPT'))).toBe(
         true
       );
       await waitFor(() => existsSync(received) && readFileSync(received, 'utf8').includes('ATOMIC-PROMPT\r'));

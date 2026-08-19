@@ -28,6 +28,7 @@ import {
 import {
   decodeMoorHolderMessage,
   encodeMoorSupervisedRequest,
+  MoorKind,
   type MoorControllerRequest,
   type MoorHolderMessage,
   type MoorStatus
@@ -53,6 +54,8 @@ export interface MoorReconnectSnapshot {
 }
 
 type Holder<T extends MoorHolderMessage['type']> = Extract<MoorHolderMessage, { type: T }>;
+type MoorFrame = { scope: number; kind: number; payload: Uint8Array };
+type MoorFrameBatch = { frames: MoorFrame[]; index: number };
 
 export interface MoorMasterClientHandlers {
   onHelloAck?: (ack: Holder<'hello-ack'>) => void;
@@ -185,6 +188,8 @@ function validateIdentity(identity: Uint8Array): Uint8Array {
 const DEFAULT_ATTACH_DEADLINE_MS = 2_000;
 const DEFAULT_LIVENESS_WINDOW_MS = 15_000;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
+const INBOUND_HIGH_WATER_BYTES = 8 * 1024 * 1024;
+const INBOUND_LOW_WATER_BYTES = 4 * 1024 * 1024;
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -218,6 +223,11 @@ type Phase =
 export class MoorMasterClient {
   private sock: Socket | null = null;
   private readonly codec = new MoorCodec();
+  private readonly inboundBatches: MoorFrameBatch[] = [];
+  private inboundBatchIndex = 0;
+  private inboundBytes = 0;
+  private routingInbound = false;
+  private inboundBackpressured = false;
   private readonly identity: Uint8Array;
   private readonly h: MoorMasterClientHandlers;
   private readonly attachDeadlineMs: number;
@@ -247,6 +257,10 @@ export class MoorMasterClient {
   /** §7.3 one-input-in-flight: the exact request the next receipt must match — retained bytes make the safe identical retry possible. */
   private pendingInput:
     | { requestId: bigint; epoch: number; bytes: Uint8Array; surfaceId?: number }
+    | undefined;
+  /** Receipt waiter for an atomic control-plane input. Transport loss leaves it indeterminate. */
+  private pendingInputCompletion:
+    | { requestId: bigint; resolve: (accepted: boolean) => void }
     | undefined;
   /** §6.1 output continuity: next record sequence and byte offset. */
   private expectedSequence = 1n;
@@ -516,6 +530,25 @@ export class MoorMasterClient {
   }
 
   sendInput(bytes: Uint8Array, surfaceId?: number): void {
+    this.startInput(bytes, surfaceId);
+  }
+
+  /** Resolve only after the holder proves the complete terminal write. */
+  submitInput(bytes: Uint8Array, surfaceId?: number): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      try {
+        this.startInput(bytes, surfaceId, resolve);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  private startInput(
+    bytes: Uint8Array,
+    surfaceId?: number,
+    resolve?: (accepted: boolean) => void
+  ): void {
     this.requireAttached();
     this.requireLease();
     if (this.pendingInput !== undefined) {
@@ -536,12 +569,16 @@ export class MoorMasterClient {
       bytes: bytes.slice(),
       ...(surfaceId === undefined ? {} : { surfaceId })
     };
+    if (resolve !== undefined) this.pendingInputCompletion = { requestId, resolve };
     try {
       this.request({ type: 'input', epoch, requestId, bytes });
     } catch (error) {
       // Transactional: a local encode/write rejection must leave the request
       // id and the one-in-flight slot exactly as they were.
       this.pendingInput = undefined;
+      if (this.pendingInputCompletion?.requestId === requestId) {
+        this.pendingInputCompletion = undefined;
+      }
       this.nextRequestId = requestId;
       throw error;
     }
@@ -795,6 +832,11 @@ export class MoorMasterClient {
     this.lastReconnectSnapshot = this.captureReconnectSnapshot();
     this.phase = 'closed';
     this.live = false;
+    this.inboundBatches.length = 0;
+    this.inboundBatchIndex = 0;
+    this.inboundBytes = 0;
+    this.routingInbound = false;
+    this.inboundBackpressured = false;
     if (this.deadline !== undefined) {
       clearTimeout(this.deadline);
       this.deadline = undefined;
@@ -870,61 +912,85 @@ export class MoorMasterClient {
 
   private onData(chunk: Buffer): void {
     const socket = this.sock;
-    // Keep unread holder output at the socket boundary while an asynchronous
-    // consumer drains the authoritative emulator. Synchronous handlers resume
-    // in the same turn through routeMessages.
-    socket?.pause();
     const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     this.h.onRaw?.(bytes);
-    let messages;
+    let frames: MoorFrame[];
     try {
-      messages = this.codec.feed(Date.now(), bytes);
+      frames = this.codec.feed(Date.now(), bytes);
     } catch (error) {
       this.fail(error);
       return;
     }
-    this.routeMessages(messages, 0, socket);
-  }
-
-  private routeMessages(
-    messages: Array<{ scope: number; kind: number; payload: Uint8Array }>,
-    index: number,
-    socket: Socket | null
-  ): void {
-    while (index < messages.length) {
-      // A prior message in this chunk may have closed the client; stop routing.
-      if (this.phase === 'closed') return;
-      const routed = this.route(messages[index]!);
-      index += 1;
-      if (routed instanceof Promise) {
-        void routed
-          .then(() => this.routeMessages(messages, index, socket))
-          .catch((error) => {
-            // route() already failed this client closed. Consume the async
-            // continuation rejection so Node does not surface it again as an
-            // unhandled rejection, while still reporting the non-wire bug.
-            console.error(
-              `[desk] moor async message handler failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            );
-          });
-        return;
+    const queued: MoorFrame[] = [];
+    for (const frame of frames) {
+      // Liveness is evidence that reached the controller socket. Do not make
+      // it wait behind authoritative emulator delivery for earlier OUTPUT.
+      if (this.phase === 'attached' && frame.kind === MoorKind.HEARTBEAT) {
+        this.route(frame);
+        if (!this.attached) return;
+      } else {
+        queued.push(frame);
+        this.inboundBytes += frame.payload.byteLength;
       }
     }
-    // Opt-in §6.1 consumption policy: one coalesced watermark ack per
-    // delivered batch, only when the watermark actually advanced.
-    if (this.autoAck && this.phase === 'attached' && this.highestReceived > this.lastAcked) {
-      this.lastAcked = this.highestReceived;
-      this.request({ type: 'output-ack', sequence: this.lastAcked });
-    } else if (this.phase === 'attached' && this.highestSuppressed > this.lastAcked) {
-      // A prior ACK may have been lost with the old socket. Suppressed replay
-      // is still decoded and continuity-validated, so consuming it again is
-      // safe and must advance the holder's retained-output watermark.
-      this.lastAcked = this.highestSuppressed;
-      this.request({ type: 'output-ack', sequence: this.lastAcked });
+    if (queued.length > 0) this.inboundBatches.push({ frames: queued, index: 0 });
+    if (this.inboundBytes >= INBOUND_HIGH_WATER_BYTES && !this.inboundBackpressured) {
+      this.inboundBackpressured = true;
+      socket?.pause();
     }
-    if (this.phase !== 'closed' && this.sock === socket) socket?.resume();
+    this.drainInbound();
+  }
+
+  private drainInbound(): void {
+    if (this.routingInbound || this.phase === 'closed') return;
+    this.routingInbound = true;
+    const advance = (): void => {
+      while (this.inboundBatchIndex < this.inboundBatches.length) {
+        if (this.phase === 'closed') {
+          this.inboundBatches.length = 0;
+          this.inboundBatchIndex = 0;
+          this.inboundBytes = 0;
+          this.routingInbound = false;
+          return;
+        }
+        const batch = this.inboundBatches[this.inboundBatchIndex]!;
+        while (batch.index < batch.frames.length) {
+          const frame = batch.frames[batch.index++]!;
+          this.inboundBytes -= frame.payload.byteLength;
+          if (this.inboundBackpressured && this.inboundBytes <= INBOUND_LOW_WATER_BYTES) {
+            this.inboundBackpressured = false;
+            this.sock?.resume();
+          }
+          const routed = this.route(frame);
+          if (this.sock === null) return;
+          if (routed instanceof Promise) {
+            void routed.then(() => setImmediate(advance)).catch((error) => {
+              this.routingInbound = false;
+              console.error(
+                `[desk] moor async message handler failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+            });
+            return;
+          }
+        }
+        // Opt-in §6.1 consumption policy: one coalesced watermark ack per
+        // decoded socket batch, only when the watermark actually advanced.
+        if (this.autoAck && this.phase === 'attached' && this.highestReceived > this.lastAcked) {
+          this.lastAcked = this.highestReceived;
+          this.request({ type: 'output-ack', sequence: this.lastAcked });
+        } else if (this.phase === 'attached' && this.highestSuppressed > this.lastAcked) {
+          this.lastAcked = this.highestSuppressed;
+          this.request({ type: 'output-ack', sequence: this.lastAcked });
+        }
+        this.inboundBatchIndex += 1;
+      }
+      this.inboundBatches.length = 0;
+      this.inboundBatchIndex = 0;
+      this.routingInbound = false;
+    };
+    advance();
   }
 
   private route(message: {
@@ -1349,7 +1415,18 @@ export class MoorMasterClient {
             `INPUT_RECEIPT byte count ${decoded.written} does not describe the ${sent}-byte request`
           );
         }
+        if (decoded.status !== 0 && decoded.written > 0n) {
+          // The PTY observed a prefix, so neither success nor safe refusal is
+          // knowable. Retain the tuple: only its byte-identical retry may run.
+          this.h.onInputReceipt?.(decoded);
+          return;
+        }
+        const completion = this.pendingInputCompletion;
         this.pendingInput = undefined;
+        this.pendingInputCompletion = undefined;
+        if (completion?.requestId === decoded.requestId) {
+          completion.resolve(decoded.status === 0);
+        }
         this.h.onInputReceipt?.(decoded);
         return;
       }

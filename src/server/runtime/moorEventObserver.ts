@@ -16,8 +16,10 @@ import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
+  createMoorStoreReadCache,
   MoorStoreError,
   MoorStoreKind,
+  type MoorStoreReadCache,
   decodeMoorEventSnapshot,
   eventsAfterMoorCursor,
   readMoorStoreSnapshot,
@@ -226,6 +228,9 @@ export class MoorEventObserver {
   private mismatchWitness:
     | { fingerprint: string; firstObservedAt: number }
     | undefined;
+  /** O(delta) polling (spec §7.3): remembers the last validated read per slot so an
+   *  unchanged commit costs two 92-byte reads and growth costs only the tail. */
+  private readonly readCache: MoorStoreReadCache = createMoorStoreReadCache();
   /** desk#59 — fences a drain read that completes after its own deadline. */
   private drainEpoch = 0;
 
@@ -372,7 +377,8 @@ export class MoorEventObserver {
       selected = await readMoorStoreSnapshot(
         this.options.directory,
         MoorStoreKind.Event,
-        this.options.generation
+        this.options.generation,
+        this.readCache
       );
     } catch (error) {
       if (

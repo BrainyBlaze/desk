@@ -46,6 +46,11 @@ import {
   type HookIdentityProvider,
   type ProviderSessionProvider
 } from '../../shared/providerSessionIdentity.js';
+import { resolvePackageRoot } from '../../shared/packageRoot.js';
+import {
+  resolveRuntimeProvenance,
+  type RuntimeProvenance
+} from '../../shared/runtimeProvenance.js';
 
 interface ManagedAgentLifecycle {
   reconcile(runningSessions: Set<string>): void;
@@ -98,6 +103,7 @@ export interface SystemRoutesOptions {
     milliseconds: number,
     signal: AbortSignal
   ) => Promise<void>;
+  runtimeProvenance?: () => RuntimeProvenance;
 }
 
 export interface ClaudeSessionStartIdentity {
@@ -479,8 +485,16 @@ export function createSystemRoutes(
     options.providerSessionRetryNow ?? (() => performance.now());
   const providerSessionRetrySleep =
     options.providerSessionRetrySleep ?? sleepForProviderEvidence;
+  const runtimeProvenance =
+    options.runtimeProvenance ??
+    (() => resolveRuntimeProvenance(resolvePackageRoot(import.meta.url)));
   const now = options.now ?? Date.now;
   return async (req, res, url) => {
+    if (req.method === 'GET' && url.pathname === '/api/runtime') {
+      sendJson(res, 200, runtimeProvenance());
+      return true;
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/desk') {
       sendJson(res, 200, buildDeskSnapshot());
       return true;

@@ -20,7 +20,12 @@ import {
   runPlan
 } from '../core/runner.js';
 import { runChannelsCli } from './channelsCli.js';
-import { createServeLaunch, findPackageRoot, parseServeOptions, runServeLaunch } from './serveCommand.js';
+import {
+  createServeLaunch,
+  parseServeOptions,
+  resolvePackageRoot,
+  runServeLaunch
+} from './serveCommand.js';
 import { assertAllowedOption, requireOptionValue } from './args.js';
 import { runAgentHostFromEnv } from '../server/agents/host/cli.js';
 import { SUPPORTED_AGENTS, isSupportedAgent } from '../core/types.js';
@@ -39,9 +44,11 @@ const HELP = `desk — agent-first multiplexer, IDE/CDE, and Slack-style chat fo
 Usage: desk <command> [options]
 
   desk serve [--host HOST] [--port PORT]
-      Start the private standalone runtime.
+      Use Vite in a source checkout or the bundled runtime in an installed release.
   desk serve --dev [--host HOST] [--port PORT]
-      Start the Vite dev server + UI.
+      Force the Vite dev server + UI.
+  desk serve --standalone [--host HOST] [--port PORT]
+      Force the bundled runtime; source checkouts require a matching build.
   up [--dry-run]                            Start every missing session
   status                                    Show which sessions exist
   init                                      Create an empty user config
@@ -78,7 +85,7 @@ const COMMAND_OPTIONS = new Map<string, ReadonlySet<string>>([
   ['help', new Set()],
   ['--help', new Set()],
   ['-h', new Set()],
-  ['serve', new Set(['--host', '--port'])],
+  ['serve', new Set(['--host', '--port', '--dev', '--standalone'])],
   ['hooks', new Set(['--home'])],
   ['config', new Set(['--file', '-f'])],
   ['init', new Set(['--file', '-f', '--force'])],
@@ -111,7 +118,7 @@ async function runCli(argv: string[]): Promise<number> {
 
   try {
     const options = parseServeOptions(argv.slice(1));
-    const launch = createServeLaunch(findPackageRoot(import.meta.url), options);
+    const launch = createServeLaunch(resolvePackageRoot(import.meta.url), options);
     console.log(launch.label);
     return await runServeLaunch(launch);
   } catch (error) {
@@ -480,11 +487,12 @@ const isCliEntry = ((): boolean => {
     return import.meta.url === pathToFileURL(process.argv[1]).href;
   }
 })();
-if (isCliEntry) {
-  const cliArgs = process.argv.slice(2);
+export async function dispatchDeskCli(cliArgs: string[]): Promise<number> {
   if (cliArgs[0] === 'channels') {
-    process.exitCode = await runChannelsCli(cliArgs.slice(1));
-  } else if (cliArgs[0] === 'terminal-daemon') {
+    return await runChannelsCli(cliArgs.slice(1));
+  }
+
+  if (cliArgs[0] === 'terminal-daemon') {
     // The moor terminal daemon: spawned + supervised by `desk serve`
     // (daemonSupervisor). Runs until SIGINT/SIGTERM; a fatal
     // start error exits non-zero so the supervisor's bounded restart sees it.
@@ -493,26 +501,34 @@ if (isCliEntry) {
       await new Promise<void>((_resolve, reject) => {
         runTerminalDaemonMain().catch(reject);
       });
+      return 0;
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
-      process.exitCode = 1;
+      return 1;
     }
-  } else if (cliArgs[0] === 'agent-host') {
+  }
+
+  if (cliArgs[0] === 'agent-host') {
     const argument = cliArgs[1];
     if (argument !== undefined) {
       console.error(argument.startsWith('--') ? `unknown option ${argument}` : `unexpected argument ${argument}`);
-      process.exitCode = 1;
+      return 1;
     } else {
       // agent-host runs forever (driver + broker WS bridge) and resolves only on shutdown,
       // fatal error, or signal — top-level await is the natural exit gate.
       try {
         await runAgentHostFromEnv();
+        return 0;
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
-        process.exitCode = 1;
+        return 1;
       }
     }
-  } else {
-    process.exitCode = await runCli(cliArgs);
   }
+
+  return await runCli(cliArgs);
+}
+
+if (isCliEntry) {
+  process.exitCode = await dispatchDeskCli(process.argv.slice(2));
 }

@@ -4,7 +4,7 @@ import { installAgentSurfaceBroker } from './agentSurfaceBroker.js';
 import { disposeChannelsRuntime, initChannelsRuntime } from './channels/index.js';
 import type { ChannelsRuntimeOwner } from './channels/index.js';
 import type { DeskApiHost } from './deskApiTypes.js';
-import { createPluginSettingsStore } from './pluginSettings.js';
+import { createManifestRepository } from './pluginSettings.js';
 import type { DeskServices } from './deskServices.js';
 import type { DisposerRegistry } from './disposerRegistry.js';
 import { installFsWatchBridge } from './fsWatchBridge.js';
@@ -98,18 +98,25 @@ export function installDeskRuntime({ host, services, plugins, disposers, channel
     });
   }
 
-  for (const plugin of plugins) {
-    // One namespaced section of the manifest per plugin name; the store's
-    // file watch dies with the server.
-    const settings = createPluginSettingsStore(plugin.name);
-    disposers.add(() => settings.dispose());
-    const dispose = plugin.setup?.({
-      httpServer,
-      onClose: (fn) => disposers.add(fn),
-      settings
-    });
-    if (dispose) {
-      disposers.add(dispose);
+  if (plugins.length > 0) {
+    const manifestRepository = createManifestRepository();
+    disposers.add(() => manifestRepository.dispose());
+    const installedNames = new Set<string>();
+    for (const plugin of plugins) {
+      if (installedNames.has(plugin.name)) {
+        throw new Error(`duplicate Desk plugin name: ${plugin.name}`);
+      }
+      installedNames.add(plugin.name);
+      const settings = manifestRepository.pluginSettings(plugin.name);
+      disposers.add(() => settings.dispose());
+      const dispose = plugin.setup?.({
+        httpServer,
+        onClose: (fn) => disposers.add(fn),
+        settings
+      });
+      if (dispose) {
+        disposers.add(dispose);
+      }
     }
   }
 

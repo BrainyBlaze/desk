@@ -1,6 +1,10 @@
 import type { AgentMode, AgentProducer } from './contract.js';
 import type { SessionRegistration } from './authority.js';
-import { agentProvider, isAgentProviderId } from '../agentRegistry.js';
+import {
+  isAgentProviderId,
+  nativeProducerOf,
+  terminalProducerOf
+} from '../agentRegistry.js';
 
 export interface SessionSubjectSource {
   agent?: string;
@@ -15,9 +19,9 @@ export function sessionStateSubjectFor(
     return { kind: 'terminal' };
   }
   const provider = source.agent;
-  const entry = agentProvider(provider);
-  const mode = source.uiMode === 'native' && entry?.nativeProducer !== undefined ? 'native' : 'terminal';
-  const producer = mode === 'native' ? entry?.nativeProducer : entry?.terminalProducer;
+  const nativeProducer = nativeProducerOf(provider);
+  const mode = source.uiMode === 'native' && nativeProducer !== undefined ? 'native' : 'terminal';
+  const producer = mode === 'native' ? nativeProducer : terminalProducerOf(provider);
   if (producer === undefined) {
     return { kind: 'terminal' };
   }

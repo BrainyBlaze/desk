@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { probeRendezvous } from '../src/server/runtime/sessionManager.js';
+import { MoorPresenceAuthority } from '../src/server/runtime/moorPresenceAuthority.js';
 import {
   MoorMasterClient,
   MoorRendezvousCapacityError
@@ -19,15 +19,17 @@ import {
 const OVER_CAPACITY_PATH = `/tmp/${'d'.repeat(120)}/oversize-session`;
 
 describe('over-capacity rendezvous classification', () => {
+  const authority = new MoorPresenceAuthority();
+
   test('probeRendezvous classifies an over-capacity path indeterminate, not stale', async () => {
-    await expect(probeRendezvous(OVER_CAPACITY_PATH)).resolves.toBe('indeterminate');
+    await expect(authority.probeRendezvous(OVER_CAPACITY_PATH)).resolves.toBe('indeterminate');
   });
 
   test('probeRendezvous still proves POSITIVE staleness for a short absent path', async () => {
     // Control: the change is scoped to the capacity ceiling. A short path with
     // no listener is genuinely, positively stale via a real connect refusal.
     const shortAbsent = `/tmp/desk-capacity-control-${process.pid}.sock`;
-    await expect(probeRendezvous(shortAbsent)).resolves.toBe('stale');
+    await expect(authority.probeRendezvous(shortAbsent)).resolves.toBe('stale');
   });
 
   test('MoorMasterClient.connect refuses an over-capacity rendezvous before connecting', async () => {

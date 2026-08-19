@@ -12,8 +12,8 @@
 
 import { shellQuote } from './shell.js';
 import {
-  AGENT_PROVIDER_ENTRIES,
-  agentProvider,
+  AGENT_PROFILE_PROVIDER_IDS,
+  profileEnvVarOf,
   type AgentProfileProviderId
 } from './agentRegistry.js';
 
@@ -22,10 +22,7 @@ export type ProfileProviderId = AgentProfileProviderId;
 
 /** The credential-directory variable each provider CLI reads. */
 export const PROFILE_ENV_VAR: Record<ProfileProviderId, string> = Object.fromEntries(
-  AGENT_PROVIDER_ENTRIES.filter((agent) => agent.profileEnvVar !== undefined).map((agent) => [
-    agent.id,
-    agent.profileEnvVar
-  ])
+  AGENT_PROFILE_PROVIDER_IDS.map((provider) => [provider, profileEnvVarOf(provider)])
 ) as Record<ProfileProviderId, string>;
 
 /**
@@ -52,7 +49,7 @@ export function isValidProfileId(id: unknown): id is string {
 }
 
 export function isProfileProvider(value: unknown): value is ProfileProviderId {
-  return typeof value === 'string' && agentProvider(value)?.profileEnvVar !== undefined;
+  return typeof value === 'string' && profileEnvVarOf(value) !== undefined;
 }
 
 /** The Desk-owned credential directory for a profile. */

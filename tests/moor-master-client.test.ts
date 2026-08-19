@@ -620,6 +620,94 @@ describe('MoorMasterClient', () => {
     expect(client.verifiedLive).toBe(true);
   });
 
+  it('observes heartbeats while authoritative output delivery is still draining', async () => {
+    const transitions: string[] = [];
+    const beats: bigint[] = [];
+    const outputs: bigint[] = [];
+    let outputStarted!: () => void;
+    let releaseOutput!: () => void;
+    const started = new Promise<void>((resolve) => {
+      outputStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseOutput = resolve;
+    });
+    const { holder, client, identity } = await start(
+      {
+        onOutput: (output) => {
+          outputs.push(output.sequence);
+          if (output.sequence === 1n) {
+            outputStarted();
+            return blocked;
+          }
+        },
+        onHeartbeat: (monotonicMs) => beats.push(monotonicMs),
+        onLivenessLost: () => transitions.push('lost')
+      },
+      { livenessWindowMs: 80 }
+    );
+    await completeAttach(holder, client, identity);
+
+    holder.send(MoorKind.OUTPUT, joined(integer(1n, 8), integer(0n, 8), text('slow')));
+    await started;
+    holder.send(MoorKind.OUTPUT, joined(integer(2n, 8), integer(4n, 8), text('ordered')));
+    for (let index = 1; index <= 5; index += 1) {
+      holder.send(MoorKind.HEARTBEAT, joined(integer(BigInt(index), 8), Uint8Array.of(0)));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+
+    expect(transitions).toEqual([]);
+    expect(beats).toHaveLength(5);
+    expect(outputs).toEqual([1n]);
+    releaseOutput();
+    await waitFor(() => outputs.length === 2, 'ordered output after drain');
+    expect(outputs).toEqual([1n, 2n]);
+  });
+
+  it('yields between resolved output deliveries so socket heartbeats reach the event loop', async () => {
+    const transitions: string[] = [];
+    const beats: bigint[] = [];
+    const outputs: bigint[] = [];
+    const { holder, client, identity } = await start(
+      {
+        onOutput: (output) => {
+          outputs.push(output.sequence);
+          const deadline = Date.now() + 2;
+          while (Date.now() < deadline) {
+            // Model the synchronous parse work that precedes an immediately resolved flush.
+          }
+          return Promise.resolve();
+        },
+        onHeartbeat: (monotonicMs) => beats.push(monotonicMs),
+        onLivenessLost: () => transitions.push('lost')
+      },
+      { livenessWindowMs: 80 }
+    );
+    await completeAttach(holder, client, identity);
+    holder.send(MoorKind.HEARTBEAT, joined(integer(1n, 8), Uint8Array.of(0)));
+    await waitFor(() => beats.length === 1, 'initial heartbeat');
+
+    let heartbeat = 1n;
+    const heartbeatTimer = setInterval(() => {
+      heartbeat += 1n;
+      holder.send(MoorKind.HEARTBEAT, joined(integer(heartbeat, 8), Uint8Array.of(0)));
+    }, 10);
+    try {
+      for (let index = 0; index < 100; index += 1) {
+        holder.send(
+          MoorKind.OUTPUT,
+          joined(integer(BigInt(index + 1), 8), integer(BigInt(index), 8), text('x'))
+        );
+      }
+      await waitFor(() => outputs.length === 100, 'all scheduled output');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(transitions).toEqual([]);
+      expect(beats.length).toBeGreaterThan(1);
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
+  });
+
   it('retries the pending input with identical bytes for the cached receipt', async () => {
     const receipts: bigint[] = [];
     const { holder, client, identity } = await start({
@@ -647,6 +735,67 @@ describe('MoorMasterClient', () => {
     );
     holder.send(MoorKind.INPUT_RECEIPT, receipt);
     await waitFor(() => receipts.length === 1, 'receipt after retry');
+  });
+
+  it('settles an atomic input only after the holder receipts the complete write', async () => {
+    const { holder, client, identity } = await start();
+    await completeAttach(holder, client, identity);
+
+    const submitted = client.submitInput(text('packet'), 0);
+    const input = await holder.next();
+    expect(input.kind).toBe(MoorKind.INPUT);
+    const settled = vi.fn();
+    void submitted.then(settled);
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    holder.send(
+      MoorKind.INPUT_RECEIPT,
+      joined(
+        integer(5, 4),
+        integer(1n, 8),
+        integer(GENERATION, 4),
+        INCARNATION,
+        integer(6n, 8),
+        Uint8Array.of(0),
+        integer(0, 2)
+      )
+    );
+
+    await expect(submitted).resolves.toBe(true);
+  });
+
+  it('keeps a partially written atomic input indeterminate under its original request id', async () => {
+    const receipts: Array<{ written: bigint; status: number }> = [];
+    const { holder, client, identity } = await start({
+      onInputReceipt: (receipt) => receipts.push(receipt)
+    });
+    await completeAttach(holder, client, identity);
+
+    const submitted = client.submitInput(text('packet'), 0);
+    const original = await holder.next();
+    const settled = vi.fn();
+    void submitted.then(settled, settled);
+
+    holder.send(
+      MoorKind.INPUT_RECEIPT,
+      joined(
+        integer(5, 4),
+        integer(1n, 8),
+        integer(GENERATION, 4),
+        INCARNATION,
+        integer(3n, 8),
+        Uint8Array.of(1),
+        integer(20, 2)
+      )
+    );
+
+    await waitFor(() => receipts.length === 1, 'partial input receipt');
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+    expect(() => client.sendInput(text('packet'))).toThrow(/already in flight/);
+    expect(client.retryPendingInput()).toBe(true);
+    expect((await holder.next()).payload).toEqual(original.payload);
   });
 
   it('does not mislabel a lease-free real-geometry attach as resumed', async () => {

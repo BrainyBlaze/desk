@@ -978,6 +978,29 @@ describe('daemon control handler', () => {
     expect(daemon.input).not.toHaveBeenCalled();
   });
 
+  it('does not acknowledge an atomic prompt before daemon delivery settles', async () => {
+    const daemon = daemonMock();
+    let resolvePrompt!: (accepted: boolean) => void;
+    daemon.prompt.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        resolvePrompt = resolve;
+      })
+    );
+
+    const pending = invoke(daemon, 'POST', '/control/prompt', {
+      sessionId: 'sess-a',
+      text: 'complete packet'
+    });
+    await vi.waitFor(() => expect(daemon.prompt).toHaveBeenCalledOnce());
+    const settled = vi.fn();
+    void pending.then(settled);
+    await Promise.resolve();
+
+    expect(settled).not.toHaveBeenCalled();
+    resolvePrompt(true);
+    await expect(pending).resolves.toEqual({ status: 200, body: { ok: true } });
+  });
+
   it('rejects an empty atomic prompt before touching the daemon', async () => {
     const daemon = daemonMock();
     const result = await invoke(daemon, 'POST', '/control/prompt', { sessionId: 'sess-a', text: '' });

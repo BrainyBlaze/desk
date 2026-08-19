@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { DeskAgent } from '../core/types.js';
-import { agentProvider, isAgentProviderId, nativeProducerOf } from '../shared/agentRegistry.js';
+import { isAgentProviderId, nativeProducerOf } from '../shared/agentRegistry.js';
 import {
   AGENT_SURFACE_RING_SIZE,
   parseAgentHostClientFrame,
@@ -1052,7 +1052,7 @@ function nativeProviderFor(agent: DeskAgent): AgentProvider | undefined {
   if (!isAgentProviderId(agent)) {
     return undefined;
   }
-  return agentProvider(agent)?.nativeProducer !== undefined ? agent : undefined;
+  return nativeProducerOf(agent) !== undefined ? agent : undefined;
 }
 
 function nativeProducerFor(provider: AgentProvider): AgentProducer {

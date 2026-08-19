@@ -52,7 +52,10 @@ import type {
 } from '../../core/types.js';
 import { ApiValidationError, readBoundedInteger, readOptionalString, readRequiredString, readStringArray } from '../apiValidation.js';
 import { isValidProfileId } from '../../shared/agentProfiles.js';
-import { agentProvider } from '../../shared/agentRegistry.js';
+import {
+  profileEnvVarOf,
+  providerSupportsBypass
+} from '../../shared/agentRegistry.js';
 import {
   isProviderSessionProvider,
   isValidProviderSessionId
@@ -158,7 +161,7 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
     if (!isValidProfileId(profileId)) {
       throw new ApiValidationError('session.profileId is not a valid profile id');
     }
-    if (!command && agentProvider(session.agent ?? 'codex')?.profileEnvVar === undefined) {
+    if (!command && profileEnvVarOf(session.agent ?? 'codex') === undefined) {
       throw new ApiValidationError(`session.profileId is not supported for agent ${session.agent ?? 'codex'}`);
     }
     session.profileId = profileId;
@@ -177,8 +180,7 @@ export function readDeskSessionBody(value: unknown, options: { cwdRequired?: boo
 
   session.agent ??= 'codex';
   session.bypassPermissions = Boolean(record.bypassPermissions);
-  const bypassProvider = agentProvider(session.agent);
-  if (session.bypassPermissions && bypassProvider !== undefined && bypassProvider.bypass !== true) {
+  if (session.bypassPermissions && !providerSupportsBypass(session.agent)) {
     throw new ApiValidationError(`session.bypassPermissions is not supported for agent ${session.agent}`);
   }
   const uiMode = readOptionalString(record.uiMode);

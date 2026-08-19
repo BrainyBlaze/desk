@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   AGENTS,
-  type AgentProducerId,
   AGENT_IDS,
   AGENT_PRODUCER_BINDINGS_TABLE,
   AGENT_PRODUCER_IDS,
   AGENT_PROVIDER_ENTRIES,
-  AGENT_PROVIDER_IDS
+  AGENT_PROVIDER_IDS,
+  agentProvider,
+  nativeProducerOf,
+  terminalProducerOf
 } from '../src/shared/agentRegistry.js';
 
 describe('agent registry invariants', () => {
@@ -21,14 +23,14 @@ describe('agent registry invariants', () => {
   it('keeps producer ids unique and bound back to their provider', () => {
     expect(new Set(AGENT_PRODUCER_IDS).size).toBe(AGENT_PRODUCER_IDS.length);
     for (const agent of AGENT_PROVIDER_ENTRIES) {
-      if (agent.terminalProducer !== undefined) {
-        expect(AGENT_PRODUCER_BINDINGS_TABLE[agent.terminalProducer as AgentProducerId]).toEqual({
-          provider: agent.id,
-          mode: 'terminal'
-        });
-      }
-      if (agent.nativeProducer !== undefined) {
-        expect(AGENT_PRODUCER_BINDINGS_TABLE[agent.nativeProducer as AgentProducerId]).toEqual({
+      const terminalProducer = terminalProducerOf(agent.id)!;
+      expect(AGENT_PRODUCER_BINDINGS_TABLE[terminalProducer]).toEqual({
+        provider: agent.id,
+        mode: 'terminal'
+      });
+      const nativeProducer = nativeProducerOf(agent.id);
+      if (nativeProducer !== undefined) {
+        expect(AGENT_PRODUCER_BINDINGS_TABLE[nativeProducer]).toEqual({
           provider: agent.id,
           mode: 'native'
         });
@@ -38,14 +40,76 @@ describe('agent registry invariants', () => {
   });
 
   it('gives every provider the fields the launch and identity seams rely on', () => {
-    for (const agent of AGENT_PROVIDER_ENTRIES) {
-      expect(agent.terminalProducer, `${agent.id} terminalProducer`).toBeDefined();
-      expect(agent.sessionIdField, `${agent.id} sessionIdField`).toBeDefined();
-      expect(agent.sessionIdShape, `${agent.id} sessionIdShape`).toBeDefined();
-      expect(agent.hooks, `${agent.id} hooks`).toBeDefined();
-      if (agent.launch !== undefined && agent.bypass === true) {
-        expect(agent.launch.bypassFlag, `${agent.id} bypassFlag`).toBeDefined();
+    expect(
+      Object.fromEntries(
+        AGENT_PROVIDER_IDS.map((id) => {
+          const agent = agentProvider(id)!;
+          return [
+            id,
+            {
+              launcher: agent.launcher.kind,
+              surfaces: agent.surfaces.kind,
+              permissions: agent.permissions.kind,
+              profile: agent.profile.kind,
+              identity: agent.identity.kind
+            }
+          ];
+        })
+      )
+    ).toEqual({
+      codex: {
+        launcher: 'managed',
+        surfaces: 'terminal-native',
+        permissions: 'bypass',
+        profile: 'directory',
+        identity: 'hooks'
+      },
+      claude: {
+        launcher: 'managed',
+        surfaces: 'terminal-native',
+        permissions: 'bypass',
+        profile: 'directory',
+        identity: 'hooks'
+      },
+      opencode: {
+        launcher: 'managed',
+        surfaces: 'terminal-native',
+        permissions: 'bypass',
+        profile: 'none',
+        identity: 'plugin'
+      },
+      qwen: {
+        launcher: 'cli',
+        surfaces: 'terminal',
+        permissions: 'bypass',
+        profile: 'none',
+        identity: 'hooks'
+      },
+      kimi: {
+        launcher: 'cli',
+        surfaces: 'terminal',
+        permissions: 'bypass',
+        profile: 'none',
+        identity: 'hooks'
+      },
+      grok: {
+        launcher: 'cli',
+        surfaces: 'terminal',
+        permissions: 'uncontrolled',
+        profile: 'none',
+        identity: 'hooks'
       }
+    });
+
+    for (const agent of AGENT_PROVIDER_ENTRIES) {
+      expect(agent).not.toHaveProperty('terminalProducer');
+      expect(agent).not.toHaveProperty('nativeProducer');
+      expect(agent).not.toHaveProperty('bypass');
+      expect(agent).not.toHaveProperty('sessionIdField');
+      expect(agent).not.toHaveProperty('sessionIdShape');
+      expect(agent).not.toHaveProperty('profileEnvVar');
+      expect(agent).not.toHaveProperty('hooks');
+      expect(agent).not.toHaveProperty('launch');
     }
   });
 

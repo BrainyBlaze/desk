@@ -133,6 +133,9 @@ describe('server architecture boundaries', () => {
     const ci = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     const release = readFileSync(join(ROOT, '.github/workflows/release.yml'), 'utf8');
     const installer = readFileSync(join(ROOT, '.github/workflows/installer.yml'), 'utf8');
+    const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+    const vitestConfig = readFileSync(join(ROOT, 'vitest.config.ts'), 'utf8');
+    const ripgrepSetup = readFileSync(join(ROOT, 'tests/setup/ripgrep-path.ts'), 'utf8');
     const retired = ['desk', 'server'].join('-');
 
     expect(ci).toContain('node-version: 22.23.1');
@@ -145,10 +148,31 @@ describe('server architecture boundaries', () => {
     expect(ci).toContain('RUN_REAL_JOIN: 1');
     expect(ci).toContain('npx vitest run tests/moor-distribution-contract.test.ts');
     expect(ci).toContain('npx vitest run tests/moor-native-e2e.test.ts');
-    expect(ci).toContain('--exclude tests/moor-distribution-contract.test.ts');
-    expect(ci).toContain('--exclude tests/moor-native-e2e.test.ts');
+    expect(ci).toContain('npm run test:ci');
+    expect(packageJson.scripts.test).toBe(
+      'npm run test:suite && npm run test:heavy-replay'
+    );
+    expect(packageJson.scripts['test:suite']).toContain(
+      '--exclude tests/real-moor-heavy-replay-stability.test.ts'
+    );
+    expect(packageJson.scripts['test:ci']).toContain(
+      '--exclude tests/moor-distribution-contract.test.ts'
+    );
+    expect(packageJson.scripts['test:ci']).toContain(
+      '--exclude tests/moor-native-e2e.test.ts'
+    );
+    expect(packageJson.scripts['test:heavy-replay']).toBe(
+      'vitest run tests/real-moor-heavy-replay-stability.test.ts --maxWorkers=1 --minWorkers=1'
+    );
     expect(ci).toContain('npm run build:application');
     expect(ci).toContain('npm run smoke:serve-modes');
+    expect(packageJson.devDependencies['@vscode/ripgrep']).toBe('1.18.0');
+    expect(vitestConfig).toContain('tests/setup/ripgrep-path.ts');
+    expect(ripgrepSetup).toContain('rgPath');
+    expect(ci).not.toContain('sudo apt-get');
+    expect(release).not.toContain('sudo apt-get');
+    expect(installer).not.toContain('sudo apt-get');
+    expect(installer).not.toContain('brew install ripgrep');
     expect(release).toContain('npm run release:assets');
     expect(release).toContain('desk-install-manifest.json');
     expect(release).toContain('-source.tar.gz');

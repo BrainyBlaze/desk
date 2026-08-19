@@ -63,6 +63,7 @@ export interface DaemonCoreDeps {
     binary: boolean,
     surfaceId: number
   ) => boolean | void;
+  sendMasterPrompt: (sessionId: string, bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
   /**
    * desk#62 — where the last COMMANDED geometry is remembered across daemon
@@ -277,6 +278,7 @@ export class DaemonCore {
       },
       sendMasterInput: (bytes, binary, surfaceId) =>
         this.d.sendMasterInput(sessionId, bytes, binary, surfaceId),
+      sendMasterPrompt: (bytes) => this.d.sendMasterPrompt(sessionId, bytes),
       sendMasterResize: (rows, cols, surfaceId) =>
         this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
     });
@@ -592,7 +594,7 @@ export class DaemonCore {
   }
 
   /** Atomic control-plane prompt submission. False if the session is unknown. */
-  injectPrompt(sessionId: string, bytes: Uint8Array): boolean {
+  async injectPrompt(sessionId: string, bytes: Uint8Array): Promise<boolean> {
     const e = this.sessions.get(sessionId);
     if (e === undefined) return false;
     return e.runtime.injectPrompt(bytes);

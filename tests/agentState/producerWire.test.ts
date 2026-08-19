@@ -24,7 +24,6 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'desk-producer-wire-'));
   capture = join(home, 'posted.jsonl');
 });
-
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
@@ -410,4 +409,3 @@ describe('the new terminal agents map through the shared claude facts path', () 
     expect(envelope.envelope.facts).toEqual([{ kind: 'tool', phase: 'end' }]);
   });
 });
-

@@ -360,9 +360,25 @@ describe('a transient store read failure must not kill a live session', () => {
     observers.push(observer);
     expect(await observer.start()).toBe(true);
 
-    const corrupted = eventBody([event('ready', 1, 1n)]);
-    corrupted[0] = corrupted[0]! ^ 0x01;
-    await writeFile(join(root, 'body.0'), corrupted, { mode: 0o600 });
+    // A writer transition observed mid-flight with NO valid candidate left:
+    // replacement (index 2) landed in slot 1 but its body is still stale,
+    // and the FOLLOWING replacement has already started rewriting body.0 under
+    // the older commit.0 (index 1). Both slots now mismatch their commits — the
+    // spec's fingerprinted UNAVAILABLE ("awaiting a stability witness"), not
+    // CORRUPT, because a live writer produces exactly this shape between
+    // flushes.
+    const next = eventBody([event('ready', 1, 1n), event('link', 1, 2n, ',"uri":"https://example.test/idle","truncated":false')]);
+    const stale = next.slice();
+    stale[next.length - 2] = stale[next.length - 2]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), stale, { mode: 0o600 });
+    await writeFile(
+      join(root, 'commit.1'),
+      commitRecord({ slot: 1, bytes: next, index: 2n, start: 1n, end: 3n }),
+      { mode: 0o600 }
+    );
+    const rewrittenOld = eventBody([event('ready', 1, 1n)]);
+    rewrittenOld[0] = rewrittenOld[0]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), rewrittenOld, { mode: 0o600 });
 
     const poll = () =>
       (observer as unknown as { poll: () => Promise<void> }).poll();
@@ -374,6 +390,8 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatch(/UNAVAILABLE/);
 
+    // Nothing moves for a full stability window: the same fingerprint again is
+    // no longer a transition in flight but a store that will not become valid.
     now.mockReturnValue(5_000);
     await poll();
 
@@ -396,10 +414,25 @@ describe('a transient store read failure must not kill a live session', () => {
     observers.push(observer);
     expect(await observer.start()).toBe(true);
 
-    const validBody = eventBody([event('ready', 1, 1n)]);
-    const transientBody = validBody.slice();
-    transientBody[0] = transientBody[0]! ^ 0x01;
-    await writeFile(join(root, 'body.0'), transientBody, { mode: 0o600 });
+    // A writer transition observed mid-flight with NO valid candidate left:
+    // replacement (index 2) landed in slot 1 but its body is still stale,
+    // and the FOLLOWING replacement has already started rewriting body.0 under
+    // the older commit.0 (index 1). Both slots now mismatch their commits — the
+    // spec's fingerprinted UNAVAILABLE ("awaiting a stability witness"), not
+    // CORRUPT, because a live writer produces exactly this shape between
+    // flushes.
+    const next = eventBody([event('ready', 1, 1n), event('link', 1, 2n, ',"uri":"https://example.test/idle","truncated":false')]);
+    const stale = next.slice();
+    stale[next.length - 2] = stale[next.length - 2]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), stale, { mode: 0o600 });
+    await writeFile(
+      join(root, 'commit.1'),
+      commitRecord({ slot: 1, bytes: next, index: 2n, start: 1n, end: 3n }),
+      { mode: 0o600 }
+    );
+    const rewrittenOld = eventBody([event('ready', 1, 1n)]);
+    rewrittenOld[0] = rewrittenOld[0]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), rewrittenOld, { mode: 0o600 });
 
     const poll = () =>
       (observer as unknown as { poll: () => Promise<void> }).poll();
@@ -412,14 +445,34 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(diagnostics).toHaveLength(2);
     expect(diagnostics.every((diagnostic) => diagnostic.includes('UNAVAILABLE'))).toBe(true);
 
-    await writeFile(join(root, 'body.0'), validBody, { mode: 0o600 });
+    // The transition completes: body.1 catches up with commit.1 (index 2). A
+    // valid read delivers the new event and restarts the mismatch clock.
+    await writeFile(join(root, 'body.1'), next, { mode: 0o600 });
     await poll();
 
-    expect(seen.map((value) => value.type)).toEqual(['ready']);
+    expect(seen.map((value) => value.type)).toEqual(['ready', 'link']);
     expect(terminalCount()).toBe(0);
     expect(availability).toEqual([]);
 
-    await writeFile(join(root, 'body.0'), transientBody, { mode: 0o600 });
+    // The next transition (index 3 into slot 0) is again seen with no valid
+    // candidate: commit.0 written, body.0 stale, and body.1 already being
+    // rewritten under the older commit.1. Its window counts from THIS sighting.
+    const next3 = eventBody([
+      event('ready', 1, 1n),
+      event('link', 1, 2n, ',"uri":"https://example.test/idle","truncated":false'),
+      event('link', 1, 3n, ',"uri":"https://example.test/busy","truncated":false')
+    ]);
+    const stale3 = next3.slice();
+    stale3[next3.length - 2] = stale3[next3.length - 2]! ^ 0x01;
+    await writeFile(join(root, 'body.0'), stale3, { mode: 0o600 });
+    await writeFile(
+      join(root, 'commit.0'),
+      commitRecord({ slot: 0, bytes: next3, index: 3n, start: 1n, end: 4n }),
+      { mode: 0o600 }
+    );
+    const rewrittenPrev = next.slice();
+    rewrittenPrev[0] = rewrittenPrev[0]! ^ 0x01;
+    await writeFile(join(root, 'body.1'), rewrittenPrev, { mode: 0o600 });
     now.mockReturnValue(6_000);
     await poll();
 
@@ -559,5 +612,67 @@ describe('a transient store read failure must not kill a live session', () => {
     expect(availability).toEqual([]);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatch(/CORRUPT/);
+  });
+});
+
+describe('polling an unchanged store is O(delta), not O(store) (spec §7.3)', () => {
+  it('reads only the two 92-byte commit records when nothing changed, and the whole selected body once something did', async () => {
+    // Live 2026-08-18: 13 sessions × 5 polls/s × whole body (≤250 KB) + sha256 +
+    // JSON per poll ≈ 3.6 MB/s of reads and ~30% CPU on an idle daemon. The
+    // observer must remember what it validated and read nothing more than the
+    // commit records while they stay byte-identical.
+    const root = await readyStore();
+    const { seen, handlers } = collector();
+    const observer = new MoorEventObserver({
+      directory: root,
+      generation: 7,
+      pollIntervalMs: 10_000,
+      maxConsecutiveReadFailures: 5,
+      ...handlers
+    });
+    observers.push(observer);
+    expect(await observer.start()).toBe(true);
+    expect(seen.map((value) => value.type)).toEqual(['ready']);
+
+    // Count bytes actually read from files during polls.
+    const fsp = await import('node:fs/promises');
+    const opened = await fsp.open(join(root, 'commit.0'), 'r');
+    const proto = Object.getPrototypeOf(opened) as { read: (...args: unknown[]) => Promise<{ bytesRead: number }> };
+    await opened.close();
+    let bytesRead = 0;
+    const original = proto.read;
+    const spy = vi.spyOn(proto, 'read').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      const result = await original.apply(this, args);
+      bytesRead += result.bytesRead;
+      return result;
+    });
+    try {
+      const poll = () => (observer as unknown as { poll: () => Promise<void> }).poll();
+      // Ten idle polls: the one populated commit record each (the empty slot's
+      // size is enough to know it is empty), nothing else — no body bytes.
+      bytesRead = 0;
+      for (let index = 0; index < 10; index += 1) await poll();
+      expect(bytesRead).toBe(10 * 92);
+
+      // A real transition (replacement into slot 1): the changed slot's body is
+      // read whole once (plus commit records) and the new event is delivered.
+      const next = eventBody([event('ready', 1, 1n), event('link', 1, 2n, ',"uri":"https://example.test/delta","truncated":false')]);
+      await writeSlot(root, 1, next, commitRecord({ slot: 1, bytes: next, index: 2n, start: 1n, end: 3n }));
+      bytesRead = 0;
+      await poll();
+      expect(seen.map((value) => value.type)).toEqual(['ready', 'link']);
+      // Both commit records + slot 1's body once; slot 0's memory was dropped
+      // by the transition, so its (unchanged, older) body is re-read whole once
+      // as well — bounded by the store, never by the poll count.
+      expect(bytesRead).toBeLessThanOrEqual(2 * 92 + next.length + eventBody([event('ready', 1, 1n)]).length);
+      expect(bytesRead).toBeGreaterThanOrEqual(2 * 92 + next.length);
+
+      // Idle again: back to the two commit records only.
+      bytesRead = 0;
+      for (let index = 0; index < 10; index += 1) await poll();
+      expect(bytesRead).toBe(10 * 2 * 92);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

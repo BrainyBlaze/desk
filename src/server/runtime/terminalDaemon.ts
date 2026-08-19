@@ -20,8 +20,7 @@ import { readManifestFile, resolveManifestPath } from '../../core/config.js';
 import { buildSessionSpecs } from '../../core/manifest.js';
 import {
   ensurePrivateSocketRoot,
-  moorRendezvousPath,
-  moorSocketRootUsable
+  moorRendezvousPath
 } from '../../shared/moorPaths.js';
 import {
   AGENT_STATE_SCHEMA_VERSION,
@@ -91,7 +90,6 @@ import {
   MOOR_STATUS_NO_LIVE_LINK_ERROR,
   type MoorHolderPresence
 } from '../../shared/daemonControlClient.js';
-import { probeRendezvous } from './sessionManager.js';
 import type {
   HolderLogClearOutcome,
   ProviderSessionProvisionRecoveryDetail,
@@ -323,8 +321,8 @@ export interface TerminalDaemon {
   ): Promise<ProviderSessionContinuityMutationResult>;
   /** Control-plane input injection (channels delivery). False if unknown. */
   input(sessionId: string, bytes: Uint8Array, paste?: boolean): boolean;
-  /** Atomic prompt submission over one Moor INPUT request. False if unknown. */
-  prompt(sessionId: string, bytes: Uint8Array): boolean;
+  /** Atomic prompt submission resolved only by a complete Moor INPUT receipt. */
+  prompt(sessionId: string, bytes: Uint8Array): Promise<boolean>;
   /**
    * Ranged plain-text window into the session's screen + scrollback. `offset`
    * counts lines back from the live edge (0/absent = the live tail); reads at
@@ -1834,31 +1832,8 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     moorSessionStatus(sessionId) {
       return router.sessions.moorStatus(sessionId);
     },
-    async moorHolderPresence(sessionId) {
-      // The rendezvous NAMESPACE first. A connect failure inside a live socket
-      // root is evidence about this session; the identical failure with the
-      // root swept, misconfigured, or foreign-owned is evidence about the
-      // root, and reporting it as `absent` would let a misconfiguration
-      // authorise starting a second holder over every live one at once.
-      if (!moorSocketRootUsable(options.moorSocketRoot)) {
-        return 'unknown';
-      }
-      // The daemon's own probe, the same one the spawn path's staleness fence
-      // uses — not a second definition of "alive". It connects and destroys:
-      // no protocol bytes (so a live holder's supervised link is never fenced
-      // or stolen by a status query) and no unlink (desk#42).
-      //
-      // `stale` is POSITIVE absence and nothing else: the kernel refused the
-      // connect (ECONNREFUSED — the node is there and no process is listening
-      // on it) or there was no rendezvous object to connect to (ENOENT). It is
-      // never inferred from a stat; every answer here costs a real connect(2)
-      // against the exact path a holder for this session would have bound.
-      // EACCES, timeouts, and resource errors are `unknown` — a live holder
-      // this daemon merely cannot reach must never read as a dead one.
-      const outcome = await probeRendezvous(
-        moorRendezvousPath(options.moorSocketRoot, sessionId)
-      );
-      return outcome === 'live' ? 'present' : outcome === 'stale' ? 'absent' : 'unknown';
+    moorHolderPresence(sessionId) {
+      return router.sessions.moorHolderPresence(sessionId, options.moorSocketRoot);
     },
     agentEndpoint(input) {
       return endpointStore.register(input);
@@ -2665,7 +2640,7 @@ export function createDaemonControlHandler(
             sendJson(res, 400, { ok: false, error: 'text must be a non-empty string' });
             return;
           }
-          const accepted = daemon.prompt(body.sessionId, new TextEncoder().encode(body.text));
+          const accepted = await daemon.prompt(body.sessionId, new TextEncoder().encode(body.text));
           if (!accepted) {
             sendJson(res, 404, { ok: false, error: `no such session: ${body.sessionId}` });
             return;

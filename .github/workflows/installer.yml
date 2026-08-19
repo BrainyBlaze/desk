@@ -6,10 +6,12 @@ on:
       - 'install.sh'
       - 'scripts/fetch-moor.mjs'
       - 'scripts/create-release-assets.mjs'
+      - 'scripts/verify-application-build.mjs'
       - 'scripts/distribution/**'
       - 'tests/moor-distribution-contract.test.ts'
       - 'tests/install-script.test.ts'
       - 'tests/release-assets.test.ts'
+      - 'tests/application-build-contract.test.ts'
       - 'tests/server-architecture.test.ts'
       - 'tests/helpers/installerFixture.ts'
       - '.github/workflows/installer.yml'
@@ -36,9 +38,6 @@ jobs:
         with:
           node-version: 22.23.1
           cache: npm
-      # The installer probes for ripgrep like any other host capability, and
-      # the fixture-driven lifecycle tests run it against this runner's PATH.
-      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci
       - name: Verify installer and release behavior with local Moor fixtures
         run: npx vitest run tests/install-script.test.ts tests/release-assets.test.ts
@@ -124,8 +123,6 @@ jobs:
         with:
           node-version: 22.23.1
           cache: npm
-      # Same reason as the Linux lane: the lifecycle tests probe this host for rg.
-      - run: brew install ripgrep
       - run: npm ci
       - name: Verify installer and release behavior with local Moor fixtures
         # The slower Intel runner can exceed Vitest 3's fork-RPC deadline even

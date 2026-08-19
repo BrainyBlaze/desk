@@ -3,8 +3,8 @@ import {
   AGENT_PROVIDER_IDS,
   agentProvider,
   isAgentProviderId,
-  type AgentHooksStyle,
-  type AgentProviderEntry,
+  terminalProducerOf,
+  type AgentHookIdentityEntry,
   type AgentProviderId
 } from './agentRegistry.js';
 
@@ -14,20 +14,12 @@ export const DESK_PROVIDER_LAUNCH_PROOF = 'DESK_PROVIDER_LAUNCH_PROOF';
 
 export type ProviderSessionProvider = AgentProviderId;
 
-type HookIdentityEntry = Extract<
-  AgentProviderEntry,
-  { hooks: Exclude<AgentHooksStyle, 'plugin'>; terminalProducer: string }
->;
-
-export type HookIdentityProvider = HookIdentityEntry['id'];
+export type HookIdentityProvider = AgentHookIdentityEntry['id'];
 
 export const HOOK_IDENTITY_PRODUCERS = Object.fromEntries(
   AGENT_PROVIDER_ENTRIES.filter(
-    (agent) =>
-      agent.hooks !== undefined &&
-      agent.hooks !== 'plugin' &&
-      agent.terminalProducer !== undefined
-  ).map((agent) => [agent.id, agent.terminalProducer])
+    (agent): agent is AgentHookIdentityEntry => agent.identity.kind === 'hooks'
+  ).map((agent) => [agent.id, terminalProducerOf(agent.id)])
 ) as Record<HookIdentityProvider, string>;
 
 export function hookIdentityProvider(
@@ -42,7 +34,7 @@ export function hookIdentityProvider(
 }
 
 export const PROVIDER_SESSION_ID_PAYLOAD_FIELD = Object.fromEntries(
-  AGENT_PROVIDER_ENTRIES.map((agent) => [agent.id, agent.sessionIdField])
+  AGENT_PROVIDER_ENTRIES.map((agent) => [agent.id, agent.identity.payloadField])
 ) as Record<ProviderSessionProvider, string>;
 
 const UUID_PROVIDER_SESSION_ID =
@@ -88,7 +80,7 @@ export function isValidProviderSessionId(
   provider: ProviderSessionProvider,
   value: string
 ): boolean {
-  switch (agentProvider(provider)?.sessionIdShape) {
+  switch (agentProvider(provider)?.identity.sessionIdShape) {
     case 'opencode':
       return OPENCODE_PROVIDER_SESSION_ID.test(value);
     case 'opaque':

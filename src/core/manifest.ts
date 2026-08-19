@@ -3,7 +3,11 @@ import { checkGlobalUniqueness, isValidSessionId, SESSION_ID_GRAMMAR } from '../
 import { shellQuote } from '../shared/shell.js';
 import { STORE_SUPPORT_FLOOR_NOTE } from '../shared/supportFloor.js';
 import { isSupportedAgent } from './types.js';
-import { agentProvider } from '../shared/agentRegistry.js';
+import {
+  agentProvider,
+  nativeProducerOf,
+  providerSupportsBypass
+} from '../shared/agentRegistry.js';
 import type {
   AgentMcpLaunchConfig,
   AgentProfile,
@@ -94,13 +98,20 @@ function parseManifestStructure(source: string): ParsedManifest {
     }
   }
 
+  if (parsed.settings !== undefined && !isRecord(parsed.settings)) {
+    throw new ManifestValidationError('desk manifest settings must be an object');
+  }
+  if (parsed.plugins !== undefined && !isRecord(parsed.plugins)) {
+    throw new ManifestValidationError('desk manifest plugins must be an object');
+  }
+
   const manifest = {
     // UI settings live in the manifest so they survive reboots and browsers;
     // every write path spreads the manifest, so parse must carry them through.
-    settings: isRecord(parsed.settings) ? (parsed.settings as ParsedManifest['settings']) : undefined,
+    settings: parsed.settings as ParsedManifest['settings'],
     // Plugin sections are opaque to desk: carried through verbatim so every
     // write path (which spreads the manifest) preserves what a plugin stored.
-    plugins: isRecord(parsed.plugins) ? (parsed.plugins as Record<string, unknown>) : undefined,
+    plugins: parsed.plugins as Record<string, unknown> | undefined,
     // Present-but-not-a-list is a mistake (e.g. an indentation slip turning
     // `groups:` into a scalar), NOT an empty config. Silently coercing it to []
     // dropped every project/session with zero diagnostics, and the next write
@@ -340,7 +351,7 @@ function validateSessionBypass(
     return;
   }
   const provider = agentProvider(session.agent);
-  if (provider === undefined || provider.bypass === true) {
+  if (provider === undefined || providerSupportsBypass(provider.id)) {
     return;
   }
   throw new ManifestValidationError(
@@ -351,7 +362,7 @@ function validateSessionBypass(
 /** Native UI mode is limited to SDK-backed agents launched without a custom command. */
 export function sessionSupportsNativeUiMode(session: Pick<DeskSession, 'agent' | 'command'>): boolean {
   const hasCustomCommand = typeof session.command === 'string' && session.command.trim() !== '';
-  return !hasCustomCommand && agentProvider(session.agent)?.nativeProducer !== undefined;
+  return !hasCustomCommand && nativeProducerOf(session.agent) !== undefined;
 }
 
 /**
@@ -499,16 +510,23 @@ export function buildAgentCommand(
   if (session.agent === 'opencode') {
     return buildOpencodeCommand(session, cwd, homeDir, sessionId);
   }
-  const launch = agentProvider(session.agent)?.launch;
-  if (launch && session.agent) {
+  const provider = agentProvider(session.agent);
+  if (provider?.launcher.kind === 'cli') {
+    const launch = provider.launcher;
     // Agents that read MCP servers only from their global settings file get the
     // per-session desk_lsp environment through the launch env instead of a
     // per-session config flag; desk-lsp-mcp resolves the file from its own env.
     const lspEnv =
-      launch.settingsMcp && agentMcp ? ` DESK_LSP_ENV_FILE=${shellQuote(agentMcp.envFilePath)}` : '';
-    const args = [session.agent];
-    if (session.bypassPermissions && launch.bypassFlag) {
-      args.push(launch.bypassFlag);
+      launch.lsp.kind === 'settings-env' && agentMcp
+        ? ` DESK_LSP_ENV_FILE=${shellQuote(agentMcp.envFilePath)}`
+        : '';
+    const args: string[] = [launch.executable];
+    if (
+      session.bypassPermissions &&
+      provider.permissions.kind === 'bypass' &&
+      provider.permissions.mechanism.kind === 'flag'
+    ) {
+      args.push(provider.permissions.mechanism.flag);
     }
     if (!session.resume) {
       return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}`;
@@ -526,7 +544,7 @@ export function buildAgentCommand(
     // no resume capture — and looks permanently silent to Desk.
     const diagnostics =
       `printf 'desk: %s resume failed with exit %s; leaving pane open — run \`desk reset-provider-session %s --force\` and restart the pane to start fresh\\n' ` +
-      `${shellQuote(session.agent)} "$desk_resume_status" ${shellQuote(sessionId)} >&2; ` +
+      `${shellQuote(provider.id)} "$desk_resume_status" ${shellQuote(sessionId)} >&2; ` +
       `printf 'desk: resume id: %s\\n' ${resumeArg} >&2;`;
     return `cd ${shellQuote(cwd)} && ${env}${lspEnv} ${args.join(' ')}; ${resumeFailureGuard('desk_resume_status', diagnostics)}`;
   }
@@ -599,5 +617,5 @@ function resumeFailureGuard(statusVar: string, diagnostics: string): string {
 // shellQuote now lives in ../shared/shell.ts (single audited copy).
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

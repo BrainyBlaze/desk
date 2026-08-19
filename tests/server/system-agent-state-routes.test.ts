@@ -292,6 +292,30 @@ async function invokeRoute(
 }
 
 describe('canonical system agent-state routes', () => {
+  it('returns the canonical runtime provenance projection', async () => {
+    const provenance = {
+      schemaVersion: 1 as const,
+      packageKind: 'distribution' as const,
+      runtimeKind: 'standalone' as const,
+      version: '0.4.0',
+      release: { state: 'unmanaged' as const }
+    };
+    const runtimeProvenance = vi.fn(() => provenance);
+
+    const result = await invoke(
+      gateway(),
+      'GET',
+      '/api/runtime',
+      undefined,
+      eventGateway(),
+      endpointGateway(),
+      { runtimeProvenance }
+    );
+
+    expect(runtimeProvenance).toHaveBeenCalledOnce();
+    expect(result).toEqual({ handled: true, status: 200, body: provenance });
+  });
+
   it('maps producer bytes to a canonical envelope and returns the daemon receipt', async () => {
     const agentStateGateway = gateway();
     const envelope = event();
