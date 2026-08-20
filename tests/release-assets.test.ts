@@ -60,6 +60,7 @@ function createRepository(): string {
   mkdirSync(join(root, 'vendor', 'moor', 'src'), { recursive: true });
   writeFileSync(join(root, 'package.json'), '{"name":"desk-fixture","version":"0.3.0"}\n');
   writeFileSync(join(root, 'README.md'), 'fixture\n');
+  writeFileSync(join(root, 'install.sh'), '#!/bin/sh\necho fixture installer\n');
   writeFileSync(join(root, 'node_modules', 'fixture', 'tracked.txt'), 'exclude\n');
   writeFileSync(join(root, 'dist', 'tracked.txt'), 'exclude\n');
   writeFileSync(join(root, 'libexec', 'desk-standalone'), 'exclude\n');
@@ -169,14 +170,16 @@ describe('release asset generation', () => {
     expect(readdirSync(first).sort()).toEqual([
       'SHA256SUMS',
       'desk-install-manifest.json',
-      'desk-v0.3.0-source.tar.gz'
+      'desk-v0.3.0-source.tar.gz',
+      'install.sh'
     ]);
     for (const name of readdirSync(first)) {
       expect(readFileSync(join(first, name))).toEqual(readFileSync(join(second, name)));
     }
+    expect(readFileSync(join(first, 'install.sh'), 'utf8')).toBe('#!/bin/sh\necho fixture installer\n');
 
     const checksums = readFileSync(join(first, 'SHA256SUMS'), 'utf8').trim().split('\n');
-    expect(checksums).toHaveLength(2);
+    expect(checksums).toHaveLength(3);
     for (const line of checksums) {
       const [digest, name] = line.split(/\s{2}/);
       expect(createHash('sha256').update(readFileSync(join(first, name))).digest('hex')).toBe(digest);
@@ -198,7 +201,8 @@ describe('release asset generation', () => {
       join(root, 'scripts', 'distribution', 'moor-pin.json'),
       `${JSON.stringify(newerPin, null, 2)}\n`
     );
-    run('git', ['add', 'scripts/distribution/moor-pin.json'], root);
+    writeFileSync(join(root, 'install.sh'), '#!/bin/sh\necho newer installer\n');
+    run('git', ['add', 'scripts/distribution/moor-pin.json', 'install.sh'], root);
     run(
       'git',
       ['-c', 'user.name=Desk Tests', '-c', 'user.email=desk-tests@example.invalid', 'commit', '-qm', 'new pin'],
@@ -211,6 +215,7 @@ describe('release asset generation', () => {
 
     const manifest = JSON.parse(readFileSync(join(outDir, 'desk-install-manifest.json'), 'utf8'));
     expect(manifest.moor.commit).toBe('b'.repeat(40));
+    expect(readFileSync(join(outDir, 'install.sh'), 'utf8')).toBe('#!/bin/sh\necho fixture installer\n');
   });
 
   it('refuses dirty or untracked checkout state instead of packaging local artifacts', () => {
