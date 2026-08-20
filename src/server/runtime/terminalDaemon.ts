@@ -529,10 +529,11 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       return providerProvisionFailure('not-authorized');
     }
     const currentAuthorization = providerLaunchLedger.current(context.sessionId);
-    // A FIRST launch needs no authorization: the fence exists to stop a
-    // relaunch from silently orphaning an existing provider conversation, and
-    // here there is none — the binding is null (checked above) and the ledger
-    // has never recorded anything for this session.
+    // The fence exists to stop a relaunch from silently orphaning an existing
+    // provider conversation. There is nothing to orphan when no live
+    // authorization stands: either the ledger never recorded this session, or
+    // its last launch already completed — and the binding is null (checked
+    // above), so no addressable conversation survives. Both admit the launch.
     //
     // desk#47: the generation used to stand in for "never launched", and it is
     // not one. The generation ledger is monotonic and tombstone-surviving by
@@ -543,10 +544,10 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     // an unauthorized relaunch, and `reset-provider-session` could not clear
     // it either, because that command requires the session to be IN the
     // manifest. The name was dead with no way back from the UI or the CLI.
-    if (currentAuthorization === undefined) {
-      return { ok: true };
-    }
-    if (context.currentGeneration === 0 && currentAuthorization.state === 'completed') {
+    if (
+      currentAuthorization === undefined ||
+      currentAuthorization.state === 'completed'
+    ) {
       return { ok: true };
     }
     const claim = providerLaunchLedger.claim({
@@ -2312,10 +2313,13 @@ export function createDaemonControlHandler(
                   : 'action' in ens && typeof ens.action === 'string'
                     ? ens.action
                     : undefined;
+            const cause =
+              detail ??
+              ('error' in ens && typeof ens.error === 'string' ? ens.error : undefined);
             sendJson(res, 503, {
               ok: false,
               error: `${ens.reason}${
-                detail === undefined ? '' : `: ${detail}`
+                cause === undefined ? '' : `: ${cause}`
               }${recovery === undefined ? '' : `; ${recovery}`}`,
               ...(detail === undefined ? {} : { detail }),
               ...(recovery === undefined ? {} : { recovery })
