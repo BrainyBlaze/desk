@@ -1273,7 +1273,11 @@ describe('generation-scoped Moor companion retention', () => {
         geometry: { rows: 24, cols: 80 },
         subject: { kind: 'terminal' }
       })
-    ).resolves.toEqual({ ok: false, reason: 'spawn-failed' });
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: 'spawn-failed',
+      error: expect.stringContaining('spawn preparation failed')
+    });
 
     expect(existsSync(launchMarker)).toBe(false);
     expect(existsSync(sessionPath)).toBe(false);

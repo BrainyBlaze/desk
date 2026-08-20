@@ -3981,7 +3981,7 @@ function SessionFormView({
           <span>Bypass permissions</span>
         </label>
       ) : null}
-      <TextInput label="Resume id" value={form.resume} placeholder="codex resume id" onChange={(resume) => onFormChange({ ...form, resume })} />
+      <TextInput label="Resume id" value={form.resume} placeholder={`${form.agent} resume id`} onChange={(resume) => onFormChange({ ...form, resume })} />
       <TextInput
         label="Command"
         value={form.command}
