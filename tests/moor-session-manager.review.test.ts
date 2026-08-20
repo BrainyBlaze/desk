@@ -283,7 +283,11 @@ describe('SessionManager Moor production-slice adversarial review', () => {
       }
     });
 
-    expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'spawn-failed',
+      error: 'no kill command was provided for this spawn'
+    });
     expect(preallocationCalled).toBe(false);
     expect(ledger.current('s1')).toBe(0);
   });
@@ -384,7 +388,11 @@ describe('SessionManager Moor production-slice adversarial review', () => {
     expect.soft(ledger.current('s1')).toBe(0);
     expect.soft(existsSync(actualSessionPath)).toBe(false);
     expect.soft(thrown).toBeUndefined();
-    expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'spawn-failed',
+      error: 'the session id is not a canonical moor rendezvous identity'
+    });
   }, 15_000);
 
   it('cannot report a clean retire for a spawned holder with no retained kill authority', async () => {
@@ -441,7 +449,11 @@ describe('SessionManager Moor production-slice adversarial review', () => {
       }
     });
 
-    expect(result).toEqual({ ok: false, reason: 'spawn-failed' });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'spawn-failed',
+      error: 'the moor launcher did not become ready before the timeout'
+    });
     expect(existsSync(`${sessionPath}.spawned-proof`)).toBe(true);
     await sleep(2700);
     expect(existsSync(sessionPath)).toBe(false);

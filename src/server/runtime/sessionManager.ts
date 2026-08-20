@@ -119,7 +119,7 @@ export type SessionSpawnResult =
       /** OB-39: the holder's ATTACH_ACK descriptor for a successful moor join. */
       moorStatus?: MoorStatus;
     })
-  | { ok: false; reason: 'spawn-failed' | 'attach-failed' }
+  | { ok: false; reason: 'spawn-failed' | 'attach-failed'; error?: string }
   | Exclude<SessionSpawnPreallocationResult, { ok: true }>;
 
 export interface TerminalObservationSnapshot {
@@ -1699,7 +1699,7 @@ export class SessionManager {
     // no durable allocation. (The type stays optional only so the refusal is
     // observable behavior, not a compile error.)
     if (opts.killSpec === undefined) {
-      return { ok: false, reason: 'spawn-failed' };
+      return { ok: false, reason: 'spawn-failed', error: 'no kill command was provided for this spawn' };
     }
     // The rendezvous path IS the §1.2 canonical session identity: a
     // noncanonical spelling would spawn a holder Desk can never attach to —
@@ -1707,7 +1707,11 @@ export class SessionManager {
     try {
       posixMoorIdentity(opts.sessionPath);
     } catch {
-      return { ok: false, reason: 'spawn-failed' };
+      return {
+        ok: false,
+        reason: 'spawn-failed',
+        error: 'the session id is not a canonical moor rendezvous identity'
+      };
     }
     // A rendezvous whose ABSOLUTE path exceeds the platform Unix-domain sun_path
     // capacity (macOS 103, Linux 107 bytes) is bindable by the holder relative
@@ -1718,13 +1722,13 @@ export class SessionManager {
     // is never created -- and name the cause explicitly, since the generic
     // spawn-failed reason cannot carry it.
     if (!rendezvousPathWithinCapacity(opts.sessionPath)) {
-      console.error(
+      const unaddressable =
         `moor rendezvous is unaddressable by node:net on ${process.platform}: ` +
-          `${Buffer.byteLength(opts.sessionPath, 'utf8')} bytes exceeds the ` +
-          `${unixSocketPathCapacity()}-byte sun_path ceiling; shorten ` +
-          `DESK_MOOR_SOCKET_ROOT or the session name — ${opts.sessionPath}`
-      );
-      return { ok: false, reason: 'spawn-failed' };
+        `${Buffer.byteLength(opts.sessionPath, 'utf8')} bytes exceeds the ` +
+        `${unixSocketPathCapacity()}-byte sun_path ceiling; shorten ` +
+        `DESK_MOOR_SOCKET_ROOT or the session name — ${opts.sessionPath}`;
+      console.error(unaddressable);
+      return { ok: false, reason: 'spawn-failed', error: 'the session name makes its socket path too long; shorten it' };
     }
     // Foreign-rendezvous preflight BEFORE any durable allocation (same wedge
     // logic as ever), with the no-follow type/identity fence: only a SOCKET
@@ -1736,18 +1740,34 @@ export class SessionManager {
       rendezvousNode = lstatSync(opts.sessionPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        return { ok: false, reason: 'spawn-failed' };
+        return {
+          ok: false,
+          reason: 'spawn-failed',
+          error: `the session's rendezvous socket is unreadable: ${(error as NodeJS.ErrnoException).code}`
+        };
       }
     }
     if (rendezvousNode !== undefined) {
       if (!rendezvousNode.isSocket()) {
-        return { ok: false, reason: 'spawn-failed' };
+        return {
+          ok: false,
+          reason: 'spawn-failed',
+          error: 'a foreign non-socket object occupies this session name; remove it manually or use another name'
+        };
       }
       // Staleness must be POSITIVE: only a refused connect proves the owner is
       // gone. A live listener or ANY indeterminate outcome (permissions,
       // timeout) preserves the node and refuses the spawn.
-      if ((await this.moorPresence.probeRendezvous(opts.sessionPath)) !== 'stale') {
-        return { ok: false, reason: 'spawn-failed' };
+      const presence = await this.moorPresence.probeRendezvous(opts.sessionPath);
+      if (presence !== 'stale') {
+        return {
+          ok: false,
+          reason: 'spawn-failed',
+          error:
+            presence === 'live'
+              ? 'a live terminal holder already occupies this session name; use another name or stop that holder first'
+              : 'this session name could not be proven free; retry, or stop whatever holds it'
+        };
       }
       // TOCTOU identity fence: re-lstat immediately before unlink and require
       // the SAME socket (dev+inode+type) the probe judged stale — a node
@@ -1759,12 +1779,20 @@ export class SessionManager {
           recheck.dev !== rendezvousNode.dev ||
           recheck.ino !== rendezvousNode.ino
         ) {
-          return { ok: false, reason: 'spawn-failed' };
+          return {
+            ok: false,
+            reason: 'spawn-failed',
+            error: 'the session name was re-occupied during spawn; retry'
+          };
         }
         unlinkSync(opts.sessionPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          return { ok: false, reason: 'spawn-failed' };
+          return {
+            ok: false,
+            reason: 'spawn-failed',
+            error: `the stale rendezvous could not be removed: ${(error as NodeJS.ErrnoException).code}`
+          };
         }
         // ENOENT: the tombstone vanished on its own — the path is free.
       }
@@ -1792,13 +1820,16 @@ export class SessionManager {
     if (opts.prepareSpawn !== undefined) {
       try {
         ({ storeDir } = await opts.prepareSpawn({ sessionId, generation: ens.generation }));
-      } catch {
+      } catch (error) {
         if (this.owners.get(sessionId) === token) this.owners.delete(sessionId);
         if (ens.created) {
           this.core.retire(sessionId, 'spawn-prepare-failed');
           this.dropTerminalObservation(sessionId, ens.generation);
         }
-        return { ok: false, reason: 'spawn-failed' };
+        console.error(
+          `spawn preparation failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        return { ok: false, reason: 'spawn-failed', error: 'spawn preparation failed' };
       }
     }
     const args = [
@@ -1871,7 +1902,14 @@ export class SessionManager {
         this.core.retire(sessionId, 'spawn-failed');
         this.dropTerminalObservation(sessionId, ens.generation);
       }
-      return { ok: false, reason: 'spawn-failed' };
+      return {
+        ok: false,
+        reason: 'spawn-failed',
+        error:
+          ready === 'timeout'
+            ? 'the moor launcher did not become ready before the timeout'
+            : 'the moor launcher failed to start or exited before the holder came up'
+      };
     }
     if (opts.killSpec !== undefined) {
       this.detachedKills.set(sessionId, {
