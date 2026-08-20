@@ -1,6 +1,6 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statfsSync } from 'node:fs';
-import { cpus, hostname, loadavg, platform, release, uptime } from 'node:os';
+import { cpus, hostname, loadavg, platform, release, totalmem, uptime } from 'node:os';
 import { promisify } from 'node:util';
 import type { DiskMetrics, GpuMetrics, MemoryMetrics, NetworkMetrics, SystemSnapshot } from '../shared/systemMetrics.js';
 
@@ -28,13 +28,18 @@ let previousDiskIo: DiskIoSample | undefined;
 
 /**
  * /proc reads + CPU/net/disk delta accounting are cheap (microseconds) and stay
- * synchronous; only the GPU readers shell out, so the core takes the already-read
- * GPU metrics and both the sync and async wrappers supply them their own way. The
- * delta state (previousCpu/net/disk) lives module-level and is touched once per
- * snapshot regardless of wrapper.
+ * synchronous; only the GPU readers and the darwin memory reader shell out, so
+ * the core takes the already-read GPU and memory metrics and both the sync and
+ * async wrappers supply them their own way. The delta state
+ * (previousCpu/net/disk) lives module-level and is touched once per snapshot
+ * regardless of wrapper.
  */
-function collectSystemSnapshotCore(gpu: { nvidia: GpuMetrics; intel: GpuMetrics }): SystemSnapshot {
-  const currentCpu = parseProcStat(readText('/proc/stat'));
+function collectSystemSnapshotCore(
+  gpu: { nvidia: GpuMetrics; intel: GpuMetrics },
+  memory: MemoryMetrics | undefined
+): SystemSnapshot {
+  const cores = cpus();
+  const currentCpu = sampleCpuTimes(cores);
   const cpuUsage = currentCpu && previousCpu ? calculateCpuUsage(previousCpu, currentCpu) : undefined;
   if (currentCpu) {
     previousCpu = currentCpu;
@@ -42,7 +47,7 @@ function collectSystemSnapshotCore(gpu: { nvidia: GpuMetrics; intel: GpuMetrics 
 
   const net = sampleNetwork();
   const loadAverage = loadavg() as [number, number, number];
-  const threads = Math.max(cpus().length, 1);
+  const threads = Math.max(cores.length, 1);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -56,7 +61,7 @@ function collectSystemSnapshotCore(gpu: { nvidia: GpuMetrics; intel: GpuMetrics 
       loadAverage,
       loadPercent: clampPercent((loadAverage[0] / threads) * 100)
     },
-    memory: parseMemInfo(readText('/proc/meminfo')),
+    memory,
     network: net,
     disk: sampleDisk(),
     gpu
@@ -64,7 +69,7 @@ function collectSystemSnapshotCore(gpu: { nvidia: GpuMetrics; intel: GpuMetrics 
 }
 
 export function collectSystemSnapshot(): SystemSnapshot {
-  return collectSystemSnapshotCore({ nvidia: readNvidiaGpu(), intel: readIntelGpu() });
+  return collectSystemSnapshotCore({ nvidia: readNvidiaGpu(), intel: readIntelGpu() }, readMemory());
 }
 
 /**
@@ -74,8 +79,40 @@ export function collectSystemSnapshot(): SystemSnapshot {
  * the pulse blocked all streams ~70ms/tick).
  */
 export async function collectSystemSnapshotAsync(): Promise<SystemSnapshot> {
-  const [nvidia, intel] = await Promise.all([readNvidiaGpuAsync(), readIntelGpuAsync()]);
-  return collectSystemSnapshotCore({ nvidia, intel });
+  const [nvidia, intel, memory] = await Promise.all([readNvidiaGpuAsync(), readIntelGpuAsync(), readMemoryAsync()]);
+  return collectSystemSnapshotCore({ nvidia, intel }, memory);
+}
+
+/**
+ * CPU times per platform: Linux keeps /proc/stat, whose totals carry
+ * iowait/softirq/steal ticks that Node's cpu times omit — folding those into
+ * "busy or idle" would misreport IO-heavy hosts. Darwin has no /proc, and
+ * there os.cpus() (host_processor_info) is the measurement.
+ */
+function sampleCpuTimes(cores: ReturnType<typeof cpus>, platformName: NodeJS.Platform = platform()): CpuTimes | undefined {
+  if (platformName === 'darwin') {
+    return cpuTimesFromOsCpus(cores);
+  }
+  return parseProcStat(readText('/proc/stat'));
+}
+
+export function cpuTimesFromOsCpus(
+  cores: ReadonlyArray<{ times: { user: number; nice: number; sys: number; idle: number; irq: number } }>
+): CpuTimes | undefined {
+  if (cores.length === 0) {
+    return undefined;
+  }
+  let idle = 0;
+  let total = 0;
+  for (const core of cores) {
+    const values = [core.times.user, core.times.nice, core.times.sys, core.times.idle, core.times.irq];
+    if (values.some((value) => !Number.isFinite(value))) {
+      return undefined;
+    }
+    idle += core.times.idle;
+    total += values.reduce((sum, value) => sum + value, 0);
+  }
+  return { idle, total };
 }
 
 export function calculateCpuUsage(previous: CpuTimes, current: CpuTimes): number {
@@ -132,6 +169,74 @@ export function parseMemInfo(source: string): MemoryMetrics | undefined {
     availableBytes,
     usedPercent: clampPercent((usedBytes / totalBytes) * 100)
   };
+}
+
+/**
+ * Darwin memory from vm_stat page counts against the os.totalmem() total.
+ * "Available" is free + inactive + speculative + purgeable pages — the same
+ * approximation Activity Monitor's App Memory view is built on, stated here
+ * because macOS has no MemAvailable-style kernel figure. Free and inactive are
+ * load-bearing; an output without them (or without the page size header) is
+ * "not measured", never zeros.
+ */
+export function parseVmStat(source: string, totalBytes: number): MemoryMetrics | undefined {
+  const pageSizeMatch = /page size of (\d+) bytes/.exec(source);
+  if (!pageSizeMatch || totalBytes <= 0) {
+    return undefined;
+  }
+  const pageSize = Number(pageSizeMatch[1]);
+  const pages = new Map<string, number>();
+  for (const line of source.split('\n')) {
+    const match = /^"?([A-Za-z -]+)"?:\s+(\d+)\.?$/.exec(line.trim());
+    if (match) {
+      pages.set(match[1]!, Number(match[2]));
+    }
+  }
+  const free = pages.get('Pages free');
+  const inactive = pages.get('Pages inactive');
+  if (pageSize <= 0 || free === undefined || inactive === undefined) {
+    return undefined;
+  }
+  const availablePages = free + inactive + (pages.get('Pages speculative') ?? 0) + (pages.get('Pages purgeable') ?? 0);
+  const availableBytes = availablePages * pageSize;
+  const usedBytes = totalBytes - availableBytes;
+  if (usedBytes <= 0) {
+    // vm_stat's page accounting and os.totalmem() are independent sources; when
+    // available alone meets or exceeds the total they disagree, and "used" is
+    // not measured — never clamp it to a confident 0%.
+    return undefined;
+  }
+  return {
+    totalBytes,
+    usedBytes,
+    availableBytes,
+    usedPercent: clampPercent((usedBytes / totalBytes) * 100)
+  };
+}
+
+const VM_STAT_TIMEOUT_MS = 1000;
+
+function readMemory(platformName: NodeJS.Platform = platform()): MemoryMetrics | undefined {
+  if (platformName !== 'darwin') {
+    return parseMemInfo(readText('/proc/meminfo'));
+  }
+  const result = spawnSync('vm_stat', [], { encoding: 'utf8', timeout: VM_STAT_TIMEOUT_MS });
+  if (result.error || result.status !== 0 || !result.stdout.trim()) {
+    return undefined;
+  }
+  return parseVmStat(result.stdout, totalmem());
+}
+
+async function readMemoryAsync(platformName: NodeJS.Platform = platform()): Promise<MemoryMetrics | undefined> {
+  if (platformName !== 'darwin') {
+    return parseMemInfo(readText('/proc/meminfo'));
+  }
+  try {
+    const { stdout } = await execFileAsync('vm_stat', [], { encoding: 'utf8', timeout: VM_STAT_TIMEOUT_MS });
+    return stdout.trim() ? parseVmStat(stdout, totalmem()) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function parseNetDev(source: string): NetworkMetrics {
@@ -248,14 +353,26 @@ function readRootUsage(): DiskMetrics | undefined {
 }
 
 function sampleNetwork(): NetworkMetrics {
-  const current = { ...parseNetDev(readText('/proc/net/dev')), sampledAtMs: Date.now() };
+  const parsed = parseNetDev(readText('/proc/net/dev'));
+  // An empty interface list means nothing was measured this tick (an
+  // unreadable source, a darwin host). Do not adopt it as the delta baseline,
+  // or the next real tick divides a full counter against zero and reports a
+  // phantom spike.
+  if (parsed.interfaces.length === 0) {
+    return parsed;
+  }
+  const current = { ...parsed, sampledAtMs: Date.now() };
   const previous = previousNet;
   previousNet = current;
-  const { sampledAtMs: _sampledAtMs, ...network } = current;
-  if (!previous) {
+  return applyNetworkRates(previous, current);
+}
+
+export function applyNetworkRates(previous: NetSample | undefined, current: NetSample): NetworkMetrics {
+  const { sampledAtMs, ...network } = current;
+  if (!previous || previous.interfaces.length === 0 || network.interfaces.length === 0) {
     return network;
   }
-  const seconds = Math.max((current.sampledAtMs - previous.sampledAtMs) / 1000, 0.001);
+  const seconds = Math.max((sampledAtMs - previous.sampledAtMs) / 1000, 0.001);
   return {
     ...network,
     rxBytesPerSecond: Math.max((current.rxBytes - previous.rxBytes) / seconds, 0),
