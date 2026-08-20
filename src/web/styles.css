@@ -436,7 +436,7 @@ button.statusSegment:hover {
   pointer-events: none;
 }
 
-.telemetrySpark polyline {
+.telemetrySpark path {
   fill: none;
   stroke: var(--desk-line-strong);
   stroke-width: 1.2;
@@ -444,7 +444,7 @@ button.statusSegment:hover {
   filter: drop-shadow(0 0 3px var(--desk-glow));
 }
 
-.telemetryCell.ok .telemetrySpark polyline {
+.telemetryCell.ok .telemetrySpark path {
   stroke: var(--desk-ok);
 }
 
