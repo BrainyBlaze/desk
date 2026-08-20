@@ -8,6 +8,22 @@ import type { DeskSnapshot, SystemSnapshot } from './types.js';
 
 export type SessionStatusMap = Record<string, SessionStatusView>;
 
+export interface TelemetryHistory {
+  cpu: SparkSample[];
+  ram: SparkSample[];
+  gpu: SparkSample[];
+  net: SparkSample[];
+  disk: SparkSample[];
+}
+
+/** Carry an unmeasured tick into every ring so the sparklines break at a
+ * failed pulse instead of freezing on the last drawn line. */
+export function markTelemetryGap(history: TelemetryHistory): void {
+  for (const ring of [history.cpu, history.ram, history.gpu, history.net, history.disk]) {
+    pushSparkSample(ring, undefined);
+  }
+}
+
 interface UsePulseParams {
   setSnapshot: Dispatch<SetStateAction<DeskSnapshot | null>>;
   setStatusViews: Dispatch<SetStateAction<SessionStatusMap>>;
@@ -16,13 +32,7 @@ interface UsePulseParams {
 interface UsePulseResult {
   systemSnapshot: SystemSnapshot | null;
   systemError: string | null;
-  telemetryHistoryRef: MutableRefObject<{
-    cpu: SparkSample[];
-    ram: SparkSample[];
-    gpu: SparkSample[];
-    net: SparkSample[];
-    disk: SparkSample[];
-  }>;
+  telemetryHistoryRef: MutableRefObject<TelemetryHistory>;
   /** Forces the next pulse to reconcile against the server payload. */
   invalidateAttentionPulse: () => void;
 }
@@ -41,12 +51,12 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
   const [systemSnapshot, setSystemSnapshot] = useState<SystemSnapshot | null>(null);
   // Telemetry sparkline rings (one sample per poll tick); the snapshot state
   // change is what re-renders the header, so a ref avoids double renders.
-  const telemetryHistoryRef = useRef({
-    cpu: [] as SparkSample[],
-    ram: [] as SparkSample[],
-    gpu: [] as SparkSample[],
-    net: [] as SparkSample[],
-    disk: [] as SparkSample[]
+  const telemetryHistoryRef = useRef<TelemetryHistory>({
+    cpu: [],
+    ram: [],
+    gpu: [],
+    net: [],
+    disk: []
   });
   const [systemError, setSystemError] = useState<string | null>(null);
   // Last server payload (serialized) for the pulse diff-and-bail. Optimistic
@@ -124,6 +134,7 @@ export function usePulse({ setSnapshot, setStatusViews }: UsePulseParams): UsePu
         if (alive) {
           pulseFailingRef.current = true;
           setSystemError(err instanceof Error ? err.message : String(err));
+          markTelemetryGap(telemetryHistoryRef.current);
           // We could not read the authority, so we no longer know what any
           // agent is doing. Say so instead of holding the last answer.
           pulseCacheRef.current.states = '';
