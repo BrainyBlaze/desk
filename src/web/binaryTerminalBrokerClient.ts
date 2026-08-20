@@ -76,6 +76,8 @@ interface BinarySurface {
   awaitingAck: boolean;
   /** Latest size not yet sent (socket connecting / channel not yet open). */
   pendingResize?: { cols: number; rows: number };
+  /** Latest geometry carried to the server for the current channel attempt. */
+  sentGeometry?: { cols: number; rows: number };
   /**
    * Keystrokes/paste bytes typed while there is no open channel — socket still
    * connecting, SUBSCRIBE_ACK still in flight, or a transport drop mid-reconnect
@@ -328,7 +330,11 @@ export class BinaryTerminalBrokerClient {
     }
     const { cols, rows } = surface.pendingResize;
     surface.pendingResize = undefined;
+    if (surface.sentGeometry?.cols === cols && surface.sentGeometry.rows === rows) {
+      return;
+    }
     this.sendFrame({ type: BpFrameType.RESIZE, channelId: surface.channelId, rows, cols });
+    surface.sentGeometry = { cols, rows };
   }
 
   /** Manual retry from the per-cell Reconnect button. */
@@ -482,6 +488,7 @@ export class BinaryTerminalBrokerClient {
   private sendSubscribe(surface: BinarySurface): void {
     surface.awaitingAck = true;
     this.pendingAcks.push(surface);
+    surface.sentGeometry = { cols: surface.cols, rows: surface.rows };
     this.sendFrame({
       type: BpFrameType.SUBSCRIBE,
       sessionId: surface.sessionId,
@@ -501,6 +508,7 @@ export class BinaryTerminalBrokerClient {
     }
     surface.channelId = undefined;
     surface.resync = undefined;
+    surface.sentGeometry = undefined;
     // Input queued for the channel being closed belongs to that channel's
     // context (unsubscribe or resync) — never replay it into whatever
     // channel a future (re)subscribe opens.
@@ -522,6 +530,7 @@ export class BinaryTerminalBrokerClient {
       surface.channelId = undefined;
       surface.resync = undefined;
       surface.awaitingAck = false;
+      surface.sentGeometry = undefined;
       // The replacement socket may belong to a freshly restarted daemon whose
       // adopted emulator is back at its bootstrap geometry. Reassert the last
       // fitted browser size after the new SUBSCRIBE_ACK even when layout did

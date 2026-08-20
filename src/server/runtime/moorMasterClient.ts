@@ -187,6 +187,8 @@ function validateIdentity(identity: Uint8Array): Uint8Array {
 
 const DEFAULT_ATTACH_DEADLINE_MS = 2_000;
 const DEFAULT_LIVENESS_WINDOW_MS = 15_000;
+const LEASE_RESUME_RETRY_MS = 10;
+const LEASE_REFUSAL_BUSY = 1;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const INBOUND_HIGH_WATER_BYTES = 8 * 1024 * 1024;
 const INBOUND_LOW_WATER_BYTES = 4 * 1024 * 1024;
@@ -251,6 +253,7 @@ export class MoorMasterClient {
   private preambleBytes: Uint8Array | undefined;
   private nextRequestId = 1n;
   private deadline: NodeJS.Timeout | undefined;
+  private resumeRetry: NodeJS.Timeout | undefined;
   /** Granted viewer lease (§7.4): epoch + token, kept alive on the 3 s cadence. */
   private lease: { epoch: number; token: Uint8Array } | undefined;
   private keepalive: NodeJS.Timeout | undefined;
@@ -841,6 +844,10 @@ export class MoorMasterClient {
       clearTimeout(this.deadline);
       this.deadline = undefined;
     }
+    if (this.resumeRetry !== undefined) {
+      clearTimeout(this.resumeRetry);
+      this.resumeRetry = undefined;
+    }
     if (this.livenessTimer !== undefined) {
       clearTimeout(this.livenessTimer);
       this.livenessTimer = undefined;
@@ -1071,14 +1078,7 @@ export class MoorMasterClient {
             return;
           }
           this.phase = 'resume-pending';
-          this.request({
-            type: 'lease-request',
-            operation: 'resume',
-            role: 'viewer',
-            epoch: resumeLease.epoch,
-            incarnation: resumeLease.incarnation,
-            token: resumeLease.token
-          });
+          this.requestResumeLease();
           return;
         }
         this.sendAttach(pending.options.requestLease ? 'fresh' : 'none');
@@ -1161,6 +1161,11 @@ export class MoorMasterClient {
             return;
           }
           if (decoded.outcome === 3) {
+            this.h.onLeaseResult?.(decoded);
+            if (decoded.reason === LEASE_REFUSAL_BUSY) {
+              this.scheduleResumeRetry();
+              return;
+            }
             this.continuity = 'none';
             if (resume.pendingInput !== undefined) {
               this.h.onInputContinuityLost?.({
@@ -1171,7 +1176,6 @@ export class MoorMasterClient {
                   : { surfaceId: resume.pendingInput.surfaceId })
               });
             }
-            this.h.onLeaseResult?.(decoded);
             this.sendAttach('fresh');
             return;
           }
@@ -1584,6 +1588,37 @@ export class MoorMasterClient {
       resumedLease: mode === 'resumed',
       nonVt: pending.options.nonVt ?? false
     });
+  }
+
+  private requestResumeLease(): void {
+    const resume = this.resumeLease;
+    if (resume === undefined || this.phase !== 'resume-pending') {
+      throw new MoorWireError('BAD_SEQUENCE', 'cannot resume a lease outside resume-pending');
+    }
+    this.request({
+      type: 'lease-request',
+      operation: 'resume',
+      role: 'viewer',
+      epoch: resume.epoch,
+      incarnation: resume.incarnation,
+      token: resume.token
+    });
+  }
+
+  private scheduleResumeRetry(): void {
+    if (this.resumeRetry !== undefined) {
+      throw new MoorWireError('BAD_SEQUENCE', 'lease resume retry is already scheduled');
+    }
+    this.resumeRetry = setTimeout(() => {
+      this.resumeRetry = undefined;
+      if (this.phase !== 'resume-pending') return;
+      try {
+        this.requestResumeLease();
+      } catch (error) {
+        this.fail(error);
+      }
+    }, LEASE_RESUME_RETRY_MS);
+    this.resumeRetry.unref?.();
   }
 
   /**

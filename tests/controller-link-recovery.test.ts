@@ -108,6 +108,10 @@ function leaseRefusedPayload(): Uint8Array {
   return joined(Uint8Array.of(3, 1, 0, 0), integer(1, 4), new Uint8Array(16));
 }
 
+function leaseResumeTerminalRefusedPayload(): Uint8Array {
+  return joined(Uint8Array.of(3, 2, 0, 0), integer(1, 4), new Uint8Array(16));
+}
+
 function leaseReleasedPayload(epoch: number): Uint8Array {
   return joined(Uint8Array.of(2, 0, 0, 0), integer(epoch, 4), new Uint8Array(16));
 }
@@ -463,7 +467,7 @@ class ExpiringLeaseHolder {
             socket,
             codec,
             MoorKind.LEASE_RESULT,
-            this.refuseLeaseResume ? leaseRefusedPayload() : leaseResumedPayload()
+            this.refuseLeaseResume ? leaseResumeTerminalRefusedPayload() : leaseResumedPayload()
           );
           if (this.resumeRefusals === 2) this.secondResumeRefusedResolve();
         } else {

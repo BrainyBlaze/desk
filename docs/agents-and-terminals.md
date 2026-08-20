@@ -139,7 +139,10 @@ resize, and output-delivery authority until reveal. The daemon owns the Moor
 holder connections, fans each session to every viewer (a desktop tab and a
 phone see the same process), restores a fresh snapshot on same-channel reveal,
 and streams output only to visible cells. Unsubscribe is reserved for actual
-surface removal or transport loss.
+surface removal or transport loss. `SUBSCRIBE` carries the fitted geometry for
+new and reconnected channels; later `RESIZE` frames are sent and applied only
+when that geometry changes, so revealing a cell cannot advance the terminal
+revision solely because its layout observer repeated the same dimensions.
 
 Rendering uses hardware WebGL where available, under a shared budget of 8
 contexts — cells beyond the budget (and machines with software-only GL) fall

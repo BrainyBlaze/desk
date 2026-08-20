@@ -262,7 +262,8 @@ export class SessionRuntime {
   /**
    * Subscribe a surface: assign a channelId, ACK it, and emit the baseline
    * SNAPSHOT at the current output offset (§7.4). Returns the channelId and, if
-   * this subscribe ACQUIRED ownership, the geometry that acquisition commanded.
+   * this subscribe acquired ownership and changed the commanded size, the
+   * geometry that acquisition commanded.
    */
   subscribe(
     surfaceId: string,
@@ -279,11 +280,11 @@ export class SessionRuntime {
     this.subscribers.set(channelId, subscriber);
     let commanded: CommandedGeometry | undefined;
     if (this.resizeOwner === undefined) {
-      // First surface in takes resize ownership, and acquisition COMMANDS the
-      // acquirer's geometry (desk#68). It must: after a real disconnect/remount,
-      // SUBSCRIBE is the only geometry carrier guaranteed before the baseline
-      // snapshot. Without commanding here, the owner can render one size while
-      // the child stays at the previous owner's forever.
+      // First surface in takes resize ownership. Acquisition commands the
+      // acquirer's geometry when it differs from the last commanded size
+      // (desk#68); an equal re-acquisition is idempotent. After a real size
+      // change, SUBSCRIBE is the only geometry carrier guaranteed before the
+      // baseline snapshot, so changed geometry must still be applied here.
       // The value is not invented: SUBSCRIBE carries the surface's current xterm
       // rows×cols (TerminalSurface.tsx subscribes with terminal.rows/cols) — the
       // fitted measurement on reveal; on a very first mount it is the terminal's
@@ -622,9 +623,7 @@ export class SessionRuntime {
     }
 
     // Ownership/geometry must settle before serializing the reveal snapshot.
-    // When hide-all returns to the already-commanded size, reacquire ownership
-    // without emitting a redundant master resize or revision bump.
-    const commanded = this.handoffIfOwnerGone(channelId, true);
+    const commanded = this.handoffIfOwnerGone(channelId);
     sub.ready = false;
     this.scheduleSubscriberActivation(channelId, sub);
     return commanded;
@@ -645,8 +644,16 @@ export class SessionRuntime {
    * master to resize the child. The one place either happens, so "who may
    * resize" is a single check. Whether the child's pty ends up at this size is
    * the holder's business — the send is best-effort and may have no link at all.
+   * Repeating the already-commanded size is an idempotent no-op.
    */
-  private commandOwnerSize(surfaceId: number, rows: number, cols: number): CommandedGeometry {
+  private commandOwnerSize(
+    surfaceId: number,
+    rows: number,
+    cols: number
+  ): CommandedGeometry | undefined {
+    if (this.commanded?.rows === rows && this.commanded.cols === cols) {
+      return undefined;
+    }
     this.commanded = { rows, cols };
     this.d.emulator.resize(rows, cols);
     // Geometry is controller-owned: the revision is bumped here and nowhere
@@ -664,33 +671,33 @@ export class SessionRuntime {
    * The successor is the visible subscriber with the LOWEST channelId. channelIds
    * are allocated monotonically, so that is the longest-standing visible surface
    * — an explicit, stable rule rather than whatever the Map happens to yield
-   * first. Its stored geometry is commanded EXACTLY ONCE here; the promoted
-   * surface does not have to re-report to fix the pty, and the demoted one
-   * cannot move it afterwards (its late resizes are observer reports).
+   * first. Its stored geometry is evaluated exactly once here; the promoted
+   * surface does not have to re-report to fix the pty when its size changed,
+   * and the demoted one cannot move it afterwards (its late resizes are
+   * observer reports). Equal-size handoff changes ownership without issuing a
+   * redundant command or revision.
    *
    * With no visible successor the session keeps its owner-less state and the
    * size is left ALONE — a child whose surfaces are all hidden is not resized
    * to nothing, and the first surface to come back takes ownership then.
    */
-  private handoffIfOwnerGone(
-    channelId: number,
-    skipUnchangedCommand = false
-  ): CommandedGeometry | undefined {
+  private handoffIfOwnerGone(channelId: number): CommandedGeometry | undefined {
     if (this.resizeOwner !== undefined) {
       if (this.resizeOwner !== channelId) return undefined;
       if (this.subscribers.get(channelId)?.visible === true) return undefined;
     }
-    return this.electOwner(skipUnchangedCommand);
+    return this.electOwner();
   }
 
   /**
    * The one election (desk#68): the visible subscriber with the lowest
    * channelId — channelIds are allocated monotonically, so that is the
-   * longest-standing visible surface — becomes owner and its stored geometry
-   * is commanded exactly once. With no visible candidate the session is
+   * longest-standing visible surface — becomes owner. Its stored geometry is
+   * commanded once when it differs from the current command; equal geometry is
+   * an idempotent ownership handoff. With no visible candidate the session is
    * owner-less and the size is left alone.
    */
-  private electOwner(skipUnchangedCommand = false): CommandedGeometry | undefined {
+  private electOwner(): CommandedGeometry | undefined {
     this.resizeOwner = undefined;
     let successor: number | undefined;
     for (const [candidate, sub] of this.subscribers) {
@@ -700,13 +707,6 @@ export class SessionRuntime {
     if (successor === undefined) return undefined;
     this.resizeOwner = successor;
     const sub = this.subscribers.get(successor)!;
-    if (
-      skipUnchangedCommand &&
-      this.commanded?.rows === sub.rows &&
-      this.commanded.cols === sub.cols
-    ) {
-      return undefined;
-    }
     return this.commandOwnerSize(successor, sub.rows, sub.cols);
   }
 

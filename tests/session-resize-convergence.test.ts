@@ -103,6 +103,29 @@ const OWNER_SIZE: [number, number] = [48, 95];
 const OBSERVER_SIZE: [number, number] = [41, 137];
 
 describe('desk#68 — one owner of the session size', () => {
+  it('treats an unchanged owner resize as idempotent', () => {
+    const { runtime, emu, sent, browser } = makeRuntime();
+    const owner = runtime.subscribe('surf-owner', ...OWNER_SIZE).channelId;
+    browser.length = 0;
+
+    const commanded = runtime.onBrowserResize(owner, ...OWNER_SIZE);
+    runtime.onMoorOutput(new TextEncoder().encode('x'), 0n);
+
+    expect(commanded).toBeUndefined();
+    expect(emu.resizes).toEqual([OWNER_SIZE]);
+    expect(sent).toEqual([[...OWNER_SIZE, owner]]);
+    expect(browser.map(({ frame }) => frame)).toEqual([
+      {
+        type: BpFrameType.OUTPUT,
+        channelId: owner,
+        generation: 1,
+        revision: 1,
+        offset: 0n,
+        bytes: new TextEncoder().encode('x')
+      }
+    ]);
+  });
+
   it('an observer cannot oscillate the owner: only the owner reaches the master', () => {
     const { runtime, emu, sizes } = makeRuntime();
     const owner = runtime.subscribe('surf-owner', ...OWNER_SIZE).channelId;
@@ -115,10 +138,10 @@ describe('desk#68 — one owner of the session size', () => {
       runtime.onBrowserResize(observer, ...OBSERVER_SIZE);
     }
 
-    // Rule 1 + 2: the FIRST subscriber owns — its acquisition commands once and
-    // each of its re-reports commands again. 48x95 five times, no other value.
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OWNER_SIZE, OWNER_SIZE, OWNER_SIZE]);
-    expect(emu.resizes).toEqual([OWNER_SIZE, OWNER_SIZE, OWNER_SIZE, OWNER_SIZE, OWNER_SIZE]);
+    // Rule 1 + 2: the FIRST subscriber owns and its acquisition commands once;
+    // unchanged owner reports and every observer report are idempotent.
+    expect(sizes()).toEqual([OWNER_SIZE]);
+    expect(emu.resizes).toEqual([OWNER_SIZE]);
     expect(runtime.resizeOwnerChannel).toBe(owner);
   });
 
@@ -138,7 +161,7 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.onBrowserResize(observer, ...OBSERVER_SIZE);
 
     expect(sizes().length).toBe(afterOwner);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]); // acquisition + the owner's report
+    expect(sizes()).toEqual([OWNER_SIZE]);
   });
 
   it('order independence: which surface reports first does not change the result', () => {
@@ -160,7 +183,7 @@ describe('desk#68 — one owner of the session size', () => {
 
     expect(reverse.sizes()).toEqual(forward.sizes());
     // Rule 1: the owner's size, not 41x95 (min) and not 48x137 (max).
-    expect(forward.sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OWNER_SIZE, OWNER_SIZE]);
+    expect(forward.sizes()).toEqual([OWNER_SIZE]);
   });
 
   // The survivor's size ending up on the pty is NOT by itself evidence of a
@@ -175,16 +198,16 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.onBrowserResize(owner, ...OWNER_SIZE);
     runtime.onBrowserResize(next, 24, 80);
     runtime.onBrowserResize(next, ...OBSERVER_SIZE); // re-fits again; still silent
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
 
     runtime.onBrowserVisibility(owner, false);
 
     // Rule 3: exactly one entry, carrying the successor's LATEST stored
     // geometry — 41x137, not 24x80 (its subscribe size), not 41x95 (a min) —
     // sent under the successor's channel. It never had to re-report.
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OBSERVER_SIZE]);
-    expect(sent.length).toBe(3);
-    expect(sent[2]).toEqual([...OBSERVER_SIZE, next]);
+    expect(sizes()).toEqual([OWNER_SIZE, OBSERVER_SIZE]);
+    expect(sent.length).toBe(2);
+    expect(sent[1]).toEqual([...OBSERVER_SIZE, next]);
     expect(runtime.resizeOwnerChannel).toBe(next);
   });
 
@@ -195,13 +218,13 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.onBrowserResize(owner, ...OWNER_SIZE);
     runtime.onBrowserResize(next, 24, 80);
     runtime.onBrowserResize(next, ...OBSERVER_SIZE);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
 
     runtime.unsubscribe(owner);
 
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OBSERVER_SIZE]);
-    expect(sent.length).toBe(3);
-    expect(sent[2]).toEqual([...OBSERVER_SIZE, next]);
+    expect(sizes()).toEqual([OWNER_SIZE, OBSERVER_SIZE]);
+    expect(sent.length).toBe(2);
+    expect(sent[1]).toEqual([...OBSERVER_SIZE, next]);
     expect(runtime.resizeOwnerChannel).toBe(next);
     expect(runtime.subscriberCount).toBe(1);
   });
@@ -219,7 +242,7 @@ describe('desk#68 — one owner of the session size', () => {
     // surface attached longest — takes it, so the size is 41x137 and not 30x90.
     expect(runtime.resizeOwnerChannel).toBe(older);
     expect(newer).toBeGreaterThan(older);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OBSERVER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE, OBSERVER_SIZE]);
   });
 
   it('promotion skips hidden candidates even when they are longer-standing', () => {
@@ -235,7 +258,7 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.unsubscribe(owner);
 
     expect(runtime.resizeOwnerChannel).toBe(newer);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, [30, 90]]);
+    expect(sizes()).toEqual([OWNER_SIZE, [30, 90]]);
   });
 
   // Isolates the "owner is still visible" guard in the handoff. Every other
@@ -252,7 +275,7 @@ describe('desk#68 — one owner of the session size', () => {
     // Clients re-announce visibility on mount and on refocus. The owner saying
     // "still visible" is not a handoff trigger and must not re-apply anything.
     runtime.onBrowserVisibility(first, true);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
     expect(runtime.resizeOwnerChannel).toBe(first);
 
     // And a surface COMING BACK does not steal the size from the live owner,
@@ -261,7 +284,7 @@ describe('desk#68 — one owner of the session size', () => {
     expect(runtime.resizeOwnerChannel).toBe(second);
     runtime.onBrowserVisibility(first, true);
     expect(runtime.resizeOwnerChannel).toBe(second);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OBSERVER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE, OBSERVER_SIZE]);
   });
 
   it('a late resize from the DEMOTED owner after promotion is ignored', () => {
@@ -275,8 +298,8 @@ describe('desk#68 — one owner of the session size', () => {
     expect(runtime.onBrowserResize(owner, ...OWNER_SIZE)).toBeUndefined();
     expect(runtime.onBrowserResize(owner, 60, 200)).toBeUndefined();
 
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, OBSERVER_SIZE]);
-    expect(emu.resizes).toEqual([OWNER_SIZE, OWNER_SIZE, OBSERVER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE, OBSERVER_SIZE]);
+    expect(emu.resizes).toEqual([OWNER_SIZE, OBSERVER_SIZE]);
     expect(runtime.commandedSize()).toEqual({ rows: 41, cols: 137 });
     expect(runtime.resizeOwnerChannel).toBe(next);
   });
@@ -287,7 +310,7 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.onBrowserResize(only, ...OWNER_SIZE);
 
     runtime.onBrowserVisibility(only, false);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
     expect(runtime.resizeOwnerChannel).toBeUndefined();
 
     // A hidden keep-alive mount keeps reporting; nothing may reach the child.
@@ -295,8 +318,8 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.unsubscribe(only);
 
     // Rule 4: still 48x95 — not 24x80, not 0x0, not a default.
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
-    expect(emu.resizes).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
+    expect(emu.resizes).toEqual([OWNER_SIZE]);
     expect(runtime.commandedSize()).toEqual({ rows: 48, cols: 95 });
     expect(runtime.subscriberCount).toBe(0);
   });
@@ -307,12 +330,12 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.onBrowserResize(only, ...OWNER_SIZE);
     runtime.onBrowserVisibility(only, false);
     runtime.onBrowserResize(only, 24, 80); // measured while hidden — recorded, not commanded
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
 
     runtime.onBrowserVisibility(only, true);
 
     expect(runtime.resizeOwnerChannel).toBe(only);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE, [24, 80]]);
+    expect(sizes()).toEqual([OWNER_SIZE, [24, 80]]);
   });
 
   it('hide-all and reveal at the unchanged size does not send a redundant resize', () => {
@@ -365,7 +388,7 @@ describe('desk#68 — one owner of the session size', () => {
     expect(runtime.unsubscribe(observer)).toBeUndefined();
 
     expect(runtime.resizeOwnerChannel).toBe(owner);
-    expect(sizes()).toEqual([OWNER_SIZE, OWNER_SIZE]);
+    expect(sizes()).toEqual([OWNER_SIZE]);
     expect(runtime.subscriberCount).toBe(1);
   });
 
@@ -380,7 +403,7 @@ describe('desk#68 — one owner of the session size', () => {
     const observer = joining.channelId;
     expect(joining.commanded).toBeUndefined();
 
-    expect(runtime.onBrowserResize(owner, ...OWNER_SIZE)).toEqual({ rows: 48, cols: 95, surfaceId: owner });
+    expect(runtime.onBrowserResize(owner, ...OWNER_SIZE)).toBeUndefined();
     expect(runtime.onBrowserResize(observer, ...OBSERVER_SIZE)).toBeUndefined();
     expect(runtime.onBrowserResize(999, 10, 10)).toBeUndefined();
     expect(runtime.commandedSize()).toEqual({ rows: 48, cols: 95 });
@@ -437,17 +460,14 @@ describe('desk#68 — DaemonCore records geometry only for a COMMANDED resize', 
       core.onBrowserResizeByChannel(observer, ...OBSERVER_SIZE);
     }
 
-    // Two records for two subscribes and five resizes — the owner's acquisition
-    // and the owner's report, both at the owner's exact size. 41x137 never
-    // appears, and neither does any size no surface reported.
-    expect(recorded).toEqual([
-      { sessionId: 's1', rows: 48, cols: 95 },
-      { sessionId: 's1', rows: 48, cols: 95 }
-    ]);
-    expect(core.onBrowserResizeByChannel(owner, ...OWNER_SIZE)).toEqual({
+    // Only the acquisition is recorded; unchanged owner reports and observer
+    // reports do not write the durable geometry ledger.
+    expect(recorded).toEqual([{ sessionId: 's1', rows: 48, cols: 95 }]);
+    expect(core.onBrowserResizeByChannel(owner, 50, 100)).toEqual({
       routed: true,
-      commanded: { rows: 48, cols: 95, surfaceId: owner }
+      commanded: { rows: 50, cols: 100, surfaceId: owner }
     });
+    expect(recorded.at(-1)).toEqual({ sessionId: 's1', rows: 50, cols: 100 });
     expect(core.onBrowserResizeByChannel(observer, ...OBSERVER_SIZE)).toEqual({ routed: true });
   });
 
@@ -465,7 +485,6 @@ describe('desk#68 — DaemonCore records geometry only for a COMMANDED resize', 
 
     expect(recorded).toEqual([
       { sessionId: 's1', rows: 48, cols: 95 }, // the owner's acquisition
-      { sessionId: 's1', rows: 48, cols: 95 }, // the owner's report
       { sessionId: 's1', rows: 41, cols: 137 } // the handoff to the survivor
     ]);
   });
@@ -488,18 +507,13 @@ describe('desk#68 — DaemonCore records geometry only for a COMMANDED resize', 
     ).resolves.toBeUndefined();
 
     expect(core.onBrowserResizeByChannel(owner, ...OWNER_SIZE)).toEqual({ routed: false });
-    expect(core.onBrowserResizeByChannel(next, ...OBSERVER_SIZE)).toEqual({
-      routed: true,
-      commanded: { rows: 41, cols: 137, surfaceId: next }
-    });
+    expect(core.onBrowserResizeByChannel(next, ...OBSERVER_SIZE)).toEqual({ routed: true });
     expect(masterOut).toEqual([
       [48, 95, owner],
-      [41, 137, next],
       [41, 137, next]
     ]);
     expect(recorded).toEqual([
       { sessionId: 's1', rows: 48, cols: 95 },
-      { sessionId: 's1', rows: 41, cols: 137 },
       { sessionId: 's1', rows: 41, cols: 137 }
     ]);
   });

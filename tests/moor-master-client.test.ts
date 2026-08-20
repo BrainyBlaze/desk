@@ -914,6 +914,62 @@ describe('MoorMasterClient', () => {
     expect(retry.payload).toEqual(originalInput.payload);
   });
 
+  it('retries a transient BUSY lease resume without losing ambiguous input', async () => {
+    const first = await start();
+    await completeAttach(first.holder, first.client, first.identity);
+    first.client.sendInput(text('survive-busy'), 42);
+    const originalInput = await first.holder.next();
+    const snapshot = first.client.reconnectSnapshot()!;
+    first.client.close();
+
+    const losses: Array<{ requestId: bigint; bytes: Uint8Array; surfaceId?: number }> = [];
+    const holder = new FakeHolder();
+    await holder.listen();
+    const client = new MoorMasterClient(
+      holder.sockPath,
+      GENERATION,
+      { onInputContinuityLost: (pending) => losses.push(pending) },
+      {
+        resumeCursor: snapshot.output,
+        resumeLease: snapshot.lease,
+        requireSameIncarnation: true
+      }
+    );
+    cleanups.push(() => {
+      client.close();
+      holder.close();
+    });
+    await client.connect();
+    const attaching = client.attach({ columns: 80, rows: 24, requestLease: true });
+    await holder.next();
+    const identity = posixMoorIdentity(holder.sockPath);
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+
+    const firstResume = await holder.next();
+    expect(firstResume.kind).toBe(MoorKind.LEASE_REQUEST);
+    holder.send(
+      MoorKind.LEASE_RESULT,
+      joined(Uint8Array.of(3, 1, 0, 0), integer(5, 4), new Uint8Array(16))
+    );
+
+    const retriedResume = await holder.next();
+    expect(retriedResume.kind).toBe(MoorKind.LEASE_REQUEST);
+    expect(retriedResume.payload).toEqual(firstResume.payload);
+    expect(losses).toEqual([]);
+    holder.send(MoorKind.LEASE_RESULT, resumedLeaseResultPayload(5));
+
+    expect((await holder.next()).kind).toBe(MoorKind.ATTACH);
+    holder.send(MoorKind.ATTACH_ACK, statusPayload(identity, 5));
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    await attaching;
+
+    expect(losses).toEqual([]);
+    expect(client.retryPendingInput()).toBe(true);
+    const retry = await holder.next();
+    expect(retry.kind).toBe(MoorKind.INPUT);
+    expect(retry.payload).toEqual(originalInput.payload);
+  });
+
   it('surfaces ambiguous input and never replays it when resume falls back to a fresh epoch', async () => {
     const first = await start();
     await completeAttach(first.holder, first.client, first.identity);
