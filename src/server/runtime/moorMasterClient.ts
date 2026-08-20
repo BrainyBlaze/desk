@@ -70,6 +70,7 @@ export interface MoorMasterClientHandlers {
     requestId: bigint;
     bytes: Uint8Array;
     surfaceId?: number;
+    reason: number;
   }) => void;
   onTerminateResult?: (result: Holder<'terminate-result'>) => void;
   onLeaseResult?: (result: Holder<'lease-result'>) => void;
@@ -84,7 +85,7 @@ export interface MoorMasterClientHandlers {
   onLivenessRestored?: () => void;
   /** A wire/protocol violation on this connection — the client is closed. */
   onProtocolError?: (error: MoorWireError) => void;
-  onClose?: () => void;
+  onClose?: (reason: Error) => void;
   /** Raw incoming bytes, before reassembly — for diagnostics/tracing. */
   onRaw?: (chunk: Uint8Array) => void;
 }
@@ -224,6 +225,7 @@ type Phase =
 
 export class MoorMasterClient {
   private sock: Socket | null = null;
+  private socketFailure: Error | undefined;
   private readonly codec = new MoorCodec();
   private readonly inboundBatches: MoorFrameBatch[] = [];
   private inboundBatchIndex = 0;
@@ -423,10 +425,22 @@ export class MoorMasterClient {
         this.pendingConnect = undefined;
         this.phase = 'connected';
         sock.on('data', (chunk: Buffer) => this.onData(chunk));
-        sock.on('error', () => this.teardown(new Error('moor holder connection errored')));
-        sock.on('close', () => {
-          this.teardown(new Error('moor holder closed the connection'));
-          this.h.onClose?.();
+        sock.on('error', (error: Error) => {
+          const failure = new Error(`moor holder connection error: ${error.message}`, {
+            cause: error
+          });
+          this.socketFailure = failure;
+          this.teardown(failure);
+        });
+        sock.on('close', (hadError: boolean) => {
+          const failure = this.socketFailure ?? new Error(
+            hadError
+              ? 'moor holder closed the connection after a transport error'
+              : 'moor holder closed the connection'
+          );
+          this.socketFailure = undefined;
+          this.teardown(failure);
+          this.h.onClose?.(failure);
         });
         resolve();
       });
@@ -1171,6 +1185,7 @@ export class MoorMasterClient {
               this.h.onInputContinuityLost?.({
                 requestId: resume.pendingInput.requestId,
                 bytes: resume.pendingInput.bytes.slice(),
+                reason: decoded.reason,
                 ...(resume.pendingInput.surfaceId === undefined
                   ? {}
                   : { surfaceId: resume.pendingInput.surfaceId })

@@ -23,10 +23,15 @@ export interface EmulatorEvent {
   data?: string;
 }
 
+export interface EmulatorSnapshotOptions {
+  /** Number of retained scrollback rows to include before the live screen. */
+  scrollback?: number;
+}
+
 /**
  * The authoritative headless emulator, as the daemon uses it. One instance per
- * LIVE terminal session (§3.3). Scrollback is 0 (history comes from the journal),
- * so `readTailText` reflects only the on-screen rows.
+ * LIVE terminal session (§3.3). Its bounded scrollback is the ranged-history
+ * authority, while browser baselines may request only the current screen.
  */
 export interface EmulatorPort {
   /** Feed raw output bytes from the master (binary end-to-end, §7.8). */
@@ -49,7 +54,7 @@ export interface EmulatorPort {
    */
   readHistoryText?(rows: number, offset: number): { lines: string[]; totalAvailable: number };
   /** A restorable display snapshot string (SerializeAddon, §7.3). */
-  serialize(): string;
+  serialize(options?: EmulatorSnapshotOptions): string;
   /** Current cursor position (for CPR/DSR worker replies, §7.7). */
   cursor(): { row: number; col: number };
   /**

@@ -922,7 +922,7 @@ describe('MoorMasterClient', () => {
     const snapshot = first.client.reconnectSnapshot()!;
     first.client.close();
 
-    const losses: Array<{ requestId: bigint; bytes: Uint8Array; surfaceId?: number }> = [];
+    const losses: Array<{ requestId: bigint; bytes: Uint8Array; surfaceId?: number; reason: number }> = [];
     const holder = new FakeHolder();
     await holder.listen();
     const client = new MoorMasterClient(
@@ -978,7 +978,7 @@ describe('MoorMasterClient', () => {
     const snapshot = first.client.reconnectSnapshot()!;
     first.client.close();
 
-    const losses: Array<{ requestId: bigint; bytes: Uint8Array; surfaceId?: number }> = [];
+    const losses: Array<{ requestId: bigint; bytes: Uint8Array; surfaceId?: number; reason: number }> = [];
     const holder = new FakeHolder();
     await holder.listen();
     const client = new MoorMasterClient(
@@ -1014,7 +1014,7 @@ describe('MoorMasterClient', () => {
     await attaching;
 
     expect(losses).toEqual([
-      { requestId: 1n, bytes: text('must-not-cross-epochs'), surfaceId: 42 }
+      { requestId: 1n, bytes: text('must-not-cross-epochs'), surfaceId: 42, reason: 2 }
     ]);
     expect(client.retryPendingInput()).toBe(false);
     client.sendInput(text('new'));
@@ -1418,6 +1418,18 @@ describe('MoorMasterClient', () => {
     await holder.next();
     holder.connection!.end();
     await expect(attached).rejects.toThrow(/closed/);
+  });
+
+  it('preserves the socket error that caused a controller link to close', async () => {
+    const closes: Error[] = [];
+    const { client } = await start({ onClose: (error: Error) => closes.push(error) });
+    const socket = (client as unknown as { sock: Socket | null }).sock!;
+
+    socket.emit('error', new Error('forced transport fault'));
+    await waitFor(() => closes.length === 1, 'controller close diagnostic');
+
+    expect(closes[0]).toBeInstanceOf(Error);
+    expect(closes[0]?.message).toContain('forced transport fault');
   });
 
   it('delivers output after attach, sends input at the lease epoch, and acks output', async () => {

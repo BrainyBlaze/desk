@@ -137,8 +137,11 @@ daemon for transport. One binary WebSocket per browser tab carries the tab's
 terminal surfaces. A hidden surface keeps its channel but relinquishes input,
 resize, and output-delivery authority until reveal. The daemon owns the Moor
 holder connections, fans each session to every viewer (a desktop tab and a
-phone see the same process), restores a fresh snapshot on same-channel reveal,
-and streams output only to visible cells. Unsubscribe is reserved for actual
+phone see the same process), retains one bounded shared output suffix, and
+catches a same-channel reveal up with one contiguous packet when its cursor and
+geometry revision are still valid. A gap or revision change falls back to a
+current-screen snapshot; retained history remains available through the frozen
+scrollback viewer. Output streams only to visible cells. Unsubscribe is reserved for actual
 surface removal or transport loss. `SUBSCRIBE` carries the fitted geometry for
 new and reconnected channels; later `RESIZE` frames are sent and applied only
 when that geometry changes, so revealing a cell cannot advance the terminal

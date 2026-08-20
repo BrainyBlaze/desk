@@ -5,6 +5,7 @@ import { ReplySuppressionAddon } from './replySuppressionAddon.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
 import { describeBpError } from './terminalBpError.js';
 import { describeSessionExit } from './terminalExitLine.js';
+import { applyTerminalSnapshot } from './terminalSnapshot.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -853,21 +854,23 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     };
 
     // Subscribe this surface to the shared broker connection (one WebSocket per
-    // browser tab). The broker streams live `output` for the session only while
-    // at least one surface is visible; a hidden surface receives nothing, so a
-    // warm-but-hidden keep-alive cell costs no parse/render. On reveal the broker
-    // sends a self-contained snapshot, which we apply after a reset.
+    // browser tab). Still-subscribed hidden surfaces do no xterm parse/render
+    // work; the server retains their cursor and catches reveal up with one
+    // bounded OUTPUT packet. A new subscription, cursor gap, or revision change
+    // receives a current-screen snapshot and resets this xterm once.
     binaryTerminalBroker.subscribe(surfaceId, daemonSessionId, terminal.rows, terminal.cols, cellVisibleRef.current, {
       onOutput: (bytes) => {
         // Raw output bytes, written binary end-to-end (no premature string decode).
         terminal.write(bytes);
       },
       onSnapshot: (data) => {
-        terminal.reset();
-        terminal.options.theme = { ...builtThemeRef.current.terminal };
-        terminal.write(data);
-        // Repair the PTY size once if the settled cell differs from the daemon.
-        stabilize();
+        applyTerminalSnapshot(
+          terminal,
+          data,
+          builtThemeRef.current.terminal,
+          // Repair the PTY size only after xterm consumed the baseline.
+          stabilize
+        );
       },
       onExit: (outcome) => {
         // The tagged ending as moor reported it: exited N, signalled N, or

@@ -19,8 +19,9 @@
  *
  *  - There is no client "request snapshot" frame. A gap still re-subscribes,
  *    while visibility uses the protocol's VISIBILITY frame on the existing
- *    channel. The server gates hidden output and emits a fresh same-channel
- *    snapshot on reveal, so view changes never churn subscription ownership.
+ *    channel. The server gates hidden output, retains that subscriber cursor,
+ *    and catches reveal up with one bounded OUTPUT packet. A new subscription,
+ *    cursor gap, or revision gap emits a current-screen snapshot.
  */
 import {
   BP_CONN_CHANNEL,

@@ -12,10 +12,11 @@
 // restore (§8.1), GAP-driven resync (§7.4), and native surfaces (§6.9) are
 // documented extension points wired the same way.
 
-import { BpFrameType, type BpFrame } from '../browserProtocol/index.js';
+import { BP_SNAP_CHUNK, BpFrameType, type BpFrame } from '../browserProtocol/index.js';
 import type { MoorExitOutcome } from '../controlPlane/contract.js';
 import { InMemoryCmdCache, type DeliveryTxn, applyDelivery } from '../delivery/index.js';
 import { type EmulatorPort } from './emulatorPort.js';
+import { TerminalOutputRing } from './terminalOutputRing.js';
 
 export interface SessionRuntimeDeps {
   sessionId: string;
@@ -58,6 +59,9 @@ interface Subscriber {
   cols: number;
   visible: boolean;
   ready: boolean;
+  hasBaseline: boolean;
+  offset: bigint;
+  revision: number;
   activation?: Promise<void>;
 }
 
@@ -98,6 +102,8 @@ export class SessionRuntime {
   private nextChannelId = 1;
   /** Byte high-water of output emitted (snapshot baseline offset, §7.4). */
   private outputOffset = 0n;
+  /** Shared bounded suffix used to catch hidden subscribers up without a reset. */
+  private readonly outputReplay = new TerminalOutputRing(BP_SNAP_CHUNK);
   /** Session-scoped Moor delivery frontier; survives individual client attempts. */
   private outputDelivery: OutputDelivery | undefined;
   /** All emulator work shares one session frontier, including attach preambles. */
@@ -225,17 +231,20 @@ export class SessionRuntime {
     this.d.emulator.write(bytes);
     const deliver = (): void => {
       if (this.disposed) return;
+      this.outputReplay.append(offset, bytes);
       this.outputOffset = end;
       for (const [channelId, subscriber] of this.subscribers) {
         if (!subscriber.visible || !subscriber.ready) continue;
-        this.sendSubscriber(channelId, {
+        if (!this.sendSubscriber(channelId, {
           type: BpFrameType.OUTPUT,
           channelId,
           generation: this.d.generation,
           revision: this.revision,
           offset,
           bytes
-        });
+        })) continue;
+        subscriber.offset = end;
+        subscriber.revision = this.revision;
       }
       for (const [channelId, subscriber] of this.subscribers) {
         if (subscriber.visible && !subscriber.ready) {
@@ -276,7 +285,16 @@ export class SessionRuntime {
     // directly (e.g. unit tests).
     const channelId = assignedChannelId ?? this.nextChannelId++;
     if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return undefined;
-    const subscriber: Subscriber = { surfaceId, rows, cols, visible: true, ready: false };
+    const subscriber: Subscriber = {
+      surfaceId,
+      rows,
+      cols,
+      visible: true,
+      ready: false,
+      hasBaseline: false,
+      offset: this.outputOffset,
+      revision: this.revision
+    };
     this.subscribers.set(channelId, subscriber);
     let commanded: CommandedGeometry | undefined;
     if (this.resizeOwner === undefined) {
@@ -341,22 +359,42 @@ export class SessionRuntime {
 
   private activateSubscriber(channelId: number, subscriber: Subscriber): void {
     if (this.subscribers.get(channelId) !== subscriber || !subscriber.visible) return;
+    if (subscriber.hasBaseline && subscriber.revision === this.revision) {
+      const replay = this.outputReplay.read(subscriber.offset, this.outputOffset);
+      if (replay !== undefined) {
+        if (replay.length > 0 && !this.sendSubscriber(channelId, {
+          type: BpFrameType.OUTPUT,
+          channelId,
+          generation: this.d.generation,
+          revision: this.revision,
+          offset: subscriber.offset,
+          bytes: replay
+        })) return;
+        subscriber.offset = this.outputOffset;
+        subscriber.revision = this.revision;
+        subscriber.ready = true;
+        return;
+      }
+    }
     let text: string;
     try {
-      text = this.d.emulator.serialize();
+      text = this.d.emulator.serialize({ scrollback: 0 });
     } catch {
       this.failSubscriber(channelId);
       return;
     }
-    subscriber.ready = true;
-    this.sendSubscriber(channelId, {
+    if (!this.sendSubscriber(channelId, {
       type: BpFrameType.SNAPSHOT,
       channelId,
       generation: this.d.generation,
       revision: this.revision,
       offset: this.outputOffset,
       text
-    });
+    })) return;
+    subscriber.hasBaseline = true;
+    subscriber.offset = this.outputOffset;
+    subscriber.revision = this.revision;
+    subscriber.ready = true;
   }
 
   private sendSubscriber(channelId: number, frame: BpFrame): boolean {
@@ -616,8 +654,8 @@ export class SessionRuntime {
     if (sub === undefined || sub.visible === visible) return undefined;
     sub.visible = visible;
     if (!visible) {
-      // A hidden subscriber remains attached but receives no deltas. Its next
-      // reveal re-baselines from the authoritative emulator on this same channel.
+      // A hidden subscriber remains attached and keeps its last delivered cursor.
+      // Reveal catches up from the shared output suffix when continuity is intact.
       sub.ready = false;
       return this.handoffIfOwnerGone(channelId);
     }

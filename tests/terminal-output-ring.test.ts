@@ -1,46 +1,45 @@
 import { describe, expect, it } from 'vitest';
-import { TerminalOutputRing } from '../src/server/terminalOutputRing';
+import { TerminalOutputRing } from '../src/shared/runtime/terminalOutputRing.js';
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 describe('TerminalOutputRing', () => {
-  it('replays appended chunks in order', () => {
+  it('returns one contiguous byte packet across appended chunks', () => {
     const ring = new TerminalOutputRing(100);
 
-    ring.append('one');
-    ring.append('two');
-    ring.append('three');
+    ring.append(10n, encoder.encode('one'));
+    ring.append(13n, encoder.encode('two'));
+    ring.append(16n, encoder.encode('three'));
 
-    expect(ring.snapshot()).toBe('onetwothree');
-    expect(ring.bytes).toBe(Buffer.byteLength('onetwothree'));
+    expect(decoder.decode(ring.read(10n, 21n))).toBe('onetwothree');
+    expect(ring.bytes).toBe(11);
   });
 
-  it('trims the oldest chunks when the byte cap is exceeded', () => {
-    const ring = new TerminalOutputRing(6);
-
-    ring.append('ab');
-    ring.append('cd');
-    ring.append('ef');
-    ring.append('gh');
-
-    expect(ring.snapshot()).toBe('cdefgh');
-    expect(ring.bytes).toBe(6);
-  });
-
-  it('keeps only the capped suffix of an oversized chunk', () => {
+  it('retains an exact capped suffix and rejects a cursor before it', () => {
     const ring = new TerminalOutputRing(5);
 
-    ring.append('123456789');
+    ring.append(20n, encoder.encode('123456789'));
 
-    expect(ring.snapshot()).toBe('56789');
+    expect(ring.read(20n, 29n)).toBeUndefined();
+    expect(decoder.decode(ring.read(24n, 29n))).toBe('56789');
     expect(ring.bytes).toBe(5);
   });
 
-  it('clears replay data', () => {
+  it('resets continuity when the next chunk starts at a different offset', () => {
     const ring = new TerminalOutputRing(100);
-    ring.append('data');
+    ring.append(0n, encoder.encode('old'));
 
-    ring.clear();
+    ring.append(10n, encoder.encode('new'));
 
-    expect(ring.snapshot()).toBe('');
-    expect(ring.bytes).toBe(0);
+    expect(ring.read(0n, 13n)).toBeUndefined();
+    expect(decoder.decode(ring.read(10n, 13n))).toBe('new');
+  });
+
+  it('returns an empty packet when the cursor is already current', () => {
+    const ring = new TerminalOutputRing(100);
+    ring.append(5n, encoder.encode('data'));
+
+    expect(ring.read(9n, 9n)).toEqual(new Uint8Array());
   });
 });

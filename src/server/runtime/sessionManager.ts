@@ -745,7 +745,7 @@ export class SessionManager {
             delete opts.resumeSnapshot!.lease!.pendingInput;
           }
           console.error(
-            `[desk] input continuity lost for ${sessionId} generation ${opts.generation} request ${pending.requestId} surface ${pending.surfaceId ?? 'unknown'}`
+            `[desk] input continuity lost for ${sessionId} generation ${opts.generation} request ${pending.requestId} surface ${pending.surfaceId ?? 'unknown'} lease-refusal-reason ${pending.reason}`
           );
           if (pending.surfaceId !== undefined && pending.surfaceId !== 0) {
             this.sendInputUnavailable(sessionId, pending.surfaceId);
@@ -771,11 +771,16 @@ export class SessionManager {
             // Lease or link lost between query and reply: §8 silence.
           }
         },
-        onClose: () => {
+        onClose: (reason) => {
           // A controller transport is not the holder. Losing the CURRENT link
           // replaces only link/status state with an exact-generation recovery
           // slot; it never retires, terminates, kills, or allocates.
           if (attached && link !== undefined && this.masters.get(sessionId) === link) {
+            if (reason.cause !== undefined) {
+              console.error(
+                `[desk] moor controller transport failed for ${sessionId} generation ${opts.generation}: ${reason.message}`
+              );
+            }
             const reconnectSnapshot = client.reconnectSnapshot();
             this.beginControllerRecovery({
               sessionId,

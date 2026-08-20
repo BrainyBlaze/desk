@@ -15,7 +15,11 @@
 // state: the defect is the repetition, and a final-state assertion cannot see it.
 
 import { describe, expect, it } from 'vitest';
-import { BpFrameType, type BpFrame } from '../src/shared/browserProtocol/index.js';
+import {
+  BP_SNAP_CHUNK,
+  BpFrameType,
+  type BpFrame
+} from '../src/shared/browserProtocol/index.js';
 import { InMemoryCmdCache } from '../src/shared/delivery/index.js';
 import { GenerationLedger, InMemoryGenerationLedger } from '../src/shared/controlPlane/index.js';
 import {
@@ -30,6 +34,7 @@ import {
 
 class FakeEmu implements EmulatorPort {
   readonly resizes: [number, number][] = [];
+  readonly serializeOptions: ({ scrollback?: number } | undefined)[] = [];
   write(): void {}
   resize(rows: number, cols: number): void {
     this.resizes.push([rows, cols]);
@@ -37,7 +42,8 @@ class FakeEmu implements EmulatorPort {
   readTailText(): string[] {
     return [];
   }
-  serialize(): string {
+  serialize(options?: { scrollback?: number }): string {
+    this.serializeOptions.push(options);
     // Like the real SerializeAddon, the serialized display reflects the
     // emulator's CURRENT geometry — which is what lets a test see whether a
     // snapshot was taken before or after a resize was applied.
@@ -349,13 +355,14 @@ describe('desk#68 — one owner of the session size', () => {
     expect(sizes()).toEqual([OWNER_SIZE]);
   });
 
-  it('keeps a hidden channel attached, suppresses deltas, and snapshots it on reveal', () => {
+  it('keeps a hidden channel attached and catches it up with one contiguous delta on reveal', () => {
     const { runtime, browser } = makeRuntime();
     const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
     browser.length = 0;
 
     runtime.onBrowserVisibility(only, false);
-    runtime.onMoorOutput(new TextEncoder().encode('hidden'), 0n);
+    runtime.onMoorOutput(new TextEncoder().encode('hidden-1'), 0n);
+    runtime.onMoorOutput(new TextEncoder().encode('hidden-2'), 8n);
     expect(browser).toEqual([]);
     expect(runtime.subscriberCount).toBe(1);
 
@@ -364,16 +371,69 @@ describe('desk#68 — one owner of the session size', () => {
       {
         channelId: only,
         frame: {
-          type: BpFrameType.SNAPSHOT,
+          type: BpFrameType.OUTPUT,
           channelId: only,
           generation: 1,
           revision: 1,
-          offset: 6n,
-          text: 'SCREEN 48x95'
+          offset: 0n,
+          bytes: new TextEncoder().encode('hidden-1hidden-2')
         }
       }
     ]);
     expect(runtime.subscriberCount).toBe(1);
+  });
+
+  it('falls back to a viewport-only snapshot when hidden output exceeds the replay cap', () => {
+    const { runtime, emu, browser } = makeRuntime();
+    const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
+    browser.length = 0;
+    emu.serializeOptions.length = 0;
+
+    runtime.onBrowserVisibility(only, false);
+    runtime.onMoorOutput(new Uint8Array(BP_SNAP_CHUNK + 1), 0n);
+    runtime.onBrowserVisibility(only, true);
+
+    expect(browser).toEqual([
+      {
+        channelId: only,
+        frame: {
+          type: BpFrameType.SNAPSHOT,
+          channelId: only,
+          generation: 1,
+          revision: 1,
+          offset: BigInt(BP_SNAP_CHUNK + 1),
+          text: 'SCREEN 48x95'
+        }
+      }
+    ]);
+    expect(emu.serializeOptions).toEqual([{ scrollback: 0 }]);
+  });
+
+  it('uses a viewport-only snapshot when reveal changes the terminal revision', () => {
+    const { runtime, emu, browser } = makeRuntime();
+    const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
+    browser.length = 0;
+    emu.serializeOptions.length = 0;
+
+    runtime.onBrowserVisibility(only, false);
+    runtime.onMoorOutput(new TextEncoder().encode('hidden'), 0n);
+    runtime.onBrowserResize(only, ...OBSERVER_SIZE);
+    runtime.onBrowserVisibility(only, true);
+
+    expect(browser).toEqual([
+      {
+        channelId: only,
+        frame: {
+          type: BpFrameType.SNAPSHOT,
+          channelId: only,
+          generation: 1,
+          revision: 2,
+          offset: 6n,
+          text: 'SCREEN 41x137'
+        }
+      }
+    ]);
+    expect(emu.serializeOptions).toEqual([{ scrollback: 0 }]);
   });
 
   it('an observer leaving changes nothing: no re-election, no re-command', () => {

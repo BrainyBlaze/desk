@@ -13,7 +13,12 @@
 import { createRequire } from 'node:module';
 import type { Terminal as XtermTerminal } from '@xterm/headless';
 import type { SerializeAddon as XtermSerializeAddon } from '@xterm/addon-serialize';
-import { type EmulatorEvent, type EmulatorFactory, type EmulatorPort } from '../../shared/runtime/emulatorPort.js';
+import {
+  type EmulatorEvent,
+  type EmulatorFactory,
+  type EmulatorPort,
+  type EmulatorSnapshotOptions
+} from '../../shared/runtime/emulatorPort.js';
 
 /**
  * Retained history bound per session (screen rows + scrollback). Matches the
@@ -87,8 +92,8 @@ export class XtermEmulator implements EmulatorPort {
     return { lines, totalAvailable };
   }
 
-  serialize(): string {
-    return this.serializer.serialize();
+  serialize(options?: EmulatorSnapshotOptions): string {
+    return this.serializer.serialize(options);
   }
 
   cursor(): { row: number; col: number } {
