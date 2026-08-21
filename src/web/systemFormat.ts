@@ -22,6 +22,30 @@ export function formatPercent(value: number | undefined): string {
   return value === undefined ? 'init' : `${Math.round(value)}%`;
 }
 
+/**
+ * Tile text while no snapshot has arrived: 'init' only as long as the pulse
+ * is still expected to deliver one. Once the pulse itself has failed, 'init'
+ * is a lie — it reads as loading while nothing is coming.
+ */
+export function telemetryPlaceholder(systemError: string | null | undefined): string {
+  return systemError ? 'no data' : 'init';
+}
+
+/**
+ * One telemetry tile's text, with a single precedence every tile shares: the
+ * measurement when present, else the domain's "unmeasured" label while a
+ * snapshot exists, else the shared placeholder. Centralised so no tile can
+ * fall back to a loading-looking string of its own during a failed pulse.
+ */
+export function telemetryTileText(
+  measured: string | false | null | undefined,
+  unmeasured: string,
+  snapshotPresent: boolean,
+  placeholder: string
+): string {
+  return measured || (snapshotPresent ? unmeasured : placeholder);
+}
+
 /** "14.2/31.5G" VRAM summary from nvidia-smi's MiB figures. */
 export function formatGpuMemory(usedMiB: number | undefined, totalMiB: number | undefined): string {
   if (usedMiB === undefined || totalMiB === undefined) {

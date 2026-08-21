@@ -24,6 +24,8 @@ import {
   formatRate,
   formatStorage,
   formatUptime,
+  telemetryPlaceholder,
+  telemetryTileText,
   type SparkSample
 } from './systemFormat.js';
 import type { DeskSnapshot, SystemSnapshot } from './types.js';
@@ -62,6 +64,14 @@ function WorkspaceHeaderImpl({
   const totals = snapshot?.view.totals;
   const nvidia = systemSnapshot?.gpu.nvidia;
   const intel = systemSnapshot?.gpu.intel;
+  // The pulse is failing whenever an error is set — whether it never delivered
+  // a first snapshot or died after one. A stale snapshot must still read as a
+  // warning, not as calm live numbers.
+  const pulseDown = Boolean(systemError);
+  const placeholder = telemetryPlaceholder(systemError);
+  const warnTone = pulseDown ? ('warn' as const) : undefined;
+  const tileText = (measured: string | false | null | undefined, unmeasured: string): string =>
+    telemetryTileText(measured, unmeasured, Boolean(systemSnapshot), placeholder);
   const bleeps = useBleeps<DeskBleepName>();
   const narrowViewport = useNarrowViewport();
   // Phone band: the toolbar collapses into a burger; this owns that menu.
@@ -86,24 +96,34 @@ function WorkspaceHeaderImpl({
   }, [menuOpen]);
   const missing = totals?.missing ?? 0;
   // One cell per adapter that actually exists; a permanently "N/A" adapter
-  // wasted a whole slot. With no GPU at all, a single N/A cell keeps the
-  // reason visible.
+  // wasted a whole slot. When nothing is available a single N/A cell keeps the
+  // reason visible — but on darwin nvidia-smi is structurally absent, so that
+  // fallback is pure noise and the row shows no GPU cell at all (Linux keeps
+  // it, where N/A diagnoses a missing driver). An Apple GPU reader will fill
+  // the slot honestly in a later phase.
   const gpuEntries = [
     { label: 'NVIDIA', gpu: nvidia, spark: telemetryHistory.gpu },
     { label: 'INTEL', gpu: intel, spark: undefined }
   ];
   const availableGpus = gpuEntries.filter((entry) => entry.gpu?.available);
-  const gpuCells = (availableGpus.length > 0 ? availableGpus : [gpuEntries[0]]).map((entry) => ({
-    label: entry.label,
-    value: formatGpuValue(entry.gpu),
-    sub: formatGpuDetail(entry.gpu),
-    tone: (entry.gpu?.available ? 'ok' : 'muted') as 'ok' | 'muted',
-    title:
-      entry.gpu?.available && entry.spark
-        ? `${entry.gpu.name ?? 'GPU'} | sparkline: last 2 min, 0–100%`
-        : entry.gpu?.name,
-    spark: entry.gpu?.available ? entry.spark : undefined
-  }));
+  const gpuFallback = systemSnapshot?.platform === 'darwin' ? [] : [gpuEntries[0]];
+  // With a snapshot present (even a stale one under warn) the real adapter
+  // cells stay, so a failing pulse does not throw away GPU numbers its sibling
+  // tiles still show; only a first load with no snapshot collapses to one
+  // placeholder cell.
+  const gpuCells = systemSnapshot
+    ? (availableGpus.length > 0 ? availableGpus : gpuFallback).map((entry) => ({
+        label: entry.label,
+        value: formatGpuValue(entry.gpu),
+        sub: formatGpuDetail(entry.gpu),
+        tone: warnTone ?? ((entry.gpu?.available ? 'ok' : 'muted') as 'ok' | 'muted'),
+        title:
+          entry.gpu?.available && entry.spark
+            ? `${entry.gpu.name ?? 'GPU'} | sparkline: last 2 min, 0–100%`
+            : entry.gpu?.name,
+        spark: entry.gpu?.available ? entry.spark : undefined
+      }))
+    : [{ label: 'GPU', value: placeholder, sub: '', tone: warnTone, title: undefined, spark: undefined }];
   return (
     <header className="workspaceTopbar">
       <div className="topbarPrimary">
@@ -302,29 +322,35 @@ function WorkspaceHeaderImpl({
         </div>
         <TelemetryCell
           label="HOST"
-          value={systemSnapshot?.hostname ?? 'init'}
-          sub={systemSnapshot ? `up ${formatUptime(systemSnapshot.uptimeSeconds)} | ${systemSnapshot.kernel}` : systemError ?? 'init'}
+          value={systemSnapshot?.hostname ?? placeholder}
+          sub={
+            pulseDown
+              ? systemError ?? placeholder
+              : systemSnapshot
+                ? `up ${formatUptime(systemSnapshot.uptimeSeconds)} | ${systemSnapshot.kernel}`
+                : placeholder
+          }
           title={systemSnapshot ? `${systemSnapshot.platform} ${systemSnapshot.kernel}` : undefined}
-          tone={systemError ? 'warn' : undefined}
+          tone={warnTone}
         />
         <TelemetryCell
           label="CPU"
-          value={formatPercent(systemSnapshot?.cpu.usagePercent)}
-          sub={formatLoad(systemSnapshot)}
+          value={systemSnapshot ? formatPercent(systemSnapshot.cpu.usagePercent) : placeholder}
+          sub={systemSnapshot ? formatLoad(systemSnapshot) : placeholder}
           title="CPU utilization | sparkline: last 2 min, 0–100%"
+          tone={warnTone}
           spark={telemetryHistory.cpu}
         />
         <TelemetryCell
           label="RAM"
-          value={formatPercent(systemSnapshot?.memory?.usedPercent)}
-          sub={
-            systemSnapshot?.memory
-              ? `${formatBytes(systemSnapshot.memory.usedBytes)} / ${formatBytes(systemSnapshot.memory.totalBytes)}`
-              : systemSnapshot
-                ? 'unmeasured'
-                : 'init'
-          }
+          value={tileText(systemSnapshot?.memory && formatPercent(systemSnapshot.memory.usedPercent), 'unmeasured')}
+          sub={tileText(
+            systemSnapshot?.memory &&
+              `${formatBytes(systemSnapshot.memory.usedBytes)} / ${formatBytes(systemSnapshot.memory.totalBytes)}`,
+            'unmeasured'
+          )}
           title="Memory used / total | sparkline: last 2 min, 0–100%"
+          tone={warnTone}
           spark={telemetryHistory.ram}
         />
         {gpuCells.map((cell) => (
@@ -340,28 +366,37 @@ function WorkspaceHeaderImpl({
         ))}
         <TelemetryCell
           label="NET"
-          value={`${formatRate(systemSnapshot?.network.rxBytesPerSecond)} down`}
-          sub={`${formatRate(systemSnapshot?.network.txBytesPerSecond)} up`}
+          value={tileText(
+            systemSnapshot &&
+              systemSnapshot.network.interfaces.length > 0 &&
+              `${formatRate(systemSnapshot.network.rxBytesPerSecond)} down`,
+            'unmeasured'
+          )}
+          sub={tileText(
+            systemSnapshot &&
+              systemSnapshot.network.interfaces.length > 0 &&
+              `${formatRate(systemSnapshot.network.txBytesPerSecond)} up`,
+            'no interfaces'
+          )}
           title="Aggregate throughput across interfaces | sparkline: download, autoscaled to 2-min peak"
+          tone={warnTone}
           spark={telemetryHistory.net}
           sparkFloor={1}
         />
         <TelemetryCell
           label="DISK"
-          value={
-            systemSnapshot?.disk
-              ? `${formatPercent(systemSnapshot.disk.usedPercent)} | ${formatStorage(systemSnapshot.disk.usedBytes, systemSnapshot.disk.totalBytes)}`
-              : systemSnapshot
-                ? 'unmeasured'
-                : 'init'
-          }
-          sub={
-            systemSnapshot?.disk?.readBytesPerSecond !== undefined
-              ? `r ${formatRate(systemSnapshot.disk.readBytesPerSecond)} | w ${formatRate(systemSnapshot.disk.writeBytesPerSecond)}`
-              : 'io init'
-          }
+          value={tileText(
+            systemSnapshot?.disk &&
+              `${formatPercent(systemSnapshot.disk.usedPercent)} | ${formatStorage(systemSnapshot.disk.usedBytes, systemSnapshot.disk.totalBytes)}`,
+            'unmeasured'
+          )}
+          sub={tileText(
+            systemSnapshot?.disk?.readBytesPerSecond !== undefined &&
+              `r ${formatRate(systemSnapshot.disk.readBytesPerSecond)} | w ${formatRate(systemSnapshot.disk.writeBytesPerSecond)}`,
+            'io init'
+          )}
           title="Root filesystem usage and whole-disk I/O"
-          tone={systemSnapshot?.disk && systemSnapshot.disk.usedPercent >= 90 ? 'warn' : undefined}
+          tone={warnTone ?? (systemSnapshot?.disk && systemSnapshot.disk.usedPercent >= 90 ? 'warn' : undefined)}
           spark={telemetryHistory.disk}
           sparkFloor={1}
         />

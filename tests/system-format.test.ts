@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type SparkSample, formatBytes, formatGpuMemory, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePath } from '../src/web/systemFormat';
+import { type SparkSample, formatBytes, formatGpuMemory, formatRate, formatStorage, formatUptime, pushSparkSample, sparklinePath, telemetryPlaceholder, telemetryTileText } from '../src/web/systemFormat';
 
 describe('system formatting', () => {
   it('formats bytes compactly', () => {
@@ -11,6 +11,23 @@ describe('system formatting', () => {
   it('formats network rates', () => {
     expect(formatRate(undefined)).toBe('init');
     expect(formatRate(2048)).toBe('2.0 KiB/s');
+  });
+
+  it('distinguishes a failing pulse from a first load in tile placeholders', () => {
+    expect(telemetryPlaceholder(null)).toBe('init');
+    expect(telemetryPlaceholder(undefined)).toBe('init');
+    expect(telemetryPlaceholder('HTTP 500')).toBe('no data');
+  });
+
+  it('resolves tile text by one shared precedence: measurement, then unmeasured label, then placeholder', () => {
+    // Measured value always wins.
+    expect(telemetryTileText('42%', 'unmeasured', true, 'no data')).toBe('42%');
+    // Snapshot present but this metric absent → the domain's unmeasured label.
+    expect(telemetryTileText(false, 'unmeasured', true, 'no data')).toBe('unmeasured');
+    expect(telemetryTileText(undefined, 'io init', true, 'init')).toBe('io init');
+    // No snapshot → the shared placeholder, never a per-tile loading string.
+    expect(telemetryTileText(false, 'unmeasured', false, 'no data')).toBe('no data');
+    expect(telemetryTileText(null, 'unmeasured', false, 'init')).toBe('init');
   });
 
   it('formats uptime as compact days and hours', () => {
