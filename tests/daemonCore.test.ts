@@ -252,7 +252,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     expect(browserOut[0]).toMatchObject({ sessionId: 's1', channelId: ch });
   });
 
-  it('delays a subscription snapshot until terminal-state parser work drains', async () => {
+  it('opens a live subscription immediately while terminal-state parser work drains', async () => {
     const emulator = new BlockingPreambleEmu();
     const { core, browserOut } = makeCore({ createEmulator: () => emulator });
     core.ensure('s1', { rows: 40, cols: 120 });
@@ -264,21 +264,19 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
         .filter((entry) => entry.channelId === channelId)
         .map((entry) => entry.frame.type)
     ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+    expect(
+      browserOut.find((entry) => entry.channelId === channelId)?.frame
+    ).toMatchObject({ type: BpFrameType.SUBSCRIBE_ACK, offset: 0n });
 
     emulator.release();
     await expect(preamble).resolves.toBe(true);
     const frames = browserOut
       .filter((entry) => entry.channelId === channelId)
       .map((entry) => entry.frame);
-    expect(frames).toHaveLength(2);
-    expect(frames[1]).toMatchObject({
-      type: BpFrameType.SNAPSHOT,
-      offset: 0n,
-      text: 'old-new'
-    });
+    expect(frames.map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
   });
 
-  it('coalesces an identical replay retry while the first parser drain is pending', async () => {
+  it('fans out output immediately while parser work continues off the data plane', async () => {
     const emulator = new BlockingFlushEmu();
     const { core, browserOut } = makeCore({ createEmulator: () => emulator });
     core.ensure('s1', { rows: 40, cols: 120 });
@@ -286,6 +284,8 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
 
     const first = core.onMoorOutput('s1', bytes, 0n);
     const retry = core.onMoorOutput('s1', bytes, 0n);
+    expect(first).toBeInstanceOf(Promise);
+    expect(retry).toBeUndefined();
     expect(new TextDecoder().decode(Uint8Array.from(emulator.written))).toBe('x');
 
     const channelId = core.subscribe('s1', 'retry-viewer', 40, 120)!.channelId;
@@ -294,19 +294,17 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
         .filter((entry) => entry.channelId === channelId)
         .map((entry) => entry.frame.type)
     ).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+    expect(
+      browserOut.find((entry) => entry.channelId === channelId)?.frame
+    ).toMatchObject({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n });
 
     emulator.release();
-    await Promise.all([first, retry]);
+    await Promise.resolve();
 
     const frames = browserOut
       .filter((entry) => entry.channelId === channelId)
       .map((entry) => entry.frame);
-    expect(frames).toHaveLength(2);
-    expect(frames[1]).toMatchObject({
-      type: BpFrameType.SNAPSHOT,
-      offset: 1n,
-      text: 'x'
-    });
+    expect(frames).toHaveLength(1);
     expect(frames.some((frame) => frame.type === BpFrameType.OUTPUT)).toBe(false);
   });
 
@@ -322,7 +320,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
 
     const output = core.onMoorOutput('s1', new TextEncoder().encode('x'), 0n);
     const exit = core.emitExit('s1', { kind: 'exited', code: 7, method: 'none' }, 2n);
-    expect(browserOut).toEqual([]);
+    expect(browserOut.map(({ frame }) => frame.type)).toEqual([BpFrameType.OUTPUT]);
     expect(
       core.onBrowserInputByChannel(channelId, false, new TextEncoder().encode('after-exit'))
     ).toBe(false);
@@ -345,7 +343,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     );
   });
 
-  it('orders an already-admitted delayed snapshot before terminal EXIT', async () => {
+  it('delivers EXIT after parser drain to a live-baselined late subscriber', async () => {
     const emulator = new BlockingFlushEmu();
     const { core, browserOut } = makeCore({ createEmulator: () => emulator });
     core.ensure('s1', { rows: 40, cols: 120 });
@@ -367,14 +365,9 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       .map((entry) => entry.frame);
     expect(frames.map((frame) => frame.type)).toEqual([
       BpFrameType.SUBSCRIBE_ACK,
-      BpFrameType.SNAPSHOT,
       BpFrameType.EXIT
     ]);
-    expect(frames[1]).toMatchObject({
-      type: BpFrameType.SNAPSHOT,
-      offset: 1n,
-      text: 'x'
-    });
+    expect(frames[0]).toMatchObject({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n });
   });
 
   it('rejects subscriptions during final drain and after the exit fence', async () => {

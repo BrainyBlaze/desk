@@ -85,6 +85,8 @@ Operational guards include:
 - visible-only output delivery so hidden cells do not parse terminal streams
 - server-enforced input suppression and queued-input revocation for hidden retained channels
 - snapshot-on-reveal from the daemon's xterm emulator
+- idempotent terminal geometry: `SUBSCRIBE` carries the current size and repeated equal `RESIZE` reports do not advance the emulator revision
+- bounded controller recovery: a transient Moor lease `BUSY` is retried within the existing adoption deadline; terminal refusal alone reports input-continuity loss
 - per-session generation fencing so stale output cannot corrupt a new process
 - retryable Moor store rotations; only a hash mismatch unchanged for the five-second stability window is corruption
 - bounded frame sizes, heartbeat detection, and resubscription after gaps

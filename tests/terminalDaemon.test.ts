@@ -245,7 +245,7 @@ function fakeMoorStatus(
     pid: 4321,
     containment: 1,
     birthToken: new Uint8Array(16).fill(0xc3),
-    replay: { first: 0n, last: 0n, start: 0n, end: 0n, complete: true, modesExact: true },
+    replay: { first: 1n, last: 0n, start: 0n, end: 0n, complete: true, modesExact: true },
     ownsLease: true,
     viewers: true,
     running: true,

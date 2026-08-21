@@ -140,10 +140,6 @@ export class TerminalWsRouter {
         if (this.ownOrReject(ws, frame.channelId)) this.manager.onBrowserResizeByChannel(frame.channelId, frame.rows, frame.cols);
         return;
       }
-      case BpFrameType.VISIBILITY: {
-        if (this.ownOrReject(ws, frame.channelId)) this.manager.onBrowserVisibilityByChannel(frame.channelId, frame.visible);
-        return;
-      }
       case BpFrameType.QUERY_REPLY: {
         if (this.ownOrReject(ws, frame.channelId)) this.manager.onBrowserQueryReplyByChannel(frame.channelId, frame.queryOffset, frame.leaseEpoch, frame.bytes);
         return;

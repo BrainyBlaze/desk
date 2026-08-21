@@ -38,6 +38,7 @@ export interface MoorAttachOptions {
   columns: number;
   rows: number;
   requestLease: boolean;
+  replay?: 'retained' | 'live-only';
   nonVt?: boolean;
 }
 
@@ -70,6 +71,7 @@ export interface MoorMasterClientHandlers {
     requestId: bigint;
     bytes: Uint8Array;
     surfaceId?: number;
+    reason: number;
   }) => void;
   onTerminateResult?: (result: Holder<'terminate-result'>) => void;
   onLeaseResult?: (result: Holder<'lease-result'>) => void;
@@ -84,7 +86,7 @@ export interface MoorMasterClientHandlers {
   onLivenessRestored?: () => void;
   /** A wire/protocol violation on this connection — the client is closed. */
   onProtocolError?: (error: MoorWireError) => void;
-  onClose?: () => void;
+  onClose?: (reason: Error) => void;
   /** Raw incoming bytes, before reassembly — for diagnostics/tracing. */
   onRaw?: (chunk: Uint8Array) => void;
 }
@@ -187,6 +189,8 @@ function validateIdentity(identity: Uint8Array): Uint8Array {
 
 const DEFAULT_ATTACH_DEADLINE_MS = 2_000;
 const DEFAULT_LIVENESS_WINDOW_MS = 15_000;
+const LEASE_RESUME_RETRY_MS = 10;
+const LEASE_REFUSAL_BUSY = 1;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const INBOUND_HIGH_WATER_BYTES = 8 * 1024 * 1024;
 const INBOUND_LOW_WATER_BYTES = 4 * 1024 * 1024;
@@ -222,6 +226,7 @@ type Phase =
 
 export class MoorMasterClient {
   private sock: Socket | null = null;
+  private socketFailure: Error | undefined;
   private readonly codec = new MoorCodec();
   private readonly inboundBatches: MoorFrameBatch[] = [];
   private inboundBatchIndex = 0;
@@ -251,6 +256,7 @@ export class MoorMasterClient {
   private preambleBytes: Uint8Array | undefined;
   private nextRequestId = 1n;
   private deadline: NodeJS.Timeout | undefined;
+  private resumeRetry: NodeJS.Timeout | undefined;
   /** Granted viewer lease (§7.4): epoch + token, kept alive on the 3 s cadence. */
   private lease: { epoch: number; token: Uint8Array } | undefined;
   private keepalive: NodeJS.Timeout | undefined;
@@ -265,6 +271,8 @@ export class MoorMasterClient {
   /** §6.1 output continuity: next record sequence and byte offset. */
   private expectedSequence = 1n;
   private expectedOffset = 0n;
+  private replayPolicy: 'retained' | 'live-only' = 'retained';
+  private adoptedOutputSequence = 0n;
   /** Highest OUTPUT record received on this connection ("highest record sent" bounds OUTPUT_ACK). */
   private highestReceived = 0n;
   /** The cumulative consumption watermark already acknowledged to the holder. */
@@ -420,10 +428,22 @@ export class MoorMasterClient {
         this.pendingConnect = undefined;
         this.phase = 'connected';
         sock.on('data', (chunk: Buffer) => this.onData(chunk));
-        sock.on('error', () => this.teardown(new Error('moor holder connection errored')));
-        sock.on('close', () => {
-          this.teardown(new Error('moor holder closed the connection'));
-          this.h.onClose?.();
+        sock.on('error', (error: Error) => {
+          const failure = new Error(`moor holder connection error: ${error.message}`, {
+            cause: error
+          });
+          this.socketFailure = failure;
+          this.teardown(failure);
+        });
+        sock.on('close', (hadError: boolean) => {
+          const failure = this.socketFailure ?? new Error(
+            hadError
+              ? 'moor holder closed the connection after a transport error'
+              : 'moor holder closed the connection'
+          );
+          this.socketFailure = undefined;
+          this.teardown(failure);
+          this.h.onClose?.(failure);
         });
         resolve();
       });
@@ -611,6 +631,13 @@ export class MoorMasterClient {
     this.requireLease();
     this.request({ type: 'resize', epoch: this.lease!.epoch, columns, rows });
     this.scheduleKeepalive(); // lease-owned traffic resets the idle cadence
+  }
+
+  sendRedraw(columns: number, rows: number): void {
+    this.requireAttached();
+    this.requireLease();
+    this.request({ type: 'redraw', epoch: this.lease!.epoch, columns, rows });
+    this.scheduleKeepalive();
   }
 
   ackOutput(sequence: bigint): void {
@@ -841,6 +868,10 @@ export class MoorMasterClient {
       clearTimeout(this.deadline);
       this.deadline = undefined;
     }
+    if (this.resumeRetry !== undefined) {
+      clearTimeout(this.resumeRetry);
+      this.resumeRetry = undefined;
+    }
     if (this.livenessTimer !== undefined) {
       clearTimeout(this.livenessTimer);
       this.livenessTimer = undefined;
@@ -882,7 +913,10 @@ export class MoorMasterClient {
   private captureReconnectSnapshot(): MoorReconnectSnapshot | undefined {
     const incarnation = this.incarnation;
     if (incarnation === undefined) return undefined;
-    const outputSequence = this.lastAcked > this.effectiveResume ? this.lastAcked : this.effectiveResume;
+    const outputSequence = [this.lastAcked, this.effectiveResume, this.adoptedOutputSequence].reduce(
+      (highest, sequence) => (sequence > highest ? sequence : highest),
+      0n
+    );
     const lease = this.lease;
     return {
       output: { sequence: outputSequence, incarnation: incarnation.slice() },
@@ -1071,14 +1105,7 @@ export class MoorMasterClient {
             return;
           }
           this.phase = 'resume-pending';
-          this.request({
-            type: 'lease-request',
-            operation: 'resume',
-            role: 'viewer',
-            epoch: resumeLease.epoch,
-            incarnation: resumeLease.incarnation,
-            token: resumeLease.token
-          });
+          this.requestResumeLease();
           return;
         }
         this.sendAttach(pending.options.requestLease ? 'fresh' : 'none');
@@ -1118,16 +1145,23 @@ export class MoorMasterClient {
           );
         }
         this.status = decoded.status;
-        // §6.1 output continuity: the replay baseline starts at record 1 and
-        // the retained start offset. A discarded prefix must arrive as exactly
-        // one GAP{1, first-1} before any replay output; empty history emits
-        // neither and live records begin at sequence 1.
-        this.expectedSequence = 1n;
-        this.expectedOffset = decoded.status.replay.start;
-        this.baselineGap =
-          decoded.status.replay.first > 1n
-            ? { last: decoded.status.replay.first - 1n }
-            : undefined;
+        if (this.replayPolicy === 'live-only') {
+          this.expectedSequence = decoded.status.replay.last + 1n;
+          this.expectedOffset = decoded.status.replay.end;
+          this.baselineGap = undefined;
+          this.adoptedOutputSequence = decoded.status.replay.last;
+        } else {
+          // §6.1 output continuity: the replay baseline starts at record 1 and
+          // the retained start offset. A discarded prefix must arrive as exactly
+          // one GAP{1, first-1} before any replay output; empty history emits
+          // neither and live records begin at sequence 1.
+          this.expectedSequence = 1n;
+          this.expectedOffset = decoded.status.replay.start;
+          this.baselineGap =
+            decoded.status.replay.first > 1n
+              ? { last: decoded.status.replay.first - 1n }
+              : undefined;
+        }
         this.phase = 'status-prefix';
         this.h.onAttachAck?.(decoded.status);
         return;
@@ -1161,17 +1195,22 @@ export class MoorMasterClient {
             return;
           }
           if (decoded.outcome === 3) {
+            this.h.onLeaseResult?.(decoded);
+            if (decoded.reason === LEASE_REFUSAL_BUSY) {
+              this.scheduleResumeRetry();
+              return;
+            }
             this.continuity = 'none';
             if (resume.pendingInput !== undefined) {
               this.h.onInputContinuityLost?.({
                 requestId: resume.pendingInput.requestId,
                 bytes: resume.pendingInput.bytes.slice(),
+                reason: decoded.reason,
                 ...(resume.pendingInput.surfaceId === undefined
                   ? {}
                   : { surfaceId: resume.pendingInput.surfaceId })
               });
             }
-            this.h.onLeaseResult?.(decoded);
             this.sendAttach('fresh');
             return;
           }
@@ -1575,6 +1614,7 @@ export class MoorMasterClient {
       throw new MoorWireError('BAD_SEQUENCE', 'cannot send ATTACH without a pending adoption');
     }
     this.attachLeaseMode = mode;
+    this.replayPolicy = pending.options.replay ?? 'retained';
     this.phase = 'adopted';
     this.request({
       type: 'attach',
@@ -1582,8 +1622,40 @@ export class MoorMasterClient {
       rows: pending.options.rows,
       requestLease: mode === 'fresh',
       resumedLease: mode === 'resumed',
+      replay: this.replayPolicy,
       nonVt: pending.options.nonVt ?? false
     });
+  }
+
+  private requestResumeLease(): void {
+    const resume = this.resumeLease;
+    if (resume === undefined || this.phase !== 'resume-pending') {
+      throw new MoorWireError('BAD_SEQUENCE', 'cannot resume a lease outside resume-pending');
+    }
+    this.request({
+      type: 'lease-request',
+      operation: 'resume',
+      role: 'viewer',
+      epoch: resume.epoch,
+      incarnation: resume.incarnation,
+      token: resume.token
+    });
+  }
+
+  private scheduleResumeRetry(): void {
+    if (this.resumeRetry !== undefined) {
+      throw new MoorWireError('BAD_SEQUENCE', 'lease resume retry is already scheduled');
+    }
+    this.resumeRetry = setTimeout(() => {
+      this.resumeRetry = undefined;
+      if (this.phase !== 'resume-pending') return;
+      try {
+        this.requestResumeLease();
+      } catch (error) {
+        this.fail(error);
+      }
+    }, LEASE_RESUME_RETRY_MS);
+    this.resumeRetry.unref?.();
   }
 
   /**

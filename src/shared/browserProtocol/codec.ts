@@ -171,11 +171,6 @@ export interface Unsubscribe {
   type: BpFrameType.UNSUBSCRIBE;
   channelId: number;
 }
-export interface Visibility {
-  type: BpFrameType.VISIBILITY;
-  channelId: number;
-  visible: boolean;
-}
 export interface Input {
   type: BpFrameType.INPUT;
   channelId: number;
@@ -201,15 +196,8 @@ export interface SubscribeAck {
   channelId: number;
   generation: number;
   revision: number;
-}
-export interface Snapshot {
-  type: BpFrameType.SNAPSHOT;
-  channelId: number;
-  generation: number;
-  revision: number;
+  /** Live output frontier; no terminal snapshot or retained output follows. */
   offset: bigint;
-  /** SerializeAddon restorable string (§7.3); carried UTF-8 on the wire. */
-  text: string;
 }
 export interface Output {
   type: BpFrameType.OUTPUT;
@@ -258,21 +246,16 @@ export interface QueryRequest {
 export type BpFrame =
   | Subscribe
   | Unsubscribe
-  | Visibility
   | Input
   | Resize
   | QueryReply
   | SubscribeAck
-  | Snapshot
   | Output
   | Gap
   | Exit
   | Heartbeat
   | ErrorFrame
   | QueryRequest;
-
-const TEXT_ENCODER = new TextEncoder();
-const TEXT_DECODER = new TextDecoder('utf-8', { fatal: false });
 
 function checkLen(n: number, max: number, what: string): void {
   if (n > max) throw new BrowserProtocolError(BpError.PAYLOAD_TOO_LARGE, `${what} ${n} > ${max}`);
@@ -288,9 +271,6 @@ export function encodeBpFrame(f: BpFrame): Uint8Array {
     case BpFrameType.UNSUBSCRIBE:
       w.u32(f.channelId);
       break;
-    case BpFrameType.VISIBILITY:
-      w.u32(f.channelId).u8(f.visible ? 1 : 0);
-      break;
     case BpFrameType.INPUT:
       checkLen(f.bytes.length, BP_MAX_INPUT_BYTES, 'input');
       w.u32(f.channelId).u8(f.binary ? 1 : 0).blob32(f.bytes);
@@ -303,14 +283,8 @@ export function encodeBpFrame(f: BpFrame): Uint8Array {
       w.u32(f.channelId).u64(f.queryOffset).u32(f.leaseEpoch).blob32(f.bytes);
       break;
     case BpFrameType.SUBSCRIBE_ACK:
-      w.u32(f.channelId).u32(f.generation).u32(f.revision);
+      w.u32(f.channelId).u32(f.generation).u32(f.revision).u64(f.offset);
       break;
-    case BpFrameType.SNAPSHOT: {
-      const enc = TEXT_ENCODER.encode(f.text);
-      checkLen(enc.length, BP_MAX_FRAME_BYTES, 'snapshot');
-      w.u32(f.channelId).u32(f.generation).u32(f.revision).u64(f.offset).blob32(enc);
-      break;
-    }
     case BpFrameType.OUTPUT:
       checkLen(f.bytes.length, BP_MAX_FRAME_BYTES, 'output');
       w.u32(f.channelId).u32(f.generation).u32(f.revision).u64(f.offset).blob32(f.bytes);
@@ -361,8 +335,6 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
       return { type, sessionId: r.str16(), surfaceId: r.str16(), rows: r.u16(), cols: r.u16() };
     case BpFrameType.UNSUBSCRIBE:
       return { type, channelId: r.u32() };
-    case BpFrameType.VISIBILITY:
-      return { type, channelId: r.u32(), visible: r.u8() !== 0 };
     case BpFrameType.INPUT: {
       const channelId = r.u32();
       const binary = (r.u8() & 1) !== 0;
@@ -381,15 +353,13 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
       return { type, channelId, queryOffset, leaseEpoch, bytes };
     }
     case BpFrameType.SUBSCRIBE_ACK:
-      return { type, channelId: r.u32(), generation: r.u32(), revision: r.u32() };
-    case BpFrameType.SNAPSHOT: {
-      const channelId = r.u32();
-      const generation = r.u32();
-      const revision = r.u32();
-      const offset = r.u64();
-      const text = TEXT_DECODER.decode(r.blob32());
-      return { type, channelId, generation, revision, offset, text };
-    }
+      return {
+        type,
+        channelId: r.u32(),
+        generation: r.u32(),
+        revision: r.u32(),
+        offset: r.u64()
+      };
     case BpFrameType.OUTPUT: {
       const channelId = r.u32();
       const generation = r.u32();

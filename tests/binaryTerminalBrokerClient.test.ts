@@ -49,7 +49,6 @@ class FakeSocket implements BinaryBrokerSocket {
 
 interface Captured {
   output: Uint8Array[];
-  snapshot: string[];
   exit: MoorExitOutcome[];
   error: number[];
   clientError: string[];
@@ -59,14 +58,13 @@ interface Captured {
 function handlers(cap: Captured): BinarySurfaceHandlers {
   return {
     onOutput: (b) => cap.output.push(b),
-    onSnapshot: (t) => cap.snapshot.push(t),
     onExit: (outcome) => cap.exit.push(outcome),
     onError: (code) => cap.error.push(code),
     onClientError: (message) => cap.clientError.push(message),
     onConnectionChange: (up) => cap.connection.push(up)
   };
 }
-const blank = (): Captured => ({ output: [], snapshot: [], exit: [], error: [], clientError: [], connection: [] });
+const blank = (): Captured => ({ output: [], exit: [], error: [], clientError: [], connection: [] });
 
 describe('binary terminal broker client (§7.4)', () => {
   let socket: FakeSocket;
@@ -80,13 +78,17 @@ describe('binary terminal broker client (§7.4)', () => {
     vi.useRealTimers();
   });
 
-  const ack = (channelId: number, generation = 1, revision = 0) => ({ type: BpFrameType.SUBSCRIBE_ACK as const, channelId, generation, revision });
-  const snapshot = (channelId: number, offset: bigint, text: string, generation = 1, revision = 0) =>
-    ({ type: BpFrameType.SNAPSHOT as const, channelId, generation, revision, offset, text });
+  const ack = (channelId: number, generation = 1, revision = 0, offset = 0n) => ({
+    type: BpFrameType.SUBSCRIBE_ACK as const,
+    channelId,
+    generation,
+    revision,
+    offset
+  });
   const output = (channelId: number, offset: bigint, bytes: Uint8Array, generation = 1, revision = 0) =>
     ({ type: BpFrameType.OUTPUT as const, channelId, generation, revision, offset, bytes });
 
-  it('keeps the ACKed channel when hidden while SUBSCRIBE was in flight', () => {
+  it('releases an ACK that arrives after the surface became hidden', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
@@ -94,21 +96,16 @@ describe('binary terminal broker client (§7.4)', () => {
 
     client.setVisibility('s1', false);
     socket.deliver(ack(7)); // ACK lands for the now-hidden surface
-    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0);
-    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
-      expect.objectContaining({ channelId: 7, visible: false })
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toEqual([
+      expect.objectContaining({ channelId: 7 })
     ]);
 
     client.setVisibility('s1', true);
 
-    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
-    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
-      expect.objectContaining({ channelId: 7, visible: false }),
-      expect.objectContaining({ channelId: 7, visible: true })
-    ]);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(2);
   });
 
-  it('subscribes on open, then applies its ACK snapshot and live output', () => {
+  it('uses the ACK frontier as a live baseline without waiting for a snapshot', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
@@ -117,10 +114,8 @@ describe('binary terminal broker client (§7.4)', () => {
     expect(subs[0]).toMatchObject({ sessionId: 'sess-1', surfaceId: 's1', rows: 40, cols: 120 });
     expect(cap.connection).toEqual([false, true]); // mount-time down, then up on open
 
-    socket.deliver(ack(7));
-    socket.deliver(snapshot(7, 100n, 'SCREEN'));
+    socket.deliver(ack(7, 1, 0, 100n));
     socket.deliver(output(7, 100n, Uint8Array.of(1, 2, 3)));
-    expect(cap.snapshot).toEqual(['SCREEN']);
     expect(cap.output).toHaveLength(1);
     expect([...cap.output[0]]).toEqual([1, 2, 3]);
   });
@@ -132,11 +127,9 @@ describe('binary terminal broker client (§7.4)', () => {
     client.subscribe('sb', 'sess-b', 40, 120, true, handlers(b));
     socket.fireOpen();
     // Two SUBSCRIBEs went out in order sa, sb → ACKs bind in that order. Each
-    // channel needs its baseline snapshot before deltas apply.
+    // ACK is that channel's live baseline.
     socket.deliver(ack(10)); // -> sa
     socket.deliver(ack(11)); // -> sb
-    socket.deliver(snapshot(10, 0n, 'A'));
-    socket.deliver(snapshot(11, 0n, 'B'));
     socket.deliver(output(10, 0n, Uint8Array.of(65)));
     socket.deliver(output(11, 0n, Uint8Array.of(66)));
     expect([...a.output[0]]).toEqual([65]);
@@ -152,7 +145,6 @@ describe('binary terminal broker client (§7.4)', () => {
     // sa fails (ghost session) → conn-channel ERROR; sb then gets the next ACK.
     socket.deliver({ type: BpFrameType.ERROR, channelId: BP_CONN_CHANNEL, code: BpError.BAD_CHANNEL });
     socket.deliver(ack(20)); // must bind to sb, NOT sa
-    socket.deliver(snapshot(20, 0n, 'B'));
     socket.deliver(output(20, 0n, Uint8Array.of(66)));
     expect(a.error).toEqual([BpError.BAD_CHANNEL]);
     expect(a.output).toHaveLength(0); // sa never got a channel
@@ -383,7 +375,19 @@ describe('binary terminal broker client (§7.4)', () => {
     expect(resizes[0]).toMatchObject({ channelId: 9, cols: 100, rows: 30 });
   });
 
-  it('remembers a fit reported while hidden and applies it when the surface is revealed', () => {
+  it('suppresses a pre-ACK resize identical to the SUBSCRIBE geometry', () => {
+    const cap = blank();
+    client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
+    socket.fireOpen();
+    client.sendResize('s1', 120, 40);
+    expect(socket.ofType(BpFrameType.RESIZE)).toHaveLength(0);
+
+    socket.deliver(ack(9));
+
+    expect(socket.ofType(BpFrameType.RESIZE)).toHaveLength(0);
+  });
+
+  it('carries a fit reported while hidden in SUBSCRIBE without a redundant RESIZE', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, false, handlers(cap));
     socket.fireOpen();
@@ -395,10 +399,10 @@ describe('binary terminal broker client (§7.4)', () => {
     client.setVisibility('s1', true);
     expect(socket.ofType(BpFrameType.SUBSCRIBE)[0]).toMatchObject({ cols: 100, rows: 30 });
     socket.deliver(ack(10));
-    expect(socket.ofType(BpFrameType.RESIZE)[0]).toMatchObject({ channelId: 10, cols: 100, rows: 30 });
+    expect(socket.ofType(BpFrameType.RESIZE)).toHaveLength(0);
   });
 
-  it('reasserts the last geometry after reconnect without a new layout event', () => {
+  it('reasserts the last geometry in SUBSCRIBE after reconnect without a redundant RESIZE', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
@@ -409,11 +413,10 @@ describe('binary terminal broker client (§7.4)', () => {
     socket = new FakeSocket();
     vi.advanceTimersByTime(2000);
     socket.fireOpen();
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)[0]).toMatchObject({ cols: 100, rows: 30 });
     socket.deliver(ack(2));
 
-    expect(socket.ofType(BpFrameType.RESIZE)).toEqual([
-      expect.objectContaining({ channelId: 2, cols: 100, rows: 30 })
-    ]);
+    expect(socket.ofType(BpFrameType.RESIZE)).toHaveLength(0);
   });
 
   it('re-subscribes for a fresh baseline when an output gap makes it dirty', () => {
@@ -421,7 +424,6 @@ describe('binary terminal broker client (§7.4)', () => {
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     socket.deliver(ack(3));
-    socket.deliver(snapshot(3, 0n, 'BASE'));
     socket.deliver(output(3, 0n, Uint8Array.of(1))); // expected → applied, expected now 1
     socket.deliver(output(3, 5n, Uint8Array.of(2))); // GAP (5 > 1) → dirty
     expect(cap.output).toHaveLength(1); // the gapped delta is NOT applied
@@ -429,10 +431,8 @@ describe('binary terminal broker client (§7.4)', () => {
     expect(socket.ofType(BpFrameType.UNSUBSCRIBE).map((f) => f.channelId)).toEqual([3]);
     expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(2);
     // New channel re-baselines and resumes.
-    socket.deliver(ack(4));
-    socket.deliver(snapshot(4, 6n, 'REBASE'));
+    socket.deliver(ack(4, 1, 0, 6n));
     socket.deliver(output(4, 6n, Uint8Array.of(9)));
-    expect(cap.snapshot).toEqual(['BASE', 'REBASE']);
     expect([...cap.output[1]]).toEqual([9]);
   });
 
@@ -441,45 +441,31 @@ describe('binary terminal broker client (§7.4)', () => {
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     socket.deliver(ack(2, /*gen*/ 5));
-    socket.deliver(snapshot(2, 0n, 'BASE', /*gen*/ 5));
     socket.deliver(output(2, 0n, Uint8Array.of(1), /*gen*/ 4)); // older gen → discard
     expect(cap.output).toHaveLength(0);
     expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0); // not dirtied
   });
 
-  it('keeps one channel across hide and reveal and gates hidden output', () => {
+  it('detaches on hide and re-subscribes live on reveal without replay', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
     socket.deliver(ack(1));
-    const visibilityStart = socket.sent.length;
     client.setVisibility('s1', false);
-    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0);
-    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
-      expect.objectContaining({ channelId: 1, visible: false })
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toEqual([
+      expect.objectContaining({ channelId: 1 })
     ]);
-    // An in-flight output that crossed the hide boundary is ignored locally.
+    // A late frame for the detached channel is ignored.
     socket.deliver(output(1, 0n, Uint8Array.of(7)));
     expect(cap.output).toHaveLength(0);
     client.sendResize('s1', 101, 31);
     client.setVisibility('s1', true);
-    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
-    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
-      expect.objectContaining({ channelId: 1, visible: false }),
-      expect.objectContaining({ channelId: 1, visible: true })
-    ]);
-    expect(
-      socket.sent
-        .slice(visibilityStart)
-        .filter((frame) =>
-          frame.type === BpFrameType.VISIBILITY || frame.type === BpFrameType.RESIZE
-        )
-        .map((frame) => frame.type)
-    ).toEqual([
-      BpFrameType.VISIBILITY,
-      BpFrameType.RESIZE,
-      BpFrameType.VISIBILITY
-    ]);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(2);
+    socket.deliver(ack(2, 1, 0, 1n));
+    expect(socket.ofType(BpFrameType.SUBSCRIBE).at(-1)).toMatchObject({ cols: 101, rows: 31 });
+    expect(socket.ofType(BpFrameType.RESIZE)).toEqual([]);
+    socket.deliver(output(2, 1n, Uint8Array.of(8)));
+    expect(cap.output.map((bytes) => [...bytes])).toEqual([[8]]);
   });
 
   it('unsubscribing while an ACK is in flight releases the orphan channel', () => {
@@ -497,12 +483,11 @@ describe('binary terminal broker client (§7.4)', () => {
     expect(cap.output).toHaveLength(0);
     // The next ACK still binds correctly to the surviving surface.
     socket.deliver(ack(9)); // -> keep
-    socket.deliver(snapshot(9, 0n, 'K'));
     socket.deliver(output(9, 0n, Uint8Array.of(75)));
     expect([...keep.output[0]]).toEqual([75]);
   });
 
-  it('does not replay pre-ACK input when hide and reveal keep the same channel', () => {
+  it('does not replay pre-ACK input after hide detaches and reveal resubscribes', () => {
     const cap = blank();
     client.subscribe('s1', 'sess-1', 40, 120, true, handlers(cap));
     socket.fireOpen();
@@ -512,12 +497,10 @@ describe('binary terminal broker client (§7.4)', () => {
 
     client.setVisibility('s1', true);
 
-    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toHaveLength(0);
-    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
-    expect(socket.ofType(BpFrameType.VISIBILITY)).toEqual([
-      expect.objectContaining({ channelId: 8, visible: false }),
-      expect.objectContaining({ channelId: 8, visible: true })
+    expect(socket.ofType(BpFrameType.UNSUBSCRIBE)).toEqual([
+      expect.objectContaining({ channelId: 8 })
     ]);
+    expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(2);
     expect(socket.ofType(BpFrameType.INPUT)).toHaveLength(0);
   });
 
@@ -586,7 +569,6 @@ describe('binary terminal broker client (§7.4)', () => {
     // The new socket re-subscribed the visible surface.
     expect(socket.ofType(BpFrameType.SUBSCRIBE)).toHaveLength(1);
     socket.deliver(ack(2));
-    socket.deliver(snapshot(2, 0n, 'REBASE'));
     socket.deliver(output(2, 0n, Uint8Array.of(2)));
     expect([...cap.output[0]]).toEqual([2]);
   });

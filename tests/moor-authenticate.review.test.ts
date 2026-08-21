@@ -71,7 +71,7 @@ class ProbeHolder {
       this.codec.encode(
         GENERATION,
         MoorKind.HELLO_ACK,
-        joined(Uint8Array.of(4), integer(GENERATION, 4), INCARNATION, wide(identity))
+        joined(Uint8Array.of(5), integer(GENERATION, 4), INCARNATION, wide(identity))
       )
     );
   }

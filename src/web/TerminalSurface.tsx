@@ -283,7 +283,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // Hidden keep-alive mount: a fit here would shrink the terminal to
         // nothing and resize the session with it. Yield the WebGL context to the
         // visible cells; the ResizeObserver fires again on reveal. Tell the
-        // broker we are hidden so it stops streaming live output to this cell.
+        // broker we are hidden so it detaches this cell from live output.
         if (cellVisibleRef.current) {
           cellVisibleRef.current = false;
           brokerVisibilityRef.current(false);
@@ -298,8 +298,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       notifyResizeRef.current(terminal.cols, terminal.rows);
       updateScrollRail();
       if (wasHidden) {
-        // Reveal: the broker replies with a self-contained snapshot, then resumes
-        // live output. No client-side reconnect or transport repaint needed.
+        // Reveal: attach at the live frontier; the daemon requests a PTY redraw.
         brokerVisibilityRef.current(true);
       }
     };
@@ -825,8 +824,8 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     let disposed = false;
     let stabilizeTimer: number | undefined;
 
-    // A fresh snapshot can race the first layout pass. Stabilize repairs the
-    // authoritative daemon size once after layout settles, but only when it
+    // A fresh live attach can race the first layout pass. Stabilize repairs the
+    // authoritative holder size once after layout settles, but only when it
     // differs from the dimensions already sent. The min-size guard keeps a
     // transient tiny fit from pinning the PTY.
     const stabilize = (): void => {
@@ -852,22 +851,13 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }, 450);
     };
 
-    // Subscribe this surface to the shared broker connection (one WebSocket per
-    // browser tab). The broker streams live `output` for the session only while
-    // at least one surface is visible; a hidden surface receives nothing, so a
-    // warm-but-hidden keep-alive cell costs no parse/render. On reveal the broker
-    // sends a self-contained snapshot, which we apply after a reset.
+    // Subscribe this surface to the shared broker connection. Hidden surfaces
+    // detach; every first show or reveal resumes only at the live frontier and
+    // relies on the PTY application's redraw, never retained output or a snapshot.
     binaryTerminalBroker.subscribe(surfaceId, daemonSessionId, terminal.rows, terminal.cols, cellVisibleRef.current, {
       onOutput: (bytes) => {
         // Raw output bytes, written binary end-to-end (no premature string decode).
         terminal.write(bytes);
-      },
-      onSnapshot: (data) => {
-        terminal.reset();
-        terminal.options.theme = { ...builtThemeRef.current.terminal };
-        terminal.write(data);
-        // Repair the PTY size once if the settled cell differs from the daemon.
-        stabilize();
       },
       onExit: (outcome) => {
         // The tagged ending as moor reported it: exited N, signalled N, or
@@ -886,7 +876,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         }
         // The connection is shared across all cells; one drop flips every cell
         // to the Reconnect affordance, one recovery clears them (the broker
-        // resubscribes visible surfaces, which re-snapshots their screens).
+        // resubscribes visible surfaces and requests a live PTY redraw).
         setBridgeDown(!up);
       }
     });
