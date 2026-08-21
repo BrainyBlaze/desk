@@ -122,13 +122,17 @@ describe('terminal WS bridge integration (§7.4)', () => {
     return c;
   };
 
-  it('routes SUBSCRIBE to an ACK + SNAPSHOT over the real socket', async () => {
+  it('routes SUBSCRIBE to one live-baseline ACK over the real socket', async () => {
     const c = await open();
     c.send({ type: BpFrameType.SUBSCRIBE, sessionId: 's1', surfaceId: 'main', rows: 40, cols: 120 });
     const ackFrame = await c.waitFor((f) => f.type === BpFrameType.SUBSCRIBE_ACK);
-    const snap = await c.waitFor((f) => f.type === BpFrameType.SNAPSHOT);
-    expect((ackFrame as Extract<BpFrame, { type: BpFrameType.SUBSCRIBE_ACK }>).channelId).toBe(1);
-    expect((snap as Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>).text).toBe('SCREEN');
+    expect(ackFrame).toMatchObject({
+      type: BpFrameType.SUBSCRIBE_ACK,
+      channelId: 1,
+      offset: 0n
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(c.frames.map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
   });
 
   it('routes RESIZE through to the session emulator', async () => {

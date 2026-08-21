@@ -42,8 +42,8 @@ import {
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VENDOR = join(ROOT, 'vendor', 'moor');
 const BUNDLED = join(ROOT, 'libexec', 'moor');
-const REQUIRED_VENDOR_COMMIT = '161de09f691d3a1bcd7cfca34070e0ccf537b988';
-const REQUIRED_SNAPSHOT_DIGEST = 'e9c8703ab67fd077d2b168b39e0b176c12575d448d82310fcb3462922541b08b';
+const REQUIRED_VENDOR_COMMIT = 'ebc7a5e087a9374d913cb723dde6c87cf8ed6a1f';
+const REQUIRED_SNAPSHOT_DIGEST = 'b1f9eebea2b3d3692413e42f91d6a09327b5f12f0af66e0c2ad062daabb7eb51';
 const BUILD_MOOR_URL = new URL('../scripts/build-moor.mjs', import.meta.url).href;
 const execFileAsync = promisify(execFile);
 
@@ -189,14 +189,14 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
   });
 
   it(
-    'builds a protocol-v4 holder through the release builder',
+    'builds a protocol-v5 holder through the release builder',
     async () => {
       const outputRoot = mkdtempSync(join(tmpdir(), 'desk-moor-release-build-'));
       const outfile = join(outputRoot, 'moor');
-      const sessionPath = join(outputRoot, 'distribution-v4');
+      const sessionPath = join(outputRoot, 'distribution-v5');
       const storeRoot = join(
         moorEventStoreRoot(outfile, { tmpdir: outputRoot }),
-        'distribution-v4.events'
+        'distribution-v5.events'
       );
       const runtimeEnv = { ...process.env, TMPDIR: outputRoot };
       let holderStarted = false;
@@ -228,33 +228,33 @@ describe('moor distribution contract — provenance-pinned vendor snapshot', () 
         expect(started.status, started.stderr).toBe(0);
         holderStarted = true;
 
-        const firstV4 = await exchangeHello(sessionPath, 4);
-        expect(firstV4.kind).toBe(MoorKind.HELLO_ACK);
-        expect(firstV4.scope).toBeGreaterThan(0);
-        expect(firstV4.payload[0]).toBe(4);
+        const firstV5 = await exchangeHello(sessionPath, 5);
+        expect(firstV5.kind).toBe(MoorKind.HELLO_ACK);
+        expect(firstV5.scope).toBeGreaterThan(0);
+        expect(firstV5.payload[0]).toBe(5);
 
-        const v3Refusal = await exchangeHello(sessionPath, 3);
-        expect(v3Refusal).toMatchObject({
-          scope: firstV4.scope,
+        const v4Refusal = await exchangeHello(sessionPath, 4);
+        expect(v4Refusal).toMatchObject({
+          scope: firstV5.scope,
           kind: MoorKind.ERROR
         });
         expect(
           new DataView(
-            v3Refusal.payload.buffer,
-            v3Refusal.payload.byteOffset,
-            v3Refusal.payload.byteLength
+            v4Refusal.payload.buffer,
+            v4Refusal.payload.byteOffset,
+            v4Refusal.payload.byteLength
           ).getUint16(
             0,
             true
           )
         ).toBe(1);
 
-        const secondV4 = await exchangeHello(sessionPath, 4);
-        expect(secondV4).toMatchObject({
-          scope: firstV4.scope,
+        const secondV5 = await exchangeHello(sessionPath, 5);
+        expect(secondV5).toMatchObject({
+          scope: firstV5.scope,
           kind: MoorKind.HELLO_ACK
         });
-        expect(secondV4.payload[0]).toBe(4);
+        expect(secondV5.payload[0]).toBe(5);
       } finally {
         if (holderStarted) {
           spawnSync(outfile, ['kill', '-f', sessionPath], {

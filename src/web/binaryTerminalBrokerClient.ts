@@ -1,27 +1,23 @@
 /**
  * Browser-singleton terminal client over the BINARY browser protocol (spec
- * §7.4/§7.6/§7.7). One WebSocket per tab carries every visible terminal
- * surface's traffic. This is the browser peer of the server-side
+ * §7.4/§7.6/§7.7). One WebSocket per tab carries currently attached
+ * terminal surfaces. This is the browser peer of the server-side
  * terminalWsRouter: it speaks the same channelId-keyed
- * frames and runs one loss-aware resync FSM per channel, so a dropped output
- * delta, a recreated session (generation bump), or a geometry change (revision
- * bump) drives the surface back to a clean snapshot instead of a corrupted
- * screen rendered from partial deltas.
+ * frames and runs one loss-aware resync FSM per channel. A lost delta detaches
+ * that channel and re-subscribes at the current live frontier; no retained
+ * output is requested or replayed.
  *
  * Two protocol facts shape the client and are worth stating up front:
  *
- *  - SUBSCRIBE_ACK is compact: it carries only {channelId, generation,
- *    revision}, NOT the surfaceId that requested it. A single ordered WS
+ *  - SUBSCRIBE_ACK carries {channelId, generation, revision, offset}, NOT the
+ *    surfaceId that requested it. A single ordered WS
  *    delivers the server's synchronous ACKs in the same order as our
  *    SUBSCRIBEs, so we pair each ACK (or a subscribe-failure ERROR on the
  *    connection channel) to the head of a FIFO `pendingAcks` queue. A failed
  *    subscribe must shift that queue too, or every later ACK misbinds.
  *
- *  - There is no client "request snapshot" frame. A gap still re-subscribes,
- *    while visibility uses the protocol's VISIBILITY frame on the existing
- *    channel. The server gates hidden output, retains that subscriber cursor,
- *    and catches reveal up with one bounded OUTPUT packet. A new subscription,
- *    cursor gap, or revision gap emits a current-screen snapshot.
+ *  - Hide detaches the channel. Reveal creates a new live-only subscription;
+ *    the server asks the PTY application to redraw, matching atch semantics.
  */
 import {
   BP_CONN_CHANNEL,
@@ -50,8 +46,6 @@ export type BinaryBrokerSocketFactory = (url: string) => BinaryBrokerSocket;
 export interface BinarySurfaceHandlers {
   /** Live output bytes for this surface; write straight to xterm (accepts Uint8Array). */
   onOutput: (bytes: Uint8Array) => void;
-  /** Baseline snapshot (SerializeAddon restorable string); do terminal.reset() then write. */
-  onSnapshot: (text: string) => void;
   /** The session ended; `outcome` is the holder's tagged ending as the EXIT frame carried it (`unknown` included). */
   onExit?: (outcome: MoorExitOutcome) => void;
   /** Protocol-level error for this surface (a BpError code). */
@@ -167,22 +161,14 @@ export class BinaryTerminalBrokerClient {
       // Input queued before the hide belongs to a focus context that no longer
       // exists and must not replay when the same channel becomes visible again.
       this.clearPendingInput(surface);
+      this.closeChannel(surface);
+      return;
     }
     if (!this.connected) {
       return; // resubscribeAll on reconnect honors the current visibility
     }
-    if (visible) {
-      if (surface.channelId !== undefined) {
-        // The fitted size was measured while hidden. Send it while the server
-        // still considers the channel hidden, then reveal so ownership election
-        // and the fresh snapshot use that exact geometry.
-        this.flushResize(surface);
-        this.sendFrame({ type: BpFrameType.VISIBILITY, channelId: surface.channelId, visible: true });
-      } else if (!surface.awaitingAck) {
-        this.sendSubscribe(surface);
-      }
-    } else if (surface.channelId !== undefined) {
-      this.sendFrame({ type: BpFrameType.VISIBILITY, channelId: surface.channelId, visible: false });
+    if (surface.channelId === undefined && !surface.awaitingAck) {
+      this.sendSubscribe(surface);
     }
   }
 
@@ -563,9 +549,7 @@ export class BinaryTerminalBrokerClient {
     }
     switch (frame.type) {
       case BpFrameType.SUBSCRIBE_ACK:
-        return this.onSubscribeAck(frame.channelId);
-      case BpFrameType.SNAPSHOT:
-        return this.onSnapshot(frame.channelId, frame);
+        return this.onSubscribeAck(frame);
       case BpFrameType.OUTPUT:
         return this.onOutput(frame.channelId, frame);
       case BpFrameType.GAP:
@@ -581,7 +565,8 @@ export class BinaryTerminalBrokerClient {
     }
   }
 
-  private onSubscribeAck(channelId: number): void {
+  private onSubscribeAck(frame: Extract<BpFrame, { type: BpFrameType.SUBSCRIBE_ACK }>): void {
+    const { channelId } = frame;
     const surface = this.pendingAcks.shift();
     if (surface === undefined) {
       return; // stray ack with no outstanding subscribe
@@ -599,10 +584,15 @@ export class BinaryTerminalBrokerClient {
     surface.channelId = channelId;
     surface.awaitingAck = false;
     surface.resync = new SubscriptionResync();
+    surface.resync.establishLiveBaseline({
+      generation: frame.generation,
+      revision: frame.revision,
+      offset: frame.offset,
+      length: 0
+    });
     this.channelToSurface.set(channelId, surface);
     if (!surface.visible) {
-      this.clearPendingInput(surface);
-      this.sendFrame({ type: BpFrameType.VISIBILITY, channelId, visible: false });
+      this.closeChannel(surface);
       return;
     }
     // A resize requested before the channel opened flushes now.
@@ -615,20 +605,9 @@ export class BinaryTerminalBrokerClient {
     }
   }
 
-  private onSnapshot(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>): void {
-    const surface = this.surfaceOf(channelId);
-    if (!surface || !surface.visible || !surface.resync) {
-      return;
-    }
-    const action = surface.resync.onSnapshot({ generation: frame.generation, revision: frame.revision, offset: frame.offset, length: 0 });
-    if (action === 'apply') {
-      surface.handlers.onSnapshot(frame.text);
-    }
-  }
-
   private onOutput(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.OUTPUT }>): void {
     const surface = this.surfaceOf(channelId);
-    if (!surface || !surface.visible || !surface.resync) {
+    if (!surface || !surface.resync) {
       return;
     }
     const action = surface.resync.onOutput({

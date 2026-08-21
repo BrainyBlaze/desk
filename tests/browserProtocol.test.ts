@@ -23,13 +23,11 @@ const bytes = (...v: number[]) => Uint8Array.of(...v);
 const SAMPLES: Record<string, BpFrame> = {
   SUBSCRIBE: { type: BpFrameType.SUBSCRIBE, sessionId: 'sess-α', surfaceId: 'main', rows: 40, cols: 120 },
   UNSUBSCRIBE: { type: BpFrameType.UNSUBSCRIBE, channelId: 7 },
-  VISIBILITY: { type: BpFrameType.VISIBILITY, channelId: 7, visible: true },
   INPUT: { type: BpFrameType.INPUT, channelId: 7, binary: false, bytes: new TextEncoder().encode('ls -la\r') },
   INPUT_BINARY: { type: BpFrameType.INPUT, channelId: 7, binary: true, bytes: bytes(0x1b, 0x5b, 0x4d, 0x20, 0x21, 0x21) },
   RESIZE: { type: BpFrameType.RESIZE, channelId: 7, rows: 50, cols: 200 },
   QUERY_REPLY: { type: BpFrameType.QUERY_REPLY, channelId: 7, queryOffset: 123456789012345n, leaseEpoch: 3, bytes: bytes(0x1b, 0x5b, 0x49) },
-  SUBSCRIBE_ACK: { type: BpFrameType.SUBSCRIBE_ACK, channelId: 7, generation: 4, revision: 9 },
-  SNAPSHOT: { type: BpFrameType.SNAPSHOT, channelId: 7, generation: 4, revision: 9, offset: 900n, text: '\x1b[H\x1b[2J restored — ★' },
+  SUBSCRIBE_ACK: { type: BpFrameType.SUBSCRIBE_ACK, channelId: 7, generation: 4, revision: 9, offset: 900n },
   OUTPUT: { type: BpFrameType.OUTPUT, channelId: 7, generation: 4, revision: 9, offset: 902n, bytes: bytes(0x00, 0xff, 0x1b, 0x5b, 0x41) },
   GAP: { type: BpFrameType.GAP, channelId: 7, from: 902n, to: 1500n },
   EXIT_EXITED: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'exited', code: 7, method: 'none' } },
@@ -41,6 +39,10 @@ const SAMPLES: Record<string, BpFrame> = {
 };
 
 describe('browser protocol — frame round-trip (§7.4)', () => {
+  it('uses the live-only protocol version', () => {
+    expect(BP_VERSION).toBe(3);
+  });
+
   for (const [name, frame] of Object.entries(SAMPLES)) {
     it(`${name} round-trips byte-exactly`, () => {
       const enc = encodeBpFrame(frame);
@@ -162,6 +164,30 @@ describe('browser protocol — validation', () => {
 
   it('rejects an unknown frame type', () => {
     const enc = Uint8Array.of(BP_VERSION, 200);
+    try {
+      decodeBpFrame(enc);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(BrowserProtocolError);
+      expect((e as BrowserProtocolError).code).toBe(BpError.UNKNOWN_TYPE);
+    }
+  });
+
+  it('rejects the retired terminal snapshot frame instead of accepting replay data', () => {
+    const retiredSnapshotType = 17;
+    const enc = Uint8Array.of(BP_VERSION, retiredSnapshotType);
+    try {
+      decodeBpFrame(enc);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(BrowserProtocolError);
+      expect((e as BrowserProtocolError).code).toBe(BpError.UNKNOWN_TYPE);
+    }
+  });
+
+  it('rejects the retired visibility frame so hide is always a real detach', () => {
+    const retiredVisibilityType = 3;
+    const enc = Uint8Array.of(BP_VERSION, retiredVisibilityType);
     try {
       decodeBpFrame(enc);
       throw new Error('should have thrown');

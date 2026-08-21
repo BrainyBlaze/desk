@@ -130,12 +130,13 @@ const text = (value: string): Uint8Array => new TextEncoder().encode(value);
 const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4), bytes);
 
 function helloAckPayload(identity: Uint8Array): Uint8Array {
-  return joined(Uint8Array.of(4), integer(GENERATION, 4), INCARNATION, wide(identity));
+  return joined(Uint8Array.of(5), integer(GENERATION, 4), INCARNATION, wide(identity));
 }
 
 function statusPayload(identity: Uint8Array): Uint8Array {
   const tail = new Uint8Array(69);
   const view = new DataView(tail.buffer);
+  view.setBigUint64(0, 1n, true);
   view.setUint8(32, 0x01 | 0x10 | 0x20 | 0x40);
   view.setUint32(33, 1, true);
   return joined(

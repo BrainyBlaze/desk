@@ -23,11 +23,11 @@ describe('Moor controller wire schema', () => {
 
   it('exports the frozen controller profile constants', () => {
     expect(Buffer.from(MOOR_MAGIC).toString('ascii')).toBe('MOOR');
-    expect(MOOR_VERSION).toBe(4);
+    expect(MOOR_VERSION).toBe(5);
     expect(MOOR_HEADER_SIZE).toBe(24);
     expect(MOOR_MAX_FRAME_PAYLOAD).toBe(1 << 20);
     expect(MOOR_MAX_MESSAGE_PAYLOAD).toBe(16 << 20);
-    expect([MOOR_MIN_KIND, MOOR_MAX_KIND]).toEqual([1, 0x1a]);
+    expect([MOOR_MIN_KIND, MOOR_MAX_KIND]).toEqual([1, 0x1b]);
   });
 
   it('accepts zero scope only for controller HELLO', () => {
@@ -42,11 +42,11 @@ describe('Moor controller wire schema', () => {
     expect(() => assertMoorKind(0)).toThrowError(
       expect.objectContaining<MoorWireError>({ code: 'UNKNOWN_TYPE' })
     );
-    expect(() => assertMoorKind(0x1b)).toThrowError(
+    expect(() => assertMoorKind(0x1c)).toThrowError(
       expect.objectContaining<MoorWireError>({ code: 'UNKNOWN_TYPE' })
     );
     expect(() => assertMoorKind(1)).not.toThrow();
-    expect(() => assertMoorKind(0x1a)).not.toThrow();
+    expect(() => assertMoorKind(0x1b)).not.toThrow();
   });
 
   it('matches the frozen fixed-payload map', () => {
@@ -58,7 +58,8 @@ describe('Moor controller wire schema', () => {
       [0x17, 20],
       [0x18, 20],
       [0x19, 24],
-      [0x1a, 32]
+      [0x1a, 32],
+      [0x1b, 8]
     ]);
   });
 
@@ -108,7 +109,7 @@ describe('Moor controller frame encoder', () => {
 
     expect(header).toEqual({
       magic: 'MOOR',
-      version: 4,
+      version: 5,
       kind: 1,
       more: 0,
       reserved: 0,
@@ -158,7 +159,7 @@ describe('Moor controller frame encoder', () => {
     expect(() => codec.encode(0, 2, new Uint8Array())).toThrowError(
       expect.objectContaining<MoorWireError>({ code: 'GENERATION_MISMATCH' })
     );
-    expect(() => codec.encode(7, 0x1b, new Uint8Array())).toThrowError(
+    expect(() => codec.encode(7, 0x1c, new Uint8Array())).toThrowError(
       expect.objectContaining<MoorWireError>({ code: 'UNKNOWN_TYPE' })
     );
     expect(() => codec.encode(7, 1, new Uint8Array(MOOR_MAX_MESSAGE_PAYLOAD + 1))).toThrowError(
@@ -303,7 +304,7 @@ describe('Moor controller streaming decoder', () => {
     ['bad reserved byte', rawFrame({ reserved: 1 }), 'MALFORMED'],
     ['bad MORE byte', rawFrame({ more: 2 }), 'MALFORMED'],
     ['zero scope outside HELLO', rawFrame({ scope: 0, kind: 2 }), 'GENERATION_MISMATCH'],
-    ['unknown kind', rawFrame({ kind: 0x1b }), 'UNKNOWN_TYPE'],
+    ['unknown kind', rawFrame({ kind: 0x1c }), 'UNKNOWN_TYPE'],
     [
       'oversized frame declaration',
       rawFrame({ length: MOOR_MAX_FRAME_PAYLOAD + 1 }),

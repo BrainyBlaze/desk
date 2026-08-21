@@ -15,6 +15,14 @@ describe('native agent grid visibility', () => {
     expect(mux).toMatch(/<NativeAgentSurface[\s\S]*?visible=\{visible\}/);
   });
 
+  it('remounts the terminal emulator when a layout cell switches sessions', () => {
+    const mux = agentMultiplexerSource();
+
+    expect(mux).toMatch(
+      /<TerminalSurface\s+key=\{cell\.activeSession\.spec\.sessionId\}/
+    );
+  });
+
   it('subscribes native cells with physical visibility, not focus or mountedness', () => {
     const source = nativeSurfaceSource();
 

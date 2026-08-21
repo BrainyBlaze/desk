@@ -45,14 +45,14 @@ function identityFor(path: string): Uint8Array {
 }
 
 function helloAckPayload(identity: Uint8Array, incarnation = INCARNATION): Uint8Array {
-  return joined(Uint8Array.of(4), integer(GENERATION, 4), incarnation, wide(identity));
+  return joined(Uint8Array.of(5), integer(GENERATION, 4), incarnation, wide(identity));
 }
 
 function statusPayload(
   identity: Uint8Array,
   incarnation = INCARNATION,
   replay: { first: bigint; last: bigint; start: bigint; end: bigint } = {
-    first: 0n,
+    first: 1n,
     last: 0n,
     start: 0n,
     end: 0n
@@ -234,6 +234,7 @@ class ExpiringLeaseHolder {
     bytes: number;
   }> = [];
   readonly resizes: Array<{ connection: number; columns: number; rows: number }> = [];
+  readonly redraws: Array<{ connection: number; columns: number; rows: number }> = [];
   leaseDeadline = 0;
   private firstRefusedResolve!: () => void;
   readonly firstRefused = new Promise<void>((resolve) => { this.firstRefusedResolve = resolve; });
@@ -283,6 +284,10 @@ class ExpiringLeaseHolder {
   private recoveryAttachedResolve!: () => void;
   readonly recoveryAttached = new Promise<void>((resolve) => {
     this.recoveryAttachedResolve = resolve;
+  });
+  private initialAttachedResolve!: () => void;
+  readonly initialAttached = new Promise<void>((resolve) => {
+    this.initialAttachedResolve = resolve;
   });
   private holdRecoveryAttach = false;
   private releaseRecoveryAttach: (() => void) | undefined;
@@ -370,6 +375,7 @@ class ExpiringLeaseHolder {
         }
         return;
       case MoorKind.ATTACH:
+        const liveOnly = (message.payload[4]! & 0b0000_0100) !== 0;
         if (connection >= 3 && this.holdRecoveryAttach) {
           this.holdRecoveryAttach = false;
           this.releaseRecoveryAttach = () => this.route(socket, codec, connection, message);
@@ -403,16 +409,21 @@ class ExpiringLeaseHolder {
             ...(message.payload[4]! & 1
               ? [codec.encode(GENERATION, MoorKind.LEASE_RESULT, leaseGrantPayload())]
               : []),
-            ...replayBytes.map((bytes, index) =>
-              codec.encode(
-                GENERATION,
-                MoorKind.OUTPUT,
-                joined(integer(BigInt(index + 1), 8), integer(BigInt(index), 8), bytes)
-              )
-            )
+            ...(liveOnly
+              ? []
+              : replayBytes.map((bytes, index) =>
+                  codec.encode(
+                    GENERATION,
+                    MoorKind.OUTPUT,
+                    joined(integer(BigInt(index + 1), 8), integer(BigInt(index), 8), bytes)
+                  )
+                ))
           ];
           socket.write(joined(...frames));
-          if (connection === 1) this.leaseDeadline = Date.now() + 1_000;
+          if (connection === 1) {
+            this.leaseDeadline = Date.now() + 1_000;
+            this.initialAttachedResolve();
+          }
           else {
             this.recoveryAttachedResolve();
             if (connection === 5) this.postFailureRetryAttachedResolve();
@@ -439,7 +450,8 @@ class ExpiringLeaseHolder {
         }
         if (connection === 1) {
           this.leaseDeadline = Date.now() + 1_000;
-          if (this.unsafeRecoveryGap) {
+          this.initialAttachedResolve();
+          if (this.unsafeRecoveryGap && !liveOnly) {
             for (let sequence = 1; sequence <= 3; sequence += 1) {
               this.send(
                 socket,
@@ -455,7 +467,7 @@ class ExpiringLeaseHolder {
           }
         } else {
           this.recoveryAttachedResolve();
-          if (this.unsafeRecoveryGap) {
+          if (this.unsafeRecoveryGap && !liveOnly) {
             this.send(socket, codec, MoorKind.GAP, joined(integer(1n, 8), integer(4n, 8)));
           }
         }
@@ -546,6 +558,19 @@ class ExpiringLeaseHolder {
           message.payload.byteLength
         );
         this.resizes.push({
+          connection,
+          columns: view.getUint16(4, true),
+          rows: view.getUint16(6, true)
+        });
+        return;
+      }
+      case MoorKind.REDRAW: {
+        const view = new DataView(
+          message.payload.buffer,
+          message.payload.byteOffset,
+          message.payload.byteLength
+        );
+        this.redraws.push({
           connection,
           columns: view.getUint16(4, true),
           rows: view.getUint16(6, true)
@@ -1068,16 +1093,8 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('recovers the master at adoption; a slow replay drain never times the attempt out, and the replay is applied exactly once', async () => {
-    // Spec §10.2: the identity/adoption gate closes at ATTACH_ACK + preamble
-    // (+ LEASE_RESULT); the display baseline "completes separately". A screen
-    // that drains the retained replay slowly is a viewer concern — it must not
-    // expire the 2 s adoption deadline, close the recovery attempt, and start a
-    // retry storm that re-streams the same replay (the live failure of
-    // 2026-08-18: 4 MiB codex tails never adopted). Recovery therefore
-    // publishes the recovered master at adoption; the replay lands afterwards,
-    // exactly once, with one ack; input queued during recovery flows after it.
-    const emulator = new BlockingRecoveryReplayEmulator();
+  it('recovers at the advertised live frontier without replaying retained output or delaying input', async () => {
+    const emulator = new EmptyEmulator();
     const harness = await startRecoveryHarness(
       () => emulator,
       (sessionPath) =>
@@ -1103,23 +1120,16 @@ describe('SessionManager controller-link recovery', () => {
       harness.holder.allowRecovery();
       await harness.holder.recoveryAttemptConnected;
       await harness.holder.recoveryAttached;
-      await emulator.replayFlushStarted;
       await settleSocketIo();
 
-      // Adopted: the recovered link is published while the replay is still
-      // draining, and the keystroke queued during recovery reaches the holder
-      // NOW — lease-owned traffic is legal the moment the lease is granted
-      // (§6.1); holding it behind the display baseline would let a heavy
-      // replay stall the agent's input all over again.
       expect(harness.holder.inputs).toEqual(['must-stay-queued']);
+      expect(joined(...emulator.writes)).toEqual(new Uint8Array());
+      expect(harness.holder.outputAcks).toEqual([]);
       expect(harness.manager.stateSnapshot('session')).toMatchObject({
         generation: GENERATION,
         health: { status: 'healthy' }
       });
 
-      // The 2 s adoption deadline (which the old contract let the replay run
-      // out) passes with the screen still shut: nothing closes, nothing
-      // reconnects — 1 primary + 1 probe + 1 recovery attach, and it stays 3.
       await vi.advanceTimersByTimeAsync(2_001);
       await settleSocketIo(4);
       expect(harness.holder.connections).toBe(3);
@@ -1129,26 +1139,14 @@ describe('SessionManager controller-link recovery', () => {
         health: { status: 'healthy' }
       });
 
-      // The screen finally drains: the replay is applied once and acked once,
-      // on the same, still-open recovered link.
-      emulator.releaseReplayFlush();
-      await settleSocketIo(12);
-      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('r');
-      expect(harness.holder.outputAcks).toEqual([1n]);
-      expect(harness.holder.inputs).toEqual(['must-stay-queued']);
-      expect(harness.holder.connections).toBe(3);
-      expect(harness.browserErrors).toEqual([]);
-
-      // A surface subscribing after the drain is baselined at the replay's
-      // end offset — the whole retained run was applied exactly once.
       const lateChannel = harness.manager.subscribe('session', 'late', 24, 80)!;
-      const snapshot = harness.browserFrames
+      const frames = harness.browserFrames
         .filter(({ channelId }) => channelId === lateChannel)
-        .map(({ frame }) => frame)
-        .find((frame) => frame.type === BpFrameType.SNAPSHOT);
-      expect(snapshot).toMatchObject({ type: BpFrameType.SNAPSHOT, offset: 1n });
+        .map(({ frame }) => frame);
+      expect(frames).toEqual([
+        expect.objectContaining({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n })
+      ]);
     } finally {
-      emulator.releaseReplayFlush();
       await harness.close();
     }
   });
@@ -1222,7 +1220,7 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('acknowledges output only after the authoritative emulator drains it', async () => {
+  it('parses later output immediately but acknowledges only after emulator drain', async () => {
     const emulator = new BlockingOutputEmulator();
     const harness = await startRecoveryHarness(() => emulator);
     try {
@@ -1230,21 +1228,52 @@ describe('SessionManager controller-link recovery', () => {
       harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('b'));
       await settleSocketIo();
 
-      expect(emulator.flushCount).toBe(2);
-      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('a');
+      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('ab');
       expect(harness.holder.outputAcks).toEqual([]);
 
       emulator.releaseOutputFlush();
       await settleSocketIo();
-
-      expect(emulator.flushCount).toBe(3);
-      expect(new TextDecoder().decode(joined(...emulator.writes))).toBe('ab');
       expect(harness.holder.outputAcks).toEqual([1n]);
 
       emulator.releaseOutputFlush();
       await settleSocketIo();
-
       expect(harness.holder.outputAcks).toEqual([1n, 2n]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('does not let output parsing head-of-line block an input receipt', async () => {
+    const emulator = new BlockingOutputEmulator();
+    const harness = await startRecoveryHarness(() => emulator);
+    try {
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('first')
+        )
+      ).toBe(true);
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('second')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual(['first']);
+
+      harness.holder.sendOutput(1, 1n, 0n, new TextEncoder().encode('first'));
+      harness.holder.acknowledgeLatestInput(1);
+      await emulator.firstOutputFlushStarted;
+      await settleSocketIo(8);
+
+      expect(harness.holder.inputs).toEqual(['first', 'second']);
+      expect(harness.holder.outputAcks).toEqual([]);
+      emulator.releaseOutputFlush();
+      await settleSocketIo();
+      expect(harness.holder.outputAcks).toEqual([1n]);
     } finally {
       await harness.close();
     }
@@ -1301,7 +1330,7 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('isolates a delayed snapshot serialization failure from output consumption', async () => {
+  it('does not serialize a snapshot while opening a live-baselined channel', async () => {
     const emulator = new BlockingOutputEmulator();
     const harness = await startRecoveryHarness(() => emulator);
     try {
@@ -1314,7 +1343,7 @@ describe('SessionManager controller-link recovery', () => {
       await settleSocketIo(8);
 
       expect(harness.holder.outputAcks).toEqual([1n]);
-      expect(harness.manager.sessionOfChannel(failedChannel)).toBeUndefined();
+      expect(harness.manager.sessionOfChannel(failedChannel)).toBe('session');
 
       harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
       await settleSocketIo();
@@ -1397,7 +1426,7 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('keeps a subscribe snapshot atomic with a pending output parser drain', async () => {
+  it('opens a subscriber at the live frontier while output parser drain is pending', async () => {
     const emulator = new BlockingOutputEmulator();
     const harness = await startRecoveryHarness(() => emulator);
     try {
@@ -1410,17 +1439,12 @@ describe('SessionManager controller-link recovery', () => {
           .filter(({ channelId }) => channelId === lateChannel)
           .map(({ frame }) => frame);
       expect(lateFrames().map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+      expect(lateFrames()[0]).toMatchObject({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n });
 
       emulator.releaseOutputFlush();
       await settleSocketIo(8);
 
-      const snapshot = lateFrames().find((frame) => frame.type === BpFrameType.SNAPSHOT);
-      expect(snapshot).toMatchObject({
-        type: BpFrameType.SNAPSHOT,
-        offset: 1n,
-        text: 'x'
-      });
-      expect(lateFrames().some((frame) => frame.type === BpFrameType.OUTPUT)).toBe(false);
+      expect(lateFrames().map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
 
       harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
       await settleSocketIo();
@@ -1433,16 +1457,16 @@ describe('SessionManager controller-link recovery', () => {
         offset: 1n,
         bytes: new TextEncoder().encode('y')
       });
-      if (snapshot?.type !== BpFrameType.SNAPSHOT || output?.type !== BpFrameType.OUTPUT) {
-        throw new Error('expected one snapshot followed by one live output frame');
+      if (output?.type !== BpFrameType.OUTPUT) {
+        throw new Error('expected one live output frame after the ACK baseline');
       }
-      expect(snapshot.text + new TextDecoder().decode(output.bytes)).toBe('xy');
+      expect(new TextDecoder().decode(output.bytes)).toBe('y');
     } finally {
       await harness.close();
     }
   });
 
-  it('keeps same-chunk replay ahead of later live output while replay drain is blocked', async () => {
+  it('skips retained attach output and delivers the first later live record once', async () => {
     const emulator = new BlockingOutputEmulator();
     const observations: Array<{ text: string; acks: bigint[] }> = [];
     const observe = (holder: ExpiringLeaseHolder): void => {
@@ -1456,24 +1480,22 @@ describe('SessionManager controller-link recovery', () => {
       (sessionPath) =>
         new ExpiringLeaseHolder(sessionPath, false, INCARNATION, false, false, true),
       async (holder) => {
-        await emulator.firstOutputFlushStarted;
+        await holder.initialAttached;
+        observe(holder);
         holder.sendOutput(1, 3n, 2n, new TextEncoder().encode('c'));
+        await emulator.firstOutputFlushStarted;
         await settleSocketIo();
         observe(holder);
-
-        for (let release = 0; release < 3; release += 1) {
-          emulator.releaseOutputFlush();
-          await settleSocketIo();
-          observe(holder);
-        }
+        emulator.releaseOutputFlush();
+        await settleSocketIo();
+        observe(holder);
       }
     );
     try {
       expect(observations).toEqual([
-        { text: 'a', acks: [] },
-        { text: 'ab', acks: [1n] },
-        { text: 'abc', acks: [1n, 2n] },
-        { text: 'abc', acks: [1n, 2n, 3n] }
+        { text: '', acks: [] },
+        { text: 'c', acks: [] },
+        { text: 'c', acks: [3n] }
       ]);
     } finally {
       await harness.close();
@@ -1699,9 +1721,16 @@ describe('SessionManager controller-link recovery', () => {
       await settleSocketIo();
 
       expect(harness.holder.resizes).toEqual([
-        // The acquisition command from the harness subscribe (desk#68) — the
-        // observer's later subscribe and resize add NOTHING to this list.
+        // The acquisition command from the harness subscribe (desk#68).
         { connection: 1, columns: 80, rows: 24 },
+        { connection: 3, columns: 95, rows: 48 }
+      ]);
+      expect(harness.holder.redraws).toEqual([
+        // The observer's subscribe asks the owner geometry to redraw, exactly
+        // like atch ATTACH + MSG_REDRAW. Its requested 41x137 never becomes a
+        // geometry command.
+        { connection: 1, columns: 80, rows: 24 },
+        // Recovery requests a repaint only after the fresh lease is attached.
         { connection: 3, columns: 95, rows: 48 }
       ]);
     } finally {
@@ -1966,7 +1995,7 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('keeps a retained-output GAP beyond the saved cursor visibly indeterminate without applying its tail', async () => {
+  it('adopts retained frontiers on live-only recovery without requesting a GAP or applying a tail', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     const root = mkdtempSync(join(tmpdir(), 'desk-link-gap-'));
     const sessionPath = join(root, 'session');
@@ -1987,22 +2016,20 @@ describe('SessionManager controller-link recovery', () => {
         sessionPath
       })).ok).toBe(true);
       const writesBeforeRecovery = emulator.writes.map((bytes) => bytes.slice());
-      expect(new TextDecoder().decode(joined(...writesBeforeRecovery))).toContain('abc');
+      expect(joined(...writesBeforeRecovery)).toEqual(new Uint8Array());
 
       await vi.advanceTimersByTimeAsync(3_001);
       await holder.firstConnectionClosed;
       await holder.recoveryHelloSeen;
       holder.allowRecovery();
       await holder.recoveryAttemptConnected;
-      await holder.recoveryAttemptClosed;
-      await vi.advanceTimersByTimeAsync(101);
-      await holder.postFailureRetryConnected;
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await holder.recoveryAttached;
+      await settleSocketIo();
 
       expect(manager.stateSnapshot('session')).toMatchObject({
         generation: GENERATION,
         lifecycle: 'running',
-        health: { status: 'degraded', reason: MOOR_LIVENESS_REASON }
+        health: { status: 'healthy' }
       });
       expect(joined(...emulator.writes)).toEqual(joined(...writesBeforeRecovery));
       expect(holder.childAlive).toBe(true);

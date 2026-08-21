@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  BP_SNAP_CHUNK,
+  BP_OUTPUT_CHUNK,
   BpFrameType,
   type BpFrame
 } from '../src/shared/browserProtocol/index.js';
@@ -63,6 +63,8 @@ function makeRuntime() {
   const emu = new FakeEmu();
   /** Every size actually put on the wire to the child's pty, in order. */
   const sent: [number, number, number][] = [];
+  /** Same-size repaint requests, kept separate from commanded geometry. */
+  const redraws: [number, number, number][] = [];
   /** Every frame pushed to a browser channel, in order. */
   const browser: { channelId: number; frame: BpFrame }[] = [];
   const runtime = new SessionRuntime({
@@ -77,10 +79,13 @@ function makeRuntime() {
     sendMasterInput: () => true,
     sendMasterResize: (rows, cols, surfaceId) => {
       sent.push([rows, cols, surfaceId]);
+    },
+    sendMasterRedraw: (rows, cols, surfaceId) => {
+      redraws.push([rows, cols, surfaceId]);
     }
   });
   const sizes = (): [number, number][] => sent.map(([rows, cols]) => [rows, cols]);
-  return { runtime, emu, sent, sizes, browser };
+  return { runtime, emu, sent, redraws, sizes, browser };
 }
 
 // THE RULE these tests derive their expected values from:
@@ -355,10 +360,11 @@ describe('desk#68 — one owner of the session size', () => {
     expect(sizes()).toEqual([OWNER_SIZE]);
   });
 
-  it('keeps a hidden channel attached and catches it up with one contiguous delta on reveal', () => {
-    const { runtime, browser } = makeRuntime();
+  it('does not deliver hidden output or replay it on reveal', () => {
+    const { runtime, emu, browser } = makeRuntime();
     const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
     browser.length = 0;
+    emu.serializeOptions.length = 0;
 
     runtime.onBrowserVisibility(only, false);
     runtime.onMoorOutput(new TextEncoder().encode('hidden-1'), 0n);
@@ -366,50 +372,30 @@ describe('desk#68 — one owner of the session size', () => {
     expect(browser).toEqual([]);
     expect(runtime.subscriberCount).toBe(1);
 
+    const framesBeforeReveal = browser.length;
     runtime.onBrowserVisibility(only, true);
-    expect(browser).toEqual([
-      {
-        channelId: only,
-        frame: {
-          type: BpFrameType.OUTPUT,
-          channelId: only,
-          generation: 1,
-          revision: 1,
-          offset: 0n,
-          bytes: new TextEncoder().encode('hidden-1hidden-2')
-        }
-      }
-    ]);
+    expect(browser).toHaveLength(framesBeforeReveal);
+    expect(emu.serializeOptions).toEqual([]);
     expect(runtime.subscriberCount).toBe(1);
   });
 
-  it('falls back to a viewport-only snapshot when hidden output exceeds the replay cap', () => {
+  it('does not buffer a large hidden output for reveal', () => {
     const { runtime, emu, browser } = makeRuntime();
     const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
     browser.length = 0;
     emu.serializeOptions.length = 0;
 
     runtime.onBrowserVisibility(only, false);
-    runtime.onMoorOutput(new Uint8Array(BP_SNAP_CHUNK + 1), 0n);
+    runtime.onMoorOutput(new Uint8Array(BP_OUTPUT_CHUNK + 1), 0n);
+    expect(browser).toEqual([]);
+    const framesBeforeReveal = browser.length;
     runtime.onBrowserVisibility(only, true);
 
-    expect(browser).toEqual([
-      {
-        channelId: only,
-        frame: {
-          type: BpFrameType.SNAPSHOT,
-          channelId: only,
-          generation: 1,
-          revision: 1,
-          offset: BigInt(BP_SNAP_CHUNK + 1),
-          text: 'SCREEN 48x95'
-        }
-      }
-    ]);
-    expect(emu.serializeOptions).toEqual([{ scrollback: 0 }]);
+    expect(browser).toHaveLength(framesBeforeReveal);
+    expect(emu.serializeOptions).toEqual([]);
   });
 
-  it('uses a viewport-only snapshot when reveal changes the terminal revision', () => {
+  it('does no reveal replay when ownership changes the terminal revision', () => {
     const { runtime, emu, browser } = makeRuntime();
     const only = runtime.subscribe('surf-only', ...OWNER_SIZE).channelId;
     browser.length = 0;
@@ -420,20 +406,8 @@ describe('desk#68 — one owner of the session size', () => {
     runtime.onBrowserResize(only, ...OBSERVER_SIZE);
     runtime.onBrowserVisibility(only, true);
 
-    expect(browser).toEqual([
-      {
-        channelId: only,
-        frame: {
-          type: BpFrameType.SNAPSHOT,
-          channelId: only,
-          generation: 1,
-          revision: 2,
-          offset: 6n,
-          text: 'SCREEN 41x137'
-        }
-      }
-    ]);
-    expect(emu.serializeOptions).toEqual([{ scrollback: 0 }]);
+    expect(browser).toEqual([]);
+    expect(emu.serializeOptions).toEqual([]);
   });
 
   it('an observer leaving changes nothing: no re-election, no re-command', () => {
@@ -591,6 +565,17 @@ describe('desk#68 — DaemonCore records geometry only for a COMMANDED resize', 
 // guaranteed on that path, so acquiring ownership must command the acquirer's
 // geometry transactionally.
 describe('desk#68 — acquiring ownership on subscribe commands the acquirer geometry', () => {
+  it('requests a same-size PTY redraw when a live-only subscriber reattaches', () => {
+    const { runtime, redraws, sizes } = makeRuntime();
+    const first = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId;
+    runtime.unsubscribe(first);
+
+    const second = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId;
+
+    expect(sizes()).toEqual([OWNER_SIZE]);
+    expect(redraws).toEqual([[OWNER_SIZE[0], OWNER_SIZE[1], second]]);
+  });
+
   it('subscribe after all channels detach owns and commands geometry with NO resize frame', () => {
     const { runtime, emu, sent, sizes } = makeRuntime();
     const a = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId;
@@ -607,13 +592,8 @@ describe('desk#68 — acquiring ownership on subscribe commands the acquirer geo
     expect(runtime.commandedSize()).toEqual({ rows: 48, cols: 95 });
   });
 
-  // Pins the ordering the acquisition comment promises: the command runs
-  // BEFORE the ACK and SNAPSHOT are emitted. With the order broken, the ACK
-  // carries the pre-command revision and the snapshot is serialized at the
-  // PREVIOUS owner's geometry — the browser renders a stale-geometry snapshot
-  // and then reflows when the resize lands, on exactly the reveal path this
-  // acquisition exists to fix.
-  it('subscribe after all channels detach ACKs and snapshots at the commanded geometry', () => {
+  // The command runs before ACK, so the live baseline carries the post-command revision.
+  it('subscribe after all channels detach ACKs at the commanded geometry', () => {
     const { runtime, browser } = makeRuntime();
     const a = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId; // revision 0 → 1
     const b = runtime.subscribe('surf-b', ...OBSERVER_SIZE).channelId;
@@ -630,18 +610,8 @@ describe('desk#68 — acquiring ownership on subscribe commands the acquirer geo
           type: BpFrameType.SUBSCRIBE_ACK,
           channelId: a2,
           generation: 1,
-          revision: 3 // the post-command revision, not 2
-        }
-      },
-      {
-        channelId: a2,
-        frame: {
-          type: BpFrameType.SNAPSHOT,
-          channelId: a2,
-          generation: 1,
-          revision: 3,
           offset: 0n,
-          text: 'SCREEN 48x95' // serialized at the commanded geometry, not at B's 41x137
+          revision: 3 // the post-command revision, not 2
         }
       }
     ]);

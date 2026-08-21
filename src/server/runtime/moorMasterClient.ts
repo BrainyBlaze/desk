@@ -38,6 +38,7 @@ export interface MoorAttachOptions {
   columns: number;
   rows: number;
   requestLease: boolean;
+  replay?: 'retained' | 'live-only';
   nonVt?: boolean;
 }
 
@@ -270,6 +271,8 @@ export class MoorMasterClient {
   /** §6.1 output continuity: next record sequence and byte offset. */
   private expectedSequence = 1n;
   private expectedOffset = 0n;
+  private replayPolicy: 'retained' | 'live-only' = 'retained';
+  private adoptedOutputSequence = 0n;
   /** Highest OUTPUT record received on this connection ("highest record sent" bounds OUTPUT_ACK). */
   private highestReceived = 0n;
   /** The cumulative consumption watermark already acknowledged to the holder. */
@@ -630,6 +633,13 @@ export class MoorMasterClient {
     this.scheduleKeepalive(); // lease-owned traffic resets the idle cadence
   }
 
+  sendRedraw(columns: number, rows: number): void {
+    this.requireAttached();
+    this.requireLease();
+    this.request({ type: 'redraw', epoch: this.lease!.epoch, columns, rows });
+    this.scheduleKeepalive();
+  }
+
   ackOutput(sequence: bigint): void {
     this.requireAttached();
     // §6.1: zero means no record consumed; anything above the highest record
@@ -903,7 +913,10 @@ export class MoorMasterClient {
   private captureReconnectSnapshot(): MoorReconnectSnapshot | undefined {
     const incarnation = this.incarnation;
     if (incarnation === undefined) return undefined;
-    const outputSequence = this.lastAcked > this.effectiveResume ? this.lastAcked : this.effectiveResume;
+    const outputSequence = [this.lastAcked, this.effectiveResume, this.adoptedOutputSequence].reduce(
+      (highest, sequence) => (sequence > highest ? sequence : highest),
+      0n
+    );
     const lease = this.lease;
     return {
       output: { sequence: outputSequence, incarnation: incarnation.slice() },
@@ -1132,16 +1145,23 @@ export class MoorMasterClient {
           );
         }
         this.status = decoded.status;
-        // §6.1 output continuity: the replay baseline starts at record 1 and
-        // the retained start offset. A discarded prefix must arrive as exactly
-        // one GAP{1, first-1} before any replay output; empty history emits
-        // neither and live records begin at sequence 1.
-        this.expectedSequence = 1n;
-        this.expectedOffset = decoded.status.replay.start;
-        this.baselineGap =
-          decoded.status.replay.first > 1n
-            ? { last: decoded.status.replay.first - 1n }
-            : undefined;
+        if (this.replayPolicy === 'live-only') {
+          this.expectedSequence = decoded.status.replay.last + 1n;
+          this.expectedOffset = decoded.status.replay.end;
+          this.baselineGap = undefined;
+          this.adoptedOutputSequence = decoded.status.replay.last;
+        } else {
+          // §6.1 output continuity: the replay baseline starts at record 1 and
+          // the retained start offset. A discarded prefix must arrive as exactly
+          // one GAP{1, first-1} before any replay output; empty history emits
+          // neither and live records begin at sequence 1.
+          this.expectedSequence = 1n;
+          this.expectedOffset = decoded.status.replay.start;
+          this.baselineGap =
+            decoded.status.replay.first > 1n
+              ? { last: decoded.status.replay.first - 1n }
+              : undefined;
+        }
         this.phase = 'status-prefix';
         this.h.onAttachAck?.(decoded.status);
         return;
@@ -1594,6 +1614,7 @@ export class MoorMasterClient {
       throw new MoorWireError('BAD_SEQUENCE', 'cannot send ATTACH without a pending adoption');
     }
     this.attachLeaseMode = mode;
+    this.replayPolicy = pending.options.replay ?? 'retained';
     this.phase = 'adopted';
     this.request({
       type: 'attach',
@@ -1601,6 +1622,7 @@ export class MoorMasterClient {
       rows: pending.options.rows,
       requestLease: mode === 'fresh',
       resumedLease: mode === 'resumed',
+      replay: this.replayPolicy,
       nonVt: pending.options.nonVt ?? false
     });
   }

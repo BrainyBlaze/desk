@@ -162,9 +162,9 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
         binPath: process.execPath,
         binArgs: NODE_IMPORT_ARGS,
         sessionPath,
-        command: ['sh', '-c', 'printf hello-from-moor; cat'],
+        command: ['sh', '-c', 'printf hidden-before-attach; cat'],
         geometry: { rows: 24, cols: 80 },
-        env: { ...process.env, TMPDIR: root },
+        env: { ...process.env, TMPDIR: root, FAKE_MOOR_REQUIRE_C0: '1' },
         killSpec,
         prepareSpawn: () => ({ storeDir })
       });
@@ -174,14 +174,13 @@ describe('SessionManager × moor join (real orchestration over the GO harness)',
       expect(ledger.current('s1')).toBe(2);
       expect(existsSync(sessionPath)).toBe(true);
 
-      // Output reaches BOTH the authoritative emulator and the browser fan-out.
+      // Atch-style attach adopts the live frontier without reconstructing old output.
       const subscribed = manager.subscribe('s1', 'main', 24, 80);
       expect(subscribed).toBeDefined();
-      await waitFor(
-        () =>
-          emu.written.some((bytes) => new TextDecoder().decode(bytes).includes('hello-from-moor')),
-        'replayed child output through the native attach'
-      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(
+        emu.written.some((bytes) => new TextDecoder().decode(bytes).includes('hidden-before-attach'))
+      ).toBe(false);
 
       // Browser input round-trips through the one-in-flight moor link.
       manager.onBrowserInput('s1', subscribed!, false, new TextEncoder().encode('echo-me\n'));
@@ -780,16 +779,13 @@ describe('SessionManager × moor restore (daemon restart re-adoption over the GO
       expect(restored.moorStatus?.layout).toBe(2);
       expect(restored.moorStatus?.generation).toBe(2);
 
-      // Replayed output reaches the fresh emulator; input round-trips.
+      // Re-adoption starts at the live frontier; retained output is not reconstructed.
       const subscribed = manager.subscribe('r1', 'main', 24, 80);
       expect(subscribed).toBeDefined();
-      await waitFor(
-        () =>
-          emu.written.some((bytes) =>
-            new TextDecoder().decode(bytes).includes('survived-restart')
-          ),
-        'replayed output through the native re-adoption'
-      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(
+        emu.written.some((bytes) => new TextDecoder().decode(bytes).includes('survived-restart'))
+      ).toBe(false);
       manager.onBrowserInput('r1', subscribed!, false, new TextEncoder().encode('back\n'));
       await waitFor(
         () => emu.written.some((bytes) => new TextDecoder().decode(bytes).includes('back')),

@@ -34,7 +34,7 @@ const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4),
 const identity = (path: string): Uint8Array => joined(Uint8Array.of(1), text(path));
 
 function helloAckPayload(path: string): Uint8Array {
-  return joined(Uint8Array.of(4), integer(GENERATION, 4), INCARNATION, wide(identity(path)));
+  return joined(Uint8Array.of(5), integer(GENERATION, 4), INCARNATION, wide(identity(path)));
 }
 
 function statusPayload(
@@ -57,7 +57,7 @@ function statusPayload(
   const ownsLease = options.ownsLease ?? true;
   const viewers = options.viewers ?? true;
   const replay = options.replay ?? {
-    first: 0n,
+    first: 1n,
     last: 0n,
     start: 0n,
     end: 0n,

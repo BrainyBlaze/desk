@@ -1,17 +1,14 @@
-// Adoption of a surviving Moor holder must not depend on the size of its
-// retained scrollback. The §3/§6 exchange (HELLO → ATTACH_ACK → TERMINAL_STATE)
-// is what makes a holder adopted; the retained-output replay that follows is
-// ordinary output for the emulator, delivered on the same backpressured path
-// as live output. It must therefore never sit between ATTACH_ACK and the
-// adoption decision — a heavy tail (a TUI that redrew itself up to the log
-// cap) must not stall this session's adoption nor starve sibling adoptions
-// running in the same daemon.
+// Desk starts terminal holders with `-C 0` and adopts them live-only. Output
+// produced before attachment is therefore neither retained by Moor nor replayed
+// into the emulator. A large pre-attach redraw must have zero effect on attach
+// latency, while output produced after attachment still follows the ordinary
+// backpressured path.
 //
 // Observed live (2026-08-18): codex holders carrying ~4 MiB / ~24k retained
 // frames failed `restore-attach-failed` across two daemon restarts while
 // ~300 KB claude holders adopted, because the buffered replay was drained
 // synchronously inside the adoption critical section.
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,13 +25,13 @@ import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulator
 const FAKE = fileURLToPath(new URL('./helpers/fake-moor-holder.ts', import.meta.url));
 const NODE_IMPORT_ARGS = ['--import', 'tsx', FAKE];
 
-/** Retained lines the child prints before any daemon attaches (the "tail"). */
+/** Lines the child prints before any daemon attaches. They must be discarded. */
 const HEAVY_TAIL_LINES = 6_000;
-/** A shell that prints the tail once, then idles like a live TUI. */
+/** A shell that prints once, then emits a marker after the test signals attach. */
 const HEAVY_TAIL_COMMAND = [
   '/bin/sh',
   '-c',
-  `i=0; while [ $i -lt ${HEAVY_TAIL_LINES} ]; do echo "redraw line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; sleep 120`
+  `i=0; while [ $i -lt ${HEAVY_TAIL_LINES} ]; do echo "redraw line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; : > "$FAKE_MOOR_PREATTACH_DONE"; while [ ! -e "$FAKE_MOOR_LIVE_TRIGGER" ]; do sleep 0.01; done; printf 'live-after-attach\\n'; exec cat`
 ];
 
 /**
@@ -55,9 +52,8 @@ class GatedEmu implements EmulatorPort {
     this.written.push(bytes.slice());
   }
   /**
-   * Let `preambleFlushes` more flushes through, then hold every later flush
-   * until `open()` is called. The replay that follows the preamble is what
-   * stalls behind the shut gate.
+   * Let `preambleFlushes` more flushes through, then hold later live output
+   * until `open()` is called.
    */
   closeAfter(preambleFlushes: number): void {
     this.freeFlushes = preambleFlushes;
@@ -128,9 +124,24 @@ async function spawnSurvivingHolder(input: {
 }): Promise<void> {
   const { child } = spawnMoorMaster({
     binPath: process.execPath,
-    args: [...NODE_IMPORT_ARGS, 'start', '-T', input.storeDir, input.sessionPath, ...input.command],
+    args: [
+      ...NODE_IMPORT_ARGS,
+      'start',
+      '-C',
+      '0',
+      '-T',
+      input.storeDir,
+      input.sessionPath,
+      ...input.command
+    ],
     generation: input.generation,
-    env: { ...process.env, TMPDIR: input.tmpdirRoot }
+    env: {
+      ...process.env,
+      TMPDIR: input.tmpdirRoot,
+      FAKE_MOOR_REQUIRE_C0: '1',
+      FAKE_MOOR_PREATTACH_DONE: `${input.sessionPath}.pre-attach-done`,
+      FAKE_MOOR_LIVE_TRIGGER: `${input.sessionPath}.live-trigger`
+    }
   });
   const code = await new Promise<number>((resolve, reject) => {
     child.once('error', reject);
@@ -142,16 +153,18 @@ async function spawnSurvivingHolder(input: {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Give the child a moment to print most of its tail before adoption so the
- * replay is genuinely heavy. Not load-bearing for correctness: on a slow host
- * whatever is still printing arrives as live output on the same ordered path,
- * and the assertions below wait for the last line either way.
+ * Give the child time to finish the pre-attach burst before adoption.
  */
-async function waitForTail(): Promise<void> {
-  await sleep(1_500);
+async function waitForTail(sessionPaths: string[]): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (sessionPaths.every((sessionPath) => existsSync(`${sessionPath}.pre-attach-done`))) return;
+    await sleep(20);
+  }
+  throw new Error('pre-attach output did not finish');
 }
 
-describe('adoption is independent of the retained replay size', () => {
+describe('live-only adoption with a zero-byte Moor cache', () => {
   const cleanups: Array<() => void | Promise<void>> = [];
   afterEach(async () => {
     while (cleanups.length > 0) await cleanups.pop()!();
@@ -178,7 +191,7 @@ describe('adoption is independent of the retained replay size', () => {
       expect(processAlive(pid)).toBe(true);
       sessions.push({ sessionId, sessionPath, pid });
     }
-    await waitForTail();
+    await waitForTail(sessions.map(({ sessionPath }) => sessionPath));
     const emulators = new Map<string, GatedEmu>();
     let nextEmulatorFor = 0;
     const state = { gateClosed: false };
@@ -188,7 +201,7 @@ describe('adoption is independent of the retained replay size', () => {
       emulatorFactory: {
         create: () => {
           const emulator = new GatedEmu();
-          if (state.gateClosed) emulator.closeAfter(1); // the §6 preamble is 1 flush; the replay is what stalls
+          if (state.gateClosed) emulator.closeAfter(1);
           emulators.set(sessions[nextEmulatorFor]!.sessionId, emulator);
           nextEmulatorFor += 1;
           return emulator;
@@ -211,16 +224,10 @@ describe('adoption is independent of the retained replay size', () => {
   }
 
   it(
-    'adopts a heavy-tailed holder before its replay reaches the emulator, then delivers the replay in order',
+    'drops all pre-attach output and delivers the first post-attach live bytes',
     async () => {
       const w = await world('single', 1);
       const [session] = w.sessions;
-      // Every emulator this world creates lets the mandatory §6 preamble drain
-      // (that IS part of the adoption gate by spec) and then shuts its flush
-      // gate: the retained replay cannot reach the screen until the test opens
-      // it. If the adoption decision waited on the replay, the attach below
-      // could not complete until open() — so it is asserted to complete FIRST,
-      // with the gate still shut.
       w.gateClosed = true;
       let emulator: GatedEmu | undefined;
       const restored = await Promise.race([
@@ -237,49 +244,31 @@ describe('adoption is independent of the retained replay size', () => {
       expect(restored).not.toBe('timeout');
       expect((restored as { ok: boolean }).ok).toBe(true);
       expect(emulator).toBeDefined();
-      // Adoption is published on the state axis — the sidebar would say so.
       expect(w.manager.stateSnapshot(session!.sessionId)?.lifecycle).toBe('running');
+      expect(emulator!.bytesWritten()).toBe(0);
 
-      // Only now let the screen drain: the retained tail arrives on the
-      // ordinary output path, complete and in order, having never gated the
-      // adoption above.
       emulator!.open();
-      // The child may still be printing on a slow host; whatever it printed
-      // before adoption arrives as replay and the rest as live output — both on
-      // the same ordered path. Wait, bounded, for the LAST line to land.
-      const lastLine = `redraw line ${HEAVY_TAIL_LINES - 1} `;
+      const liveMarker = 'live-after-attach\n';
+      writeFileSync(`${session!.sessionPath}.live-trigger`, '');
       const startedAt = Date.now();
       let text = '';
-      while (Date.now() - startedAt < 30_000) {
+      while (Date.now() - startedAt < 10_000) {
         text = Buffer.concat(emulator!.written.map((chunk) => Buffer.from(chunk))).toString('utf8');
-        if (text.includes(lastLine)) break;
-        await sleep(50);
+        if (text.includes(liveMarker)) break;
+        await sleep(20);
       }
-      // The preamble (an empty §6 TERMINAL_STATE) precedes the tail; the first
-      // retained line is the first thing after it, and every line arrives in
-      // order.
-      expect(text.startsWith('redraw line 0 ')).toBe(true);
-      expect(text).toContain(lastLine);
-      let cursor = 0;
-      for (const line of [0, 1, 2, HEAVY_TAIL_LINES - 2, HEAVY_TAIL_LINES - 1]) {
-        const at = text.indexOf(`redraw line ${line} `, cursor);
-        expect(at).toBeGreaterThanOrEqual(cursor);
-        cursor = at;
-      }
+      expect(text).toContain(liveMarker);
+      expect(text).not.toContain('redraw line ');
       expect(processAlive(session!.pid)).toBe(true);
     },
-    60_000
+    30_000
   );
 
   it(
-    'adopts every heavy-tailed holder when several are restored concurrently in one daemon',
+    'adopts every zero-cache holder concurrently without writing pre-attach bytes',
     async () => {
       const HOLDERS = 6;
       const w = await world('many', HOLDERS);
-      // Every screen drains slowly (gate shut after the preamble): with the
-      // replay drained INSIDE the adoption critical section, the first
-      // adoption would hold the event loop and its siblings' 2 s protocol
-      // deadlines would expire before their own preambles were even read.
       w.gateClosed = true;
       const results = await Promise.all(
         w.sessions.map((session) =>
@@ -298,9 +287,9 @@ describe('adoption is independent of the retained replay size', () => {
       expect(failed).toEqual([]);
       for (const session of w.sessions) {
         expect(w.manager.stateSnapshot(session.sessionId)?.lifecycle).toBe('running');
+        expect(w.emulators.get(session.sessionId)?.bytesWritten()).toBe(0);
         expect(processAlive(session.pid)).toBe(true);
       }
-      // Let the screens drain so teardown does not wait on a shut gate.
       for (const emulator of w.emulators.values()) emulator.open();
     },
     120_000

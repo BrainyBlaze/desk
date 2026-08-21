@@ -7,16 +7,15 @@
 // session with real adapters (a socket to the master, a WS to each surface, an
 // @xterm/headless emulator, fsync'd control/delivery stores).
 //
-// Scope: the primary flows (output/resize/exit, subscribe/snapshot, input,
+// Scope: the primary flows (output/resize/exit, live subscribe, input,
 // delivery confirmation). Lease handoff (§7.9), checkpoint
 // restore (§8.1), GAP-driven resync (§7.4), and native surfaces (§6.9) are
 // documented extension points wired the same way.
 
-import { BP_SNAP_CHUNK, BpFrameType, type BpFrame } from '../browserProtocol/index.js';
+import { BpFrameType, type BpFrame } from '../browserProtocol/index.js';
 import type { MoorExitOutcome } from '../controlPlane/contract.js';
 import { InMemoryCmdCache, type DeliveryTxn, applyDelivery } from '../delivery/index.js';
 import { type EmulatorPort } from './emulatorPort.js';
-import { TerminalOutputRing } from './terminalOutputRing.js';
 
 export interface SessionRuntimeDeps {
   sessionId: string;
@@ -35,6 +34,8 @@ export interface SessionRuntimeDeps {
   sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
   sendMasterPrompt: (bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
+  /** Ask the live child to repaint without replaying retained terminal bytes. */
+  sendMasterRedraw?: (rows: number, cols: number, surfaceId: number) => void;
 }
 
 /**
@@ -58,17 +59,6 @@ interface Subscriber {
   rows: number;
   cols: number;
   visible: boolean;
-  ready: boolean;
-  hasBaseline: boolean;
-  offset: bigint;
-  revision: number;
-  activation?: Promise<void>;
-}
-
-interface OutputDelivery {
-  offset: bigint;
-  bytes: Uint8Array;
-  promise: Promise<void>;
 }
 
 interface TerminalStateDelivery {
@@ -100,12 +90,8 @@ export class SessionRuntime {
   private readonly subscribers = new Map<number, Subscriber>();
   private readonly txns = new Map<string, DeliveryTxn>();
   private nextChannelId = 1;
-  /** Byte high-water of output emitted (snapshot baseline offset, §7.4). */
+  /** Byte high-water of live output emitted (SUBSCRIBE_ACK baseline offset). */
   private outputOffset = 0n;
-  /** Shared bounded suffix used to catch hidden subscribers up without a reset. */
-  private readonly outputReplay = new TerminalOutputRing(BP_SNAP_CHUNK);
-  /** Session-scoped Moor delivery frontier; survives individual client attempts. */
-  private outputDelivery: OutputDelivery | undefined;
   /** All emulator work shares one session frontier, including attach preambles. */
   private authoritativeWork: Promise<void> | undefined;
   private terminalStateDelivery: TerminalStateDelivery | undefined;
@@ -204,7 +190,8 @@ export class SessionRuntime {
 
   /**
    * Moor-native child output (§6.1 OUTPUT): absolute byte offset + raw bytes.
-   * Feeds the authoritative emulator and fans out to visible subscribed surfaces.
+   * Advances and fans out synchronously. Emulator parsing remains the holder's
+   * delivery-ack boundary, but never blocks later Moor control/input receipts.
    */
   onMoorOutput(bytes: Uint8Array, offset: bigint): void | Promise<void> {
     if (this.disposed) return;
@@ -217,60 +204,44 @@ export class SessionRuntime {
     }
     if (end <= this.outputOffset) return;
 
-    const pending = this.outputDelivery;
-    if (pending !== undefined) {
-      if (pending.offset === offset) {
-        if (!this.sameBytes(pending.bytes, bytes)) {
-          throw new Error(`conflicting Moor output at offset ${offset}`);
-        }
-        return pending.promise;
-      }
-      return pending.promise.then(() => this.onMoorOutput(bytes, offset));
-    }
-
     this.d.emulator.write(bytes);
-    const deliver = (): void => {
-      if (this.disposed) return;
-      this.outputReplay.append(offset, bytes);
-      this.outputOffset = end;
-      for (const [channelId, subscriber] of this.subscribers) {
-        if (!subscriber.visible || !subscriber.ready) continue;
-        if (!this.sendSubscriber(channelId, {
-          type: BpFrameType.OUTPUT,
-          channelId,
-          generation: this.d.generation,
-          revision: this.revision,
-          offset,
-          bytes
-        })) continue;
-        subscriber.offset = end;
-        subscriber.revision = this.revision;
-      }
-      for (const [channelId, subscriber] of this.subscribers) {
-        if (subscriber.visible && !subscriber.ready) {
-          this.scheduleSubscriberActivation(channelId, subscriber);
-        }
-      }
-      this.completeExitIfReady();
-    };
+    this.outputOffset = end;
+    for (const [channelId, subscriber] of this.subscribers) {
+      if (!subscriber.visible) continue;
+      this.sendSubscriber(channelId, {
+        type: BpFrameType.OUTPUT,
+        channelId,
+        generation: this.d.generation,
+        revision: this.revision,
+        offset,
+        bytes
+      });
+    }
     const draining = this.d.emulator.flush?.();
     if (draining === undefined) {
-      deliver();
+      this.completeExitIfReady();
       return;
     }
-    const delivery = draining.then(deliver);
-    this.outputDelivery = { offset, bytes, promise: delivery };
+    const delivery = Promise.resolve(draining).then(() => {
+      if (!this.disposed) this.completeExitIfReady();
+    });
     this.trackAuthoritativeWork(delivery);
-    void delivery.then(() => {
-      if (this.outputDelivery?.promise === delivery) this.outputDelivery = undefined;
-    }, () => undefined);
     return delivery;
+  }
+
+  adoptMoorOutputFrontier(offset: bigint): void {
+    if (this.disposed) throw new Error('cannot adopt output frontier for a disposed session');
+    if (offset < this.outputOffset) {
+      throw new Error(`Moor output frontier ${offset} precedes delivered output ${this.outputOffset}`);
+    }
+    if (offset === this.outputOffset) return;
+    this.outputOffset = offset;
   }
 
   // ---- browser → daemon (§7.4/§7.6) -----------------------------------------
   /**
-   * Subscribe a surface: assign a channelId, ACK it, and emit the baseline
-   * SNAPSHOT at the current output offset (§7.4). Returns the channelId and, if
+   * Subscribe a surface: assign a channelId and ACK the current live frontier.
+   * No retained terminal output or snapshot is emitted. Returns the channelId and, if
    * this subscribe acquired ownership and changed the commanded size, the
    * geometry that acquisition commanded.
    */
@@ -289,11 +260,7 @@ export class SessionRuntime {
       surfaceId,
       rows,
       cols,
-      visible: true,
-      ready: false,
-      hasBaseline: false,
-      offset: this.outputOffset,
-      revision: this.revision
+      visible: true
     };
     this.subscribers.set(channelId, subscriber);
     let commanded: CommandedGeometry | undefined;
@@ -302,7 +269,7 @@ export class SessionRuntime {
       // acquirer's geometry when it differs from the last commanded size
       // (desk#68); an equal re-acquisition is idempotent. After a real size
       // change, SUBSCRIBE is the only geometry carrier guaranteed before the
-      // baseline snapshot, so changed geometry must still be applied here.
+      // live baseline, so changed geometry must still be applied here.
       // The value is not invented: SUBSCRIBE carries the surface's current xterm
       // rows×cols (TerminalSurface.tsx subscribes with terminal.rows/cols) — the
       // fitted measurement on reveal; on a very first mount it is the terminal's
@@ -314,87 +281,25 @@ export class SessionRuntime {
       this.resizeOwner = channelId;
       commanded = this.commandOwnerSize(channelId, rows, cols);
     }
-    // ACK + SNAPSHOT emit AFTER any acquisition command, so the ACK carries the
-    // post-command revision. The snapshot is deferred behind authoritative
-    // output, then serialized at the geometry the surface will actually render.
+    // ACK emits after any acquisition command and is itself the live baseline.
     if (!this.sendSubscriber(channelId, {
       type: BpFrameType.SUBSCRIBE_ACK,
       channelId,
       generation: this.d.generation,
-      revision: this.revision
+      revision: this.revision,
+      offset: this.outputOffset
     })) return undefined;
-    this.scheduleSubscriberActivation(channelId, subscriber);
+    if (commanded === undefined && this.commanded !== undefined) {
+      // Atch's zero-replay attach asks the PTY application to repaint. Moor's
+      // explicit REDRAW is the same operation; it carries no terminal history.
+      this.d.sendMasterRedraw?.(
+        this.commanded.rows,
+        this.commanded.cols,
+        this.resizeOwner ?? channelId
+      );
+    }
     if (this.subscribers.get(channelId) !== subscriber) return undefined;
     return commanded === undefined ? { channelId } : { channelId, commanded };
-  }
-
-  private scheduleSubscriberActivation(channelId: number, subscriber: Subscriber): void {
-    if (
-      this.subscribers.get(channelId) !== subscriber ||
-      !subscriber.visible ||
-      subscriber.ready ||
-      subscriber.activation !== undefined
-    ) {
-      return;
-    }
-    const frontier = this.authoritativeWork;
-    if (frontier === undefined) {
-      this.activateSubscriber(channelId, subscriber);
-      return;
-    }
-    const activation = frontier.then(
-      () => {
-        if (subscriber.activation !== activation) return;
-        subscriber.activation = undefined;
-        this.scheduleSubscriberActivation(channelId, subscriber);
-      },
-      () => {
-        if (subscriber.activation !== activation) return;
-        subscriber.activation = undefined;
-        if (this.subscribers.get(channelId) === subscriber) this.failSubscriber(channelId);
-      }
-    );
-    subscriber.activation = activation;
-  }
-
-  private activateSubscriber(channelId: number, subscriber: Subscriber): void {
-    if (this.subscribers.get(channelId) !== subscriber || !subscriber.visible) return;
-    if (subscriber.hasBaseline && subscriber.revision === this.revision) {
-      const replay = this.outputReplay.read(subscriber.offset, this.outputOffset);
-      if (replay !== undefined) {
-        if (replay.length > 0 && !this.sendSubscriber(channelId, {
-          type: BpFrameType.OUTPUT,
-          channelId,
-          generation: this.d.generation,
-          revision: this.revision,
-          offset: subscriber.offset,
-          bytes: replay
-        })) return;
-        subscriber.offset = this.outputOffset;
-        subscriber.revision = this.revision;
-        subscriber.ready = true;
-        return;
-      }
-    }
-    let text: string;
-    try {
-      text = this.d.emulator.serialize({ scrollback: 0 });
-    } catch {
-      this.failSubscriber(channelId);
-      return;
-    }
-    if (!this.sendSubscriber(channelId, {
-      type: BpFrameType.SNAPSHOT,
-      channelId,
-      generation: this.d.generation,
-      revision: this.revision,
-      offset: this.outputOffset,
-      text
-    })) return;
-    subscriber.hasBaseline = true;
-    subscriber.offset = this.outputOffset;
-    subscriber.revision = this.revision;
-    subscriber.ready = true;
   }
 
   private sendSubscriber(channelId: number, frame: BpFrame): boolean {
@@ -454,9 +359,6 @@ export class SessionRuntime {
   private finishPendingExit(pending: PendingExit): void {
     this.exitFenced = true;
     this.pendingExit = undefined;
-    for (const [channelId, subscriber] of this.subscribers) {
-      if (!subscriber.ready) this.activateSubscriber(channelId, subscriber);
-    }
     for (const channelId of this.subscribers.keys()) {
       this.sendSubscriber(channelId, {
         type: BpFrameType.EXIT,
@@ -497,7 +399,6 @@ export class SessionRuntime {
     this.disposed = true;
     this.subscribers.clear();
     this.txns.clear();
-    this.outputDelivery = undefined;
     this.authoritativeWork = undefined;
     this.terminalStateDelivery = undefined;
     this.pendingExit?.resolve();
@@ -654,17 +555,11 @@ export class SessionRuntime {
     if (sub === undefined || sub.visible === visible) return undefined;
     sub.visible = visible;
     if (!visible) {
-      // A hidden subscriber remains attached and keeps its last delivered cursor.
-      // Reveal catches up from the shared output suffix when continuity is intact.
-      sub.ready = false;
+      // A hidden mounted subscriber remains live and consumes every new byte.
       return this.handoffIfOwnerGone(channelId);
     }
 
-    // Ownership/geometry must settle before serializing the reveal snapshot.
-    const commanded = this.handoffIfOwnerGone(channelId);
-    sub.ready = false;
-    this.scheduleSubscriberActivation(channelId, sub);
-    return commanded;
+    return this.handoffIfOwnerGone(channelId);
   }
 
   /** The channel that currently owns this session's size, if any (§7.5, desk#68). */

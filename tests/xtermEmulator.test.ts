@@ -1,7 +1,6 @@
 // Real @xterm/headless emulator adapter (spec §3.3/§6.8/§7.2/§7.3). Proves the
 // authoritative worker renders OUTPUT, exposes plain-text rows for the classifier,
-// serializes a restorable snapshot, tracks the cursor, resizes, and surfaces
-// semantic events — all headless in Node.
+// tracks the cursor, resizes, and surfaces semantic events — all headless in Node.
 
 import { describe, expect, it } from 'vitest';
 import { SCROLLBACK_LINES, XtermEmulator, XtermEmulatorFactory } from '../src/server/runtime/xtermEmulator.js';
@@ -39,32 +38,6 @@ describe('xterm emulator adapter (§3.3/§7.3)', () => {
     await e.flush();
     expect(e.bracketedPaste()).toBe(false);
     e.dispose();
-  });
-
-  it('serializes a non-empty restorable snapshot that carries the content', async () => {
-    const e = new XtermEmulator({ rows: 6, cols: 20 });
-    e.write(enc('line1\r\nline2'));
-    await e.flush();
-    const snap = e.serialize();
-    expect(snap.length).toBeGreaterThan(0);
-    expect(snap).toContain('line1');
-    expect(snap).toContain('line2');
-    e.dispose();
-  });
-
-  it('a snapshot restores into a fresh emulator to the same screen text', async () => {
-    const a = new XtermEmulator({ rows: 6, cols: 20 });
-    a.write(enc('restore-me\r\nsecond'));
-    await a.flush();
-    const snap = a.serialize();
-
-    const b = new XtermEmulator({ rows: 6, cols: 20 });
-    b.write(enc(snap)); // apply the serialized restore string
-    await b.flush();
-    expect(b.readTailText(6).join('\n')).toContain('restore-me');
-    expect(b.readTailText(6).join('\n')).toContain('second');
-    a.dispose();
-    b.dispose();
   });
 
   it('resizes (rows × cols)', async () => {

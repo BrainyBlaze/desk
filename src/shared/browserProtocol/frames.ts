@@ -7,10 +7,15 @@
 // header (version, type) + a typed payload. A SUBSCRIBE assigns a compact u32
 // `channelId` (returned in SUBSCRIBE_ACK); every subsequent frame routes by
 // channelId instead of repeating the session/surface strings on the hot path.
-// Every DATA frame (SNAPSHOT/OUTPUT) carries generation+revision so a stale
-// producer's bytes are discardable at the browser.
+// Every OUTPUT frame carries generation+revision so a stale producer's bytes
+// are discardable at the browser.
 
 /**
+ * v3: SUBSCRIBE_ACK carries the authoritative live output offset and the
+ * terminal SNAPSHOT frame is retired. An older tab must reload rather than
+ * decode the longer ACK under the v2 layout or request replay that no longer
+ * exists.
+ *
  * v2: EXIT carries the holder's tagged ending (BpExitKind + per-kind payload)
  * instead of one i32 code + u16 signal, so an unprovable ending travels as
  * `unknown` rather than a fabricated code 0. Both ends ship in this repo and
@@ -19,13 +24,13 @@
  * the server its v1 frames) until it reloads — silence, never a mis-decoded
  * ending shown as a code.
  */
-export const BP_VERSION = 2;
+export const BP_VERSION = 3;
 export const BP_HEADER_LEN = 2; // u8 version + u8 type
 
-/** Hard per-frame payload cap (bytes). The server chunks output/snapshots below this. */
+/** Hard per-frame payload cap (bytes). The server chunks output below this. */
 export const BP_MAX_FRAME_BYTES = 1 << 20; // 1 MiB
-/** Snapshot/output chunk size the server targets (§7.4 SNAP_CHUNK). */
-export const BP_SNAP_CHUNK = 256 * 1024;
+/** Output chunk size the server targets (§7.4). */
+export const BP_OUTPUT_CHUNK = 256 * 1024;
 /** Input payload cap per frame. */
 export const BP_MAX_INPUT_BYTES = 1 << 16; // 64 KiB
 /** Query request/reply byte cap (parity with the legacy wire MAX_TERMINAL_REPLY). */
@@ -41,13 +46,11 @@ export enum BpFrameType {
   // client → server
   SUBSCRIBE = 1,
   UNSUBSCRIBE = 2,
-  VISIBILITY = 3,
   INPUT = 4,
   RESIZE = 5,
   QUERY_REPLY = 6,
   // server → client
   SUBSCRIBE_ACK = 16,
-  SNAPSHOT = 17,
   OUTPUT = 18,
   GAP = 19,
   EXIT = 20,

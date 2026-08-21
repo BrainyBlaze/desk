@@ -10,7 +10,6 @@
 //   readTailText(n)   → iterate terminal.buffer.active.getLine(i).translateToString()
 //                       over the last n rows (plain text for capture and delivery
 //                       verification, never semantic agent-state inference)
-//   serialize()       → SerializeAddon.serialize() (restorable display string, §7.3)
 //   onBell/onOsc/...  → terminal.onBell / terminal.parser.registerOscHandler(code,…)
 //                       / registerCsiHandler(…) (PUBLIC hooks only, §7.2)
 
@@ -21,11 +20,6 @@ export interface EmulatorEvent {
   code?: number;
   /** Raw payload (OSC body, title text, link, or the query bytes). */
   data?: string;
-}
-
-export interface EmulatorSnapshotOptions {
-  /** Number of retained scrollback rows to include before the live screen. */
-  scrollback?: number;
 }
 
 /**
@@ -53,8 +47,6 @@ export interface EmulatorPort {
    * emulator retains no history beyond the live tail.
    */
   readHistoryText?(rows: number, offset: number): { lines: string[]; totalAvailable: number };
-  /** A restorable display snapshot string (SerializeAddon, §7.3). */
-  serialize(options?: EmulatorSnapshotOptions): string;
   /** Current cursor position (for CPR/DSR worker replies, §7.7). */
   cursor(): { row: number; col: number };
   /**

@@ -45,7 +45,7 @@ function integer(value: number | bigint, bytes: 2 | 4 | 8): Uint8Array {
 const wide = (bytes: Uint8Array): Uint8Array => joined(integer(bytes.length, 4), bytes);
 
 function helloAckPayload(identity: Uint8Array, incarnation = INCARNATION): Uint8Array {
-  return joined(Uint8Array.of(4), integer(GENERATION, 4), incarnation, wide(identity));
+  return joined(Uint8Array.of(5), integer(GENERATION, 4), incarnation, wide(identity));
 }
 
 /** Minimal valid §5 status descriptor: layout 0 (no event store), lease owned. */
@@ -59,7 +59,7 @@ function statusPayload(
 ): Uint8Array {
   const tail = new Uint8Array(69);
   const view = new DataView(tail.buffer);
-  const replay = options.replay ?? { first: 0n, last: 0n, start: 0n, end: 0n };
+  const replay = options.replay ?? { first: 1n, last: 0n, start: 0n, end: 0n };
   // complete (bit0) is frozen to: empty-at-zero, or retained from record 1/byte 0.
   const complete = replay.first <= 1n && replay.start === 0n;
   const ownsLease = options.ownsLease ?? true;
@@ -246,7 +246,7 @@ describe('MoorMasterClient', () => {
     const hello = await holder.next();
     expect(hello.kind).toBe(MoorKind.HELLO);
     expect(hello.scope).toBe(GENERATION);
-    expect(hello.payload).toEqual(joined(text('MOOR'), Uint8Array.of(4, 0, 0), wide(identity)));
+    expect(hello.payload).toEqual(joined(text('MOOR'), Uint8Array.of(5, 0, 0), wide(identity)));
   });
 
   it('walks the exact §6 prefix and resolves attach with the ACK status', async () => {
@@ -463,6 +463,41 @@ describe('MoorMasterClient', () => {
     holder.send(MoorKind.GAP, joined(integer(5n, 8), integer(6n, 8)));
     await waitFor(() => protocolErrors.length === 1, 'stray gap refused');
     expect(protocolErrors).toEqual(['BAD_SEQUENCE']);
+  });
+
+  it('live-only attach adopts the ACK frontier and delivers only later output', async () => {
+    const outputs: Array<{ sequence: bigint; offset: bigint; bytes: string }> = [];
+    const { holder, client, identity } = await start({
+      onOutput: (output) =>
+        outputs.push({
+          sequence: output.sequence,
+          offset: output.offset,
+          bytes: new TextDecoder().decode(output.bytes)
+        })
+    });
+    const attached = client.attach({
+      columns: 80,
+      rows: 24,
+      requestLease: true,
+      replay: 'live-only'
+    });
+    await holder.next();
+    holder.send(MoorKind.HELLO_ACK, helloAckPayload(identity));
+    const attach = await holder.next();
+    expect(attach.kind).toBe(MoorKind.ATTACH);
+    expect(attach.payload[4]! & 0b100).toBe(0b100);
+    holder.send(
+      MoorKind.ATTACH_ACK,
+      statusPayload(identity, 5, { replay: { first: 3n, last: 4n, start: 100n, end: 120n } })
+    );
+    holder.send(MoorKind.TERMINAL_STATE, emptyPreamble());
+    holder.send(MoorKind.LEASE_RESULT, leaseResultPayload(5));
+
+    await expect(attached).resolves.toBeDefined();
+    expect(outputs).toEqual([]);
+    holder.send(MoorKind.OUTPUT, joined(integer(5n, 8), integer(120n, 8), text('live')));
+    await waitFor(() => outputs.length === 1, 'first post-attach live output');
+    expect(outputs).toEqual([{ sequence: 5n, offset: 120n, bytes: 'live' }]);
   });
 
   it('refuses resumed and released lease results answering the fresh attach shorthand', async () => {
@@ -1473,7 +1508,7 @@ describe('MoorMasterClient', () => {
     await waitFor(() => receipts.length === 1, 'input receipt');
   });
 
-  it('routes holder errors and heartbeats without closing, and resize carries the lease epoch', async () => {
+  it('routes holder errors and heartbeats while resize and redraw carry the lease epoch', async () => {
     const errors: number[] = [];
     const beats: bigint[] = [];
     let closed = false;
@@ -1502,6 +1537,14 @@ describe('MoorMasterClient', () => {
     expect(view.getUint32(0, true)).toBe(5); // lease epoch
     expect(view.getUint16(4, true)).toBe(120);
     expect(view.getUint16(6, true)).toBe(40);
+
+    client.sendRedraw(120, 40);
+    const redraw = await holder.next();
+    expect(redraw.kind).toBe(MoorKind.REDRAW);
+    const redrawView = new DataView(redraw.payload.buffer, redraw.payload.byteOffset);
+    expect(redrawView.getUint32(0, true)).toBe(5);
+    expect(redrawView.getUint16(4, true)).toBe(120);
+    expect(redrawView.getUint16(6, true)).toBe(40);
   });
 
   it('fails closed on a scope mismatch: protocol error, socket closed, no silent resync', async () => {

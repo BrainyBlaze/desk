@@ -98,7 +98,7 @@ function tag01Identity(path: string): Uint8Array {
 }
 
 function helloAckPayload(generation: number, incarnation: Uint8Array, identity: Uint8Array): Uint8Array {
-  return joined(Uint8Array.of(4), integer(generation, 4), incarnation, wide(identity));
+  return joined(Uint8Array.of(5), integer(generation, 4), incarnation, wide(identity));
 }
 
 /** Minimal valid §5 status: lease owned, viewers, running; layout 2 with the
@@ -323,20 +323,33 @@ function readChannelToEof(fd: number): Promise<Buffer> {
   });
 }
 
-function parseStart(argv: string[]): { storeDir: string | undefined; sessionPath: string; command: string[] } {
+function parseStart(argv: string[]): {
+  cacheBytes: number | undefined;
+  storeDir: string | undefined;
+  sessionPath: string;
+  command: string[];
+} {
+  let cacheBytes: number | undefined;
   let storeDir: string | undefined;
   let index = 0;
-  if (argv[index] === '-T') {
-    storeDir = argv[index + 1];
+  while (argv[index] === '-C' || argv[index] === '-T') {
+    const option = argv[index];
+    const value = argv[index + 1];
+    if (value === undefined) fail(`start: ${option} requires a value`);
+    if (option === '-C') cacheBytes = Number(value);
+    else storeDir = value;
     index += 2;
   }
   const sessionPath = argv[index];
   if (sessionPath === undefined) fail('start: missing session path');
-  return { storeDir, sessionPath, command: argv.slice(index + 1) };
+  return { cacheBytes, storeDir, sessionPath, command: argv.slice(index + 1) };
 }
 
 async function launcher(argv: string[]): Promise<never> {
-  const { storeDir, sessionPath, command } = parseStart(argv);
+  const { cacheBytes, storeDir, sessionPath, command } = parseStart(argv);
+  if (process.env.FAKE_MOOR_REQUIRE_C0 === '1' && cacheBytes !== 0) {
+    fail('launcher: Desk must disable the holder log with -C 0');
+  }
   // The selector key derives from THIS process's invoked name (spec §10.1.1) —
   // the fake models an independent moor holder with zero Desk vocabulary.
   const selectorKey = moorLaunchChannelEnvKey(process.execPath);
@@ -395,6 +408,7 @@ async function launcher(argv: string[]): Promise<never> {
       process.argv[1]!,
       '--holder',
       String(generation),
+      cacheBytes === undefined ? '-' : String(cacheBytes),
       storeDir ?? '-',
       sessionPath,
       ...command
@@ -438,9 +452,10 @@ function holderLaunchFailure(sessionPath: string, message: string): never {
 
 async function holder(argv: string[]): Promise<void> {
   const generation = Number(argv[0]);
-  const storeDir = argv[1] === '-' ? undefined : argv[1];
-  const sessionPath = argv[2];
-  const command = argv.slice(3);
+  const cacheBytes = argv[1] === '-' ? undefined : Number(argv[1]);
+  const storeDir = argv[2] === '-' ? undefined : argv[2];
+  const sessionPath = argv[3];
+  const command = argv.slice(4);
   if (!Number.isInteger(generation) || sessionPath === undefined) fail('holder: bad argv');
 
   const incarnation = randomBytes(16);
@@ -490,12 +505,18 @@ async function holder(argv: string[]): Promise<void> {
   let rows = 24;
   /** Retained records for the §6.1 attach replay baseline. */
   const retained: Array<{ sequence: bigint; offset: bigint; bytes: Buffer }> = [];
+  const replayDescriptor = () => ({
+    first: retained[0]?.sequence ?? outputSequence + 1n,
+    last: retained[retained.length - 1]?.sequence ?? outputSequence,
+    start: retained[0]?.offset ?? outputOffset,
+    end: outputOffset
+  });
   const connections = new Set<{ socket: Socket; codec: MoorCodec; attached: boolean }>();
 
   child?.stdout?.on('data', (chunk: Buffer) => {
     outputSequence += 1n;
     const record = { sequence: outputSequence, offset: outputOffset, bytes: Buffer.from(chunk) };
-    retained.push(record);
+    if (cacheBytes !== 0) retained.push(record);
     outputOffset += BigInt(chunk.byteLength);
     const payload = joined(
       integer(record.sequence, 8),
@@ -573,14 +594,10 @@ async function holder(argv: string[]): Promise<void> {
             }
             // Frozen §6 prefix: ATTACH_ACK → TERMINAL_STATE → LEASE_RESULT
             // when requested → the retained replay baseline → live output.
-            const replay = {
-              first: retained.length > 0 ? 1n : 0n,
-              last: retained.length > 0 ? retained[retained.length - 1]!.sequence : 0n,
-              start: 0n,
-              end: outputOffset
-            };
+            const replay = replayDescriptor();
             const leaseBusyFile = process.env.FAKE_MOOR_VIEWER_LEASE_BUSY_FILE;
             const wantsLease = (message.payload[4]! & 1) === 1;
+            const liveOnly = (message.payload[4]! & 0b100) !== 0;
             const leaseBusy =
               wantsLease &&
               leaseBusyFile !== undefined &&
@@ -637,14 +654,16 @@ async function holder(argv: string[]): Promise<void> {
                 )
               );
             }
-            for (const record of retained) {
-              socket.write(
-                conn.codec.encode(
-                  generation,
-                  MoorKind.OUTPUT,
-                  joined(integer(record.sequence, 8), integer(record.offset, 8), new Uint8Array(record.bytes))
-                )
-              );
+            if (!liveOnly) {
+              for (const record of retained) {
+                socket.write(
+                  conn.codec.encode(
+                    generation,
+                    MoorKind.OUTPUT,
+                    joined(integer(record.sequence, 8), integer(record.offset, 8), new Uint8Array(record.bytes))
+                  )
+                );
+              }
             }
             conn.attached = true;
             heartbeat = setInterval(() => {
@@ -861,12 +880,7 @@ async function holder(argv: string[]): Promise<void> {
                   incarnation,
                   identity,
                   1,
-                  {
-                    first: retained.length > 0 ? 1n : 0n,
-                    last: retained.length > 0 ? retained[retained.length - 1]!.sequence : 0n,
-                    start: 0n,
-                    end: outputOffset
-                  },
+                  replayDescriptor(),
                   columns,
                   rows,
                   store === undefined || storeDir === undefined

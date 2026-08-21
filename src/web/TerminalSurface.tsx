@@ -5,7 +5,6 @@ import { ReplySuppressionAddon } from './replySuppressionAddon.js';
 import { terminalSessionKey } from './terminalSessionKey.js';
 import { describeBpError } from './terminalBpError.js';
 import { describeSessionExit } from './terminalExitLine.js';
-import { applyTerminalSnapshot } from './terminalSnapshot.js';
 import { copyTextWithFallback, shouldSuppressContextMenu } from './terminalClipboard.js';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -284,7 +283,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         // Hidden keep-alive mount: a fit here would shrink the terminal to
         // nothing and resize the session with it. Yield the WebGL context to the
         // visible cells; the ResizeObserver fires again on reveal. Tell the
-        // broker we are hidden so it stops streaming live output to this cell.
+        // broker we are hidden so it detaches this cell from live output.
         if (cellVisibleRef.current) {
           cellVisibleRef.current = false;
           brokerVisibilityRef.current(false);
@@ -299,8 +298,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       notifyResizeRef.current(terminal.cols, terminal.rows);
       updateScrollRail();
       if (wasHidden) {
-        // Reveal: the broker replies with a self-contained snapshot, then resumes
-        // live output. No client-side reconnect or transport repaint needed.
+        // Reveal: attach at the live frontier; the daemon requests a PTY redraw.
         brokerVisibilityRef.current(true);
       }
     };
@@ -826,8 +824,8 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     let disposed = false;
     let stabilizeTimer: number | undefined;
 
-    // A fresh snapshot can race the first layout pass. Stabilize repairs the
-    // authoritative daemon size once after layout settles, but only when it
+    // A fresh live attach can race the first layout pass. Stabilize repairs the
+    // authoritative holder size once after layout settles, but only when it
     // differs from the dimensions already sent. The min-size guard keeps a
     // transient tiny fit from pinning the PTY.
     const stabilize = (): void => {
@@ -853,24 +851,13 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }, 450);
     };
 
-    // Subscribe this surface to the shared broker connection (one WebSocket per
-    // browser tab). Still-subscribed hidden surfaces do no xterm parse/render
-    // work; the server retains their cursor and catches reveal up with one
-    // bounded OUTPUT packet. A new subscription, cursor gap, or revision change
-    // receives a current-screen snapshot and resets this xterm once.
+    // Subscribe this surface to the shared broker connection. Hidden surfaces
+    // detach; every first show or reveal resumes only at the live frontier and
+    // relies on the PTY application's redraw, never retained output or a snapshot.
     binaryTerminalBroker.subscribe(surfaceId, daemonSessionId, terminal.rows, terminal.cols, cellVisibleRef.current, {
       onOutput: (bytes) => {
         // Raw output bytes, written binary end-to-end (no premature string decode).
         terminal.write(bytes);
-      },
-      onSnapshot: (data) => {
-        applyTerminalSnapshot(
-          terminal,
-          data,
-          builtThemeRef.current.terminal,
-          // Repair the PTY size only after xterm consumed the baseline.
-          stabilize
-        );
       },
       onExit: (outcome) => {
         // The tagged ending as moor reported it: exited N, signalled N, or
@@ -889,7 +876,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         }
         // The connection is shared across all cells; one drop flips every cell
         // to the Reconnect affordance, one recovery clears them (the broker
-        // resubscribes visible surfaces, which re-snapshots their screens).
+        // resubscribes visible surfaces and requests a live PTY redraw).
         setBridgeDown(!up);
       }
     });

@@ -281,6 +281,7 @@ export interface SessionMasterLink {
   cancelQueuedInput(surfaceId: number): void;
   sealInput(): void;
   sendResize(rows: number, cols: number, surfaceId: number): void;
+  sendRedraw(rows: number, cols: number, surfaceId: number): void;
   close(): void;
   /**
    * §9 wire terminate over the LIVE link — identity+generation+incarnation
@@ -382,6 +383,30 @@ export class SessionManager {
     this.now = deps.now;
     this.ledger = deps.ledger;
     this.onLateMoorAdoption = deps.onLateMoorAdoption;
+    const sendMasterGeometry = (
+      sessionId: string,
+      rows: number,
+      cols: number,
+      surfaceId: number
+    ): void => {
+      const recovery = this.recoveries.get(sessionId);
+      if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
+        return;
+      }
+      this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId);
+    };
+    const sendMasterRedraw = (
+      sessionId: string,
+      rows: number,
+      cols: number,
+      surfaceId: number
+    ): void => {
+      const recovery = this.recoveries.get(sessionId);
+      if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
+        return;
+      }
+      this.masters.get(sessionId)?.sendRedraw(rows, cols, surfaceId);
+    };
     this.core = new DaemonCore({
       ledger: deps.ledger,
       supervisor: deps.supervisor,
@@ -395,16 +420,8 @@ export class SessionManager {
       sendMasterInput: (sessionId, bytes, binary, surfaceId) =>
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterPrompt: (sessionId, bytes) => this.dispatchMasterPrompt(sessionId, bytes),
-      sendMasterResize: (sessionId, rows, cols, surfaceId) => {
-        const recovery = this.recoveries.get(sessionId);
-        if (
-          recovery !== undefined &&
-          this.recoveryCurrent(recovery, recovery.episode)
-        ) {
-          return;
-        }
-        this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId);
-      },
+      sendMasterResize: sendMasterGeometry,
+      sendMasterRedraw,
       ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
@@ -651,7 +668,7 @@ export class SessionManager {
     let attached = false;
     /** §6: parser preamble work must DRAIN before adoption is complete. */
     let terminalStateReady: Promise<boolean> = Promise.resolve(true);
-    /** Frozen adoption order: no replay/live OUTPUT may touch the emulator
+    /** Frozen adoption order: no live OUTPUT may touch the emulator
      *  before the preamble drains — buffer until the barrier passes. */
     let preambleDrained = false;
     const bufferedOutput: Array<{ bytes: Uint8Array; offset: bigint; sequence: bigint }> = [];
@@ -672,6 +689,7 @@ export class SessionManager {
     let leaseReset: Promise<void> | undefined;
     let discardLeaseOnClose = false;
     let leaseResetResize: { rows: number; cols: number; surfaceId: number } | undefined;
+    let leaseResetRedraw: { rows: number; cols: number; surfaceId: number } | undefined;
     const queueInput = (bytes: Uint8Array, surfaceId: number, queuedAt: number): boolean => {
       const queuedBytes = inputQueue.reduce((sum, pending) => sum + pending.bytes.length, 0);
       if (queuedBytes + bytes.length > RECOVERY_INPUT_MAX_BYTES) return false;
@@ -719,8 +737,19 @@ export class SessionManager {
             }
           };
           const delivered = this.core.onMoorOutput(sessionId, output.bytes, output.offset);
-          if (delivered instanceof Promise) return delivered.then(acknowledge);
+          if (delivered instanceof Promise) {
+            void delivered.then(acknowledge, (error: unknown) => {
+              console.error(
+                `[desk] moor async message handler failed: ${error instanceof Error ? error.message : String(error)}`
+              );
+              client.close();
+            });
+            return;
+          }
           acknowledge();
+        },
+        onAttachAck: (status) => {
+          this.core.adoptMoorOutputFrontier(sessionId, status.replay.end);
         },
         onTerminalState: (preamble: Uint8Array) => {
           terminalStateReady = terminalStateReady
@@ -730,8 +759,8 @@ export class SessionManager {
             .catch(() => false);
           return terminalStateReady.then((ready) => {
             // The Moor client serializes this promise before the remaining
-            // prefix and replay frames. Mark the barrier open here so replay
-            // and later live OUTPUT cannot overtake terminal-state handling.
+            // prefix frames. Mark the barrier open here so live OUTPUT cannot
+            // overtake terminal-state handling.
             if (ready) preambleDrained = true;
           });
         },
@@ -845,8 +874,7 @@ export class SessionManager {
                 incarnation: opts.resumeSnapshot.output.incarnation
               },
               resumeLease: opts.resumeSnapshot.lease,
-              requireSameIncarnation: true,
-              requireReplayContinuity: true
+              requireSameIncarnation: true
             })
       }
     );
@@ -890,17 +918,21 @@ export class SessionManager {
     let adopted: MoorStatus;
     try {
       await client.connect();
-      adopted = await client.attach({ columns: geometry.cols, rows: geometry.rows, requestLease: true });
+      adopted = await client.attach({
+        columns: geometry.cols,
+        rows: geometry.rows,
+        requestLease: true,
+        replay: 'live-only'
+      });
     } catch {
       client.close();
       return false;
     }
     // The §6 status ACK precedes terminal state on the wire. The client chains
-    // terminal-state handling before every later prefix/replay frame, and the
+    // terminal-state handling before every later prefix frame, and the
     // adoption gate (spec §10.2) closes when that mandatory preamble has
-    // drained clean — NOT when the retained replay has reached the screen.
-    // "Identity success must not be confused with screen exactness": the
-    // display baseline completes separately, on the ordinary output path.
+    // drained clean. With `moor start -C 0`, attach has no retained output
+    // baseline; the current TUI is painted only by the explicit live redraw.
     if (!(await terminalStateReady)) {
       client.close();
       return false;
@@ -916,14 +948,10 @@ export class SessionManager {
       return false;
     }
     attached = true;
-    // Release the replay that was held behind the preamble barrier onto the
-    // same backpressured, acknowledged path live output takes. The runtime
-    // serializes deliveries per session (SessionRuntime.onMoorOutput chains on
-    // its own outputDelivery), so arrival order is preserved: every buffered
-    // record is enqueued here before any later live record can be enqueued
-    // by onOutput. Nothing awaits the screen — a holder that retained 4 MiB of
-    // TUI redraws adopts as fast as one that retained 4 KiB, and sibling
-    // adoptions on this daemon are never starved by this session's tail.
+    // Release live records that arrived while the terminal-state preamble was
+    // draining. `-C 0` means these are never retained attach history. Each
+    // record enters the same immediate fanout and post-flush ACK path as later
+    // output, while the Moor parser remains free to process input receipts.
     for (const pending of bufferedOutput.splice(0)) {
       const acknowledge = (): void => {
         try {
@@ -971,9 +999,14 @@ export class SessionManager {
           }
           discardLeaseOnClose = false;
           const pendingResize = leaseResetResize;
+          const pendingRedraw = leaseResetRedraw;
           leaseResetResize = undefined;
+          leaseResetRedraw = undefined;
           if (pendingResize !== undefined) {
             client.sendResize(pendingResize.cols, pendingResize.rows);
+          }
+          if (pendingRedraw !== undefined) {
+            client.sendRedraw(pendingRedraw.cols, pendingRedraw.rows);
           }
           flushQueue(client);
         } catch (error) {
@@ -1059,6 +1092,18 @@ export class SessionManager {
           client.sendResize(cols, rows);
         } catch {
           // Observer or closed link: geometry stays local-only.
+        }
+      },
+      sendRedraw: (rows, cols, surfaceId) => {
+        if (inputSealed) return;
+        if (leaseReset !== undefined || discardLeaseOnClose) {
+          leaseResetRedraw = { rows, cols, surfaceId };
+          return;
+        }
+        try {
+          client.sendRedraw(cols, rows);
+        } catch {
+          // Observer or closed link: redraw cannot be authorised.
         }
       },
       close: () => client.close(),
@@ -1416,6 +1461,10 @@ export class SessionManager {
     if (link !== undefined && slot.pendingResize !== undefined) {
       const resize = slot.pendingResize;
       link.sendResize(resize.rows, resize.cols, resize.surfaceId);
+    }
+    if (link !== undefined) {
+      const surfaceId = slot.pendingResize?.surfaceId ?? 0;
+      link.sendRedraw(slot.geometry.rows, slot.geometry.cols, surfaceId);
     }
     for (const pending of slot.inputQueue.splice(0)) {
       slot.inputBytes -= pending.bytes.length;
@@ -1840,6 +1889,8 @@ export class SessionManager {
     const args = [
       ...(opts.binArgs ?? []),
       'start',
+      '-C',
+      '0',
       ...(storeDir === undefined ? [] : ['-T', storeDir]),
       opts.sessionPath,
       ...opts.command
