@@ -1,4 +1,4 @@
-// Live-only browser subscription continuity (§7.4).
+// Bounded-screen browser subscription continuity (§7.4).
 
 import { describe, expect, it } from 'vitest';
 import { SubscriptionResync, type FrameMeta } from '../src/shared/browserProtocol/index.js';
@@ -17,12 +17,12 @@ const output = (offset: bigint, length: number, generation = 1, revision = 0): F
 });
 
 describe('live subscription baseline', () => {
-  it('ignores output until SUBSCRIBE_ACK establishes the live frontier', () => {
+  it('ignores output until SNAPSHOT establishes the live frontier', () => {
     const r = new SubscriptionResync();
     expect(r.phase).toBe('awaiting-baseline');
     expect(r.onOutput(output(0n, 5))).toBe('ignore');
 
-    r.establishLiveBaseline(baseline(100n));
+    expect(r.onSnapshot(baseline(100n))).toBe('apply');
 
     expect(r.phase).toBe('live');
     expect(r.expectedOffset).toBe(100n);
@@ -32,7 +32,7 @@ describe('live subscription baseline', () => {
 
   it('discards already-seen output without moving the frontier', () => {
     const r = new SubscriptionResync();
-    r.establishLiveBaseline(baseline(0n));
+    r.onSnapshot(baseline(0n));
     expect(r.onOutput(output(0n, 10))).toBe('apply');
     expect(r.onOutput(output(0n, 10))).toBe('discard');
     expect(r.expectedOffset).toBe(10n);
@@ -40,27 +40,27 @@ describe('live subscription baseline', () => {
 });
 
 describe('live subscription replacement', () => {
-  it('marks a gapped channel dirty and lets a replacement ACK establish a new frontier', () => {
+  it('marks a gapped channel dirty and lets a replacement SNAPSHOT establish a new frontier', () => {
     const old = new SubscriptionResync();
-    old.establishLiveBaseline(baseline(0n));
+    old.onSnapshot(baseline(0n));
     expect(old.onOutput(output(0n, 10))).toBe('apply');
     expect(old.onOutput(output(20n, 5))).toBe('dirty');
     expect(old.phase).toBe('dirty');
     expect(old.onOutput(output(25n, 5))).toBe('ignore');
 
     const replacement = new SubscriptionResync();
-    replacement.establishLiveBaseline(baseline(30n));
+    replacement.onSnapshot(baseline(30n));
     expect(replacement.phase).toBe('live');
     expect(replacement.onOutput(output(30n, 5))).toBe('apply');
   });
 
   it('marks explicit loss and local backpressure dirty', () => {
     const gap = new SubscriptionResync();
-    gap.establishLiveBaseline(baseline(0n));
+    gap.onSnapshot(baseline(0n));
     expect(gap.onGap()).toBe('dirty');
 
     const backpressure = new SubscriptionResync();
-    backpressure.establishLiveBaseline(baseline(0n));
+    backpressure.onSnapshot(baseline(0n));
     expect(backpressure.onBackpressure()).toBe('dirty');
   });
 });
@@ -68,7 +68,7 @@ describe('live subscription replacement', () => {
 describe('generation and revision boundaries', () => {
   it('discards stale generation and revision output', () => {
     const r = new SubscriptionResync();
-    r.establishLiveBaseline(baseline(0n, 5, 3));
+    r.onSnapshot(baseline(0n, 5, 3));
     expect(r.onOutput(output(0n, 5, 4, 3))).toBe('discard');
     expect(r.onOutput(output(0n, 5, 5, 2))).toBe('discard');
     expect(r.phase).toBe('live');
@@ -76,14 +76,14 @@ describe('generation and revision boundaries', () => {
 
   it('marks a newer generation dirty', () => {
     const r = new SubscriptionResync();
-    r.establishLiveBaseline(baseline(0n, 1, 0));
+    r.onSnapshot(baseline(0n, 1, 0));
     expect(r.onOutput(output(0n, 5, 2, 0))).toBe('dirty');
     expect(r.phase).toBe('dirty');
   });
 
   it('accepts contiguous live output across a newer geometry revision', () => {
     const r = new SubscriptionResync();
-    r.establishLiveBaseline(baseline(40n, 1, 0));
+    r.onSnapshot(baseline(40n, 1, 0));
     expect(r.onOutput(output(40n, 5, 1, 1))).toBe('apply');
     expect(r.expectedOffset).toBe(45n);
     expect(r.phase).toBe('live');
@@ -93,7 +93,7 @@ describe('generation and revision boundaries', () => {
 
   it('marks a newer revision with a non-contiguous offset dirty', () => {
     const r = new SubscriptionResync();
-    r.establishLiveBaseline(baseline(40n, 1, 0));
+    r.onSnapshot(baseline(40n, 1, 0));
     expect(r.onOutput(output(50n, 5, 1, 1))).toBe('dirty');
     expect(r.phase).toBe('dirty');
   });

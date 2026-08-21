@@ -43,6 +43,7 @@ import { TerminalWsRouter } from './terminalWsRouter.js';
 import { XtermEmulatorFactory } from './xtermEmulator.js';
 import { FileGenerationLedgerStore } from './fileGenerationLedger.js';
 import { FileSessionGeometryStore } from './fileSessionGeometryStore.js';
+import { FileSessionScreenCheckpointStore } from './fileSessionScreenCheckpointStore.js';
 import { installTerminalWsBridge } from '../terminalWsBridge.js';
 import { HttpBodyError, readJsonBody, sendJson } from '../httpUtil.js';
 import type { DaemonAgentStateIntakeResult } from '../../shared/runtime/daemonCore.js';
@@ -657,6 +658,9 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
   const sessionGeometryStore = new FileSessionGeometryStore(
     join(options.homeRoot, '_engine', 'session-geometry.ndjson')
   );
+  const sessionScreenCheckpointStore = new FileSessionScreenCheckpointStore(
+    join(options.homeRoot, '_engine', 'session-screens')
+  );
   const router = new TerminalWsRouter({
     ledger,
     supervisor:
@@ -668,6 +672,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
     // every commanded resize, read by every re-adoption — without it a restart
     // has nothing to approximate a surviving session's size with.
     sessionGeometry: sessionGeometryStore,
+    screenCheckpoints: sessionScreenCheckpointStore,
     initialAgentHealth: (subject) => {
       if (subject.mode !== 'terminal') return undefined;
       const probe = hookInstallationProbe(subject.provider);
@@ -1973,6 +1978,7 @@ export function createTerminalDaemon(options: TerminalDaemonOptions): TerminalDa
       intakeStore?.close();
       intakeStore = undefined;
       sessionGeometryStore.close();
+      sessionScreenCheckpointStore.close();
       eventJournal.close();
       providerLaunchLedger.close();
       providerContinuityLedger.close();

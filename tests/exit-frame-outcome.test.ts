@@ -65,6 +65,7 @@ function tab() {
   const rendered: string[] = [];
   const exits: MoorExitOutcome[] = [];
   client.subscribe('surface-1', 'sess', 24, 80, true, {
+    onSnapshot: () => {},
     onOutput: () => {},
     onExit: (outcome) => {
       exits.push(outcome);

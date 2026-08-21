@@ -10,6 +10,7 @@
 //   readTailText(n)   → iterate terminal.buffer.active.getLine(i).translateToString()
 //                       over the last n rows (plain text for capture and delivery
 //                       verification, never semantic agent-state inference)
+//   serialize({scrollback: 0}) → restorable current-screen baseline (§7.3)
 //   onBell/onOsc/...  → terminal.onBell / terminal.parser.registerOscHandler(code,…)
 //                       / registerCsiHandler(…) (PUBLIC hooks only, §7.2)
 
@@ -47,6 +48,12 @@ export interface EmulatorPort {
    * emulator retains no history beyond the live tail.
    */
   readHistoryText?(rows: number, offset: number): { lines: string[]; totalAvailable: number };
+  /**
+   * Restorable terminal serialization. Browser baselines MUST pass
+   * `{ scrollback: 0 }`; retained history is available only through ranged
+   * control-plane reads and never crosses the live browser protocol.
+   */
+  serialize(options?: { scrollback?: number }): string;
   /** Current cursor position (for CPR/DSR worker replies, §7.7). */
   cursor(): { row: number; col: number };
   /**

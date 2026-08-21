@@ -33,6 +33,10 @@ import {
 import { createLeaseState, claim, release, type ClaimResult, type LeaseState } from '../lease/index.js';
 import { decideStop } from './instanceLock.js';
 import type { MoorExitOutcome, SessionExit } from '../controlPlane/contract.js';
+import {
+  InMemorySessionScreenCheckpointStore,
+  type SessionScreenCheckpointStore
+} from './sessionScreenCheckpointStore.js';
 
 /** desk#59 — the closed observation-failure vocabulary. */
 export type ExitDiagnostic = NonNullable<SessionExit['diagnostic']>;
@@ -65,7 +69,7 @@ export interface DaemonCoreDeps {
   ) => boolean | void;
   sendMasterPrompt: (sessionId: string, bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
-  sendMasterRedraw?: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
+  screenCheckpoints?: SessionScreenCheckpointStore;
   /**
    * desk#62 — where the last COMMANDED geometry is remembered across daemon
    * incarnations. Every commanded resize is recorded here, and restore() reads
@@ -104,7 +108,7 @@ export type EnsureResult =
   | { ok: false; reason: 'cap-exceeded' };
 
 export type RestoreResult =
-  | { ok: true; generation: number }
+  | { ok: true; generation: number; screenBaseline: 'checkpoint' | 'missing' }
   | { ok: false; reason: 'cap-exceeded' | 'no-generation' | 'already-live' };
 
 export type DaemonAgentStateIntakeResult =
@@ -168,6 +172,7 @@ export class DaemonCore {
   private readonly agentStateIntakeStore: AgentStateIntakeStore;
   private readonly cmdCache = new InMemoryCmdCache();
   private readonly sessionGeometry: SessionGeometryStore;
+  private readonly screenCheckpoints: SessionScreenCheckpointStore;
   /** Global monotonic channelId allocator (§7.4) — never reused across sessions. */
   private nextChannelId = 1;
   /** channelId → owning sessionId, for channelId-only INPUT routing. */
@@ -176,6 +181,8 @@ export class DaemonCore {
   constructor(deps: DaemonCoreDeps) {
     this.d = deps;
     this.sessionGeometry = deps.sessionGeometry ?? new InMemorySessionGeometryStore();
+    this.screenCheckpoints =
+      deps.screenCheckpoints ?? new InMemorySessionScreenCheckpointStore();
     this.authority = new AgentStateAuthority({
       now: deps.now,
       workingLeaseMs: deps.workingLeaseMs ?? 15_000,
@@ -236,7 +243,7 @@ export class DaemonCore {
     geometry: { rows: number; cols: number },
     generation: number,
     subject: SessionRegistration['subject']
-  ): void {
+  ): boolean {
     this.registerAuthoritySession(sessionId, generation, subject);
     if (subject.kind === 'agent' && this.d.initialAgentHealth !== undefined) {
       let health: AgentHealthInput | undefined;
@@ -259,7 +266,9 @@ export class DaemonCore {
         this.assessAgentHealth(sessionId, generation, health);
       }
     }
-    const emulator = this.d.emulatorFactory.create(geometry);
+    const checkpoint = this.screenCheckpoints.get(sessionId, generation);
+    const screenGeometry = checkpoint?.geometry ?? geometry;
+    const emulator = this.d.emulatorFactory.create(screenGeometry);
     const runtime = new SessionRuntime({
       sessionId,
       generation,
@@ -282,10 +291,12 @@ export class DaemonCore {
       sendMasterPrompt: (bytes) => this.d.sendMasterPrompt(sessionId, bytes),
       sendMasterResize: (rows, cols, surfaceId) =>
         this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
-      sendMasterRedraw: (rows, cols, surfaceId) =>
-        this.d.sendMasterRedraw?.(sessionId, rows, cols, surfaceId),
+      initialGeometry: screenGeometry,
+      ...(checkpoint === undefined ? {} : { initialScreen: checkpoint }),
+      screenCheckpoints: this.screenCheckpoints
     });
     this.sessions.set(sessionId, { runtime, lease: createLeaseState(), generation });
+    return checkpoint !== undefined;
   }
 
   /**
@@ -314,13 +325,17 @@ export class DaemonCore {
     // no-viewer creation size (spec §4.3) because that is exactly what an
     // unrendered child's pty is — and the ATTACH that adopts the holder
     // carries preserve either way, so neither value reaches the child.
-    this.admitSession(
+    const hasScreenCheckpoint = this.admitSession(
       sessionId,
       this.sessionGeometry.get(sessionId) ?? UNRECORDED_SESSION_GEOMETRY,
       generation,
       subject
     );
-    return { ok: true, generation };
+    return {
+      ok: true,
+      generation,
+      screenBaseline: hasScreenCheckpoint ? 'checkpoint' : 'missing'
+    };
   }
 
   /**
@@ -352,6 +367,7 @@ export class DaemonCore {
     // come back at the last commanded size (the best approximation Desk has;
     // moor owns the pty's real size), which is the whole feature.
     this.sessionGeometry.forget(sessionId);
+    this.screenCheckpoints.forget(sessionId);
     this.d.supervisor.release(sessionId);
     for (const [ch, sid] of this.channelToSession) if (sid === sessionId) this.channelToSession.delete(ch);
   }

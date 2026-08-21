@@ -14,6 +14,7 @@ import { InMemoryGenerationLedger, MOOR_LIVENESS_REASON } from '../src/shared/co
 import { BpError, BpFrameType, type BpFrame } from '../src/shared/browserProtocol/index.js';
 import { WorkerSupervisor } from '../src/shared/runtime/workerSupervisor.js';
 import { DEFAULT_SUPERVISOR_CONFIG } from '../src/shared/runtime/workerSupervisor.js';
+import { InMemorySessionScreenCheckpointStore } from '../src/shared/runtime/sessionScreenCheckpointStore.js';
 import type { EmulatorEvent, EmulatorPort } from '../src/shared/runtime/emulatorPort.js';
 
 const GENERATION = 2;
@@ -57,7 +58,8 @@ function statusPayload(
     start: 0n,
     end: 0n
   },
-  running = true
+  running = true,
+  ownsLease = true
 ): Uint8Array {
   const tail = new Uint8Array(69);
   const view = new DataView(tail.buffer);
@@ -68,7 +70,7 @@ function statusPayload(
   view.setUint8(
     32,
     (replay.first <= 1n && replay.start === 0n ? 0x01 : 0) |
-      0x10 |
+      (ownsLease ? 0x10 : 0) |
       0x20 |
       (running ? 0x40 : 0)
   );
@@ -187,6 +189,7 @@ class BlockingRecoveryReplayEmulator extends EmptyEmulator {
 class BlockingOutputEmulator extends EmptyEmulator {
   flushCount = 0;
   failNextSerialize = false;
+  serializeFailuresRemaining = 0;
   private readonly outputFlushResolvers: Array<() => void> = [];
   private firstOutputFlushStartedResolve!: () => void;
   readonly firstOutputFlushStarted = new Promise<void>((resolve) => {
@@ -209,6 +212,10 @@ class BlockingOutputEmulator extends EmptyEmulator {
   }
 
   override serialize(): string {
+    if (this.serializeFailuresRemaining > 0) {
+      this.serializeFailuresRemaining -= 1;
+      throw new Error('serialize boom');
+    }
     if (this.failNextSerialize) {
       this.failNextSerialize = false;
       throw new Error('serialize boom');
@@ -276,6 +283,13 @@ class ExpiringLeaseHolder {
   });
   private resumeRefusals = 0;
   private nextFreshLeaseEpoch = 2;
+  private initialLeaseObserver = false;
+  private holdFreshLeaseGrant = false;
+  private releaseFreshLeaseGrant: (() => void) | undefined;
+  private freshLeaseRequestSeenResolve!: () => void;
+  readonly freshLeaseRequestSeen = new Promise<void>((resolve) => {
+    this.freshLeaseRequestSeenResolve = resolve;
+  });
   private recoveryHello: (() => void) | undefined;
   private recoveryHelloSeenResolve!: () => void;
   readonly recoveryHelloSeen = new Promise<void>((resolve) => {
@@ -311,6 +325,23 @@ class ExpiringLeaseHolder {
     private readonly refuseLeaseRelease = false
   ) {
     this.identity = identityFor(sessionPath);
+  }
+
+  refuseInitialLease(): this {
+    this.initialLeaseObserver = true;
+    return this;
+  }
+
+  holdNextFreshLeaseGrant(): this {
+    this.holdFreshLeaseGrant = true;
+    return this;
+  }
+
+  allowFreshLeaseGrant(): void {
+    const release = this.releaseFreshLeaseGrant;
+    if (release === undefined) throw new Error('fresh viewer lease was not requested');
+    this.releaseFreshLeaseGrant = undefined;
+    release();
   }
 
   async listen(): Promise<void> {
@@ -402,12 +433,22 @@ class ExpiringLeaseHolder {
                 last: BigInt(replayBytes.length),
                 start: 0n,
                   end: BigInt(replayBytes.length)
-                }
+                },
+                true,
+                !(connection === 1 && this.initialLeaseObserver)
               )
             ),
             codec.encode(GENERATION, MoorKind.TERMINAL_STATE, integer(0, 2)),
             ...(message.payload[4]! & 1
-              ? [codec.encode(GENERATION, MoorKind.LEASE_RESULT, leaseGrantPayload())]
+              ? [
+                  codec.encode(
+                    GENERATION,
+                    MoorKind.LEASE_RESULT,
+                    connection === 1 && this.initialLeaseObserver
+                      ? leaseRefusedPayload()
+                      : leaseGrantPayload()
+                  )
+                ]
               : []),
             ...(liveOnly
               ? []
@@ -441,12 +482,21 @@ class ExpiringLeaseHolder {
               ? connection === 1
                 ? { first: 1n, last: 3n, start: 0n, end: 3n }
                 : { first: 5n, last: 5n, start: 4n, end: 5n }
-              : undefined
+              : undefined,
+            true,
+            !(connection === 1 && this.initialLeaseObserver)
           )
         );
         this.send(socket, codec, MoorKind.TERMINAL_STATE, integer(0, 2));
         if ((message.payload[4]! & 1) === 1) {
-          this.send(socket, codec, MoorKind.LEASE_RESULT, leaseGrantPayload());
+          this.send(
+            socket,
+            codec,
+            MoorKind.LEASE_RESULT,
+            connection === 1 && this.initialLeaseObserver
+              ? leaseRefusedPayload()
+              : leaseGrantPayload()
+          );
         }
         if (connection === 1) {
           this.leaseDeadline = Date.now() + 1_000;
@@ -483,12 +533,21 @@ class ExpiringLeaseHolder {
           );
           if (this.resumeRefusals === 2) this.secondResumeRefusedResolve();
         } else {
-          this.send(
-            socket,
-            codec,
-            MoorKind.LEASE_RESULT,
-            leaseGrantPayload(this.nextFreshLeaseEpoch++)
-          );
+          const grant = () => {
+            this.send(
+              socket,
+              codec,
+              MoorKind.LEASE_RESULT,
+              leaseGrantPayload(this.nextFreshLeaseEpoch++)
+            );
+          };
+          if (this.holdFreshLeaseGrant) {
+            this.holdFreshLeaseGrant = false;
+            this.releaseFreshLeaseGrant = grant;
+            this.freshLeaseRequestSeenResolve();
+          } else {
+            grant();
+          }
         }
         return;
       case MoorKind.LEASE_RELEASE: {
@@ -679,6 +738,8 @@ async function startRecoveryHarness(
   duringRestore?: (holder: ExpiringLeaseHolder) => Promise<void>,
   options: {
     onLateMoorAdoption?: SessionManagerDeps['onLateMoorAdoption'];
+    missingScreenBaseline?: boolean;
+    beforeSubscribe?: (holder: ExpiringLeaseHolder, manager: SessionManager) => void;
   } = {}
 ): Promise<{
   holder: ExpiringLeaseHolder;
@@ -697,6 +758,16 @@ async function startRecoveryHarness(
   await holder.listen();
   const ledger = new GenerationLedger(new InMemoryGenerationLedger());
   expect(ledger.allocate('session')).toBe(GENERATION);
+  const screenCheckpoints = new InMemorySessionScreenCheckpointStore();
+  if (options.missingScreenBaseline !== true) {
+    screenCheckpoints.record({
+      sessionId: 'session',
+      generation: GENERATION,
+      outputOffset: 0n,
+      geometry: { rows: 23, cols: 79 },
+      snapshot: ''
+    });
+  }
   const browserErrors: number[] = [];
   const browserFrames: Array<{ channelId: number; frame: BpFrame }> = [];
   const failingBrowserChannels = new Set<number>();
@@ -704,6 +775,7 @@ async function startRecoveryHarness(
     ledger,
     supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
     emulatorFactory: { create: createEmulator },
+    screenCheckpoints,
     now: () => Date.now(),
     ...(options.onLateMoorAdoption === undefined
       ? {}
@@ -721,6 +793,7 @@ async function startRecoveryHarness(
   if (duringRestore !== undefined) await duringRestore(holder);
   const restored = await restoring;
   expect(restored.ok).toBe(true);
+  options.beforeSubscribe?.(holder, manager);
   const channelId = manager.subscribe('session', 'main', 24, 80)!;
   return {
     holder,
@@ -746,6 +819,83 @@ async function startRecoveryHarness(
 
 describe('SessionManager controller-link recovery', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('requests a holder-enforced redraw only after a missing screen becomes visible', async () => {
+    const harness = await startRecoveryHarness(undefined, undefined, undefined, {
+      missingScreenBaseline: true,
+      beforeSubscribe: (holder) => {
+        expect(holder.inputs).toEqual([]);
+        expect(holder.resizes).toEqual([]);
+      }
+    });
+    try {
+      await waitForSocketCondition(
+        () => harness.holder.redraws.length === 1,
+        'visible cold-screen redraw'
+      );
+      expect(harness.holder.inputs).toEqual([]);
+      expect(harness.holder.resizes).toEqual([
+        { connection: 1, columns: 80, rows: 24 }
+      ]);
+      expect(harness.holder.redraws).toEqual([
+        { connection: 1, columns: 80, rows: 24 }
+      ]);
+
+      await harness.enterRecovery();
+      harness.holder.allowRecovery();
+      await harness.holder.recoveryAttached;
+      await settleSocketIo();
+
+      expect(harness.holder.inputs).toEqual([]);
+      expect(harness.holder.resizes).toHaveLength(1);
+      expect(harness.holder.redraws).toHaveLength(1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('acquires a fresh viewer lease before redrawing a missing screen after an initial observer attach', async () => {
+    const harness = await startRecoveryHarness(
+      undefined,
+      (sessionPath) =>
+        new ExpiringLeaseHolder(sessionPath)
+          .refuseInitialLease()
+          .holdNextFreshLeaseGrant(),
+      undefined,
+      { missingScreenBaseline: true }
+    );
+    try {
+      await harness.holder.freshLeaseRequestSeen;
+      expect(
+        harness.manager.onBrowserInputByChannel(
+          harness.channelId,
+          false,
+          new TextEncoder().encode('queued-before-fresh-grant')
+        )
+      ).toBe(true);
+      await settleSocketIo();
+      expect(harness.holder.inputs).toEqual([]);
+
+      harness.holder.allowFreshLeaseGrant();
+      await waitForSocketCondition(
+        () =>
+          harness.holder.redraws.length === 1 &&
+          harness.holder.inputs.length === 1,
+        'initial observer lease recovery redraw'
+      );
+      expect(harness.holder.connections).toBe(1);
+      expect(harness.holder.inputs).toEqual(['queued-before-fresh-grant']);
+      expect(harness.holder.resizes).toEqual([
+        { connection: 1, columns: 80, rows: 24 }
+      ]);
+      expect(harness.holder.redraws).toEqual([
+        { connection: 1, columns: 80, rows: 24 }
+      ]);
+      expect(harness.browserErrors).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
 
   it('does not strand future input when hide revokes a retained request before recovery attach completes', async () => {
     const harness = await startRecoveryHarness();
@@ -1144,7 +1294,8 @@ describe('SessionManager controller-link recovery', () => {
         .filter(({ channelId }) => channelId === lateChannel)
         .map(({ frame }) => frame);
       expect(frames).toEqual([
-        expect.objectContaining({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n })
+        expect.objectContaining({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n }),
+        expect.objectContaining({ type: BpFrameType.SNAPSHOT, offset: 1n, text: '' })
       ]);
     } finally {
       await harness.close();
@@ -1330,7 +1481,7 @@ describe('SessionManager controller-link recovery', () => {
     }
   });
 
-  it('does not serialize a snapshot while opening a live-baselined channel', async () => {
+  it('contains a snapshot serialization failure to the new subscriber', async () => {
     const emulator = new BlockingOutputEmulator();
     const harness = await startRecoveryHarness(() => emulator);
     try {
@@ -1338,12 +1489,14 @@ describe('SessionManager controller-link recovery', () => {
       await emulator.firstOutputFlushStarted;
 
       const failedChannel = harness.manager.subscribe('session', 'failed-snapshot', 24, 80)!;
-      emulator.failNextSerialize = true;
+      // The post-flush checkpoint serializes first; fail both it and the
+      // waiting subscriber's independent snapshot serialization.
+      emulator.serializeFailuresRemaining = 2;
       emulator.releaseOutputFlush();
       await settleSocketIo(8);
 
       expect(harness.holder.outputAcks).toEqual([1n]);
-      expect(harness.manager.sessionOfChannel(failedChannel)).toBe('session');
+      expect(harness.manager.sessionOfChannel(failedChannel)).toBeUndefined();
 
       harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
       await settleSocketIo();
@@ -1444,7 +1597,15 @@ describe('SessionManager controller-link recovery', () => {
       emulator.releaseOutputFlush();
       await settleSocketIo(8);
 
-      expect(lateFrames().map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+      expect(lateFrames().map((frame) => frame.type)).toEqual([
+        BpFrameType.SUBSCRIBE_ACK,
+        BpFrameType.SNAPSHOT
+      ]);
+      expect(lateFrames()[1]).toMatchObject({
+        type: BpFrameType.SNAPSHOT,
+        offset: 1n,
+        text: 'x'
+      });
 
       harness.holder.sendOutput(1, 2n, 1n, new TextEncoder().encode('y'));
       await settleSocketIo();
@@ -1458,7 +1619,7 @@ describe('SessionManager controller-link recovery', () => {
         bytes: new TextEncoder().encode('y')
       });
       if (output?.type !== BpFrameType.OUTPUT) {
-        throw new Error('expected one live output frame after the ACK baseline');
+        throw new Error('expected one live output frame after the snapshot baseline');
       }
       expect(new TextDecoder().decode(output.bytes)).toBe('y');
     } finally {
@@ -1725,14 +1886,7 @@ describe('SessionManager controller-link recovery', () => {
         { connection: 1, columns: 80, rows: 24 },
         { connection: 3, columns: 95, rows: 48 }
       ]);
-      expect(harness.holder.redraws).toEqual([
-        // The observer's subscribe asks the owner geometry to redraw, exactly
-        // like atch ATTACH + MSG_REDRAW. Its requested 41x137 never becomes a
-        // geometry command.
-        { connection: 1, columns: 80, rows: 24 },
-        // Recovery requests a repaint only after the fresh lease is attached.
-        { connection: 3, columns: 95, rows: 48 }
-      ]);
+      expect(harness.holder.redraws).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -1778,10 +1932,19 @@ describe('SessionManager controller-link recovery', () => {
     await holder.listen();
     const ledger = new GenerationLedger(new InMemoryGenerationLedger());
     expect(ledger.allocate('session')).toBe(GENERATION);
+    const screenCheckpoints = new InMemorySessionScreenCheckpointStore();
+    screenCheckpoints.record({
+      sessionId: 'session',
+      generation: GENERATION,
+      outputOffset: 0n,
+      geometry: { rows: 23, cols: 79 },
+      snapshot: ''
+    });
     const manager = new SessionManager({
       ledger,
       supervisor: new WorkerSupervisor({ ...DEFAULT_SUPERVISOR_CONFIG, maxLiveWorkers: 8 }),
       emulatorFactory: { create: () => new EmptyEmulator() },
+      screenCheckpoints,
       now: () => Date.now(),
       sendBrowser: () => undefined
     });

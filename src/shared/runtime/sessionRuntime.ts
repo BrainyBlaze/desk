@@ -7,7 +7,7 @@
 // session with real adapters (a socket to the master, a WS to each surface, an
 // @xterm/headless emulator, fsync'd control/delivery stores).
 //
-// Scope: the primary flows (output/resize/exit, live subscribe, input,
+// Scope: the primary flows (output/resize/exit, subscribe/screen baseline, input,
 // delivery confirmation). Lease handoff (§7.9), checkpoint
 // restore (§8.1), GAP-driven resync (§7.4), and native surfaces (§6.9) are
 // documented extension points wired the same way.
@@ -16,6 +16,15 @@ import { BpFrameType, type BpFrame } from '../browserProtocol/index.js';
 import type { MoorExitOutcome } from '../controlPlane/contract.js';
 import { InMemoryCmdCache, type DeliveryTxn, applyDelivery } from '../delivery/index.js';
 import { type EmulatorPort } from './emulatorPort.js';
+import type {
+  SessionScreenCheckpoint,
+  SessionScreenCheckpointStore
+} from './sessionScreenCheckpointStore.js';
+import { screenSnapshotHasVisibleText } from './sessionScreenCheckpointStore.js';
+import {
+  SESSION_CREATION_GEOMETRY,
+  type SessionGeometry
+} from './sessionGeometryStore.js';
 
 export interface SessionRuntimeDeps {
   sessionId: string;
@@ -34,8 +43,9 @@ export interface SessionRuntimeDeps {
   sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
   sendMasterPrompt: (bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
-  /** Ask the live child to repaint without replaying retained terminal bytes. */
-  sendMasterRedraw?: (rows: number, cols: number, surfaceId: number) => void;
+  initialGeometry?: SessionGeometry;
+  initialScreen?: SessionScreenCheckpoint;
+  screenCheckpoints?: SessionScreenCheckpointStore;
 }
 
 /**
@@ -59,6 +69,9 @@ interface Subscriber {
   rows: number;
   cols: number;
   visible: boolean;
+  /** Live deltas start only after a current-screen snapshot establishes baseline. */
+  ready: boolean;
+  activation?: Promise<void>;
 }
 
 interface TerminalStateDelivery {
@@ -90,7 +103,7 @@ export class SessionRuntime {
   private readonly subscribers = new Map<number, Subscriber>();
   private readonly txns = new Map<string, DeliveryTxn>();
   private nextChannelId = 1;
-  /** Byte high-water of live output emitted (SUBSCRIBE_ACK baseline offset). */
+  /** Byte high-water of live output emitted (snapshot baseline offset). */
   private outputOffset = 0n;
   /** All emulator work shares one session frontier, including attach preambles. */
   private authoritativeWork: Promise<void> | undefined;
@@ -116,9 +129,24 @@ export class SessionRuntime {
   private resizeOwner: number | undefined;
   /** The rows×cols this runtime last COMMANDED (see CommandedGeometry). */
   private commanded: { rows: number; cols: number } | undefined;
+  private screenGeometry: SessionGeometry;
 
   constructor(deps: SessionRuntimeDeps) {
     this.d = deps;
+    this.screenGeometry = {
+      ...(deps.initialGeometry ?? SESSION_CREATION_GEOMETRY)
+    };
+    const checkpoint = deps.initialScreen;
+    if (checkpoint !== undefined) {
+      this.outputOffset = checkpoint.outputOffset;
+      this.commanded = { ...checkpoint.geometry };
+      this.screenGeometry = { ...checkpoint.geometry };
+      if (checkpoint.snapshot.length > 0) {
+        this.d.emulator.write(new TextEncoder().encode(checkpoint.snapshot));
+        const draining = this.d.emulator.flush?.();
+        if (draining !== undefined) this.trackAuthoritativeWork(Promise.resolve(draining));
+      }
+    }
   }
 
   // ---- master → daemon (data plane, §7.1) -----------------------------------
@@ -207,7 +235,7 @@ export class SessionRuntime {
     this.d.emulator.write(bytes);
     this.outputOffset = end;
     for (const [channelId, subscriber] of this.subscribers) {
-      if (!subscriber.visible) continue;
+      if (!subscriber.visible || !subscriber.ready) continue;
       this.sendSubscriber(channelId, {
         type: BpFrameType.OUTPUT,
         channelId,
@@ -219,13 +247,19 @@ export class SessionRuntime {
     }
     const draining = this.d.emulator.flush?.();
     if (draining === undefined) {
+      this.recordScreenCheckpoint();
+      this.activateWaitingSubscribers();
       this.completeExitIfReady();
       return;
     }
     const delivery = Promise.resolve(draining).then(() => {
-      if (!this.disposed) this.completeExitIfReady();
+      if (!this.disposed) {
+        this.recordScreenCheckpoint();
+        this.completeExitIfReady();
+      }
     });
     this.trackAuthoritativeWork(delivery);
+    this.activateWaitingSubscribers();
     return delivery;
   }
 
@@ -240,10 +274,9 @@ export class SessionRuntime {
 
   // ---- browser → daemon (§7.4/§7.6) -----------------------------------------
   /**
-   * Subscribe a surface: assign a channelId and ACK the current live frontier.
-   * No retained terminal output or snapshot is emitted. Returns the channelId and, if
-   * this subscribe acquired ownership and changed the commanded size, the
-   * geometry that acquisition commanded.
+   * Subscribe a surface: assign a channelId immediately, then emit a bounded
+   * current-screen snapshot after authoritative parser work drains. No retained
+   * Moor output is requested or replayed.
    */
   subscribe(
     surfaceId: string,
@@ -260,7 +293,8 @@ export class SessionRuntime {
       surfaceId,
       rows,
       cols,
-      visible: true
+      visible: true,
+      ready: false
     };
     this.subscribers.set(channelId, subscriber);
     let commanded: CommandedGeometry | undefined;
@@ -281,7 +315,8 @@ export class SessionRuntime {
       this.resizeOwner = channelId;
       commanded = this.commandOwnerSize(channelId, rows, cols);
     }
-    // ACK emits after any acquisition command and is itself the live baseline.
+    // ACK assigns the channel after any acquisition command. SNAPSHOT establishes
+    // the display/live-output baseline once authoritative parser work is drained.
     if (!this.sendSubscriber(channelId, {
       type: BpFrameType.SUBSCRIBE_ACK,
       channelId,
@@ -289,17 +324,66 @@ export class SessionRuntime {
       revision: this.revision,
       offset: this.outputOffset
     })) return undefined;
-    if (commanded === undefined && this.commanded !== undefined) {
-      // Atch's zero-replay attach asks the PTY application to repaint. Moor's
-      // explicit REDRAW is the same operation; it carries no terminal history.
-      this.d.sendMasterRedraw?.(
-        this.commanded.rows,
-        this.commanded.cols,
-        this.resizeOwner ?? channelId
-      );
-    }
+    this.scheduleSubscriberActivation(channelId, subscriber);
     if (this.subscribers.get(channelId) !== subscriber) return undefined;
     return commanded === undefined ? { channelId } : { channelId, commanded };
+  }
+
+  private activateWaitingSubscribers(): void {
+    for (const [channelId, subscriber] of this.subscribers) {
+      if (subscriber.visible && !subscriber.ready) {
+        this.scheduleSubscriberActivation(channelId, subscriber);
+      }
+    }
+  }
+
+  private scheduleSubscriberActivation(channelId: number, subscriber: Subscriber): void {
+    if (
+      this.subscribers.get(channelId) !== subscriber ||
+      !subscriber.visible ||
+      subscriber.ready ||
+      subscriber.activation !== undefined
+    ) {
+      return;
+    }
+    const frontier = this.authoritativeWork;
+    if (frontier === undefined) {
+      this.activateSubscriber(channelId, subscriber);
+      return;
+    }
+    const activation = frontier.then(
+      () => {
+        if (subscriber.activation !== activation) return;
+        subscriber.activation = undefined;
+        this.scheduleSubscriberActivation(channelId, subscriber);
+      },
+      () => {
+        if (subscriber.activation !== activation) return;
+        subscriber.activation = undefined;
+        if (this.subscribers.get(channelId) === subscriber) this.failSubscriber(channelId);
+      }
+    );
+    subscriber.activation = activation;
+  }
+
+  private activateSubscriber(channelId: number, subscriber: Subscriber): void {
+    if (this.subscribers.get(channelId) !== subscriber || !subscriber.visible) return;
+    let text: string;
+    try {
+      text = this.d.emulator.serialize({ scrollback: 0 });
+    } catch {
+      this.failSubscriber(channelId);
+      return;
+    }
+    subscriber.ready = true;
+    this.sendSubscriber(channelId, {
+      type: BpFrameType.SNAPSHOT,
+      channelId,
+      generation: this.d.generation,
+      revision: this.revision,
+      offset: this.outputOffset,
+      text
+    });
   }
 
   private sendSubscriber(channelId: number, frame: BpFrame): boolean {
@@ -359,6 +443,9 @@ export class SessionRuntime {
   private finishPendingExit(pending: PendingExit): void {
     this.exitFenced = true;
     this.pendingExit = undefined;
+    for (const [channelId, subscriber] of this.subscribers) {
+      if (!subscriber.ready) this.activateSubscriber(channelId, subscriber);
+    }
     for (const channelId of this.subscribers.keys()) {
       this.sendSubscriber(channelId, {
         type: BpFrameType.EXIT,
@@ -588,13 +675,33 @@ export class SessionRuntime {
       return undefined;
     }
     this.commanded = { rows, cols };
+    this.screenGeometry = { rows, cols };
     this.d.emulator.resize(rows, cols);
     // Geometry is controller-owned: the revision is bumped here and nowhere
     // else. The moor holder never echoes geometry back, so this counter is the
     // only authority on which frames are stale after a size change.
     this.revision += 1;
     this.d.sendMasterResize(rows, cols, surfaceId);
+    this.recordScreenCheckpoint();
     return { rows, cols, surfaceId };
+  }
+
+  private recordScreenCheckpoint(): void {
+    const store = this.d.screenCheckpoints;
+    if (store === undefined || this.disposed) return;
+    try {
+      const snapshot = this.d.emulator.serialize({ scrollback: 0 });
+      if (!screenSnapshotHasVisibleText(snapshot) && this.outputOffset > 0n) return;
+      store.record({
+        sessionId: this.d.sessionId,
+        generation: this.d.generation,
+        outputOffset: this.outputOffset,
+        geometry: { ...this.screenGeometry },
+        snapshot
+      });
+    } catch {
+      // A checkpoint is restart acceleration, never a reason to break live I/O.
+    }
   }
 
   /**

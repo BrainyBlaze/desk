@@ -7,14 +7,16 @@
 // header (version, type) + a typed payload. A SUBSCRIBE assigns a compact u32
 // `channelId` (returned in SUBSCRIBE_ACK); every subsequent frame routes by
 // channelId instead of repeating the session/surface strings on the hot path.
-// Every OUTPUT frame carries generation+revision so a stale producer's bytes
-// are discardable at the browser.
+// Every SNAPSHOT/OUTPUT frame carries generation+revision so a stale producer's
+// bytes are discardable at the browser.
 
 /**
- * v3: SUBSCRIBE_ACK carries the authoritative live output offset and the
- * terminal SNAPSHOT frame is retired. An older tab must reload rather than
- * decode the longer ACK under the v2 layout or request replay that no longer
- * exists.
+ * v4: SNAPSHOT is a bounded serialization of the authoritative emulator's
+ * current screen. It is not Moor output retention or replay. A v3 tab must
+ * reload rather than treat SUBSCRIBE_ACK as a complete display baseline.
+ *
+ * v3: SUBSCRIBE_ACK added the authoritative live output offset and retired the
+ * old unbounded snapshot path.
  *
  * v2: EXIT carries the holder's tagged ending (BpExitKind + per-kind payload)
  * instead of one i32 code + u16 signal, so an unprovable ending travels as
@@ -24,10 +26,10 @@
  * the server its v1 frames) until it reloads — silence, never a mis-decoded
  * ending shown as a code.
  */
-export const BP_VERSION = 3;
+export const BP_VERSION = 4;
 export const BP_HEADER_LEN = 2; // u8 version + u8 type
 
-/** Hard per-frame payload cap (bytes). The server chunks output below this. */
+/** Hard per-frame payload cap (bytes). Output is chunked; a screen must fit. */
 export const BP_MAX_FRAME_BYTES = 1 << 20; // 1 MiB
 /** Output chunk size the server targets (§7.4). */
 export const BP_OUTPUT_CHUNK = 256 * 1024;
@@ -51,6 +53,7 @@ export enum BpFrameType {
   QUERY_REPLY = 6,
   // server → client
   SUBSCRIBE_ACK = 16,
+  SNAPSHOT = 17,
   OUTPUT = 18,
   GAP = 19,
   EXIT = 20,

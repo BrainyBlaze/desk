@@ -196,8 +196,18 @@ export interface SubscribeAck {
   channelId: number;
   generation: number;
   revision: number;
-  /** Live output frontier; no terminal snapshot or retained output follows. */
+  /** Live output frontier at acknowledgement time. */
   offset: bigint;
+}
+export interface Snapshot {
+  type: BpFrameType.SNAPSHOT;
+  channelId: number;
+  generation: number;
+  revision: number;
+  /** Output frontier represented by this current-screen serialization. */
+  offset: bigint;
+  /** Restorable current screen only; never Moor history or emulator scrollback. */
+  text: string;
 }
 export interface Output {
   type: BpFrameType.OUTPUT;
@@ -250,6 +260,7 @@ export type BpFrame =
   | Resize
   | QueryReply
   | SubscribeAck
+  | Snapshot
   | Output
   | Gap
   | Exit
@@ -260,6 +271,9 @@ export type BpFrame =
 function checkLen(n: number, max: number, what: string): void {
   if (n > max) throw new BrowserProtocolError(BpError.PAYLOAD_TOO_LARGE, `${what} ${n} > ${max}`);
 }
+
+const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder('utf-8', { fatal: false });
 
 /** Encode one frame to a single WS binary message (header + payload). */
 export function encodeBpFrame(f: BpFrame): Uint8Array {
@@ -285,6 +299,12 @@ export function encodeBpFrame(f: BpFrame): Uint8Array {
     case BpFrameType.SUBSCRIBE_ACK:
       w.u32(f.channelId).u32(f.generation).u32(f.revision).u64(f.offset);
       break;
+    case BpFrameType.SNAPSHOT: {
+      const bytes = TEXT_ENCODER.encode(f.text);
+      checkLen(bytes.length, BP_MAX_FRAME_BYTES, 'snapshot');
+      w.u32(f.channelId).u32(f.generation).u32(f.revision).u64(f.offset).blob32(bytes);
+      break;
+    }
     case BpFrameType.OUTPUT:
       checkLen(f.bytes.length, BP_MAX_FRAME_BYTES, 'output');
       w.u32(f.channelId).u32(f.generation).u32(f.revision).u64(f.offset).blob32(f.bytes);
@@ -360,6 +380,15 @@ function decodeBody(type: BpFrameType, r: ByteReader): BpFrame {
         revision: r.u32(),
         offset: r.u64()
       };
+    case BpFrameType.SNAPSHOT: {
+      const channelId = r.u32();
+      const generation = r.u32();
+      const revision = r.u32();
+      const offset = r.u64();
+      const bytes = r.blob32();
+      checkLen(bytes.length, BP_MAX_FRAME_BYTES, 'snapshot');
+      return { type, channelId, generation, revision, offset, text: TEXT_DECODER.decode(bytes) };
+    }
     case BpFrameType.OUTPUT: {
       const channelId = r.u32();
       const generation = r.u32();

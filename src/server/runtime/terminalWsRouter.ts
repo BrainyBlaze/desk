@@ -27,6 +27,7 @@ export interface TerminalWsRouterDeps {
   emulatorFactory: EmulatorFactory;
   now: () => number;
   sessionGeometry?: SessionManagerDeps['sessionGeometry'];
+  screenCheckpoints?: SessionManagerDeps['screenCheckpoints'];
   workingLeaseMs?: SessionManagerDeps['workingLeaseMs'];
   openToolLeaseMs?: SessionManagerDeps['openToolLeaseMs'];
   initialAgentHealth?: SessionManagerDeps['initialAgentHealth'];
@@ -57,6 +58,9 @@ export class TerminalWsRouter {
         if (ws !== undefined) this.wsChannels.get(ws)?.delete(channelId);
       },
       ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
+      ...(deps.screenCheckpoints !== undefined
+        ? { screenCheckpoints: deps.screenCheckpoints }
+        : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -100,7 +104,9 @@ export class TerminalWsRouter {
     }
     switch (frame.type) {
       case BpFrameType.SUBSCRIBE: {
-        this.pendingWs = ws; // the ACK + SNAPSHOT emit synchronously during subscribe
+        // ACK and an already-drained SNAPSHOT may emit synchronously here. A
+        // snapshot waiting on parser work routes through channelToWs afterwards.
+        this.pendingWs = ws;
         const channelId = this.manager.subscribe(frame.sessionId, frame.surfaceId, frame.rows, frame.cols);
         this.pendingWs = null;
         if (channelId === undefined) {

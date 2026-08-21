@@ -40,6 +40,23 @@ describe('xterm emulator adapter (§3.3/§7.3)', () => {
     e.dispose();
   });
 
+  it('restores a bounded current-screen serialization into a fresh emulator', async () => {
+    const before = new XtermEmulator({ rows: 6, cols: 30 });
+    before.write(enc('first\r\n\x1b[32mcurrent screen\x1b[0m'));
+    await before.flush();
+    const snapshot = before.serialize({ scrollback: 0 });
+    const cursor = before.cursor();
+
+    const after = new XtermEmulator({ rows: 6, cols: 30 });
+    after.write(enc(snapshot));
+    await after.flush();
+
+    expect(after.readTailText(6)).toEqual(before.readTailText(6));
+    expect(after.cursor()).toEqual(cursor);
+    before.dispose();
+    after.dispose();
+  });
+
   it('resizes (rows × cols)', async () => {
     const e = new XtermEmulator({ rows: 10, cols: 40 });
     e.resize(24, 80);
@@ -97,6 +114,19 @@ describe('xterm emulator adapter (§3.3/§7.3)', () => {
     // the newest written line survives at the live edge (cursor sits on a
     // fresh empty row after the trailing newline)
     expect(e.readHistoryText(3, 0).lines.join('\n')).toContain(`l${SCROLLBACK_LINES + 300}`);
+    e.dispose();
+  });
+
+  it('serializes only the current screen for a browser baseline', async () => {
+    const e = new XtermEmulator({ rows: 5, cols: 40 });
+    for (let i = 1; i <= 40; i++) e.write(enc(`history-${i}\r\n`));
+    e.write(enc('\x1b[2J\x1b[HCURRENT SCREEN'));
+    await e.flush();
+
+    const snapshot = e.serialize({ scrollback: 0 });
+    expect(snapshot).toContain('CURRENT SCREEN');
+    expect(snapshot).not.toContain('history-1');
+    expect(snapshot.length).toBeLessThan(4_096);
     e.dispose();
   });
 

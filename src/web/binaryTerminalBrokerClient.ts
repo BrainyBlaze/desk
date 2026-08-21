@@ -4,8 +4,8 @@
  * terminal surfaces. This is the browser peer of the server-side
  * terminalWsRouter: it speaks the same channelId-keyed
  * frames and runs one loss-aware resync FSM per channel. A lost delta detaches
- * that channel and re-subscribes at the current live frontier; no retained
- * output is requested or replayed.
+ * that channel and re-subscribes for a bounded current-screen baseline; no
+ * retained Moor output is requested or replayed.
  *
  * Two protocol facts shape the client and are worth stating up front:
  *
@@ -16,8 +16,8 @@
  *    connection channel) to the head of a FIFO `pendingAcks` queue. A failed
  *    subscribe must shift that queue too, or every later ACK misbinds.
  *
- *  - Hide detaches the channel. Reveal creates a new live-only subscription;
- *    the server asks the PTY application to redraw, matching atch semantics.
+ *  - Hide detaches the channel. Reveal creates a new subscription whose screen
+ *    snapshot comes from the daemon's authoritative emulator, not PTY history.
  */
 import {
   BP_CONN_CHANNEL,
@@ -44,6 +44,8 @@ export interface BinaryBrokerSocket {
 export type BinaryBrokerSocketFactory = (url: string) => BinaryBrokerSocket;
 
 export interface BinarySurfaceHandlers {
+  /** Restorable current-screen baseline; reset xterm, then write this string. */
+  onSnapshot: (text: string) => void;
   /** Live output bytes for this surface; write straight to xterm (accepts Uint8Array). */
   onOutput: (bytes: Uint8Array) => void;
   /** The session ended; `outcome` is the holder's tagged ending as the EXIT frame carried it (`unknown` included). */
@@ -550,6 +552,8 @@ export class BinaryTerminalBrokerClient {
     switch (frame.type) {
       case BpFrameType.SUBSCRIBE_ACK:
         return this.onSubscribeAck(frame);
+      case BpFrameType.SNAPSHOT:
+        return this.onSnapshot(frame.channelId, frame);
       case BpFrameType.OUTPUT:
         return this.onOutput(frame.channelId, frame);
       case BpFrameType.GAP:
@@ -584,12 +588,6 @@ export class BinaryTerminalBrokerClient {
     surface.channelId = channelId;
     surface.awaitingAck = false;
     surface.resync = new SubscriptionResync();
-    surface.resync.establishLiveBaseline({
-      generation: frame.generation,
-      revision: frame.revision,
-      offset: frame.offset,
-      length: 0
-    });
     this.channelToSurface.set(channelId, surface);
     if (!surface.visible) {
       this.closeChannel(surface);
@@ -603,6 +601,21 @@ export class BinaryTerminalBrokerClient {
     } else {
       this.flushInput(surface);
     }
+  }
+
+  private onSnapshot(
+    channelId: number,
+    frame: Extract<BpFrame, { type: BpFrameType.SNAPSHOT }>
+  ): void {
+    const surface = this.surfaceOf(channelId);
+    if (!surface || !surface.visible || !surface.resync) return;
+    const action = surface.resync.onSnapshot({
+      generation: frame.generation,
+      revision: frame.revision,
+      offset: frame.offset,
+      length: 0
+    });
+    if (action === 'apply') surface.handlers.onSnapshot(frame.text);
   }
 
   private onOutput(channelId: number, frame: Extract<BpFrame, { type: BpFrameType.OUTPUT }>): void {
