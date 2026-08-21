@@ -1,4 +1,4 @@
-// Loss-aware browser protocol conformance (spec §7.4). Round-trips all 14 frame
+// Loss-aware browser protocol conformance (spec §7.4). Round-trips every frame
 // types and asserts version/type/bounds validation and the signed/BigInt edges.
 
 import { describe, expect, it } from 'vitest';
@@ -28,6 +28,7 @@ const SAMPLES: Record<string, BpFrame> = {
   RESIZE: { type: BpFrameType.RESIZE, channelId: 7, rows: 50, cols: 200 },
   QUERY_REPLY: { type: BpFrameType.QUERY_REPLY, channelId: 7, queryOffset: 123456789012345n, leaseEpoch: 3, bytes: bytes(0x1b, 0x5b, 0x49) },
   SUBSCRIBE_ACK: { type: BpFrameType.SUBSCRIBE_ACK, channelId: 7, generation: 4, revision: 9, offset: 900n },
+  SNAPSHOT: { type: BpFrameType.SNAPSHOT, channelId: 7, generation: 4, revision: 9, offset: 900n, text: '\x1b[2J\x1b[HCURRENT' },
   OUTPUT: { type: BpFrameType.OUTPUT, channelId: 7, generation: 4, revision: 9, offset: 902n, bytes: bytes(0x00, 0xff, 0x1b, 0x5b, 0x41) },
   GAP: { type: BpFrameType.GAP, channelId: 7, from: 902n, to: 1500n },
   EXIT_EXITED: { type: BpFrameType.EXIT, channelId: 7, outcome: { kind: 'exited', code: 7, method: 'none' } },
@@ -39,8 +40,8 @@ const SAMPLES: Record<string, BpFrame> = {
 };
 
 describe('browser protocol — frame round-trip (§7.4)', () => {
-  it('uses the live-only protocol version', () => {
-    expect(BP_VERSION).toBe(3);
+  it('uses the bounded-screen-baseline protocol version', () => {
+    expect(BP_VERSION).toBe(4);
   });
 
   for (const [name, frame] of Object.entries(SAMPLES)) {
@@ -164,18 +165,6 @@ describe('browser protocol — validation', () => {
 
   it('rejects an unknown frame type', () => {
     const enc = Uint8Array.of(BP_VERSION, 200);
-    try {
-      decodeBpFrame(enc);
-      throw new Error('should have thrown');
-    } catch (e) {
-      expect(e).toBeInstanceOf(BrowserProtocolError);
-      expect((e as BrowserProtocolError).code).toBe(BpError.UNKNOWN_TYPE);
-    }
-  });
-
-  it('rejects the retired terminal snapshot frame instead of accepting replay data', () => {
-    const retiredSnapshotType = 17;
-    const enc = Uint8Array.of(BP_VERSION, retiredSnapshotType);
     try {
       decodeBpFrame(enc);
       throw new Error('should have thrown');

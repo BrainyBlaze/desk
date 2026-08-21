@@ -411,7 +411,6 @@ export function App(): JSX.Element {
   });
   const [muted, setMuted] = useState(() => readStoredMuted(localStorage.getItem(MUTED_STORAGE_KEY)));
   const [interacted, setInteracted] = useState(false);
-  const [booted, setBooted] = useState(false);
   const reduced = useMemo(() => isReducedMotion(), []);
   const [themeName, setThemeName] = useState<DeskThemeName>(() => readStoredTheme(localStorage.getItem(THEME_STORAGE_KEY)));
   const [autosaveMode, setAutosaveMode] = useState<DeskAutosaveMode>('off');
@@ -743,7 +742,6 @@ export function App(): JSX.Element {
         }
         console.warn(`[desk] initial settings load failed: ${toErrorMessage(error)}`);
       });
-    setBooted(true);
     const unlock = (): void => setInteracted(true);
     window.addEventListener('pointerdown', unlock, { once: true });
     return () => window.removeEventListener('pointerdown', unlock);
@@ -2124,11 +2122,10 @@ export function App(): JSX.Element {
         disabled={reduced}
         duration={{ enter: DESK_DURATIONS.enter, exit: DESK_DURATIONS.exit, stagger: DESK_DURATIONS.stagger }}
       >
-        <Animator active={booted && snapshot !== null} combine manager="stagger" duration={{ stagger: 0.12 }}>
           <main className="deskShell" style={themeVars}>
             <BackdropField />
             <AttentionAnnouncer statusViews={statusViews} />
-            <Animated as="section" className="terminalFrame" animated={['fade']}>
+            <section className="terminalFrame">
               <FrameLines />
               <Animator combine manager="stagger" duration={{ stagger: 0.04 }}>
                 <Animated animated={['flicker']}>
@@ -2387,9 +2384,8 @@ export function App(): JSX.Element {
                 />
               ) : null}
               <ToastStack toasts={toasts} onDismiss={dismissToast} />
-            </Animated>
+            </section>
           </main>
-        </Animator>
       </AnimatorGeneralProvider>
     </BleepsProvider>
     </DeskThemeContext.Provider>
@@ -3599,19 +3595,17 @@ const MountedMux = memo(function MountedMuxImpl({
   );
   return (
     <div className="muxMount" style={{ display: visible ? 'flex' : 'none' }} aria-hidden={!visible}>
-      <Animator combine manager="stagger" duration={{ stagger: 0.04, limit: 8 }}>
-        <AgentMultiplexer
-          group={group}
-          visible={visible}
-          cells={cells}
-          selectedSessionId={selectedSessionId}
-          statusViews={statusViews}
-          busy={busy}
-          onDragSession={onDragSession}
-          terminalRevisions={terminalRevisions}
-          {...handlers}
-        />
-      </Animator>
+      <AgentMultiplexer
+        group={group}
+        visible={visible}
+        cells={cells}
+        selectedSessionId={selectedSessionId}
+        statusViews={statusViews}
+        busy={busy}
+        onDragSession={onDragSession}
+        terminalRevisions={terminalRevisions}
+        {...handlers}
+      />
     </div>
   );
 }, mountedMuxPropsEqual);

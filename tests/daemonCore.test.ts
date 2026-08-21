@@ -252,7 +252,7 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     expect(browserOut[0]).toMatchObject({ sessionId: 's1', channelId: ch });
   });
 
-  it('opens a live subscription immediately while terminal-state parser work drains', async () => {
+  it('opens a channel immediately, then snapshots parser state after terminal-state drain', async () => {
     const emulator = new BlockingPreambleEmu();
     const { core, browserOut } = makeCore({ createEmulator: () => emulator });
     core.ensure('s1', { rows: 40, cols: 120 });
@@ -273,10 +273,18 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     const frames = browserOut
       .filter((entry) => entry.channelId === channelId)
       .map((entry) => entry.frame);
-    expect(frames.map((frame) => frame.type)).toEqual([BpFrameType.SUBSCRIBE_ACK]);
+    expect(frames.map((frame) => frame.type)).toEqual([
+      BpFrameType.SUBSCRIBE_ACK,
+      BpFrameType.SNAPSHOT
+    ]);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 0n,
+      text: 'old-new'
+    });
   });
 
-  it('fans out output immediately while parser work continues off the data plane', async () => {
+  it('snapshots the parsed screen at the live frontier without replaying the output delta', async () => {
     const emulator = new BlockingFlushEmu();
     const { core, browserOut } = makeCore({ createEmulator: () => emulator });
     core.ensure('s1', { rows: 40, cols: 120 });
@@ -299,12 +307,21 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
     ).toMatchObject({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n });
 
     emulator.release();
+    await first;
     await Promise.resolve();
 
     const frames = browserOut
       .filter((entry) => entry.channelId === channelId)
       .map((entry) => entry.frame);
-    expect(frames).toHaveLength(1);
+    expect(frames.map((frame) => frame.type)).toEqual([
+      BpFrameType.SUBSCRIBE_ACK,
+      BpFrameType.SNAPSHOT
+    ]);
+    expect(frames[1]).toMatchObject({
+      type: BpFrameType.SNAPSHOT,
+      offset: 1n,
+      text: 'x'
+    });
     expect(frames.some((frame) => frame.type === BpFrameType.OUTPUT)).toBe(false);
   });
 
@@ -365,9 +382,11 @@ describe('DaemonCore — routing + projections (§7.1/§6.7)', () => {
       .map((entry) => entry.frame);
     expect(frames.map((frame) => frame.type)).toEqual([
       BpFrameType.SUBSCRIBE_ACK,
+      BpFrameType.SNAPSHOT,
       BpFrameType.EXIT
     ]);
     expect(frames[0]).toMatchObject({ type: BpFrameType.SUBSCRIBE_ACK, offset: 1n });
+    expect(frames[1]).toMatchObject({ type: BpFrameType.SNAPSHOT, offset: 1n, text: 'x' });
   });
 
   it('rejects subscriptions during final drain and after the exit fence', async () => {
@@ -609,7 +628,7 @@ describe('DaemonCore — restore (re-adopt a surviving master after daemon resta
     const ledger = new GenerationLedger(store);
     const { core, masterOut } = coreOverLedger(ledger);
     const restored = core.restore('s1');
-    expect(restored).toEqual({ ok: true, generation: 2 });
+    expect(restored).toEqual({ ok: true, generation: 2, screenBaseline: 'missing' });
     expect(ledger.current('s1')).toBe(2); // NOT bumped — the surviving master owns 2
 
     // Master-bound sends route through the installed link, which the manager

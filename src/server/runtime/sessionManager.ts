@@ -255,6 +255,7 @@ export interface SessionManagerDeps {
   onSubscriberFailure?: (channelId: number) => void;
   /** desk#62 — durable last-COMMANDED geometry per session (see DaemonCoreDeps). */
   sessionGeometry?: DaemonCoreDeps['sessionGeometry'];
+  screenCheckpoints?: DaemonCoreDeps['screenCheckpoints'];
   workingLeaseMs?: DaemonCoreDeps['workingLeaseMs'];
   openToolLeaseMs?: DaemonCoreDeps['openToolLeaseMs'];
   initialAgentHealth?: DaemonCoreDeps['initialAgentHealth'];
@@ -336,6 +337,7 @@ interface MoorRecoverySlot {
   observerAcceptance?: Promise<boolean>;
   observer?: boolean;
   pendingResize?: { rows: number; cols: number; surfaceId: number };
+  needsScreenRefresh: boolean;
 }
 
 const RECOVERY_BACKOFF_MS = [0, 100, 250, 500, 1_000, 2_000] as const;
@@ -370,6 +372,14 @@ export class SessionManager {
   private readonly owners = new Map<string, symbol>();
   /** One exact-generation controller re-adoption slot per live session. */
   private readonly recoveries = new Map<string, MoorRecoverySlot>();
+  /** Missing zero-cache screens awaiting their first visible surface. */
+  private readonly missingScreenRefreshes = new Map<
+    string,
+    {
+      generation: number;
+      target?: { rows: number; cols: number; surfaceId: number };
+    }
+  >();
   /**
    * In-flight provision per session: concurrent calls COALESCE onto one
    * operation (two Boot clicks = one spawn, both get its result). Interleaved
@@ -395,18 +405,6 @@ export class SessionManager {
       }
       this.masters.get(sessionId)?.sendResize(rows, cols, surfaceId);
     };
-    const sendMasterRedraw = (
-      sessionId: string,
-      rows: number,
-      cols: number,
-      surfaceId: number
-    ): void => {
-      const recovery = this.recoveries.get(sessionId);
-      if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
-        return;
-      }
-      this.masters.get(sessionId)?.sendRedraw(rows, cols, surfaceId);
-    };
     this.core = new DaemonCore({
       ledger: deps.ledger,
       supervisor: deps.supervisor,
@@ -421,8 +419,10 @@ export class SessionManager {
         this.dispatchMasterInput(sessionId, bytes, binary, surfaceId),
       sendMasterPrompt: (sessionId, bytes) => this.dispatchMasterPrompt(sessionId, bytes),
       sendMasterResize: sendMasterGeometry,
-      sendMasterRedraw,
       ...(deps.sessionGeometry !== undefined ? { sessionGeometry: deps.sessionGeometry } : {}),
+      ...(deps.screenCheckpoints !== undefined
+        ? { screenCheckpoints: deps.screenCheckpoints }
+        : {}),
       ...(deps.workingLeaseMs !== undefined ? { workingLeaseMs: deps.workingLeaseMs } : {}),
       ...(deps.openToolLeaseMs !== undefined
         ? { openToolLeaseMs: deps.openToolLeaseMs }
@@ -501,6 +501,11 @@ export class SessionManager {
   > {
     const restored = this.core.restore(sessionId, opts.subject ?? { kind: 'terminal' });
     if (!restored.ok) return restored;
+    if (restored.screenBaseline === 'missing') {
+      this.missingScreenRefreshes.set(sessionId, { generation: restored.generation });
+    } else {
+      this.missingScreenRefreshes.delete(sessionId);
+    }
     this.ensureTerminalObservation(sessionId, restored.generation);
     const token = Symbol('restore-op');
     this.owners.set(sessionId, token); // stale prior-op callbacks go inert
@@ -610,7 +615,8 @@ export class SessionManager {
         sessionPath: opts.sessionPath,
         geometry: attachGeometry,
         generation: restored.generation,
-        owner: token
+        owner: token,
+        needsScreenRefresh: this.screenRefreshRequested(sessionId, restored.generation)
       });
       // `retained` is the FACT, read back from the map — not the helper's
       // report of it. The two differ exactly when a guard inside declines
@@ -631,6 +637,21 @@ export class SessionManager {
       };
     }
     const moorStatus = this.moorStatuses.get(sessionId);
+    const link = this.masters.get(sessionId);
+    if (link?.hasViewerLease?.() === false) {
+      this.openRecoverySlot({
+        sessionId,
+        sessionPath: opts.sessionPath,
+        geometry: attachGeometry,
+        generation: restored.generation,
+        owner: token,
+        snapshot: undefined,
+        queuedInput: [],
+        needsScreenRefresh: false,
+        observer: true
+      });
+    }
+    this.flushMissingScreenRefresh(sessionId, restored.generation);
     return moorStatus === undefined ? restored : { ...restored, moorStatus };
   }
 
@@ -1221,6 +1242,7 @@ export class SessionManager {
     geometry: { rows: number; cols: number };
     generation: number;
     owner: symbol;
+    needsScreenRefresh: boolean;
   }): void {
     if (this.owners.get(input.sessionId) !== input.owner) return;
     const state = this.core.stateSnapshot(input.sessionId);
@@ -1244,6 +1266,8 @@ export class SessionManager {
     snapshot: MoorReconnectSnapshot | undefined;
     queuedInput: MoorRecoverySlot['inputQueue'];
     pendingResize?: MoorRecoverySlot['pendingResize'];
+    needsScreenRefresh?: boolean;
+    observer?: boolean;
   }): void {
     const previous = this.recoveries.get(input.sessionId);
     if (previous?.timer !== undefined) clearTimeout(previous.timer);
@@ -1260,6 +1284,11 @@ export class SessionManager {
       inputBytes:
         (previous?.inputBytes ?? 0) +
         input.queuedInput.reduce((sum, pending) => sum + pending.bytes.length, 0),
+      observer: input.observer ?? false,
+      needsScreenRefresh:
+        previous?.needsScreenRefresh ??
+        input.needsScreenRefresh ??
+        this.screenRefreshRequested(input.sessionId, input.generation),
       ...(previous?.retainedInputQueuedAt !== undefined
         ? { retainedInputQueuedAt: previous.retainedInputQueuedAt }
         : input.snapshot?.lease?.pendingInput === undefined
@@ -1272,7 +1301,10 @@ export class SessionManager {
           : { pendingResize: { ...input.pendingResize } })
     };
     this.recoveries.set(input.sessionId, slot);
-    void this.runControllerRecovery(slot, slot.episode).catch((error) => {
+    const run = slot.observer
+      ? this.runObserverLeaseRecovery(slot, slot.episode)
+      : this.runControllerRecovery(slot, slot.episode);
+    void run.catch((error) => {
       console.error(
         `[desk] controller recovery failed for ${input.sessionId} generation ${input.generation}: ${
           error instanceof Error ? error.message : String(error)
@@ -1462,10 +1494,6 @@ export class SessionManager {
       const resize = slot.pendingResize;
       link.sendResize(resize.rows, resize.cols, resize.surfaceId);
     }
-    if (link !== undefined) {
-      const surfaceId = slot.pendingResize?.surfaceId ?? 0;
-      link.sendRedraw(slot.geometry.rows, slot.geometry.cols, surfaceId);
-    }
     for (const pending of slot.inputQueue.splice(0)) {
       slot.inputBytes -= pending.bytes.length;
       if (
@@ -1476,9 +1504,66 @@ export class SessionManager {
         this.sendInputUnavailable(slot.sessionId, pending.surfaceId);
       }
     }
+    if (slot.needsScreenRefresh && link !== undefined) {
+      const pending = this.missingScreenRefreshes.get(slot.sessionId);
+      const target =
+        pending?.generation === slot.generation ? pending.target : undefined;
+      const geometry = target ?? slot.pendingResize ?? {
+        rows: slot.geometry.rows,
+        cols: slot.geometry.cols,
+        surfaceId: 0
+      };
+      this.sendColdScreenRedraw(
+        link,
+        geometry.rows,
+        geometry.cols,
+        geometry.surfaceId
+      );
+      if (pending?.generation === slot.generation) {
+        this.missingScreenRefreshes.delete(slot.sessionId);
+      }
+    }
     if (slot.timer !== undefined) clearTimeout(slot.timer);
     this.recoveries.delete(slot.sessionId);
     this.core.observeHolderLiveness(slot.sessionId, slot.generation, true);
+  }
+
+  private sendColdScreenRedraw(
+    link: SessionMasterLink,
+    rows: number,
+    cols: number,
+    surfaceId: number
+  ): void {
+    // Moor REDRAW owns the same-size refresh contract: it applies the measured
+    // geometry and explicitly signals the foreground process group when the
+    // PTY was already that size.
+    link.sendRedraw(rows, cols, surfaceId);
+  }
+
+  private screenRefreshRequested(sessionId: string, generation: number): boolean {
+    const pending = this.missingScreenRefreshes.get(sessionId);
+    return pending?.generation === generation && pending.target !== undefined;
+  }
+
+  private flushMissingScreenRefresh(sessionId: string, generation: number): void {
+    const pending = this.missingScreenRefreshes.get(sessionId);
+    if (pending === undefined) return;
+    if (pending.generation !== generation) {
+      this.missingScreenRefreshes.delete(sessionId);
+      return;
+    }
+    const target = pending.target;
+    if (target === undefined) return;
+    const recovery = this.recoveries.get(sessionId);
+    if (recovery !== undefined && this.recoveryCurrent(recovery, recovery.episode)) {
+      recovery.needsScreenRefresh = true;
+      recovery.pendingResize = { ...target };
+      return;
+    }
+    const link = this.masters.get(sessionId);
+    if (link === undefined) return;
+    this.sendColdScreenRedraw(link, target.rows, target.cols, target.surfaceId);
+    this.missingScreenRefreshes.delete(sessionId);
   }
 
   private async runObserverLeaseRecovery(slot: MoorRecoverySlot, episode: number): Promise<void> {
@@ -2145,6 +2230,11 @@ export class SessionManager {
     if (result.commanded !== undefined) {
       this.noteCommandedGeometry(sessionId, result.commanded);
     }
+    const missing = this.missingScreenRefreshes.get(sessionId);
+    if (missing !== undefined) {
+      missing.target = { rows, cols, surfaceId: result.channelId };
+      this.flushMissingScreenRefresh(sessionId, missing.generation);
+    }
     return result.channelId;
   }
 
@@ -2764,6 +2854,7 @@ export class SessionManager {
    */
   private beginRetire(sessionId: string, reason: RetireReason): DetachedKillRecord | undefined {
     this.owners.delete(sessionId); // any deferred old-operation callback goes stale
+    this.missingScreenRefreshes.delete(sessionId);
     const recovery = this.recoveries.get(sessionId);
     if (recovery?.timer !== undefined) clearTimeout(recovery.timer);
     recovery?.candidate?.close();

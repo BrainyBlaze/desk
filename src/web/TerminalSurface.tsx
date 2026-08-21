@@ -298,7 +298,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       notifyResizeRef.current(terminal.cols, terminal.rows);
       updateScrollRail();
       if (wasHidden) {
-        // Reveal: attach at the live frontier; the daemon requests a PTY redraw.
+        // Reveal: attach to the daemon's bounded current-screen baseline.
         brokerVisibilityRef.current(true);
       }
     };
@@ -824,7 +824,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
     let disposed = false;
     let stabilizeTimer: number | undefined;
 
-    // A fresh live attach can race the first layout pass. Stabilize repairs the
+    // A fresh screen baseline can race the first layout pass. Stabilize repairs the
     // authoritative holder size once after layout settles, but only when it
     // differs from the dimensions already sent. The min-size guard keeps a
     // transient tiny fit from pinning the PTY.
@@ -851,10 +851,16 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
       }, 450);
     };
 
-    // Subscribe this surface to the shared broker connection. Hidden surfaces
-    // detach; every first show or reveal resumes only at the live frontier and
-    // relies on the PTY application's redraw, never retained output or a snapshot.
+    // Hidden surfaces detach. Every first show or reveal receives only the
+    // daemon emulator's current screen, then contiguous live output. Moor stays
+    // at zero retention; no terminal history is replayed into this xterm.
     binaryTerminalBroker.subscribe(surfaceId, daemonSessionId, terminal.rows, terminal.cols, cellVisibleRef.current, {
+      onSnapshot: (text) => {
+        terminal.reset();
+        terminal.options.theme = { ...builtThemeRef.current.terminal };
+        terminal.write(text);
+        stabilize();
+      },
       onOutput: (bytes) => {
         // Raw output bytes, written binary end-to-end (no premature string decode).
         terminal.write(bytes);
@@ -876,7 +882,7 @@ export function TerminalSurface({ session, revision = 0, focused = false, onSele
         }
         // The connection is shared across all cells; one drop flips every cell
         // to the Reconnect affordance, one recovery clears them (the broker
-        // resubscribes visible surfaces and requests a live PTY redraw).
+        // resubscribes visible surfaces for fresh current-screen baselines).
         setBridgeDown(!up);
       }
     });

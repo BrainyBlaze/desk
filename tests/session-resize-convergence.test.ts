@@ -565,15 +565,15 @@ describe('desk#68 — DaemonCore records geometry only for a COMMANDED resize', 
 // guaranteed on that path, so acquiring ownership must command the acquirer's
 // geometry transactionally.
 describe('desk#68 — acquiring ownership on subscribe commands the acquirer geometry', () => {
-  it('requests a same-size PTY redraw when a live-only subscriber reattaches', () => {
+  it('serves the daemon snapshot without repainting the child on same-size reattach', () => {
     const { runtime, redraws, sizes } = makeRuntime();
     const first = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId;
     runtime.unsubscribe(first);
 
-    const second = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId;
+    runtime.subscribe('surf-a', ...OWNER_SIZE);
 
     expect(sizes()).toEqual([OWNER_SIZE]);
-    expect(redraws).toEqual([[OWNER_SIZE[0], OWNER_SIZE[1], second]]);
+    expect(redraws).toEqual([]);
   });
 
   it('subscribe after all channels detach owns and commands geometry with NO resize frame', () => {
@@ -592,8 +592,8 @@ describe('desk#68 — acquiring ownership on subscribe commands the acquirer geo
     expect(runtime.commandedSize()).toEqual({ rows: 48, cols: 95 });
   });
 
-  // The command runs before ACK, so the live baseline carries the post-command revision.
-  it('subscribe after all channels detach ACKs at the commanded geometry', () => {
+  // The command runs before ACK/snapshot, so both carry the post-command revision.
+  it('subscribe after all channels detach baselines at the commanded geometry', () => {
     const { runtime, browser } = makeRuntime();
     const a = runtime.subscribe('surf-a', ...OWNER_SIZE).channelId; // revision 0 → 1
     const b = runtime.subscribe('surf-b', ...OBSERVER_SIZE).channelId;
@@ -612,6 +612,17 @@ describe('desk#68 — acquiring ownership on subscribe commands the acquirer geo
           generation: 1,
           offset: 0n,
           revision: 3 // the post-command revision, not 2
+        }
+      },
+      {
+        channelId: a2,
+        frame: {
+          type: BpFrameType.SNAPSHOT,
+          channelId: a2,
+          generation: 1,
+          offset: 0n,
+          revision: 3,
+          text: 'SCREEN 48x95'
         }
       }
     ]);

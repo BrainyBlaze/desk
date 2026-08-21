@@ -72,11 +72,17 @@ describe('terminal WS router (§7.4)', () => {
     router.sessions.ensure('s2', { rows: 40, cols: 120 });
   });
 
-  it('SUBSCRIBE routes one live-baseline ACK back to the subscribing WS', () => {
+  it('SUBSCRIBE routes ACK then bounded current-screen baseline to the subscribing WS', () => {
     const ws = new FakeWs();
     router.onWsFrame(ws, subscribe('s1'));
     expect(ws.frames).toEqual([
-      expect.objectContaining({ type: BpFrameType.SUBSCRIBE_ACK, channelId: 1, offset: 0n })
+      expect.objectContaining({ type: BpFrameType.SUBSCRIBE_ACK, channelId: 1, offset: 0n }),
+      expect.objectContaining({
+        type: BpFrameType.SNAPSHOT,
+        channelId: 1,
+        offset: 0n,
+        text: 'SCREEN'
+      })
     ]);
     expect(ws.acks()).toEqual([1]); // first global channelId
   });

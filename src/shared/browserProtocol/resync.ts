@@ -1,13 +1,12 @@
 // Loss-aware subscription resync (spec §7.4). Pure state machine, one per
 // browser subscription (channel). Makes the binary protocol "loss-aware": it
 // detects dropped output (offset gaps) or a recreated session (generation bump)
-// and drives the client to detach and subscribe again at the current live
-// frontier. No screen snapshot or retained terminal output exists in this path.
-// Every output frame carries (generation, revision, offset), so this decision is
-// local and order-independent.
+// and drives the client to detach and subscribe again. A bounded current-screen
+// snapshot establishes the replacement channel; no retained Moor output is
+// requested or replayed. Every data frame carries (generation, revision, offset).
 
 export type ResyncState =
-  | 'awaiting-baseline' // subscribed; waiting for SUBSCRIBE_ACK
+  | 'awaiting-baseline' // ACKed; waiting for the current-screen snapshot
   | 'live' // applying contiguous output deltas
   | 'dirty'; // this channel must be detached and replaced
 
@@ -22,7 +21,7 @@ export interface FrameMeta {
   generation: number;
   revision: number;
   offset: bigint;
-  /** Byte length of this output frame (0 for SUBSCRIBE_ACK metadata). */
+  /** Byte length of this output frame (0 for a snapshot baseline). */
   length: number;
 }
 
@@ -32,6 +31,7 @@ export class SubscriptionResync {
   private revision = 0;
   /** Next contiguous output offset expected while live. */
   private expected = 0n;
+  private hasBaseline = false;
 
   get phase(): ResyncState {
     return this.state;
@@ -40,12 +40,21 @@ export class SubscriptionResync {
     return this.expected;
   }
 
-  /** SUBSCRIBE_ACK is the live baseline when the holder runs with `-C 0`. */
-  establishLiveBaseline(m: FrameMeta): void {
+  /** A current-screen SNAPSHOT establishes the contiguous live-output baseline. */
+  onSnapshot(m: FrameMeta): FrameAction {
+    if (
+      this.hasBaseline &&
+      (m.generation < this.generation ||
+        (m.generation === this.generation && m.revision < this.revision))
+    ) {
+      return 'discard';
+    }
     this.generation = m.generation;
     this.revision = m.revision;
     this.expected = m.offset;
     this.state = 'live';
+    this.hasBaseline = true;
+    return 'apply';
   }
 
   /**
@@ -57,8 +66,8 @@ export class SubscriptionResync {
    *      offset === expected  → apply, advance expected by length
    *      offset  >  expected  → GAP → dirty
    *      offset  <  expected  → already-seen overlap → discard
-   * Before ACK or after `dirty`, deltas are ignored. The owner replaces the
-   * channel; its next SUBSCRIBE_ACK establishes a new live baseline.
+   * Before SNAPSHOT or after `dirty`, deltas are ignored. The owner replaces the
+   * channel; its next bounded screen snapshot establishes a new live baseline.
    */
   onOutput(m: FrameMeta): FrameAction {
     if (this.state !== 'live') return 'ignore';
