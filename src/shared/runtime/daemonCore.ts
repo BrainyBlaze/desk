@@ -65,6 +65,7 @@ export interface DaemonCoreDeps {
   ) => boolean | void;
   sendMasterPrompt: (sessionId: string, bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
+  sendMasterRedraw?: (sessionId: string, rows: number, cols: number, surfaceId: number) => void;
   /**
    * desk#62 — where the last COMMANDED geometry is remembered across daemon
    * incarnations. Every commanded resize is recorded here, and restore() reads
@@ -281,6 +282,8 @@ export class DaemonCore {
       sendMasterPrompt: (bytes) => this.d.sendMasterPrompt(sessionId, bytes),
       sendMasterResize: (rows, cols, surfaceId) =>
         this.d.sendMasterResize(sessionId, rows, cols, surfaceId),
+      sendMasterRedraw: (rows, cols, surfaceId) =>
+        this.d.sendMasterRedraw?.(sessionId, rows, cols, surfaceId),
     });
     this.sessions.set(sessionId, { runtime, lease: createLeaseState(), generation });
   }
@@ -517,6 +520,14 @@ export class DaemonCore {
   /** Moor-native child output: absolute byte offset + raw bytes (§6.1). */
   onMoorOutput(sessionId: string, bytes: Uint8Array, offset: bigint): void | Promise<void> {
     return this.sessions.get(sessionId)?.runtime.onMoorOutput(bytes, offset);
+  }
+
+  adoptMoorOutputFrontier(sessionId: string, offset: bigint): void {
+    const runtime = this.sessions.get(sessionId)?.runtime;
+    if (runtime === undefined) {
+      throw new Error(`cannot adopt output frontier for missing session ${sessionId}`);
+    }
+    runtime.adoptMoorOutputFrontier(offset);
   }
 
   pendingAuthoritativeWork(sessionId: string): Promise<void> | undefined {

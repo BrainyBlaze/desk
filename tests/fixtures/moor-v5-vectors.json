@@ -1,57 +1,57 @@
 {
  "V1": {
   "description": "side-effect-free `HELLO`, exact generation 7, sequence 1; hello flags are reserved zero",
-  "hex": "4d4f4f52040100000700000001000000210000003ec8f1244d4f4f5204000016000000012f746d702f2e6d6f6f722d313030302f6275696c64",
+  "hex": "4d4f4f5205010000070000000100000021000000c0c5fdd64d4f4f5205000016000000012f746d702f2e6d6f6f722d313030302f6275696c64",
   "bytes": 57
  },
  "V2": {
   "description": "`OUTPUT`, record sequence 42, byte offset 4096, payload `hi`",
-  "hex": "4d4f4f52040600000700000009000000120000009d65ed092a0000000000000000100000000000006869",
+  "hex": "4d4f4f52050600000700000009000000120000006368e1fb2a0000000000000000100000000000006869",
   "bytes": 42
  },
  "V3": {
   "description": "`ATTACH` with geometry 0×0 — *preserve both* (OB-19) — requesting the lease",
-  "hex": "4d4f4f52040300000700000002000000050000002d90af9c0000000001",
+  "hex": "4d4f4f5205030000070000000200000005000000d39da36e0000000001",
   "bytes": 29
  },
  "V4": {
   "description": "`RESIZE`, lease epoch 3, geometry 80×24 — payload is 8 bytes: epoch then geometry",
-  "hex": "4d4f4f52040b0000070000000b000000080000006662c8f50300000050001800",
+  "hex": "4d4f4f52050b0000070000000b00000008000000986fc4070300000050001800",
   "bytes": 32
  },
  "V5": {
   "description": "`RESIZE` with 80×0 — half-specified, MUST be refused with `HALF_SPECIFIED_GEOMETRY`",
-  "hex": "4d4f4f52040b0000070000000c000000080000006267910f0300000050000000",
+  "hex": "4d4f4f52050b0000070000000c000000080000009c6a9dfd0300000050000000",
   "bytes": 32
  },
  "V6": {
   "description": "any frame with generation 0 — MUST be refused; shown as `OUTPUT_ACK`",
-  "hex": "4d4f4f5204070000000000000300000008000000c2bb32880100000000000000",
+  "hex": "4d4f4f52050700000000000003000000080000003cb63e7a0100000000000000",
   "bytes": 32
  },
  "V7": {
   "description": "a `MORE` run of two `INPUT` frames. The first carries lease epoch 3, request id 1 and flags `00`, then `AAAA`; the continuation carries `BB` and no metadata. They reassemble to one request whose data is `AAAABB`",
-  "hex": "4d4f4f52040901000700000014000000110000002bbda39003000000010000000000000000414141414d4f4f52040900000700000015000000020000004eadde064242",
+  "hex": "4d4f4f5205090100070000001400000011000000d5b0af6203000000010000000000000000414141414d4f4f5205090000070000001500000002000000b0a0d2f44242",
   "bytes": 67
  },
  "V8": {
   "description": "the `INPUT_RECEIPT` answering V7: lease epoch 3, request id 1, 6 bytes written, status `00`, result code zero. This is the receipt payload the holder caches",
-  "hex": "4d4f4f52040a0000070000000a0000002b000000f27f7d6e03000000010000000000000007000000000102030405060708090a0b0c0d0e0f0600000000000000000000",
+  "hex": "4d4f4f52050a0000070000000a0000002b0000000c72719c03000000010000000000000007000000000102030405060708090a0b0c0d0e0f0600000000000000000000",
   "bytes": 67
  },
  "V9": {
   "description": "**a replay of V7** — same lease epoch 3, same request id 1, identical bytes. The holder MUST write nothing and return the cached V8 receipt payload in a newly sequenced frame (V18)",
-  "hex": "4d4f4f5204090000070000001600000013000000a231bbe903000000010000000000000000414141414242",
+  "hex": "4d4f4f52050900000700000016000000130000005c3cb71b03000000010000000000000000414141414242",
   "bytes": 43
  },
  "V10": {
   "description": "**same request id, different bytes** — lease epoch 3, request id 1, payload `DIFFERENT`. MUST be refused with `BAD_SEQUENCE` and **nothing written**",
-  "hex": "4d4f4f5204090000070000001700000016000000ced7e00603000000010000000000000000444946464552454e54",
+  "hex": "4d4f4f520509000007000000170000001600000030daecf403000000010000000000000000444946464552454e54",
   "bytes": 46
  },
  "V11": {
   "description": "`ERROR` carrying `GENERATION_MISMATCH` (9)",
-  "hex": "4d4f4f5204130000070000000d0000001e000000272c493d09001a0067656e65726174696f6e20332069732073757065727365646564",
+  "hex": "4d4f4f5205130000070000000d0000001e000000d92145cf09001a0067656e65726174696f6e20332069732073757065727365646564",
   "bytes": 54
  },
  "V13": {
@@ -74,7 +74,7 @@
  },
  "V16": {
   "description": "controller `INPUT` requiring a receipt from source `claude`, application id `20..2F`, data `hello`",
-  "hex": "4d4f4f5204090000070000001e0000002a0000009059c0be03000000020000000000000001202122232425262728292a2b2c2d2e2f0600636c6175646568656c6c6f",
+  "hex": "4d4f4f5205090000070000001e0000002a0000006e54cc4c03000000020000000000000001202122232425262728292a2b2c2d2e2f0600636c6175646568656c6c6f",
   "bytes": 66
  },
  "V17": {
@@ -84,7 +84,7 @@
  },
  "V18": {
   "description": "the replay response to V9. Its payload is byte-identical to V8, while its holder-to-controller frame sequence advances from 10 to 11",
-  "hex": "4d4f4f52040a0000070000000b0000002b000000d502412703000000010000000000000007000000000102030405060708090a0b0c0d0e0f0600000000000000000000",
+  "hex": "4d4f4f52050a0000070000000b0000002b0000002b0f4dd503000000010000000000000007000000000102030405060708090a0b0c0d0e0f0600000000000000000000",
   "bytes": 67
  },
  "V19": {
@@ -113,28 +113,28 @@
   "bytes": 92
  },
  "V26": {
-  "description": "`NON_VT` attach and its required empty preamble. The attach preserves geometry and sets only flag bit 1. The preamble payload is the plain u16 zero length, not an absent frame; tracked exactness may remain set in the ACK. The attach uses controller-direction sequence 2; under revision 4's status-first prefix the empty preamble FOLLOWS the sequence-2 `ATTACH_ACK`, so it carries holder-direction sequence 3:",
-  "hex": "4d4f4f52040300000700000002000000050000002d90af9c00000000024d4f4f5204050000070000000300000002000000372d59980000",
+  "description": "`NON_VT` attach and its required empty preamble. The attach preserves geometry and sets only flag bit 1. The preamble payload is the plain u16 zero length, not an absent frame; tracked exactness may remain set in the ACK. The attach uses controller-direction sequence 2; under schema 5's status-first prefix the empty preamble FOLLOWS the sequence-2 `ATTACH_ACK`, so it carries holder-direction sequence 3:",
+  "hex": "4d4f4f5205030000070000000200000005000000d39da36e00000000024d4f4f5205050000070000000300000002000000c920556a0000",
   "bytes": 55
  },
  "V27": {
   "description": "private-mode query/reply with correlation `0102030405060708`, lease epoch 3, echoed class `04`, and plain u16 byte lengths. The query is `CSI7 ?2004$p`; the accepted reply is `CSI7 ?2004;1$y`. Both directions use frame sequence 3:",
-  "hex": "4d4f4f52041400000700000003000000180000005ac7163b0807060504030201030000000409001b5b3f3230303424704d4f4f52040c000007000000030000001a000000f671b4d2080706050403020103000000040b001b5b3f323030343b312479",
+  "hex": "4d4f4f5205140000070000000300000018000000a4ca1ac90807060504030201030000000409001b5b3f3230303424704d4f4f52050c000007000000030000001a000000087cb820080706050403020103000000040b001b5b3f323030343b312479",
   "bytes": 98
  },
  "V28": {
   "description": "expanded `HEARTBEAT`, generation 7/sequence 4, monotonic value `0102030405060708`, with all five defined health bits set and reserved bits clear:",
-  "hex": "4d4f4f52041200000700000004000000090000002ca1a4a108070605040302011f",
+  "hex": "4d4f4f5205120000070000000400000009000000d2aca85308070605040302011f",
   "bytes": 33
  },
  "V29": {
   "description": "fresh viewer lease grant followed by explicit release. The fresh request carries operation/role zero and 36 zero freshness bytes; the grant allocates epoch 3 and token `00..0F`; release echoes that tuple; released result carries outcome `02`, epoch 3, and zero token. Controller sequences are 4 then 5; holder sequences are 5 then 6:",
-  "hex": "4d4f4f5204150000070000000400000028000000e99a8098000000000000000000000000000000000000000000000000000000000000000000000000000000004d4f4f52041600000700000005000000180000007b456e470000000003000000000102030405060708090a0b0c0d0e0f4d4f4f52041700000700000005000000140000006fea86ad03000000000102030405060708090a0b0c0d0e0f4d4f4f520416000007000000060000001800000012c22a9c020000000300000000000000000000000000000000000000",
+  "hex": "4d4f4f520515000007000000040000002800000017978c6a000000000000000000000000000000000000000000000000000000000000000000000000000000004d4f4f5205160000070000000500000018000000854862b50000000003000000000102030405060708090a0b0c0d0e0f4d4f4f520517000007000000050000001400000091e78a5f03000000000102030405060708090a0b0c0d0e0f4d4f4f5205160000070000000600000018000000eccf266e020000000300000000000000000000000000000000000000",
   "bytes": 204
  },
  "V30": {
   "description": "ordered clear request and every `LOG_CLEAR_RESULT` row. The request uses incarnation `00..0F`, observed index `P=5`, generation 7, controller sequence 6:",
-  "hex": "4d4f4f5204190000070000000600000018000000ff342d9d000102030405060708090a0b0c0d0e0f0500000000000000",
+  "hex": "4d4f4f52051900000700000006000000180000000139216f000102030405060708090a0b0c0d0e0f0500000000000000",
   "bytes": 48
  },
  "V31": {
@@ -145,30 +145,127 @@
  "V32": {
   "description": "exact geometry, numeric-size, and same-size-redraw fixtures",
   "geometry": [
-   { "columns": 0, "rows": 0, "hex": "00000000", "result": "preserve-both" },
-   { "columns": 0, "rows": 1, "hex": "00000100", "result": "HALF_SPECIFIED_GEOMETRY" },
-   { "columns": 1, "rows": 0, "hex": "01000000", "result": "HALF_SPECIFIED_GEOMETRY" },
-   { "columns": 1, "rows": 1, "hex": "01000100", "result": "valid" },
-   { "columns": 2000, "rows": 1000, "hex": "d007e803", "result": "valid" },
-   { "columns": 2001, "rows": 1000, "hex": "d107e803", "result": "malformed-product" },
-   { "columns": 32767, "rows": 61, "hex": "ff7f3d00", "result": "valid" },
-   { "columns": 32767, "rows": 62, "hex": "ff7f3e00", "result": "malformed-product" },
-   { "columns": 32768, "rows": 1, "hex": "00800100", "result": "malformed-dimension" }
+   {
+    "columns": 0,
+    "rows": 0,
+    "hex": "00000000",
+    "result": "preserve-both"
+   },
+   {
+    "columns": 0,
+    "rows": 1,
+    "hex": "00000100",
+    "result": "HALF_SPECIFIED_GEOMETRY"
+   },
+   {
+    "columns": 1,
+    "rows": 0,
+    "hex": "01000000",
+    "result": "HALF_SPECIFIED_GEOMETRY"
+   },
+   {
+    "columns": 1,
+    "rows": 1,
+    "hex": "01000100",
+    "result": "valid"
+   },
+   {
+    "columns": 2000,
+    "rows": 1000,
+    "hex": "d007e803",
+    "result": "valid"
+   },
+   {
+    "columns": 2001,
+    "rows": 1000,
+    "hex": "d107e803",
+    "result": "malformed-product"
+   },
+   {
+    "columns": 32767,
+    "rows": 61,
+    "hex": "ff7f3d00",
+    "result": "valid"
+   },
+   {
+    "columns": 32767,
+    "rows": 62,
+    "hex": "ff7f3e00",
+    "result": "malformed-product"
+   },
+   {
+    "columns": 32768,
+    "rows": 1,
+    "hex": "00800100",
+    "result": "malformed-dimension"
+   }
   ],
   "numeric_sizes": [
-   { "operand": "0", "surface": "-C", "result": "0" },
-   { "operand": "1k", "surface": "-C", "result": "1024" },
-   { "operand": "1K", "surface": "-C", "result": "1024" },
-   { "operand": "2m", "surface": "-C", "result": "2097152" },
-   { "operand": "2M", "surface": "-C", "result": "2097152" },
-   { "operand": "3g", "surface": "-C", "result": "3221225472" },
-   { "operand": "3G", "surface": "-C", "result": "3221225472" },
-   { "operand": "18446744073709551615", "surface": "-C", "result": "18446744073709551615" },
-   { "operand": "18014398509481983k", "surface": "-C", "result": "18446744073709550592" },
-   { "operand": "18014398509481984k", "surface": "-C", "result": "invalid-overflow" },
-   { "operand": "01k", "surface": "-C", "result": "invalid-spelling" },
-   { "operand": "1kb", "surface": "-C", "result": "invalid-spelling" },
-   { "operand": "1k", "surface": "tail -n", "result": "invalid-unsuffixed-u32" }
+   {
+    "operand": "0",
+    "surface": "-C",
+    "result": "0"
+   },
+   {
+    "operand": "1k",
+    "surface": "-C",
+    "result": "1024"
+   },
+   {
+    "operand": "1K",
+    "surface": "-C",
+    "result": "1024"
+   },
+   {
+    "operand": "2m",
+    "surface": "-C",
+    "result": "2097152"
+   },
+   {
+    "operand": "2M",
+    "surface": "-C",
+    "result": "2097152"
+   },
+   {
+    "operand": "3g",
+    "surface": "-C",
+    "result": "3221225472"
+   },
+   {
+    "operand": "3G",
+    "surface": "-C",
+    "result": "3221225472"
+   },
+   {
+    "operand": "18446744073709551615",
+    "surface": "-C",
+    "result": "18446744073709551615"
+   },
+   {
+    "operand": "18014398509481983k",
+    "surface": "-C",
+    "result": "18446744073709550592"
+   },
+   {
+    "operand": "18014398509481984k",
+    "surface": "-C",
+    "result": "invalid-overflow"
+   },
+   {
+    "operand": "01k",
+    "surface": "-C",
+    "result": "invalid-spelling"
+   },
+   {
+    "operand": "1kb",
+    "surface": "-C",
+    "result": "invalid-spelling"
+   },
+   {
+    "operand": "1k",
+    "surface": "tail -n",
+    "result": "invalid-unsuffixed-u32"
+   }
   ],
   "same_size_redraw": {
    "columns": 80,
@@ -181,7 +278,7 @@
  },
  "V33": {
   "description": "`WAKEUP` interposed between `HELLO_ACK` and `ATTACH_ACK`. `WAKEUP` is legal at EVERY post-`HELLO_ACK` phase (§7), and this is the exceptional pre-attach window an independent implementer would otherwise guess about. The sequence numbers are the real ones: `HELLO_ACK` consumed holder-direction sequence 1, so the interposed `WAKEUP` carries sequence 2, the `ATTACH_ACK` that follows carries sequence 3, and the terminal-state preamble carries sequence 4. The frame is header-only — kind `11`, generation 7, zero payload — and its CRC-32C covers the twenty header bytes:",
-  "hex": "4d4f4f520411000007000000020000000000000052175391",
+  "hex": "4d4f4f5205110000070000000200000000000000ac1a5f63",
   "bytes": 24
  },
  "V24": {
@@ -195,14 +292,14 @@
  "V25": {
   "description": "POSIX `STATUS_REPLY`, layout `02`. Session identity is tag `01` plus `/tmp/.moor-1000/build`; event path is `/tmp/events`; holder incarnation is `00..0F`; selec",
   "hex": [
-   "4d4f4f52040e00000700000001000000f800000068d0951e16000000012f746d702f2e6d6f6f722d313030302f6275696c6407000000000102030405060708090a0b0c0d0e0f020b0000002f746d702f6576656e747300010000000000000085000000000000002bbeefb637546612d6a3a6bd7cbdb7be2942d6daddc733395445f9edd788b64b0100000000000000020000000000000003030303030303030303030303030303040000002f746d703412000078560000101112131415161718191a1b1c1d1e1f500018000000000000000000000000000000000000000000000000000000000000000000e3030000000000000f01000000010000000000000000000000000000000000000000000000"
+   "4d4f4f52050e00000700000001000000f800000096dd99ec16000000012f746d702f2e6d6f6f722d313030302f6275696c6407000000000102030405060708090a0b0c0d0e0f020b0000002f746d702f6576656e747300010000000000000085000000000000002bbeefb637546612d6a3a6bd7cbdb7be2942d6daddc733395445f9edd788b64b0100000000000000020000000000000003030303030303030303030303030303040000002f746d703412000078560000101112131415161718191a1b1c1d1e1f500018000100000000000000000000000000000000000000000000000000000000000000e3030000000000000f01000000010000000000000000000000000000000000000000000000"
   ],
   "bytes": 272,
   "blocks": 1
  },
  "_meta": {
-  "source": "moor spec/moor-wire-schema.md §16 @ 526cbb2df57a61240d8a6c135b55888716cf32c9",
-  "cross_checked": "tests/vectors.rs plus V32 runtime/CLI fixtures @ 526cbb2df57a61240d8a6c135b55888716cf32c9 — 32/32 verified by content",
+  "source": "moor schema-5 candidate in /home/dev/projects/desk/moor-live-attach",
+  "cross_checked": "tests/vectors.rs plus V32 runtime/CLI fixtures in the same schema-5 candidate",
   "note": "multi-frame vectors (V26 attach+preamble, V29 grant+release, V31 three states, V33 hello_ack+wakeup+attach_ack sequence) are concatenated in one hex field here; Rust keeps them as separate string consts — split on 24-byte MOOR headers when consuming frame-wise"
  }
 }

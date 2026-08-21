@@ -507,6 +507,7 @@ function TerminalCellImpl({
                   />
                 ) : (
                   <TerminalSurface
+                    key={cell.activeSession.spec.sessionId}
                     session={cell.activeSession}
                     revision={revision}
                     focused={cell.activeSession.spec.sessionId === selectedSessionId}

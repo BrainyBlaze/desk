@@ -101,7 +101,7 @@ describe('Moor controller payload encoder', () => {
     const identity = text('session-id');
     expect(encodeMoorControllerRequest({ type: 'hello', identity })).toEqual({
       kind: MoorKind.HELLO,
-      payload: joined(text('MOOR'), Uint8Array.of(4, 0, 0), wide(identity))
+      payload: joined(text('MOOR'), Uint8Array.of(5, 0, 0), wide(identity))
     });
     expect(
       encodeMoorControllerRequest({
@@ -109,9 +109,20 @@ describe('Moor controller payload encoder', () => {
         columns: 80,
         rows: 24,
         requestLease: true,
+        replay: 'retained',
         nonVt: true
       })
     ).toEqual({ kind: MoorKind.ATTACH, payload: Uint8Array.of(80, 0, 24, 0, 3) });
+    expect(
+      encodeMoorControllerRequest({
+        type: 'attach',
+        columns: 80,
+        rows: 24,
+        requestLease: true,
+        replay: 'live-only',
+        nonVt: false
+      })
+    ).toEqual({ kind: MoorKind.ATTACH, payload: Uint8Array.of(80, 0, 24, 0, 5) });
     expect(encodeMoorControllerRequest({ type: 'output-ack', sequence: 2n ** 60n })).toEqual({
       kind: MoorKind.OUTPUT_ACK,
       payload: integer(2n ** 60n, 8)
@@ -135,6 +146,12 @@ describe('Moor controller payload encoder', () => {
       encodeMoorControllerRequest({ type: 'resize', epoch: 3, columns: 120, rows: 40 })
     ).toEqual({
       kind: MoorKind.RESIZE,
+      payload: joined(integer(3, 4), integer(120, 2), integer(40, 2))
+    });
+    expect(
+      encodeMoorControllerRequest({ type: 'redraw', epoch: 3, columns: 120, rows: 40 })
+    ).toEqual({
+      kind: MoorKind.REDRAW,
       payload: joined(integer(3, 4), integer(120, 2), integer(40, 2))
     });
     expect(
@@ -295,7 +312,7 @@ describe('Moor holder payload decoder', () => {
   it('adopts a HELLO_ACK generation only when scope and identity agree', () => {
     const identity = text('session-id');
     const incarnation = nonzero(16, 0x61);
-    const payload = joined(Uint8Array.of(4), integer(7, 4), incarnation, wide(identity));
+    const payload = joined(Uint8Array.of(5), integer(7, 4), incarnation, wide(identity));
     expect(
       decodeMoorHolderMessage(
         { scope: 7, kind: MoorKind.HELLO_ACK, payload },

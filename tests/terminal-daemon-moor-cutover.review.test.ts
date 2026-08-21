@@ -156,7 +156,7 @@ function fakeMoorStatus(
     containment: 1,
     birthToken: new Uint8Array(16).fill(0xc3),
     replay: {
-      first: 0n,
+      first: 1n,
       last: 0n,
       start: 0n,
       end: 0n,

@@ -27,7 +27,8 @@ export const MoorKind = {
   LEASE_RELEASE: 23,
   LEASE_KEEPALIVE: 24,
   LOG_CLEAR: 25,
-  LOG_CLEAR_RESULT: 26
+  LOG_CLEAR_RESULT: 26,
+  REDRAW: 27
 } as const;
 
 /**
@@ -56,6 +57,7 @@ export type MoorControllerRequest =
       readonly rows: number;
       readonly requestLease: boolean;
       readonly resumedLease?: boolean;
+      readonly replay?: 'retained' | 'live-only';
       readonly nonVt: boolean;
     }
   | { readonly type: 'output-ack'; readonly sequence: bigint }
@@ -70,6 +72,7 @@ export type MoorControllerRequest =
       };
     }
   | { readonly type: 'resize'; readonly epoch: number; readonly columns: number; readonly rows: number }
+  | { readonly type: 'redraw'; readonly epoch: number; readonly columns: number; readonly rows: number }
   | {
       readonly type: 'query-reply';
       readonly correlation: bigint;
@@ -234,7 +237,10 @@ export function encodeMoorControllerRequest(
       ) {
         malformed('invalid attach geometry');
       }
-      const flags = Number(request.requestLease) | (Number(request.nonVt) << 1);
+      const flags =
+        Number(request.requestLease) |
+        (Number(request.nonVt) << 1) |
+        (Number(request.replay === 'live-only') << 2);
       return frame(
         MoorKind.ATTACH,
         join(u16(request.columns), u16(request.rows), Uint8Array.of(flags))
@@ -266,6 +272,14 @@ export function encodeMoorControllerRequest(
       }
       return frame(
         MoorKind.RESIZE,
+        join(u32(request.epoch), u16(request.columns), u16(request.rows))
+      );
+    case 'redraw':
+      if (!validMoorGeometry(request.columns, request.rows, true)) {
+        malformed('invalid redraw geometry');
+      }
+      return frame(
+        MoorKind.REDRAW,
         join(u32(request.epoch), u16(request.columns), u16(request.rows))
       );
     case 'query-reply':
@@ -509,7 +523,7 @@ function decodeStatus(payload: Uint8Array, context: MoorHolderDecodeContext): Mo
   const retainedEnd = view.getBigUint64(61, true);
   const complete = (flags & 1) !== 0;
   const rangeValid =
-    (first === 0n && last === 0n && start === end) ||
+    (last < U64_MAX && first === last + 1n && start === end) ||
     (first !== 0n && first <= last && start < end);
   const ownsLease = (flags & 0x10) !== 0;
   const logging = logEpoch !== 0 || logIndex !== 0n || retainedStart !== 0n || retainedEnd !== 0n;

@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/BrainyBlaze/moor.git",
-  "commit": "161de09f691d3a1bcd7cfca34070e0ccf537b988",
+  "commit": "bc14470e8c2ae3385e04342ec89fced046ed3b07",
   "version": "0.1.0",
   "license": "MIT OR Apache-2.0",
-  "snapshotDigest": "e9c8703ab67fd077d2b168b39e0b176c12575d448d82310fcb3462922541b08b"
+  "snapshotDigest": "aae39f354bab3ef270b59b25543bf6f88cd0e10c51d9ec12376ef9988b049e59"
 }

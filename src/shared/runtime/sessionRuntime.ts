@@ -7,7 +7,7 @@
 // session with real adapters (a socket to the master, a WS to each surface, an
 // @xterm/headless emulator, fsync'd control/delivery stores).
 //
-// Scope: the primary flows (output/resize/exit, subscribe/snapshot, input,
+// Scope: the primary flows (output/resize/exit, live subscribe, input,
 // delivery confirmation). Lease handoff (§7.9), checkpoint
 // restore (§8.1), GAP-driven resync (§7.4), and native surfaces (§6.9) are
 // documented extension points wired the same way.
@@ -34,6 +34,8 @@ export interface SessionRuntimeDeps {
   sendMasterInput: (bytes: Uint8Array, binary: boolean, surfaceId: number) => boolean | void;
   sendMasterPrompt: (bytes: Uint8Array) => Promise<boolean>;
   sendMasterResize: (rows: number, cols: number, surfaceId: number) => void;
+  /** Ask the live child to repaint without replaying retained terminal bytes. */
+  sendMasterRedraw?: (rows: number, cols: number, surfaceId: number) => void;
 }
 
 /**
@@ -57,14 +59,6 @@ interface Subscriber {
   rows: number;
   cols: number;
   visible: boolean;
-  ready: boolean;
-  activation?: Promise<void>;
-}
-
-interface OutputDelivery {
-  offset: bigint;
-  bytes: Uint8Array;
-  promise: Promise<void>;
 }
 
 interface TerminalStateDelivery {
@@ -96,10 +90,8 @@ export class SessionRuntime {
   private readonly subscribers = new Map<number, Subscriber>();
   private readonly txns = new Map<string, DeliveryTxn>();
   private nextChannelId = 1;
-  /** Byte high-water of output emitted (snapshot baseline offset, §7.4). */
+  /** Byte high-water of live output emitted (SUBSCRIBE_ACK baseline offset). */
   private outputOffset = 0n;
-  /** Session-scoped Moor delivery frontier; survives individual client attempts. */
-  private outputDelivery: OutputDelivery | undefined;
   /** All emulator work shares one session frontier, including attach preambles. */
   private authoritativeWork: Promise<void> | undefined;
   private terminalStateDelivery: TerminalStateDelivery | undefined;
@@ -198,7 +190,8 @@ export class SessionRuntime {
 
   /**
    * Moor-native child output (§6.1 OUTPUT): absolute byte offset + raw bytes.
-   * Feeds the authoritative emulator and fans out to visible subscribed surfaces.
+   * Advances and fans out synchronously. Emulator parsing remains the holder's
+   * delivery-ack boundary, but never blocks later Moor control/input receipts.
    */
   onMoorOutput(bytes: Uint8Array, offset: bigint): void | Promise<void> {
     if (this.disposed) return;
@@ -211,58 +204,46 @@ export class SessionRuntime {
     }
     if (end <= this.outputOffset) return;
 
-    const pending = this.outputDelivery;
-    if (pending !== undefined) {
-      if (pending.offset === offset) {
-        if (!this.sameBytes(pending.bytes, bytes)) {
-          throw new Error(`conflicting Moor output at offset ${offset}`);
-        }
-        return pending.promise;
-      }
-      return pending.promise.then(() => this.onMoorOutput(bytes, offset));
-    }
-
     this.d.emulator.write(bytes);
-    const deliver = (): void => {
-      if (this.disposed) return;
-      this.outputOffset = end;
-      for (const [channelId, subscriber] of this.subscribers) {
-        if (!subscriber.visible || !subscriber.ready) continue;
-        this.sendSubscriber(channelId, {
-          type: BpFrameType.OUTPUT,
-          channelId,
-          generation: this.d.generation,
-          revision: this.revision,
-          offset,
-          bytes
-        });
-      }
-      for (const [channelId, subscriber] of this.subscribers) {
-        if (subscriber.visible && !subscriber.ready) {
-          this.scheduleSubscriberActivation(channelId, subscriber);
-        }
-      }
-      this.completeExitIfReady();
-    };
+    this.outputOffset = end;
+    for (const [channelId, subscriber] of this.subscribers) {
+      if (!subscriber.visible) continue;
+      this.sendSubscriber(channelId, {
+        type: BpFrameType.OUTPUT,
+        channelId,
+        generation: this.d.generation,
+        revision: this.revision,
+        offset,
+        bytes
+      });
+    }
     const draining = this.d.emulator.flush?.();
     if (draining === undefined) {
-      deliver();
+      this.completeExitIfReady();
       return;
     }
-    const delivery = draining.then(deliver);
-    this.outputDelivery = { offset, bytes, promise: delivery };
+    const delivery = Promise.resolve(draining).then(() => {
+      if (!this.disposed) this.completeExitIfReady();
+    });
     this.trackAuthoritativeWork(delivery);
-    void delivery.then(() => {
-      if (this.outputDelivery?.promise === delivery) this.outputDelivery = undefined;
-    }, () => undefined);
     return delivery;
+  }
+
+  adoptMoorOutputFrontier(offset: bigint): void {
+    if (this.disposed) throw new Error('cannot adopt output frontier for a disposed session');
+    if (offset < this.outputOffset) {
+      throw new Error(`Moor output frontier ${offset} precedes delivered output ${this.outputOffset}`);
+    }
+    if (offset === this.outputOffset) return;
+    this.outputOffset = offset;
   }
 
   // ---- browser → daemon (§7.4/§7.6) -----------------------------------------
   /**
-   * Subscribe a surface: assign a channelId, ACK it, and emit the baseline
-   * SNAPSHOT at the current output offset (§7.4). Returns the channelId and, if
-   * this subscribe ACQUIRED ownership, the geometry that acquisition commanded.
+   * Subscribe a surface: assign a channelId and ACK the current live frontier.
+   * No retained terminal output or snapshot is emitted. Returns the channelId and, if
+   * this subscribe acquired ownership and changed the commanded size, the
+   * geometry that acquisition commanded.
    */
   subscribe(
     surfaceId: string,
@@ -275,15 +256,20 @@ export class SessionRuntime {
     // directly (e.g. unit tests).
     const channelId = assignedChannelId ?? this.nextChannelId++;
     if (this.disposed || this.pendingExit !== undefined || this.exitFenced) return undefined;
-    const subscriber: Subscriber = { surfaceId, rows, cols, visible: true, ready: false };
+    const subscriber: Subscriber = {
+      surfaceId,
+      rows,
+      cols,
+      visible: true
+    };
     this.subscribers.set(channelId, subscriber);
     let commanded: CommandedGeometry | undefined;
     if (this.resizeOwner === undefined) {
-      // First surface in takes resize ownership, and acquisition COMMANDS the
-      // acquirer's geometry (desk#68). It must: after a real disconnect/remount,
-      // SUBSCRIBE is the only geometry carrier guaranteed before the baseline
-      // snapshot. Without commanding here, the owner can render one size while
-      // the child stays at the previous owner's forever.
+      // First surface in takes resize ownership. Acquisition commands the
+      // acquirer's geometry when it differs from the last commanded size
+      // (desk#68); an equal re-acquisition is idempotent. After a real size
+      // change, SUBSCRIBE is the only geometry carrier guaranteed before the
+      // live baseline, so changed geometry must still be applied here.
       // The value is not invented: SUBSCRIBE carries the surface's current xterm
       // rows×cols (TerminalSurface.tsx subscribes with terminal.rows/cols) — the
       // fitted measurement on reveal; on a very first mount it is the terminal's
@@ -295,67 +281,25 @@ export class SessionRuntime {
       this.resizeOwner = channelId;
       commanded = this.commandOwnerSize(channelId, rows, cols);
     }
-    // ACK + SNAPSHOT emit AFTER any acquisition command, so the ACK carries the
-    // post-command revision. The snapshot is deferred behind authoritative
-    // output, then serialized at the geometry the surface will actually render.
+    // ACK emits after any acquisition command and is itself the live baseline.
     if (!this.sendSubscriber(channelId, {
       type: BpFrameType.SUBSCRIBE_ACK,
       channelId,
       generation: this.d.generation,
-      revision: this.revision
+      revision: this.revision,
+      offset: this.outputOffset
     })) return undefined;
-    this.scheduleSubscriberActivation(channelId, subscriber);
+    if (commanded === undefined && this.commanded !== undefined) {
+      // Atch's zero-replay attach asks the PTY application to repaint. Moor's
+      // explicit REDRAW is the same operation; it carries no terminal history.
+      this.d.sendMasterRedraw?.(
+        this.commanded.rows,
+        this.commanded.cols,
+        this.resizeOwner ?? channelId
+      );
+    }
     if (this.subscribers.get(channelId) !== subscriber) return undefined;
     return commanded === undefined ? { channelId } : { channelId, commanded };
-  }
-
-  private scheduleSubscriberActivation(channelId: number, subscriber: Subscriber): void {
-    if (
-      this.subscribers.get(channelId) !== subscriber ||
-      !subscriber.visible ||
-      subscriber.ready ||
-      subscriber.activation !== undefined
-    ) {
-      return;
-    }
-    const frontier = this.authoritativeWork;
-    if (frontier === undefined) {
-      this.activateSubscriber(channelId, subscriber);
-      return;
-    }
-    const activation = frontier.then(
-      () => {
-        if (subscriber.activation !== activation) return;
-        subscriber.activation = undefined;
-        this.scheduleSubscriberActivation(channelId, subscriber);
-      },
-      () => {
-        if (subscriber.activation !== activation) return;
-        subscriber.activation = undefined;
-        if (this.subscribers.get(channelId) === subscriber) this.failSubscriber(channelId);
-      }
-    );
-    subscriber.activation = activation;
-  }
-
-  private activateSubscriber(channelId: number, subscriber: Subscriber): void {
-    if (this.subscribers.get(channelId) !== subscriber || !subscriber.visible) return;
-    let text: string;
-    try {
-      text = this.d.emulator.serialize();
-    } catch {
-      this.failSubscriber(channelId);
-      return;
-    }
-    subscriber.ready = true;
-    this.sendSubscriber(channelId, {
-      type: BpFrameType.SNAPSHOT,
-      channelId,
-      generation: this.d.generation,
-      revision: this.revision,
-      offset: this.outputOffset,
-      text
-    });
   }
 
   private sendSubscriber(channelId: number, frame: BpFrame): boolean {
@@ -415,9 +359,6 @@ export class SessionRuntime {
   private finishPendingExit(pending: PendingExit): void {
     this.exitFenced = true;
     this.pendingExit = undefined;
-    for (const [channelId, subscriber] of this.subscribers) {
-      if (!subscriber.ready) this.activateSubscriber(channelId, subscriber);
-    }
     for (const channelId of this.subscribers.keys()) {
       this.sendSubscriber(channelId, {
         type: BpFrameType.EXIT,
@@ -458,7 +399,6 @@ export class SessionRuntime {
     this.disposed = true;
     this.subscribers.clear();
     this.txns.clear();
-    this.outputDelivery = undefined;
     this.authoritativeWork = undefined;
     this.terminalStateDelivery = undefined;
     this.pendingExit?.resolve();
@@ -615,19 +555,11 @@ export class SessionRuntime {
     if (sub === undefined || sub.visible === visible) return undefined;
     sub.visible = visible;
     if (!visible) {
-      // A hidden subscriber remains attached but receives no deltas. Its next
-      // reveal re-baselines from the authoritative emulator on this same channel.
-      sub.ready = false;
+      // A hidden mounted subscriber remains live and consumes every new byte.
       return this.handoffIfOwnerGone(channelId);
     }
 
-    // Ownership/geometry must settle before serializing the reveal snapshot.
-    // When hide-all returns to the already-commanded size, reacquire ownership
-    // without emitting a redundant master resize or revision bump.
-    const commanded = this.handoffIfOwnerGone(channelId, true);
-    sub.ready = false;
-    this.scheduleSubscriberActivation(channelId, sub);
-    return commanded;
+    return this.handoffIfOwnerGone(channelId);
   }
 
   /** The channel that currently owns this session's size, if any (§7.5, desk#68). */
@@ -645,8 +577,16 @@ export class SessionRuntime {
    * master to resize the child. The one place either happens, so "who may
    * resize" is a single check. Whether the child's pty ends up at this size is
    * the holder's business — the send is best-effort and may have no link at all.
+   * Repeating the already-commanded size is an idempotent no-op.
    */
-  private commandOwnerSize(surfaceId: number, rows: number, cols: number): CommandedGeometry {
+  private commandOwnerSize(
+    surfaceId: number,
+    rows: number,
+    cols: number
+  ): CommandedGeometry | undefined {
+    if (this.commanded?.rows === rows && this.commanded.cols === cols) {
+      return undefined;
+    }
     this.commanded = { rows, cols };
     this.d.emulator.resize(rows, cols);
     // Geometry is controller-owned: the revision is bumped here and nowhere
@@ -664,33 +604,33 @@ export class SessionRuntime {
    * The successor is the visible subscriber with the LOWEST channelId. channelIds
    * are allocated monotonically, so that is the longest-standing visible surface
    * — an explicit, stable rule rather than whatever the Map happens to yield
-   * first. Its stored geometry is commanded EXACTLY ONCE here; the promoted
-   * surface does not have to re-report to fix the pty, and the demoted one
-   * cannot move it afterwards (its late resizes are observer reports).
+   * first. Its stored geometry is evaluated exactly once here; the promoted
+   * surface does not have to re-report to fix the pty when its size changed,
+   * and the demoted one cannot move it afterwards (its late resizes are
+   * observer reports). Equal-size handoff changes ownership without issuing a
+   * redundant command or revision.
    *
    * With no visible successor the session keeps its owner-less state and the
    * size is left ALONE — a child whose surfaces are all hidden is not resized
    * to nothing, and the first surface to come back takes ownership then.
    */
-  private handoffIfOwnerGone(
-    channelId: number,
-    skipUnchangedCommand = false
-  ): CommandedGeometry | undefined {
+  private handoffIfOwnerGone(channelId: number): CommandedGeometry | undefined {
     if (this.resizeOwner !== undefined) {
       if (this.resizeOwner !== channelId) return undefined;
       if (this.subscribers.get(channelId)?.visible === true) return undefined;
     }
-    return this.electOwner(skipUnchangedCommand);
+    return this.electOwner();
   }
 
   /**
    * The one election (desk#68): the visible subscriber with the lowest
    * channelId — channelIds are allocated monotonically, so that is the
-   * longest-standing visible surface — becomes owner and its stored geometry
-   * is commanded exactly once. With no visible candidate the session is
+   * longest-standing visible surface — becomes owner. Its stored geometry is
+   * commanded once when it differs from the current command; equal geometry is
+   * an idempotent ownership handoff. With no visible candidate the session is
    * owner-less and the size is left alone.
    */
-  private electOwner(skipUnchangedCommand = false): CommandedGeometry | undefined {
+  private electOwner(): CommandedGeometry | undefined {
     this.resizeOwner = undefined;
     let successor: number | undefined;
     for (const [candidate, sub] of this.subscribers) {
@@ -700,13 +640,6 @@ export class SessionRuntime {
     if (successor === undefined) return undefined;
     this.resizeOwner = successor;
     const sub = this.subscribers.get(successor)!;
-    if (
-      skipUnchangedCommand &&
-      this.commanded?.rows === sub.rows &&
-      this.commanded.cols === sub.cols
-    ) {
-      return undefined;
-    }
     return this.commandOwnerSize(successor, sub.rows, sub.cols);
   }
 

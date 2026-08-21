@@ -12,8 +12,11 @@
 
 import { createRequire } from 'node:module';
 import type { Terminal as XtermTerminal } from '@xterm/headless';
-import type { SerializeAddon as XtermSerializeAddon } from '@xterm/addon-serialize';
-import { type EmulatorEvent, type EmulatorFactory, type EmulatorPort } from '../../shared/runtime/emulatorPort.js';
+import {
+  type EmulatorEvent,
+  type EmulatorFactory,
+  type EmulatorPort
+} from '../../shared/runtime/emulatorPort.js';
 
 /**
  * Retained history bound per session (screen rows + scrollback). Matches the
@@ -28,17 +31,13 @@ export const SCROLLBACK_LINES = 2000;
 // side-steps the interop entirely; types stay via import type.
 const require = createRequire(import.meta.url);
 const { Terminal } = require('@xterm/headless') as { Terminal: typeof XtermTerminal };
-const { SerializeAddon } = require('@xterm/addon-serialize') as { SerializeAddon: typeof XtermSerializeAddon };
 
 export class XtermEmulator implements EmulatorPort {
   private readonly term: XtermTerminal;
-  private readonly serializer: XtermSerializeAddon;
   private listeners: ((e: EmulatorEvent) => void)[] = [];
 
   constructor(opts: { rows: number; cols: number }) {
     this.term = new Terminal({ rows: opts.rows, cols: opts.cols, scrollback: SCROLLBACK_LINES, allowProposedApi: true });
-    this.serializer = new SerializeAddon();
-    this.term.loadAddon(this.serializer);
     // Semantic events via PUBLIC hooks (§7.2). OSC handlers return false so the
     // emulator ALSO applies them (observe, do not suppress) — suppression is the
     // browser addon's job (§7.7), not the authoritative worker's.
@@ -85,10 +84,6 @@ export class XtermEmulator implements EmulatorPort {
     const lines: string[] = [];
     for (let i = start; i < end; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '');
     return { lines, totalAvailable };
-  }
-
-  serialize(): string {
-    return this.serializer.serialize();
   }
 
   cursor(): { row: number; col: number } {

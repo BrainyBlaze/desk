@@ -154,12 +154,12 @@ function expectIndependentCopies(stable: string, archive: string): void {
   }
 }
 
-async function sendV3Hello(sessionPath: string): Promise<Uint8Array> {
+async function sendV4Hello(sessionPath: string): Promise<Uint8Array> {
   const frame = encodeMoorDiscoveryHello(
     new MoorCodec(),
     new TextEncoder().encode(sessionPath)
   );
-  frame[4] = 3;
+  frame[4] = 4;
   new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setUint32(
     20,
     crc32c(frame.subarray(0, 20)),
@@ -171,7 +171,7 @@ async function sendV3Hello(sessionPath: string): Promise<Uint8Array> {
     const chunks: Buffer[] = [];
     const timeout = setTimeout(() => {
       socket.destroy();
-      reject(new Error('timed out waiting for native v3 refusal'));
+      reject(new Error('timed out waiting for native v4 refusal'));
     }, 5_000);
     socket.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
     socket.once('connect', () => socket.write(frame));
@@ -203,9 +203,9 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
   }
 
   it(
-    'refuses a CRC-valid v3 client before attach while the v4 owner remains live',
+    'refuses a CRC-valid v4 client before attach while the v5 owner remains live',
     async () => {
-      const root = mkdtempSync(join(tmpdir(), 'moor-native-v3-refusal-'));
+      const root = mkdtempSync(join(tmpdir(), 'moor-native-v4-refusal-'));
       cleanups.push(() => rmSync(root, { recursive: true, force: true }));
       pinTmpdir(root);
       mkdirSync(join(root, '_engine'), { recursive: true });
@@ -217,18 +217,18 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       });
       cleanups.push(() => daemon.dispose());
 
-      const provisioned = await daemon.provision('native-v3', {
+      const provisioned = await daemon.provision('native-v4', {
         command: ['sh', '-c', 'cat'],
         geometry: { rows: 24, cols: 80 },
         subject: { kind: 'terminal' }
       });
       expect(provisioned).toMatchObject({ ok: true, generation: 2 });
-      const sessionPath = join(root, 'native-v3');
+      const sessionPath = join(root, 'native-v4');
       cleanups.push(async () => {
-        await daemon.retire('native-v3').catch(() => undefined);
+        await daemon.retire('native-v4').catch(() => undefined);
       });
 
-      const refusal = await sendV3Hello(sessionPath);
+      const refusal = await sendV4Hello(sessionPath);
       const messages = new MoorCodec().feed(Date.now(), refusal);
       expect(messages).toHaveLength(1);
       expect(messages[0]).toMatchObject({ scope: 2, kind: 0x13 });
@@ -239,12 +239,12 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
         )
       ).toBe(1);
 
-      expect(daemon.input('native-v3', new TextEncoder().encode('printf v4-still-live\n'))).toBe(
+      expect(daemon.input('native-v4', new TextEncoder().encode('printf v5-still-live\n'))).toBe(
         true
       );
       await waitFor(
-        () => (daemon.tail('native-v3', 24)?.lines ?? []).join('\n').includes('v4-still-live'),
-        'v4 owner after v3 refusal'
+        () => (daemon.tail('native-v4', 24)?.lines ?? []).join('\n').includes('v5-still-live'),
+        'v5 owner after v4 refusal'
       );
     },
     30_000
@@ -284,15 +284,13 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       const storeDir = moorEventStoreDir(moorEventStoreRoot(NATIVE_BIN), 'native-1', 2);
       expect(existsSync(join(storeDir, 'commit.0'))).toBe(true);
 
-      // Real output replay reaches the daemon's authoritative emulator.
+      // The production holder runs with -C 0, so bytes written before attach
+      // are intentionally not replayed into the authoritative emulator.
       const subscribed = daemon.router.sessions.subscribe('native-1', 'main', 24, 80);
       expect(subscribed).toBeDefined();
-      await waitFor(
-        () => (daemon.tail('native-1', 24)?.lines ?? []).join('\n').includes('native-e2e-output'),
-        'real replayed output through the native join'
-      );
 
-      // Real input round-trip over the one-in-flight link (§7.2 receipts).
+      // Post-attach input/output remains live over the one-in-flight link
+      // (§7.2 receipts).
       expect(daemon.input('native-1', new TextEncoder().encode('printf marker-back\n'))).toBe(
         true
       );
@@ -500,7 +498,8 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
 
       await archiveMoorGenerationStores(sessionPath, 3);
       expectIndependentCopies(`${sessionPath}.exit`, `${sessionPath}.2.exit`);
-      expectIndependentCopies(`${sessionPath}.log`, `${sessionPath}.2.log`);
+      expect(existsSync(`${sessionPath}.log`)).toBe(false);
+      expect(existsSync(`${sessionPath}.2.log`)).toBe(false);
 
       const successor = await daemon.provision(sessionId, {
         command: ['sh', '-c', 'printf successor-ready; cat'],
@@ -520,9 +519,7 @@ describe.skipIf(!HAVE_BINARY)('NATIVE moor E2E (real binary, real Desk stack)', 
       await expect(
         readMoorStoreSnapshot(`${sessionPath}.2.exit`, MoorStoreKind.Exit, 2)
       ).resolves.toBeDefined();
-      await expect(
-        readMoorStoreSnapshot(`${sessionPath}.2.log`, MoorStoreKind.Log, 2)
-      ).resolves.toBeDefined();
+      expect(existsSync(`${sessionPath}.2.log`)).toBe(false);
     },
     30_000
   );

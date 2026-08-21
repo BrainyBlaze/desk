@@ -50,9 +50,9 @@ class FakeWs implements WsConn {
 }
 
 const subscribe = (sessionId: string, surfaceId = 'main') => encodeBpFrame({ type: BpFrameType.SUBSCRIBE, sessionId, surfaceId, rows: 40, cols: 120 });
+const unsubscribe = (channelId: number) => encodeBpFrame({ type: BpFrameType.UNSUBSCRIBE, channelId });
 const input = (channelId: number, text: string) => encodeBpFrame({ type: BpFrameType.INPUT, channelId, binary: false, bytes: new TextEncoder().encode(text) });
 const resize = (channelId: number, rows: number, cols: number) => encodeBpFrame({ type: BpFrameType.RESIZE, channelId, rows, cols });
-const visibility = (channelId: number, visible: boolean) => encodeBpFrame({ type: BpFrameType.VISIBILITY, channelId, visible });
 const queryReply = (channelId: number) => encodeBpFrame({ type: BpFrameType.QUERY_REPLY, channelId, queryOffset: 0n, leaseEpoch: 0, bytes: Uint8Array.of(0x1b) });
 
 describe('terminal WS router (§7.4)', () => {
@@ -72,10 +72,12 @@ describe('terminal WS router (§7.4)', () => {
     router.sessions.ensure('s2', { rows: 40, cols: 120 });
   });
 
-  it('SUBSCRIBE routes ACK + SNAPSHOT back to the subscribing WS', () => {
+  it('SUBSCRIBE routes one live-baseline ACK back to the subscribing WS', () => {
     const ws = new FakeWs();
     router.onWsFrame(ws, subscribe('s1'));
-    expect(ws.frames.map((f) => f.type)).toEqual([BpFrameType.SUBSCRIBE_ACK, BpFrameType.SNAPSHOT]);
+    expect(ws.frames).toEqual([
+      expect.objectContaining({ type: BpFrameType.SUBSCRIBE_ACK, channelId: 1, offset: 0n })
+    ]);
     expect(ws.acks()).toEqual([1]); // first global channelId
   });
 
@@ -120,7 +122,7 @@ describe('terminal WS router (§7.4)', () => {
     );
   });
 
-  it('rejects INPUT from a retained hidden channel without forwarding master bytes', () => {
+  it('rejects INPUT after hide detaches the channel without forwarding master bytes', () => {
     const ws = new FakeWs();
     router.onWsFrame(ws, subscribe('s1'));
     const channelId = ws.acks()[0]!;
@@ -141,11 +143,11 @@ describe('terminal WS router (§7.4)', () => {
     );
     ws.frames.length = 0;
 
-    router.onWsFrame(ws, visibility(channelId, false));
+    router.onWsFrame(ws, unsubscribe(channelId));
     router.onWsFrame(ws, input(channelId, 'must-not-reach-master'));
 
     expect(forwarded).toEqual([]);
-    expect(ws.errors()).toEqual([BpError.INPUT_UNAVAILABLE]);
+    expect(ws.errors()).toEqual([BpError.BAD_CHANNEL]);
   });
 
   it('WS close unsubscribes its channels; later INPUT on them is rejected', () => {
@@ -183,16 +185,6 @@ describe('terminal WS router (§7.4)', () => {
     router.onWsFrame(b, resize(1, 24, 80)); // b is not the owner
     expect(b.errors()).toContain(BpError.BAD_CHANNEL);
     expect(emu.resizes).not.toContainEqual({ rows: 24, cols: 80 }); // never routed
-  });
-
-  it('VISIBILITY from the owner is accepted; from a non-owner is rejected', () => {
-    const a = new FakeWs();
-    const b = new FakeWs();
-    router.onWsFrame(a, subscribe('s1')); // a owns channel 1
-    router.onWsFrame(a, visibility(1, false));
-    expect(a.errors()).toHaveLength(0); // owner → accepted
-    router.onWsFrame(b, visibility(1, false)); // non-owner
-    expect(b.errors()).toContain(BpError.BAD_CHANNEL);
   });
 
   // ---- desk#68: a closing connection removes its channels in BULK -----------

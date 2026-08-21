@@ -85,7 +85,22 @@ async function killHolder(sessionPath: string): Promise<void> {
   process.exit(1);
 }
 
-const [mode, sessionPath] = process.argv.slice(2);
+function parseStartSessionPath(argv: string[]): string | undefined {
+  let index = 0;
+  let cacheBytes: number | undefined;
+  while (argv[index] === '-C' || argv[index] === '-T') {
+    const option = argv[index];
+    const value = argv[index + 1];
+    if (value === undefined) return undefined;
+    if (option === '-C') cacheBytes = Number(value);
+    index += 2;
+  }
+  if (cacheBytes !== 0) return undefined;
+  return argv[index];
+}
+
+const [mode, ...args] = process.argv.slice(2);
+const sessionPath = mode === 'start' ? parseStartSessionPath(args) : args[0];
 if (sessionPath === undefined) process.exit(1);
 if (mode === 'start') void launcher(sessionPath);
 else if (mode === '--holder') void holder(sessionPath);

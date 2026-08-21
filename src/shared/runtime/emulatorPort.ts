@@ -10,7 +10,6 @@
 //   readTailText(n)   → iterate terminal.buffer.active.getLine(i).translateToString()
 //                       over the last n rows (plain text for capture and delivery
 //                       verification, never semantic agent-state inference)
-//   serialize()       → SerializeAddon.serialize() (restorable display string, §7.3)
 //   onBell/onOsc/...  → terminal.onBell / terminal.parser.registerOscHandler(code,…)
 //                       / registerCsiHandler(…) (PUBLIC hooks only, §7.2)
 
@@ -25,8 +24,8 @@ export interface EmulatorEvent {
 
 /**
  * The authoritative headless emulator, as the daemon uses it. One instance per
- * LIVE terminal session (§3.3). Scrollback is 0 (history comes from the journal),
- * so `readTailText` reflects only the on-screen rows.
+ * LIVE terminal session (§3.3). Its bounded scrollback is the ranged-history
+ * authority, while browser baselines may request only the current screen.
  */
 export interface EmulatorPort {
   /** Feed raw output bytes from the master (binary end-to-end, §7.8). */
@@ -48,8 +47,6 @@ export interface EmulatorPort {
    * emulator retains no history beyond the live tail.
    */
   readHistoryText?(rows: number, offset: number): { lines: string[]; totalAvailable: number };
-  /** A restorable display snapshot string (SerializeAddon, §7.3). */
-  serialize(): string;
   /** Current cursor position (for CPR/DSR worker replies, §7.7). */
   cursor(): { row: number; col: number };
   /**

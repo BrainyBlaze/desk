@@ -53,7 +53,7 @@ interface CorpusMeta {
 }
 
 const corpus = JSON.parse(
-  readFileSync(new URL('./fixtures/moor-v4-vectors.json', import.meta.url), 'utf8')
+  readFileSync(new URL('./fixtures/moor-v5-vectors.json', import.meta.url), 'utf8')
 ) as Record<string, FrozenVector | FrozenV32 | CorpusMeta>;
 
 const fromHex = (value: string): Uint8Array => {
@@ -80,7 +80,7 @@ function v32(): FrozenV32 {
   return entry;
 }
 
-describe('Moor v4 frozen wire conformance', () => {
+describe('Moor v5 frozen wire conformance', () => {
   it('commits all 32 content-verified normative vectors without truncation', () => {
     const names = Object.keys(corpus).filter((name) => /^V\d+$/u.test(name));
     expect(names).toHaveLength(32);
@@ -189,7 +189,7 @@ describe('Moor v4 frozen wire conformance', () => {
     const incarnation = new Uint8Array(16).fill(1);
     const payload = new Uint8Array(1 + 4 + 16 + 4 + identity.length);
     const view = new DataView(payload.buffer);
-    payload[0] = 4;
+    payload[0] = 5;
     view.setUint32(1, 7, true);
     payload.set(incarnation, 5);
     view.setUint32(21, identity.length, true);
